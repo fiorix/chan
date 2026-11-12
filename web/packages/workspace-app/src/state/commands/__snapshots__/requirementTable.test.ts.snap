@@ -88,8 +88,10 @@ app.tab.prev any
 app.tab.reopenClosed any
 app.tab.sendToA any
 app.tab.sendToB any
+app.terminal.broadcastTargets terminal
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.copyScrollback terminal
 app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.profile terminal
@@ -107,6 +109,9 @@ app.window.hide any
 app.window.new any
 app.window.reload any
 app.workspace.showWarnings workspace
+terminal.copy terminal
+terminal.find terminal
+terminal.paste terminal
 terminal.richPrompt drafts
 terminal.richPromptToolbar drafts
 # terminal
@@ -138,8 +143,10 @@ app.tab.prev any
 app.tab.reopenClosed any
 app.tab.sendToA any
 app.tab.sendToB any
+app.terminal.broadcastTargets terminal
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.copyScrollback terminal
 app.terminal.details terminal
 app.terminal.profile terminal
 app.terminal.restart terminal
@@ -153,6 +160,9 @@ app.window.devtools any
 app.window.hide any
 app.window.new any
 app.window.reload any
+terminal.copy terminal
+terminal.find terminal
+terminal.paste terminal
 # terminal+files
 app.browser.clearClipboard files
 app.browser.clearSelection files
@@ -218,8 +228,10 @@ app.tab.prev any
 app.tab.reopenClosed any
 app.tab.sendToA any
 app.tab.sendToB any
+app.terminal.broadcastTargets terminal
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.copyScrollback terminal
 app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.profile terminal
@@ -235,6 +247,9 @@ app.window.devtools any
 app.window.hide any
 app.window.new any
 app.window.reload any
+terminal.copy terminal
+terminal.find terminal
+terminal.paste terminal
 # terminal+files+drafts
 app.browser.clearClipboard files
 app.browser.clearSelection files
@@ -304,8 +319,10 @@ app.tab.prev any
 app.tab.reopenClosed any
 app.tab.sendToA any
 app.tab.sendToB any
+app.terminal.broadcastTargets terminal
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.copyScrollback terminal
 app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.profile terminal
@@ -321,6 +338,9 @@ app.window.devtools any
 app.window.hide any
 app.window.new any
 app.window.reload any
+terminal.copy terminal
+terminal.find terminal
+terminal.paste terminal
 terminal.richPrompt drafts
 terminal.richPromptToolbar drafts
 # control
@@ -352,8 +372,10 @@ app.tab.prev any
 app.tab.reopenClosed any
 app.tab.sendToA any
 app.tab.sendToB any
+app.terminal.broadcastTargets terminal
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.copyScrollback terminal
 app.terminal.details terminal
 app.terminal.profile terminal
 app.terminal.restart terminal
@@ -366,5 +388,8 @@ app.window.close any
 app.window.devtools any
 app.window.hide any
 app.window.new any
-app.window.reload any"
+app.window.reload any
+terminal.copy terminal
+terminal.find terminal
+terminal.paste terminal"
 `;

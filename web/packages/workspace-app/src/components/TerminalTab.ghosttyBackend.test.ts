@@ -323,14 +323,15 @@ function key(term: Record<string, any>, init: KeyboardEventInit): { event: Keybo
   return { event, claimed: term.keyHandler(event) };
 }
 
-/// What the open body menu says of the terminal: its engine and its masking
-/// row, with how many times the ghostty kit was asked for.
-async function spawned(target: HTMLElement): Promise<{ engine: string; masking: string; kitLoads: number }> {
+const MASKING_ROW = "Secret masking (this terminal)";
+
+/// What the open body menu says of the terminal: its engine and whether its
+/// masking row is checked, with how many times the ghostty kit was asked for.
+async function spawned(target: HTMLElement): Promise<{ engine: string; masking: boolean; kitLoads: number }> {
   await openBodyMenu(target);
-  const labels = [...document.body.querySelectorAll(".mbtn-label")].map((el) => el.textContent?.trim() ?? "");
   return {
     engine: document.body.querySelector(".terminal-backend-value")?.textContent ?? "",
-    masking: labels.find((label) => label.startsWith("Secret masking")) ?? "",
+    masking: menuRow(MASKING_ROW).getAttribute("aria-checked") === "true",
     kitLoads: ghostty.record.kitLoads,
   };
 }
@@ -343,30 +344,30 @@ describe("a control terminal whose masking starts on", () => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, ...masking }));
     const { target } = await mountGhostty();
-    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking: on", kitLoads: 1 });
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
     expect(ghostty.record.terminals, "one ghostty terminal built").toHaveLength(1);
   });
 
   test("its own toggle turns masking off and leaves it on ghostty", async () => {
     ui.terminalControl = true;
     const { target } = await mountGhostty();
-    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking: on", kitLoads: 1 });
-    menuRow("Secret masking: on").click();
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
+    menuRow(MASKING_ROW).click();
     await tick();
-    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking: off", kitLoads: 1 });
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
   test("with the preference off it starts unmasked on the configured backend", async () => {
     ui.terminalControl = true;
     __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
-    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking: off", kitLoads: 1 });
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: false, kitLoads: 1 });
   });
 
   test("a terminal of any other window masks on ghostty with the preference on", async () => {
     __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: true }));
     const { target } = await mountGhostty();
-    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking: on", kitLoads: 1 });
+    expect(await spawned(target)).toEqual({ engine: "ghostty", masking: true, kitLoads: 1 });
   });
 });
 
@@ -744,7 +745,7 @@ describe("the body menu's Commands", () => {
     window.addEventListener("chan:command", onCommand);
     try {
       await openBodyMenu(target);
-      const row = menuRow("Commands");
+      const row = menuRow("Command launcher");
       row.focus();
       row.click();
       await tick();
@@ -876,12 +877,12 @@ describe("secret masking", () => {
   test("the painter hooks ghostty's renderer and the toggle flips it in place", async () => {
     const { target, term } = await mountGhostty();
     expect(term.renderer.render, "render wrapped after open").not.toBe(ghostty.fakeRender);
-    expect(await spawned(target)).toMatchObject({ masking: "Secret masking: off" });
-    menuRow("Secret masking: off").click();
+    expect(await spawned(target)).toMatchObject({ masking: false });
+    menuRow(MASKING_ROW).click();
     await tick();
     expect(ui.status).toBe("Secret masking enabled for this terminal");
-    expect(await spawned(target)).toMatchObject({ masking: "Secret masking: on" });
-    menuRow("Secret masking: on").click();
+    expect(await spawned(target)).toMatchObject({ masking: true });
+    menuRow(MASKING_ROW).click();
     await tick();
     expect(ui.status).toBe("Secret masking disabled for this terminal");
   });
@@ -891,7 +892,7 @@ describe("secret masking", () => {
     ghostty.record.bareRenderer = true;
     const { target } = await mountGhostty();
     expect(ui.status).toBe("Secret masking stopped working in this terminal");
-    expect(await spawned(target)).toMatchObject({ masking: "Secret masking: off" });
+    expect(await spawned(target)).toMatchObject({ masking: false });
   });
 });
 

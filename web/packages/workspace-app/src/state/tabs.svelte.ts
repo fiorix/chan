@@ -5,6 +5,7 @@
 // nested arbitrarily.
 
 import { flushSync } from "svelte";
+import { privacy } from "@chan/web-shared/privacy";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
 import type { TmuxPaneRef } from "./tmux";
@@ -521,6 +522,15 @@ export type TerminalTab = {
   /// and folded with the others over tmux's layout into the window size the
   /// page asks tmux for. Local to this window and never serialized.
   tmuxHostGrid?: { cols: number; rows: number };
+  /// This terminal's own secret-masking choice: seeded from the preference
+  /// and the window kind each time its shell spawns, then flipped by its
+  /// toggle. Local to this window and never serialized, so a new terminal
+  /// reads the rule again.
+  secretMasking?: boolean;
+  /// Set when this terminal's masker stopped working. Masking then stays off
+  /// whatever asks for it, Privacy mode included, until its toggle is used
+  /// again. Local to this window and never serialized.
+  secretMaskingFailed?: boolean;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1608,6 +1618,8 @@ function tabForReopen(src: Tab): Tab {
     tab.tmuxConsent = undefined;
     tab.tmuxPane = undefined;
     tab.tmuxHostGrid = undefined;
+    tab.secretMasking = undefined;
+    tab.secretMaskingFailed = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2570,6 +2582,66 @@ export function terminalBroadcastReachCount(tab: TerminalTab): number {
   return local + cross;
 }
 
+/// One terminal a terminal's broadcast list offers: the terminal itself, a
+/// terminal of its group in this window, or a member of the group in another
+/// window that a page holds.
+export type TerminalBroadcastTarget = {
+  /// The tab id of a terminal in this window, the session id of a member in
+  /// another.
+  id: string;
+  name: string;
+  /// The terminal itself, whose entry turns its own broadcast on or off.
+  self: boolean;
+  /// A member in another window, which flips through the server.
+  otherWindow: boolean;
+  on: boolean;
+  /// Turn the target on or off. For a member in another window the promise
+  /// settles when the server has taken the request; the roster then carries
+  /// the member's new state.
+  set: (on: boolean) => void | Promise<void>;
+};
+
+/// A terminal's broadcast list in the order it is shown: the terminal
+/// itself, the other terminals of its group in this window, then the group's
+/// members in other windows. The terminal's menu and the launcher's choice
+/// both list these, so they offer the same terminals with the same state.
+export function terminalBroadcastTargets(tab: TerminalTab): TerminalBroadcastTarget[] {
+  const group = terminalTabGroup(tab);
+  const selected = new Set(terminalBroadcastMemberIds(tab));
+  const local = allTerminalTabs()
+    .filter((t) => terminalTabGroup(t) === group)
+    .sort((a, b) => {
+      if (a.id === tab.id) return -1;
+      if (b.id === tab.id) return 1;
+      return 0;
+    })
+    .map((target): TerminalBroadcastTarget => {
+      const self = target.id === tab.id;
+      return {
+        id: target.id,
+        name: terminalTabName(target),
+        self,
+        otherWindow: false,
+        on: self ? tab.broadcastEnabled : selected.has(target.id),
+        set: (on) =>
+          self
+            ? setTerminalBroadcastEnabled(tab, on)
+            : setTerminalBroadcastTarget(tab, target.id, on),
+      };
+    });
+  const cross = crossWindowBroadcastMembers(tab).map(
+    (member): TerminalBroadcastTarget => ({
+      id: member.id,
+      name: member.tab_name ?? "terminal",
+      self: false,
+      otherWindow: true,
+      on: member.broadcast,
+      set: (on) => api.setTerminalSessionBroadcast(member.id, on),
+    }),
+  );
+  return [...local, ...cross];
+}
+
 export function setTerminalSession(tab: TerminalTab, sessionId: string): void {
   const wasFresh = !tab.terminalSessionId || tab.terminalSessionId !== sessionId;
   tab.terminalSessionId = sessionId;
@@ -2622,6 +2694,45 @@ export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus
 /// no reading.
 export function setTerminalProgram(tab: TerminalTab, program: TerminalProgram | undefined): void {
   tab.terminalProgram = program;
+}
+
+/// Set a terminal's own secret-masking choice as its shell spawns.
+export function seedTerminalSecretMasking(tab: TerminalTab, enabled: boolean): void {
+  tab.secretMasking = enabled;
+}
+
+/// Record that a terminal's masker stopped working. Its own choice goes off
+/// with it, so the toggle reads what the screen shows.
+export function failTerminalSecretMasking(tab: TerminalTab): void {
+  tab.secretMasking = false;
+  tab.secretMaskingFailed = true;
+}
+
+/// Whether Privacy mode masks secrets in every terminal, over each one's own
+/// choice.
+function privacyMasksTerminalSecrets(): boolean {
+  return privacy.enabled && privacy.mask_terminal_secrets;
+}
+
+/// Whether secret masking is in effect on a terminal: by its own choice or by
+/// Privacy mode, and by neither once its masker has failed.
+export function terminalSecretMaskingOn(tab: TerminalTab): boolean {
+  return !tab.secretMaskingFailed && (tab.secretMasking === true || privacyMasksTerminalSecrets());
+}
+
+/// Flip a terminal's own secret-masking choice and say so on the status
+/// line. Privacy mode holds masking on, so under it the choice stays as it is
+/// and the status says why; a masker that failed is tried again. Returns
+/// whether the choice changed.
+export function toggleTerminalSecretMasking(tab: TerminalTab): boolean {
+  if (privacyMasksTerminalSecrets() && !tab.secretMaskingFailed) {
+    notify("Secret masking is enabled by Privacy mode");
+    return false;
+  }
+  tab.secretMaskingFailed = false;
+  tab.secretMasking = !tab.secretMasking;
+  notify(`Secret masking ${tab.secretMasking ? "enabled" : "disabled"} for this terminal`);
+  return true;
 }
 
 /// The server's tmux consent state for the attached page, applied for the
@@ -4566,6 +4677,8 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   tmuxConsent: "carry",
   tmuxPane: "carry",
   tmuxHostGrid: "carry",
+  secretMasking: "carry",
+  secretMaskingFailed: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -7987,6 +8100,11 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   seedInput: "drop",
   spawnCommand: "drop",
   spawnEnv: "drop",
+  // This window's masking of this terminal: the terminal seeds its own choice
+  // from the preference as it starts in the target window, where no masker
+  // of its has failed.
+  secretMasking: "drop",
+  secretMaskingFailed: "drop",
 };
 
 /// Rebuild a tab from another window's snapshot and append it to `paneId`.
