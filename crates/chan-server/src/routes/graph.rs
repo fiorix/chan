@@ -1535,7 +1535,8 @@ fn gzip_each_frame(
 /// Holds a graph stream's producer after its `meta` event until the test
 /// that asked lets it go, so the test can read what a client has while the
 /// server is still building. Keyed by the workspace root, so tests that run
-/// at once never share a hold.
+/// at once never share a hold. A test can also shorten the stream's
+/// keep-alive for the requests its own thread opens.
 #[cfg(test)]
 pub(crate) mod stream_hold {
     use std::collections::HashMap;
@@ -1543,6 +1544,13 @@ pub(crate) mod stream_hold {
     use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
     type Hold = Arc<(Mutex<bool>, Condvar)>;
+
+    thread_local! {
+        /// The keep-alive period of the graph streams this thread's requests
+        /// open, in place of the route's.
+        pub(crate) static KEEPALIVE: std::cell::Cell<Option<std::time::Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
 
     static HOLDS: LazyLock<Mutex<HashMap<PathBuf, Hold>>> = LazyLock::new(Default::default);
 
@@ -1705,7 +1713,7 @@ async fn stream_graph_response(
         GraphStreamMessage::Data(bytes) => bytes,
         GraphStreamMessage::Error(e) => graph_ndjson_error_bytes(e.to_string()),
     };
-    let frames = bridge.into_stream(first, render);
+    let frames = keep_alive(bridge.into_stream(first, render), graph_stream_keepalive());
     if gzip {
         // Encoded here rather than by the route's compression layer, which
         // passes an answer that carries its own encoding through as it is.
@@ -1722,6 +1730,45 @@ async fn stream_graph_response(
     }
     let body = Body::from_stream(frames);
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
+}
+
+/// How long the graph stream may send nothing before it sends an empty
+/// `nodes` batch. A client gives a stream up as stalled after a silence
+/// (the SPA's `GRAPH_STALL_MS`, 30 s), and the build that runs before the
+/// first batch and between batches outlasts that on a large workspace; any
+/// event resets the client's count, and an empty batch adds nothing to the
+/// view.
+const GRAPH_STREAM_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn graph_stream_keepalive() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(period) = stream_hold::KEEPALIVE.with(std::cell::Cell::get) {
+        return period;
+    }
+    GRAPH_STREAM_KEEPALIVE
+}
+
+/// `frames`, with an empty `nodes` event whenever `period` passes with no
+/// frame. The frame the wait was for is not lost: the stream's own pending
+/// receive outlives the wait.
+fn keep_alive(
+    frames: impl futures::Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+    period: std::time::Duration,
+) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    use futures::StreamExt;
+
+    futures::stream::unfold(Box::pin(frames), move |mut frames| async move {
+        match tokio::time::timeout(period, frames.next()).await {
+            Ok(Some(frame)) => Some((frame, frames)),
+            Ok(None) => None,
+            Err(_) => {
+                let empty = graph_ndjson_bytes(&GraphStreamEvent::Nodes { nodes: Vec::new() })
+                    .map_err(std::io::Error::other);
+                Some((empty, frames))
+            }
+        }
+    })
+    .fuse()
 }
 
 fn build_graph_view(
@@ -2650,6 +2697,62 @@ mod tests {
             whole.ends_with("{\"type\":\"done\"}\n"),
             "the stream does not end with its done event: {whole}"
         );
+    }
+
+    // A stream whose build runs long still reaches its client: while the
+    // producer is held after `meta`, the client keeps getting empty `nodes`
+    // batches, any of which resets a client's stall count, and once the build
+    // goes on it gets the rest.
+    #[tokio::test]
+    async fn a_graph_stream_sends_empty_batches_while_its_build_runs() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let held = stream_hold::hold(workspace.root());
+        stream_hold::KEEPALIVE
+            .with(|period| period.set(Some(std::time::Duration::from_millis(100))));
+
+        let request = axum::http::Request::builder()
+            .uri("/api/graph?stream=1")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        let held_lines = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while text.lines().count() < 3 {
+                let chunk = body
+                    .next()
+                    .await
+                    .expect("the stream ended while the server was held")
+                    .expect("a body chunk");
+                text.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        })
+        .await;
+        stream_hold::KEEPALIVE.with(|period| period.set(None));
+        assert!(
+            held_lines.is_ok(),
+            "the held stream went silent after: {text:?}"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("{\"type\":\"meta\""), "{text}");
+        assert_eq!(lines[1], "{\"type\":\"nodes\",\"nodes\":[]}");
+        assert_eq!(lines[2], "{\"type\":\"nodes\",\"nodes\":[]}");
+
+        drop(held);
+        while let Some(chunk) = body.next().await {
+            text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+        assert!(text.ends_with("{\"type\":\"done\"}\n"), "{text}");
     }
 
     #[test]
