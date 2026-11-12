@@ -1392,12 +1392,8 @@ fn on_close_requested(
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
-    let _ = window.unminimize();
-    if let Err(e) = window.show() {
+    if let Err(e) = crate::raise::raise_window(&window) {
         tracing::warn!(label = %label, error = %e, "raising close-confirm window failed");
-    }
-    if let Err(e) = window.set_focus() {
-        tracing::warn!(label = %label, error = %e, "focusing close-confirm window failed");
     }
     let _ = window.eval(CONFIRM_CLOSE_DISPATCH_JS);
 }
@@ -4498,16 +4494,22 @@ mod tests {
         // nothing buries here until the SPA calls back.
         assert!(arm.contains("api.prevent_close();"));
         assert!(arm.contains("window.eval(CONFIRM_CLOSE_DISPATCH_JS)"));
+        // The prompt owner is raised through the shared raise, which
+        // restores, shows and focuses it (`raise.rs` pins that order), before
+        // the prompt is asked for.
         let raise = arm
-            .find("window.show()")
-            .expect("the prompt owner is raised");
-        let focus = arm
-            .find("window.set_focus()")
-            .expect("the prompt owner is focused");
+            .find("crate::raise::raise_window(&window)")
+            .expect("the prompt owner is raised through the shared raise");
         let eval = arm
             .find("window.eval(CONFIRM_CLOSE_DISPATCH_JS)")
             .expect("the close prompt is evaluated");
-        assert!(raise < focus && focus < eval);
+        assert!(raise < eval);
+        for own in ["window.unminimize()", "window.show()", "window.set_focus()"] {
+            assert!(
+                !arm.contains(own),
+                "the prompt owner's raise must leave {own} to the shared raise"
+            );
+        }
         // The real-close cases (control terminal still connecting and pre-SPA
         // connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));

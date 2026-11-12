@@ -672,12 +672,8 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     match forward_for(app, state) {
         Forward::Raise(label) => {
             if let Some(window) = app.get_webview_window(&label) {
-                let _ = window.unminimize();
-                if let Err(e) = window.show() {
-                    tracing::warn!(label = %window.label(), error = %e, "showing the window to come forward failed");
-                }
-                if let Err(e) = window.set_focus() {
-                    tracing::warn!(label = %window.label(), error = %e, "focusing the window to come forward failed");
+                if let Err(e) = crate::raise::raise_window(&window) {
+                    tracing::warn!(label = %window.label(), error = %e, "raising the window to come forward failed");
                 }
             }
         }
@@ -1298,6 +1294,38 @@ mod tests {
             forward_choice(Some("local::gone"), &[], false),
             Forward::OpenTerminal
         );
+    }
+
+    /// The window `come_forward` picks is raised through the shared raise,
+    /// which restores, shows and focuses it (`raise.rs` pins that order). A
+    /// source pin: it holds the call, not what the platform then does.
+    #[test]
+    fn come_forward_raises_its_window_through_the_shared_raise() {
+        let (production, _) = include_str!("single_instance.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, come_forward) = production
+            .split_once("\npub(crate) fn come_forward(")
+            .expect("come_forward exists");
+        let (come_forward, _) = come_forward
+            .split_once("\n}\n")
+            .expect("come_forward ends at a column-0 brace");
+        let (_, raise) = come_forward
+            .split_once("Forward::Raise(label) => {")
+            .expect("come_forward has a raise arm");
+        let (raise, _) = raise
+            .split_once("Forward::OpenTerminal =>")
+            .expect("the terminal arm follows the raise arm");
+        assert!(
+            raise.contains("crate::raise::raise_window(&window)"),
+            "{raise}"
+        );
+        for own in ["window.unminimize()", "window.show()", "window.set_focus()"] {
+            assert!(
+                !come_forward.contains(own),
+                "come_forward must leave {own} to the shared raise"
+            );
+        }
     }
 
     #[test]
