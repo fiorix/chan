@@ -80,7 +80,10 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 toml = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
+# The gzip of the graph route is chan-server's alone: the gateway workspace
+# compiles chan-tunnel-server by path with the workspace's features, and has
+# no use for the compression crates in its lock.
+tower-http = { workspace = true, features = ["compression-gzip"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
