@@ -262,6 +262,9 @@ async function closeDeck(page) {
 
 async function deck(page, steps) {
   await page.bringToFront();
+  // The shortcut toggles the deck, so one an earlier gesture or a failed
+  // step left open is dismissed first.
+  await closeDeck(page);
   await page.keyboard.down("Control");
   await page.keyboard.down("Alt");
   await page.keyboard.press("KeyK");
