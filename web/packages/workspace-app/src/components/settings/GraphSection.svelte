@@ -2,7 +2,8 @@
   // Graph settings: the node palette override, per colour scheme, and
   // the graph surface's Hybrid body-theme override. Every commit
   // replaces the whole `graph_colors` composite with one hue changed,
-  // keeping any dormant palette for the other scheme.
+  // keeping any dormant palette for the other scheme (see graphColors.ts).
+  // Each field takes its words from the settings index.
 
   import type { GraphColorPrefs, GraphPalette, Preferences } from "../../api/types";
   import { ui } from "../../state/store.svelte";
@@ -10,11 +11,12 @@
     GRAPH_COLOR_GROUPS,
     GRAPH_COLOR_ROWS,
     GRAPH_PALETTE_DEFAULTS,
-    sanitizeGraphPalette,
     type GraphColorKind,
     type GraphColorTheme,
   } from "../../state/graphPalette.svelte";
-  import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
+  import { commitSetting, type CommitFn, type CommitOptions, type SaveStatus } from "./commit";
+  import { graphColorsChange } from "./graphColors";
+  import { settingEntry, toggledIn } from "./settingsIndex";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
   import PillRadio from "./PillRadio.svelte";
@@ -28,51 +30,20 @@
     { value: "light", label: "Light" },
   ] as const;
 
-  const graphColorsOn = $derived(prefs.graph_colors?.mode === "custom");
+  const CUSTOM_COLORS = settingEntry("graph.customColors");
+  const COLOR_ROWS = GRAPH_COLOR_ROWS.map((row) => ({
+    ...row,
+    entry: settingEntry(`graph.colors.${row.kind}`),
+  }));
+
+  const graphColorsOn = $derived(toggledIn(CUSTOM_COLORS, prefs));
   let graphEditTheme = $state<GraphColorTheme>(ui.theme);
 
-  /// Drop invalid hues from a stored palette before it enters a PATCH
-  /// body, with the same per-key rule the paint path applies. The
-  /// server serves stored hues unvalidated but rejects the whole
-  /// `graph_colors` object with a 400 on any invalid hex, and
-  /// preferences.toml is hand-editable, so spreading a raw stored
-  /// palette lets one bad value silently fail every commit until the
-  /// TOML is fixed out of band. An emptied palette becomes undefined
-  /// so the scheme key is omitted, matching writeGraphColor's prune.
-  function sanitizedStoredPalette(
-    palette: GraphPalette | undefined,
-  ): GraphPalette | undefined {
-    const clean = sanitizeGraphPalette(palette);
-    return Object.keys(clean).length === 0 ? undefined : clean;
-  }
-
-  /// Replace the whole composite with `update` applied, keeping any
-  /// dormant palette for the other scheme. Stored palettes are
-  /// sanitized on the way in, so `update` and the PATCH body only ever
-  /// see valid hues.
   function commitGraphColors(
     update: (current: GraphColorPrefs) => GraphColorPrefs,
     options?: CommitOptions,
   ): Promise<SaveStatus> {
-    return commit((p) => {
-      const current = p.graph_colors;
-      const dark = sanitizedStoredPalette(current?.dark);
-      const light = sanitizedStoredPalette(current?.light);
-      return {
-        ...p,
-        graph_colors: update({
-          mode: current?.mode ?? "standard",
-          ...(dark ? { dark } : {}),
-          ...(light ? { light } : {}),
-        }),
-      };
-    }, undefined, options);
-  }
-
-  function toggleCustomGraphColors(on: boolean): void {
-    // Off keeps the stored palettes dormant (terminal parity), so a
-    // later activation restores them unchanged.
-    commitGraphColors((c) => ({ ...c, mode: on ? "custom" : "standard" }));
+    return commit(graphColorsChange(update), undefined, options);
   }
 
   /// Write or clear one hue in the edited scheme's palette. `hex` null
@@ -118,14 +89,14 @@
 </script>
 
 <SettingField
-  label="Custom graph colours"
+  setting={CUSTOM_COLORS}
   pref="graph_colors"
   hint="Override graph node hues, per colour scheme. Applies to the graph surface only; every other surface keeps the theme palette. Clear a field to fall back to the default hue."
 >
   <PillToggle
-    label="Custom graph colours"
+    label={CUSTOM_COLORS.caption}
     checked={graphColorsOn}
-    ontoggle={toggleCustomGraphColors}
+    ontoggle={(on) => commitSetting(commit, CUSTOM_COLORS, on)}
   />
 </SettingField>
 
@@ -142,11 +113,12 @@
   <div class="graph-colours">
     {#each GRAPH_COLOR_GROUPS as group (group)}
       <div class="graph-palette-group">{group}</div>
-      {#each GRAPH_COLOR_ROWS.filter((row) => row.group === group) as row (row.kind)}
+      {#each COLOR_ROWS.filter((row) => row.group === group) as row (row.kind)}
         {@const committed = prefs.graph_colors?.[graphEditTheme]?.[row.kind]}
         <ColorField
           id={`graph-colour-${row.kind}`}
-          label={row.label}
+          setting={row.entry.id}
+          label={row.entry.caption}
           description={row.description}
           value={committed ?? GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}
           defaultHex={GRAPH_PALETTE_DEFAULTS[graphEditTheme][row.kind]}

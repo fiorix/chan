@@ -1,4 +1,5 @@
 import type { Preferences } from "../../api/types";
+import type { SettingEntry } from "./settingsIndex";
 
 // A single-field settings write. `mutate` returns the preferences with
 // one slice changed; `persist`, when a field has a dedicated store/api
@@ -41,3 +42,18 @@ export type SaveStatusLookup = (pref: string) => SaveStatus;
 export const FIELD_SAVE = Symbol("settings-field-save");
 
 export type FieldSave = { status(): SaveStatus; claimNote(): void };
+
+/// Commit a toggle or a choice stored in the machine preferences through
+/// the overlay's own write, with the change and the setter its index entry
+/// names, so the overlay and the launcher send the same write.
+export function commitSetting(
+  commit: CommitFn,
+  entry: SettingEntry,
+  value: boolean | string,
+  options?: CommitOptions,
+): Promise<SaveStatus> {
+  const access = entry.pref;
+  if (!access) throw new Error(`setting ${entry.id} is not a machine preference`);
+  const persist = access.persist;
+  return commit(access.change(value), persist ? () => persist(value) : undefined, options);
+}

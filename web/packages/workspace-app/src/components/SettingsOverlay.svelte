@@ -7,11 +7,17 @@
   // form re-reads on the config_changed WS event (a sibling window's
   // change refreshes workspace.info.preferences), so every open window
   // stays in sync.
+  //
+  // `openSettings` may name a section and a field of the settings index to
+  // land on: the surface switches to the section, brings the field into
+  // view, focuses its first control and marks it for a moment.
 
   import { Maximize2, Minimize2, X } from "@lucide/svelte";
-  import { setContext, tick } from "svelte";
+  import { setContext, tick, untrack } from "svelte";
   import { SAVE_STATUS, type SaveStatus } from "./settings/commit";
-  import type { Preferences, PreferencesPatch } from "../api/types";
+  import { changePatch, clonePreferences as clone } from "./settings/preferenceState.svelte";
+  import { settingsIndex } from "./settings/settingsIndex";
+  import type { Preferences } from "../api/types";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import {
@@ -65,10 +71,7 @@
   let lastServerSnap = "";
   let settingsEl: HTMLDivElement | undefined = $state();
   let sectionNavEl: HTMLElement | undefined = $state();
-
-  function clone(p: Preferences): Preferences {
-    return JSON.parse(JSON.stringify(p)) as Preferences;
-  }
+  let contentEl: HTMLDivElement | undefined = $state();
 
   /// Normalize the fields the form presents that carry legacy aliases,
   /// so a persisted "tight" spacing or a retired date-format id maps to
@@ -139,20 +142,6 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
   }
 }
 
-function mutationPatch(
-    current: Preferences,
-    mutate: (preferences: Preferences) => Preferences,
-  ): PreferencesPatch | null {
-    const next = mutate(clone(current));
-    const changed = Object.entries(next).filter(
-      ([key, value]) =>
-        JSON.stringify(current[key as keyof Preferences]) !== JSON.stringify(value),
-    );
-    return changed.length > 0
-      ? (Object.fromEntries(changed) as PreferencesPatch)
-      : null;
-  }
-
   async function reload(): Promise<void> {
     if (loading) return;
     loading = true;
@@ -177,9 +166,10 @@ function mutationPatch(
     if (open && !wasOpen) {
       void reload();
       void tick().then(() => {
-        if (settingsPanel.open) settingsEl?.focus({ preventScroll: true });
+        if (settingsPanel.open && !aimed) settingsEl?.focus({ preventScroll: true });
       });
     } else if (!open && wasOpen) {
+      aimed = false;
       void tick().then(() => {
         if (!settingsPanel.open) bumpTabFocusPulse();
       });
@@ -250,7 +240,7 @@ function mutationPatch(
     setSaveStatus(keys, "saving");
     const run = persist
       ? persist()
-      : updateGlobalConfigSerial((prefs) => mutationPatch(prefs, mutate));
+      : updateGlobalConfigSerial((prefs) => changePatch(prefs, mutate));
     try {
       await run;
       setSaveStatus(keys, "saved");
@@ -289,6 +279,115 @@ function mutationPatch(
     if (activeSection === "workspace" && workspace.info === null) {
       activeSection = "global";
     }
+  });
+
+  /// How long a link waits for its field to render. The form mounts once
+  /// the config has loaded, and a workspace control renders part of itself
+  /// only once its own state has.
+  const LANDING_WAIT_MS = 3000;
+  /// How long a field a link landed on stays marked.
+  const LANDED_MARK_MS = 1600;
+  const FOCUSABLE =
+    "input:not([disabled]), select:not([disabled]), button:not([disabled]), textarea:not([disabled])";
+  /// A link aimed this open at a field, which takes the focus the surface
+  /// would otherwise take for itself.
+  let aimed = false;
+  let cancelLanding: (() => void) | null = null;
+  let marked: { el: HTMLElement; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  function anchorOf(field: string): HTMLElement | null {
+    const anchors = contentEl?.querySelectorAll<HTMLElement>("[data-setting]") ?? [];
+    for (const anchor of anchors) {
+      if (anchor.dataset.setting === field) return anchor;
+    }
+    return null;
+  }
+
+  function unmark(): void {
+    if (!marked) return;
+    clearTimeout(marked.timer);
+    marked.el.removeAttribute("data-setting-landed");
+    marked = null;
+  }
+
+  function landOn(anchor: HTMLElement): void {
+    anchor.scrollIntoView?.({ block: "center" });
+    // A radio group is entered on its checked pill, as Tab enters it.
+    const control =
+      anchor.querySelector<HTMLElement>('input[type="radio"]:checked:not([disabled])') ??
+      anchor.querySelector<HTMLElement>(FOCUSABLE);
+    (control ?? settingsEl)?.focus({ preventScroll: true });
+    unmark();
+    anchor.setAttribute("data-setting-landed", "");
+    marked = { el: anchor, timer: setTimeout(unmark, LANDED_MARK_MS) };
+  }
+
+  /// Land on `field` of `section` once it renders. Leaving the section, a
+  /// later link, or closing the surface ends the wait.
+  function land(section: SettingsSectionId, field: string): void {
+    cancelLanding?.();
+    let observer: MutationObserver | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let live = true;
+    const stop = (): void => {
+      live = false;
+      observer?.disconnect();
+      if (timer) clearTimeout(timer);
+      if (cancelLanding === stop) cancelLanding = null;
+    };
+    cancelLanding = stop;
+    const attempt = (): boolean => {
+      if (!live) return true;
+      if (!settingsPanel.open || activeSection !== section) {
+        stop();
+        return true;
+      }
+      const anchor = anchorOf(field);
+      if (!anchor) return false;
+      stop();
+      landOn(anchor);
+      return true;
+    };
+    void tick().then(() => {
+      if (attempt() || !contentEl) return;
+      observer = new MutationObserver(() => void attempt());
+      observer.observe(contentEl, { childList: true, subtree: true });
+      timer = setTimeout(() => {
+        // The field never rendered: the surface still takes the focus.
+        const waiting = live;
+        stop();
+        if (waiting && settingsPanel.open) settingsEl?.focus({ preventScroll: true });
+      }, LANDING_WAIT_MS);
+    });
+  }
+
+  // Follow a link from the launcher: `openSettings` records where to land
+  // and this surface shows it, whether it was closed or already open. A
+  // field is filed under its own section, whatever section the link names.
+  $effect(() => {
+    const target = settingsPanel.target;
+    if (!target) return;
+    untrack(() => {
+      settingsPanel.target = null;
+      if (!settingsPanel.open) return;
+      const field = target.field;
+      const filedUnder = settingsIndex().find((spec) => spec.id === field)?.section;
+      const section = sections.find((s) => s.id === (filedUnder ?? target.section));
+      if (!section) return;
+      activeSection = section.id;
+      if (field === undefined) return;
+      aimed = true;
+      land(section.id, field);
+    });
+  });
+
+  // A surface that closes mid-wait or still marked starts clean next time.
+  $effect(() => {
+    if (settingsPanel.open) return;
+    untrack(() => {
+      cancelLanding?.();
+      unmark();
+    });
   });
 
   function toggleMax(): void {
@@ -380,7 +479,7 @@ function mutationPatch(
           </button>
         {/each}
       </nav>
-      <div class="content">
+      <div class="content" bind:this={contentEl}>
         {#if loadError}
           <div class="state">
             <p class="err">Could not load settings: {loadError}</p>
@@ -394,7 +493,7 @@ function mutationPatch(
           <!-- KeymapSettings owns its own filter + scrolling grid; it
                needs a sized flex-column container so its internal scroll
                is bounded to the overlay height. -->
-          <div class="keymap-mount">
+          <div class="keymap-mount" data-setting="shortcuts.grid">
             <KeymapSettings />
           </div>
         {:else}
@@ -519,6 +618,27 @@ function mutationPatch(
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* The field a link from the launcher landed on, marked for a moment. */
+  .content :global([data-setting-landed]) {
+    border-radius: 6px;
+    animation: setting-landed 1.6s ease-out;
+  }
+  @keyframes setting-landed {
+    from {
+      background: color-mix(in srgb, var(--link) 24%, transparent);
+      box-shadow: 0 0 0 6px color-mix(in srgb, var(--link) 24%, transparent);
+    }
+    to {
+      background: transparent;
+      box-shadow: 0 0 0 6px transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .content :global([data-setting-landed]) {
+      animation: none;
+      background: color-mix(in srgb, var(--link) 14%, transparent);
+    }
   }
   .state {
     display: flex;
