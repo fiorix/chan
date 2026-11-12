@@ -1709,6 +1709,83 @@ describe("CommandDeck run and navigation keys", () => {
   });
 });
 
+describe("CommandDeck keys under a card", () => {
+  type Shown = "preparing" | "pending" | "success" | "confirm" | "error";
+  const never = <T,>(): Promise<T> => new Promise<T>(() => {});
+
+  /// Mount one row and bring up the card of that kind.
+  async function showCard(kind: Shown): Promise<void> {
+    const over: Record<Shown, Partial<DeckItem>> = {
+      preparing: { confirm: () => never<DeckConfirm>() },
+      pending: { awaitResult: true },
+      success: { awaitResult: true },
+      confirm: { confirm: confirmation("Sure?") },
+      error: {},
+    };
+    const onChoose: Record<Shown, () => void | Promise<void>> = {
+      preparing: () => {},
+      pending: () => never<void>(),
+      success: async () => {},
+      confirm: () => {},
+      error: async () => {
+        throw new Error("refused");
+      },
+    };
+    await mountWith({ items: [named("close", "Close", over[kind])], onChoose: onChoose[kind] });
+    await press("Enter");
+    deckInput().dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    const text: Record<Shown, string> = {
+      preparing: "Checking...",
+      pending: "Working",
+      success: "Done",
+      confirm: "Sure?",
+      error: "refused",
+    };
+    expect(target.querySelector(".deck-operation")?.textContent, `the ${kind} card`).toContain(text[kind]);
+  }
+
+  for (const kind of ["preparing", "pending", "success", "confirm", "error"] as const) {
+    it(`keeps Tab and the query to itself under a ${kind} card`, async () => {
+      await showCard(kind);
+      const tab = await press("Tab");
+      const back = await press("Tab", { shiftKey: true });
+      expect(tab.defaultPrevented, "Tab does not walk off the input").toBe(true);
+      expect(back.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(deckInput());
+      expect(deckInput().readOnly, "the query is not edited under a card").toBe(true);
+
+      const browsers = await press("Tab", { ctrlKey: true });
+      expect(browsers.defaultPrevented, "a chord stays the browser's").toBe(false);
+    });
+  }
+
+  it("moves between a card's two answers on Tab", async () => {
+    await showCard("confirm");
+    const chosen = (): string | null | undefined =>
+      target.querySelector(".deck-decisions button.chosen")?.textContent;
+    expect(chosen()).toBe("Cancel");
+    await press("Tab");
+    expect(chosen()).toBe("Close");
+    await press("Tab", { ctrlKey: true });
+    expect(chosen(), "a chord is not the card's").toBe("Close");
+  });
+
+  it("gives the query back when the card leaves", async () => {
+    await showCard("confirm");
+    expect(deckInput().readOnly).toBe(true);
+    await press("Escape");
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(deckInput().readOnly).toBe(false);
+  });
+
+  it("keeps a card's buttons and the scrim out of the tab order", async () => {
+    await showCard("confirm");
+    const controls = target.querySelectorAll(".deck-decisions button, .deck-backdrop");
+    expect(controls).toHaveLength(3);
+    for (const control of controls) expect(control.getAttribute("tabindex")).toBe("-1");
+  });
+});
+
 describe("CommandDeck key list", () => {
   const keyList = (): Element | null => target.querySelector(".deck-keys");
 

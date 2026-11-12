@@ -669,6 +669,17 @@
     draft.operation = null;
   }
 
+  /// Move a confirmation or an error card to its other answer. The cards
+  /// that only report have none.
+  function otherAnswer(): void {
+    const operation = draft.operation;
+    if (operation?.kind === "confirm") {
+      operation.selected = operation.selected === "cancel" ? "action" : "cancel";
+    } else if (operation?.kind === "error") {
+      operation.selected = operation.selected === "back" ? "retry" : "back";
+    }
+  }
+
   function operationEnter(event: KeyboardEvent): void {
     const operation = draft.operation;
     if (!operation || event.repeat || !confirmKeyReleased) return;
@@ -790,29 +801,37 @@
       return;
     }
 
-    const operation = draft.operation;
-    if (operation) {
-      if (operation.kind === "confirm" || operation.kind === "error") {
-        if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Tab") {
-          event.preventDefault();
-          operation.selected =
-            operation.kind === "confirm"
-              ? operation.selected === "cancel" ? "action" : "cancel"
-              : operation.selected === "back" ? "retry" : "back";
-        } else if (event.key === "Enter") {
-          event.preventDefault();
-          operationEnter(event);
-        } else if (event.key === "Backspace") {
-          event.preventDefault();
-          operationBack();
-        }
-      }
-      return;
-    }
-
     const chord = event.ctrlKey || event.metaKey || event.altKey;
     // AltGr reports as Ctrl+Alt on Windows, and some layouts type `?` with it.
     const typesText = event.key.length === 1 && !event.metaKey && event.ctrlKey === event.altKey;
+
+    const operation = draft.operation;
+    if (operation) {
+      // A card answers the keys it names and no other. Tab is taken under
+      // every card, so focus cannot walk off the input to the card's
+      // buttons. The input is read-only meanwhile, so nothing typed changes
+      // the query: one that filtered the card's row out of the list would
+      // leave its action nothing to run. A chord stays the browser's or the
+      // host's.
+      if (chord) return;
+      const answers = operation.kind === "confirm" || operation.kind === "error";
+      if (event.key === "Tab") {
+        event.preventDefault();
+        otherAnswer();
+      } else if (!answers) {
+        return;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        otherAnswer();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        operationEnter(event);
+      } else if (event.key === "Backspace") {
+        event.preventDefault();
+        operationBack();
+      }
+      return;
+    }
 
     if (keysShown) {
       // Any key leaves the key list and does nothing else, except a
@@ -954,7 +973,7 @@
 
 {#if open}
   <div bind:this={overlay} class="deck-overlay" data-direction={direction}>
-    <button class="deck-backdrop" type="button" aria-label="Hide command launcher" onclick={onClose}></button>
+    <button class="deck-backdrop" type="button" tabindex="-1" aria-label="Hide command launcher" onclick={onClose}></button>
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role, a11y_no_noninteractive_element_interactions -->
     <section
       class="deck-shell"
@@ -1004,6 +1023,7 @@
               class="deck-input"
               bind:this={input}
               value={draft.query}
+              readonly={draft.operation !== null}
               type="text"
               role="combobox"
               aria-expanded="true"
@@ -1059,11 +1079,12 @@
                 <span><PrivateField field={`command:${operation.itemId}:message`} label="action message">{operation.message}</PrivateField></span>
               </div>
               <div class="deck-decisions">
-                <button class:chosen={operation.selected === "cancel"} type="button" onclick={operationBack}>Cancel</button>
+                <button class:chosen={operation.selected === "cancel"} type="button" tabindex="-1" onclick={operationBack}>Cancel</button>
                 <button
                   class:chosen={operation.selected === "action"}
                   class:danger={operation.danger}
                   type="button"
+                  tabindex="-1"
                   onclick={() => {
                     const item = operationItem();
                     if (item) void execute(item);
@@ -1074,13 +1095,13 @@
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span>Checking...</span></div>
               <div class="deck-decisions">
-                <button type="button" onclick={releaseOperation}>Dismiss</button>
+                <button type="button" tabindex="-1" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
               <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span>Working…</span></div>
               <div class="deck-decisions">
-                <button type="button" onclick={releaseOperation}>Dismiss</button>
+                <button type="button" tabindex="-1" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>
@@ -1089,10 +1110,11 @@
               <div class="deck-operation-icon error">!</div>
               <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span><PrivateField field={`command:${operation.itemId}:message`} label="action message">{operation.message}</PrivateField></span></div>
               <div class="deck-decisions">
-                <button class:chosen={operation.selected === "back"} type="button" onclick={operationBack}>Back</button>
+                <button class:chosen={operation.selected === "back"} type="button" tabindex="-1" onclick={operationBack}>Back</button>
                 <button
                   class:chosen={operation.selected === "retry"}
                   type="button"
+                  tabindex="-1"
                   onclick={() => { const item = operationItem(); if (item) retry(item); }}
                 >Retry</button>
               </div>

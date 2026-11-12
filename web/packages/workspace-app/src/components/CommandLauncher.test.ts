@@ -1207,6 +1207,33 @@ describe("contextual command deck", () => {
     expect(launcherDraft.query, "a command that ran clears the query").toBe("");
   });
 
+  test("typing under a Close card leaves the query alone, so the card's row stays listed for its action", async () => {
+    stubPopup();
+    scopedLibrary.liveTerminals.mockResolvedValue(1);
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "close release");
+    row(target, `Close ${CAPTIONED}`).click();
+    await flush();
+    expect(operation(target)).toContain("1 terminal session in this window will stop.");
+    // Keys typed now, as a browser delivers them: text goes into a field
+    // only while the field can be edited.
+    const field = input(target);
+    for (const character of "zzz") {
+      const down = new KeyboardEvent("keydown", { key: character, bubbles: true, cancelable: true });
+      field.dispatchEvent(down);
+      if (down.defaultPrevented || field.readOnly) continue;
+      field.value += character;
+      field.dispatchEvent(new InputEvent("input", { bubbles: true, data: character }));
+    }
+    await flush();
+    expect(launcherDraft.query).toBe("close release");
+    expect(operation(target), "the card stays").toContain("1 terminal session in this window will stop.");
+    decision(target, "Close").click();
+    await flush();
+    expect(scopedLibrary.run).toHaveBeenCalledExactlyOnceWith({ action: "close_window", window_id: "w-captioned" });
+  });
+
   /// The roster follows a scoped action as the library's does: Hide marks the
   /// window hidden and Close removes it, and the next snapshot says so.
   function rosterFollowsActions(): void {
