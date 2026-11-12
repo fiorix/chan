@@ -786,6 +786,10 @@ fn apprun_block(key: &str) -> &'static [&'static str] {
 /// AppRun's order, with its trailing separators; for `PYTHONPATH`, whose block
 /// is a lone entry, that entry with its trailing separator under a directory
 /// other than the root, which is a Python import path inside some mount.
+/// `XDG_DATA_DIRS`' second entry is the GTK hook's, under the mount as
+/// `$APPDIR` names it, where AppRun's first is under the mount resolved: the
+/// two names differ ahead of the mount's own (a `TMPDIR` that is a link, or
+/// ends in a separator) and end in that same name.
 fn apprun_block_at(key: &str, entries: &[PathBuf], at: usize) -> Option<usize> {
     let block = apprun_block(key);
     let run = entries
@@ -794,11 +798,22 @@ fn apprun_block_at(key: &str, entries: &[PathBuf], at: usize) -> Option<usize> {
     let dir = run[0].to_str()?.strip_suffix(block[0])?;
     let whole = dir.len() > 1
         && dir.starts_with('/')
-        && run.iter().zip(block).all(|(entry, suffix)| {
-            entry
-                .to_str()
-                .is_some_and(|entry| entry == format!("{dir}{suffix}"))
-        });
+        && run
+            .iter()
+            .zip(block)
+            .enumerate()
+            .all(|(index, (entry, suffix))| {
+                let Some(under) = entry.to_str().and_then(|entry| entry.strip_suffix(suffix))
+                else {
+                    return false;
+                };
+                under == dir
+                    || (key == "XDG_DATA_DIRS"
+                        && index == 1
+                        && under.starts_with('/')
+                        && Path::new(under).file_name().is_some()
+                        && Path::new(under).file_name() == Path::new(dir).file_name())
+            });
     whole.then(|| at + block.len() - 1)
 }
 
@@ -1783,6 +1798,14 @@ mod appimage_env_tests {
             (tmp, link, resolved)
         }
 
+        /// The directory `resolved` lies in.
+        fn resolved_parent(resolved: &str) -> &str {
+            std::path::Path::new(resolved)
+                .parent()
+                .and_then(std::path::Path::to_str)
+                .expect("utf-8 parent")
+        }
+
         /// The names the runtime gives that directory through the link: as
         /// `$TMPDIR` is spelled, with the doubled separator a `TMPDIR` that
         /// ends in one gives, and with a trailing separator.
@@ -1909,6 +1932,65 @@ mod appimage_env_tests {
                     "{named}"
                 );
             }
+        }
+
+        /// An older parent started through the same link wrote its
+        /// `XDG_DATA_DIRS` block as AppRun's entry under its resolved
+        /// directory and the GTK hook's under its `$APPDIR`: the two name the
+        /// same mount, so the block is that parent's whole and goes, as it
+        /// does with no link.
+        #[test]
+        fn an_older_parents_data_dirs_named_through_a_link_are_not_the_users() {
+            let (_tmp, link, resolved) = linked_extraction();
+            // Its directory need not exist: a block is told by its shape.
+            let old_resolved = format!("{}/appimage_extracted_0456", resolved_parent(&resolved));
+            for named in names_through(&link) {
+                for old_named in [
+                    format!("{link}/appimage_extracted_0456"),
+                    format!("{link}//appimage_extracted_0456"),
+                    format!("{link}/appimage_extracted_0456/"),
+                ] {
+                    let chained = |user: &str| {
+                        OsString::from(format!(
+                            "{resolved}/usr/share/:{named}/usr/share:/usr/share:\
+                             {old_resolved}/usr/share/:{old_named}/usr/share:/usr/share:{user}"
+                        ))
+                    };
+                    let vars = |user: &str| {
+                        let mut vars = linked_desktop(&named, &resolved);
+                        vars.retain(|(name, _)| name != "XDG_DATA_DIRS");
+                        vars.push(("XDG_DATA_DIRS".into(), chained(user)));
+                        vars
+                    };
+                    let host = |user: &str| {
+                        appimage_host_env(vars(user), HostEnvFor::Terminal)
+                            .into_iter()
+                            .find(|(key, _)| key == "XDG_DATA_DIRS")
+                            .map(|(_, scrub)| scrub)
+                    };
+                    assert_eq!(host(""), Some(Scrub::Remove), "{old_named}");
+                    assert_eq!(
+                        host("/usr/local/share:/usr/share"),
+                        Some(Scrub::Rewrite("/usr/local/share:/usr/share".into())),
+                        "{old_named}"
+                    );
+                    assert_eq!(
+                        without_foreign_apprun_blocks("XDG_DATA_DIRS", vars("/opt/share"), None),
+                        Some(OsString::from(format!(
+                            "{resolved}/usr/share/:{named}/usr/share:/usr/share:/opt/share"
+                        ))),
+                        "{old_named}"
+                    );
+                }
+            }
+            // Two directories of other names are not one mount's block.
+            let unrelated = OsString::from(format!(
+                "{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:/opt/a/usr/share/:/opt/b/usr/share"
+            ));
+            assert_eq!(
+                scrub("XDG_DATA_DIRS", &unrelated),
+                Some(Scrub::Rewrite("/opt/a/usr/share/:/opt/b/usr/share".into()))
+            );
         }
 
         /// AppRun's Qt block, under `dir`.
