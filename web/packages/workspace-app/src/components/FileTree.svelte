@@ -81,7 +81,7 @@
     openTerminalInPane,
   } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import {
     browserSelection,
     fbActivateInstance,
@@ -804,7 +804,7 @@
   // The launcher's own toggle is a chord with no catalog row, so its menu row
   // takes the shortcut table's words.
   const LAUNCHER = "app.launcher.toggle";
-  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   /// Open the launcher from the row menu, with the keyboard handed back to
   /// the tree first so the launcher returns it there when it closes.

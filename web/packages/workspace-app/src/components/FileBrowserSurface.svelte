@@ -9,7 +9,7 @@
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import { settingEntry } from "./settings/settingsIndex";
   import { tabMenu } from "../state/tabMenu.svelte";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { commandState, commandTitle } from "../state/commands";
   import "../state/commands/install";
   import { browserView, dropBrowserView, setBrowserView, toggleBrowserDetails, toggleBrowserView } from "../state/browserView.svelte";
@@ -99,7 +99,7 @@
   // The launcher's own toggle is a chord with no catalog row, so its menu row
   // takes the shortcut table's words.
   const LAUNCHER = "app.launcher.toggle";
-  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   function keyLabel(command: BrowserCommand): string {
     const id = keyCommands[command];

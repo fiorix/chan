@@ -704,6 +704,15 @@ export function chordFor(id: string): string | null {
   return formatChord(chord, os);
 }
 
+/// The table's label for `id`: the words of an action the command catalog
+/// holds no row for, as the launcher's own toggle is. A menu that offers
+/// such an action words its row through this, so the words are written
+/// once. An id the table does not hold reads as itself, which a test over
+/// a menu's rows catches before a reader does.
+export function shortcutLabel(id: string): string {
+  return SHORTCUTS.find((s) => s.id === id)?.label ?? id;
+}
+
 /// The desktop's inspector chord: Cmd+Alt+I on macOS, Ctrl+Alt+I on Linux
 /// and Windows. chan-desktop's key bridge (`desktop/src-tauri/src/
 /// key_bridge.js`) opens the inspector on it before the page sees the key,

@@ -98,7 +98,7 @@
     isOpenableTextKind,
     type FileKind,
   } from "../state/kinds";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { commandTitle } from "../state/commands";
   import {
     graphFilterRows,
@@ -952,7 +952,7 @@
   // The launcher's own toggle is a chord with no catalog row, so its menu row
   // takes the shortcut table's words.
   const LAUNCHER = "app.launcher.toggle";
-  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   /// Open the launcher from the menu. A graph holds no keyboard caret to
   /// hand back, so the launcher records the page as its opener.

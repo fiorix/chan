@@ -42,7 +42,7 @@
     Trash,
     X,
   } from "@lucide/svelte";
-  import { chordFor, currentOS, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, currentOS, shortcutLabel } from "../state/shortcuts";
   import { commandState, commandTitle } from "../state/commands";
   import "../state/commands/install";
   import {
@@ -1133,10 +1133,9 @@
   const PAGE_WIDTH = settingEntry("editor.pageWidth");
 
   /// The launcher's own toggle is a chord with no catalog row, so its words
-  /// are the shortcut table's. An id the table lacks reads as itself, as an
-  /// unregistered command's does.
+  /// are the shortcut table's.
   const LAUNCHER = "app.launcher.toggle";
-  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   function closeTabMenuChordLabel(): string {
     // The canvas surface keeps Ctrl+D for Excalidraw's duplicate gesture, so

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { renderTable } from "./shortcuts";
+import { renderTable, shortcutLabel, SHORTCUTS } from "./shortcuts";
 
 describe("shortcut table", () => {
   test("advertises Command launcher as Ctrl+Alt+K on web and Cmd+K on native mac", () => {
@@ -187,4 +187,20 @@ describe("shortcut table", () => {
     expect(plain).toMatch(/^Search workspace\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux/m);
   });
 
+});
+
+// A menu words an action the command catalog holds no row for, the
+// launcher's own toggle, from the table.
+describe("shortcutLabel", () => {
+  test("is the table's label for an id the table holds", () => {
+    const launcher = SHORTCUTS.find((shortcut) => shortcut.id === "app.launcher.toggle")!;
+
+    expect(shortcutLabel("app.launcher.toggle")).toBe("Command launcher");
+    expect(shortcutLabel("app.launcher.toggle")).toBe(launcher.label);
+    expect(shortcutLabel("app.settings.open")).toBe("Settings");
+  });
+
+  test("reads an id the table does not hold as itself", () => {
+    expect(shortcutLabel("app.no.such.action")).toBe("app.no.such.action");
+  });
 });
