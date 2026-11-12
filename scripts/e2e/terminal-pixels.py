@@ -14,13 +14,19 @@ The four default scenarios are explicit DOM and ghostty reference arms over
 {os-default, source-code-pro}; --include-renderers adds the xterm WebGL
 reference. They cover the AppImage's NVIDIA fallback and accelerated readings
 without pretending to execute chan-desktop's driver policy. The font chain is
-not restated here; it is read out of TerminalTab.svelte, and the @font-face
-block is read out of the app's own fonts.css, so a chain edit moves the
-measurement with it.
+not restated here; it is read out of terminal/font.ts, the @font-face block
+out of the app's own fonts.css and the palette out of TerminalTab.svelte, so
+a chain or palette edit moves the measurement with it.
+
+The ghostty pattern arms paint what the grid pattern never reaches: cell
+colours and attributes, wide and combined glyphs, each cursor style, history
+rows and the selection. Nothing is measured on them beyond a liveness and a
+blank region; they are byte-level references, and --compare holds a run's
+PNGs to an earlier run's, which is how a renderer change is accepted.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
-                                           [--only SUBSTRING]
+                                           [--only SUBSTRING] [--compare DIR]
 
 Exit status: 0 pass, 1 fail, 2 skipped because the GUI stack is unavailable.
 A skip is not a pass; report it as a skip.
@@ -64,6 +70,7 @@ WEB = REPO / "web"
 WORKSPACE_APP = WEB / "packages/workspace-app"
 FONT_MODULE = WORKSPACE_APP / "src/terminal/font.ts"
 FONTS_CSS = WORKSPACE_APP / "src/fonts.css"
+TERMINAL_TAB = WORKSPACE_APP / "src/components/TerminalTab.svelte"
 GHOSTTY_COMPAT = WORKSPACE_APP / "src/terminal/ghosttyCompat.ts"
 PAGE_DIR = pathlib.Path(__file__).resolve().parent / "terminal-pixels"
 BUILD_GHOSTTY = PAGE_DIR / "build-ghostty.mjs"
@@ -91,6 +98,18 @@ MIN_BLOCK_COVERAGE = 0.995
 # stale pixels or an overlay drawing over content.
 MAX_BLANK_INK = 0.001
 
+# A pattern arm's written rows hold text, so some of their pixels are ink. A
+# page that painted nothing would otherwise match an earlier run that also
+# painted nothing.
+MIN_PAINTED_INK = 0.01
+
+# The 16 colours a theme names, in the order TerminalTab's theme lists them.
+PALETTE_NAMES = (
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow",
+    "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+)
+
 
 def linux_font_chain(pref: str) -> str:
     """The chain the terminal hands the renderer on Linux for this preference.
@@ -116,6 +135,28 @@ def font_face_block() -> str:
     if not match:
         raise SystemExit(f"{FONTS_CSS}: no @font-face rule found")
     return f"<style>\n{match.group(0)}\n</style>"
+
+
+def dark_palette() -> dict[str, str]:
+    """The 16 colours TerminalTab's dark theme hands the terminal.
+
+    Read from terminalTheme() in TerminalTab.svelte, whose last return is
+    the dark branch; the page paints at the dark-theme fallbacks of its
+    other colours too.
+    """
+    text = TERMINAL_TAB.read_text(encoding="utf-8")
+    start = text.find("function terminalTheme()")
+    end = text.find("\n  }\n", start)
+    returns = re.findall(r"return \{\s*\.\.\.base,(.*?)\};", text[start:end], re.S)
+    if start < 0 or end < 0 or not returns:
+        raise SystemExit(f"{TERMINAL_TAB}: no terminalTheme() palette found")
+    palette = dict(re.findall(r'(\w+): "(#[0-9a-fA-F]{6})"', returns[-1]))
+    if sorted(palette) != sorted(PALETTE_NAMES):
+        raise SystemExit(
+            f"{TERMINAL_TAB}: terminalTheme()'s dark palette names"
+            f" {sorted(palette)}, not the 16 theme colours"
+        )
+    return palette
 
 
 def build_serve_dir(root: pathlib.Path) -> None:
@@ -474,6 +515,11 @@ def measure(pixels: Pixels, report) -> dict:
     if "blank" in regions:
         numbers["blank_ink"] = pixels.coverage(span_rect(pixels, regions["blank"]))
 
+    if "painted" in regions:
+        numbers["painted_ink"] = pixels.coverage(
+            span_rect(pixels, regions["painted"])
+        )
+
     return numbers
 
 
@@ -486,25 +532,38 @@ class Scenario:
         font: str,
         renderer: str = "dom",
         new_tab: bool = False,
+        pattern: str = "",
+        cursor_style: str = "",
     ):
         self.backend = backend
         self.font = font
         # Only meaningful for the xterm backend; ghostty owns its renderer.
         self.renderer = renderer
         self.new_tab = new_tab
+        # One of the page's reference patterns, or "" for the grid pattern.
+        self.pattern = pattern
+        # The widget's cursorStyle option, for the cursor patterns.
+        self.cursor_style = cursor_style
 
     @property
     def name(self) -> str:
         suffix = "" if self.renderer == "dom" else f" +{self.renderer}"
         suffix += " (second tab)" if self.new_tab else ""
+        if self.pattern:
+            style = f" {self.cursor_style}" if self.cursor_style else ""
+            suffix += f", {self.pattern}{style} pattern"
         return f"{self.font}, {self.backend}{suffix}"
 
     @property
     def slug(self) -> str:
+        pattern = self.pattern
+        if self.cursor_style:
+            pattern = pattern.replace("cursor-", f"cursor-{self.cursor_style}-")
         return (
             f"{self.backend}-{self.font}"
             f"{'' if self.renderer == 'dom' else '-' + self.renderer}"
             f"{'-newtab' if self.new_tab else ''}"
+            f"{'-' + pattern if pattern else ''}"
         )
 
     def url(self, port: int) -> str:
@@ -516,6 +575,13 @@ class Scenario:
             "newTab": self.new_tab,
             "renderer": self.renderer,
         }
+        # The grid pattern paints default colours under the widget's default
+        # cursor style, so only the pattern arms carry these.
+        if self.pattern:
+            config["pattern"] = self.pattern
+            config["palette"] = dark_palette()
+        if self.cursor_style:
+            config["cursorStyle"] = self.cursor_style
         fragment = urllib.parse.quote(json.dumps(config))
         return f"http://127.0.0.1:{port}/index.html#{fragment}"
 
@@ -529,6 +595,21 @@ SCENARIOS = [
     Scenario("ghostty", "source-code-pro"),
     Scenario("xterm", "os-default", new_tab=True),
     Scenario("ghostty", "os-default", new_tab=True),
+]
+
+# The ghostty reference patterns (harness.mjs's PATTERNS), each cursor pattern
+# once per cursor style the widget draws. On the os-default arm only: on Linux
+# both font preferences resolve to the same chain (TG-06), so a second font
+# arm would paint the same PNGs.
+PATTERN_SCENARIOS = [
+    Scenario("ghostty", "os-default", pattern="attrs"),
+    Scenario("ghostty", "os-default", pattern="glyphs"),
+    Scenario("ghostty", "os-default", pattern="scrollback"),
+    Scenario("ghostty", "os-default", pattern="selection"),
+] + [
+    Scenario("ghostty", "os-default", pattern=f"cursor-{where}", cursor_style=style)
+    for style in ("block", "underline", "bar")
+    for where in ("blank", "glyph")
 ]
 
 # Explicit accelerated-path reference, run only under --include-renderers.
@@ -575,6 +656,13 @@ def report_scenario(scenario: Scenario, report, numbers) -> list[str]:
             "max",
             None,
         ),
+        (
+            "the pattern painted where it wrote",
+            "painted_ink",
+            MIN_PAINTED_INK,
+            "min",
+            None,
+        ),
     ]
     checks = [
         (label, numbers[key], bound, direction, numbers.get(gaps_key) or [])
@@ -604,6 +692,25 @@ def report_scenario(scenario: Scenario, report, numbers) -> list[str]:
     return failures
 
 
+def compare_png(scenario: Scenario, png: pathlib.Path, reference: pathlib.Path):
+    """Hold one PNG to the reference run's; return the assertion it failed.
+
+    Bytes, not pixels: the snapshot is written by one cairo build in both
+    runs, so the same pixels encode to the same file, and any difference is a
+    difference in what was painted.
+    """
+    earlier = reference / png.name
+    label = f"PNG is byte-identical to {earlier}"
+    if not earlier.is_file():
+        print(f"  FAIL  {label}: the reference run has no such PNG")
+    elif earlier.read_bytes() != png.read_bytes():
+        print(f"  FAIL  {label}: the bytes differ")
+    else:
+        print(f"  ok  {label}")
+        return []
+    return [f"{scenario.name}: PNG differs from {earlier}"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -622,11 +729,26 @@ def main() -> int:
         default="",
         help="run only scenarios whose slug contains this substring",
     )
+    parser.add_argument(
+        "--compare",
+        type=pathlib.Path,
+        help="an earlier run's --out directory: every PNG this run writes"
+        " must be byte-identical to the one of the same name there",
+    )
     args = parser.parse_args()
     out = args.out if args.out.is_absolute() else REPO / args.out
     out.mkdir(parents=True, exist_ok=True)
+    reference = None
+    if args.compare:
+        reference = (
+            args.compare if args.compare.is_absolute() else REPO / args.compare
+        )
+        if not reference.is_dir():
+            raise SystemExit(f"--compare {reference}: no such directory")
+        if reference.resolve() == out.resolve():
+            raise SystemExit("--compare names the directory this run writes")
 
-    scenarios = SCENARIOS + (
+    scenarios = SCENARIOS + PATTERN_SCENARIOS + (
         RENDERER_SCENARIOS if args.include_renderers else []
     )
     if args.only:
@@ -647,6 +769,8 @@ def main() -> int:
                 surface, report = render(gui, scenario.url(port), png)
                 numbers = measure(Pixels(surface, report), report)
                 failures.extend(report_scenario(scenario, report, numbers))
+                if reference is not None:
+                    failures.extend(compare_png(scenario, png, reference))
                 print(f"        {png}")
         finally:
             shutdown()
@@ -662,7 +786,8 @@ def main() -> int:
             print(f"  {failure}")
         print(f"PNGs preserved under {out}")
         return 1
-    print(f"\nPASS: every scenario paints a gap-free grid ({out})")
+    matched = f", every PNG matching {reference}" if reference else ""
+    print(f"\nPASS: every scenario's assertions hold{matched} ({out})")
     return 0
 
 

@@ -1,6 +1,7 @@
 /// The page under test for terminal-pixels.py: one real terminal, built the
 /// way TerminalTab.svelte builds it, painting a fixed pattern whose ink the
-/// driver measures.
+/// driver measures, or one of the reference patterns (PATTERNS below) whose
+/// PNG a later run is compared with byte for byte.
 ///
 /// WHY the pattern lives here rather than in the driver: the driver measures
 /// pixels, and pixels only mean something against the cells they came from.
@@ -155,15 +156,239 @@ function regions() {
   };
 }
 
+/// One run of cells in an SGR, then back to the defaults.
+function sgr(params, text) {
+  return `\x1b[${params}m${text}\x1b[0m`;
+}
+
+/// A labelled row of SGR samples, a default-coloured space between them.
+function sampleRow(row, label, samples) {
+  return (
+    cup(0, row) +
+    label +
+    samples.map(([params, text]) => sgr(params, text)).join(" ")
+  );
+}
+
+/// History for the scrollback pattern: more lines than the screen holds,
+/// one of them long enough to soft-wrap, viewed scrolled back far enough
+/// that history rows fill the top of the view and screen rows the bottom.
+const SCROLLBACK_LINES = 40;
+const SCROLLBACK_WRAP_LINE = 14;
+const SCROLLBACK_SHOWN = 12;
+
+/// Where the cursor patterns park the cursor: on the W of row 2, or on a
+/// cell of row 6 nothing is written to.
+const CURSOR_GLYPH = { col: 21, row: 2 };
+const CURSOR_BLANK = { col: 30, row: 6 };
+
+/// The reference patterns, by the scenario's `pattern`. The grid pattern
+/// above is the one the ink measures read; these paint the paths it never
+/// reaches (cell colours and attributes, wide and combined glyphs, each
+/// cursor style, history rows, the selection), so that a change to the
+/// renderer can be held to byte-identical PNGs against a run before it. They
+/// record what the renderer paints, not what it ought to: each declares only
+/// where it wrote, which must carry ink so that a page that drew nothing
+/// cannot pass for a match, and a region nothing writes. Every one starts on
+/// a fresh terminal and hides the cursor unless the cursor is its subject.
+const PATTERNS = {
+  // Colours and attributes. Row 1 sets explicit black backgrounds beside
+  // default ones: the palette's black and RGB (1,1,1), which the renderer
+  // paints, and the 256-colour table's black (16) and RGB black, which it
+  // leaves unpainted as if they were the default. Rows 10 and 11 give cells
+  // a background and no character, by erasing in a colour.
+  attrs: {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        sampleRow(1, "blk ", [
+          ["0", "Ab"], ["40", "Ab"], ["0", "Ab"], ["48;5;0", "Ab"],
+          ["48;5;16", "Ab"], ["48;2;0;0;0", "Ab"], ["48;2;1;1;1", "Ab"],
+          ["40", "  "], ["48;2;0;0;0", "  "], ["7;40", "Ab"],
+          ["30;40", "Ab"], ["30", "Ab"],
+        ]),
+        sampleRow(2, "bg  ", [41, 42, 43, 44, 45, 46, 47, 100, 101, 102, 103, 104, 105, 106, 107].map((n) => [String(n), "A"])),
+        sampleRow(3, "fg  ", [30, 31, 32, 33, 34, 35, 36, 37, 90, 91, 92, 93, 94, 95, 96, 97].map((n) => [String(n), "Ab"])),
+        cup(0, 4) +
+          "256 " +
+          [1, 9, 17, 52, 88, 124, 160, 196, 202, 214, 226, 46, 51, 93, 201, 232, 240, 250, 255]
+            .map((n) => sgr(`38;5;${n}`, "A") + sgr(`48;5;${n}`, " "))
+            .join(""),
+        sampleRow(5, "rgb ", [
+          ["38;2;255;0;0", "Ab"], ["38;2;0;255;0", "Ab"], ["38;2;0;0;255", "Ab"],
+          ["38;2;255;160;0", "Ab"], ["38;2;1;1;1", "Ab"], ["38;2;254;254;254", "Ab"],
+          ["48;2;255;0;0", "Ab"], ["48;2;0;128;0", "Ab"], ["48;2;40;80;120", "Ab"],
+          ["48;2;250;250;250", "Ab"], ["38;2;255;255;0;48;2;80;0;80", "Ab"],
+        ]),
+        sampleRow(6, "sgr ", [
+          ["1", "Bd"], ["2", "Fa"], ["3", "It"], ["4", "Ul"], ["4:2", "U2"],
+          ["4:3", "U3"], ["4:4", "U4"], ["4:5", "U5"], ["5", "Bl"], ["7", "In"],
+          ["8", "Iv"], ["9", "St"], ["53", "Ov"],
+        ]),
+        sampleRow(7, "mix ", [
+          ["1;3", "BI"], ["1;4", "BU"], ["2;9", "FS"], ["3;4;9", "IUS"],
+          ["7;31", "r7"], ["7;41", "b7"], ["7;38;5;196;48;5;21", "x7"],
+          ["8;44", "hid"], ["2;31", "fr"], ["1;2", "bf"], ["4;31", "ur"],
+          ["9;32;48;5;236", "sg"], ["7", "   "],
+        ]),
+        sampleRow(8, "box ", [
+          ["31", "█"], ["2", "█"], ["2;33", "▀▄"], ["7", "█"], ["8;41", "█"],
+          ["33;44", "─│┼"], ["2;36", "═║╬"], ["7;35", "▌▐"], ["1", "░▒▓"],
+          ["4;32", "──"], ["9", "││"], ["38;2;255;128;0;48;2;0;0;0", "█─"],
+        ]),
+        cup(0, 10) + "el  \x1b[45m\x1b[K\x1b[0m",
+        cup(0, 11) + "ech \x1b[48;2;40;80;120m\x1b[6X",
+        cup(12, 11) + "\x1b[48;5;22m\x1b[4X",
+        cup(18, 11) + "\x1b[40m\x1b[5X",
+        cup(25, 11) + "\x1b[48;2;0;0;0m\x1b[5X",
+        cup(32, 11) + "\x1b[48;5;16m\x1b[5X\x1b[0m",
+      ].join("");
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: 11 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 13, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // Widths: wide characters with and without attributes, emoji with
+  // variation selectors, a skin tone and ZWJ sequences, combining marks and
+  // clusters, a wide character that does not fit in the last column (it
+  // leaves a spacer there and wraps), and a row that soft-wraps.
+  glyphs: {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        cup(0, 1) + "cjk 漢字かなカナ한글 " +
+          [["31;44", "漢"], ["7", "字"], ["4", "下"], ["9", "線"], ["1;3", "強"]]
+            .map(([p, t]) => sgr(p, t)).join(" "),
+        cup(0, 3) + "emo 😀 👍🏽 👨‍👩‍👧 🏳️‍🌈 ❤️ ✈️ " + sgr("44", "😀") + " " + sgr("7", "👍🏽"),
+        cup(0, 5) + "cmb é à̖ ñ ȫ कि क्ष 각 " +
+          sgr("4", "é") + " " + sgr("33;41", "à"),
+        cup(0, 7) + "w".repeat(COLS - 1) + "漢tail",
+        cup(0, 10) + "soft wrap: " + "0123456789".repeat(6) + "+continued",
+        cup(0, 13) + "mix ┌漢┐ █漢█ " + sgr("31", "▀漢▄") + " é█",
+      ].join("");
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: 13 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 15, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // Rows read from history while the view is scrolled back, among them a
+  // row that soft-wrapped, with the attributes of the attrs pattern, above
+  // rows of the screen.
+  scrollback: {
+    bytes() {
+      const styles = ["0", "1;31", "2", "3;4", "7", "40", "48;2;0;0;0", "38;5;208;48;5;24", "9;32", "8;43"];
+      const lines = [];
+      for (let i = 0; i < SCROLLBACK_LINES; i += 1) {
+        const n = String(i).padStart(2, "0");
+        if (i === SCROLLBACK_WRAP_LINE) {
+          lines.push(sgr("36", `history ${n} wraps: `) + "abcdefghij".repeat(6));
+          continue;
+        }
+        lines.push(
+          sgr(styles[i % styles.length], `history ${n}`) +
+            " ─│█▀ " +
+            (i % 3 === 0 ? "漢字 " : "") +
+            (i % 4 === 0 ? "é " : "") +
+            "end",
+        );
+      }
+      return "\x1b[?25l" + lines.join("\r\n");
+    },
+    async settle(term) {
+      term.scrollLines(-SCROLLBACK_SHOWN);
+      if (term.getViewportY() !== SCROLLBACK_SHOWN) {
+        throw new Error(
+          `scrolled back ${term.getViewportY()} rows, not ${SCROLLBACK_SHOWN}`,
+        );
+      }
+      // A scroll shows the widget's overlay scrollbar, which fades in and
+      // then hides itself on a timer. A frame taken mid-fade would not
+      // reproduce, so the snapshot waits for it to be gone.
+      const deadline = performance.now() + 10000;
+      while (term.scrollbarVisible !== false) {
+        if (typeof term.scrollbarVisible !== "boolean") {
+          throw new Error("the widget's scrollbar state is unreadable");
+        }
+        if (performance.now() > deadline) {
+          throw new Error("the overlay scrollbar never hid");
+        }
+        await nextFrame();
+      }
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: 39, firstRow: 0, lastRow: ROWS - 1 },
+      blank: { firstCol: 40, lastCol: 55, firstRow: 7, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A selection from inside row 2 to inside row 5 (the first, a middle and
+  // the last row of a selection are painted by separate branches) over
+  // cells with colours, attributes, wide and combined characters and box
+  // glyphs.
+  selection: {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        cup(0, 2) + "select: plain text " +
+          [["40", "blk"], ["7", "inv"], ["44", "bg"], ["4;31", "ul"]].map(([p, t]) => sgr(p, t)).join(" "),
+        cup(0, 3) + "漢字 é " + sgr("1", "bold") + " ─│┼ █▀▄ " +
+          sgr("33;48;2;0;0;0", "rgb0") + " " + sgr("8", "hid") + " end",
+        cup(0, 4) + "a full row: " + "0123456789".repeat(4),
+        cup(0, 5) + sgr("38;5;208;48;5;24", "256 colours") + " " + sgr("2", "faint") + " " +
+          sgr("9", "strike") + " 漢",
+        cup(0, 6) + "below the selection",
+      ].join("");
+    },
+    async settle(term) {
+      // From column 8 of row 2 to column 20 of row 5.
+      term.select(8, 2, (COLS - 8) + COLS * 2 + 21);
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 2, lastRow: 6 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 8, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A visible cursor parked on a glyph or on a blank cell; the scenario's
+  // cursorStyle picks the shape the renderer draws.
+  "cursor-glyph": cursorPattern(CURSOR_GLYPH),
+  "cursor-blank": cursorPattern(CURSOR_BLANK),
+};
+
+function cursorPattern(at) {
+  return {
+    bytes() {
+      return [
+        "\x1b[?25h",
+        cup(2, 2) + "cursor on a glyph: W",
+        cup(2, 4) + "and on a blank cell below",
+        cup(2, 8) + sgr("44", " a coloured row ") + " " + sgr("1;31", "bold"),
+        cup(at.col, at.row),
+      ].join("");
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 2, lastRow: 8 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 10, lastRow: ROWS - 1 },
+    }),
+  };
+}
+
 /// TerminalTab's terminalTheme() at its dark-theme fallbacks, read from the
-/// same CSS variables it reads.
-function terminalTheme(host) {
+/// same CSS variables it reads. The reference patterns also carry its dark
+/// palette, which the driver reads out of TerminalTab.svelte; the grid
+/// pattern paints default colours only and takes none.
+function terminalTheme(host, palette) {
   const styles = getComputedStyle(host);
   return {
     background: styles.getPropertyValue("--bg").trim() || "#1c1c1e",
     foreground: styles.getPropertyValue("--text").trim() || "#ebebf0",
     cursor: styles.getPropertyValue("--link").trim() || "#58a6ff",
     selectionBackground: "rgba(88, 166, 255, 0.35)",
+    ...palette,
   };
 }
 
@@ -242,7 +467,7 @@ function compileGhostty() {
   return ghosttyModule;
 }
 
-async function startGhostty(host, scenario, warnings, bytes) {
+async function startGhostty(host, scenario, warnings, bytes, settle) {
   // TerminalTab's instance host: replies the core generates outside a write
   // (a resize report) go to the PTY, which this page does not have.
   let term = null;
@@ -257,14 +482,14 @@ async function startGhostty(host, scenario, warnings, bytes) {
     allowTransparency: false,
     cols: COLS,
     cursorBlink: false,
-    cursorStyle: "block",
+    cursorStyle: scenario.cursorStyle ?? "block",
     fontFamily: scenario.fontFamily,
     fontSize: scenario.fontSize,
     ghostty,
     rows: ROWS,
     scrollback: 1000,
     smoothScrollDuration: 0,
-    theme: terminalTheme(host),
+    theme: terminalTheme(host, scenario.palette),
   });
   term.open(host);
 
@@ -292,6 +517,10 @@ async function startGhostty(host, scenario, warnings, bytes) {
 
   await new Promise((resolve) => term.write(bytes, resolve));
   await nextFrame();
+  if (settle) {
+    await settle(term);
+    await nextFrame();
+  }
 
   const canvas = host.querySelector("canvas");
   if (!canvas) throw new Error("ghostty painted no canvas");
@@ -332,6 +561,16 @@ async function main() {
   const start =
     scenario.backend === "ghostty" ? startGhostty : startXterm;
 
+  // A reference pattern settles through the ghostty widget's own API and
+  // its scrollbar's timing, so it is painted on ghostty alone.
+  const pattern = scenario.pattern ? PATTERNS[scenario.pattern] : null;
+  if (scenario.pattern && !pattern) {
+    throw new Error(`no pattern named ${scenario.pattern}`);
+  }
+  if (pattern && (scenario.backend !== "ghostty" || scenario.newTab)) {
+    throw new Error(`the ${scenario.pattern} pattern paints one ghostty tab`);
+  }
+
   // The new-tab arm reproduces chan's tab model rather than a bare second
   // terminal: the tab a user was already on stays mounted and keeps its
   // content, and the new one is a second terminal built from the same
@@ -348,8 +587,12 @@ async function main() {
     await start(prior, scenario, warnings, patternBytes());
   }
 
-  const bytes = scenario.newTab ? promptBytes() : patternBytes();
-  const grid = await start(host, scenario, warnings, bytes);
+  const bytes = pattern
+    ? pattern.bytes()
+    : scenario.newTab
+      ? promptBytes()
+      : patternBytes();
+  const grid = await start(host, scenario, warnings, bytes, pattern?.settle);
 
   // The title is the whole channel back to the driver: it is readable
   // without a JavaScriptCore binding and it arrives on an event the driver
@@ -358,7 +601,11 @@ async function main() {
     ...grid,
     devicePixelRatio: window.devicePixelRatio,
     faceLoaded,
-    regions: scenario.newTab ? newTabRegions() : regions(),
+    regions: pattern
+      ? pattern.regions()
+      : scenario.newTab
+        ? newTabRegions()
+        : regions(),
     warnings,
   })}`;
 }
