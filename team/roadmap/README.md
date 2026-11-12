@@ -21,113 +21,56 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.128.0
+### v0.129.0
 
-Opened 2026-11-09 by the owner with one item taken in parts over this and the following releases: the ghostty terminals render through ghostty-web, a package with no release since v0.4.0 that chan drives from outside through its private internals, so chan forks the parts it uses into `web/packages/ghostty-web-ng`, a widget over libghostty-vt 1.0 with public hooks for highlights, painting, focus and events, decides later whether to extract it to its own repository, and folds in the find gaps the v0.127.0 follow-ups left ([ghosttyng]). v0.127.0 keeps its ghostty work as tested.
-
-The owner added a second the same day, measured in those follow-ups: with the find bar open at the largest scrollback and a needle that matches often, the search's feed runs a find frame to 30 to 57 ms while output streams, so a feed's backlog gets a bound ([findfeed]).
-
-A third came the same day from the review of v0.127.0's live-metrics fixes: the CLI's calls to the local devserver (`chan ps`, the terminal drain, `rotate-token` and the health probes) build their HTTP client from the environment, so a proxy setting sends the devserver's token to the proxy; `chan metrics` was fixed in v0.127.0 alone, and the rest get one direct local client with the listener check `chan metrics` uses ([cliproxy]).
-
-The owner moved two more here from v0.127.0 the same day, both not started: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]), and the system CA store for the Rust TLS clients, read on three platforms ([systemca]).
-
-The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, copy and paste carry no stray bytes, and Linux gets middle-click paste from the PRIMARY selection ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]). The tmux title bar was built the next day and moved to v0.127.0.
-
-A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's selected match on every resize, so v0.127.0 drops the highlight and shows no index until the next step, and the owner moved keeping the match, through the core's tracked grid references, here ([findresize]).
-
-A sixth came from the owner on 2026-11-10: in windows that are not tmux windows, the pane tree shows beside each terminal what runs in it, read as tmux panes are, from the title the program sets, else its foreground command ([termcmd]). A seventh is the time-bound tests' follow-up: six tests that still go red under the heaviest CPU load, and one that flaked in the full gate's symlink arm ([loadres]).
-
-Two more came from the owner the same day: a `tmux -CC` connection's windows, and its hidden control terminal, show under All windows and on the connection's own card but not on the card of the machine they run on ([tmuxcard]); and Cmd+Shift+N in a devserver's `tmux -CC` window opens a plain devserver window, where a local tmux window gets a new tmux window ([tmuxnew]).
-
-Four more came the same day from the second reading of v0.127.0's merged code ([reread]), each left for this release by the owner: a launch beside a desktop that does not answer exits with nothing on screen ([silentlaunch]); the Windows handoff pipe takes clients before it is served and collides across like-named accounts ([winpipe]); coming forward to a minimized window may not activate the app ([minraise]); and the test that an unused sign-in token cuts nothing reads its counters before a cut could run ([tokentest]).
-
-Two more came from the fixes of the owner's Mac checks that day, found beside them and left alone: a desktop upload's cancel and error paths leave a failure line, a row and an open picker behind and name local paths to the page ([uploadpaths]); and moving a tmux window to another index may close its chan window, read from a probe of tmux and not yet run through chan ([tmuxmove]).
-
-The owner then closed v0.127.0 to new work ("just close off the current in-flight items and the rest moves to v128"), and the small findings of the reading and its fixes that had no row yet are collected in one: `ci.yml` without `permissions`, the gateway roles' `TEMPORARY` grant through `PUBLIC`, and the rest ([leftovers]).
-
-Also on 2026-11-10 the owner had the gateway lane of the per-node WireGuard ingress built directly with an agent outside the round's seats: identity's ingress list, discovery, redeem, consent and peers route, profile's gateway-wide peers and migration 18, the packaging and the documents, on `feat/wireguard-ingress-per-node-gateway`, gated, then reviewed and merged into the release's integration branch on 2026-11-11; the desktop lane follows ([wgnode]).
-
-The owner added one more on 2026-11-11, after reading v0.127.0's centered Metrics slide on his Mac: the Dashboard's About, Workspace and Search slides sit in the middle of a large tab as the Metrics slide does, where today they start at its top ([dashslides]).
-
-Two more came from the owner on 2026-11-11, at the start of the release's round: `make clean` leaves `.build-tools/` and a stale `gateway/node_modules` behind ([makeclean]); and the basic flows (an image pasted or dropped into the Rich Prompt or the editor, typing and saving, a terminal's input and paste, opening a file, the search, the panes) have no end-to-end check that would have caught v0.127.0's lost image paste on WebKit, so an audit lists them and each gap gets a Chrome check and a WebKit check ([basicflows]). The same day he ruled on the tmux card row: a connection keeps its own card with the detach on its title, and the card of the machine it runs on lists only its buried control terminal, with a detach button on that row ([tmuxcard]).
-
-Seven more came from the round's own checks and readings on 2026-11-11, accepted by the owner the same day: a used token's cut is lost when the client hangs up before the spawn ([tokencut]); an image pasted by chord into the editor on the Linux desktop lands nothing ([linuxpaste]); a file dropped on the Linux desktop hands the page a URI, not a file ([linuxdrop]); a save that meets its file gone opens the external edit dialog ([savegone]); the tag-scoped graph never refits its nodes ([taglens]); ghostty sends a pasted line break as LF where xterm.js sends CR ([ghosttylf]); and a local close outlasts its CLI reply window ([closebudget]).
-
-One more came from the owner on 2026-11-11 and was built outside the team by his Mac agent from the lead's order, then taken in as an intake: in title-bar-tabs mode the window title moves back from the pane tree heading into the title bar, next to the pane tree button with no tabs and at the bar's right end once a tab opens, and a local window reads like a devserver's, `local / {workspace} Window N [label]`, with the library's own title the machine-neutral tail that `cs window list` prints ([titlebar]).
-
-A second intake came from the owner on 2026-11-11, from a screenshot of a window that came back as its traffic lights alone after a display sleep and a Space switch: his Mac agent, from the lead's order, measured the blank from WebKit's unified log and found every terminal repaint asked for while the window was hidden queued its own animation frame, all run in the first frame back, which the page now bounds to one pending repaint per terminal; 19.5 s blank against 0.20 s ([wakeblank]).
+Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise waits on the owner's Mac reading before anything is built ([minraise]). The owner adds the release's other rows at planning.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | GA |
-| [find frames run long at max scrollback][findfeed] | landed | GA |
-| [local devserver calls go through a proxy][cliproxy] | landed | GA |
-| [one WireGuard ingress per proxy node][wgnode] | landed | GA |
-| [the Rust TLS clients ignore the system's CA store][systemca] | built | gate |
-| [wrapped ghostty copies paste broken][gcopy] | landed | GA |
-| [a theme switch leaves ghostty colours][livetheme] | landed | GA |
-| [the system cannot open files in chan][openwith] | built | gate |
-| [find loses its match on a resize][findresize] | landed | GA |
-| [the pane tree hides what a terminal runs][termcmd] | landed | GA |
-| [tests still red under the heaviest load][loadres] | built | gate |
-| [tmux windows not on their machine card][tmuxcard] | landed | GA |
-| [New Window in a devserver tmux window][tmuxnew] | landed | GA |
-| [a launch beside a silent desktop shows nothing][silentlaunch] | landed | GA |
-| [the Windows handoff pipe's early clients][winpipe] | landed | GA |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
-| [the unused-token test reads too early][tokentest] | landed | GA |
-| [a desktop upload's cancel and error paths][uploadpaths] | landed | GA |
-| [a moved tmux window may close its chan window][tmuxmove] | landed | GA |
-| [small findings of the second reading are open][leftovers] | landed | GA |
-| [other Dashboard slides sit at the top][dashslides] | landed | GA |
-| [make clean leaves the build tools behind][makeclean] | landed | GA |
-| [basic flows have no end-to-end check][basicflows] | landed | GA |
-| [a used token's cut is lost when the client hangs up][tokencut] | landed | GA |
-| [an image pasted by chord on the Linux desktop lands nothing][linuxpaste] | landed | GA |
-| [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | landed | GA |
-| [a save that meets its file gone opens the external edit dialog][savegone] | landed | GA |
-| [the tag-scoped graph never refits its nodes][taglens] | landed | GA |
-| [ghostty sends a pasted line break as LF][ghosttylf] | landed | GA |
-| [a local close outlasts its CLI reply window][closebudget] | landed | GA |
-| [the window title moves back into the title bar][titlebar] | landed | GA |
-| [a window comes back as traffic lights after a sleep][wakeblank] | landed | GA |
 
-[ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
-[findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
-[cliproxy]: v0.128.0/the-clis-local-devserver-calls-go-through-a-proxy.md
-[wgnode]: v0.128.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
-[systemca]: v0.128.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
-[gcopy]: v0.128.0/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md
-[livetheme]: v0.128.0/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md
-[openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
-[findresize]: v0.128.0/a-ghostty-find-loses-its-match-on-a-resize.md
-[termcmd]: v0.128.0/the-pane-tree-does-not-show-what-a-terminal-is-running.md
-[loadres]: v0.128.0/some-tests-still-go-red-under-the-heaviest-cpu-load.md
-[tmuxcard]: v0.128.0/a-tmux-connections-windows-are-missing-from-their-machines-card.md
-[tmuxnew]: v0.128.0/new-window-in-a-devservers-tmux-window-opens-a-plain-window.md
-[silentlaunch]: v0.128.0/a-launch-beside-a-desktop-that-does-not-answer-shows-nothing.md
-[winpipe]: v0.128.0/the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts.md
-[minraise]: v0.128.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
-[tokentest]: v0.128.0/the-unused-token-test-reads-its-counters-before-a-cut-could-run.md
-[uploadpaths]: v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md
-[tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
-[leftovers]: v0.128.0/small-findings-of-the-v0127-second-reading-are-still-open.md
-[dashslides]: v0.128.0/the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab.md
-[makeclean]: v0.128.0/make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind.md
-[basicflows]: v0.128.0/basic-flows-break-with-no-end-to-end-check-to-catch-them.md
-[tokencut]: v0.128.0/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md
-[linuxpaste]: v0.128.0/an-image-pasted-by-chord-into-the-editor-on-the-linux-desktop-lands-nothing.md
-[linuxdrop]: v0.128.0/a-file-dropped-on-the-linux-desktop-hands-the-page-a-uri-not-a-file.md
-[savegone]: v0.128.0/a-save-that-meets-its-file-gone-opens-the-external-edit-dialog.md
-[taglens]: v0.128.0/the-tag-scoped-graph-never-refits-its-nodes.md
-[ghosttylf]: v0.128.0/ghostty-sends-a-pasted-line-break-as-lf.md
-[closebudget]: v0.128.0/a-local-close-outlasts-its-cli-reply-window.md
-[titlebar]: v0.128.0/the-window-title-moves-back-into-the-title-bar.md
-[wakeblank]: v0.128.0/a-chan-window-comes-back-as-traffic-lights-alone-after-a-display-sleep-and-a-space-switch-on-macos.md
-[reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
-[tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
+[ghosttyng]: v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[minraise]: v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
 
 ## Completed
+
+### v0.128.0
+
+Shipped 2026-11-12; see [release-v0.128.0](../release/release-v0.128.0.md). A no-rc release by the owner's word ("let's carry on and release, ga and tag"): seventy-three `--no-ff` merges from fifty-one branches into the integration branch `v0128/int` over `main` at `8e41a9264` (the v0.127.0 record `fcb9388c8` and the owner's Dashboard slides row), with the lead's documents commits and two Nix re-pins between them, under thirty-two rows, thirty shipped; those rows are in [`done/`](done/). The thirty-first, the ghostty-web fork, shipped its part 1, the import, and moves to v0.129.0 for parts 2 to 6; the thirty-second, coming forward to a minimized window, was not started and moves to v0.129.0 with its first step, the owner's reading on macOS.
+
+- [a-chan-window-comes-back-as-traffic-lights-alone-after-a-display-sleep-and-a-space-switch-on-macos](done/a-chan-window-comes-back-as-traffic-lights-alone-after-a-display-sleep-and-a-space-switch-on-macos.md) - A chan window comes back as traffic lights alone after a display sleep and a Space switch on macOS.
+- [a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress](done/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md) - A desktop reaches every proxy node through one WireGuard ingress.
+- [a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths](done/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md) - A desktop upload's cancel and error paths leave traces and name local paths.
+- [a-file-dropped-on-the-linux-desktop-hands-the-page-a-uri-not-a-file](done/a-file-dropped-on-the-linux-desktop-hands-the-page-a-uri-not-a-file.md) - A file dropped on the Linux desktop hands the page a URI, not a file.
+- [a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback](done/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md) - A ghostty find frame runs long while output streams at the largest scrollback.
+- [a-ghostty-find-loses-its-match-on-a-resize](done/a-ghostty-find-loses-its-match-on-a-resize.md) - A ghostty find loses its match on a resize.
+- [a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch](done/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md) - A ghostty terminal keeps its old colours after a theme switch.
+- [a-launch-beside-a-desktop-that-does-not-answer-shows-nothing](done/a-launch-beside-a-desktop-that-does-not-answer-shows-nothing.md) - A launch beside a desktop that does not answer shows nothing.
+- [a-local-close-outlasts-its-cli-reply-window](done/a-local-close-outlasts-its-cli-reply-window.md) - A local close outlasts its CLI reply window.
+- [an-image-pasted-by-chord-into-the-editor-on-the-linux-desktop-lands-nothing](done/an-image-pasted-by-chord-into-the-editor-on-the-linux-desktop-lands-nothing.md) - An image pasted by chord into the editor on the Linux desktop lands nothing.
+- [a-save-that-meets-its-file-gone-opens-the-external-edit-dialog](done/a-save-that-meets-its-file-gone-opens-the-external-edit-dialog.md) - A save that meets its file gone opens the external edit dialog.
+- [a-tmux-connections-windows-are-missing-from-their-machines-card](done/a-tmux-connections-windows-are-missing-from-their-machines-card.md) - A tmux connection's windows are missing from their machine's card.
+- [a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn](done/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md) - A used token's cut is lost when the client hangs up between the commit and the spawn.
+- [basic-flows-break-with-no-end-to-end-check-to-catch-them](done/basic-flows-break-with-no-end-to-end-check-to-catch-them.md) - Basic flows break with no end-to-end check to catch them.
+- [chan-cannot-be-opened-as-a-file-browser-or-markdown-editor](done/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md) - chan cannot be opened as a file browser or Markdown editor.
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
+- [coming-forward-to-a-minimized-window-may-not-activate-the-app](v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app (carried to v0.129.0, not started).
+- [copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken](done/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md) - Copying a wrapped command from a ghostty terminal pastes it broken.
+- [ghostty-sends-a-pasted-line-break-as-lf](done/ghostty-sends-a-pasted-line-break-as-lf.md) - ghostty sends a pasted line break as LF where xterm.js sends CR.
+- [make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind](done/make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind.md) - make clean leaves the gateway's node_modules and the build tools behind.
+- [moving-a-tmux-window-to-another-index-may-close-its-chan-window](done/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md) - Moving a tmux window to another index may close its chan window.
+- [new-window-in-a-devservers-tmux-window-opens-a-plain-window](done/new-window-in-a-devservers-tmux-window-opens-a-plain-window.md) - New Window in a devserver's tmux window opens a plain window.
+- [small-findings-of-the-v0127-second-reading-are-still-open](done/small-findings-of-the-v0127-second-reading-are-still-open.md) - Small findings of the v0.127.0 second reading are still open.
+- [some-tests-still-go-red-under-the-heaviest-cpu-load](done/some-tests-still-go-red-under-the-heaviest-cpu-load.md) - Some tests still go red under the heaviest CPU load.
+- [the-clis-local-devserver-calls-go-through-a-proxy](done/the-clis-local-devserver-calls-go-through-a-proxy.md) - The CLI's local devserver calls go through a proxy.
+- [the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab](done/the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab.md) - The Dashboard's About, Workspace and Search slides sit at the top of a large tab.
+- [the-pane-tree-does-not-show-what-a-terminal-is-running](done/the-pane-tree-does-not-show-what-a-terminal-is-running.md) - The pane tree does not show what a terminal is running.
+- [the-rust-tls-clients-ignore-the-systems-ca-store](done/the-rust-tls-clients-ignore-the-systems-ca-store.md) - The Rust TLS clients ignore the system's CA store.
+- [the-tag-scoped-graph-never-refits-its-nodes](done/the-tag-scoped-graph-never-refits-its-nodes.md) - The tag-scoped graph never refits its nodes.
+- [the-unused-token-test-reads-its-counters-before-a-cut-could-run](done/the-unused-token-test-reads-its-counters-before-a-cut-could-run.md) - The unused-token test reads its counters before a wrongly started cut could run.
+- [the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts](done/the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts.md) - The Windows handoff pipe takes clients before it is served and collides across like-named accounts.
+- [the-window-title-moves-back-into-the-title-bar](done/the-window-title-moves-back-into-the-title-bar.md) - The window title moves back into the title bar in title-bar-tabs mode and reads like a devserver's.
 
 ### v0.127.0
 

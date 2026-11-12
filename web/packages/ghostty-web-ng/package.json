@@ -1,6 +1,6 @@
 {
   "name": "@chan/ghostty-web-ng",
-  "version": "0.127.0",
+  "version": "0.128.0",
   "private": true,
   "description": "Web-based terminal emulator using Ghostty's VT100 parser via WebAssembly",
   "license": "MIT",
