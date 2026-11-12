@@ -59,26 +59,39 @@ async function leftDock(ctx, page) {
 
 const LAUNCHER_INPUT = '[role="dialog"][aria-label="Command launcher"] input[role="combobox"]';
 
-/// A command the launcher lists, run from the launcher as a person runs it:
-/// the window's `chan:command` event reaches only the commands App.svelte
-/// dispatches by name.
-async function launcherCommand(page, title) {
+/// The state the launcher's row titled `title` reads in its right column, or
+/// null while the launcher lists no such row.
+function launcherRowState(page, title) {
+  return page.evaluate((title) => [...document.querySelectorAll('[role="option"]')]
+    .find((row) => row.querySelector(".deck-result-title")?.textContent?.trim() === title)
+    ?.querySelector(".deck-result-value")?.textContent?.trim() ?? null, title);
+}
+
+/// A toggle the launcher lists, flipped from the launcher as a person flips
+/// it: the window's `chan:command` event reaches only the commands App.svelte
+/// dispatches by name. The row reads the toggle's state and stays on show
+/// once chosen, so the helper waits for it to read the other state and then
+/// closes the launcher with Escape.
+async function launcherToggle(page, title) {
   await page.click(".pane .hamburger-trigger");
   await page.waitForSelector(".hamburger-menu", { visible: true });
   const opened = await page.evaluate(() => {
     const button = [...document.querySelectorAll(".hamburger-menu button")]
-      .find((b) => b.querySelector(".menu-row-label")?.textContent?.trim() === "Commands");
+      .find((b) => b.querySelector(".menu-row-label")?.textContent?.trim() === "Command launcher");
     button?.click();
     return Boolean(button);
   });
-  assert.ok(opened, "the pane menu has a Commands row");
+  assert.ok(opened, "the pane menu has a Command launcher row");
   const input = await page.waitForSelector(LAUNCHER_INPUT, { visible: true });
   await input.click({ count: 3 });
   await page.keyboard.type(title);
-  await page.waitForFunction((title) => [...document.querySelectorAll('[role="option"] .deck-result-title')]
-    .some((n) => n.textContent?.trim() === title), { timeout: 10_000 }, title);
+  const before = await waitFor(`the launcher's ${title} row and its state`, 10_000, () => launcherRowState(page, title));
+  assert.ok(before === "on" || before === "off", `the launcher's ${title} row reads on or off: ${before}`);
   await page.evaluate((title) => [...document.querySelectorAll('[role="option"] .deck-result-title')]
     .find((n) => n.textContent?.trim() === title)?.closest('[role="option"]')?.click(), title);
+  const after = before === "on" ? "off" : "on";
+  await waitFor(`the launcher's ${title} row to read ${after}`, 10_000, async () => (await launcherRowState(page, title)) === after);
+  await page.keyboard.press("Escape");
   await page.waitForSelector(LAUNCHER_INPUT, { hidden: true, timeout: 10_000 });
 }
 
@@ -238,7 +251,7 @@ export default {
       assert.equal(found.shown, found.saved, "the page shows the dock the server holds");
       dockFound = found.saved;
       if (!dockFound) {
-        await launcherCommand(page, "Toggle left file browser dock");
+        await launcherToggle(page, "Left file browser dock");
         await page.waitForSelector(".browser-side-pane.left .handle", { timeout: 10_000 });
         await waitFor("the left dock saved open", 15_000, async () => (await leftDock(ctx, page)).saved);
       }
@@ -282,7 +295,7 @@ export default {
     } finally {
       try {
         if (dockFound === false) {
-          if ((await leftDock(ctx, page)).shown) await launcherCommand(page, "Toggle left file browser dock");
+          if ((await leftDock(ctx, page)).shown) await launcherToggle(page, "Left file browser dock");
           await waitFor("the left dock closed in the page and saved closed", 15_000, async () => {
             const dock = await leftDock(ctx, page);
             return !dock.saved && !dock.shown;
