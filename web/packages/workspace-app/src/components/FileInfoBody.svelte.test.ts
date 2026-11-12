@@ -8,7 +8,14 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import FileInfoBody from "./FileInfoBody.svelte";
-import { classifyFileActions } from "../state/fileActions";
+import { classifyFileActions, type FileActionId } from "../state/fileActions";
+import {
+  allCommands,
+  commandById,
+  registerCommands,
+  unregisterCommands,
+  type Command,
+} from "../state/commands";
 import { ApiError } from "../api/errors";
 import { terminalFromHereTarget } from "../terminal/fromHere";
 import type { TreeEntry } from "../api/types";
@@ -32,7 +39,10 @@ const h = vi.hoisted(() => ({
   fileReport: null as unknown,
 }));
 
-vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: h.caps,
+}));
 
 vi.mock("../api/client", () => ({
   api: {
@@ -47,7 +57,11 @@ vi.mock("../api/client", () => ({
   fileUrl: (p: string) => `/api/fs/${encodeURIComponent(p).replace(/%2F/g, "/")}?token=inspector-test`,
 }));
 
-vi.mock("../state/store.svelte", () => ({
+// The store and the tab state are the real modules with the members this
+// body reads replaced: the action pill loads the command catalog, whose
+// modules import the rest of both.
+vi.mock("../state/store.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/store.svelte")>()),
   copyTextToClipboard: vi.fn(async () => {}),
   draftsDir: () => h.draftsDir,
   isDraftPath: (p: string) => p === h.draftsDir || p.startsWith(`${h.draftsDir}/`),
@@ -76,7 +90,10 @@ vi.mock("../state/store.svelte", () => ({
   },
 }));
 
-vi.mock("../state/tabs.svelte", () => ({ openTerminalInActivePane: vi.fn() }));
+vi.mock("../state/tabs.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/tabs.svelte")>()),
+  openTerminalInActivePane: vi.fn(),
+}));
 vi.mock("../state/mediaOpen", () => ({
   openMediaViewer: vi.fn(() => true),
   dirImageSet: () => [],
@@ -99,6 +116,7 @@ import { exportPathToPdf } from "../state/fileActionExecutors";
 
 type Props = {
   path: string | null;
+  surface?: "file" | "browser";
   onOpen?: () => void;
   onReveal?: () => void;
   onSetAsScope?: () => void;
@@ -162,6 +180,72 @@ function menuItem(target: HTMLElement, label: string): HTMLButtonElement {
   return item;
 }
 
+/// The command each classifier action is where the inspector shows a
+/// selection: the file browser's.
+const BROWSER: Record<FileActionId, string> = {
+  open: "app.browser.open",
+  showFile: "app.browser.openInBrowser",
+  viewMedia: "app.browser.viewMedia",
+  download: "app.browser.downloadSelection",
+  upload: "app.browser.uploadSelection",
+  newTerminal: "app.browser.newTerminal",
+  exportPdf: "app.browser.exportPdf",
+  graphFromHere: "app.browser.newGraph",
+};
+
+/// The command each action is in the editor's Details panel: the editor's
+/// own where it has one.
+const EDITOR: Record<FileActionId, string> = {
+  ...BROWSER,
+  showFile: "app.editor.showInBrowser",
+  download: "app.editor.download",
+  newTerminal: "app.editor.terminalFromHere",
+  exportPdf: "app.editor.exportPdf",
+  graphFromHere: "app.editor.graphFromHere",
+};
+
+/// File browser commands the inspector names that the file browser's module
+/// may not register in the catalog this test loads. A missing one is
+/// registered here under its catalog title, so the row's words resolve.
+const BROWSER_STAND_INS: Record<string, string> = {
+  "app.browser.open": "Open",
+  "app.browser.viewMedia": "View",
+  "app.browser.exportPdf": "Export to PDF",
+};
+
+function registerMissingBrowserCommands(): void {
+  registerCommands(
+    Object.entries(BROWSER_STAND_INS)
+      .filter(([id]) => !commandById(id))
+      .map(([id, title]): Command => ({
+        id,
+        title,
+        category: "File Browser",
+        scope: "app",
+        surface: "browser",
+        requirement: "files",
+        available: () => true,
+        run: () => {},
+      })),
+  );
+}
+
+function title(id: string): string {
+  const command = commandById(id);
+  if (!command) throw new Error(`no command ${id}`);
+  return command.title;
+}
+
+let catalog: Command[] | null = null;
+
+/// Registers every command again under a title that spells its id, so a row
+/// shows which command it was given.
+function retitleCatalog(): void {
+  catalog = allCommands();
+  unregisterCommands(() => true);
+  registerCommands(catalog.map((command) => ({ ...command, title: `<${command.id}>` })));
+}
+
 beforeEach(() => {
   let entries = $state<Entry[]>([]);
   Object.defineProperty(h, "entries", {
@@ -173,6 +257,7 @@ beforeEach(() => {
   h.draftsDir = ".Drafts";
   h.prefixReport = null;
   h.fileReport = null;
+  registerMissingBrowserCommands();
 });
 
 afterEach(() => {
@@ -180,6 +265,11 @@ afterEach(() => {
   document.body.innerHTML = "";
   graphData.view = null;
   graphData.partial = false;
+  if (catalog) {
+    unregisterCommands(() => true);
+    registerCommands(catalog);
+    catalog = null;
+  }
   vi.clearAllMocks();
 });
 
@@ -191,12 +281,7 @@ describe("the actions section", () => {
 
     expect(pill(target).textContent?.trim()).toBe("Open");
     expect(target.querySelector(".action-menu"), "the menu starts closed").toBeNull();
-    expect(openMenu(target)).toEqual([
-      "Upload file here",
-      "Download tarball",
-      "New terminal here",
-      "Graph from here",
-    ]);
+    expect(openMenu(target)).toEqual(["Upload", "Download", "New terminal here", "New graph here"]);
     expect(caret(target)?.getAttribute("aria-expanded")).toBe("true");
     expect(caret(target)?.getAttribute("aria-haspopup")).toBe("menu");
     expect(target.querySelector(".action-menu")?.getAttribute("role")).toBe("menu");
@@ -208,14 +293,14 @@ describe("the actions section", () => {
     const target = await render({ path: "docs", onSetAsScope });
 
     openMenu(target);
-    menuItem(target, "Download tarball").click();
+    menuItem(target, "Download").click();
     flushSync();
 
     expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("docs", true);
     expect(target.querySelector(".action-menu")).toBeNull();
 
     openMenu(target);
-    menuItem(target, "Graph from here").click();
+    menuItem(target, "New graph here").click();
     expect(onSetAsScope).toHaveBeenCalledTimes(1);
   });
 
@@ -260,32 +345,38 @@ describe("the actions section", () => {
     pill(target).click();
     expect(onOpen).toHaveBeenCalledTimes(1);
 
-    expect(openMenu(target)).toEqual(["Download file", "New terminal here", "Export to PDF"]);
+    expect(openMenu(target)).toEqual(["Download", "New terminal here", "Export to PDF"]);
     menuItem(target, "Export to PDF").click();
     expect(exportPathToPdf).toHaveBeenCalledWith("notes/plan.md");
   });
 
-  test("with no Open the editor's details panel leads with Show file", async () => {
+  test("with no Open the editor's details panel leads with Show in file browser", async () => {
     h.entries = [file("notes/plan.md")];
     const onReveal = vi.fn();
-    const target = await render({ path: "notes/plan.md", onReveal });
+    const target = await render({ path: "notes/plan.md", surface: "file", onReveal });
 
-    expect(pill(target).textContent?.trim()).toBe("Show file");
+    expect(pill(target).textContent?.trim()).toBe("Show in file browser");
     pill(target).click();
     expect(onReveal).toHaveBeenCalledTimes(1);
   });
 
-  test("media keeps a per-kind label and opens through the shared media router", async () => {
-    const cases: Array<[string, string]> = [
-      ["pics/cat.png", "View / Zoom"],
-      ["clips/intro.mp4", "View Video"],
-      ["sound/theme.mp3", "View Audio"],
-      ["papers/spec.pdf", "View PDF"],
-    ];
-    h.entries = cases.map(([p]) => file(p, "media"));
-    for (const [path, label] of cases) {
+  test("a host that opens and reveals offers the reveal behind the caret", async () => {
+    h.entries = [file("notes/plan.md")];
+    const onReveal = vi.fn();
+    const target = await render({ path: "notes/plan.md", onOpen() {}, onReveal });
+
+    expect(pill(target).textContent?.trim()).toBe("Open");
+    expect(openMenu(target)[0]).toBe("Open in new file browser");
+    menuItem(target, "Open in new file browser").click();
+    expect(onReveal).toHaveBeenCalledTimes(1);
+  });
+
+  test("media leads with View whatever its kind, and opens through the shared media router", async () => {
+    const paths = ["pics/cat.png", "clips/intro.mp4", "sound/theme.mp3", "papers/spec.pdf"];
+    h.entries = paths.map((p) => file(p, "media"));
+    for (const path of paths) {
       const target = await render({ path });
-      expect(pill(target).textContent?.trim(), path).toBe(label);
+      expect(pill(target).textContent?.trim(), path).toBe("View");
       pill(target).click();
       expect(openMediaViewer).toHaveBeenLastCalledWith(path);
     }
@@ -296,42 +387,70 @@ describe("the actions section", () => {
     h.entries = [file("bin/tool", "binary")];
     const target = await render({ path: "bin/tool" });
 
-    expect(pill(target).textContent?.trim()).toBe("Download file");
+    expect(pill(target).textContent?.trim()).toBe("Download");
     expect(caret(target)).toBeNull();
     pill(target).click();
     expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("bin/tool", false);
   });
 
-  test("the rendered actions are the shared classifier's, in its order", async () => {
-    // Applicability is the classifier's decision (the FileTree menu reads the
-    // same one); the inspector maps ids to labels. Render each shape and
-    // compare against the classifier directly.
-    const label: Record<string, string> = {
-      open: "Open",
-      showFile: "Show file",
-      download: "Download file",
-      upload: "Upload file here",
-      newTerminal: "New terminal here",
-      exportPdf: "Export to PDF",
-      graphFromHere: "Graph from here",
-      viewMedia: "View / Zoom",
-    };
-    const shapes: Array<{ entry: Entry; props: Omit<Props, "path"> }> = [
-      { entry: file("a.md"), props: { onOpen() {}, onReveal() {}, onSetAsScope() {} } },
-      { entry: file("src/main.rs", "text"), props: { onOpen() {} } },
-      { entry: file("img/a.png", "media"), props: { onSetAsScope() {} } },
-      { entry: file("blob.bin", "binary"), props: { onSetAsScope() {} } },
-    ];
-    h.entries = shapes.map((s) => s.entry);
-    for (const { entry, props } of shapes) {
+  /// Every shape the classifier tells apart, on each host: a selection's
+  /// inspector, which names the file browser's commands, and the editor's
+  /// Details panel, which names the editor's.
+  const SHAPES: Array<{ entry: Entry; props: Omit<Props, "path"> }> = [
+    { entry: file("a.md"), props: { onOpen() {}, onReveal() {}, onSetAsScope() {} } },
+    { entry: file("src/main.rs", "text"), props: { onOpen() {} } },
+    { entry: file("img/a.png", "media"), props: { onSetAsScope() {} } },
+    { entry: file("blob.bin", "binary"), props: { onSetAsScope() {} } },
+    { entry: dir("docs"), props: { onSetAsScope() {} } },
+    { entry: file(".Drafts/idea/a.md"), props: {} },
+    { entry: file("b.md"), props: { surface: "file", onReveal() {}, onSetAsScope() {} } },
+    { entry: file("src/lib.rs", "text"), props: { surface: "file", onReveal() {} } },
+    { entry: file("tool.bin", "binary"), props: { surface: "file", onReveal() {}, onSetAsScope() {} } },
+  ];
+
+  /// Renders each shape and returns, per path, the rows it shows and the
+  /// classifier's actions for it, main first.
+  async function renderedActions(): Promise<
+    Array<{ path: string; surface: "file" | "browser"; rows: string[]; actions: FileActionId[] }>
+  > {
+    h.entries = SHAPES.map((s) => s.entry);
+    const out = [];
+    for (const { entry, props } of SHAPES) {
+      // Applicability is the classifier's decision (the FileTree menu reads
+      // the same one); the inspector maps each action to a command.
       const set = classifyFileActions(
-        { path: entry.path, isDir: false, serverKind: entry.kind, isDraft: false },
+        {
+          path: entry.path,
+          isDir: entry.is_dir,
+          serverKind: entry.kind,
+          isDraft: entry.path.startsWith(`${h.draftsDir}/`),
+        },
         { open: !!props.onOpen, reveal: !!props.onReveal, graph: !!props.onSetAsScope, upload: true },
       );
       const target = await render({ path: entry.path, ...props });
-      expect(pill(target).textContent?.trim(), entry.path).toBe(label[set.main]);
-      const rendered = set.secondary.length > 0 ? openMenu(target) : [];
-      expect(rendered, entry.path).toEqual(set.secondary.map((id) => label[id]));
+      const rows = [pill(target).textContent?.trim() ?? "", ...(caret(target) ? openMenu(target) : [])];
+      out.push({
+        path: entry.path,
+        surface: props.surface ?? ("browser" as const),
+        rows,
+        actions: [set.main, ...set.secondary],
+      });
+    }
+    return out;
+  }
+
+  test("every action is worded by the title of a registered command, in the classifier's order", async () => {
+    for (const { path, surface, rows, actions } of await renderedActions()) {
+      const ids = surface === "file" ? EDITOR : BROWSER;
+      expect(rows, path).toEqual(actions.map((action) => title(ids[action])));
+    }
+  });
+
+  test("an action is the editor's command in its Details panel and the file browser's elsewhere", async () => {
+    retitleCatalog();
+    for (const { path, surface, rows, actions } of await renderedActions()) {
+      const ids = surface === "file" ? EDITOR : BROWSER;
+      expect(rows, path).toEqual(actions.map((action) => `<${ids[action]}>`));
     }
   });
 
@@ -371,7 +490,7 @@ describe("the actions section", () => {
     const onNewTerminal = vi.fn();
     const target = await render({ path: ".Drafts/idea/a b.md", onNewTerminal });
 
-    expect(pill(target).textContent?.trim()).toBe("Terminal from here");
+    expect(pill(target).textContent?.trim()).toBe("New terminal here");
     expect(caret(target)).toBeNull();
     pill(target).click();
 
@@ -386,7 +505,7 @@ describe("the actions section", () => {
     h.entries = [dir(".Drafts/idea")];
     const target = await render({ path: ".Drafts/idea" });
 
-    expect(pill(target).textContent?.trim()).toBe("Terminal from here");
+    expect(pill(target).textContent?.trim()).toBe("New terminal here");
     pill(target).click();
     expect(openTerminalInActivePane).toHaveBeenCalledWith(
       terminalFromHereTarget(".Drafts/idea", true),
@@ -400,7 +519,7 @@ describe("the actions section", () => {
     const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
 
     openMenu(target);
-    menuItem(target, "Upload file here").click();
+    menuItem(target, "Upload").click();
     expect(pick).toHaveBeenCalledTimes(1);
 
     const picked = [new File(["x"], "x.txt")];
