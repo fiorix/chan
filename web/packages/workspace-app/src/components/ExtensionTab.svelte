@@ -46,7 +46,6 @@
   import {
     closeTab,
     flipHybrid,
-    layout,
     panesHaveSides,
     type ExtensionTab,
   } from "../state/tabs.svelte";
@@ -112,7 +111,7 @@
 
   function doFlip(): void {
     menu?.close();
-    flipHybrid(layout.activePaneId);
+    flipHybrid(paneId);
   }
 
   function togglePresentation(): void {

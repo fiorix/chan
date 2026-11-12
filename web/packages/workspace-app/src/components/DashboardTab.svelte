@@ -16,7 +16,6 @@
     closeTab,
     type DashboardTab,
     flipHybrid,
-    layout,
     panesHaveSides,
   } from "../state/tabs.svelte";
   import EmptyPaneCarousel from "./EmptyPaneCarousel.svelte";
@@ -75,7 +74,7 @@
 
   function doFlip(): void {
     menu?.close();
-    flipHybrid(layout.activePaneId);
+    flipHybrid(paneId);
   }
 
   function doCloseTab(): void {

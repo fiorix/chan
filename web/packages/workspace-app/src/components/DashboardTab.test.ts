@@ -8,7 +8,8 @@
 // title, switches each slide on or off (never the last one) through the
 // options of the launcher's Shown slides, then offers Reload window, the tail
 // every tab menu ends with (Flip pane, Close tab) and the launcher row, each
-// worded by the catalog. Its carousel shows the workspace,
+// worded by the catalog; Flip pane turns the pane the dashboard is in,
+// whichever pane holds the focus. Its carousel shows the workspace,
 // the index graph and an About slide with the version, the build, the links,
 // the donation QR and the free-software line; its dots and rotation skip a
 // switched-off slide, and its index graph draws only while the carousel is
@@ -236,6 +237,19 @@ describe("the dashboard's menu", () => {
 
     expect(pane().side).toBe("b");
     expect(document.querySelector(".hamburger-menu")).toBeNull();
+  });
+
+  test("Flip pane turns the dashboard's own pane while another pane holds the focus", async () => {
+    const other = splitPane("pane-test", "row")!;
+    await settle();
+    await rightClick();
+    expect(layout.activePaneId, "the focus stays in the other pane").toBe(other);
+
+    row("Flip pane").click();
+    await settle();
+
+    expect((layout.nodes["pane-test"] as LeafNode).side, "the dashboard's pane").toBe("b");
+    expect((layout.nodes[other] as LeafNode).side ?? "a", "the focused pane").toBe("a");
   });
 
   test("Command launcher opens the launcher and closes the menu", async () => {
