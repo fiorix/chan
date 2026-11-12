@@ -415,6 +415,16 @@ describe("a selection the index has to answer, while the graph is gated", () => 
     expect(graphTabLabel(tab)).toBe("path=#t");
   });
 
+  test("a tag waits no longer once the index reports an error", async () => {
+    serveGated();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "#t" }));
+    expect(tab.pendingSelectId).toBe("#t");
+    indexStatus.value = { state: "error", message: "index write failed" } as IndexStatus;
+    await settle();
+    expect(tab.pendingSelectId, "dropped: no answer is coming").toBeNull();
+    expect(canvas.props!.selectedId).toBeNull();
+  });
+
   test("a directory resolves from the spine meanwhile", async () => {
     serveGated();
     await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));

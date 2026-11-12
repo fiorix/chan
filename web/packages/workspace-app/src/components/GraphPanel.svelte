@@ -439,13 +439,14 @@
   /// The tab draws a whole graph: its spine is in, and the shared graph it
   /// took is complete and is the one the window holds now. An answer marked
   /// gated is the empty graph of an index being rebuilt, which says nothing
-  /// of what the workspace holds.
+  /// of what the workspace holds, until the index reports an error: then no
+  /// later answer is coming.
   const graphWhole = $derived(
     !loading &&
       taken !== null &&
       !taken.partial &&
       taken.view === graphData.view &&
-      !graphData.gated,
+      (!graphData.gated || indexStatus.value?.state === "error"),
   );
   /// Set once `showSelectedDirectoryFiles` has had its one run.
   let shownDirectoryFiles = false;
