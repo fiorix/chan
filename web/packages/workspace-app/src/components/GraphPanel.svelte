@@ -856,6 +856,15 @@
   // auto-open on click; the panel's Open button is the only path to
   // opening a file from here.
   let selectedId = $state<string | null>(null);
+  // The tab outlives its panel: moving it to another pane mounts a new
+  // panel, whose `selectedId` starts empty. The selection the tab recorded
+  // goes through the pending path a reload restores it by, so the first
+  // load selects its node, or drops it when the node is gone.
+  untrack(() => {
+    if (tab.pendingSelectId === null && tab.selectedNodeId != null) {
+      tab.pendingSelectId = tab.selectedNodeId;
+    }
+  });
   let expansionFitNonce = 0;
   let expansionFitRequest = $state<{ nonce: number; ids: string[] } | null>(null);
 
@@ -2040,8 +2049,11 @@
         languageMaxDepth = g.max_depth;
         nodes = mapLanguageNodes(g.nodes);
         edges = mapLanguageEdges(g.edges);
-        selectedId = selectedId && g.nodes.some((n) => n.id === selectedId)
-          ? selectedId
+        // A pending selection (a restored or moved tab) wins over the
+        // panel's own, which is empty on a first load.
+        const wanted = graphState.pendingSelectId ?? selectedId;
+        selectedId = wanted !== null && g.nodes.some((n) => n.id === wanted)
+          ? wanted
           : null;
         graphState.pendingSelectId = null;
         return;
