@@ -402,6 +402,29 @@ describe("Computers command deck", () => {
     expect(activeCommandLauncherDraft().scope).toBeNull();
   });
 
+  it("closes from the chord with the keyboard in the deck, and opens from it again", async () => {
+    windowKey({ ctrlKey: true, altKey: true });
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    await query("deploy");
+
+    // A key pressed in the deck is dispatched on its query, not the window.
+    const seen = vi.fn();
+    window.addEventListener("keydown", seen);
+    const chord = new KeyboardEvent("keydown", {
+      key: "k", code: "KeyK", ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
+    });
+    input().dispatchEvent(chord);
+    flushSync();
+    window.removeEventListener("keydown", seen);
+    expect(activeCommandLauncherDraft().visible, "the chord toggles").toBe(false);
+    expect(chord.defaultPrevented).toBe(true);
+    expect(seen, "the page behind the deck sees no key").not.toHaveBeenCalled();
+    expect(activeCommandLauncherDraft().query, "a dismissal keeps what was typed").toBe("deploy");
+
+    windowKey({ ctrlKey: true, altKey: true });
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+  });
+
   it("opens from the chord on the Gateways screen as on Computers", () => {
     screen.current = "gateways";
     const opened = windowKey({ ctrlKey: true, altKey: true });

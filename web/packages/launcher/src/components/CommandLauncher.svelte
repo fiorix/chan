@@ -693,14 +693,21 @@
     draft.selectedId = null;
   }
 
-  function onWindowKey(event: KeyboardEvent): void {
+  /// Whether a key is the deck's chord on this surface. The open deck reads
+  /// it too: it takes every key ahead of the listener below, and closes on
+  /// this one.
+  function isDeckChord(event: KeyboardEvent): boolean {
     const macDesktop = hasDesktopBridge && hostOs === "macos";
-    const contextual =
+    return (
       shortcutLetter(event) === "K" &&
       (macDesktop
         ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
-        : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey);
-    if (contextual && !readOnly) {
+        : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey)
+    );
+  }
+
+  function onWindowKey(event: KeyboardEvent): void {
+    if (isDeckChord(event) && !readOnly) {
       event.preventDefault();
       event.stopImmediatePropagation();
       toggleCommandLauncher();
@@ -736,6 +743,7 @@
     {onScope}
     onClearScope={clearScope}
     onSuccess={finish}
+    toggleChord={isDeckChord}
   />
 
   {#snippet failed(error, reset)}

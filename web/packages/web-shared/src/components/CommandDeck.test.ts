@@ -1786,6 +1786,98 @@ describe("CommandDeck keys under a card", () => {
   });
 });
 
+describe("CommandDeck host chord", () => {
+  // The chord a host opens the deck with, as a host states it.
+  const toggleChord = (event: KeyboardEvent): boolean =>
+    event.ctrlKey && event.altKey && !event.shiftKey && event.key.toLowerCase() === "k";
+  const CHORD: KeyboardEventInit = { ctrlKey: true, altKey: true };
+  const never = (): Promise<void> => new Promise<void>(() => {});
+
+  /// Whether the next chord, sent to `where`, closed the deck. A listener
+  /// past the deck stands for the page's own key handling.
+  async function chordCloses(where: EventTarget): Promise<{ closed: boolean; taken: boolean; leaked: boolean }> {
+    const leaked = vi.fn();
+    window.addEventListener("keydown", leaked);
+    const event = new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true, ...CHORD });
+    try {
+      where.dispatchEvent(event);
+      await flush();
+    } finally {
+      window.removeEventListener("keydown", leaked);
+    }
+    return {
+      closed: target.querySelector(".deck-shell") === null,
+      taken: event.defaultPrevented,
+      leaked: leaked.mock.calls.length > 0,
+    };
+  }
+
+  const CLOSED = { closed: true, taken: true, leaked: false };
+
+  it("closes on the host's chord from the query", async () => {
+    const onClose = vi.fn();
+    await mountWith({ items: plainRows(2), toggleChord, onClose, initialDraft: { query: "split" } });
+    expect(await chordCloses(deckInput())).toEqual(CLOSED);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(hostDraft().query, "a dismissal keeps what was typed").toBe("split");
+  });
+
+  it("closes on the chord after focus fell to the page", async () => {
+    await mountWith({ items: plainRows(2), toggleChord });
+    deckInput().blur();
+    expect(await chordCloses(document.body)).toEqual(CLOSED);
+  });
+
+  it("closes on the chord inside a branch, where Escape would go back", async () => {
+    const onBack = vi.fn();
+    await mountWith({ items: plainRows(2), toggleChord, onBack, initialDraft: { path: ["windows"] } });
+    expect(await chordCloses(deckInput())).toEqual(CLOSED);
+    expect(onBack).not.toHaveBeenCalled();
+  });
+
+  it("closes on the chord under a card and from the key list", async () => {
+    await mountWith({
+      items: [named("close", "Close", { awaitResult: true })],
+      toggleChord,
+      onChoose: never,
+    });
+    await press("Enter");
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
+    expect(await chordCloses(deckInput())).toEqual(CLOSED);
+
+    (app.resetDraft as () => void)();
+    (app.open as () => void)();
+    await flush();
+    await press("?", { shiftKey: true });
+    expect(target.querySelector(".deck-keys")).not.toBeNull();
+    expect(await chordCloses(deckInput())).toEqual(CLOSED);
+  });
+
+  it("takes a chord that repeats while the key is held and stays open", async () => {
+    // The press that opened the deck is the host's; its repeats arrive here.
+    const onClose = vi.fn();
+    await mountWith({ items: plainRows(2), toggleChord, onClose });
+    const held = await press("k", { ...CHORD, repeat: true });
+    expect(held.defaultPrevented).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-shell")).not.toBeNull();
+  });
+
+  it("leaves every other chord alone, and the host's too when the host names none", async () => {
+    const onClose = vi.fn();
+    await mountWith({ items: plainRows(2), toggleChord, onClose });
+    const shifted = await press("K", { ...CHORD, shiftKey: true });
+    expect(shifted.defaultPrevented).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+
+    unmount(app);
+    await mountWith({ items: plainRows(2), onClose });
+    const unnamed = await press("k", CHORD);
+    expect(unnamed.defaultPrevented).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
 describe("CommandDeck key list", () => {
   const keyList = (): Element | null => target.querySelector(".deck-keys");
 

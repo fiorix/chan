@@ -1655,6 +1655,32 @@ describe("contextual command deck", () => {
     expect(leaked).not.toHaveBeenCalled();
   });
 
+  test("the window's chord closes the launcher from the query and keeps the draft", async () => {
+    const toggleChord = (event: KeyboardEvent): boolean =>
+      event.ctrlKey && event.altKey && event.key.toLowerCase() === "k";
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(CommandLauncher, { target, props: { toggleChord } }) as Record<string, unknown>);
+    launcherPanel.open = true;
+    await flush();
+    await typeQuery(target, "project");
+    const leaked = vi.fn();
+    window.addEventListener("keydown", leaked);
+    const chord = new KeyboardEvent("keydown", {
+      key: "k", code: "KeyK", ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
+    });
+    try {
+      input(target).dispatchEvent(chord);
+      await flush();
+    } finally {
+      window.removeEventListener("keydown", leaked);
+    }
+    expect(launcherPanel.open).toBe(false);
+    expect(chord.defaultPrevented).toBe(true);
+    expect(leaked, "the window's own listener is not reached a second time").not.toHaveBeenCalled();
+    expect(launcherDraft.query).toBe("project");
+  });
+
   test("Escape hides but preserves the draft for the next invocation", async () => {
     const target = openLauncher();
     await flush();

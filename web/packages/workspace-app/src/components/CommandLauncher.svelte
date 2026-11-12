@@ -113,11 +113,15 @@
 
   let {
     allComputers,
+    toggleChord,
   }: {
     /// Show the screen of this window's app that lists every computer, with
     /// the query typed here for it to search. Given where the app has such a
     /// screen: the Computers scope then ends with the row that opens it.
     allComputers?: (query: string) => void | Promise<void>;
+    /// Whether a key is the chord this window opens the launcher with, the
+    /// built-in one or one the user assigned. The open deck closes on it.
+    toggleChord?: (event: KeyboardEvent) => boolean;
   } = $props();
 
   /// A deck row and what choosing it does. A catalog or settings row comes
@@ -846,4 +850,5 @@
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
   mayTakeFocus={() => !refocusRefused(activeTerminalTab()?.id ?? null)}
+  {toggleChord}
 />

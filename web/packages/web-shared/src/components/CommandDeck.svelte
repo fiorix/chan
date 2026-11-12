@@ -48,6 +48,7 @@
     onError,
     onFocusLost,
     mayTakeFocus,
+    toggleChord,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -78,6 +79,11 @@
     /// nothing: a focus change in the page would take the keyboard from
     /// that surface.
     mayTakeFocus?: () => boolean;
+    /// Whether a key is the chord the host opens this deck with. The open
+    /// deck takes every key ahead of the host's own listener, which
+    /// therefore never sees the chord then: the deck closes on it, so the
+    /// chord toggles.
+    toggleChord?: (event: KeyboardEvent) => boolean;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -782,6 +788,15 @@
     // and so does the one that commits it: some engines send that Enter once
     // the composition has ended, marked only by the key code 229.
     if (event.isComposing || event.keyCode === 229 || LONE_MODIFIERS.has(event.key)) return;
+
+    if (toggleChord?.(event)) {
+      // Wherever the deck stands: a second press of the chord is a
+      // dismissal, not a step back. The press that opened the deck may still
+      // be held, and its repeats close nothing.
+      event.preventDefault();
+      if (!event.repeat) onClose();
+      return;
+    }
 
     if (event.key === "Escape") {
       event.preventDefault();

@@ -26,6 +26,7 @@
     onError = () => {},
     onFocusLost,
     mayTakeFocus,
+    toggleChord,
     onClose,
     onBack = () => {},
     onScope = () => {},
@@ -43,6 +44,7 @@
     onError?: (item: DeckItem, error: unknown) => void;
     onFocusLost?: () => void;
     mayTakeFocus?: () => boolean;
+    toggleChord?: (event: KeyboardEvent) => boolean;
     onClose?: () => void;
     onBack?: () => void;
     onScope?: (scope: DeckScopeId) => void;
@@ -140,6 +142,7 @@
   {onSuccess}
   {onFocusLost}
   {mayTakeFocus}
+  {toggleChord}
   {...{ onError }}
   {onBack}
   {onScope}
