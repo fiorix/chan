@@ -183,7 +183,6 @@ export type WorkspaceActionId =
 
 export type MachineActionId =
   | "new-terminal"
-  | "new-workspace"
   | "connect"
   | "connect-and-open"
   | "disconnect"
@@ -408,6 +407,8 @@ interface Act {
   detached?: boolean;
   /** The root's New section already lists this action. */
   twin?: boolean;
+  /** The row states an on/off state in its value. */
+  toggle?: boolean;
   confirm?: DeckItem["confirm"];
   run: NonNullable<ComputersEntry["run"]>;
 }
@@ -432,9 +433,17 @@ function searchText(title: string, layout: Layout, extra?: string): string {
   return [title, layout.subtitle, layout.breadcrumb, layout.search, extra].filter(Boolean).join(" ");
 }
 
-function actEntry(b: Builder, act: Act, key: string, title: string, layout: Layout): ComputersEntry {
+/** An action's row. `key` names the object it acts on; an action of the host
+ * itself has none. */
+function actEntry(
+  b: Builder,
+  act: Act,
+  key: string | undefined,
+  title: string,
+  layout: Layout,
+): ComputersEntry {
   return {
-    id: `computers:${act.id}:${key}`,
+    id: key === undefined ? `computers:${act.id}` : `computers:${act.id}:${key}`,
     title,
     breadcrumb: layout.breadcrumb,
     searchText: searchText(title, layout, `${act.label} ${act.keywords ?? ""}`),
@@ -442,6 +451,7 @@ function actEntry(b: Builder, act: Act, key: string, title: string, layout: Layo
     icon: b.ctx.icons[act.icon],
     section: layout.section,
     subtitle: act.disabled ?? layout.subtitle,
+    kind: act.toggle ? "toggle" : undefined,
     value: act.value,
     danger: act.danger,
     disabled: act.disabled !== undefined || undefined,
@@ -733,17 +743,7 @@ function machineActs(b: Builder, machine: ComputersMachine): Act[] {
         run: run("new-terminal"),
       });
     }
-    if (may.newWorkspace) {
-      acts.push({
-        id: "new-workspace",
-        label: "New workspace",
-        phrase: `New workspace on ${name}`,
-        icon: "add",
-        detached: true,
-        twin: true,
-        run: run("new-workspace"),
-      });
-    }
+    if (may.newWorkspace) acts.push({ ...appAct(b, "new-workspace", "New workspace", "add folder"), twin: true });
   }
 
   if (machine.kind === "devserver") {
@@ -994,6 +994,19 @@ function gatewayActEntries(b: Builder, gateway: ComputersGateway, own: boolean, 
 
 // ---- New and the app --------------------------------------------------------
 
+/** An action of the host itself, which opens a form or changes the app. */
+function appAct(b: Builder, action: AppActionId, label: string, keywords: string): Act {
+  return {
+    id: action,
+    label,
+    phrase: label,
+    icon: "add",
+    keywords,
+    detached: true,
+    run: () => b.ctx.bridge.run({ target: "app", action }),
+  };
+}
+
 interface Created {
   entry: ComputersEntry;
   /** The type filter the row also closes. */
@@ -1002,114 +1015,49 @@ interface Created {
 
 function createEntries(b: Builder, section?: string): Created[] {
   const { may } = b.model;
-  const layout = (filter: ComputersFilter): Layout => ({
-    section,
-    breadcrumb: COMPUTERS_SECTIONS.create,
-    scope: b.scopes[filter],
-  });
-  const app = (
-    action: AppActionId,
-    title: string,
-    filter: ComputersFilter,
-    keywords: string,
-  ): Created => {
-    const place = layout(filter);
-    return {
-      filter,
-      entry: {
-        id: `computers:${action}`,
-        title,
-        breadcrumb: place.breadcrumb,
-        searchText: searchText(title, place, keywords),
-        scope: place.scope,
-        icon: b.ctx.icons.add,
-        section,
-        awaitResult: false,
-        run: () => b.ctx.bridge.run({ target: "app", action }),
-      },
-    };
-  };
   const rows: Created[] = [];
+  const add = (filter: ComputersFilter, act: Act): void => {
+    const layout = { section, breadcrumb: COMPUTERS_SECTIONS.create, scope: b.scopes[filter] };
+    rows.push({ filter, entry: actEntry(b, act, undefined, act.label, layout) });
+  };
+  // A terminal opens on this machine: a devserver's is on its own page.
   const local = b.model.machines.find((machine) => machine.kind === "local");
-  if (may.terminal && local) {
-    const title = b.ctx.terminalTitle ?? "New terminal";
-    const place = layout("windows");
-    rows.push({
-      filter: "windows",
-      entry: {
-        id: "computers:new-terminal",
-        title,
-        breadcrumb: place.breadcrumb,
-        searchText: searchText(title, place, `shell ${local.name} ${local.search ?? ""}`),
-        scope: place.scope,
-        icon: b.ctx.icons.terminal,
-        section,
-        awaitResult: true,
-        dismissImmediatelyOnSuccess: true,
-        run: () => b.ctx.bridge.run({ target: "machine", key: local.key, action: "new-terminal" }),
-      },
-    });
+  const terminal = local && machineActs(b, local).find((act) => act.id === "new-terminal");
+  if (local && terminal) {
+    add("windows", { ...terminal, keywords: `shell ${local.name} ${local.search ?? ""}` });
   }
-  if (may.newWorkspace) rows.push(app("new-workspace", "New workspace", "workspaces", "add folder"));
-  if (may.addDevserver) rows.push(app("add-devserver", "Add devserver", "machines", "new computer server"));
-  if (may.addGateway) rows.push(app("add-gateway", "Add gateway", "gateways", "new"));
+  if (may.newWorkspace) add("workspaces", appAct(b, "new-workspace", "New workspace", "add folder"));
+  if (may.addDevserver) add("machines", appAct(b, "add-devserver", "Add devserver", "new computer server"));
+  if (may.addGateway) add("gateways", appAct(b, "add-gateway", "Add gateway", "new"));
   return rows;
 }
 
 function desktopEntries(b: Builder, section?: string): ComputersEntry[] {
   const desktop = b.model.desktop;
   if (!desktop) return [];
-  const place: Layout = {
-    section,
-    breadcrumb: COMPUTERS_SECTIONS.desktop,
-    scope: b.scopes.machines,
-  };
   const next = desktop.theme === "dark" ? "light" : "dark";
-  const theme = `Switch to ${next} theme`;
-  return [
+  const acts: Act[] = [
+    { ...appAct(b, "theme", `Switch to ${next} theme`, "appearance toggle"), icon: next },
     {
-      id: "computers:theme",
-      title: theme,
-      breadcrumb: place.breadcrumb,
-      searchText: searchText(theme, place, "appearance toggle"),
-      scope: place.scope,
-      icon: b.ctx.icons[next],
-      section,
-      awaitResult: false,
-      run: () => b.ctx.bridge.run({ target: "app", action: "theme" }),
-    },
-    {
-      id: "computers:select",
-      title: "Select",
-      breadcrumb: place.breadcrumb,
-      searchText: searchText("Select", place, "select mode bulk turn on turn off remove"),
-      scope: place.scope,
-      icon: b.ctx.icons.select,
-      section,
-      kind: "toggle",
+      ...appAct(b, "select", "Select", "select mode bulk turn on turn off remove"),
+      icon: "select",
+      toggle: true,
       value: desktop.selecting ? "on" : "off",
-      awaitResult: false,
-      run: () => b.ctx.bridge.run({ target: "app", action: "select" }),
     },
     {
-      id: "computers:quit",
-      title: "Quit",
-      breadcrumb: place.breadcrumb,
-      searchText: searchText("Quit", place, "exit app desktop"),
-      scope: place.scope,
-      icon: b.ctx.icons.quit,
-      section,
+      ...appAct(b, "quit", "Quit", "exit app desktop"),
+      icon: "quit",
       danger: true,
-      awaitResult: false,
       confirm: {
         title: "Quit Chan Desktop?",
         message: "Local workspaces and terminal sessions will stop.",
         actionLabel: "Quit",
         danger: true,
       },
-      run: () => b.ctx.bridge.run({ target: "app", action: "quit" }),
     },
   ];
+  const layout = { section, breadcrumb: COMPUTERS_SECTIONS.desktop, scope: b.scopes.machines };
+  return acts.map((act) => actEntry(b, act, undefined, act.label, layout));
 }
 
 // ---- Lists ------------------------------------------------------------------

@@ -457,7 +457,6 @@
       }
       case "machine": {
         if (command.action === "show-card") return showComputerCard(command.key);
-        if (command.action === "new-workspace") return openNewDialog("local");
         const connection = records.tmux.get(command.key);
         if (connection !== undefined) {
           if (command.action === "detach") return detachTmux(connection);
