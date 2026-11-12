@@ -9400,15 +9400,24 @@ mod tests {
             "\nfn relaunch(app: tauri::AppHandle) {",
             "\n/// [`relaunch`]'s route,",
         );
-        for wiring in [
-            "let appimage = app.env().appimage.map(|image| (image, app.env().args_os));",
-            "std::env::vars_os(),",
-            "|mut command| command.spawn().map(drop),",
-            "|| app.exit(0),",
-            "|| app.restart(),",
-        ] {
-            assert!(relaunch.contains(wiring), "relaunch passes {wiring}");
-        }
+        // The call's arguments are pinned in order: the exit follows a start
+        // that worked, Tauri's restart one that failed.
+        let wiring = "
+    let appimage = app.env().appimage.map(|image| (image, app.env().args_os));
+    #[cfg(not(target_os = \"linux\"))]
+    let appimage = None;
+    relaunch_with(
+        appimage,
+        std::env::vars_os(),
+        |mut command| command.spawn().map(drop),
+        || app.exit(0),
+        || app.restart(),
+    );
+}";
+        assert!(
+            relaunch.trim_end().ends_with(wiring),
+            "relaunch passes, in order:{wiring}"
+        );
     }
 
     /// The route itself, driven with stand-ins for the start, the exit and
