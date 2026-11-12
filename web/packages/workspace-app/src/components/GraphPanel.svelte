@@ -21,6 +21,7 @@
 
   import { api } from "../api/client";
   import { ApiError, isWorkspaceRootMissingError } from "../api/errors";
+  import { isDraftClientPath } from "../api/fileIdentity";
   import type {
     DraftListEntry,
     FsGraphEdge,
@@ -1413,14 +1414,24 @@
     return level < spineRead.levels || spineRead.patched.has(dir);
   }
 
+  /// Path segments whose contents the spine never draws: the repository's
+  /// state and chan's own, which the walk leaves out and the watch still
+  /// reports (git's HEAD and index, for one, on every commit).
+  const UNDRAWN_SEGMENTS: ReadonlySet<string> = new Set([".git", ".hg", ".chan"]);
+
   /// The directories whose children a change at `paths` can have moved
   /// and the spine holds, or null for a change that named no path, which
-  /// only a whole fetch answers.
+  /// only a whole fetch answers. A draft's path names no workspace
+  /// directory, and a path under `.git`, `.hg` or `.chan` none the spine
+  /// draws.
   function spineDirsTouched(paths: Iterable<string>): Set<string> | null {
     const dirs = new Set<string>();
     let named = false;
     for (const path of paths) {
       named = true;
+      if (isDraftClientPath(path) || path.split("/").some((segment) => UNDRAWN_SEGMENTS.has(segment))) {
+        continue;
+      }
       const dir = parentDir(path);
       if (spineHoldsChildren(dir)) dirs.add(dir);
     }
@@ -1445,7 +1456,7 @@
   }
 
   /// One directory's children, read from disk a page at a time; null when
-  /// the directory is gone. Throws any other failure.
+  /// the directory is no longer there. Throws any other failure.
   async function fetchSpineLevel(
     dir: string,
     seq: number,
@@ -1468,7 +1479,8 @@
       } while (!fs.done && cursor);
     } catch (e) {
       if (seq !== spineSeq) return "superseded";
-      if (dir !== "" && e instanceof ApiError && e.status === 404 && !isWorkspaceRootMissingError(e)) {
+      // 404: the directory is gone; 400: a file stands where it was.
+      if (dir !== "" && e instanceof ApiError && (e.status === 404 || e.status === 400) && !isWorkspaceRootMissingError(e)) {
         return null;
       }
       throw e;
@@ -1492,55 +1504,81 @@
     const run = async (): Promise<void> => {
       const read = spineRead;
       if (read === null || seq !== spineSeq) return;
-      const levels = new Map<string, { nodes: FsGraphNode[]; edges: FsGraphEdge[] } | null>();
       try {
-        for (const dir of dirs) {
+        // Parents first, so a directory an earlier level of this patch
+        // brings is in the spine by the time its own turn comes.
+        for (const dir of [...dirs].sort(byDepth)) {
+          // A directory is read only when the spine holds it: what the walk
+          // never drew, a patch never draws either.
+          if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) continue;
           const level = await fetchSpineLevel(dir, seq);
-          if (level === "superseded") return;
-          levels.set(dir, level);
+          if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
+          applySpineLevel(read, dir, level);
         }
       } catch {
         if (seq === spineSeq) void loadSpine();
         return;
       }
-      if (seq !== spineSeq || read !== spineRead) return;
-      for (const [dir, level] of levels) {
-        const fresh = new Set(level?.nodes.map((n) => n.id) ?? []);
-        const gone = new Set<string>();
-        for (const n of read.nodes.values()) {
-          if (!spineChildOf(dir, n)) continue;
-          gone.add(n.id);
-          // A directory no longer there takes what the spine held below it.
-          if (isFsDirectory(n) && !fresh.has(n.id)) {
-            for (const m of read.nodes.values()) if (spineBelow(n.path, m)) gone.add(m.id);
-            for (const p of read.patched) if (p === n.path || p.startsWith(`${n.path}/`)) read.patched.delete(p);
-          }
-        }
-        if (level === null) {
-          for (const m of read.nodes.values()) if (spineBelow(dir, m)) gone.add(m.id);
-          read.patched.delete(dir);
-        }
-        for (const id of gone) read.nodes.delete(id);
-        read.edges = read.edges.filter(
-          (e) => !gone.has(e.source) && !gone.has(e.target) && !(e.kind === "contains" && e.source === dir),
-        );
-        if (level !== null) {
-          for (const n of level.nodes) read.nodes.set(n.id, n);
-          read.edges.push(...level.edges);
-          read.patched.add(dir);
-        }
-      }
-      // A ghost no symlink points at any more goes too.
-      const pointed = new Set(read.edges.map((e) => e.target));
-      for (const n of read.nodes.values()) {
-        if (n.kind === "ghost" && !pointed.has(n.id)) read.nodes.delete(n.id);
-      }
-      const nodes = [...read.nodes.values()];
-      read.edges = joinFsHardlinks(nodes, read.edges);
-      spine = drawnSpine(nodes, read.edges);
+      publishSpine(read);
     };
     spinePatches = spinePatches.then(run, run);
     return spinePatches;
+  }
+
+  /// Shallower paths first, then by name.
+  function byDepth(a: string, b: string): number {
+    return (a === "" ? 0 : a.split("/").length) - (b === "" ? 0 : b.split("/").length) || a.localeCompare(b);
+  }
+
+  function isFsDirectoryNode(n: FsGraphNode | undefined): boolean {
+    return n !== undefined && isFsDirectory(n);
+  }
+
+  /// Lays the children of `dir` as read now over what `read` held of them:
+  /// what is gone goes, a directory no longer there takes what was below it,
+  /// and `dir`'s children count as read from then on. A null level is a
+  /// directory gone from disk, which takes everything below it.
+  function applySpineLevel(
+    read: NonNullable<typeof spineRead>,
+    dir: string,
+    level: { nodes: FsGraphNode[]; edges: FsGraphEdge[] } | null,
+  ): void {
+    // A directory there now, by id; a file where a directory was is not one.
+    const freshDirs = new Set(level?.nodes.filter(isFsDirectory).map((n) => n.id) ?? []);
+    const gone = new Set<string>();
+    const dropBelow = (below: string): void => {
+      for (const m of read.nodes.values()) if (spineBelow(below, m)) gone.add(m.id);
+      for (const p of read.patched) if (p === below || p.startsWith(`${below}/`)) read.patched.delete(p);
+    };
+    for (const n of read.nodes.values()) {
+      if (!spineChildOf(dir, n)) continue;
+      gone.add(n.id);
+      if (isFsDirectory(n) && !freshDirs.has(n.id)) dropBelow(n.path);
+    }
+    if (level === null) dropBelow(dir);
+    for (const id of gone) read.nodes.delete(id);
+    read.edges = read.edges.filter(
+      (e) => !gone.has(e.source) && !gone.has(e.target) && !(e.kind === "contains" && e.source === dir),
+    );
+    if (level === null) {
+      read.patched.delete(dir);
+      return;
+    }
+    for (const n of level.nodes) read.nodes.set(n.id, n);
+    read.edges.push(...level.edges);
+    read.patched.add(dir);
+  }
+
+  /// Draws `read`: hardlinks joined over every node it holds, and a ghost no
+  /// symlink points at any more dropped.
+  function publishSpine(read: NonNullable<typeof spineRead>): void {
+    const pointed = new Set(read.edges.map((e) => e.target));
+    for (const n of read.nodes.values()) {
+      if (n.kind === "ghost" && !pointed.has(n.id)) read.nodes.delete(n.id);
+    }
+    const nodes = [...read.nodes.values()];
+    read.edges = joinFsHardlinks(nodes, read.edges);
+    spine = drawnSpine(nodes, read.edges);
   }
 
   /// The spine as the canvas takes it: each directory under the semantic
@@ -1781,10 +1819,13 @@
   $effect(() => {
     const nonce = graphReloadSignal.nonce;
     if (nonce === seenGraphReloadNonce) return;
+    // Two changes signalled before this runs leave the paths of the later
+    // one alone, so a skipped count is a change whose paths are not known.
+    const skipped = nonce !== seenGraphReloadNonce + 1;
     seenGraphReloadNonce = nonce;
     untrack(() => {
       const paths = graphReloadSignal.paths;
-      if (paths.length === 0) spineChanges = null;
+      if (skipped || paths.length === 0) spineChanges = null;
       else if (spineChanges !== null) for (const path of paths) spineChanges.add(path);
     });
     if (!visible) {

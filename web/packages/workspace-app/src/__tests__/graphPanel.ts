@@ -14,7 +14,7 @@
 //       await importOriginal<typeof import("../api/client")>(),
 //     ));
 //
-// This module imports no component and no api module, so the mock factories
+// This module imports no component and no api client, so the mock factories
 // above can load it without a cycle.
 //
 // The panel draws the window's shared graph (`state/graphData`), which is
@@ -33,6 +33,7 @@ import type {
   GraphViewEdge,
   GraphViewNode,
 } from "../api/types";
+import { ApiError } from "../api/errors";
 import { directoryNodeId } from "../graph/canvasNodes";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
 
@@ -71,7 +72,8 @@ export function canvasProbeModule(): { default: (anchor: unknown, props: CanvasP
 
 /// The graph the api stub serves. `view` answers graphStream (the semantic
 /// graph, which the window's shared store asks for); `fs` answers fsGraph
-/// (a tab's spine) by directory path, trimmed to the requested depth.
+/// (a tab's spine) by directory path, trimmed to the requested depth, with
+/// the scope's ancestors on every page and the route's refusals.
 export const graphServer = {
   view: { nodes: [], edges: [] } as GraphView,
   fs: { nodes: [], edges: [] } as { nodes: FsGraphNode[]; edges: FsGraphEdge[] },
@@ -114,8 +116,33 @@ function depthBelow(root: string, path: string): number {
   return path.slice(root.length + 1).split("/").length;
 }
 
+/// The directories above `path`, the root first, and their `contains` edges:
+/// what the route sends ahead of every page of a walk under `path`.
+function ancestorChain(path: string): { nodes: FsGraphNode[]; edges: FsGraphEdge[] } {
+  if (path === "") return { nodes: [], edges: [] };
+  const parts = path.split("/");
+  const above = ["", ...parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"))];
+  const byPath = new Map(graphServer.fs.nodes.map((n) => [n.path, n]));
+  const nodes = above.map((dir) => byPath.get(dir)).filter((n): n is FsGraphNode => n !== undefined);
+  const chain = new Set([...above, path]);
+  const edges = graphServer.fs.edges.filter(
+    (e) => e.kind === "contains" && chain.has(e.source) && chain.has(e.target),
+  );
+  return { nodes, edges };
+}
+
 /// The fs graph under `path`, down to `depth` levels, as one final batch.
+/// The route refuses a directory scope it cannot walk: 404 for a path that
+/// is not there, 400 for one that is not a directory.
 export function fsResponse(path: string, depth: number): FsGraphResponse {
+  if (path !== "") {
+    const scope = graphServer.fs.nodes.find((n) => n.path === path && n.kind !== "ghost");
+    if (!scope) throw new ApiError(404, `no such path: ${path}`, { error: `no such path: ${path}` });
+    if (scope.kind !== "directory") {
+      const error = `scope=directory requires a directory; ${path} is not`;
+      throw new ApiError(400, error, { error });
+    }
+  }
   const nodes = graphServer.fs.nodes.filter((n) => {
     const d = depthBelow(path, n.path);
     return d >= 0 && d <= depth;
@@ -186,16 +213,20 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
         if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
         const whole = fsResponse(o.path, o.depth);
+        // Every answer carries the scope's ancestors, as the route's does.
+        const chain = ancestorChain(o.path);
         const size = graphServer.fsPageSize;
-        if (size === null || o.limit === undefined) return whole;
+        if (size === null || o.limit === undefined) {
+          return { ...whole, nodes: [...chain.nodes, ...whole.nodes], edges: [...chain.edges, ...whole.edges] };
+        }
         const start = Number(o.cursor ?? 0);
-        const nodes = whole.nodes.slice(start, start + size);
-        const ids = new Set(nodes.map((n) => n.id));
+        const page = whole.nodes.slice(start, start + size);
+        const ids = new Set(page.map((n) => n.id));
         const done = start + size >= whole.nodes.length;
         return {
           ...whole,
-          nodes,
-          edges: whole.edges.filter((e) => ids.has(e.target)),
+          nodes: [...chain.nodes, ...page],
+          edges: [...chain.edges, ...whole.edges.filter((e) => ids.has(e.target))],
           cursor: done ? null : String(start + size),
           done,
         };

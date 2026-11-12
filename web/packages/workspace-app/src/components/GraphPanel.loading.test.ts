@@ -37,6 +37,7 @@ import {
 } from "../__tests__/graphPanel";
 import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphData.svelte";
 import { openedForPath } from "../graph/selectionView";
+import { draftClientPath } from "../api/fileIdentity";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
@@ -502,6 +503,83 @@ describe("watching the directories it shows", () => {
     expect(ids).not.toContain("notes/old.md");
     expect(ids).not.toContain("directory:notes/sub");
     expect(ids, "under the directory that went").not.toContain("notes/sub/s.md");
+  });
+
+  test("git's own files and a new draft's path read nothing of the spine", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes", expanded: openedForPath("notes") }));
+    const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "draft-1" });
+    const { spines } = await change([".git/index", ".git/HEAD", ".hg/dirstate", ".chan/workspace.toml", draft]);
+    expect(spines).toEqual([]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("directory:.git");
+  });
+
+  test("a directory the spine does not hold is not read, unless the same change brings it", async () => {
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("notes/deep"), fsg.dir("notes/fresh"), fsg.file("notes/fresh/x.md")],
+      edges: [
+        ...graphServer.fs.edges,
+        fsg.contains("notes", "notes/deep"),
+        fsg.contains("notes", "notes/fresh"),
+        fsg.contains("notes/fresh", "notes/fresh/x.md"),
+      ],
+    };
+    // Opened to notes/deep, so the spine holds the levels down to it.
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/deep") }));
+    const { spines } = await change(["notes/fresh", "notes/fresh/x.md", "notes/nowhere/y.md"]);
+    expect(spines.map((c) => c.path), "notes/nowhere is no directory the spine holds").toEqual(["notes", "notes/fresh"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/fresh/x.md");
+  });
+
+  test("a directory gone from disk takes what the spine held below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/sub/s.md");
+
+    // The change names the file alone: its directory answers 404.
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.dir("notes")], edges: [fsg.contains("", "notes")] };
+    const { spines } = await change(["notes/sub/s.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes/sub"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("notes/sub/s.md");
+  });
+
+  test("a file where an opened directory was takes what the spine held below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.file("notes/sub")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub")],
+    };
+    await change(["notes/sub/s.md", "notes/sub"]);
+    const ids = canvas.props!.nodes.map((n) => n.id);
+    expect(ids).not.toContain("notes/sub/s.md");
+    expect(ids, "the file, under its bare path").toContain("notes/sub");
+    expect(ids).not.toContain("directory:notes/sub");
+  });
+
+  test("two changes signalled before the tab looks are a change whose paths are not known", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
+    vi.useFakeTimers();
+    try {
+      const spines = graphServer.fsGraphCalls.length;
+      graphReloadSignal.paths = ["src/one.rs"];
+      graphReloadSignal.nonce += 1;
+      graphReloadSignal.paths = ["notes/two.md"];
+      graphReloadSignal.nonce += 1;
+      await vi.runAllTimersAsync();
+      const read = graphServer.fsGraphCalls.slice(spines).map((c) => c.path);
+      expect(read, "the spine is read whole, from the root").toContain("");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("a change that names no path fetches the spine whole", async () => {
