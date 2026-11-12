@@ -48,7 +48,7 @@ describe("ghostty kit instances", () => {
 
   /// Cells on screen holding the disposed terminal's marker byte.
   function staleCells(term: VtTerminal): number {
-    term.update();
+    term.beginFrame();
     const { rows } = term.getDimensions();
     let stale = 0;
     for (let y = 0; y < rows; y++) {

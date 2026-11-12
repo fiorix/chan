@@ -1,15 +1,17 @@
 /// Ghostty's VT core from Ghostty's own release build, bound as the core
-/// ghostty-web's `Terminal` takes as its `ghostty` option. The widget's
+/// the widget's `Terminal` takes as its `ghostty` option. The widget's
 /// sources in `lib/` are typed against the classes here.
 ///
 /// WHY: ghostty-web ships a wasm it compiles from a patched Ghostty
 /// snapshot with its own C entry points: render-state getters, a polled
 /// reply buffer, and a stream handler that dispatches a hand-picked
 /// subset of Ghostty's actions. Ghostty's release wasm exposes the
-/// libghostty-vt C API instead, with Ghostty's full stream handler.
-/// ghostty-web keeps its renderer, input handler and selection; this
-/// module gives them the terminal and key encoder they call, method for
-/// method, over upstream's parser and terminal state.
+/// libghostty-vt C API instead, with Ghostty's full stream handler. The
+/// widget keeps ghostty-web's renderer, input handler and selection; this
+/// module gives them the terminal and key encoder they call over upstream's
+/// parser and terminal state, and the renderer, the buffer API and the
+/// selection read the core's render state through its frame reader
+/// (`VtTerminal`, `VtCells`).
 ///
 /// The ABI numbers and struct offsets below are read off the pinned
 /// build's `ghostty_type_json()`; `ghosttyVt.test.ts` checks each one
@@ -46,7 +48,7 @@ export const ABI = {
   GhosttyPointTag: { ACTIVE: 0, VIEWPORT: 1, SCREEN: 2, HISTORY: 3 },
   GhosttyRenderStateData: { DIRTY: 3, ROW_ITERATOR: 4, CURSOR_VISIBLE: 11, COLORS: 19 },
   GhosttyRenderStateDirty: { FALSE: 0, PARTIAL: 1, FULL: 2 },
-  GhosttyRenderStateRowData: { DIRTY: 1, CELLS: 3, CELLS_RAW: 5 },
+  GhosttyRenderStateRowData: { CELLS: 3, CELLS_RAW: 5 },
   GhosttyRenderStateRowCellsData: { RAW: 1, STYLE: 2, GRAPHEMES_BUF: 4, BG_COLOR: 5, FG_COLOR: 6 },
   GhosttyRowData: { WRAP_CONTINUATION: 2 },
   GhosttyStyleColorTag: { NONE: 0, PALETTE: 1, RGB: 2 },
@@ -1037,36 +1039,9 @@ export class VtTerminal {
   }
 
   // ------------------------------------------------------------------
-  // ghostty-web's cell format and dirty calls, over the frame reader
+  // ghostty-web's cell format, for the tests that hold the binding to
+  // ghostty-web's own build and read cells in that shape
   // ------------------------------------------------------------------
-
-  update(): number {
-    return this.beginFrame();
-  }
-
-  markClean(): void {
-    this.endFrame();
-  }
-
-  clearDirty(): void {
-    this.endFrame();
-  }
-
-  isDirty(): boolean {
-    return this.beginFrame() !== ABI.GhosttyRenderStateDirty.FALSE;
-  }
-
-  needsFullRedraw(): boolean {
-    return this.beginFrame() === ABI.GhosttyRenderStateDirty.FULL;
-  }
-
-  /// Every active-screen cell, row-major, in ghostty-web's cell format.
-  getViewport(): GhosttyCell[] {
-    const cells = new VtCells();
-    const out: GhosttyCell[] = [];
-    for (let y = 0; y < this._rows; y++) if (this.readRow(y, cells)) out.push(...legacyCells(cells));
-    return out;
-  }
 
   /// Screen row `y` in ghostty-web's cell format, cells of its own.
   getLine(y: number): GhosttyCell[] | null {
@@ -1074,8 +1049,23 @@ export class VtTerminal {
     return this.readRow(y, cells) ? legacyCells(cells) : null;
   }
 
+  /// History row `offset`, 0 the oldest, in ghostty-web's cell format.
+  getScrollbackLine(offset: number): GhosttyCell[] | null {
+    const cells = new VtCells();
+    return this.readHistoryRow(offset, cells) ? legacyCells(cells) : null;
+  }
+
+  /// The text of screen row `row`'s cell at `col`: its cluster, its
+  /// codepoint, or a space.
   getGraphemeString(row: number, col: number): string {
     return this.readRow(row, this.lookup) ? cellText(this.lookup.at(col)) : " ";
+  }
+
+  /// The text of history row `offset`'s cell at `col`, read through the
+  /// cell's own grid reference.
+  getScrollbackGraphemeString(offset: number, col: number): string {
+    if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, col, offset)) return " ";
+    return this.gridGraphemes() ?? " ";
   }
 
   // ------------------------------------------------------------------
@@ -1251,12 +1241,6 @@ export class VtTerminal {
     return this.wasm.view().getUint32(ptr, true);
   }
 
-  /// History row `offset`, 0 the oldest, in ghostty-web's cell format.
-  getScrollbackLine(offset: number): GhosttyCell[] | null {
-    const cells = new VtCells();
-    return this.readHistoryRow(offset, cells) ? legacyCells(cells) : null;
-  }
-
   /// Whether row `row` continues the row above it, the meaning xterm's
   /// `isWrapped` has and ghostty-web's buffer API passes on.
   isRowWrapped(row: number): boolean {
@@ -1285,11 +1269,6 @@ export class VtTerminal {
 
   getScrollbackHyperlinkUri(offset: number, col: number): string | null {
     return this.hyperlinkAt(ABI.GhosttyPointTag.HISTORY, col, offset);
-  }
-
-  getScrollbackGraphemeString(offset: number, col: number): string {
-    if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, col, offset)) return " ";
-    return this.gridGraphemes() ?? " ";
   }
 
   // ------------------------------------------------------------------
