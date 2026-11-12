@@ -180,7 +180,7 @@ export async function focusComputerWindow(window: WindowRecord): Promise<void> {
     return;
   }
   if (window.origin !== "browser") {
-    throw new Error("Native focus is unavailable in this browser. Use Open in this browser.");
+    throw new Error("Native focus is unavailable in this browser. Use Open window.");
   }
   if (!(await openWindowRecord(window))) return;
   if (window.hidden) {

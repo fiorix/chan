@@ -152,7 +152,8 @@ describe("browser action visibility", () => {
     const check = vi.spyOn(backend, "checkWindowPage");
     for (const hidden of [true, false]) {
       await expect(focusComputerWindow({ ...record, window_id: `focus ${origin} ${hidden}`, hidden, origin: origin === "native" ? "native" : undefined }))
-        .rejects.toThrow(/native focus.*unavailable/i);
+        // The row a browser offers on such a record, by the name it carries.
+        .rejects.toThrow("Native focus is unavailable in this browser. Use Open window.");
     }
     expect(open).not.toHaveBeenCalled();
     expect(check).not.toHaveBeenCalled();
