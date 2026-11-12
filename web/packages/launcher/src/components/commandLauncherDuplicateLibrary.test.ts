@@ -235,11 +235,13 @@ describe("Computers deck with two rows on one library", () => {
 
     openDeck();
     await filterBy("windows");
-    expect(items().map((row) => `${row.section}: ${row.subtitle}`)).toEqual([
-      "beta: beta",
-      "tmux -CC on beta (main): tmux -CC on beta (main)",
-      "New: undefined",
-    ]);
+    expect(items().map((row) => row.section)).toEqual(["beta", "tmux -CC on beta (main)", "New"]);
+    // Typed, the rows interleave and each names its machine.
+    await query("shared terminal");
+    const named = items()
+      .filter((row) => row.id.startsWith("computers:window:"))
+      .map((row) => row.subtitle);
+    expect(named.sort()).toEqual(["beta", "tmux -CC on beta (main)"]);
   });
 
   it("uses the library's machine name for a workspace target", async () => {

@@ -318,7 +318,7 @@ describe("what a row does", () => {
     const window = row(build(devserverModel(), {}, ctx), "Window 1");
     expect(window.expandable).toBe(true);
     expect(window.page).toEqual(["window:local:w-1"]);
-    expect(window.subtitle).toBe("chan · This machine");
+    expect(window.subtitle, "the only machine is not named on every row").toBe("chan");
     await window.run?.();
     expect(commands).toEqual([{ target: "window", key: "local:w-1", action: "focus" }]);
   });
@@ -364,7 +364,59 @@ describe("what a row does", () => {
 
   it("marks the window this deck sits in", () => {
     const model = devserverModel({ machines: [local({ windows: [win("here", { current: true })] })] });
-    expect(row(build(model), "here").subtitle).toBe("This machine · This window");
+    expect(row(build(model), "here").subtitle).toBe("This window");
+  });
+});
+
+describe("a row's second line", () => {
+  it("names the machine where several are listed together", () => {
+    const deck = build(desktopModel({ recent: ["lib-g:t-1", "local:w-1"] }));
+    expect(row(deck, "Terminal Window 1").subtitle).toBe("geekom");
+    expect(row(deck, "Window 1").subtitle).toBe("chan · This machine");
+  });
+
+  it("does not repeat the only machine there is", () => {
+    const deck = build(devserverModel());
+    expect([row(deck, "chan").subtitle, row(deck, "Terminal Window 1").subtitle]).toEqual([
+      undefined,
+      undefined,
+    ]);
+    const typed = build(devserverModel(), { query: "x" });
+    expect([row(typed, "Turn off chan").subtitle, row(typed, "Turn off chan").breadcrumb]).toEqual([
+      undefined,
+      "Workspaces",
+    ]);
+    expect(row(typed, "Close Window 1").subtitle).toBe("chan");
+  });
+
+  it("does not repeat the machine a section or a page is named for", () => {
+    const windows = build(desktopModel(), { filter: "windows" });
+    expect(windows.entries.map((entry) => entry.subtitle)).toEqual([
+      undefined,
+      "chan",
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    const page = build(desktopModel(), { path: ["machine:geekom"] });
+    expect(page.entries.map((entry) => entry.subtitle).filter(Boolean)).toEqual([]);
+  });
+
+  it("keeps the machine a workspace names when it is not the one that lists it", () => {
+    const model = desktopModel();
+    model.machines[1].workspaces[0].machine = "beta";
+    expect(row(build(model, { filter: "workspaces" }), "api").subtitle).toBe("beta");
+    expect(row(build(model, { path: ["machine:geekom"] }), "api").subtitle).toBe("beta");
+  });
+
+  it("leaves an object's own actions bare under its name, and its windows without it", () => {
+    const deck = build(desktopModel(), { path: ["workspace:local:chan"] });
+    expect(deck.entries.map((entry) => [entry.title, entry.subtitle])).toEqual([
+      ["New window", undefined],
+      ["New terminal window", undefined],
+      ["Turn off", undefined],
+      ["Window 1", undefined],
+    ]);
   });
 });
 

@@ -419,6 +419,10 @@ interface Builder {
   scopes: ComputersScopeIds;
   /** The path rows of the current list extend to reach a page. */
   base: readonly string[];
+  /** The machine the whole list belongs to, which its rows do not repeat:
+   * the only machine there is, the one a page is under, or the one a section
+   * is named for. */
+  quiet?: string;
 }
 
 interface Layout {
@@ -538,14 +542,20 @@ function windowActs(b: Builder, window: ComputersWindow): Act[] {
   });
 }
 
+/** The type of a row and the machine it is on, for a list where rows of
+ * every type and machine interleave. */
+function typePath(b: Builder, type: string, machine: string): string {
+  return machine === b.quiet ? type : `${type} › ${machine}`;
+}
+
 function windowLayout(b: Builder, placed: PlacedWindow, section?: string): Layout {
   const { window, machine } = placed;
   return {
     section,
-    subtitle: joined(window.context, machine, window.current && "This window"),
-    breadcrumb: `${COMPUTERS_SECTIONS.windows} › ${machine}`,
+    subtitle: joined(window.context, machine !== b.quiet && machine, window.current && "This window"),
+    breadcrumb: typePath(b, COMPUTERS_SECTIONS.windows, machine),
     scope: b.scopes.windows,
-    search: window.search,
+    search: `${window.search ?? ""} ${machine}`,
   };
 }
 
@@ -565,10 +575,16 @@ function windowEntry(b: Builder, placed: PlacedWindow, section?: string, note?: 
   });
 }
 
+/** Where an object's action rows sit. On the object's own page its name is
+ * above them already, so they carry no second line of their own. */
+function actLayout(layout: Layout, own: boolean): Layout {
+  return own ? { ...layout, subtitle: undefined } : layout;
+}
+
 /** An object's actions as rows: under its own page they carry the card's
  * label, and in a list of many objects the phrase that names the object. */
 function windowActEntries(b: Builder, placed: PlacedWindow, own: boolean, section?: string): ComputersEntry[] {
-  const layout = windowLayout(b, placed, section);
+  const layout = actLayout(windowLayout(b, placed, section), own);
   return windowActs(b, placed.window).map((act) =>
     actEntry(b, act, placed.window.key, own ? act.label : act.phrase, layout),
   );
@@ -590,6 +606,10 @@ function placeWorkspaces(machine: ComputersMachine): PlacedWorkspace[] {
 
 function workspaceWindows(placed: PlacedWorkspace): PlacedWindow[] {
   return placed.workspace.windows.map((window) => ({ window, machine: placed.machine }));
+}
+
+function withoutContext(placed: PlacedWindow): PlacedWindow {
+  return { ...placed, window: { ...placed.window, context: undefined } };
 }
 
 function workspaceActs(b: Builder, workspace: ComputersWorkspace): Act[] {
@@ -684,12 +704,13 @@ function workspaceActs(b: Builder, workspace: ComputersWorkspace): Act[] {
 }
 
 function workspaceLayout(b: Builder, placed: PlacedWorkspace, section?: string): Layout {
+  const { workspace, machine } = placed;
   return {
     section,
-    subtitle: placed.machine,
-    breadcrumb: `${COMPUTERS_SECTIONS.workspaces} › ${placed.machine}`,
+    subtitle: machine === b.quiet ? undefined : machine,
+    breadcrumb: typePath(b, COMPUTERS_SECTIONS.workspaces, machine),
     scope: b.scopes.workspaces,
-    search: placed.workspace.search,
+    search: `${workspace.search ?? ""} ${machine}`,
   };
 }
 
@@ -707,7 +728,7 @@ function workspaceEntry(b: Builder, placed: PlacedWorkspace, section?: string, n
 }
 
 function workspaceActEntries(b: Builder, placed: PlacedWorkspace, own: boolean, section?: string): ComputersEntry[] {
-  const layout = workspaceLayout(b, placed, section);
+  const layout = actLayout(workspaceLayout(b, placed, section), own);
   return workspaceActs(b, placed.workspace).map((act) =>
     actEntry(b, act, placed.workspace.key, own ? act.label : act.phrase, layout),
   );
@@ -889,7 +910,7 @@ function machineEntry(b: Builder, machine: ComputersMachine, section?: string): 
 }
 
 function machineActEntries(b: Builder, machine: ComputersMachine, own: boolean, section?: string): ComputersEntry[] {
-  const layout = machineLayout(b, machine, section);
+  const layout = actLayout(machineLayout(b, machine, section), own);
   return machineActs(b, machine)
     .filter((act) => own || !act.twin)
     .map((act) => actEntry(b, act, machine.key, own ? act.label : act.phrase, layout));
@@ -986,7 +1007,7 @@ function gatewayEntry(b: Builder, gateway: ComputersGateway, section?: string): 
 }
 
 function gatewayActEntries(b: Builder, gateway: ComputersGateway, own: boolean, section?: string): ComputersEntry[] {
-  const layout = gatewayLayout(b, gateway, section);
+  const layout = actLayout(gatewayLayout(b, gateway, section), own);
   return gatewayActs(b, gateway).map((act) =>
     actEntry(b, act, gateway.key, own ? act.label : act.phrase, layout),
   );
@@ -1130,18 +1151,21 @@ function rootEntries(b: Builder): ComputersEntry[] {
 function filterEntries(b: Builder, filter: ComputersFilter): ComputersEntry[] {
   const { model } = b;
   const rows: ComputersEntry[] = [];
+  // A section named for a machine says where its rows are.
+  const under = (machine: ComputersMachine): Builder => ({ ...b, quiet: machine.name });
   if (filter === "windows") {
     for (const machine of model.machines) {
-      rows.push(...machineWindows(machine).map((placed) => windowEntry(b, placed, machine.name)));
+      rows.push(...machineWindows(machine).map((placed) => windowEntry(under(machine), placed, machine.name)));
     }
+    const waiting = COMPUTERS_SECTIONS.unplaced;
     rows.push(
       ...(model.unplaced ?? []).map((window) =>
-        windowEntry(b, { window, machine: COMPUTERS_SECTIONS.unplaced }, COMPUTERS_SECTIONS.unplaced),
+        windowEntry({ ...b, quiet: waiting }, { window, machine: waiting }, waiting),
       ),
     );
   } else if (filter === "workspaces") {
     for (const machine of model.machines) {
-      rows.push(...placeWorkspaces(machine).map((placed) => workspaceEntry(b, placed, machine.name)));
+      rows.push(...placeWorkspaces(machine).map((placed) => workspaceEntry(under(machine), placed, machine.name)));
     }
   } else if (filter === "machines") {
     rows.push(...model.machines.map((machine) => machineEntry(b, machine, COMPUTERS_SECTIONS.machines)));
@@ -1261,7 +1285,8 @@ function pageEntries(b: Builder, page: Page, searching: boolean): ComputersEntry
       const { placed } = page;
       return [
         ...workspaceActEntries(b, placed, true, section(COMPUTERS_SECTIONS.actions)),
-        ...workspaceWindows(placed).flatMap((window) => [
+        // Under their workspace's name, its windows do not repeat it.
+        ...workspaceWindows(placed).map(withoutContext).flatMap((window) => [
           windowEntry(b, window, section(COMPUTERS_SECTIONS.windows)),
           ...(searching ? windowActEntries(b, window, false) : []),
         ]),
@@ -1287,9 +1312,17 @@ export function computersDeck(model: ComputersModel, view: ComputersView, ctx: C
     pages.push(page);
   }
   const path = view.path.slice(0, pages.length);
-  const b: Builder = { model, ctx, scopes, base: path };
-  const searching = view.query.trim() !== "";
   const page = pages.at(-1);
+  const quiet =
+    page?.kind === "machine"
+      ? page.machine.name
+      : page?.kind === "workspace"
+        ? page.placed.machine
+        : model.machines.length === 1
+          ? model.machines[0].name
+          : undefined;
+  const b: Builder = { model, ctx, scopes, base: path, quiet };
+  const searching = view.query.trim() !== "";
   const crumbs = pages.map(pageName);
   if (page) {
     return { entries: pageEntries(b, page, searching), path, crumbs, title: pageName(page) };

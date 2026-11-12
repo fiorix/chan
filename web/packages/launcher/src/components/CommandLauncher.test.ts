@@ -856,6 +856,54 @@ describe("Computers command deck", () => {
   });
 });
 
+describe("keys through the deck", () => {
+  it("Right opens the page of the row Enter would run, and runs nothing", async () => {
+    open();
+    await tick();
+    // The first row is selected on open: the workspace.
+    await key("ArrowRight");
+    expect(activeCommandLauncherDraft().path).toEqual([PROJECT_PAGE]);
+    expect(actions.newWorkspace).not.toHaveBeenCalled();
+    // On its page the first row is an action, which Right leaves alone.
+    await key("ArrowRight");
+    await flushPromises();
+    expect(activeCommandLauncherDraft().path).toEqual([PROJECT_PAGE]);
+    expect(actions.newWorkspace).not.toHaveBeenCalled();
+    await key("Enter");
+    await flushPromises();
+    expect(actions.newWorkspace).toHaveBeenCalledOnce();
+  });
+
+  it("Tab cycles the type filters and comes back to the whole library", async () => {
+    open();
+    await tick();
+    const seen: (string | null)[] = [];
+    for (let press = 0; press < 4; press += 1) {
+      await key("Tab");
+      seen.push(activeCommandLauncherDraft().scope);
+    }
+    expect(seen).toEqual(["windows", "workspaces", "computers", null]);
+    expect(outline()[0]).toBe("Workspaces: Project");
+  });
+
+  it("Escape leaves a page before it closes the deck", async () => {
+    await openWindowPage();
+    await key("Escape");
+    expect(activeCommandLauncherDraft().path).toEqual([]);
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    await key("Escape");
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+  });
+
+  it("Backspace on an empty query drops the filter", async () => {
+    open();
+    await filterBy("windows");
+    await key("Backspace");
+    expect(activeCommandLauncherDraft().scope).toBeNull();
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+  });
+});
+
 describe("the type filter", () => {
   it("narrows the list to one type and names it in the placeholder", async () => {
     open();
@@ -1187,10 +1235,7 @@ describe("the desktop's library", () => {
     ]);
     // A tmux window with no chan window yet reads hidden; its one action
     // asks the connection to open it.
-    expect([item("logs").value, item("logs").subtitle]).toEqual([
-      "hidden",
-      "@7, 2 panes · tmux -CC on this machine (main)",
-    ]);
+    expect([item("logs").value, item("logs").subtitle]).toEqual(["hidden", "@7, 2 panes"]);
     result("logs").click();
     await settle();
     expect(actions.openTmuxWindow).toHaveBeenCalledExactlyOnceWith("tm-1", connection.windows[0]);
@@ -1383,6 +1428,10 @@ describe("tmux windows", () => {
       "tmux -CC on alpha (work): Terminal Window 2 [logs]",
       "New: New terminal",
     ]);
+    // Under the root, where machines interleave, each row names its own.
+    (deck.props!.onClearScope as () => void)();
+    await tick();
+    await query("vim");
     expect(item("Terminal Window 2 [vim]").subtitle).toBe("tmux -CC on alpha (main)");
   });
 });
