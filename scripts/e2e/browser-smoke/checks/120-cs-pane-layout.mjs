@@ -312,6 +312,12 @@ async function selectedLauncherTitle(page) {
   );
 }
 
+/// The titles of the rows the launcher lists, in its order.
+async function launcherTitles(page) {
+  return page.$$eval(ROW_TITLE_SELECTOR, (entries) =>
+    entries.map((entry) => entry.textContent?.replace(/\s+/g, " ").trim() ?? ""));
+}
+
 /// Wait until the launcher's selected row is the one titled `title`.
 async function waitLauncherSelection(page, title) {
   try {
@@ -323,10 +329,7 @@ async function waitLauncherSelection(page, title) {
       title,
     );
   } catch (cause) {
-    const rows = await page
-      .$$eval(ROW_TITLE_SELECTOR, (entries) =>
-        entries.map((entry) => entry.textContent?.replace(/\s+/g, " ").trim() ?? ""))
-      .catch(() => []);
+    const rows = await launcherTitles(page).catch(() => []);
     throw new Error(
       `the launcher did not select "${title}"; its rows are ${JSON.stringify(rows)}`,
       { cause },
@@ -335,11 +338,11 @@ async function waitLauncherSelection(page, title) {
 }
 
 /// Type `title` into the launcher, run the row it selects and answer that
-/// row's title. The typed title must select its own row: at once, or with
-/// `under`, one Down below the row of that title. Among hits of one kind
-/// the list puts the focused app's rows ahead of the pane's, so a pane row
-/// whose title an app row extends stands under that row.
-async function launcherRun(page, title, { confirm = false, under = null } = {}) {
+/// row's title. The typed title must select its own row. With `above`, the
+/// list must also hold a row of that title, under the typed one: a title
+/// that is the whole query leads every other hit, a title of the focused
+/// app that starts with the same words included.
+async function launcherRun(page, title, { confirm = false, above = null } = {}) {
   await page.evaluate(() => {
     window.dispatchEvent(
       new CustomEvent("chan:command", {
@@ -353,11 +356,15 @@ async function launcherRun(page, title, { confirm = false, under = null } = {}) 
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await page.type(LAUNCHER_INPUT_SELECTOR, title);
-  if (under !== null) {
-    await waitLauncherSelection(page, under);
-    await page.keyboard.press("ArrowDown");
-  }
   await waitLauncherSelection(page, title);
+  if (above !== null) {
+    const rows = await launcherTitles(page);
+    if (rows.indexOf(above) <= rows.indexOf(title)) {
+      throw new Error(
+        `the launcher did not list "${above}" under "${title}"; its rows are ${JSON.stringify(rows)}`,
+      );
+    }
+  }
   const selected = await selectedLauncherTitle(page);
   await page.keyboard.press("Enter");
   if (confirm) {
@@ -1242,19 +1249,19 @@ is_lead = false
       );
 
       // Each row runs on the tab the row before it opened. On the Files tab
-      // the file browser's own New graph here leads the hits for New graph,
-      // and the pane's row is the one under it.
+      // the file browser's own New graph here is a hit for New graph too,
+      // and the pane's row, titled as typed, stands above it.
       const launcherKinds = [
         ["New file browser", "browser", null],
         ["New graph", "graph", "New graph here"],
         ["New dashboard", "dashboard", null],
         ["New terminal", "terminal", null],
       ];
-      for (const [title, kind, under] of launcherKinds) {
+      for (const [title, kind, above] of launcherKinds) {
         const countBefore = sideTabs(await paneList(ctx, WINDOW_ID), leftId, "a").filter(
           (tab) => tab.kind === kind,
         ).length;
-        const selected = await launcherRun(page, title, { under });
+        const selected = await launcherRun(page, title, { above });
         check(selected === title, `launcher selected ${selected}, expected ${title}`);
         await pollLayout(
           ctx,
