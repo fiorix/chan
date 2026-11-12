@@ -49,7 +49,9 @@ import {
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
 import { isDraftPath } from "../workspace.svelte";
-import { parentDir } from "../format";
+import { basename, parentDir } from "../format";
+import { api } from "../../api/client";
+import { isTauriDesktop, runDesktopDownload } from "../../api/desktop";
 import { displayPath, isDraftClientPath } from "../../api/fileIdentity";
 import { terminalFromHereTarget } from "../../terminal/fromHere";
 import { stripTrailingWhitespaceText } from "../../editor/tools";
@@ -70,14 +72,6 @@ function onFile(fn: (tab: FileTab) => void): () => void {
 function onPlacedFile(ctx: CommandContext): boolean {
   const tab = activeFileTab();
   return onSurface(ctx, "file") && !(tab !== null && isDraftClientPath(tab.path));
-}
-
-/// Whether the active file tab is on a file the Details inspector offers to
-/// download or export: any file but a draft, which is scratch space until
-/// it is saved.
-function onKeptFile(ctx: CommandContext): boolean {
-  const tab = activeFileTab();
-  return onSurface(ctx, "file") && tab !== null && !isDraftPath(tab.path);
 }
 
 /// The active file tab's value for a toggle's state, null when no file tab
@@ -115,6 +109,35 @@ export async function deleteFile(tab: FileTab): Promise<void> {
 export async function duplicateFile(tab: FileTab): Promise<void> {
   if (isDraftClientPath(tab.path)) return;
   await fileOps.duplicateFile(tab.path);
+}
+
+/// Download the tab's file as the server holds it, a draft's too: the
+/// desktop's Downloads folder with the transfer bubble's progress, the
+/// browser's own download elsewhere. A standalone window's draft is a file
+/// of the machine and downloads as one. A workspace's is asked for by its
+/// draft identity.
+export function downloadFile(tab: FileTab): void {
+  if (!isDraftClientPath(tab.path)) {
+    fileOps.downloadPathWithProgress(tab.path, false);
+    return;
+  }
+  // The desktop's transfer record keeps a download's path in session
+  // storage to offer Retry after a reload, and a workspace draft's client
+  // path is never stored. So the desktop downloads one with no source to
+  // retry from, and the browser's own download keeps no record at all.
+  if (isTauriDesktop()) {
+    const url = new URL(api.downloadUrl(tab.path), window.location.href).toString();
+    void runDesktopDownload(url, basename(tab.path)).catch(() => {});
+    return;
+  }
+  fileOps.downloadPath(tab.path, false);
+}
+
+/// Render the tab's Markdown file to PDF as the server holds it, a draft's
+/// too; exportPathToPdf reports progress and failure on the status line.
+export async function exportFileToPdf(tab: FileTab): Promise<void> {
+  if (!isMarkdown(tab.path)) return;
+  await exportPathToPdf(tab.path);
 }
 
 /// Open workspace search on the text selected in the tab's editor, capped
@@ -397,14 +420,8 @@ registerCommands([
     order: 11,
     requirement: "files",
     keywords: ["Download file", "save", "export"],
-    available: onKeptFile,
-    unavailableReason: () => "Needs a file that is not a draft",
-    // The file as it is on disk: the desktop's Downloads folder with the
-    // transfer bubble's progress, the browser's own download elsewhere.
-    run: onFile((tab) => {
-      if (isDraftPath(tab.path)) return;
-      fileOps.downloadPathWithProgress(tab.path, false);
-    }),
+    available: (ctx) => onSurface(ctx, "file"),
+    run: onFile(downloadFile),
   },
   {
     id: "app.editor.terminalFromHere",
@@ -432,19 +449,9 @@ registerCommands([
     order: 13,
     requirement: "files",
     keywords: ["print", "save as"],
-    available: (ctx) => onKeptFile(ctx) && isMarkdown(activeFileTab()?.path ?? ""),
-    unavailableReason: () => {
-      const tab = activeFileTab();
-      return tab !== null && isMarkdown(tab.path)
-        ? "Needs a file that is not a draft"
-        : "Needs a Markdown file";
-    },
-    // Renders the file as it is on disk; exportPathToPdf reports progress
-    // and failure on the status line.
-    run: onFile((tab) => {
-      if (isDraftPath(tab.path) || !isMarkdown(tab.path)) return;
-      void exportPathToPdf(tab.path);
-    }),
+    available: (ctx) => onSurface(ctx, "file") && isMarkdown(activeFileTab()?.path ?? ""),
+    unavailableReason: () => "Needs a Markdown file",
+    run: onFile((tab) => void exportFileToPdf(tab)),
   },
   {
     id: "app.editor.graphFromHere",

@@ -1098,6 +1098,51 @@ describe("a menu row and its command", () => {
     await settle(2);
     expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([["notes/plan.md"], ["notes/plan.md"]]);
   });
+
+  // A workspace's draft has no entry for the file inspector to act on. Its
+  // Details panel names the draft and offers the editor's two commands for
+  // it, each through the command's own function.
+  test("a workspace draft's Details panel offers Download and Export to PDF, and runs what their commands run", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const download = vi.spyOn(fileOps, "downloadPath").mockImplementation(() => {});
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const titled = (id: string): string => commandById(id)!.title;
+    const main = details.querySelector<HTMLButtonElement>(".pill-main")!;
+    const items = (): HTMLButtonElement[] => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      return [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")];
+    };
+
+    expect(details.querySelector(".drafts-chip"), "the draft's own body").not.toBeNull();
+    expect(main.textContent?.trim()).toBe(titled("app.editor.download"));
+    main.click();
+    run("app.editor.download");
+    expect(download.mock.calls).toEqual([
+      [path, false],
+      [path, false],
+    ]);
+
+    const [exportItem, ...rest] = items();
+    expect([exportItem?.textContent?.trim(), rest.length]).toEqual([titled("app.editor.exportPdf"), 0]);
+    exportItem!.click();
+    run("app.editor.exportPdf");
+    await settle(2);
+    expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[path], [path]]);
+  });
+
+  test("a workspace draft that is not Markdown offers Download alone", async () => {
+    const tab = seat(
+      fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
+    );
+    const { target } = await render(tab);
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+
+    expect(details.querySelector(".pill-main")?.textContent?.trim()).toBe(commandById("app.editor.download")!.title);
+    expect(details.querySelector(".pill-caret")).toBeNull();
+  });
 });
 
 // The editor keeps focus while its menu is open, so an Escape goes first to

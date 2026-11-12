@@ -32,7 +32,7 @@
     TreeEntry,
   } from "../api/types";
   import { AUDIO_UNSUPPORTED_MESSAGE } from "../state/audioViewer";
-  import { isAudio, isImage, isPdf, isVideo } from "../state/fileTypes";
+  import { isAudio, isImage, isMarkdown, isPdf, isVideo } from "../state/fileTypes";
   import { basename, formatMtime, formatSize, parentDir } from "../state/format";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -67,6 +67,7 @@
   import {
     classifyFileActions,
     type FileActionId,
+    type FileActionSet,
   } from "../state/fileActions";
   import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
@@ -662,18 +663,16 @@
     }
   }
 
-  const actionModel = $derived.by<{
-    main: InspectorAction;
-    secondary: InspectorAction[];
-  } | null>(() => {
-    if (!entry) return null;
+  /// The entry's actions: the shared classifier's, and on the editor's
+  /// Details panel a draft file's two ways out of the window besides. The
+  /// classifier gives a draft a terminal alone, which is all a selection in
+  /// the file browser offers it. The editor has the draft open, so its
+  /// panel offers what its commands do: Download, and Export to PDF on
+  /// Markdown.
+  function actionsFor(e: TreeEntry): FileActionSet {
+    const isDraft = e.path === draftsDir() || isDraftPath(e.path);
     const set = classifyFileActions(
-      {
-        path: entry.path,
-        isDir: entry.is_dir,
-        serverKind: entry.kind,
-        isDraft: entry.path === draftsDir() || isDraftPath(entry.path),
-      },
+      { path: e.path, isDir: e.is_dir, serverKind: e.kind, isDraft },
       {
         open: !!onOpen,
         reveal: !!onReveal,
@@ -681,6 +680,18 @@
         upload: allowUpload,
       },
     );
+    if (surface !== "file" || !isDraft || e.is_dir) return set;
+    const secondary: FileActionId[] = [...set.secondary, "download"];
+    if (isMarkdown(e.path)) secondary.push("exportPdf");
+    return { main: set.main, secondary };
+  }
+
+  const actionModel = $derived.by<{
+    main: InspectorAction;
+    secondary: InspectorAction[];
+  } | null>(() => {
+    if (!entry) return null;
+    const set = actionsFor(entry);
     return { main: actionFor(set.main), secondary: set.secondary.map(actionFor) };
   });
 
@@ -773,7 +784,8 @@
        - editable file: open (gated on the server content kind, so an
          odd-suffix plaintext file opens like the tree double-click);
        - media: view, in the viewer of its kind;
-       - a directory: upload; every entry but a draft: download;
+       - a directory: upload; every entry but a draft: download, which
+         the editor's panel offers on the draft it has open too;
        - host-provided: reveal (onReveal), graph (onSetAsScope).
      Each action is worded by its command's title on the host surface.
      A full-path toggle reveals the workspace-relative path (header shows

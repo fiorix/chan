@@ -48,7 +48,9 @@
   import {
     copyFilePath,
     deleteFile,
+    downloadFile,
     duplicateFile,
+    exportFileToPdf,
     searchSelection,
     showInFileBrowser,
   } from "../state/commands/editor";
@@ -61,6 +63,7 @@
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
+  import InspectorActionPill, { type InspectorAction } from "./InspectorActionPill.svelte";
   import { displayPath, isDraftClientPath } from "../api/fileIdentity";
   import StyleToolbar from "./StyleToolbar.svelte";
   import { clampMenu } from "./menuClamp";
@@ -134,7 +137,7 @@
     saveDraftTabToWorkspace,
     tabFocusPulse,
   } from "../state/tabs.svelte";
-  import { csvDelimiter, isCsv, isExcalidraw, isJson } from "../state/fileTypes";
+  import { csvDelimiter, isCsv, isExcalidraw, isJson, isMarkdown } from "../state/fileTypes";
   import {
     acquireDocSession,
     isDocSyncEligible,
@@ -802,6 +805,17 @@
   /// A workspace's draft is no file of the workspace: it is not deleted or
   /// duplicated as one, and leaves by its discard or its save.
   const isWorkspaceDraftTab = $derived(isDraftClientPath(tab.path));
+  /// What the Details panel offers on a workspace's draft. A draft has no
+  /// entry in the tree for the file inspector to act on, so the panel names
+  /// the draft and offers the two actions the editor's commands have for
+  /// it, each through the command's own function: Download, and Export to
+  /// PDF on Markdown.
+  const draftActions = $derived<{ main: InspectorAction; secondary: InspectorAction[] }>({
+    main: { command: "app.editor.download", onClick: () => downloadFile(tab) },
+    secondary: isMarkdown(tab.path)
+      ? [{ command: "app.editor.exportPdf", onClick: () => void exportFileToPdf(tab) }]
+      : [],
+  });
   $effect(() => {
     // Sync the draft to the tab path when the underlying file
     // changes (e.g. external rename, or another menu surface).
@@ -1833,6 +1847,9 @@
       >
         {#if isWorkspaceDraftTab}
           <DraftInfoBody path={tab.path} />
+          <div class="draft-actions">
+            <InspectorActionPill main={draftActions.main} secondary={draftActions.secondary} />
+          </div>
         {:else}
           <FileInfoBody
             path={tab.path}
@@ -2143,6 +2160,12 @@
     color: var(--danger-text, #d33);
     padding: 1rem;
     text-align: center;
+  }
+  /* A draft's actions sit under the draft body, in its gutter and at its
+     text size. */
+  .draft-actions {
+    padding: 0 0.7rem 0.8rem;
+    font-size: 12.5px;
   }
   .missing-file-state {
     flex: 1;
