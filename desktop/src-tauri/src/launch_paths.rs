@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use chan_server::handoff::{self, Response};
 
-use crate::{serve, terminal_mode, AppState};
+use crate::{serve, AppState};
 
 /// What a GUI launch's arguments come to.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -30,26 +30,20 @@ pub(crate) struct LaunchArgs {
 /// old macOS Finder passes `-psn_...`); an empty argument is ignored. Every
 /// other one is read as `chan-files` reads its paths
 /// ([`handoff::launch_arg_path`]), and one that names nothing this desktop can
-/// open is skipped with its reason. `Err` is the sentence for a usage error: a
-/// terminal-mode option (`-e`, `--`, `--dir` and the rest) beside a path,
-/// since a launch either opens paths or runs a terminal, and that one is a
-/// mistake rather than a path.
+/// open is skipped with its reason. `Err` is the sentence for a usage error:
+/// an option of `chan-term`'s launch (`-e`, `--`, `--dir` and the rest), which
+/// runs terminals where chan-desktop opens paths; left alone, the arguments
+/// after `-e` would be read as paths, and a missing one created empty.
 pub(crate) fn from_args(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
 ) -> Result<LaunchArgs, String> {
     let args: Vec<OsString> = args.into_iter().filter(|arg| !arg.is_empty()).collect();
-    if args.iter().any(|arg| !is_option(arg)) {
-        if let Some(option) = args
-            .iter()
-            .find(|arg| terminal_mode::is_terminal_option(arg))
-        {
-            return Err(format!(
-                "{} is a terminal option and the launch also names a path: open paths with one \
-                 chan-desktop and run a terminal with another",
-                option.to_string_lossy()
-            ));
-        }
+    if let Some(option) = args.iter().find(|arg| chan::term::is_launch_option(arg)) {
+        return Err(format!(
+            "{} is a chan-term option: run the terminal with chan-term, which takes it",
+            option.to_string_lossy()
+        ));
     }
     let mut launch = LaunchArgs::default();
     for arg in args.iter().filter(|arg| !is_option(arg)) {
@@ -221,32 +215,34 @@ mod tests {
         );
     }
 
-    /// A terminal-mode option beside a path is a mistake, not a path: the
+    /// An option of `chan-term`'s launch is a usage error that points there,
+    /// with a path beside it or none: chan-desktop runs no terminal, and the
     /// arguments after `-e` would otherwise be read as paths, and a missing
     /// one created empty.
     #[test]
-    fn a_terminal_option_beside_a_path_is_a_usage_error() {
+    fn a_chan_term_option_is_a_usage_error() {
         for (argv, option) in [
             (&["notes.md", "-e", "htop"][..], "-e"),
+            (&["-e", "htop"][..], "-e"),
             (&["notes.md", "--", "htop"][..], "--"),
             (&["notes.md", "--title=x"][..], "--title=x"),
-            (&["notes.md", "--dir", "/srv"][..], "--dir"),
-            (&["notes.md", "--hold"][..], "--hold"),
+            (&["--dir", "/srv"][..], "--dir"),
+            (&["--dir=/srv"][..], "--dir=/srv"),
+            (&["--hold"][..], "--hold"),
+            (
+                &["--app-id=TUI.float", "-e", "btop"][..],
+                "--app-id=TUI.float",
+            ),
         ] {
             assert_eq!(
                 from_args(args(argv), Some(Path::new("/srv"))),
                 Err(format!(
-                    "{option} is a terminal option and the launch also names a path: open paths \
-                     with one chan-desktop and run a terminal with another"
+                    "{option} is a chan-term option: run the terminal with chan-term, which \
+                     takes it"
                 )),
                 "{argv:?}"
             );
         }
-        assert_eq!(
-            from_args(args(&["--hold"]), None).unwrap(),
-            LaunchArgs::default(),
-            "with no path there is nothing to refuse"
-        );
     }
 
     /// An open-file event's URLs read as the same URIs given to a launch do:

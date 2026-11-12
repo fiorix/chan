@@ -15,8 +15,8 @@
 //! its pipe not created yet, is waited for first. When that desktop does not
 //! answer, or is still shutting down past the wait, the launch says so in a
 //! native message before it exits, unless its stderr is a terminal that has
-//! the log line. The CLI personalities and the default-terminal launch never
-//! reach this: they are dispatched before it in `main`.
+//! the log line. The CLI personalities and the `chan-term` launch never reach
+//! this: they are dispatched before it in `main`.
 //!
 //! The endpoint is per account (the runtime directory on unix, the account's
 //! SID in both pipes' names on Windows), not per `CHAN_HOME`.

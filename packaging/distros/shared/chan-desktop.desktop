@@ -5,10 +5,5 @@ Comment=Supercharged terminal emulator
 Exec=chan-desktop %U
 Icon=chan-desktop
 Terminal=false
-Categories=Office;TextEditor;System;TerminalEmulator;
+Categories=Office;TextEditor;System;
 StartupWMClass=chan-desktop
-X-TerminalArgExec=-e
-X-TerminalArgDir=--dir=
-X-TerminalArgAppId=--app-id=
-X-TerminalArgTitle=--title=
-X-TerminalArgHold=--hold
