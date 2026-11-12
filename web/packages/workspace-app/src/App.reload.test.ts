@@ -92,7 +92,7 @@ describe("the other ways to reload", () => {
       .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
     await settle();
     const row = [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
-      (button) => button.querySelector(".menu-row-label")?.textContent === "Reload",
+      (button) => button.querySelector(".menu-row-label")?.textContent === "Reload window",
     );
     expect(row?.querySelector(".menu-row-chord")?.textContent).toBe("Ctrl+Shift+R");
 
