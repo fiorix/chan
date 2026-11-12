@@ -25,12 +25,21 @@ function rectOf(page, selector) {
   });
 }
 
-/// Open the terminal's menu, as a long press does, and tap the row named.
+/// Open the terminal's menu, as a long press does, and tap the row named
+/// once the menu is at rest. The menu pops in, scaling up from its top-left
+/// corner, so a row's box read on an early frame lies above the row's place
+/// a few frames later: a tap aimed from that box and landing late, as on a
+/// busy machine, reaches the row above, which closes the menu without the
+/// named row's command.
 async function tapMenuRow(page, label) {
   await page.$eval(".terminal-tab.active", (el) => el.dispatchEvent(new MouseEvent("contextmenu", {
     bubbles: true, cancelable: true, clientX: 40, clientY: 160,
   })));
   await page.waitForSelector("button.mbtn", { visible: true, timeout: 10_000 });
+  await page.waitForFunction(() => {
+    const menu = document.querySelector(".terminal-tab-menu-bubble");
+    return !!menu && menu.getAnimations().every((a) => a.playState !== "running");
+  }, { timeout: 10_000 });
   const row = (await page.evaluateHandle((label) => [...document.querySelectorAll("button.mbtn")]
     .find((b) => b.querySelector(".mbtn-label")?.textContent?.trim() === label) ?? null, label)).asElement();
   assert.ok(row, `the terminal menu has a "${label}" row`);
