@@ -37,16 +37,13 @@
     allPaneTabs,
     flipHybrid,
     layout,
-    openBrowserInActivePane,
     openGraphInActivePane,
     openInActivePane,
     panesHaveSides,
     type GraphTab,
   } from "../state/tabs.svelte";
   import {
-    browserSelection,
     effectiveHybridSurfaceTheme,
-    fbSelectSingle,
     graphReloadSignal,
     indexStatus,
     openCommandLauncherFromMenu,
@@ -56,12 +53,11 @@
     openGraphForTag,
     paneWidths,
     persistPaneWidths,
-    persistTreeExpanded,
+    revealPathInBrowser,
     schedulePersistStateToHash,
     scheduleSessionSave,
     surfaceThemeOverride,
     tree,
-    treeExpanded,
   } from "../state/store.svelte";
   import { drafts, refreshDrafts } from "../state/drafts.svelte";
   import { graphPaletteStyleFor } from "../state/graphPalette.svelte";
@@ -102,7 +98,7 @@
     isOpenableTextKind,
     type FileKind,
   } from "../state/kinds";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { commandTitle } from "../state/commands";
   import {
     graphFilterRows,
@@ -956,7 +952,7 @@
   // The launcher's own toggle is a chord with no catalog row, so its menu row
   // takes the shortcut table's words.
   const LAUNCHER = "app.launcher.toggle";
-  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   /// Open the launcher from the menu. A graph holds no keyboard caret to
   /// hand back, so the launcher records the page as its opener.
@@ -1657,37 +1653,6 @@
       : null,
   );
 
-  /// Tab-world reveal: open a File Browser TAB at `path`, select it, and
-  /// expand its ancestor chain; for a directory expand the directory
-  /// ITSELF too so the browser opens AT it ("enter the directory").
-  /// Mirrors FileTree's `openSelectionInFileBrowser`.
-  ///
-  /// The File Browser opens as a sibling tab (`openBrowserInActivePane`)
-  /// and the graph tab stays open.
-  function revealPathInBrowserTab(path: string, isDir: boolean): void {
-    const parts = path.split("/").filter(Boolean);
-    // Directory: expand itself + ancestors. File: ancestors only (select
-    // the file inside its already-expanded parent).
-    const upto = isDir ? parts.length : parts.length - 1;
-    const expanded: string[] = [];
-    let acc = "";
-    for (let i = 0; i < upto; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      if (acc) expanded.push(acc);
-    }
-    const isRoot = path === "";
-    const tab = openBrowserInActivePane(isRoot ? {} : { select: path });
-    tab.inspectorOpen = true;
-    tab.showWorkspace = isRoot;
-    tab.expanded = expanded.length > 0 ? expanded : undefined;
-    fbSelectSingle(isRoot ? null : path);
-    browserSelection.showWorkspace = isRoot;
-    const map = treeExpanded.map;
-    map[""] = true;
-    for (const e of expanded) map[e] = true;
-    persistTreeExpanded();
-  }
-
   /// Graph "Open" for a node that resolves to a real workspace path.
   /// Mirrors the File Browser's open-selection: an editable text file
   /// (markdown note, contact, plain source / config) opens in the active
@@ -1699,14 +1664,16 @@
   /// the editable verdict comes from the tree entry's server kind (with
   /// a path-based fallback when the entry isn't in the current listing).
   /// Directory nodes never reach here: a directory "Open" routes through
-  /// `onReveal` -> `revealPathInBrowserTab(path, true)`.
+  /// `onReveal`, which reveals it in a File Browser tab that enters it.
+  /// Either reveal opens the File Browser as a sibling tab and the graph
+  /// tab stays open.
   function openFileOrReveal(path: string): void {
     const entry = tree.entries.find((e) => e.path === path);
     const kind = entry ? classifyEntry(entry) : classifyFileKind(path);
     if (isOpenableTextKind(kind)) {
       void openInActivePane(path);
     } else {
-      revealPathInBrowserTab(path, false);
+      revealPathInBrowser(path);
     }
   }
 
@@ -2893,11 +2860,11 @@
              glyph.
              The workspace root is a regular directory inspector
              with both directory actions wired:
-             "Show in File Browser" (revealPathInBrowserTab) and
+             "Show in File Browser" (revealPathInBrowser) and
              "Graph from here" (graphFromHere opens a new graph tab at
              the workspace root). variant defaults to inspector. -->
         <WorkspaceInfoBody
-          onReveal={() => revealPathInBrowserTab("", true)}
+          onReveal={() => revealPathInBrowser("", { enter: true })}
           onSetAsScope={() => graphFromHere("", true)}
           onLanguageClick={openGraphForLanguage}
           onContactNavigate={openGraphForContact}
@@ -2922,7 +2889,7 @@
           selection={{ kind: "file", path: fsPath }}
           showRefs
           onOpen={fsKind === "file" ? () => openFileOrReveal(fsPath) : undefined}
-          onReveal={fsIsDir ? () => revealPathInBrowserTab(fsPath, true) : undefined}
+          onReveal={fsIsDir ? () => revealPathInBrowser(fsPath, { enter: true }) : undefined}
           onNavigate={(p) => {
             const peer = fsNodes.find((n) => n.path === p);
             if (peer) {
@@ -3005,7 +2972,7 @@
                 // "Open" button through openDirInBrowser → onReveal, so a
                 // dir reveals into a new File Browser tab here (the file
                 // case uses onOpen above).
-                () => revealPathInBrowserTab(inspectorSelection.path, true)
+                () => revealPathInBrowser(inspectorSelection.path, { enter: true })
               : undefined
           }
           onNavigate={selectByPath}

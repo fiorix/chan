@@ -116,57 +116,52 @@ const DEFAULT_DEVSERVER_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// space after it, which would strip the first row's table indent.
 const KEYBINDINGS_TABLE: &str = "  App
   ---
-  Command launcher                             Ctrl+Alt+K
-  Settings                                     Cmd+,
-  Search                                       Cmd+Shift+S
-      (Ctrl+Alt+S on Linux / Windows)
-  New terminal                                 Ctrl+Shift+T
+  Command launcher            Ctrl+Alt+K
+  Settings                    Cmd+,
+  Search workspace            Cmd+Shift+S   (Ctrl+Alt+S on Linux / Windows)
+  New terminal                Ctrl+Shift+T
       (Cmd+T on macOS desktop; or Mod+. t (Hybrid Nav))
-  Reload window                                Cmd+R
-      (Ctrl+Shift+R on Linux / Windows)
-  Dismiss overlay                              Esc
+  Reload window               Cmd+R   (Ctrl+Shift+R on Linux / Windows)
+  Dismiss overlay             Esc
 
   File
   ----
-  Delete file or directory                     Backspace
+  Delete file or directory    Backspace
 
   Panes
   -----
-  Hybrid Nav                                   Cmd+.
-  Flip pane side                               Ctrl+`
-  Previous pane                                Alt+[
-  Next pane                                    Alt+]
-  Split right                                  Ctrl+Alt+/
-  Split bottom                                 Ctrl+Alt+?
-  Show panes and tabs                          Cmd+Shift+A
+  Hybrid Nav                  Cmd+.
+  Flip pane                   Ctrl+`
+  Previous pane               Alt+[
+  Next pane                   Alt+]
+  Split right                 Ctrl+Alt+/
+  Split down                  Ctrl+Alt+?
+  Show panes and tabs         Cmd+Shift+A
 
   Tabs
   ----
-  Close tab                                    Ctrl+D
+  Close tab                   Ctrl+D
       (Cmd+W on macOS, Ctrl+Shift+W on the Linux / Windows desktop)
-  Reopen closed tab                            Ctrl+Alt+Shift+T
+  Reopen closed tab           Ctrl+Alt+Shift+T
       (Cmd+Shift+T on macOS desktop)
-  Next tab                                     Alt+Shift+]
-  Previous tab                                 Alt+Shift+[
-  Jump to tab N                                Ctrl+Alt+1..9
+  Next tab                    Alt+Shift+]
+  Previous tab                Alt+Shift+[
+  Jump to tab N               Ctrl+Alt+1..9
 
   Editor
   ------
-  Show Source Code (toggle rendered/source)    Cmd+E
-  Bold                                         Cmd+B
-  Italic                                       Cmd+I
-  Preview slide deck                           Cmd+Enter
-  Present slide deck fullscreen                Cmd+Shift+Enter
+  Source mode                 Cmd+E
+  Bold                        Cmd+B
+  Italic                      Cmd+I
+  Preview slide deck          Cmd+Enter
+  Present slide deck          Cmd+Shift+Enter
 
   Terminal
   --------
-  Copy selection                               Cmd+C
-      (Ctrl+Shift+C on Linux / Windows)
-  Paste                                        Cmd+V
-      (Ctrl+Shift+V on Linux / Windows)
-  Show/Hide Rich Prompt                        Cmd+Shift+P
-      (Ctrl+Alt+P on Linux / Windows)
-  Find in terminal                             Cmd+F
+  Copy                        Cmd+C   (Ctrl+Shift+C on Linux / Windows)
+  Paste                       Cmd+V   (Ctrl+Shift+V on Linux / Windows)
+  Rich Prompt                 Cmd+Shift+P   (Ctrl+Alt+P on Linux / Windows)
+  Find                        Cmd+F
 ";
 
 /// The build this binary was made from, stamped by `build.rs`.

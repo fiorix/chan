@@ -2,10 +2,11 @@
 //
 // The extension tab's menu: Reload extension and, for an extension that
 // presents, Present extension as a check, then the tail every tab menu ends
-// with (Flip pane, Close tab) and the launcher row. Each row is worded by
-// the catalog, and each of the tab's two commands runs the function its row
-// runs: the launcher's Present extension and the row flip one state, and its
-// Reload extension loads the frame the row reloads.
+// with (Flip pane, which turns the tab's own pane, and Close tab) and the
+// launcher row. Each row is worded by the catalog, and each of the tab's two
+// commands runs the function its row runs: the launcher's Present extension
+// and the row flip one state, and its Reload extension loads the frame the
+// row reloads.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -17,7 +18,14 @@ import type { ExtensionInfo } from "../api/types";
 import { commandById, commandContext, commandState, commandUnavailableReason } from "../state/commands";
 import { extensionPresenting, refreshExtensions } from "../state/extensions.svelte";
 import { launcherPanel } from "../state/store.svelte";
-import { activePane, paneSide, type ExtensionTab as ExtensionTabState } from "../state/tabs.svelte";
+import {
+  activePane,
+  layout,
+  paneSide,
+  splitPane,
+  type ExtensionTab as ExtensionTabState,
+  type LeafNode,
+} from "../state/tabs.svelte";
 import ExtensionTab from "./ExtensionTab.svelte";
 
 const ENTRY: ExtensionInfo = {
@@ -218,6 +226,19 @@ describe("the extension tab's menu", () => {
     (await row("Close tab")).click();
     await flush();
     expect(activePane().tabs).toEqual([]);
+  });
+
+  test("Flip pane turns the tab's own pane while another pane holds the focus", async () => {
+    await show(ENTRY);
+    const own = activePane().id;
+    const other = splitPane(own, "row")!;
+    expect(activePane().id, "the new pane holds the focus").toBe(other);
+
+    (await row("Flip pane")).click();
+    await flush();
+
+    expect(paneSide(layout.nodes[own] as LeafNode), "the tab's pane").toBe("b");
+    expect(paneSide(activePane()), "the focused pane").toBe("a");
   });
 
   test("Command launcher opens the launcher's bus and closes the menu", async () => {

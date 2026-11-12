@@ -44,6 +44,7 @@
   import { dirImageSet, openMediaViewer } from "../state/mediaOpen";
   import { openVideoViewer } from "../state/videoViewer";
   import { exportPathToPdf } from "../state/fileActionExecutors";
+  import { uploadToEntry } from "../state/commands/browser";
   import {
     copyTextToClipboard,
     draftsDir,
@@ -453,24 +454,6 @@
     onNavigate?.(targetPath);
   }
 
-  let uploadInput = $state<HTMLInputElement | null>(null);
-
-  function triggerUpload(): void {
-    uploadInput?.click();
-  }
-
-  async function onUploadPicked(e: Event): Promise<void> {
-    const input = e.currentTarget as HTMLInputElement;
-    const files = input.files;
-    if (!entry || !files || files.length === 0) return;
-    if (entry.is_dir) {
-      await fileOps.uploadFilesTo(entry.path, files);
-    } else {
-      await fileOps.replaceFileAt(entry.path, files[0]!);
-    }
-    input.value = "";
-  }
-
   function downloadSelection(): void {
     if (!entry) return;
     // Desktop routes through the progress-tracked capability (the transfer
@@ -644,8 +627,9 @@
         return { command, onClick: () => void openMediaViewer(p) };
       case "download":
         return { command, onClick: downloadSelection, title: downloadTitle };
+      // The picker the file browser's Upload raises for the same entry.
       case "upload":
-        return { command, onClick: triggerUpload, title: uploadTitle };
+        return { command, onClick: () => uploadToEntry(p, e.is_dir), title: uploadTitle };
       case "newTerminal": {
         // Drafts are scratch space, but the two draft shapes route
         // differently: a draft DIRECTORY roots the terminal in the
@@ -817,15 +801,6 @@
         {/if}
       {/if}
       <InspectorActionPill main={actionModel.main} secondary={actionModel.secondary} />
-      <input
-        bind:this={uploadInput}
-        class="file-picker"
-        type="file"
-        multiple={entry.is_dir}
-        onchange={onUploadPicked}
-        aria-hidden="true"
-        tabindex="-1"
-      />
     </div>
   {/if}
 {/snippet}
@@ -1389,13 +1364,6 @@
   .path-row-group .path-row {
     flex: 1;
     margin: 0;
-  }
-  .file-picker {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
   }
   /* Reference sections (tags / mentions / dates / links / backlinks).
      Visual style mirrors the graph panel's aside so the two

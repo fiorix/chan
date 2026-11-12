@@ -70,9 +70,9 @@ vi.mock("../state/store.svelte", async (importOriginal) => ({
   workspace: { info: { root: "/home/me/ws/", label: "ws" } },
   fileOps: {
     downloadPathWithProgress: vi.fn(),
-    uploadFilesTo: vi.fn(async () => {}),
-    replaceFileAt: vi.fn(async () => {}),
   },
+  raiseReplacePicker: vi.fn(),
+  raiseUploadPicker: vi.fn(),
   loadTreeDir: vi.fn(async () => {}),
   openGraphAtNode: vi.fn(),
   openGraphForContact: vi.fn(),
@@ -107,6 +107,8 @@ import {
   fileOps,
   openGraphForContact,
   openGraphForLanguage,
+  raiseReplacePicker,
+  raiseUploadPicker,
   revealPathInBrowser,
   tree,
 } from "../state/store.svelte";
@@ -564,21 +566,15 @@ describe("the actions section", () => {
     );
   });
 
-  test("Upload opens the picker and sends the picked files to the directory", async () => {
+  test("Upload raises the picker that uploads into the directory, as the file browser's Upload does", async () => {
     h.entries = [dir("docs")];
     const target = await render({ path: "docs" });
-    const picker = target.querySelector<HTMLInputElement>("input.file-picker")!;
-    const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
 
     openMenu(target);
     menuItem(target, "Upload").click();
-    expect(pick).toHaveBeenCalledTimes(1);
 
-    const picked = [new File(["x"], "x.txt")];
-    Object.defineProperty(picker, "files", { configurable: true, value: picked });
-    picker.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("docs", picked);
+    expect(raiseUploadPicker).toHaveBeenCalledExactlyOnceWith("docs");
+    expect(raiseReplacePicker).not.toHaveBeenCalled();
   });
 
   test("the path toggle reveals the absolute path and resets on a new selection", async () => {

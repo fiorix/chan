@@ -41,12 +41,11 @@
   import { extensionPresentationLayer } from "../state/extensionPresentation";
   import { notify } from "../state/notify.svelte";
   import { sessionState } from "../state/session.svelte";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { openCommandLauncherFromMenu } from "../state/store.svelte";
   import {
     closeTab,
     flipHybrid,
-    layout,
     panesHaveSides,
     type ExtensionTab,
   } from "../state/tabs.svelte";
@@ -88,7 +87,7 @@
   });
 
   // The launcher's own toggle has no catalog row; the shortcut table names it.
-  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+  const launcherLabel = shortcutLabel("app.launcher.toggle");
 
   function chordLabel(id: string): string {
     return chordFor(id) ?? "";
@@ -112,7 +111,7 @@
 
   function doFlip(): void {
     menu?.close();
-    flipHybrid(layout.activePaneId);
+    flipHybrid(paneId);
   }
 
   function togglePresentation(): void {

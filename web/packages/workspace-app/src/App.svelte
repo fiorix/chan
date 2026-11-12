@@ -888,7 +888,8 @@
     // branch and this path never double-fire), and cmd.available re-applies
     // the same window-mode + surface gate the launcher shows. The chord is
     // the one the keystroke resolves to, the same winner the terminal escape
-    // registry reads.
+    // registry reads. The command is told a chord ran it, for the one whose
+    // chord does less than its row.
     {
       const overrideChord = resolveEventChord(e);
       const commands = allCommands();
@@ -904,7 +905,7 @@
         const cmd = commands.find((c) => c.id === overrideId);
         if (cmd && cmd.available(commandContext())) {
           e.preventDefault();
-          cmd.run();
+          cmd.run(undefined, "chord");
           return;
         }
       }

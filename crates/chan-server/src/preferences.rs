@@ -20,8 +20,8 @@
 //!   - strip_trailing_whitespace_on_save
 //!   - bubble_overlay_mode (stack / tray for watcher notifications)
 //!   - empty_pane_carousel_cycling (auto-rotate the Dashboard
-//!     carousel, the Settings row "Dashboard carousel"; per-user toggle,
-//!     default true)
+//!     carousel, the Settings row "Dashboard auto-rotate"; per-user
+//!     toggle, default true)
 //!   - pane_strip_auto_hide (hide a pane's tab strip while the side it
 //!     shows holds fewer than two tabs; default off)
 //!   - page_width_ratio (editor page-width cap as a ratio of the
@@ -82,7 +82,7 @@ pub struct EditorPrefs {
     #[serde(default)]
     pub hybrid_surface_themes: HybridSurfaceThemes,
     /// Auto-rotate the Dashboard carousel: the Settings row "Dashboard
-    /// carousel", under the key's older name. On by default; a user who
+    /// auto-rotate", under the key's older name. On by default; a user who
     /// wants a stationary Dashboard turns it off and the choice persists.
     /// The pause while the pointer is over the carousel is independent of
     /// this flag.

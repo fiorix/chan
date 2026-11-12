@@ -46,8 +46,8 @@
     currentOS,
     eventMatchesShortcut,
     resolvedEventKey,
+    shortcutLabel,
     shouldEscapeTerminal,
-    SHORTCUTS,
   } from "../state/shortcuts";
   import { commandContext, commandState, commandTitle, type CommandContext } from "../state/commands";
   // The menus name their rows through the catalog, which this fills.
@@ -2245,7 +2245,7 @@
   });
 
   // The launcher's own toggle has no catalog row; the shortcut table names it.
-  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+  const launcherLabel = shortcutLabel("app.launcher.toggle");
 
   // Rich Prompt: the row mirrors the `terminal.richPrompt` chord (App.svelte
   // onWindowKey) and calls the toggle the chord's command reaches.

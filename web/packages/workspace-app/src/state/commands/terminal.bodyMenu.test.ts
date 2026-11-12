@@ -146,9 +146,9 @@ describe("the terminal's commands", () => {
   });
 });
 
-// The window's key handler runs the command of an assigned chord inside that
-// chord's keydown, from its listener on the document. A run there is the
-// chord's; a run from a launcher row, by Enter or a click, is not.
+// The window's key handler runs the command of an assigned chord and says a
+// chord ran it. A launcher row and a menu say nothing of how, and the command
+// reads what it is told, not the key being pressed.
 describe("Copy run by the chord assigned to it", () => {
   const ASSIGNED = { key: "j", code: "KeyJ", ctrlKey: true, altKey: true } as const;
 
@@ -156,52 +156,44 @@ describe("Copy run by the chord assigned to it", () => {
     hydrateOverrides(null);
   });
 
-  /// What a run of `id` sends the focused terminal: run inside the keydown
-  /// `during`, from a listener on the document as the window's handler is,
-  /// or with no key being pressed when there is none.
-  function sent(id: string, during?: KeyboardEventInit): unknown[] {
+  /// What `run` sends the focused terminal.
+  function sent(run: () => void): unknown[] {
     const details: unknown[] = [];
     const onCommand = (e: Event) => details.push((e as CustomEvent).detail);
-    const onKey = () => command(id).run();
     window.addEventListener("chan:command", onCommand);
     try {
-      if (!during) command(id).run();
-      else {
-        document.addEventListener("keydown", onKey);
-        pressInPage(during);
-      }
+      run();
     } finally {
-      document.removeEventListener("keydown", onKey);
       window.removeEventListener("chan:command", onCommand);
     }
     return details;
   }
 
   test("tells the terminal a chord asked", () => {
-    assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-
-    expect(sent("terminal.copy", ASSIGNED)).toEqual([{ name: "terminal.copy", chord: true }]);
+    expect(sent(() => command("terminal.copy").run(undefined, "chord"))).toEqual([
+      { name: "terminal.copy", chord: true },
+    ]);
   });
 
-  test("says nothing of a chord from a launcher row, run by Enter or with no key at all", () => {
-    assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-
-    expect(sent("terminal.copy", { key: "Enter", code: "Enter" })).toEqual([{ name: "terminal.copy" }]);
-    expect(sent("terminal.copy")).toEqual([{ name: "terminal.copy" }]);
+  test("says nothing of a chord when its caller names none, as a launcher row's run does", () => {
+    expect(sent(() => command("terminal.copy").run())).toEqual([{ name: "terminal.copy" }]);
+    expect(sent(() => command("terminal.copy").run("typed"))).toEqual([{ name: "terminal.copy" }]);
   });
 
-  test("says nothing of a chord once the chord's key is done", () => {
+  test("says nothing of a chord for running while the assigned chord's key is down", () => {
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
-
-    expect(sent("terminal.copy", ASSIGNED)).toEqual([{ name: "terminal.copy", chord: true }]);
-    expect(sent("terminal.copy")).toEqual([{ name: "terminal.copy" }]);
+    const onKey = () => command("terminal.copy").run();
+    document.addEventListener("keydown", onKey);
+    try {
+      expect(sent(() => pressInPage(ASSIGNED))).toEqual([{ name: "terminal.copy" }]);
+    } finally {
+      document.removeEventListener("keydown", onKey);
+    }
   });
 
-  test("says nothing of a chord inside a key that is another command's, or nobody's", () => {
-    expect(sent("terminal.copy", ASSIGNED), "no chord assigned").toEqual([{ name: "terminal.copy" }]);
-
-    assignOverride("terminal.paste", "Ctrl+Alt+J", "web");
-    expect(sent("terminal.copy", ASSIGNED), "the key is Paste's").toEqual([{ name: "terminal.copy" }]);
-    expect(sent("terminal.paste", ASSIGNED), "Paste has one behaviour").toEqual([{ name: "terminal.paste" }]);
+  test("Paste has one behaviour, a chord's or not", () => {
+    expect(sent(() => command("terminal.paste").run(undefined, "chord"))).toEqual([
+      { name: "terminal.paste" },
+    ]);
   });
 });

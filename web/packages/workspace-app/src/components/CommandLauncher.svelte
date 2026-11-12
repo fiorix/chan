@@ -26,7 +26,6 @@
     type ComputersModel,
     type ComputersWindow,
     type ComputersWorkspace,
-    type ComputersWorkspaceCondition,
   } from "@chan/web-shared/computers-deck";
   import { privateText } from "@chan/web-shared/privacy";
   import { windowDisplayName } from "@chan/web-shared/window-label";
@@ -100,7 +99,6 @@
     type ScopedLibrarySnapshot,
     type ScopedLibraryWindow,
     type ScopedLibraryWorkspace,
-    type ScopedWorkspaceStatus,
   } from "../api/libraryCommand";
   import {
     createLibraryWindow,
@@ -108,6 +106,7 @@
     runLibraryWindowAction,
     type LibraryWindowBridge,
   } from "../api/libraryWindows";
+  import { workspaceCondition } from "../api/workspaceStatus";
   import { SETTINGS_SECTIONS } from "./settings/sections";
   import { settingsIndex } from "./settings/settingsIndex";
   import "../state/commands/install";
@@ -352,27 +351,6 @@
   function unlistedWorkspaceName(window: ScopedLibraryWindow): string {
     const name = window.workspace_path?.split("/").filter(Boolean).at(-1);
     return name ? privateText(name, "Workspace") : "Workspace";
-  }
-
-  /// How a workspace's mount reads in the Computers tree. Total over the
-  /// union, so a new status has to decide this rather than inherit an answer.
-  function workspaceCondition(status: ScopedWorkspaceStatus): ComputersWorkspaceCondition {
-    switch (status) {
-      case "stopped":
-        return "idle";
-      case "starting":
-      case "closing":
-      case "removing":
-        return "busy";
-      case "running":
-        return "ready";
-      case "locked":
-        return "foreign";
-      case "unavailable":
-        return "degraded";
-      case "error":
-        return "failed";
-    }
   }
 
   /// This window's library as the Computers tree reads it: one machine, the

@@ -271,6 +271,7 @@ describe("a directory node", () => {
     const files = paneTabs().find((t): t is BrowserTab => t.kind === "browser");
     expect(files).toBeDefined();
     expect(files!.inspectorOpen).toBe(true);
+    expect(files!.directory, "the tab lists the directory itself").toBe("notes/deep");
     expect(files!.expanded, "the directory itself and its ancestors").toEqual(["notes", "notes/deep"]);
     expect(browserSelection.path).toBe("notes/deep");
   });

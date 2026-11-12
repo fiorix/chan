@@ -122,7 +122,7 @@
     terminalBroadcastReachCount,
   } from "../state/tabs.svelte";
   import type { BrowserLabelCtx } from "../state/tabs.svelte";
-  import { chordFor, SHORTCUTS, webInspectorChordLabel } from "../state/shortcuts";
+  import { chordFor, shortcutLabel, webInspectorChordLabel } from "../state/shortcuts";
   import { openTabMenu, tabMenu } from "../state/tabMenu.svelte";
   import {
     defaultShellProfileId,
@@ -292,7 +292,7 @@
   );
 
   // The launcher's own toggle has no catalog row; the shortcut table names it.
-  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+  const launcherLabel = shortcutLabel("app.launcher.toggle");
 
   /// The options a choice command offers now. The hamburger's focus colour
   /// rows and shell rows are the options of the commands that list them in

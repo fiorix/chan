@@ -6,7 +6,7 @@
   import { shownSlideOptions } from "../state/commands/dashboard";
   // The menu names its rows through the catalog, which this fills.
   import "../state/commands/install";
-  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
   import {
     openCommandLauncherFromMenu,
     scheduleSessionSave,
@@ -16,7 +16,6 @@
     closeTab,
     type DashboardTab,
     flipHybrid,
-    layout,
     panesHaveSides,
   } from "../state/tabs.svelte";
   import EmptyPaneCarousel from "./EmptyPaneCarousel.svelte";
@@ -53,7 +52,7 @@
   }
 
   // The launcher's own toggle has no catalog row; the shortcut table names it.
-  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+  const launcherLabel = shortcutLabel("app.launcher.toggle");
 
   // The slide rows are the options of Shown slides, read for this tab.
   const slideOptions = $derived(shownSlideOptions(tab));
@@ -75,7 +74,7 @@
 
   function doFlip(): void {
     menu?.close();
-    flipHybrid(layout.activePaneId);
+    flipHybrid(paneId);
   }
 
   function doCloseTab(): void {
