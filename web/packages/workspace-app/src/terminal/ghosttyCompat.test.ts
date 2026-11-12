@@ -1,6 +1,7 @@
-import { CanvasRenderer, Ghostty, Terminal } from "@chan/ghostty-web-ng";
+import { readFileSync } from "node:fs";
+import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
+import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { ghosttyWidgetWasmUrl } from "../__tests__/ghosttyWidgetWasm";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import {
   alignGhosttyRendererToXterm,
@@ -9,6 +10,8 @@ import {
   installGhosttyOverlayScrollbar,
   xtermCellDimensionsFromMeasurement,
 } from "./ghosttyCompat";
+
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 
 describe("Ghostty xterm-compatible font metrics", () => {
   test("uses xterm's device-pixel rounding and line height", () => {
@@ -499,8 +502,11 @@ describe("Ghostty overlay scrollbar clicks", () => {
   }
 
   test("the pinned build still exposes the state the gate binds to", async () => {
+    // The terminal a ghostty tab constructs: the widget over chan's binding
+    // on its own instance of the vendored core, as backend.ts's kit hands it.
+    const module = await WebAssembly.compile(readFileSync(VENDORED));
     const terminal = new Terminal({
-      ghostty: await Ghostty.load(ghosttyWidgetWasmUrl()),
+      ghostty: new GhosttyVt(await WebAssembly.instantiate(module, {})).asGhostty(),
     }) as unknown as {
       handleMouseDown?: unknown;
     };

@@ -2,15 +2,18 @@
 // visible rows and the rows they wrap with at the offset ghostty draws, and
 // fills each span onto the canvas after the frame's content. The fake
 // buffer suites drive the hook the way ghostty-web's render loop does; the
-// real-build suite runs the pinned wasm terminal and renderer over the
-// software canvas and reads the pixels back.
+// real-build suite runs ghostty-web's terminal and renderer over chan's
+// binding on the vendored core, over the software canvas, and reads the
+// pixels back.
 
-import { CanvasRenderer, Ghostty, Terminal } from "@chan/ghostty-web-ng";
-import { afterEach, describe, expect, test, vi } from "vitest";
-import { ghosttyWidgetWasmUrl } from "../__tests__/ghosttyWidgetWasm";
+import { readFileSync } from "node:fs";
+import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
+import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
 
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const MASK = "#6c6c70";
 const CELL = { width: 8, height: 19, baseline: 13 };
 
@@ -361,6 +364,12 @@ describe("ghostty secret masking over a fake buffer", () => {
 });
 
 describe("ghostty secret masking over the pinned build", () => {
+  let vendored: WebAssembly.Module;
+
+  beforeAll(async () => {
+    vendored = await WebAssembly.compile(readFileSync(VENDORED));
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -370,10 +379,11 @@ describe("ghostty secret masking over the pinned build", () => {
   const BACKGROUND = { r: 16, g: 16, b: 16, a: 1 };
   const MASKED = { r: 0x6c, g: 0x6c, b: 0x70, a: 1 };
 
-  /// The real wasm terminal and renderer, wired the way Terminal.open()
-  /// wires them, without the DOM and the render loop open() starts: the
-  /// test issues the frames. The software canvas records what the renderer
-  /// and the painter fill.
+  /// The binding's terminal on its own instance of the vendored core, as
+  /// backend.ts's kit hands one to each terminal, and the real renderer,
+  /// wired the way Terminal.open() wires them, without the DOM and the
+  /// render loop open() starts: the test issues the frames. The software
+  /// canvas records what the renderer and the painter fill.
   async function pinnedTerminal() {
     const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
@@ -385,9 +395,9 @@ describe("ghostty secret masking over the pinned build", () => {
         return created as unknown as CanvasRenderingContext2D;
       } as unknown as typeof HTMLCanvasElement.prototype.getContext,
     );
-    const ghostty = await Ghostty.load(ghosttyWidgetWasmUrl());
-    const term = new Terminal({ ghostty, cols: COLS, rows: ROWS });
-    term.wasmTerm = ghostty.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const term = new Terminal({ ghostty: vt.asGhostty(), cols: COLS, rows: ROWS });
+    term.wasmTerm = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
     const canvas = document.createElement("canvas");
     const renderer = new CanvasRenderer(canvas, {
       devicePixelRatio: 1,
