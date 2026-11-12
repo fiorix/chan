@@ -276,7 +276,7 @@ describe("the window tab bar mode", () => {
   });
 
   describe("the window's title", () => {
-    const TITLE = "\u2197 geekom / chan Window 1 [label]";
+    const TITLE = "\u2191\uFE0E geekom / chan Window 1 [label]";
 
     function titleBox(): HTMLElement {
       const box = document.querySelector<HTMLElement>(".bar-title");

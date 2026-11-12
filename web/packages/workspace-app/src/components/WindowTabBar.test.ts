@@ -207,11 +207,11 @@ describe("under the Computers launcher", () => {
       }],
     });
     windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true };
-    windowTabBar.title = "\u2197 geekom / work Window 2 [deploy]";
+    windowTabBar.title = "\u2191\uFE0E geekom / work Window 2 [deploy]";
     const bar = await renderBar();
     await marked(true);
     const covered = (): string | undefined => bar.querySelector(".window-title")?.textContent?.trim();
-    expect(covered()).toBe("\u2197 geekom / work Window 2 [deploy]");
+    expect(covered()).toBe("\u2191\uFE0E geekom / work Window 2 [deploy]");
 
     // The page hears privacy mode turn on while it still holds the full title.
     privacy.enabled = true;
@@ -615,7 +615,7 @@ describe("the window controls", () => {
 
 describe("the window's title", () => {
   const LOCAL = "\u2193\uFE0E local / chan Window 1 [my own title]";
-  const REMOTE = "\u2197 geekom / chan Window 1 [label]";
+  const REMOTE = "\u2191\uFE0E geekom / chan Window 1 [label]";
 
   function titleBox(): HTMLElement {
     const box = document.querySelector<HTMLElement>(".bar-title");
@@ -867,9 +867,9 @@ describe("the window's title", () => {
 
   test("privacy mode shows the generated name alone, and the full title once it is off", async () => {
     vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
-    windowTabBar.title = "\u2197 geekom Terminal Window 2 [deploy shell]";
+    windowTabBar.title = "\u2191\uFE0E geekom Terminal Window 2 [deploy shell]";
     await renderBar();
-    expect(shown()).toBe("\u2197 geekom Terminal Window 2 [deploy shell]");
+    expect(shown()).toBe("\u2191\uFE0E geekom Terminal Window 2 [deploy shell]");
     expect(loadScopedLibrarySnapshot, "the desktop's title needs no read").not.toHaveBeenCalled();
 
     // The page still holds the full title when it hears privacy mode turn on.
@@ -884,12 +884,12 @@ describe("the window's title", () => {
     await tick();
     expect(shown()).toBe("Terminal Window 2");
     // Turning it off retitles every window before the setting is announced.
-    windowTabBar.title = "\u2197 geekom Terminal Window 2 [private.example]";
+    windowTabBar.title = "\u2191\uFE0E geekom Terminal Window 2 [private.example]";
     await tick();
     expect(shown()).toBe("Terminal Window 2");
     privacy.enabled = false;
     await tick();
-    expect(shown()).toBe("\u2197 geekom Terminal Window 2 [private.example]");
+    expect(shown()).toBe("\u2191\uFE0E geekom Terminal Window 2 [private.example]");
   });
 
   test("a window no title has reached is named as Computers names it, read at a pane tree open and again after a failed read", async () => {

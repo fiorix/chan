@@ -296,7 +296,7 @@ mod tests {
         );
         assert_eq!(
             window_title(&state, "lib-a::w-1", &remote),
-            "\u{2197}\u{FE0E} geekom / chan Window 1 [my own title]"
+            "\u{2191}\u{FE0E} geekom / chan Window 1 [my own title]"
         );
     }
 
