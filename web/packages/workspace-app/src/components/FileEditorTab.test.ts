@@ -259,12 +259,16 @@ function bubble(): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(".tab-menu-bubble");
 }
 
+/// The open menu's separators, fields and action rows in the order they
+/// show, whichever of them sit inside one of the tab menu's own menus.
+function menuParts(): Element[] {
+  return [...(bubble()?.querySelectorAll(".action-list :is(.msep, .name-row, .page-width-row, .mbtn)") ?? [])];
+}
+
 /// The menu's rows in order: "---" for a separator, "Name" for the name row,
 /// "Page width" for the slider row, else the button's label.
 function menuRows(): string[] {
-  const list = bubble()?.querySelector(".action-list");
-  if (!list) return [];
-  return [...list.children].map((el) => {
+  return menuParts().map((el) => {
     if (el.getAttribute("role") === "separator") return "---";
     if (el.classList.contains("name-row")) return "Name";
     if (el.classList.contains("page-width-row")) return "Page width";
@@ -897,9 +901,7 @@ describe("where a menu row's words come from", () => {
 
   /// The visible words of every row of the open menu, in order.
   function menuLabels(): string[] {
-    const list = bubble()?.querySelector(".action-list");
-    if (!list) return [];
-    return [...list.children]
+    return menuParts()
       .filter((el) => el.getAttribute("role") !== "separator")
       .map((el) =>
         (el.querySelector(".mbtn-label, .name-label, .page-width-label")?.textContent ?? "").trim(),
@@ -1187,10 +1189,29 @@ describe("a menu row and its command", () => {
   });
 });
 
-// A menu role is true inside a menu. Both of the editor's menus are menus,
-// so every action row of either is a menu item, and a row with a check a
-// menu item checkbox.
+// A menu role is true inside a menu, and a menu holds items alone. The body
+// menu is a menu of action rows. The tab menu also holds the Name field and
+// the page width slider, so it is a dialog, and its action rows sit in menus
+// inside it. Every action row of either is a menu item, and a row with a
+// check a menu item checkbox.
 describe("the menus' roles", () => {
+  /// The menus inside the open tab menu, each as its name and the roles of
+  /// what it holds.
+  function innerMenus(): Array<[string | null, Array<string | null>]> {
+    return [...bubble()!.querySelectorAll<HTMLElement>('[role="menu"]')].map((menu) => [
+      menu.getAttribute("aria-label"),
+      [...menu.children].map((child) => child.getAttribute("role")),
+    ]);
+  }
+
+  /// The labels of the open menu's items that no menu holds.
+  function itemsOutsideAMenu(): string[] {
+    const root = bubble()!;
+    return [...root.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')]
+      .filter((item) => item.closest('[role="menu"]') === null)
+      .map((item) => item.querySelector(".mbtn-label")?.textContent?.trim() ?? "");
+  }
+
   /// Every button of the open menu, as its label and its role.
   function buttonRoles(): Array<[string, string | null]> {
     return [...bubble()!.querySelectorAll<HTMLButtonElement>("button")].map((button) => [
@@ -1232,12 +1253,67 @@ describe("the menus' roles", () => {
     );
   });
 
+  test("the body menu holds no field, and every item of it is the menu's own", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.querySelectorAll("input")).toHaveLength(0);
+    expect(itemsOutsideAMenu()).toEqual([]);
+  });
+
+  test("the tab menu is a dialog that holds its two fields, with its action rows in a menu of items alone", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+    const dialog = bubble()!;
+
+    expect([dialog.getAttribute("role"), dialog.getAttribute("aria-label")]).toEqual(["dialog", "tab menu"]);
+    expect(innerMenus()).toEqual([
+      [
+        "tab actions",
+        [
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "separator",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "separator",
+          "menuitem",
+          "menuitem",
+        ],
+      ],
+    ]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    // The Name field and the page width slider, neither inside a menu.
+    const fields = [...dialog.querySelectorAll("input")];
+    expect(fields.map((field) => field.getAttribute("aria-label"))).toEqual([
+      "file path",
+      settingEntry("editor.pageWidth").label,
+    ]);
+    expect(fields.filter((field) => field.closest('[role="menu"]') !== null)).toEqual([]);
+  });
+
+  test("a draft's tab menu holds Save draft in a menu of its own, before the slider", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(bubble()!.getAttribute("role")).toBe("dialog");
+    expect(innerMenus().map(([name]) => name)).toEqual(["draft actions", "tab actions"]);
+    expect(innerMenus()[0]![1]).toEqual(["menuitem"]);
+    const held = innerMenus().flatMap(([, roles]) => roles);
+    expect(held.filter((role) => !["menuitem", "menuitemcheckbox", "separator"].includes(role ?? ""))).toEqual([]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    expect(menuRows().slice(0, 3)).toEqual([commandById("app.draft.save")!.title, "---", "Page width"]);
+  });
+
   test("every action row of the tab menu is a menu item, a view row a checkbox", async () => {
     const tab = seat(fileTab());
     await render(tab);
     await openMenu(tab);
 
-    expect(bubble()!.getAttribute("role")).toBe("menu");
     expect(buttonRoles()).toEqual([
       ["Outline", "menuitemcheckbox"],
       ["Details", "menuitemcheckbox"],
