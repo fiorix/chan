@@ -1,11 +1,19 @@
 <script lang="ts">
   // Editor settings: everything that skins or shapes the editor
   // surface - its theme, density, font size, page width, date format
-  // and save behaviour, plus its Hybrid body-theme override.
+  // and save behaviour, plus its Hybrid body-theme override. Each field
+  // takes its words, and a toggle or a choice its change, from the
+  // settings index.
 
-  import type { EditorTheme, LineSpacing, Preferences } from "../../api/types";
-  import type { CommitFn } from "./commit";
-  import { DATE_FORMATS } from "../../editor/dateFormats";
+  import type { Preferences } from "../../api/types";
+  import { commitSetting, type CommitFn } from "./commit";
+  import {
+    chosenIn,
+    optionsOf,
+    pageWidthPercent,
+    settingEntry,
+    toggledIn,
+  } from "./settingsIndex";
   import {
     PAGE_WIDTH_MAX_PCT,
     PAGE_WIDTH_MIN_PCT,
@@ -26,20 +34,12 @@
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
-  const EDITOR_THEMES = [
-    { value: "github", label: "GitHub" },
-    { value: "google_docs", label: "Google Docs" },
-    { value: "word", label: "Microsoft Word" },
-  ] as const;
-  const SPACING = [
-    { value: "standard", label: "Standard" },
-    { value: "compact", label: "Compact" },
-  ] as const;
-
-  function ratioToPct(r: number | undefined): number {
-    const clamped = Math.min(1, Math.max(0.25, r ?? 0.8));
-    return Math.round(clamped * 100);
-  }
+  const THEME = settingEntry("editor.theme");
+  const SPACING = settingEntry("editor.lineSpacing");
+  const FONT_SIZE = settingEntry("editor.fontSize");
+  const DATE_FORMAT = settingEntry("editor.dateFormat");
+  const STRIP = settingEntry("editor.stripTrailingWhitespace");
+  const PAGE_WIDTH = settingEntry("editor.pageWidth");
 
   // The placeholder previews the active theme's body size, so it
   // follows a theme switch even though the field stays empty.
@@ -61,35 +61,35 @@
 </script>
 
 <SettingField
-  label="Editor theme"
+  setting={THEME}
   hint="Typography and chrome of the markdown editor only."
   pref="editor_theme"
 >
   <PillRadio
     name="settings-editor-theme"
     ariaLabel="Editor theme"
-    value={prefs.editor_theme}
-    options={EDITOR_THEMES}
-    onselect={(v) => commit((p) => ({ ...p, editor_theme: v as EditorTheme }))}
+    value={chosenIn(THEME, prefs)}
+    options={optionsOf(THEME)}
+    onselect={(v) => commitSetting(commit, THEME, v)}
   />
 </SettingField>
 
 <SettingField
-  label="Line spacing"
+  setting={SPACING}
   pref="line_spacing"
   hint="Reading density for paragraphs and lists in the editor."
 >
   <PillRadio
     name="settings-line-spacing"
     ariaLabel="Line spacing"
-    value={prefs.line_spacing}
-    options={SPACING}
-    onselect={(v) => commit((p) => ({ ...p, line_spacing: v as LineSpacing }))}
+    value={chosenIn(SPACING, prefs)}
+    options={optionsOf(SPACING)}
+    onselect={(v) => commitSetting(commit, SPACING, v)}
   />
 </SettingField>
 
 <SettingField
-  label="Editor font size"
+  setting={FONT_SIZE}
   pref="editor_font_size"
   hint="Absolute body size for WYSIWYG, source, document, and slide surfaces. Leave empty to use the active theme."
 >
@@ -113,43 +113,39 @@
 </SettingField>
 
 <SettingField
-  label="Date format"
+  setting={DATE_FORMAT}
   pref="date_format"
   hint="Default used by @today and pre-selected in the @date picker."
 >
   <select
-    value={prefs.date_format}
-    onchange={(e) => {
-      const value = e.currentTarget.value;
-      commit((p) => ({ ...p, date_format: value }));
-    }}
+    value={chosenIn(DATE_FORMAT, prefs)}
+    onchange={(e) => commitSetting(commit, DATE_FORMAT, e.currentTarget.value)}
   >
-    {#each DATE_FORMATS as f (f.id)}
-      <option value={f.id}>{f.label}</option>
+    {#each optionsOf(DATE_FORMAT) as format (format.value)}
+      <option value={format.value}>{format.label}</option>
     {/each}
   </select>
 </SettingField>
 
 <SettingField
-  label="Strip trailing whitespace"
+  setting={STRIP}
   pref="strip_trailing_whitespace_on_save"
   hint="Remove trailing spaces and tabs from each line on save. Applies to every editable text buffer."
 >
   <PillToggle
-    label="Strip on save"
-    checked={prefs.strip_trailing_whitespace_on_save}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, strip_trailing_whitespace_on_save: on }))}
+    label={STRIP.caption}
+    checked={toggledIn(STRIP, prefs)}
+    ontoggle={(on) => commitSetting(commit, STRIP, on)}
   />
 </SettingField>
 
 <SettingField
-  label="Editor page width"
+  setting={PAGE_WIDTH}
   pref="page_width_ratio"
   hint="Cap the editor text column as a share of the window width. 100% removes the cap."
 >
   <SliderField
-    value={ratioToPct(prefs.page_width_ratio)}
+    value={pageWidthPercent(prefs.page_width_ratio)}
     min={PAGE_WIDTH_MIN_PCT}
     max={PAGE_WIDTH_MAX_PCT}
     step={PAGE_WIDTH_STEP_PCT}

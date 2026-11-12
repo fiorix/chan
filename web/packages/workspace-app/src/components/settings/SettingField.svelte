@@ -9,14 +9,20 @@
 
   import { getContext, setContext, type Snippet } from "svelte";
   import { FIELD_SAVE, SAVE_STATUS, type FieldSave, type SaveStatusLookup } from "./commit";
+  import type { SettingEntry } from "./settingsIndex";
 
   let {
+    setting,
     label,
     hint,
     children,
     pref,
   }: {
-    label: string;
+    /// The field's entry in the settings index: the heading comes from it,
+    /// and its id anchors the field for a link from the launcher.
+    setting?: SettingEntry;
+    /// The heading of a field with no entry.
+    label?: string;
     /// Plain text, or a snippet when the hint carries markup (<code>).
     hint?: string | Snippet;
     children: Snippet;
@@ -40,9 +46,9 @@
   });
 </script>
 
-<section class="field">
+<section class="field" data-setting={setting?.id}>
   <div class="meta">
-    <h3>{label}</h3>
+    <h3>{setting?.heading ?? label}</h3>
     {#if hint}
       <p class="hint">
         {#if typeof hint === "string"}

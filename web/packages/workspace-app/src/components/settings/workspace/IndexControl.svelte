@@ -9,6 +9,9 @@
   import { api } from "../../../api/client";
   import { indexStatus } from "../../../state/store.svelte";
   import SettingField from "../SettingField.svelte";
+  import { settingEntry } from "../settingsIndex";
+
+  const INDEX = settingEntry("workspace.index");
 
   let mounted = $state(false);
   let indexResetting = $state(false);
@@ -76,7 +79,7 @@
   });
 </script>
 
-<SettingField label="Index">
+<SettingField setting={INDEX}>
   <div class="stack">
     <div class="grid">
       <span class="k">state</span>

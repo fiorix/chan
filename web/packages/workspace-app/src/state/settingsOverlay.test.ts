@@ -19,6 +19,7 @@ import {
 
 afterEach(() => {
   settingsPanel.open = false;
+  settingsPanel.target = null;
   launcherPanel.open = false;
   searchPanel.open = false;
   overlayStack.ids = [];
@@ -31,6 +32,15 @@ describe("settings overlay state", () => {
     expect(settingsPanel.open).toBe(true);
     closeSettings();
     expect(settingsPanel.open).toBe(false);
+  });
+
+  test("an open aimed at a field records where to land, and a plain open records nothing", () => {
+    openSettings();
+    expect(settingsPanel.target).toBeNull();
+
+    openSettings({ section: "terminal", field: "terminal.engine" });
+    expect(settingsPanel.open).toBe(true);
+    expect(settingsPanel.target).toEqual({ section: "terminal", field: "terminal.engine" });
   });
 
   test("syncOverlayStack tracks settings; topOverlay + closeOverlay agree", () => {

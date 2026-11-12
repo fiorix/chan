@@ -99,6 +99,14 @@ function clickTab(target: HTMLElement, label: string): void {
   tab.click();
 }
 
+/// The toggle of the File browser field headed `heading`.
+function dockPill(target: HTMLElement, heading: string): HTMLLabelElement | null {
+  const field = [...target.querySelectorAll<HTMLElement>(".field")].find(
+    (e) => e.querySelector("h3")?.textContent?.trim() === heading,
+  );
+  return field?.querySelector<HTMLLabelElement>("label.pill") ?? null;
+}
+
 /// Mirror of `PreferencesPatch::owner`
 /// (crates/chan-server/src/routes/preferences.rs): `terminal` and
 /// `search_aggression` are Server-owned; every other field is
@@ -511,22 +519,20 @@ describe("settings surface render", () => {
     await flush();
 
     // An image lands beside its document or in its draft: there is no
-    // folder to configure. The side panes show that the section rendered.
-    expect(target.textContent).toContain("Side panes");
+    // folder to configure. The docks show that the section rendered.
+    expect(target.textContent).toContain("Left file browser dock");
     expect.soft(target.textContent).not.toContain("Attachments folder");
     expect.soft(target.querySelector('[aria-label="Attachments folder"]')).toBeNull();
   });
 
-  test("the File browser section toggles one side pane at a time", async () => {
+  test("the File browser section toggles one dock at a time", async () => {
     const target = openSurface();
     await flush();
     clickTab(target, "File browser");
     await flush();
-    const pill = [...target.querySelectorAll("label.pill")].find(
-      (e) => e.textContent?.trim() === "Left pane",
-    ) as HTMLLabelElement;
-    expect(pill, "Left pane pill").not.toBeNull();
-    (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    const pill = dockPill(target, "Left file browser dock");
+    expect(pill, "left dock pill").not.toBeNull();
+    (pill!.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
     await flush();
     expect(patchBodies[patchBodies.length - 1]!.browser_side_panes).toEqual({
       left: true,
@@ -709,10 +715,8 @@ describe("settings surface render", () => {
     expect(
       Object.keys(
         await drive("File browser", () => {
-          const pill = [...target.querySelectorAll("label.pill")].find(
-            (e) => e.textContent?.trim() === "Right pane",
-          ) as HTMLLabelElement;
-          (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+          const pill = dockPill(target, "Right file browser dock");
+          (pill!.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
         }),
       ),
     ).toEqual(["browser_side_panes"]);
