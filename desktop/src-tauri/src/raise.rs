@@ -6,9 +6,8 @@
 //!
 //! The raise restores the window, shows it and focuses it through Tauri, and
 //! then settles what those calls leave undone on the platform. The focus call
-//! is tao's `set_focus`, which does nothing while the window reads minimized,
-//! and on macOS also while it reads not visible. Each platform settles that
-//! its own way:
+//! is tao's `set_focus`, which on every platform does nothing while the window
+//! reads minimized or not visible. Each platform settles that its own way:
 //!
 //! - macOS: `set_focus` is the only one of the three calls that activates
 //!   the app (it makes the window key and calls `activateIgnoringOtherApps:`),
@@ -18,23 +17,25 @@
 //!   thread, after the window calls, it unhides a hidden app, makes the
 //!   window key and activates the app. For a window that was neither
 //!   minimized nor hidden that repeats what `set_focus` already did.
-//! - Linux and FreeBSD, where tao drives GTK: tao queues the restore for the
-//!   GTK main loop and clears its minimized flag only when GTK reports the
-//!   window's new state, after the window manager has handled the restore,
-//!   so a `set_focus` that follows the restore at once finds the window
-//!   still minimized. A window that read minimized before the raise is
-//!   focused again once it no longer reads minimized, looked at off the main
-//!   thread every [`RESTORE_POLL`] for at most [`RESTORE_WAIT`]; one that
-//!   still reads minimized then is left as the window manager put it. A
-//!   window that did not read minimized needs nothing more, since
-//!   `set_focus` already presented it. Whether the window manager then
-//!   gives the window the focus is its own decision: one that prevents
-//!   focus stealing weighs the request's time, which GTK takes from the last
-//!   input the app received, against the user's last input elsewhere.
-//! - Windows: tao restores the window with `ShowWindow(SW_RESTORE)` on the
-//!   event loop's thread and clears its minimized flag in the same step,
-//!   before the focus call runs there, so `set_focus` brings the window to
-//!   the foreground by itself.
+//! - Linux and FreeBSD, where tao drives GTK: tao queues the restore and the
+//!   show for the GTK main loop and clears its minimized flag only when GTK
+//!   reports the window's new state, after the window manager has handled
+//!   the restore, so a `set_focus` that follows the restore at once finds
+//!   the window still minimized. A window that read minimized before the
+//!   raise is focused again once it no longer reads minimized, looked at off
+//!   the main thread every [`RESTORE_POLL`] for at most [`RESTORE_WAIT`]; one
+//!   that still reads minimized then is left as the window manager put it.
+//!   A window that read shown needs nothing more, since `set_focus` presented
+//!   it. A window that read hidden is shown by the queued `show` after
+//!   `set_focus` has already skipped it, so the raise leaves it unfocused.
+//!   Whether the window manager gives a presented window the focus is its
+//!   own decision: one that prevents focus stealing weighs the request's
+//!   time, which GTK takes from the last input the app received, against
+//!   the user's last input elsewhere.
+//! - Windows: tao restores the window with `ShowWindow(SW_RESTORE)` and shows
+//!   it on the event loop's thread, setting its minimized and visible flags
+//!   in the same steps, before the focus call runs there, so `set_focus`
+//!   brings the window to the foreground by itself.
 
 use std::time::Duration;
 
