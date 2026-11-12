@@ -1,4 +1,6 @@
-export type DeckScopeId = "tab" | "pane" | "window" | "computers";
+/** A scope's id. Each host lists its own scopes, so the deck treats the id as
+ * opaque and compares it only against the scopes it was given. */
+export type DeckScopeId = string;
 
 const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
 
@@ -29,7 +31,26 @@ export interface DeckItem {
   scope: DeckScopeId;
   icon?: DeckIcon;
   shortcut?: string | null;
-  kind?: "action" | "branch";
+  /** How the row answers Enter: an action runs, a branch and a choice open a
+   * deeper list, a toggle flips its state. Absent means action. */
+  kind?: "action" | "branch" | "toggle" | "choice";
+  /** The heading this row sits under while the deck browses. Consecutive rows
+   * that share it form one section. A row without one renders flat with its
+   * breadcrumb, as a typed result does. */
+  section?: string;
+  /** A second line under the title: an object's machine or path, or the
+   * reason a disabled row cannot run. */
+  subtitle?: string;
+  /** Current state for the row's right column: on, off, or a choice's value. */
+  value?: string;
+  /** Marks the current option inside a choice. */
+  checked?: boolean;
+  /** A destructive action, drawn as one. */
+  danger?: boolean;
+  /** The row runs on Enter and also has a page of its own, which Right opens
+   * through the deck's `onExpand`: a window that Enter focuses and whose
+   * other actions sit one level down. */
+  expandable?: boolean;
   disabled?: boolean;
   /** Keep the deck open while the returned promise settles. */
   awaitResult?: boolean;
@@ -47,6 +68,9 @@ export interface DeckItem {
 export interface DeckScope {
   id: DeckScopeId;
   label: string;
+  /** A shorter name for the rail when the label is too long to sit under an
+   * orb. Absent means the label. */
+  caption?: string;
   icon: DeckIcon;
   available?: boolean;
 }
@@ -90,8 +114,10 @@ export function createDeckDraft(): DeckDraft {
   };
 }
 
+/** A restored scope is any short id. Whether the host still offers it is the
+ * host's and the deck's to settle against the live scope list. */
 function isScope(value: unknown): value is DeckScopeId {
-  return value === "tab" || value === "pane" || value === "window" || value === "computers";
+  return typeof value === "string" && value.length > 0 && value.length <= 64;
 }
 
 function boundedString(value: unknown, max = 512): string | null {

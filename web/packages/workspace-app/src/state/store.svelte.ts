@@ -4894,12 +4894,20 @@ export function openCommandLauncherFromMenu(row: Element, refocus?: () => void):
 // so a change in one window reflects in every other.
 export const settingsPanel = $state<{
   open: boolean;
+  /// Where an open should land: a rail section id and, inside it, a field id
+  /// from the settings index. The overlay shows it and clears it.
+  target: SettingsTarget | null;
 }>({
   open: false,
+  target: null,
 });
 
-/// Open the settings surface. Idempotent when already open.
-export function openSettings(): void {
+export type SettingsTarget = { section: string; field?: string };
+
+/// Open the settings surface, on `target` when one is given. Idempotent when
+/// already open; a target then moves the open overlay to it.
+export function openSettings(target?: SettingsTarget): void {
+  if (target) settingsPanel.target = target;
   settingsPanel.open = true;
 }
 

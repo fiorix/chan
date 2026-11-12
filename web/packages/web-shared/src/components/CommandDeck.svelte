@@ -56,6 +56,11 @@
     onBack: () => void;
     onScope: (scope: DeckScopeId) => void;
     onClearScope: () => void;
+    /// Open the page of an `expandable` row, the one Enter would run.
+    onExpand?: (item: DeckItem) => void;
+    /// Where the deck stands, outermost first: the scope, then each branch
+    /// entered. Drawn beside the query; absent means the active scope alone.
+    crumbs?: string[];
     onSuccess?: (item: DeckItem) => void;
     onError: (item: DeckItem, error: unknown) => void;
     /// A run closed the deck and left focus nowhere, and the element the
