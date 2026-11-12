@@ -382,9 +382,9 @@
       unplaced: machineTree.orphans.map(windowModel),
       gateways,
       recent: recentWindows.keys,
-      // What this surface offers today. The devserver page has no bridge to
-      // dial a devserver or a gateway through, and the demo's hero keeps its
-      // New workspace button for resetting the demo.
+      // What this surface offers. The devserver page has no bridge to dial a
+      // devserver or a gateway through, and the demo's hero keeps its New
+      // workspace button for resetting the demo.
       may: {
         terminal: true,
         remoteTerminal: hasDesktopBridge,
@@ -622,8 +622,14 @@
     closeCommandLauncher();
   }
 
-  function clearDeck(): void {
+  /// A command that ran leaves the deck closed on a fresh draft that keeps
+  /// the query that found it, which the next opening selects: Enter then
+  /// repeats the command and typing replaces the query.
+  function finish(): void {
+    const { query } = draft;
+    closeDeck();
     clearCommandLauncherDraft();
+    activeCommandLauncherDraft().query = query;
   }
 
   function back(): void {
@@ -657,10 +663,7 @@
     }
     clearError();
     const result = await entry.run?.();
-    if (!entry.awaitResult) {
-      closeDeck();
-      clearDeck();
-    }
+    if (!entry.awaitResult) finish();
     return result;
   }
 
@@ -672,11 +675,6 @@
   function commandFailed(item: DeckItem, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     reportError(new Error(`${item.title}: ${message}`));
-  }
-
-  function succeeded(): void {
-    closeDeck();
-    clearDeck();
   }
 
   function onScope(scope: DeckScopeId): void {
@@ -735,7 +733,7 @@
     onBack={back}
     {onScope}
     onClearScope={clearScope}
-    onSuccess={succeeded}
+    onSuccess={finish}
   />
 
   {#snippet failed(error, reset)}

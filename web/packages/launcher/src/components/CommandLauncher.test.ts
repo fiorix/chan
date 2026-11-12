@@ -818,8 +818,36 @@ describe("Computers command deck", () => {
     await tick();
 
     expect(activeCommandLauncherDraft().visible).toBe(false);
-    expect(activeCommandLauncherDraft().query).toBe("");
     expect(target.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("keeps the query of a command that ran, for the next opening to repeat", async () => {
+    open();
+    await query("deploy shell focus");
+    result("Focus Control terminal").click();
+    await settle();
+    const closed = activeCommandLauncherDraft();
+    expect([closed.visible, closed.query, closed.path, closed.operation]).toEqual([
+      false,
+      "deploy shell focus",
+      [],
+      null,
+    ]);
+    open();
+    await tick();
+    expect(input().value).toBe("deploy shell focus");
+    expect(titles()).toContain("Focus Control terminal");
+  });
+
+  it("carries no query out of a page into the next opening", async () => {
+    open();
+    await query("release");
+    await expand(WINDOW_1);
+    result("Focus window").click();
+    await settle();
+    open();
+    expect(activeCommandLauncherDraft().query).toBe("");
+    expect(outline()[0]).toBe(`Recent windows: ${WINDOW_1}`);
   });
 
   it("reopens at the root with the last query kept", async () => {
