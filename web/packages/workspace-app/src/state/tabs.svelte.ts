@@ -1741,9 +1741,9 @@ export function activeDashboardTab(): DashboardTab | null {
   return t;
 }
 
-/// Toggle broadcast SELECT-ALL / DESELECT-ALL for the active terminal.
-/// Chord-driven (Cmd+Shift+I) equivalent of the per-tab "Select All" /
-/// "Deselect All" button. No-op when the active tab isn't a terminal.
+/// Flip `Group broadcast` for the active terminal: what the command and its
+/// chord run, as the tab menu's row does on its own tab. No-op when the
+/// active tab isn't a terminal.
 export function toggleActiveTerminalBroadcastSelectAll(): void {
   const tab = activeTerminalTab();
   if (tab) toggleTerminalGroupBroadcast(tab);
@@ -1784,10 +1784,10 @@ export function toggleTerminalGroupBroadcast(tab: TerminalTab): void {
 }
 
 /// Set a local terminal's broadcast toggle by its live session id. This is
-/// the `terminal_broadcast` window-command entry point: another window's Select All /
-/// per-row toggle reaches the owning window here, which flips the matching
-/// tab so the normal `set-broadcast` sync + sign + fan run unchanged. No-op
-/// when no local tab hosts that session.
+/// the `terminal_broadcast` window-command entry point: another window's
+/// `Group broadcast` or per-row toggle reaches the owning window here, which
+/// flips the matching tab so the normal `set-broadcast` sync + sign + fan run
+/// unchanged. No-op when no local tab hosts that session.
 export function setTerminalBroadcastBySession(sessionId: string, on: boolean): void {
   const tab = allTerminalTabs().find((t) => t.terminalSessionId === sessionId);
   if (tab) setTerminalBroadcastEnabled(tab, on);
@@ -2547,9 +2547,9 @@ function reconcileLocalMetadataFromRoster(entries: TerminalRosterEntry[]): void 
 }
 
 /// Same-group sessions in OTHER windows of this tenant that a page holds. The
-/// broadcast menu lists these under other windows, the group toggle and its
-/// Select All label count them, and the indicator counts the ones that have
-/// opted in. Sessions with no `window_id` are skipped: they cannot be
+/// broadcast menu lists these under other windows, the `Group broadcast`
+/// toggle and its check count them, and the indicator counts the ones that
+/// have opted in. Sessions with no `window_id` are skipped: they cannot be
 /// attributed to a window, and this window's own sessions are excluded
 /// (already shown as local tabs). So is a session whose window no page holds
 /// (`window_live` false): only its window's page flips its broadcast flag, so
