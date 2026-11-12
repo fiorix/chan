@@ -439,7 +439,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // Windows divergence the handler implements.
   {
     id: "terminal.copy",
-    label: "Copy selection",
+    label: "Copy",
     web: "Cmd+C",
     native: "Cmd+C",
     group: "Terminal",
@@ -492,7 +492,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // the shell.
   {
     id: "terminal.find",
-    label: "Find in terminal",
+    label: "Find",
     web: "Mod+F",
     native: "Mod+F",
     group: "Terminal",

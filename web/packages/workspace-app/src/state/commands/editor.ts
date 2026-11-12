@@ -163,10 +163,6 @@ function findCommand(
   };
 }
 
-function onFileOrTerminal(ctx: CommandContext): boolean {
-  return onSurface(ctx, "file") || (onSurface(ctx, "terminal") && !ctx.terminalControl);
-}
-
 /// Stepping a search needs the file tab's find bar open. A terminal holds
 /// its own bar's state, so there the step is offered and the terminal
 /// ignores it while the bar is closed.
@@ -324,7 +320,15 @@ registerCommands([
   // that follow Find take orders just past its own and short of the next
   // whole number, where every other row of the editor and of the terminal
   // sits, so the family stays adjacent on either tab.
-  findCommand("app.find.open", "Find", 8, ["Find on page", "search", "find bar"], onFileOrTerminal),
+  {
+    // A terminal lists its own Find in this row's place, under the id of the
+    // chord that opens its bar; it still answers this id when the desktop
+    // sends it.
+    ...findCommand("app.find.open", "Find", 8, ["Find on page", "search", "find bar"], (ctx) =>
+      onSurface(ctx, "file"),
+    ),
+    surface: "file",
+  },
   findCommand(
     "app.find.next",
     "Find next",
