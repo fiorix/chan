@@ -620,11 +620,16 @@ fn write_devserver_unit(
 /// AppImage, through its `chan` wrapper, has its mount's entries ahead of the
 /// user's `PATH`, and the unit outlives that mount: recorded, its entries
 /// would name directories under `/tmp` that no longer exist, searched first
-/// at every service start ([`chan_server::appimage_host_var`]).
+/// at every service start ([`chan_server::appimage_host_var`]). A process
+/// that is no AppImage's, a deb's `chan` in a shell of an older chan
+/// AppImage's terminal, can still hold a whole AppRun block, which goes too,
+/// as the recorded `PATH` loses it ([`with_devserver_unit_search_path`]), so
+/// the two renders agree.
 fn unit_search_path(
     parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> std::ffi::OsString {
-    chan_server::appimage_host_var("PATH", parent).unwrap_or_default()
+    let path = chan_server::appimage_host_var("PATH", parent).unwrap_or_default();
+    chan_server::without_apprun_blocks("PATH", &path)
 }
 
 /// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
@@ -846,7 +851,8 @@ mod tests {
     use crate::devserver::persisted::devserver_addr_from_persisted_args;
 
     /// A unit written from an AppImage records the user's `PATH`, none of
-    /// the mount's entries ahead of it; off an AppImage, the `PATH` as it is.
+    /// the mount's entries ahead of it; off an AppImage, the `PATH` as it is
+    /// but for a whole AppRun block, which goes there too.
     #[test]
     fn a_unit_written_from_the_appimage_records_the_users_path() {
         let mount = "/tmp/.mount_ChanCLI";
@@ -869,9 +875,60 @@ mod tests {
             .into_iter()
             .filter(|(key, _)| key != "APPDIR")
             .collect();
+        assert_eq!(unit_search_path(plain), "/usr/local/bin:/usr/bin");
+        let users = vec![(
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("/opt/x/usr/bin/:/usr/bin"),
+        )];
+        assert_eq!(unit_search_path(users), "/opt/x/usr/bin/:/usr/bin");
+    }
+
+    /// A process that is no AppImage's, with a whole AppRun block in its
+    /// `PATH` (a deb's `chan` in a shell an older chan AppImage started),
+    /// records the `PATH` without it, as a render without a terminal keeps
+    /// it: an interactive start, a scripted one and an interactive one again
+    /// write the unit once and leave it alone after.
+    #[test]
+    fn the_renders_agree_on_a_path_holding_a_block() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec =
+            || devserver_systemd_unit_spec(Path::new("/home/u/.local/bin/chan"), addr, None, None);
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("/tmp/.mount_ChanOLD/{entry}"))
+            .join(":");
+        let shell: Vec<(std::ffi::OsString, std::ffi::OsString)> = vec![(
+            "PATH".into(),
+            format!("{block}:/home/u/.local/bin:/usr/bin").into(),
+        )];
+        let current = unit_search_path(shell);
+        let mut renders = Vec::new();
+        for interactive in [true, false, true] {
+            let installed = std::fs::read_to_string(&path).ok();
+            let render = with_devserver_unit_search_path(
+                spec(),
+                &current,
+                installed.as_deref(),
+                interactive,
+            );
+            let update =
+                write_rendered_devserver_unit(&path, &render, false).expect("chan's own unit");
+            let written = std::fs::read_to_string(&path).unwrap();
+            let line = written
+                .lines()
+                .find(|line| line.starts_with("Environment=\"PATH="))
+                .map(str::to_string);
+            renders.push((interactive, update.changed, line));
+        }
+        let line = Some("Environment=\"PATH=/home/u/.local/bin:/usr/bin\"".to_string());
         assert_eq!(
-            unit_search_path(plain),
-            std::ffi::OsString::from(format!("{block}:/usr/local/bin:/usr/bin"))
+            renders,
+            [
+                (true, true, line.clone()),
+                (false, false, line.clone()),
+                (true, false, line)
+            ]
         );
     }
 
