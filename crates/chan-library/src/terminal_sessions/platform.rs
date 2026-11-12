@@ -718,6 +718,29 @@ pub fn without_foreign_apprun_blocks(
     std::env::join_paths(own.into_iter().chain(user)).ok()
 }
 
+/// `key` of `vars` as [`without_foreign_apprun_blocks`] gives it, or as it
+/// stands when there is nothing to drop, and without the lone empty entry
+/// AppRun's separator leaves after this mount's block when the user had no
+/// value of their own: for a process this one re-execs into, whose loader
+/// would read that entry as its current directory. AppRun writes the key as
+/// its block, a separator, then the user's value, so what the user wrote
+/// follows the separator: one empty entry and nothing else there is
+/// AppRun's; an empty entry next to another one, or to an entry of theirs, is
+/// the user's and stays. A user who set the key to the empty string cannot be
+/// told from one who left it unset, and to the loader the two are alike.
+/// `None` off an AppImage or when the key holds no entry of this mount.
+pub fn own_apprun_value(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<OsString> {
+    let (own, mut user, _) = own_and_users_entries(key, vars, reexec_dir)?;
+    if user == [PathBuf::new()] {
+        user.clear();
+    }
+    std::env::join_paths(own.into_iter().chain(user)).ok()
+}
+
 /// `key` of `vars` split into this process's own entries, up to its mount's
 /// last one, and the user's after the blocks that chain on from them, with
 /// the number of entries the value had. `None` off an AppImage, or when the
@@ -1245,8 +1268,8 @@ mod appimage_env_tests {
     #[cfg(unix)]
     mod apprun_shapes {
         use super::super::{
-            appimage_host_env, appimage_host_var, hand_appimage_host_env, without_apprun_blocks,
-            without_foreign_apprun_blocks,
+            appimage_host_env, appimage_host_var, hand_appimage_host_env, own_apprun_value,
+            without_apprun_blocks, without_foreign_apprun_blocks,
         };
         use super::{scrub, HostEnvFor, Scrub, APPDIR};
         use std::ffi::{OsStr, OsString};
@@ -2068,6 +2091,47 @@ mod appimage_env_tests {
                     "{key}"
                 );
             }
+        }
+
+        /// A process the re-exec starts gets this mount's block and the
+        /// user's value, without the lone empty entry AppRun's separator
+        /// leaves when the user had none, which the loader reads as the
+        /// current directory; an empty entry the user wrote is theirs and
+        /// stays where they put it.
+        #[test]
+        fn a_reexec_gets_no_empty_entry_the_user_did_not_write() {
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let vars = |value: String| {
+                vec![
+                    (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                    (OsString::from("LD_LIBRARY_PATH"), OsString::from(value)),
+                ]
+            };
+            let reexec = |value: String| {
+                own_apprun_value("LD_LIBRARY_PATH", vars(value), Some(OsStr::new(HOST_LIB)))
+            };
+            assert_eq!(reexec(format!("{own}:")), Some(OsString::from(&own)));
+            for user in [":", ":/opt/a", "/opt/a:", "/opt/a::/opt/b", "/opt/a"] {
+                assert_eq!(
+                    reexec(format!("{own}:{user}")),
+                    Some(OsString::from(format!("{own}:{user}"))),
+                    "{user:?}"
+                );
+            }
+            let older = format!(
+                "{own}:{HOST_LIB}:{}:",
+                block_under("/tmp/.mount_chanZZ", &LD_BLOCK)
+            );
+            assert_eq!(reexec(older), Some(OsString::from(&own)));
+            assert_eq!(
+                own_apprun_value(
+                    "LD_LIBRARY_PATH",
+                    vec![(OsString::from("LD_LIBRARY_PATH"), OsString::from("/opt/a"))],
+                    None
+                ),
+                None,
+                "no AppImage"
+            );
         }
     }
 }

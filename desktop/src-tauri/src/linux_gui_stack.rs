@@ -300,14 +300,17 @@ mod linux {
     /// to the host copies, then this process's `LD_LIBRARY_PATH` falling back
     /// to the bundle for anything the host lacks, without the block of any
     /// mount but this one's, which an older release that started this process
-    /// handed down, its re-exec directory ahead of its block included
-    /// ([`chan_server::without_foreign_apprun_blocks`]).
+    /// handed down, its re-exec directory ahead of its block included, and
+    /// without the empty entry AppRun's separator leaves when the user had no
+    /// `LD_LIBRARY_PATH`, which would have the desktop and its WebKit
+    /// processes search their current directory for libraries
+    /// ([`chan_server::own_apprun_value`]).
     fn reexec_ld_path(
         system_dir: OsString,
         vars: impl IntoIterator<Item = (OsString, OsString)>,
     ) -> OsString {
         let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
-        let existing = chan_server::without_foreign_apprun_blocks(
+        let existing = chan_server::own_apprun_value(
             "LD_LIBRARY_PATH",
             vars.iter().cloned(),
             Some(system_dir.as_os_str()),
@@ -647,6 +650,17 @@ mod linux {
             assert_eq!(
                 reexec_ld_path(host.into(), vars(own.clone())),
                 OsString::from(format!("{host}:{own}"))
+            );
+            // A user with no LD_LIBRARY_PATH: AppRun's trailing separator
+            // goes, so the loader does not search the current directory; one
+            // the user wrote stays.
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(format!("{}:", block(mount)))),
+                OsString::from(format!("{host}:{}", block(mount)))
+            );
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(format!("{}::/opt/a/lib", block(mount)))),
+                OsString::from(format!("{host}:{}::/opt/a/lib", block(mount)))
             );
             assert_eq!(
                 reexec_ld_path(host.into(), Vec::new()),
