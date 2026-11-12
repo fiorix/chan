@@ -46,7 +46,7 @@ export const ABI = {
   GhosttyPointTag: { ACTIVE: 0, VIEWPORT: 1, SCREEN: 2, HISTORY: 3 },
   GhosttyRenderStateData: { DIRTY: 3, ROW_ITERATOR: 4, CURSOR_VISIBLE: 11, COLORS: 19 },
   GhosttyRenderStateDirty: { FALSE: 0, PARTIAL: 1, FULL: 2 },
-  GhosttyRenderStateRowData: { DIRTY: 1, CELLS: 3 },
+  GhosttyRenderStateRowData: { DIRTY: 1, CELLS: 3, CELLS_RAW: 5 },
   GhosttyRenderStateRowCellsData: { RAW: 1, STYLE: 2, GRAPHEMES_BUF: 4, BG_COLOR: 5, FG_COLOR: 6 },
   GhosttyRowData: { WRAP_CONTINUATION: 2 },
   GhosttyStyleColorTag: { NONE: 0, PALETTE: 1, RGB: 2 },
@@ -108,6 +108,7 @@ export const LAYOUT = {
   },
   GhosttySelection: { size: 20, fields: { start: 0, end: 8, rectangle: 16 } },
   GhosttyString: { size: 8, fields: { ptr: 0, len: 4 } },
+  GhosttyCellsView: { size: 8, fields: { ptr: 0, len: 4 } },
   GhosttySelectionBuffer: { size: 12, fields: { ptr: 0, cap: 4, len: 8 } },
   GhosttyCodepointBuffer: { size: 12, fields: { ptr: 0, cap: 4, len: 8 } },
 } as const;
@@ -134,6 +135,96 @@ export const STYLE_FLAG_BITS = {
   overline: [7, 1],
   underline: [8, 3],
 } as const;
+
+const mask = ([lsb, width]: readonly [number, number]) => ((1 << width) - 1) << lsb;
+
+/// The bits of a `VtCell`'s `flags`, the core's own `GhosttyStyleFlags`:
+/// each attribute's mask, `UNDERLINE` covering every underline style.
+export const VtFlag = {
+  BOLD: mask(STYLE_FLAG_BITS.bold),
+  ITALIC: mask(STYLE_FLAG_BITS.italic),
+  FAINT: mask(STYLE_FLAG_BITS.faint),
+  BLINK: mask(STYLE_FLAG_BITS.blink),
+  INVERSE: mask(STYLE_FLAG_BITS.inverse),
+  INVISIBLE: mask(STYLE_FLAG_BITS.invisible),
+  STRIKETHROUGH: mask(STYLE_FLAG_BITS.strikethrough),
+  OVERLINE: mask(STYLE_FLAG_BITS.overline),
+  UNDERLINE: mask(STYLE_FLAG_BITS.underline),
+} as const;
+
+/// One cell of a row as the reader decodes it from the core.
+export type VtCell = {
+  /// The base codepoint; 0 for a cell nothing was written to, or one that
+  /// holds only a background colour.
+  codepoint: number;
+  /// The whole grapheme cluster when the cell holds more than one
+  /// codepoint, else null.
+  cluster: string | null;
+  /// The columns the cell takes: 1, 2 for a wide character, and 0 for a
+  /// spacer: the column after a wide character, or the last column of a row
+  /// a wide character did not fit at the end of.
+  width: number;
+  /// The cell's style flags (`VtFlag`); 0 when the cell has no style.
+  flags: number;
+  /// The foreground and the background as 0xRRGGBB, resolved against the
+  /// palette and the terminal's default colours.
+  fg: number;
+  bg: number;
+  /// 1 when the cell carries an OSC 8 hyperlink, else 0. The core does not
+  /// number links, so every link reads 1.
+  hyperlink: number;
+};
+
+/// A row of cells read from a terminal (`VtTerminal.readRow`,
+/// `readHistoryRow`) into cell objects the view keeps and fills again on its
+/// next read, so reading a row allocates nothing beyond a cluster's string.
+/// A view holds one row at a time: a reader that needs two rows at once keeps
+/// a view for each.
+export class VtCells {
+  private readonly cells: VtCell[] = [];
+  /// The cells of the row read last; `at` answers for `0` to `length - 1`.
+  length = 0;
+  /// Where the row was read from: history row `row`, 0 the oldest, or screen
+  /// row `row`. `row` is -1 before the first read.
+  history = false;
+  row = -1;
+  /// The terminal and the state of its screen the row was read at, so a
+  /// read of the same row in the same state reads nothing.
+  private source: object | null = null;
+  private generation = -1;
+
+  /// The cell at column `x`, or undefined outside the row.
+  at(x: number): VtCell | undefined {
+    return x >= 0 && x < this.length ? this.cells[x] : undefined;
+  }
+
+  /// Whether the view holds the row a reader is asked for, read from `source`
+  /// at `generation`. For `VtTerminal`'s readers.
+  holds(source: object, history: boolean, row: number, generation: number): boolean {
+    return this.source === source && this.generation === generation && this.history === history && this.row === row;
+  }
+
+  /// Takes the view for a row of `length` cells and returns its cells, whose
+  /// first `length` a reader fills, every one. For `VtTerminal`'s readers.
+  fill(source: object, history: boolean, row: number, generation: number, length: number): VtCell[] {
+    while (this.cells.length < length) {
+      this.cells.push({ codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0, bg: 0, hyperlink: 0 });
+    }
+    this.source = source;
+    this.history = history;
+    this.row = row;
+    this.generation = generation;
+    this.length = length;
+    return this.cells;
+  }
+
+  /// Forgets the row, as when a read fails partway.
+  drop(): void {
+    this.source = null;
+    this.length = 0;
+    this.row = -1;
+  }
+}
 
 /// First ghostty-web `Key` value that upstream numbers one higher.
 /// Upstream inserted `FN` at this value; every key before it keeps its
@@ -260,11 +351,13 @@ const FUNCTIONS = [
   "ghostty_render_state_row_iterator_new",
   "ghostty_render_state_row_iterator_free",
   "ghostty_render_state_row_iterator_next",
-  "ghostty_render_state_row_get",
+  "ghostty_render_state_row_iterator_next_dirty",
+  "ghostty_render_state_row_get_multi",
   "ghostty_render_state_row_cells_new",
   "ghostty_render_state_row_cells_free",
-  "ghostty_render_state_row_cells_next",
+  "ghostty_render_state_row_cells_select",
   "ghostty_render_state_row_cells_get",
+  "ghostty_render_state_row_cells_get_multi",
   "ghostty_key_encoder_new",
   "ghostty_key_encoder_free",
   "ghostty_formatter_terminal_new",
@@ -503,52 +596,13 @@ function writeDeviceAttributes(wasm: VtWasm, out: number): void {
 
 type Rgb = { r: number; g: number; b: number };
 
-function sameRgb(a: Rgb, b: Rgb): boolean {
-  return a.r === b.r && a.g === b.g && a.b === b.b;
-}
-
-function blankCell(fg: Rgb, bg: Rgb): GhosttyCell {
-  return {
-    codepoint: 0,
-    fg_r: fg.r,
-    fg_g: fg.g,
-    fg_b: fg.b,
-    bg_r: bg.r,
-    bg_g: bg.g,
-    bg_b: bg.b,
-    flags: 0,
-    width: 1,
-    hyperlink_id: 0,
-    grapheme_len: 0,
-  };
-}
-
-/// A raw `GhosttyCell` split into the fields this binding reads.
-type RawCell = {
-  tag: number;
-  content: number;
-  styleId: number;
-  wide: number;
-  hyperlink: boolean;
-};
-
-function bits(lo: number, hi: number, [lsb, width]: readonly [number, number]): number {
-  // Every field read here sits inside bits 0-47, so a JS number (exact to
-  // 2^53) holds the whole value.
-  const value = hi * 2 ** 32 + (lo >>> 0);
-  return Math.floor(value / 2 ** lsb) % 2 ** width;
-}
-
-function decodeCell(view: DataView, ptr: number): RawCell {
-  const lo = view.getUint32(ptr, true);
-  const hi = view.getUint32(ptr + 4, true);
-  return {
-    tag: bits(lo, hi, CELL_BITS.content_tag),
-    content: bits(lo, hi, CELL_BITS.content),
-    styleId: bits(lo, hi, CELL_BITS.style_id),
-    wide: bits(lo, hi, CELL_BITS.wide),
-    hyperlink: bits(lo, hi, CELL_BITS.hyperlink) === 1,
-  };
+/// Field `range` of a packed 64-bit `GhosttyCell` given as its low and high
+/// 32 bits. No field the binding reads is wider than 24 bits.
+function cellBits(lo: number, hi: number, [lsb, width]: readonly [number, number]): number {
+  const m = (1 << width) - 1;
+  if (lsb >= 32) return (hi >>> (lsb - 32)) & m;
+  if (lsb + width <= 32) return (lo >>> lsb) & m;
+  return ((lo >>> lsb) | (hi << (32 - lsb))) & m;
 }
 
 function cellWidth(wide: number): number {
@@ -556,34 +610,61 @@ function cellWidth(wide: number): number {
   return wide === W.WIDE ? 2 : wide === W.SPACER_TAIL || wide === W.SPACER_HEAD ? 0 : 1;
 }
 
-function codepointOf(raw: RawCell): number {
-  const T = ABI.GhosttyCellContentTag;
-  return raw.tag === T.CODEPOINT || raw.tag === T.CODEPOINT_GRAPHEME ? raw.content & 0x1fffff : 0;
+/// The 0xRRGGBB of a `GhosttyColorRgb` at `ptr`.
+function readRgb(view: DataView, ptr: number): number {
+  return (view.getUint8(ptr) << 16) | (view.getUint8(ptr + 1) << 8) | view.getUint8(ptr + 2);
 }
 
-/// ghostty-web's `CellFlags` from an upstream `GhosttyStyle` at `ptr`.
-/// Any underline style underlines; overline has no ghostty-web flag.
-function styleFlags(view: DataView, ptr: number): number {
-  const packed = view.getUint16(ptr + LAYOUT.GhosttyStyle.fields.flags, true);
-  const bit = ([lsb, width]: readonly [number, number]) => (packed >>> lsb) & ((1 << width) - 1);
-  const B = STYLE_FLAG_BITS;
-  let flags = 0;
-  if (bit(B.bold)) flags |= FLAG.BOLD;
-  if (bit(B.italic)) flags |= FLAG.ITALIC;
-  if (bit(B.underline)) flags |= FLAG.UNDERLINE;
-  if (bit(B.strikethrough)) flags |= FLAG.STRIKETHROUGH;
-  if (bit(B.inverse)) flags |= FLAG.INVERSE;
-  if (bit(B.invisible)) flags |= FLAG.INVISIBLE;
-  if (bit(B.blink)) flags |= FLAG.BLINK;
-  if (bit(B.faint)) flags |= FLAG.FAINT;
-  return flags;
+function rgbOf(color: number): Rgb {
+  return { r: (color >>> 16) & 0xff, g: (color >>> 8) & 0xff, b: color & 0xff };
 }
 
-function readRgb(view: DataView, ptr: number): Rgb {
-  return { r: view.getUint8(ptr), g: view.getUint8(ptr + 1), b: view.getUint8(ptr + 2) };
+/// ghostty-web's `CellFlags` for a cell's `VtFlag`s. Any underline style
+/// underlines; overline has no ghostty-web flag.
+function legacyFlags(flags: number): number {
+  let out = 0;
+  if (flags & VtFlag.BOLD) out |= FLAG.BOLD;
+  if (flags & VtFlag.ITALIC) out |= FLAG.ITALIC;
+  if (flags & VtFlag.UNDERLINE) out |= FLAG.UNDERLINE;
+  if (flags & VtFlag.STRIKETHROUGH) out |= FLAG.STRIKETHROUGH;
+  if (flags & VtFlag.INVERSE) out |= FLAG.INVERSE;
+  if (flags & VtFlag.INVISIBLE) out |= FLAG.INVISIBLE;
+  if (flags & VtFlag.BLINK) out |= FLAG.BLINK;
+  if (flags & VtFlag.FAINT) out |= FLAG.FAINT;
+  return out;
 }
 
-/// Byte size of the scratch area each terminal keeps for out parameters.
+/// A row in ghostty-web's cell format.
+function legacyCells(cells: VtCells): GhosttyCell[] {
+  const out: GhosttyCell[] = [];
+  for (let x = 0; x < cells.length; x++) {
+    const cell = cells.at(x)!;
+    const fg = rgbOf(cell.fg);
+    const bg = rgbOf(cell.bg);
+    out.push({
+      codepoint: cell.codepoint,
+      fg_r: fg.r,
+      fg_g: fg.g,
+      fg_b: fg.b,
+      bg_r: bg.r,
+      bg_g: bg.g,
+      bg_b: bg.b,
+      flags: legacyFlags(cell.flags),
+      width: cell.width,
+      hyperlink_id: cell.hyperlink,
+      grapheme_len: cell.cluster ? [...cell.cluster].length - 1 : 0,
+    });
+  }
+  return out;
+}
+
+/// The text a cell shows: its cluster, its codepoint, or a space.
+function cellText(cell: VtCell | undefined): string {
+  return cell?.cluster ?? (cell?.codepoint ? String.fromCodePoint(cell.codepoint) : " ");
+}
+
+/// Byte offsets of the scratch area each terminal keeps for out parameters
+/// and the key and value arrays of its multi-get calls.
 export const SCRATCH = {
   slot: 0, // u32 handle or size_t out value
   slot2: 8, // second u32 out value
@@ -596,14 +677,31 @@ export const SCRATCH = {
   codepoints: 80, // GhosttyCodepointBuffer (12 bytes)
   colors: 92, // GhosttyRenderStateColors (784 bytes)
   graphemes: 876, // u32[GRAPHEME_CAP]
-  size: 876 + 32 * 4,
+  cellsView: 1004, // GhosttyCellsView (8 bytes)
+  rowCells: 1012, // GhosttyRenderStateRowCells, the handle a row's cells are read into
+  rowKeys: 1016, // GhosttyRenderStateRowData[2]: CELLS_RAW, CELLS
+  rowValues: 1024, // void*[2]: cellsView, rowCells
+  cellKeys: 1032, // GhosttyRenderStateRowCellsData[2]: STYLE, GRAPHEMES_BUF
+  cellValues: 1040, // void*[2]: style, codepoints
+  dirtyY: 1048, // u16, the row next_dirty moved to
+  size: 1052,
 } as const;
 const GRAPHEME_CAP = 32;
 
-/// ghostty-web's `GhosttyTerminal`, over an upstream terminal and render
-/// state. ghostty-web scrolls in JS (it reads history rows itself), so
-/// upstream's viewport never moves and its render state is the active
-/// screen.
+/// Distinct styles a row's read keeps by style id. A style id names one style
+/// in the page a row is on, and a row is on one page, so within a row the
+/// first read of an id serves every cell that carries it.
+const ROW_STYLES = 64;
+
+/// A terminal of the core and the render state the widget paints it from.
+/// The widget scrolls in JS (it reads history rows itself), so the core's
+/// viewport never moves and its render state is the active screen.
+///
+/// A frame reads it in three parts: `beginFrame` brings the render state up
+/// to date and says what changed since the last frame, the whole screen or
+/// the rows `isRowDirty` names, which the core's own dirty iteration lists;
+/// `readRow` and `readHistoryRow` read any row's cells into a `VtCells` view;
+/// `endFrame` marks it all painted.
 export class VtTerminal {
   private readonly wasm: VtWasm;
   private readonly owner: GhosttyVt;
@@ -617,23 +715,36 @@ export class VtTerminal {
   private _cols: number;
   private _rows: number;
 
-  /// Rows of the active screen as ghostty-web cells, refreshed from the
-  /// render state for the rows it reports dirty.
-  private rowCache: GhosttyCell[][] = [];
-  /// Full grapheme text by column, for rows that hold clusters.
-  private graphemeCache: Map<number, string>[] = [];
-  /// Dirty state accumulated since ghostty-web last cleaned it.
+  /// What changed since the last `endFrame`: the render state's dirty
+  /// state, and the rows the core listed dirty while it was partial.
   private dirty = 0;
   private rowDirty = new Uint8Array(0);
-  /// Writes or a resize since the render state was last read.
+  /// Writes or a resize since the render state was last updated.
   private stale = true;
+  /// Updates of the render state so far. A view holds a row read at one
+  /// count, and the row iterator was filled at one.
+  private generation = 0;
+  private iteratorGeneration = -1;
+  /// The row the iterator stands on, -1 before its first row.
+  private iteratorRow = -1;
+  /// The styles a row's read has met, by style id: flags, foreground and
+  /// background.
+  private readonly styleIds = new Int32Array(ROW_STYLES);
+  private readonly styleFlags = new Uint16Array(ROW_STYLES);
+  private readonly styleFg = new Int32Array(ROW_STYLES);
+  private readonly styleBg = new Int32Array(ROW_STYLES);
+  private styleCount = 0;
+  /// The history's length at an update, for the reads after it.
+  private historyGeneration = -1;
+  private historyRows = 0;
+  /// A view for the binding's own one-cell reads.
+  private readonly lookup = new VtCells();
   /// Writes and resizes taken so far. A search compares it with the count
   /// at its last feed to tell whether the matches it holds are current.
   private changes = 0;
-  private forceFull = true;
-  private lastScreenAlternate = false;
-  private fg: Rgb = { r: 204, g: 204, b: 204 };
-  private bg: Rgb = { r: 0, g: 0, b: 0 };
+  /// The default colours as 0xRRGGBB and the palette, as of the last update.
+  private fg = 0xcccccc;
+  private bg = 0x000000;
   private palette = new Uint8Array(768);
   private replies: Uint8Array[] = [];
   /// The cells tracked on this terminal and not freed yet; the terminal
@@ -665,7 +776,8 @@ export class VtTerminal {
     fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.DEVICE_ATTRIBUTES, owner.deviceAttributesCallback);
     this.setMode(MODE_GRAPHEME_CLUSTER, false, true);
     this.applyConfig(config);
-    this.resetCache();
+    this.writeMultiArgs();
+    this.rowDirty = new Uint8Array(rows);
   }
 
   get cols(): number {
@@ -708,7 +820,10 @@ export class VtTerminal {
       this.handle, cols, rows,
       Math.round(cell?.width ?? 0), Math.round(cell?.height ?? 0),
     );
-    this.resetCache();
+    // The render state's next update redraws every row; until then, nothing
+    // is dirty at the new size.
+    this.rowDirty = new Uint8Array(rows);
+    this.stale = true;
     // ghostty-web drains after writes only; a resize can produce its own
     // mode 2048 report while the program is otherwise silent.
     if (this.owner.host) {
@@ -745,15 +860,141 @@ export class VtTerminal {
   }
 
   // ------------------------------------------------------------------
-  // Render state
+  // Frames
   // ------------------------------------------------------------------
 
-  /// Brings the cached rows up to date and returns the dirty state
-  /// accumulated since the last `markClean`. Cheap to call repeatedly:
-  /// without a write or resize in between it reads nothing.
-  update(): number {
+  /// Begins a frame: brings the render state up to date with the writes and
+  /// resizes since its last update and returns what changed since the last
+  /// `endFrame`, a `GhosttyRenderStateDirty`: FALSE nothing, PARTIAL the rows
+  /// `isRowDirty` names, FULL every row. Cheap to call again: without a write
+  /// or a resize in between it reads nothing.
+  beginFrame(): number {
     this.sync();
     return this.dirty;
+  }
+
+  /// Whether screen row `y` changed since the last `endFrame`, as of the
+  /// last `beginFrame` or read.
+  isRowDirty(y: number): boolean {
+    return this.dirty === ABI.GhosttyRenderStateDirty.FULL || this.rowDirty[y] === 1;
+  }
+
+  /// Ends a frame: what changed so far counts as painted, in the core's
+  /// render state too.
+  endFrame(): void {
+    if (this.dirty === ABI.GhosttyRenderStateDirty.FALSE || !this.handle) return;
+    this.wasm.fn.ghostty_render_state_clean(this.renderState);
+    this.dirty = ABI.GhosttyRenderStateDirty.FALSE;
+    this.rowDirty.fill(0);
+  }
+
+  /// Reads screen row `y` into `into` from the render state, brought up to
+  /// date first: the row's raw cells in one call, read where the core keeps
+  /// them, and a style or a cluster for the cells that carry one. False
+  /// outside the screen or once the terminal is freed. A view that holds the
+  /// row already, read since the last update, is left as it is.
+  readRow(y: number, into: VtCells): boolean {
+    if (y < 0 || y >= this._rows || !this.handle) return false;
+    this.sync();
+    if (into.holds(this, false, y, this.generation)) return true;
+    const fn = this.wasm.fn;
+    const s = this.scratch;
+    const ok = ABI.GhosttyResult.SUCCESS;
+    const V = LAYOUT.GhosttyCellsView.fields;
+    if (!this.seekRow(y) || fn.ghostty_render_state_row_get_multi(this.rowIterator, 2, s + SCRATCH.rowKeys, s + SCRATCH.rowValues, 0) !== ok) {
+      into.drop();
+      return false;
+    }
+    let view = this.wasm.view();
+    const raw = view.getUint32(s + SCRATCH.cellsView + V.ptr, true);
+    const len = view.getUint32(s + SCRATCH.cellsView + V.len, true);
+    const cells = into.fill(this, false, y, this.generation, this._cols);
+    const T = ABI.GhosttyCellContentTag;
+    this.styleCount = 0;
+    for (let x = 0; x < this._cols; x++) {
+      const cell = cells[x];
+      if (x >= len) {
+        this.blank(cell);
+        continue;
+      }
+      const lo = view.getUint32(raw + x * 8, true);
+      const hi = view.getUint32(raw + x * 8 + 4, true);
+      this.rawCell(cell, lo, hi);
+      const styleId = cellBits(lo, hi, CELL_BITS.style_id);
+      let style = styleId === 0 ? -1 : this.knownStyle(styleId);
+      const grapheme = cellBits(lo, hi, CELL_BITS.content_tag) === T.CODEPOINT_GRAPHEME;
+      if ((styleId !== 0 && style < 0) || grapheme) {
+        // One call for what the cell needs read: its style, its cluster or
+        // both (the keys are STYLE then GRAPHEMES_BUF).
+        const wantStyle = styleId !== 0 && style < 0;
+        const first = wantStyle ? 0 : 1;
+        const count = (wantStyle ? 1 : 0) + (grapheme ? 1 : 0);
+        if (grapheme) this.clearCodepoints();
+        const selected = fn.ghostty_render_state_row_cells_select(this.rowCells, x) === ok;
+        const result = selected
+          ? fn.ghostty_render_state_row_cells_get_multi(this.rowCells, count, s + SCRATCH.cellKeys + first * 4, s + SCRATCH.cellValues + first * 4, s + SCRATCH.slot)
+          : ABI.GhosttyResult.NO_VALUE;
+        view = this.wasm.view();
+        const written = selected ? view.getUint32(s + SCRATCH.slot, true) : 0;
+        if (wantStyle && written >= 1) style = this.rememberStyle(styleId, view, s + SCRATCH.style);
+        if (grapheme && selected) {
+          // A cluster longer than the scratch holds reads again into a
+          // buffer of its own.
+          const cps = result === ok ? this.scratchCodepoints() : this.rowCellCluster();
+          view = this.wasm.view();
+          if (cps && cps.length > 1) cell.cluster = String.fromCodePoint(...cps);
+        }
+      }
+      if (style >= 0) this.applyStyle(cell, style);
+      this.contentBackground(cell, lo, hi);
+    }
+    return true;
+  }
+
+  /// Reads history row `offset`, 0 the oldest, into `into` through the
+  /// core's grid references: a reference and a raw cell for each cell, and a
+  /// style or a cluster for the cells that carry one. False outside the
+  /// history or once the terminal is freed. A view that holds the row
+  /// already, read since the last update, is left as it is.
+  readHistoryRow(offset: number, into: VtCells): boolean {
+    if (offset < 0 || !this.handle) return false;
+    this.sync();
+    if (this.historyGeneration !== this.generation) {
+      this.historyRows = this.getScrollbackLength();
+      this.historyGeneration = this.generation;
+    }
+    if (offset >= this.historyRows) return false;
+    if (into.holds(this, true, offset, this.generation)) return true;
+    const fn = this.wasm.fn;
+    const s = this.scratch;
+    const ok = ABI.GhosttyResult.SUCCESS;
+    const T = ABI.GhosttyCellContentTag;
+    const cells = into.fill(this, true, offset, this.generation, this._cols);
+    this.styleCount = 0;
+    for (let x = 0; x < this._cols; x++) {
+      const cell = cells[x];
+      if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, x, offset) || fn.ghostty_grid_ref_cell(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ok) {
+        this.blank(cell);
+        continue;
+      }
+      let view = this.wasm.view();
+      const lo = view.getUint32(s + SCRATCH.raw, true);
+      const hi = view.getUint32(s + SCRATCH.raw + 4, true);
+      this.rawCell(cell, lo, hi);
+      const styleId = cellBits(lo, hi, CELL_BITS.style_id);
+      let style = styleId === 0 ? -1 : this.knownStyle(styleId);
+      if (styleId !== 0 && style < 0 && fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, s + SCRATCH.style) === ok) {
+        view = this.wasm.view();
+        style = this.rememberStyle(styleId, view, s + SCRATCH.style);
+      }
+      if (style >= 0) this.applyStyle(cell, style);
+      this.contentBackground(cell, lo, hi);
+      if (cellBits(lo, hi, CELL_BITS.content_tag) === T.CODEPOINT_GRAPHEME) {
+        const text = this.gridGraphemes();
+        if (text && [...text].length > 1) cell.cluster = text;
+      }
+    }
+    return true;
   }
 
   getCursor(): {
@@ -781,7 +1022,7 @@ export class VtTerminal {
 
   getColors(): { background: Rgb; foreground: Rgb; cursor: null } {
     this.sync();
-    return { background: { ...this.bg }, foreground: { ...this.fg }, cursor: null };
+    return { background: rgbOf(this.bg), foreground: rgbOf(this.fg), cursor: null };
   }
 
   /// Replaces the default colors, the cursor color and the 16-color
@@ -795,48 +1036,46 @@ export class VtTerminal {
     this.stale = true;
   }
 
-  isRowDirty(y: number): boolean {
-    return this.dirty === ABI.GhosttyRenderStateDirty.FULL || this.rowDirty[y] === 1;
+  // ------------------------------------------------------------------
+  // ghostty-web's cell format and dirty calls, over the frame reader
+  // ------------------------------------------------------------------
+
+  update(): number {
+    return this.beginFrame();
   }
 
   markClean(): void {
-    this.dirty = ABI.GhosttyRenderStateDirty.FALSE;
-    this.rowDirty.fill(0);
+    this.endFrame();
   }
 
   clearDirty(): void {
-    this.markClean();
+    this.endFrame();
   }
 
   isDirty(): boolean {
-    return this.update() !== ABI.GhosttyRenderStateDirty.FALSE;
+    return this.beginFrame() !== ABI.GhosttyRenderStateDirty.FALSE;
   }
 
   needsFullRedraw(): boolean {
-    return this.update() === ABI.GhosttyRenderStateDirty.FULL;
+    return this.beginFrame() === ABI.GhosttyRenderStateDirty.FULL;
   }
 
-  /// Every active-screen cell, row-major. ghostty-web's renderer reads
-  /// rows through `getLine`; this flat form is its binding's older API.
+  /// Every active-screen cell, row-major, in ghostty-web's cell format.
   getViewport(): GhosttyCell[] {
-    this.sync();
-    return this.rowCache.flat();
+    const cells = new VtCells();
+    const out: GhosttyCell[] = [];
+    for (let y = 0; y < this._rows; y++) if (this.readRow(y, cells)) out.push(...legacyCells(cells));
+    return out;
   }
 
-  /// A copy of row `y`, so a caller that keeps it is not handed cells the
-  /// next update rewrites.
+  /// Screen row `y` in ghostty-web's cell format, cells of its own.
   getLine(y: number): GhosttyCell[] | null {
-    if (y < 0 || y >= this._rows) return null;
-    this.sync();
-    return this.rowCache[y].map((cell) => ({ ...cell }));
+    const cells = new VtCells();
+    return this.readRow(y, cells) ? legacyCells(cells) : null;
   }
 
   getGraphemeString(row: number, col: number): string {
-    this.sync();
-    const cached = this.graphemeCache[row]?.get(col);
-    if (cached !== undefined) return cached;
-    const cell = this.rowCache[row]?.[col];
-    return cell && cell.codepoint ? String.fromCodePoint(cell.codepoint) : " ";
+    return this.readRow(row, this.lookup) ? cellText(this.lookup.at(col)) : " ";
   }
 
   // ------------------------------------------------------------------
@@ -1012,15 +1251,10 @@ export class VtTerminal {
     return this.wasm.view().getUint32(ptr, true);
   }
 
-  /// History row `offset`, 0 the oldest.
+  /// History row `offset`, 0 the oldest, in ghostty-web's cell format.
   getScrollbackLine(offset: number): GhosttyCell[] | null {
-    if (offset < 0 || offset >= this.getScrollbackLength()) return null;
-    this.sync();
-    const cells: GhosttyCell[] = [];
-    for (let x = 0; x < this._cols; x++) {
-      cells.push(this.gridCell(ABI.GhosttyPointTag.HISTORY, x, offset));
-    }
-    return cells;
+    const cells = new VtCells();
+    return this.readHistoryRow(offset, cells) ? legacyCells(cells) : null;
   }
 
   /// Whether row `row` continues the row above it, the meaning xterm's
@@ -1188,42 +1422,164 @@ export class VtTerminal {
     this.wasm.fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.MODE, ptr);
   }
 
-  private resetCache(): void {
-    this.rowCache = Array.from({ length: this._rows }, () =>
-      Array.from({ length: this._cols }, () => blankCell(this.fg, this.bg)),
-    );
-    this.graphemeCache = Array.from({ length: this._rows }, () => new Map());
-    this.rowDirty = new Uint8Array(this._rows);
-    this.stale = true;
-    this.forceFull = true;
+  /// Writes the key and value arrays of the multi-get calls a row's read
+  /// makes, which stay put: the row's raw cells and its cells handle, and a
+  /// cell's style and cluster.
+  private writeMultiArgs(): void {
+    const view = this.wasm.view();
+    const s = this.scratch;
+    view.setInt32(s + SCRATCH.rowKeys, ABI.GhosttyRenderStateRowData.CELLS_RAW, true);
+    view.setInt32(s + SCRATCH.rowKeys + 4, ABI.GhosttyRenderStateRowData.CELLS, true);
+    view.setUint32(s + SCRATCH.rowValues, s + SCRATCH.cellsView, true);
+    view.setUint32(s + SCRATCH.rowValues + 4, s + SCRATCH.rowCells, true);
+    view.setUint32(s + SCRATCH.rowCells, this.rowCells, true);
+    view.setInt32(s + SCRATCH.cellKeys, ABI.GhosttyRenderStateRowCellsData.STYLE, true);
+    view.setInt32(s + SCRATCH.cellKeys + 4, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, true);
+    view.setUint32(s + SCRATCH.cellValues, s + SCRATCH.style, true);
+    view.setUint32(s + SCRATCH.cellValues + 4, s + SCRATCH.codepoints, true);
   }
 
-  /// Reads the render state into the row cache when a write or resize
-  /// changed the terminal since the last read.
+  /// Updates the render state when a write, a resize or new colours changed
+  /// the terminal since its last update, and adds what the update reports
+  /// changed to what changed since the last `endFrame`. The core keeps its
+  /// own dirty state across updates until `endFrame` cleans it, so its dirty
+  /// iteration lists every row changed since then. It reports the whole
+  /// screen changed after a resize, a switch of screens, new colours and
+  /// output that scrolled.
   private sync(): void {
-    if (!this.stale) return;
+    if (!this.stale || !this.handle) return;
     this.stale = false;
+    this.generation++;
     const fn = this.wasm.fn;
     const s = this.scratch;
     const D = ABI.GhosttyRenderStateDirty;
     fn.ghostty_render_state_update(this.renderState, this.handle);
-
     fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.DIRTY, s + SCRATCH.slot);
     let dirty = this.wasm.view().getInt32(s + SCRATCH.slot, true);
-    // A switch between the primary and alternate screen redraws
-    // everything, as ghostty-web's binding reports it.
-    const alternate = this.isAlternateScreen();
-    if (alternate !== this.lastScreenAlternate || this.forceFull) dirty = D.FULL;
-    this.lastScreenAlternate = alternate;
-    this.forceFull = false;
-
-    // Every unstyled cell carries the default colors and every palette cell
-    // its resolved color, so a change to either redraws the whole screen,
-    // which the render state marks only as far as the rows it touched.
+    // Every cell's colours resolve against the defaults and the palette read
+    // here, so a change to them repaints every row whatever the core says.
     if (this.readColors()) dirty = D.FULL;
-    if (dirty !== D.FALSE) this.readRows(dirty === D.FULL);
-    fn.ghostty_render_state_clean(this.renderState);
+    if (dirty === D.PARTIAL) this.readDirtyRows();
     if (dirty > this.dirty) this.dirty = dirty;
+    // The update moved the rows the iterator was filled with.
+    this.iteratorGeneration = -1;
+  }
+
+  /// Marks the rows the core's dirty iteration lists.
+  private readDirtyRows(): void {
+    const fn = this.wasm.fn;
+    const s = this.scratch;
+    this.wasm.view().setUint32(s + SCRATCH.slot, this.rowIterator, true);
+    fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
+    while (fn.ghostty_render_state_row_iterator_next_dirty(this.rowIterator, s + SCRATCH.dirtyY)) {
+      const y = this.wasm.view().getUint16(s + SCRATCH.dirtyY, true);
+      if (y < this.rowDirty.length) this.rowDirty[y] = 1;
+    }
+  }
+
+  /// Moves the row iterator to screen row `y`, filling it again when the
+  /// render state was updated since or the row is above it; rows are read
+  /// top to bottom in a frame, so a frame steps it down the screen once.
+  private seekRow(y: number): boolean {
+    const fn = this.wasm.fn;
+    if (this.iteratorGeneration !== this.generation || y < this.iteratorRow) {
+      const s = this.scratch;
+      this.wasm.view().setUint32(s + SCRATCH.slot, this.rowIterator, true);
+      fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
+      this.iteratorGeneration = this.generation;
+      this.iteratorRow = -1;
+    }
+    while (this.iteratorRow < y) {
+      if (!fn.ghostty_render_state_row_iterator_next(this.rowIterator)) {
+        this.iteratorGeneration = -1;
+        return false;
+      }
+      this.iteratorRow++;
+    }
+    return true;
+  }
+
+  /// A cell nothing was written to, in the default colours.
+  private blank(cell: VtCell): void {
+    cell.codepoint = 0;
+    cell.cluster = null;
+    cell.width = 1;
+    cell.flags = 0;
+    cell.fg = this.fg;
+    cell.bg = this.bg;
+    cell.hyperlink = 0;
+  }
+
+  /// A cell from its raw value, `lo` and `hi`, with no style yet: its text,
+  /// its width, its link and the default colours.
+  private rawCell(cell: VtCell, lo: number, hi: number): void {
+    const T = ABI.GhosttyCellContentTag;
+    const tag = cellBits(lo, hi, CELL_BITS.content_tag);
+    cell.codepoint = tag === T.CODEPOINT || tag === T.CODEPOINT_GRAPHEME ? cellBits(lo, hi, CELL_BITS.content) & 0x1fffff : 0;
+    cell.cluster = null;
+    cell.width = cellWidth(cellBits(lo, hi, CELL_BITS.wide));
+    cell.flags = 0;
+    cell.fg = this.fg;
+    cell.bg = this.bg;
+    cell.hyperlink = cellBits(lo, hi, CELL_BITS.hyperlink);
+  }
+
+  /// The background a cell with no text carries in its raw value, over its
+  /// style's.
+  private contentBackground(cell: VtCell, lo: number, hi: number): void {
+    const T = ABI.GhosttyCellContentTag;
+    const tag = cellBits(lo, hi, CELL_BITS.content_tag);
+    if (tag === T.BG_COLOR_PALETTE) {
+      cell.bg = this.paletteColor(cellBits(lo, hi, CELL_BITS.content) & 0xff);
+    } else if (tag === T.BG_COLOR_RGB) {
+      const c = cellBits(lo, hi, CELL_BITS.content);
+      cell.bg = ((c & 0xff) << 16) | (c & 0xff00) | ((c >>> 16) & 0xff);
+    }
+  }
+
+  /// The slot of style `id` among the styles this row's read has met, or -1.
+  private knownStyle(id: number): number {
+    for (let i = 0; i < this.styleCount; i++) if (this.styleIds[i] === id) return i;
+    return -1;
+  }
+
+  /// Keeps the `GhosttyStyle` at `ptr` as style `id`, resolved against the
+  /// palette and the defaults, and returns its slot. Past ROW_STYLES styles
+  /// in a row the last slot serves each new one in turn.
+  private rememberStyle(id: number, view: DataView, ptr: number): number {
+    const L = LAYOUT.GhosttyStyle.fields;
+    const slot = this.styleCount < ROW_STYLES ? this.styleCount++ : ROW_STYLES - 1;
+    this.styleIds[slot] = id;
+    this.styleFlags[slot] = view.getUint16(ptr + L.flags, true);
+    this.styleFg[slot] = this.styleColor(view, ptr + L.fg_color) ?? this.fg;
+    this.styleBg[slot] = this.styleColor(view, ptr + L.bg_color) ?? this.bg;
+    return slot;
+  }
+
+  private applyStyle(cell: VtCell, slot: number): void {
+    cell.flags = this.styleFlags[slot];
+    cell.fg = this.styleFg[slot];
+    cell.bg = this.styleBg[slot];
+  }
+
+  /// Points the codepoint buffer of a cell's multi-get at the scratch room.
+  private clearCodepoints(): void {
+    const B = LAYOUT.GhosttyCodepointBuffer.fields;
+    const view = this.wasm.view();
+    const cb = this.scratch + SCRATCH.codepoints;
+    view.setUint32(cb + B.ptr, this.scratch + SCRATCH.graphemes, true);
+    view.setUint32(cb + B.cap, GRAPHEME_CAP, true);
+    view.setUint32(cb + B.len, 0, true);
+  }
+
+  /// The codepoints a cell's multi-get wrote to the scratch room.
+  private scratchCodepoints(): number[] {
+    const B = LAYOUT.GhosttyCodepointBuffer.fields;
+    const view = this.wasm.view();
+    const len = Math.min(view.getUint32(this.scratch + SCRATCH.codepoints + B.len, true), GRAPHEME_CAP);
+    const cps: number[] = [];
+    for (let i = 0; i < len; i++) cps.push(view.getUint32(this.scratch + SCRATCH.graphemes + i * 4, true));
+    return cps;
   }
 
   /// Reads the default colors and the palette; true when any of them
@@ -1237,89 +1593,13 @@ export class VtTerminal {
     const view = this.wasm.view();
     const bg = readRgb(view, ptr + C.fields.background);
     const fg = readRgb(view, ptr + C.fields.foreground);
-    const palette = this.wasm.bytes().slice(ptr + C.fields.palette, ptr + C.fields.palette + 768);
-    const changed =
-      !sameRgb(bg, this.bg) || !sameRgb(fg, this.fg) || palette.some((v, i) => v !== this.palette[i]);
+    const palette = this.wasm.bytes().subarray(ptr + C.fields.palette, ptr + C.fields.palette + 768);
+    let changed = bg !== this.bg || fg !== this.fg;
+    for (let i = 0; i < 768 && !changed; i++) changed = palette[i] !== this.palette[i];
     this.bg = bg;
     this.fg = fg;
-    this.palette = palette;
+    if (changed) this.palette.set(palette);
     return changed;
-  }
-
-  private readRows(full: boolean): void {
-    const fn = this.wasm.fn;
-    const s = this.scratch;
-    const view = () => this.wasm.view();
-    view().setUint32(s + SCRATCH.slot, this.rowIterator, true);
-    fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
-    let y = 0;
-    while (y < this._rows && fn.ghostty_render_state_row_iterator_next(this.rowIterator)) {
-      let rowDirty = full;
-      if (!rowDirty) {
-        fn.ghostty_render_state_row_get(this.rowIterator, ABI.GhosttyRenderStateRowData.DIRTY, s + SCRATCH.slot);
-        rowDirty = view().getUint8(s + SCRATCH.slot) !== 0;
-      }
-      if (rowDirty) {
-        this.rowDirty[y] = 1;
-        view().setUint32(s + SCRATCH.slot, this.rowCells, true);
-        fn.ghostty_render_state_row_get(this.rowIterator, ABI.GhosttyRenderStateRowData.CELLS, s + SCRATCH.slot);
-        this.readRowCells(y);
-      }
-      y++;
-    }
-  }
-
-  private readRowCells(y: number): void {
-    const fn = this.wasm.fn;
-    const s = this.scratch;
-    const K = ABI.GhosttyRenderStateRowCellsData;
-    const T = ABI.GhosttyCellContentTag;
-    const ok = ABI.GhosttyResult.SUCCESS;
-    const row = this.rowCache[y];
-    const graphemes = this.graphemeCache[y];
-    graphemes.clear();
-    let x = 0;
-    while (x < this._cols && fn.ghostty_render_state_row_cells_next(this.rowCells)) {
-      fn.ghostty_render_state_row_cells_get(this.rowCells, K.RAW, s + SCRATCH.raw);
-      const raw = decodeCell(this.wasm.view(), s + SCRATCH.raw);
-      let fg = this.fg;
-      let bg = this.bg;
-      let flags = 0;
-      if (raw.styleId !== 0) {
-        const style = s + SCRATCH.style;
-        fn.ghostty_render_state_row_cells_get(this.rowCells, K.STYLE, style);
-        flags = styleFlags(this.wasm.view(), style);
-        if (fn.ghostty_render_state_row_cells_get(this.rowCells, K.FG_COLOR, s + SCRATCH.rgb) === ok) {
-          fg = readRgb(this.wasm.view(), s + SCRATCH.rgb);
-        }
-      }
-      if (raw.styleId !== 0 || raw.tag === T.BG_COLOR_PALETTE || raw.tag === T.BG_COLOR_RGB) {
-        if (fn.ghostty_render_state_row_cells_get(this.rowCells, K.BG_COLOR, s + SCRATCH.rgb) === ok) {
-          bg = readRgb(this.wasm.view(), s + SCRATCH.rgb);
-        }
-      }
-      let graphemeLen = 0;
-      if (raw.tag === T.CODEPOINT_GRAPHEME) {
-        const cps = this.rowCellCluster();
-        if (cps && cps.length > 1) {
-          graphemes.set(x, String.fromCodePoint(...cps));
-          graphemeLen = cps.length - 1;
-        }
-      }
-      const cell = row[x];
-      cell.codepoint = codepointOf(raw);
-      cell.fg_r = fg.r;
-      cell.fg_g = fg.g;
-      cell.fg_b = fg.b;
-      cell.bg_r = bg.r;
-      cell.bg_g = bg.g;
-      cell.bg_b = bg.b;
-      cell.flags = flags;
-      cell.width = cellWidth(raw.wide);
-      cell.hyperlink_id = raw.hyperlink ? 1 : 0;
-      cell.grapheme_len = graphemeLen;
-      x++;
-    }
   }
 
   /// Points the scratch grid ref at a cell; false when the point is
@@ -1341,54 +1621,9 @@ export class VtTerminal {
     return point;
   }
 
-  /// A cell of the screen or history as ghostty-web's binding builds it:
-  /// colors resolved against the current palette and defaults, inverse
-  /// left to the renderer.
-  private gridCell(tag: number, x: number, y: number): GhosttyCell {
-    if (!this.gridRef(tag, x, y)) return blankCell(this.fg, this.bg);
-    const fn = this.wasm.fn;
-    const s = this.scratch;
-    const ok = ABI.GhosttyResult.SUCCESS;
-    if (fn.ghostty_grid_ref_cell(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ok) return blankCell(this.fg, this.bg);
-    const raw = decodeCell(this.wasm.view(), s + SCRATCH.raw);
-    let fg = this.fg;
-    let bg = this.bg;
-    let flags = 0;
-    const T = ABI.GhosttyCellContentTag;
-    if (raw.styleId !== 0) {
-      const style = s + SCRATCH.style;
-      if (fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, style) === ok) {
-        const view = this.wasm.view();
-        flags = styleFlags(view, style);
-        fg = this.styleColor(view, style + LAYOUT.GhosttyStyle.fields.fg_color) ?? this.fg;
-        bg = this.styleColor(view, style + LAYOUT.GhosttyStyle.fields.bg_color) ?? this.bg;
-      }
-    }
-    if (raw.tag === T.BG_COLOR_PALETTE) bg = this.paletteColor(raw.content & 0xff);
-    if (raw.tag === T.BG_COLOR_RGB) {
-      bg = { r: raw.content & 0xff, g: (raw.content >>> 8) & 0xff, b: (raw.content >>> 16) & 0xff };
-    }
-    let graphemeLen = 0;
-    if (raw.tag === T.CODEPOINT_GRAPHEME) {
-      const text = this.gridGraphemes();
-      graphemeLen = text ? Math.max([...text].length - 1, 0) : 0;
-    }
-    return {
-      codepoint: codepointOf(raw),
-      fg_r: fg.r,
-      fg_g: fg.g,
-      fg_b: fg.b,
-      bg_r: bg.r,
-      bg_g: bg.g,
-      bg_b: bg.b,
-      flags,
-      width: cellWidth(raw.wide),
-      hyperlink_id: raw.hyperlink ? 1 : 0,
-      grapheme_len: graphemeLen,
-    };
-  }
-
-  private styleColor(view: DataView, ptr: number): Rgb | null {
+  /// The 0xRRGGBB of the `GhosttyStyleColor` at `ptr`, or null when it
+  /// names no colour.
+  private styleColor(view: DataView, ptr: number): number | null {
     const C = LAYOUT.GhosttyStyleColor.fields;
     const tag = view.getUint8(ptr + C.tag);
     if (tag === ABI.GhosttyStyleColorTag.PALETTE) return this.paletteColor(view.getUint8(ptr + C.value));
@@ -1396,9 +1631,9 @@ export class VtTerminal {
     return null;
   }
 
-  private paletteColor(index: number): Rgb {
+  private paletteColor(index: number): number {
     const p = this.palette;
-    return { r: p[index * 3], g: p[index * 3 + 1], b: p[index * 3 + 2] };
+    return (p[index * 3] << 16) | (p[index * 3 + 1] << 8) | p[index * 3 + 2];
   }
 
   /// The codepoints of a cluster, base first, through `read`, which fills

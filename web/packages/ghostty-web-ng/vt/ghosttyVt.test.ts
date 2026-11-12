@@ -515,13 +515,15 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     type Probe = GhosttyTerminal & { scratch: number; wasm: Wasm };
     const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
     const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
-    // The core keeps its own state (the cursor among it) right past the
-    // scratch, so a plain one-cell write on an identical terminal names the
-    // bytes a write moves on its own.
+    // The core keeps its own state (the cursor and the read position among
+    // it) right past the scratch, so a two-codepoint cluster, which fits
+    // the scratch, written and read on an identical terminal names the
+    // bytes a write and a read move on their own.
     const control = (await upstream()).createTerminal(20, 3) as unknown as Probe;
     const controlBefore = pastScratch(control);
-    control.write("e");
+    control.write("e\u0301");
     control.update();
+    control.getGraphemeString(0, 0);
     const ownState = moved(controlBefore, pastScratch(control));
     const t = (await upstream()).createTerminal(20, 3) as unknown as Probe;
     expect(t.scratch, "the control's layout is this terminal's").toBe(control.scratch);
@@ -541,11 +543,11 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     // One cluster: "e" and n - 1 combining acute accents.
     t.write("e" + "\u0301".repeat(n - 1));
     t.update();
+    const cell = [...t.getGraphemeString(0, 0)];
     expect(ownState, "nothing past the scratch but the core's own state").toEqual(expect.arrayContaining(moved(before, pastScratch(t))));
     const own = allocs.filter(([, len]) => len === n * 4);
     expect(own, "one buffer of four bytes a codepoint").toHaveLength(1);
     expect(frees, "freed with its length").toContainEqual(own[0]);
-    const cell = [...t.getGraphemeString(0, 0)];
     expect(cell[0]).toBe("e");
     expect(cell.length).toBe(n);
   });
