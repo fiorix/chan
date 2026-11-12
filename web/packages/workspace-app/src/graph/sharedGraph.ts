@@ -5,6 +5,8 @@
 // read it, so the tabs of a window hold the same node and edge objects.
 // `withSpine` lays that graph over a tab's own filesystem spine, which is
 // the tree as deep as the tab has it opened, read straight from disk.
+// `drawnPart` is what a hidden tab keeps of it once the window's graph has
+// moved on.
 
 import type { GraphView, GraphViewEdge, GraphViewNode } from "../api/types";
 import type { CanvasEdge, CanvasNode } from "./canvasNodes";
@@ -94,4 +96,30 @@ export function withSpine(spine: DrawnGraph, view: GraphView | null): DrawnGraph
     nodes: nodes.length === 0 ? shared.graph.nodes : [...shared.graph.nodes, ...nodes],
     edges: edges.length === 0 ? shared.graph.edges : [...shared.graph.edges, ...edges],
   };
+}
+
+/// The part of `graph` a tab draws from, given the ids the graph includes
+/// before the filter chips (`selectionView.graphNodeIds`): the included
+/// files and folders, every edge between two included nodes, and the tags,
+/// mentions and languages those edges reach, with the selected node. The
+/// rules that choose what is drawn read no more than this, so over the part
+/// they choose the same nodes and edges as over the whole graph. A hidden
+/// tab keeps it in place of the view it took.
+export function drawnPart(
+  graph: DrawnGraph,
+  included: ReadonlySet<string>,
+  selectedId: string | null,
+): DrawnGraph {
+  const edges = graph.edges.filter((e) => included.has(e.source) && included.has(e.target));
+  const reached = new Set<string>();
+  for (const e of edges) {
+    reached.add(e.source);
+    reached.add(e.target);
+  }
+  const nodes = graph.nodes.filter((n) =>
+    n.kind === "file" || n.kind === "folder"
+      ? included.has(n.id)
+      : reached.has(n.id) || n.id === selectedId,
+  );
+  return { nodes, edges };
 }

@@ -205,6 +205,46 @@ describe("graph tabs in a pane", () => {
     expect(two!.nodes, "the window's one copy again").toBe(one!.nodes);
   });
 
+  test("a hidden tab lets go of the graph once the window's has moved on, and keeps what it draws", async () => {
+    // Tab two has the root's level drawn and `notes` selected; `notes` is
+    // closed, so what it draws leaves out the files below it.
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/b.md"), g.tag("t")],
+      edges: [
+        ...graphServer.view.edges,
+        g.edge("directory:notes", "notes/b.md", "contains"),
+        g.edge("notes/a.md", "#t", "tag"),
+      ],
+    };
+    const { pane } = await renderPane();
+    pane.activeTabId = "two";
+    await settle();
+    pane.activeTabId = "one";
+    await settle();
+    const [one, two] = canvas.all;
+    const first = two!.nodes;
+    const drawn = [...two!.visibleNodeIds].sort();
+    expect(first, "hidden under the graph it took: the window's own arrays").toBe(one!.nodes);
+    expect(drawn).toEqual(["", "directory:notes"]);
+
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/new.md")],
+      edges: [...graphServer.view.edges, g.edge("directory:notes", "notes/new.md", "contains")],
+    };
+    noteGraphChanged(() => true);
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(one!.nodes.map((n) => n.id)).toContain("notes/new.md");
+    expect(two!.nodes, "the view it took is let go").not.toBe(first);
+    expect(two!.nodes.map((n) => n.id), "the part it draws from, and no more").toEqual(["", "directory:notes"]);
+    expect([...two!.visibleNodeIds].sort(), "and it draws what it drew").toEqual(drawn);
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(two!.nodes, "shown again, it draws the window's graph").toBe(one!.nodes);
+    expect([...two!.visibleNodeIds].sort()).toEqual(drawn);
+  });
+
   test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {
     const { pane } = await renderPane();
     const [one, two] = canvas.all;

@@ -99,7 +99,13 @@
     type DraftLayer,
   } from "../graph/draftNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
-  import { NO_GRAPH, graphEdgeKey, withSpine, type DrawnGraph } from "../graph/sharedGraph";
+  import {
+    NO_GRAPH,
+    drawnPart,
+    graphEdgeKey,
+    withSpine,
+    type DrawnGraph,
+  } from "../graph/sharedGraph";
   import {
     graphNodeIds,
     openBelow,
@@ -399,9 +405,12 @@
 
   /// The view of the window's shared graph this tab draws, and whether it
   /// was still streaming when taken (`graphData.partial`). The tab takes it
-  /// while shown and keeps it while hidden (see the effect that takes it).
-  /// Held raw: the view is the store's own object, never a copy.
+  /// while shown (see the effect that takes it). Held raw: the view is the
+  /// store's own object, never a copy.
   let taken = $state.raw<{ view: GraphView; partial: boolean } | null>(null);
+  /// What a hidden tab holds in place of `taken` once the window's graph has
+  /// moved on under it: the part of its view it draws from, and no more.
+  let kept = $state.raw<DrawnGraph | null>(null);
   /// The tab's own filesystem spine (`loadSpine`), under the canvas's types.
   let spine = $state.raw<DrawnGraph>(NO_GRAPH);
   let spineLoading = $state(true);
@@ -414,7 +423,9 @@
   /// What the tab draws from: the shared graph over the spine. With nothing
   /// of the spine's own to add these are the shared graph's arrays
   /// themselves, the same in every tab of the window.
-  const graph = $derived(rootGone ? NO_GRAPH : withSpine(spine, taken?.view ?? null));
+  const graph = $derived(
+    rootGone ? NO_GRAPH : (kept ?? withSpine(spine, taken?.view ?? null)),
+  );
   const nodes = $derived(graph.nodes);
   const edges = $derived(graph.edges);
   const loading = $derived(spineLoading || graphData.loading);
@@ -1374,9 +1385,8 @@
     untrack(() => void ensureGraphLoaded());
   });
 
-  // A shown tab draws the view the window holds. A hidden tab takes nothing:
-  // it keeps what it last drew, does no work while the graph changes under
-  // it, and takes the current view when it is next shown. A view still
+  // A shown tab draws the view the window holds. A hidden tab takes nothing
+  // and takes the current view when it is next shown. A view still
   // streaming is taken only by a tab that draws no whole graph (none yet,
   // or the empty one of an index that could not answer), so a reload keeps
   // the drawn graph on screen until its successor is complete, and a
@@ -1388,9 +1398,28 @@
     untrack(() => {
       if (view === null) return;
       if (taken !== null && taken.view === view && taken.partial === partial) return;
-      const drawsWhole = taken !== null && !taken.partial && taken.view.nodes.length > 0;
+      const drawsWhole =
+        kept !== null || (taken !== null && !taken.partial && taken.view.nodes.length > 0);
       if (partial && drawsWhole) return;
       taken = { view, partial };
+      kept = null;
+    });
+  });
+
+  // A hidden tab lets go of the view it took as soon as the window's graph
+  // moves on, so the window holds one copy of the graph and not one more for
+  // every tab last shown under an older one. It keeps the part it draws
+  // from (`drawnPart`), which is all its canvas reads, so its layout is
+  // there when it is shown again; from then on it does no work while the
+  // graph changes under it.
+  $effect(() => {
+    if (visible) return;
+    const view = graphData.view;
+    untrack(() => {
+      if (taken === null || taken.view === view) return;
+      const whole = !taken.partial && taken.view.nodes.length > 0;
+      kept = whole ? drawnPart(graph, scopedNodeIds, selectedId) : null;
+      taken = null;
     });
   });
 
