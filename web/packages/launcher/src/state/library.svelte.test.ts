@@ -23,7 +23,7 @@ import {
   updateGateway,
   windowLiveTerminalCount,
 } from "./library.svelte";
-import { ApiError, type GatewayEntry, type WorkspaceEntry } from "../api/library";
+import { ApiError, type GatewayEntry, type WindowSet, type WorkspaceEntry } from "../api/library";
 import { setDemoMode } from "./demo.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
@@ -98,6 +98,78 @@ describe("loadLibrary", () => {
     watch.mockRestore();
     workspaces.mockRestore();
     devservers.mockRestore();
+  });
+
+  it("counts the library as read once the registries and the window feed have both answered", async () => {
+    stopWatching();
+    expect(library.loaded, "a stopped feed starts the reading over").toBe(false);
+    const { backend } = await import("../api/backend");
+    let frame: (set: WindowSet) => void = () => {};
+    // Every listing asked for and not yet answered: a frame asks for one of
+    // its own beside the load's.
+    const asked: Array<(rows: WorkspaceEntry[]) => void> = [];
+    const answer = (): void => {
+      for (const resolve of asked.splice(0)) resolve([]);
+    };
+    const watch = vi.spyOn(backend, "watchWindows").mockImplementation((onSet) => {
+      frame = onSet;
+      return () => {};
+    });
+    const workspaces = vi.spyOn(backend, "listWorkspaces").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          asked.push(resolve);
+        }),
+    );
+    try {
+      const loading = loadLibrary();
+      expect(library.loaded).toBe(false);
+      frame({ windows: [] });
+      expect(library.loaded, "a frame before the registries answer").toBe(false);
+      answer();
+      await loading;
+      expect(library.loaded).toBe(true);
+
+      stopWatching();
+      expect(library.loaded).toBe(false);
+      const again = loadLibrary();
+      answer();
+      await again;
+      expect(library.loaded, "the registries before a frame").toBe(false);
+      frame({ windows: [] });
+      expect(library.loaded).toBe(true);
+    } finally {
+      answer();
+      watch.mockRestore();
+      workspaces.mockRestore();
+    }
+  });
+
+  it("does not wait on a window feed that cannot start", async () => {
+    stopWatching();
+    const { backend } = await import("../api/backend");
+    const watch = vi.spyOn(backend, "watchWindows").mockImplementation(() => {
+      throw new Error("no WebSocket here");
+    });
+    try {
+      await loadLibrary();
+      expect(library.loaded).toBe(true);
+    } finally {
+      watch.mockRestore();
+    }
+  });
+
+  it("counts registries that answered with an error as answered", async () => {
+    stopWatching();
+    const { backend } = await import("../api/backend");
+    const workspaces = vi.spyOn(backend, "listWorkspaces").mockRejectedValue(new Error("listing failed"));
+    try {
+      await loadLibrary();
+      expect(library.error).toBe("listing failed");
+      expect(library.loaded).toBe(true);
+    } finally {
+      workspaces.mockRestore();
+    }
   });
 });
 

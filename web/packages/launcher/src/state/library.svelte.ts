@@ -34,6 +34,12 @@ interface LibraryState {
   // launcher's window handles to gate leader-only create controls.
   leaders: Record<string, string>;
   loading: boolean;
+  // Whether the library has been read once: the registries have answered a
+  // load, with rows or with an error, and the window feed has delivered a
+  // frame or could not start. Until then an empty list means not read yet,
+  // not empty, so what names an object waits before it concludes the object
+  // is gone.
+  loaded: boolean;
   error: string | null;
 }
 
@@ -45,8 +51,18 @@ export const library = $state<LibraryState>({
   tmuxConnections: [],
   leaders: {},
   loading: false,
+  loaded: false,
   error: null,
 });
+
+// The two answers `library.loaded` waits for. `stopWatching` ends a reading,
+// so the load that follows it starts another.
+let registriesAnswered = false;
+let feedAnswered = false;
+
+function noteAnswered(): void {
+  library.loaded = registriesAnswered && feedAnswered;
+}
 
 let unwatch: (() => void) | null = null;
 let removeVisibilityResync: (() => void) | null = null;
@@ -102,6 +118,8 @@ function ensureWindowFeed(): void {
       library.windows = set.windows;
       library.tmuxConnections = set.tmux_connections ?? [];
       library.leaders = set.leaders ?? {};
+      feedAnswered = true;
+      noteAnswered();
       // On a self-managed surface, reconcile the window.open handle map against
       // the feed (close handles for discarded records, flag orphans). Inert on
       // desktop (bridge-driven, no browser-origin records) and in the demo.
@@ -118,7 +136,10 @@ function ensureWindowFeed(): void {
     });
   } catch {
     // The window feed is best-effort: a host without WebSocket or a failed
-    // connection must not break loading the registries.
+    // connection must not break loading the registries. No frame will come,
+    // so nothing waits for one.
+    feedAnswered = true;
+    noteAnswered();
   }
   installVisibilityResync();
   startWorkspacePolling();
@@ -149,12 +170,17 @@ export async function loadLibrary(): Promise<void> {
     reportError(e);
   } finally {
     library.loading = false;
+    registriesAnswered = true;
+    noteAnswered();
   }
 }
 
 export function stopWatching(): void {
   unwatch?.();
   unwatch = null;
+  registriesAnswered = false;
+  feedAnswered = false;
+  noteAnswered();
   removeVisibilityResync?.();
   removeVisibilityResync = null;
   stopWorkspacePolling();

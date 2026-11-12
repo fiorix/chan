@@ -98,9 +98,10 @@ import type {
   GatewayEntry,
   TmuxConnectionEntry,
   WindowRecord,
+  WindowSet,
   WorkspaceEntry,
 } from "../api/library";
-import { library } from "../state/library.svelte";
+import { library, loadLibrary, stopWatching } from "../state/library.svelte";
 import {
   activeCommandLauncherDraft,
   clearCommandLauncherDraft,
@@ -120,6 +121,7 @@ import { selection, setSelectMode } from "../state/selection.svelte";
 import { themeState, type ThemeChoice } from "../state/theme.svelte";
 import { backend } from "../api/backend";
 import { mintWindow, resetWindowManager } from "../state/windowManager.svelte";
+import { clearAllWindowAttention } from "../state/windowAttention.svelte";
 import { notices, clearNotices } from "../state/notices.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -340,6 +342,8 @@ beforeEach(() => {
   clearRecentWindows();
   clearNotices();
   resetWindowManager();
+  // A feed frame flags the windows this page holds no handle to.
+  clearAllWindowAttention();
   library.error = null;
   target = document.createElement("div");
   document.body.appendChild(target);
@@ -349,6 +353,8 @@ beforeEach(() => {
   library.gateways = [];
   library.leaders = {};
   library.tmuxConnections = [];
+  // The lists above are the library as read.
+  library.loaded = true;
   screen.current = "computers";
   screen.flips = 0;
   clearCommandLauncherDraft();
@@ -359,6 +365,7 @@ beforeEach(() => {
 afterEach(async () => {
   unmount(app);
   target.remove();
+  stopWatching();
   closeCommandLauncher();
   closeDialog();
   setSelectMode(false);
@@ -946,15 +953,63 @@ describe("Computers command deck", () => {
     expect(input().value).toBe("close");
   });
 
-  it("restores an open deck where it stood across a reload", async () => {
-    await openWindowPage();
+  /// Mount the deck again as a reload does: over the saved draft and a
+  /// library nothing has read yet. The registries answer when `listed`
+  /// resolves and the window feed when `frame` is called.
+  function reload(): {
+    listed: { resolve: (rows: WorkspaceEntry[]) => void };
+    frame: (set: WindowSet) => void;
+  } {
     persistCommandLauncherDraft();
     unmount(app);
+    stopWatching();
+    library.workspaces = [];
+    library.windows = [];
     commandLauncher.draft = loadSessionDeckDraft("chan.command-launcher.v1:contextual");
+    const listed = deferred<WorkspaceEntry[]>();
+    let onSet: ((set: WindowSet) => void) | null = null;
+    vi.spyOn(backend, "listWorkspaces").mockImplementation(() => listed.promise);
+    vi.spyOn(backend, "listDevservers").mockResolvedValue([]);
+    vi.spyOn(backend, "listGateways").mockResolvedValue([]);
+    vi.spyOn(backend, "watchWindows").mockImplementation((subscriber) => {
+      onSet = subscriber;
+      return () => {};
+    });
     app = mount(CommandLauncher, { target }) as Record<string, unknown>;
     flushSync();
-    expect(activeCommandLauncherDraft().path).toEqual([WINDOW_1_PAGE]);
+    return { listed, frame: (set) => onSet!(set) };
+  }
+
+  it("restores an open deck where it stood across a reload, once the library has been read", async () => {
+    await openWindowPage();
+    const path = (): string[] => activeCommandLauncherDraft().path;
+    const { listed, frame } = reload();
+    expect(path(), "a library nothing has read says nothing about the page").toEqual([WINDOW_1_PAGE]);
+
+    // The app loads the library once it has mounted, after the deck.
+    const loading = loadLibrary();
+    flushSync();
+    expect(path()).toEqual([WINDOW_1_PAGE]);
+    listed.resolve([{ ...workspace }]);
+    await loading;
+    flushSync();
+    expect(path(), "the registries do not list the windows").toEqual([WINDOW_1_PAGE]);
+    frame({ windows: [{ ...windowRecord }, { ...terminalRecord }] });
+    await flushPromises();
+    expect(path()).toEqual([WINDOW_1_PAGE]);
     expect(result("Close window")).toBeTruthy();
+  });
+
+  it("leaves a restored page whose window is gone, once the library has been read", async () => {
+    await openWindowPage();
+    const { listed, frame } = reload();
+    const loading = loadLibrary();
+    listed.resolve([{ ...workspace }]);
+    await loading;
+    frame({ windows: [{ ...terminalRecord }] });
+    await flushPromises();
+    expect(activeCommandLauncherDraft().path).toEqual([]);
+    expect(result("Control terminal")).toBeTruthy();
   });
 
   it("leaves the query that found an object behind when it enters its page", async () => {

@@ -590,10 +590,11 @@
 
   // The feed is pushed, so an object can leave from anywhere while its page
   // is on screen. Fall back to the nearest page that still names one rather
-  // than leaving an empty body behind. A restored draft waits for the
-  // registries it names.
+  // than leaving an empty body behind. A draft restored by a reload names
+  // its page before anything has read the library, so the fallback waits
+  // until the registries and the window feed have both answered.
   $effect(() => {
-    if (!draft.visible || library.loading) return;
+    if (!draft.visible || !library.loaded) return;
     if (deck.path.length === draft.path.length) return;
     direction = "back";
     draft.path = deck.path;
