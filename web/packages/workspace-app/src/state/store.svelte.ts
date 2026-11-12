@@ -4586,9 +4586,12 @@ export function __testResetSessionDiscarded(): void {
   sessionDiscarded = false;
 }
 
-/// Forget the write in flight, the waiting save, the retry and the report, for
-/// tests that share one store and leave a write held.
+/// Forget the debounced save, the write in flight, the waiting save, the retry
+/// and the report, for tests that share one store and leave a save armed or a
+/// write held.
 export function __testResetSessionWrites(): void {
+  if (sessionTimer) clearTimeout(sessionTimer);
+  sessionTimer = null;
   sessionWrite = null;
   sessionSaveQueued = false;
   if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
