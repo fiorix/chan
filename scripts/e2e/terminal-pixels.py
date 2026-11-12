@@ -22,7 +22,9 @@ The ghostty pattern arms paint what the grid pattern never reaches: cell
 colours and attributes, wide and combined glyphs, each cursor style, history
 rows and the selection. Nothing is measured on them beyond a liveness and a
 blank region; they are byte-level references, and --compare holds a run's
-PNGs to an earlier run's, which is how a renderer change is accepted.
+PNGs to an earlier run's, which is how a renderer change is accepted. A PNG
+of the earlier run that names no scenario this driver has fails too, so a
+scenario cannot drop out between the two runs unseen.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
@@ -711,6 +713,27 @@ def compare_png(scenario: Scenario, png: pathlib.Path, reference: pathlib.Path):
     return [f"{scenario.name}: PNG differs from {earlier}"]
 
 
+def unwritten_references(
+    reference: pathlib.Path, written: list[str], skipped: set[str], only: str
+):
+    """Fail each PNG of the reference run that this run should have written.
+
+    Only the PNGs a run writes are compared, so a scenario dropped or renamed
+    since the reference run would otherwise pass unseen. `skipped` names the
+    scenarios this run's selection left out, and a name outside `--only`
+    is never expected.
+    """
+    failures = []
+    for earlier in sorted(reference.glob("*.png")):
+        if earlier.name in written or earlier.name in skipped:
+            continue
+        if only not in earlier.stem:
+            continue
+        print(f"  FAIL  {earlier} has no PNG of this run's to match")
+        failures.append(f"{earlier.name}: in {reference}, not written by this run")
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -733,7 +756,9 @@ def main() -> int:
         "--compare",
         type=pathlib.Path,
         help="an earlier run's --out directory: every PNG this run writes"
-        " must be byte-identical to the one of the same name there",
+        " must be byte-identical to the one of the same name there, and a PNG"
+        " there of a scenario this driver no longer has fails, unless --only"
+        " leaves its name out",
     )
     args = parser.parse_args()
     out = args.out if args.out.is_absolute() else REPO / args.out
@@ -751,6 +776,7 @@ def main() -> int:
     scenarios = SCENARIOS + PATTERN_SCENARIOS + (
         RENDERER_SCENARIOS if args.include_renderers else []
     )
+    every = SCENARIOS + PATTERN_SCENARIOS + RENDERER_SCENARIOS
     if args.only:
         scenarios = [s for s in scenarios if args.only in s.slug]
     if not scenarios:
@@ -779,6 +805,14 @@ def main() -> int:
         # is still a directory and still holds the page it was built with.
         if (root / "harness.mjs").is_symlink():
             shutil.rmtree(root)
+
+    if reference is not None:
+        print(f"\nreference run {reference}")
+        written = [f"{s.slug}.png" for s in scenarios]
+        skipped = {f"{s.slug}.png" for s in every} - set(written)
+        failures.extend(
+            unwritten_references(reference, written, skipped, args.only)
+        )
 
     if failures:
         print(f"\nFAIL: {len(failures)} assertion(s)")
