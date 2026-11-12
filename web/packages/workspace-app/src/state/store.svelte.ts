@@ -4816,7 +4816,9 @@ export const searchPanel = $state<{
 // accessors preserve the long-standing `.open` / `.query` API used by the
 // overlay stack while the shared deck receives the complete serializable draft.
 // A reload recreates this module and restores visibility, query, scope, path,
-// selection, and recoverable operation state. Closing the browser tab drops it.
+// selection, and recoverable operation state, so a launcher that was open
+// comes back as it stood. Opening it from closed starts over at the root and
+// keeps only the query. Closing the browser tab drops the draft.
 const LAUNCHER_DRAFT_KEY = SESSION_DECK_DRAFT_KEY;
 export const launcherDraft = $state<DeckDraft>(
   loadSessionDeckDraft(LAUNCHER_DRAFT_KEY),
@@ -4850,8 +4852,22 @@ export function clearLauncherDraft(): void {
   persistLauncherDraft();
 }
 
-/// Open or resume this window's launcher draft. Idempotent when already open.
-export function openCommandLauncher(): void {
+/// Open this window's launcher. From closed it starts at the root with no
+/// scope, the first row selected and the last query kept, so the chord never
+/// lands in the branch or scope of an earlier visit. With `path` it opens
+/// inside that branch instead, on an empty query, whether or not it was
+/// already open. Idempotent when already open with no `path`.
+export function openCommandLauncher(path: readonly string[] = []): void {
+  if (!launcherDraft.visible || path.length > 0) {
+    launcherDraft.path = [...path];
+    launcherDraft.selectedId = null;
+    launcherDraft.operation = null;
+  }
+  if (!launcherDraft.visible) {
+    launcherDraft.scope = null;
+    launcherDraft.contextChanged = false;
+  }
+  if (path.length > 0) launcherDraft.query = "";
   launcherPanel.open = true;
 }
 

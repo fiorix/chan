@@ -1,20 +1,25 @@
-// Net-new Global commands: theme (system / light / dark), the screen-lock
-// family (enable / disable / test / set pin / theme), and the window
-// controls (Reload, Open Inspector, Hide window, New window, Close window)
-// that mirror the WebView native menu, and Show transfers and Show
-// workspace warnings, the ways to the transfer panel and the warnings
-// dialog while their status bar lines are closed. The reuse-existing
-// Global entries live in core.ts; these need a new action or an in-app
-// prompt. Theme, screen lock, and Reload are machine-global; the other
-// window controls are desktop-only. Register with registerCommands. See
-// state/commands.ts for the Command shape and helpers.
+// Net-new commands of the window and the workspace: Open, the screen-lock
+// actions (test, set PIN), the window controls (Reload window, Open
+// Inspector, Hide window, New window, Close window) that mirror the WebView
+// native menu, and Show transfers and Show workspace warnings, the ways to
+// the transfer panel and the warnings dialog while their status bar lines
+// are closed. The reuse-existing entries live in core.ts; these need a new
+// action or an in-app prompt. The screen lock's own settings (on or off, its
+// theme) are fields of the Settings overlay and reach the launcher through
+// the settings index. Register with registerCommands. See state/commands.ts
+// for the Command shape and helpers.
 
-import { allowedInWindow, registerCommands, withStatus, workspaceOnly } from "../commands";
+import {
+  allowedInWindow,
+  dispatchChanCommand,
+  registerCommands,
+  withStatus,
+  workspaceOnly,
+} from "../commands";
 import {
   backslashRefusal,
   discardWindowSession,
   openWorkspaceWarningsDialog,
-  setThemeChoice,
   setTransientStatus,
   typedPathRoot,
   ui,
@@ -29,7 +34,12 @@ import { api, sessionWindowId } from "../../api/client";
 import { errorText } from "../../api/errors";
 import { windowCaps } from "../windowCaps";
 import { backslashClimbReason } from "../pathValidate";
-import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
+import {
+  GRAPH_LINK_PREFIX,
+  openBrowserInActivePane,
+  openInActivePane,
+  tmuxRequestCarrier,
+} from "../tabs.svelte";
 import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
 import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
 import { showTransfers, transfers } from "../transfers.svelte";
@@ -126,6 +136,11 @@ async function setScreenLockPin(): Promise<void> {
   );
 }
 
+/// The reason a desktop-only command gives in a browser.
+function desktopOnlyReason(): string | null {
+  return isTauriDesktop() ? null : "Needs the desktop app";
+}
+
 registerCommands([
   {
     // The global Open: bare invocation pops the path dialog; "Open <path>"
@@ -133,15 +148,20 @@ registerCommands([
     // (acceptsArg). workspaceOnly hides it in standalone-terminal windows
     // (precedent "New file"): the route only mounts on workspace tenants
     // and the control socket refuses opens there anyway, so the launcher
-    // simply never offers it.
+    // simply never offers it. It closes the New tab group: what it opens
+    // lands in the active pane as a tab.
     id: "app.open.path",
-    title: "Open",
+    title: "Open...",
     category: "Global",
+    scope: "pane",
+    group: "New tab",
+    order: 2000,
+    kind: "open",
     // Open resolves to a file or directory surface; a graph link target
     // still needs a workspace window to render, and run() reports the
     // server refusal there.
     requirement: "files",
-    keywords: ["open", "file", "path", "folder", "go to", "goto", "graph link"],
+    keywords: ["Open", "file", "path", "folder", "go to", "goto", "graph link"],
     icon: "folder",
     available: workspaceOnly,
     acceptsArg: true,
@@ -152,142 +172,27 @@ registerCommands([
     },
   },
   {
-    id: "app.theme.system",
-    title: "Theme: system",
-    category: "Global",
-    requirement: "any",
-    keywords: ["appearance", "auto", "dark", "light"],
-    available: () => true,
-    run: () => setThemeChoice("system"),
-  },
-  {
-    id: "app.theme.light",
-    title: "Theme: light",
-    category: "Global",
-    requirement: "any",
-    keywords: ["appearance"],
-    available: () => true,
-    run: () => setThemeChoice("light"),
-  },
-  {
-    id: "app.theme.dark",
-    title: "Theme: dark",
-    category: "Global",
-    requirement: "any",
-    keywords: ["appearance"],
-    available: () => true,
-    run: () => setThemeChoice("dark"),
-  },
-  {
-    id: "app.screensaver.enable",
-    title: "Screen lock: on",
-    category: "Global",
-    requirement: "workspace",
-    keywords: ["screensaver", "lock", "privacy"],
-    available: () => true,
-    run: () =>
-      void withStatus(
-        () => api.screensaverPatch({ enabled: true }),
-        "Screen lock on",
-        "Screen lock update failed",
-      ),
-  },
-  {
-    id: "app.screensaver.disable",
-    title: "Screen lock: off",
-    category: "Global",
-    requirement: "workspace",
-    keywords: ["screensaver", "lock", "privacy"],
-    available: () => true,
-    run: () =>
-      void withStatus(
-        () => api.screensaverPatch({ enabled: false }),
-        "Screen lock off",
-        "Screen lock update failed",
-      ),
-  },
-  {
     id: "app.screensaver.test",
-    title: "Screen lock: test",
+    title: "Test screen lock",
     category: "Global",
+    scope: "workspace",
+    order: 5,
     requirement: "workspace",
-    keywords: ["screensaver", "lock", "preview"],
+    keywords: ["Screen lock: test", "screensaver", "lock", "preview"],
     available: () => true,
     run: () => void testScreenLock(),
   },
   {
     id: "app.screensaver.setPin",
-    title: "Screen lock: set PIN",
+    title: "Set screen lock PIN",
     category: "Global",
+    scope: "workspace",
+    order: 6,
+    kind: "open",
     requirement: "workspace",
-    keywords: ["screensaver", "lock", "password", "passcode"],
+    keywords: ["Screen lock: set PIN", "screensaver", "lock", "password", "passcode"],
     available: () => true,
     run: () => void setScreenLockPin(),
-  },
-  {
-    id: "app.screensaver.theme.plain",
-    title: "Screen lock theme: default",
-    category: "Global",
-    requirement: "workspace",
-    keywords: ["screensaver", "plain"],
-    available: () => true,
-    run: () =>
-      void withStatus(
-        () => api.screensaverPatch({ theme: "plain" }),
-        "Screen lock theme: default",
-        "Screen lock update failed",
-      ),
-  },
-  {
-    id: "app.screensaver.theme.matrix",
-    title: "Screen lock theme: matrix",
-    category: "Global",
-    requirement: "workspace",
-    keywords: ["screensaver", "matrix", "rain"],
-    available: () => true,
-    run: () =>
-      void withStatus(
-        () => api.screensaverPatch({ theme: "matrix" }),
-        "Screen lock theme: matrix",
-        "Screen lock update failed",
-      ),
-  },
-  {
-    // Shares the SHORTCUTS id so the launcher row renders its chord read
-    // only. reloadWindow works on web (location.reload) and desktop (IPC).
-    id: "app.window.reload",
-    title: "Reload",
-    category: "Global",
-    requirement: "any",
-    keywords: ["reload", "refresh", "window"],
-    available: () => true,
-    run: () => void reloadWindow(),
-  },
-  {
-    // Desktop-only: on web the browser owns DevTools and openWebInspector
-    // no-ops, so it is not offered there. Cmd+Opt+I is a Tauri-native chord
-    // that bypasses the SPA, so this launcher entry stays chordless.
-    id: "app.window.devtools",
-    title: "Open Inspector",
-    category: "Global",
-    requirement: "any",
-    keywords: ["devtools", "inspector", "console", "javascript", "debug"],
-    available: () => isTauriDesktop(),
-    run: () => void openWebInspector(),
-  },
-  {
-    // The close-confirm overlay's Hide answer without the prompt: bury THIS
-    // window (sessions stay warm, the record persists hidden and reopens from
-    // the launcher). Shares the SHORTCUTS id so the row renders its chord.
-    // Desktop-only: the bury IPC is an explicit no-op in a plain browser, so
-    // the entry is not offered there.
-    id: "app.window.hide",
-    title: "Hide window",
-    category: "Global",
-    requirement: "any",
-    keywords: ["hide", "window", "bury", "minimize"],
-    available: () => isTauriDesktop(),
-    run: () => flushAndHideWindow(),
   },
   {
     // Desktop-only: the host routes by the invoking window's label, and the
@@ -296,11 +201,29 @@ registerCommands([
     id: "app.window.new",
     title: "New window",
     category: "Global",
+    scope: "window",
+    order: 0,
     requirement: "any",
     keywords: ["new", "window", "open", "create"],
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.new", ctx),
+    unavailableReason: desktopOnlyReason,
     run: () => void openNewWindow(),
+  },
+  {
+    // A tmux window's own New window: a new tmux window in a chan window of
+    // its own, the request the desktop's New Window makes there. Offered
+    // while this window shows a tmux pane to carry the request.
+    id: "app.tmux.newWindow",
+    title: "New tmux window",
+    category: "Global",
+    scope: "window",
+    order: 1,
+    requirement: "terminal",
+    keywords: ["tmux", "window", "new"],
+    available: () => tmuxRequestCarrier() !== null,
+    unavailableReason: () => "Needs a tmux window",
+    run: () => dispatchChanCommand("app.tmux.newWindow"),
   },
   {
     // Desktop-only: the browser owns its window lifecycle and the wrapper
@@ -313,6 +236,8 @@ registerCommands([
     id: "app.window.close",
     title: "Close window",
     category: "Global",
+    scope: "window",
+    order: 2,
     requirement: "any",
     keywords: ["close", "window", "discard", "destroy"],
     confirm: {
@@ -323,7 +248,54 @@ registerCommands([
     },
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.close", ctx),
+    unavailableReason: desktopOnlyReason,
     run: () => void flushAndCloseWindow({ discard: () => discardWindowSession() }),
+  },
+  {
+    // The close-confirm overlay's Hide answer without the prompt: bury THIS
+    // window (sessions stay warm, the record persists hidden and reopens from
+    // the launcher). Shares the SHORTCUTS id so the row renders its chord.
+    // Desktop-only: the bury IPC is an explicit no-op in a plain browser, so
+    // the entry is not offered there.
+    id: "app.window.hide",
+    title: "Hide window",
+    category: "Global",
+    scope: "window",
+    order: 3,
+    requirement: "any",
+    keywords: ["hide", "window", "bury", "minimize"],
+    available: () => isTauriDesktop(),
+    unavailableReason: desktopOnlyReason,
+    run: () => flushAndHideWindow(),
+  },
+  {
+    // Shares the SHORTCUTS id so the launcher row renders its chord read
+    // only. reloadWindow works on web (location.reload) and desktop (IPC).
+    id: "app.window.reload",
+    title: "Reload window",
+    category: "Global",
+    scope: "window",
+    order: 4,
+    requirement: "any",
+    keywords: ["Reload", "refresh", "window"],
+    available: () => true,
+    run: () => void reloadWindow(),
+  },
+  {
+    // Desktop-only: on web the browser owns DevTools and openWebInspector
+    // no-ops, so it is not offered there. Cmd+Opt+I is a Tauri-native chord
+    // that bypasses the SPA, so this launcher entry stays chordless.
+    id: "app.window.devtools",
+    title: "Open Inspector",
+    category: "Global",
+    scope: "window",
+    order: 5,
+    kind: "open",
+    requirement: "any",
+    keywords: ["devtools", "inspector", "console", "javascript", "debug"],
+    available: () => isTauriDesktop(),
+    unavailableReason: desktopOnlyReason,
+    run: () => void openWebInspector(),
   },
   {
     // The status bar's Transfers launcher can be closed while a transfer
@@ -331,9 +303,13 @@ registerCommands([
     id: "app.transfers.show",
     title: "Show transfers",
     category: "Global",
+    scope: "window",
+    order: 11,
+    kind: "open",
     requirement: "files",
     keywords: ["transfers", "upload", "download", "progress", "cancel"],
     available: () => transfers.items.length > 0 || uploadRequestCount() > 0,
+    unavailableReason: () => "No transfers to show",
     run: showTransfers,
   },
   {
@@ -342,9 +318,13 @@ registerCommands([
     id: "app.workspace.showWarnings",
     title: "Show workspace warnings",
     category: "Global",
+    scope: "workspace",
+    order: 7,
+    kind: "open",
     requirement: "workspace",
     keywords: ["warnings", "broken", "draft", "problems"],
     available: () => workspaceWarningsDialog.warnings.length > 0,
+    unavailableReason: () => "No workspace warnings",
     run: openWorkspaceWarningsDialog,
   },
 ]);

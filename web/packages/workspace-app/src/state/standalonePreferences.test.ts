@@ -14,7 +14,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { GlobalConfig, HybridSurfaceThemes, Preferences } from "../api/types";
 import { __testSetStandalonePreferences, currentPreferences, workspace } from "./store.svelte";
-import { allCommands } from "./commands";
 import "./commands/install";
 import { defaultDateFormatId } from "../editor/commands/date_macros";
 import { chanMarkdown } from "../editor/markdown/grammar";
@@ -130,13 +129,6 @@ describe("each reader of a setting", () => {
     expect(target.querySelector(".tabs.auto-hidden"), "a lone tab draws no strip").not.toBeNull();
   });
 
-  test("the terminal engine command names the configured engine", () => {
-    const title = () => allCommands().find((c) => c.id === "app.terminal.backend.toggle")!.title;
-    expect(title()).toMatch(/^Terminal engine: xterm /);
-    __testSetStandalonePreferences(preferences({ terminal: { ...preferences().terminal, ghostty: true } }));
-    expect(title()).toMatch(/^Terminal engine: ghostty /);
-  });
-
   test("the app applies the editor theme", async () => {
     const timers = trackTimers();
     const app: Array<Record<string, unknown>> = [];
@@ -187,15 +179,6 @@ describe("the per-surface body themes", () => {
     expect(windowCaps.workspace, `a ${kind} window`).toBe(kind === "workspace");
   }
 
-  /// The command as the launcher runs it, from this window's own registry.
-  async function runCommand(id: string): Promise<void> {
-    const { allCommands } = await import("./commands");
-    await import("./commands/install");
-    const command = allCommands().find((c) => c.id === id);
-    expect(command, id).toBeDefined();
-    await command!.run();
-  }
-
   function liveTable(): HybridSurfaceThemes {
     const out: HybridSurfaceThemes = {};
     for (const kind of store.HYBRID_SURFACE_KINDS) {
@@ -233,7 +216,7 @@ describe("the per-surface body themes", () => {
     vi.resetModules();
   });
 
-  test("the Dashboard theme command in a window with no workspace keeps the other surfaces' stored themes", async () => {
+  test("a Dashboard theme set in a window with no workspace keeps the other surfaces' stored themes", async () => {
     await openWindow("terminal");
     // The frame every window hears after a settings write, and the same
     // refresh this window runs at boot.
@@ -241,7 +224,7 @@ describe("the per-surface body themes", () => {
     await vi.waitFor(() => expect(store.currentPreferences()).not.toBeNull());
     expect(liveTable(), "the window took the served table").toEqual(STORED);
 
-    await runCommand("app.dashboard.surfaceTheme.dark");
+    await store.setHybridSurfaceTheme("dashboard", "dark");
 
     expect(tables).toEqual([{ editor: "light", terminal: "dark", dashboard: "dark" }]);
     expect(server.preferences.hybrid_surface_themes).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
@@ -253,7 +236,7 @@ describe("the per-surface body themes", () => {
     // No refresh has run: the window's own table is empty.
     expect(liveTable()).toEqual({});
 
-    await runCommand("app.dashboard.surfaceTheme.dark");
+    await store.setHybridSurfaceTheme("dashboard", "dark");
     expect(tables.at(-1)).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
 
     // A clear drops its own surface and nothing else.

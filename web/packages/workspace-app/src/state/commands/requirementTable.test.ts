@@ -80,11 +80,13 @@ describe("command requirement table", () => {
     expect(availableCommands(context).some((c) => c.id === "app.dashboard.open")).toBe(strip);
     expect(windowModeAllowsCommand("app.dashboard.open", mode)).toBe(strip);
     expect(dispatchAllowsCommand("app.dashboard.open", caps)).toBe(true);
+    // Go to slide is offered wherever a Dashboard is, and lists the slides
+    // this window can show: Metrics and About anywhere, Workspace and Search
+    // only over a workspace. Slide availability reads the booted window's
+    // own capabilities, which in this file are a workspace window's.
     const dashboard = availableCommands({ ...context, activeSurface: "dashboard" });
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.metrics")).toBe(true);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.about")).toBe(true);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.workspace")).toBe(caps.workspace);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.indexing")).toBe(caps.workspace);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide")).toBe(true);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slides")).toBe(true);
   });
 
   it("declares one of the five requirement values on every command", () => {
@@ -114,8 +116,8 @@ describe("command requirement table", () => {
     // TERMINAL_ONLY_COMMANDS is the set of ids that need no workspace. Some of
     // them are dispatch-only: they are fired by chords and by the desktop's
     // `chan:command` bridge and have no launcher row, so they are NOT catalog
-    // entries -- `app.window.confirmClose` (the OS close button), the find
-    // family, `app.tab.jump`, `app.launcher.toggle`. The dispatch gate runs for
+    // entries -- `app.window.confirmClose` (the OS close button),
+    // `app.tab.jump`, `app.launcher.toggle`. The dispatch gate runs for
     // any window that is more than terminals, so it has to allow them there
     // too; dropping one leaves the desktop holding a close the SPA never
     // answers.

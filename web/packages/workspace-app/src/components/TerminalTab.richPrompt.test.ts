@@ -288,7 +288,7 @@ describe("the doors to the composer", () => {
   test("the launcher's style toolbar command is offered only while the composer shows", async () => {
     const { tab } = await attached();
     const command = allCommands().find((c) => c.id === "terminal.richPromptToolbar")!;
-    expect(command).toMatchObject({ title: "Toggle Rich Prompt style toolbar", category: "Terminal", requirement: "drafts" });
+    expect(command).toMatchObject({ title: "Rich Prompt style toolbar", category: "Terminal", requirement: "drafts" });
     expect(command.available?.(commandContext())).toBe(false);
 
     showRichPromptForTab(tab.id);
@@ -301,7 +301,7 @@ describe("the doors to the composer", () => {
 
   test("the launcher's command asks the app to toggle it", async () => {
     const command = allCommands().find((c) => c.id === "terminal.richPrompt")!;
-    expect(command).toMatchObject({ title: "Show/Hide Rich Prompt", category: "Terminal", requirement: "drafts" });
+    expect(command).toMatchObject({ title: "Rich Prompt", category: "Terminal", requirement: "drafts" });
     const heard: unknown[] = [];
     const listener = (e: Event) => heard.push((e as CustomEvent).detail?.name);
     window.addEventListener("chan:command", listener);

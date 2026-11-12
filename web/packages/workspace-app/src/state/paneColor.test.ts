@@ -338,7 +338,7 @@ describe("launcher focus-colour command applies the doc-root var", () => {
   // WINS over the data-focus-color preset whenever it is set - so a launcher
   // command that only updates the selection is invisibly masked. The command
   // must apply the var exactly like the pane menu button does.
-  test("app.pane.focusColor.orange sets --pane-highlight-color to the mapped hex", () => {
+  test("app.pane.focusColor's orange option sets --pane-highlight-color to the mapped hex", () => {
     const ctx: CommandContext = {
       terminalOnly: false,
       terminalControl: false,
@@ -351,10 +351,11 @@ describe("launcher focus-colour command applies the doc-root var", () => {
       activeExtensionId: null,
     };
     const command = availableCommands(ctx).find(
-      (candidate) => candidate.id === "app.pane.focusColor.orange",
+      (candidate) => candidate.id === "app.pane.focusColor",
     );
-    if (!command) throw new Error("app.pane.focusColor.orange not registered");
-    command.run();
+    const orange = command?.options?.(ctx).find((option) => option.id === "orange");
+    if (!orange) throw new Error("app.pane.focusColor offers no orange option");
+    void orange.run();
     expect(document.documentElement.style.getPropertyValue(CSS_VAR)).toBe(
       NAMED_PANE_HEX.orange,
     );
@@ -378,7 +379,7 @@ describe("applyNamedFocusColor applies the full preset path", () => {
 });
 
 describe("the pane menu's focus border colours", () => {
-  // The menu and the launcher's app.pane.focusColor.* commands share the one
+  // The menu and the options of the launcher's app.pane.focusColor share the one
   // apply path above; the menu also saves the colour for the library, best
   // effort. The request that save sends is checked in
   // api/localColorRootPath.test.ts.

@@ -1,19 +1,22 @@
 // The command catalog: every launcher-invokable action as data. Each
-// entry pairs a stable id with a title, a category for grouping, an
-// availability predicate, and a run() thunk. Chorded commands reuse
-// their SHORTCUTS id so the launcher can show the current chord via
-// chordFor(id) and route run() back through the same dispatch the chord
-// fires; chordless commands live only here and call their action
-// directly. Categories match the groups the launcher renders.
+// entry pairs a stable id with the one title the action carries everywhere,
+// the scope it acts in, what choosing it does, an availability predicate
+// and a run() thunk. Chorded commands reuse their SHORTCUTS id so the
+// launcher can show the current chord via chordFor(id) and route run() back
+// through the same dispatch the chord fires; chordless commands live only
+// here and call their action directly.
 //
-// Entries register through registerCommands from per-category modules in
+// Two axes place a command. `scope` says where it acts, which is the
+// launcher scope that lists it; `group` and `order` say where inside the
+// scope. `category` is the surface that owns it, which the Settings rail
+// and the Keyboard Shortcuts grid group by; it does not decide the scope.
+//
+// Entries register through registerCommands from per-surface modules in
 // state/commands/, each imported for its side effect by
-// state/commands/install. Keeping one module per surface lets the
-// command lanes own disjoint files; the launcher reads the merged,
-// context-filtered list. This catalog is also the single command source
-// the launcher and command-forwarding surfaces consume.
+// state/commands/install. This catalog is the single command source the
+// launcher and the command-forwarding surfaces consume.
 
-import { setTransientStatus, ui } from "./store.svelte";
+import { openCommandLauncher, setTransientStatus, ui } from "./store.svelte";
 import {
   activePane,
   activeTabInPane,
@@ -50,6 +53,44 @@ export type CommandSurface =
   | "browser"
   | "dashboard"
   | "extension";
+
+/// Where a command acts, which is also the launcher scope that lists it:
+/// the focused tab's content (`app`), the pane and its tabs, the window, the
+/// workspace, or a preference.
+export type CommandScope = "app" | "pane" | "window" | "workspace" | "settings";
+
+/// What choosing a command does: an `action` runs, a `toggle` flips the
+/// thing it is named for, a `choice` offers its options, and an `open`
+/// command raises a dialog or an overlay.
+export type CommandKind = "action" | "toggle" | "choice" | "open";
+
+/// One option of a `choice` command.
+export type CommandOption = {
+  /// Stable within its command.
+  id: string;
+  label: string;
+  /// Whether this option is in effect. A choice between values checks one;
+  /// a choice over a set, such as filters, checks each member that is on.
+  checked: boolean;
+  /// True when choosing the option is an action of its own, such as opening
+  /// a tab, and not a value put in effect: the launcher closes on it as on
+  /// any action, where it stays open on a value to show the check move.
+  dismiss?: boolean;
+  run: () => void | Promise<void>;
+};
+
+/// The sections of the Pane scope, in the order the launcher lists them.
+export const PANE_GROUPS = ["New tab", "Tab", "Pane"] as const;
+
+/// The name a surface's commands are listed under.
+export const SURFACE_LABELS: Record<CommandSurface, string> = {
+  file: "Editor",
+  terminal: "Terminal",
+  browser: "File browser",
+  graph: "Graph",
+  dashboard: "Dashboard",
+  extension: "Extension",
+};
 
 /// The capability a command needs before it may appear or dispatch:
 /// `any` for window/pane/tab/settings plumbing that works everywhere,
@@ -109,6 +150,29 @@ export type Command = {
   id: string;
   title: string;
   category: CommandCategory;
+  /// Where the command acts. Every catalog command declares one, which the
+  /// registry test holds; a row registered without one, as the extension
+  /// catalog's are, is placed by [`commandPlacement`].
+  scope?: CommandScope;
+  /// The tab kinds an `app` command acts on.
+  surface?: CommandSurface | readonly CommandSurface[];
+  /// The section inside the scope. A pane command names one of
+  /// [`PANE_GROUPS`]; elsewhere absent means the scope's own section.
+  group?: string;
+  /// Position inside the group, ascending. Commands without one follow the
+  /// ordered ones by title.
+  order?: number;
+  /// What choosing the command does. Absent means `action`.
+  kind?: CommandKind;
+  /// The current state: a toggle's on or off, a choice's current label, or
+  /// the value an action steps. A command that reports one changes in
+  /// place: the launcher stays open on it and shows the new state.
+  state?: (ctx: CommandContext) => boolean | string | null;
+  /// A choice's options, in the order the launcher lists them.
+  options?: (ctx: CommandContext) => readonly CommandOption[];
+  /// Why the command cannot run in `ctx`, in the launcher's words (`Needs a
+  /// selection`), when the requirement and the surface do not already say.
+  unavailableReason?: (ctx: CommandContext) => string | null;
   /// The capability this command needs; see [`CommandRequirement`]. Every
   /// command declares one explicitly so a window mode can be proven
   /// against the whole catalog.
@@ -120,14 +184,16 @@ export type Command = {
   /// False keeps the chord visible but removes the assignment affordance.
   /// Defaults to true.
   shortcutEditable?: boolean;
-  /// Extra terms the type-ahead matches beyond the title (synonyms, the
-  /// surface name, related verbs).
+  /// Extra terms the type-ahead matches beyond the title: synonyms, related
+  /// verbs, and every title the command has carried before, so a search by
+  /// an old name still finds it.
   keywords?: readonly string[];
   /// lucide icon name, optional; the launcher falls back to a generic
   /// glyph when absent.
   icon?: string;
-  /// Whether the command shows in the given context. Unavailable
-  /// commands are hidden (not shown-disabled) for a clean Spotlight feel.
+  /// Whether the command can run in the given context. The launcher hides
+  /// an unavailable command while it browses and lists it disabled, with
+  /// the reason, among typed results.
   available: (ctx: CommandContext) => boolean;
   /// Whether the launcher forwards a typed argument: with this set, a
   /// query like "Open notes/x.md" matches the command on its HEAD token
@@ -144,8 +210,9 @@ export type Command = {
   };
   /// Perform the action. Reuse-existing commands dispatch their id
   /// through the chan:command bridge; chordless commands call their
-  /// action directly. `arg` is the launcher's verbatim remainder for
-  /// acceptsArg commands; everything else ignores it.
+  /// action directly. A toggle's run flips it, and a choice's run opens the
+  /// launcher on its options (see [`openChoice`]). `arg` is the launcher's
+  /// verbatim remainder for acceptsArg commands; everything else ignores it.
   run: (arg?: string) => void;
 };
 
@@ -193,9 +260,8 @@ export function availableCommands(ctx: CommandContext): Command[] {
 /// Mirrors the catalog filter for ids that are registered. Some dispatchable
 /// ids are NOT catalog entries: they are window-level actions fired by chords
 /// and by the host's `chan:command` bridge with no launcher row to offer --
-/// the find family, `app.tab.jump`, `app.launcher.toggle`, and
-/// `app.window.confirmClose`, which is how the desktop's close button asks the
-/// window whether it may go. [`TERMINAL_ONLY_COMMANDS`] is exactly the set of
+/// `app.tab.jump`, `app.launcher.toggle`, and `app.window.confirmClose`,
+/// which is how the desktop's close button asks the window whether it may go. [`TERMINAL_ONLY_COMMANDS`] is exactly the set of
 /// ids that need no workspace, so it classifies those; an id in neither table
 /// fails closed, so a window with reduced capabilities never leaks a workspace
 /// action it cannot honour.
@@ -204,6 +270,113 @@ export function dispatchAllowsCommand(id: string, caps: WindowCaps): boolean {
   const command = allCommands().find((c) => c.id === id);
   if (!command) return TERMINAL_ONLY_COMMANDS.has(id);
   return requirementAllows(command.requirement, caps);
+}
+
+// ---- placement ---------------------------------------------------------
+
+/// Where the launcher lists a command.
+export type CommandPlacement = {
+  scope: CommandScope;
+  /// The tab kinds an `app` command belongs to; empty in every other scope.
+  surfaces: readonly CommandSurface[];
+  /// The section heading. Null for an `app` command with no group of its
+  /// own: its section is named after the app.
+  group: string | null;
+};
+
+const SCOPE_GROUPS: Record<Exclude<CommandScope, "app">, string> = {
+  pane: "Pane",
+  window: "Window",
+  workspace: "Workspace",
+  settings: "Settings",
+};
+
+const EXTENSION_PREFIX = "extension.";
+
+/// The placement of a row registered without a scope. The extension catalog
+/// registers two shapes: `extension.<id>` opens or focuses the app, a spawn
+/// action like the rest of New tab, and `extension.<id>.<command>` is one of
+/// that app's own commands. Anything else is listed with the window.
+function unscopedPlacement(command: Command): Pick<Command, "scope" | "surface" | "group"> {
+  if (!command.id.startsWith(EXTENSION_PREFIX)) return { scope: "window" };
+  return command.id.includes(".", EXTENSION_PREFIX.length)
+    ? { scope: "app", surface: "extension" }
+    : { scope: "pane", group: "New tab" };
+}
+
+/// Resolve where the launcher lists `command`.
+export function commandPlacement(command: Command): CommandPlacement {
+  const placed = command.scope ? command : unscopedPlacement(command);
+  const scope = placed.scope ?? "window";
+  if (scope !== "app") {
+    return { scope, surfaces: [], group: placed.group ?? SCOPE_GROUPS[scope] };
+  }
+  const surface = placed.surface ?? [];
+  return {
+    scope,
+    surfaces: typeof surface === "string" ? [surface] : surface,
+    group: placed.group ?? null,
+  };
+}
+
+/// Whether an `app` command belongs to the focused tab: the tab is one of
+/// the command's surfaces and, on an extension tab, the command is that
+/// extension's own.
+export function commandOnActiveSurface(command: Command, ctx: CommandContext): boolean {
+  const { scope, surfaces } = commandPlacement(command);
+  if (scope !== "app" || ctx.activeSurface === null) return false;
+  if (!surfaces.includes(ctx.activeSurface)) return false;
+  if (ctx.activeSurface !== "extension" || !command.id.startsWith(EXTENSION_PREFIX)) return true;
+  return (
+    ctx.activeExtensionId !== null &&
+    command.id.startsWith(`${EXTENSION_PREFIX}${ctx.activeExtensionId}.`)
+  );
+}
+
+const REQUIREMENT_REASONS: Record<CommandRequirement, string> = {
+  any: "Not available in this window",
+  terminal: "Needs a terminal window",
+  files: "Needs a file surface",
+  drafts: "Needs a draft store",
+  workspace: "Needs a workspace window",
+};
+
+const SURFACE_NOUNS: Record<CommandSurface, string> = {
+  file: "an editor",
+  terminal: "a terminal",
+  browser: "a file browser",
+  graph: "a graph",
+  dashboard: "a dashboard",
+  extension: "an extension",
+};
+
+/// Why a command that is not available in `ctx` cannot run: the capability
+/// its window lacks, the tab it needs focused, or its own reason. Null when
+/// none of the three says, and the launcher then leaves the command out.
+export function commandUnavailableReason(command: Command, ctx: CommandContext): string | null {
+  if (!requirementAllows(command.requirement, ctx.caps)) {
+    return REQUIREMENT_REASONS[command.requirement];
+  }
+  const { scope, surfaces } = commandPlacement(command);
+  if (scope === "app" && surfaces.length > 0 && !commandOnActiveSurface(command, ctx)) {
+    return `Needs ${surfaces.map((surface) => SURFACE_NOUNS[surface]).join(" or ")} tab`;
+  }
+  return command.unavailableReason?.(ctx) ?? null;
+}
+
+/// The prefix of the launcher path level that lists a choice command's
+/// options; the command's id follows it.
+export const CHOICE_LEVEL = "command:";
+
+/// The launcher path that lists a choice command's options.
+export function choicePath(id: string): string[] {
+  return [`${CHOICE_LEVEL}${id}`];
+}
+
+/// A choice command's run(): open the launcher on its options, so a chord
+/// and the host bridge reach the list the launcher's own row opens.
+export function openChoice(id: string): void {
+  openCommandLauncher(choicePath(id));
 }
 
 // ---- context -----------------------------------------------------------

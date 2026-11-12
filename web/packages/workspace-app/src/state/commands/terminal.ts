@@ -1,11 +1,12 @@
 // Terminal surface commands: available when a terminal tab is the active
 // surface, excluding the control-terminal singleton whose chrome and
-// lifecycle belong to the connect flow. Theme, group broadcast, and set
-// name / group act on the active terminal tab directly; the live-PTY
-// actions dispatch a chan:command that the owning app/TerminalTab path
-// handles, since live CWD, session lifecycle, and Rich Prompt visibility
-// live outside this catalog. Register with registerCommands. See
-// state/commands.ts for the Command shape and helpers.
+// lifecycle belong to the connect flow. Group broadcast, rename and set
+// group act on the active terminal tab directly; the live-PTY actions
+// dispatch a chan:command that the owning app/TerminalTab path handles,
+// since live CWD, session lifecycle, and secret masking live outside this
+// catalog. The terminal's theme and its engine are fields of the Settings
+// overlay and reach the launcher through the settings index. Register with
+// registerCommands. See state/commands.ts for the Command shape and helpers.
 
 import {
   registerCommands,
@@ -13,21 +14,23 @@ import {
   onSurface,
   type CommandContext,
 } from "../commands";
-import {
-  currentPreferences,
-  setHybridSurfaceTheme,
-  setTransientStatus,
-  uiPrompt,
-} from "../store.svelte";
-import { updateGlobalConfigSerial } from "../configWrite";
+import { uiPrompt } from "../store.svelte";
 import {
   activeTerminalTab,
+  allTerminalTabs,
+  crossWindowBroadcastMembers,
   renameTerminalTab,
   setTabInspectorOpen,
+  terminalBroadcastMemberIds,
+  terminalTabGroup,
   terminalTabName,
+  type TerminalTab,
 } from "../tabs.svelte";
-import { workspace } from "../workspace.svelte";
-import { isRichPromptVisible, toggleRichPromptToolbar } from "../richPrompt.svelte";
+import {
+  isRichPromptToolbarOpen,
+  isRichPromptVisible,
+  toggleRichPromptToolbar,
+} from "../richPrompt.svelte";
 
 function onTerminal(ctx: CommandContext): boolean {
   return onSurface(ctx, "terminal") && !ctx.terminalControl;
@@ -35,6 +38,15 @@ function onTerminal(ctx: CommandContext): boolean {
 
 function onWorkspaceTerminal(ctx: CommandContext): boolean {
   return onTerminal(ctx) && !ctx.terminalOnly;
+}
+
+/// The active terminal tab's value for a toggle's state, null when no
+/// terminal tab is active.
+function terminalState(read: (tab: TerminalTab) => boolean): () => boolean | null {
+  return () => {
+    const tab = activeTerminalTab();
+    return tab ? read(tab) : null;
+  };
 }
 
 async function renameActiveTerminal(): Promise<void> {
@@ -55,112 +67,33 @@ async function setActiveTerminalGroup(): Promise<void> {
   renameTerminalTab(t, terminalTabName(t), group);
 }
 
-function configuredTerminalBackend(): "xterm" | "ghostty" {
-  return currentPreferences()?.terminal.ghostty ? "ghostty" : "xterm";
-}
-
-async function toggleTerminalBackend(): Promise<void> {
-  let nextGhostty = false;
-  try {
-    await updateGlobalConfigSerial((prefs) => {
-      nextGhostty = !(prefs.terminal.ghostty ?? false);
-      return {
-        terminal: { ...prefs.terminal, ghostty: nextGhostty },
-      };
-    });
-    // The config_changed refresh makes this authoritative across windows.
-    // Mirror the accepted value now so reopening the launcher immediately
-    // reports the new preference instead of waiting for that round-trip.
-    if (workspace.info) {
-      workspace.info = {
-        ...workspace.info,
-        preferences: {
-          ...workspace.info.preferences,
-          terminal: {
-            ...workspace.info.preferences.terminal,
-            ghostty: nextGhostty,
-          },
-        },
-      };
-    }
-    setTransientStatus(
-      `Terminal engine set to ${nextGhostty ? "ghostty" : "xterm"}; newly opened terminals only`,
-    );
-  } catch (error) {
-    setTransientStatus(`Could not change terminal engine: ${(error as Error).message}`);
-  }
+/// Whether the whole broadcast group is on: every same-group terminal of
+/// this window and every member another window's page holds. The rule the
+/// toggle itself flips on, so the row reads on exactly when choosing it
+/// would turn the group off.
+function groupBroadcastOn(tab: TerminalTab): boolean {
+  const group = terminalTabGroup(tab);
+  const local = allTerminalTabs().filter((t) => terminalTabGroup(t) === group);
+  const cross = crossWindowBroadcastMembers(tab);
+  if (local.length === 0 && cross.length === 0) return false;
+  const selected = new Set(terminalBroadcastMemberIds(tab));
+  return (
+    local.every((t) => (t.id === tab.id ? tab.broadcastEnabled : selected.has(t.id))) &&
+    cross.every((member) => member.broadcast)
+  );
 }
 
 registerCommands([
   {
-    id: "app.terminal.surfaceTheme.light",
-    title: "Terminal theme: light",
-    category: "Terminal",
-    requirement: "terminal",
-    keywords: ["theme", "appearance", "light"],
-    available: onTerminal,
-    run: () => setHybridSurfaceTheme("terminal", "light"),
-  },
-  {
-    id: "app.terminal.surfaceTheme.dark",
-    title: "Terminal theme: dark",
-    category: "Terminal",
-    requirement: "terminal",
-    keywords: ["theme", "appearance", "dark"],
-    available: onTerminal,
-    run: () => setHybridSurfaceTheme("terminal", "dark"),
-  },
-  {
-    id: "app.terminal.details",
-    title: "Toggle details",
-    category: "Terminal",
-    requirement: "terminal",
-    keywords: ["inspector", "details", "info", "program status"],
-    available: onTerminal,
-    run: () => {
-      const tab = activeTerminalTab();
-      if (tab) setTabInspectorOpen(tab, !tab.inspectorOpen);
-    },
-  },
-  {
-    id: "app.terminal.backend.toggle",
-    get title() {
-      return `Terminal engine: ${configuredTerminalBackend()} (toggle; newly opened terminals only)`;
-    },
-    category: "Terminal",
-    // Persisting the engine preference writes /api/config, which only the
-    // workspace tenant serves.
-    requirement: "workspace",
-    keywords: ["backend", "engine", "ghostty", "xterm", "new terminal"],
-    // The workspace tenant owns /api/config. Standalone terminal tenants are
-    // intentionally slim and cannot persist global preferences themselves.
-    available: onWorkspaceTerminal,
-    run: () => void toggleTerminalBackend(),
-  },
-  {
-    id: "app.terminal.secretMasking.toggle",
-    title: "Toggle secret masking for this terminal",
-    category: "Terminal",
-    requirement: "terminal",
-    keywords: ["secret", "mask", "credential", "screen share", "demo"],
-    available: onTerminal,
-    run: () => dispatchChanCommand("app.terminal.secretMasking.toggle"),
-  },
-  {
-    id: "app.terminal.broadcastToggle",
-    title: "Toggle group broadcast",
-    category: "Terminal",
-    requirement: "terminal",
-    keywords: ["broadcast", "group", "select all", "input"],
-    available: onTerminal,
-    run: () => dispatchChanCommand("app.terminal.broadcastToggle"),
-  },
-  {
     id: "app.terminal.setName",
-    title: "Set terminal name",
+    title: "Rename terminal",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 0,
+    kind: "open",
     requirement: "terminal",
-    keywords: ["rename", "name", "title"],
+    keywords: ["Set terminal name", "name", "title"],
     available: onTerminal,
     run: () => void renameActiveTerminal(),
   },
@@ -168,42 +101,22 @@ registerCommands([
     id: "app.terminal.setGroup",
     title: "Set terminal group",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 1,
+    kind: "open",
     requirement: "terminal",
     keywords: ["group", "broadcast"],
     available: onTerminal,
     run: () => void setActiveTerminalGroup(),
   },
   {
-    id: "terminal.richPrompt",
-    title: "Show/Hide Rich Prompt",
-    category: "Terminal",
-    // Rich Prompt drafts into the tenant's drafts store.
-    requirement: "drafts",
-    keywords: ["rich prompt", "prompt", "composer"],
-    available: onWorkspaceTerminal,
-    run: () => dispatchChanCommand("terminal.richPrompt"),
-  },
-  {
-    id: "terminal.richPromptToolbar",
-    title: "Toggle Rich Prompt style toolbar",
-    category: "Terminal",
-    // The toolbar lives in the Rich Prompt, so the command is offered only
-    // while the active terminal shows it.
-    requirement: "drafts",
-    keywords: ["rich prompt", "style", "toolbar", "format", "markdown"],
-    available: (ctx) => {
-      const t = activeTerminalTab();
-      return onWorkspaceTerminal(ctx) && t !== null && isRichPromptVisible(t.id);
-    },
-    run: () => {
-      const t = activeTerminalTab();
-      if (t) toggleRichPromptToolbar(t.id);
-    },
-  },
-  {
     id: "app.terminal.restart",
     title: "Restart terminal",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 2,
     requirement: "terminal",
     keywords: ["restart", "respawn", "reload", "new session"],
     // An exited terminal has no live shell to stop, so restart needs no
@@ -221,11 +134,103 @@ registerCommands([
     run: () => dispatchChanCommand("app.terminal.restart"),
   },
   {
-    id: "app.terminal.copyCwd",
-    title: "Copy path to $CWD",
+    id: "app.terminal.broadcastToggle",
+    title: "Group broadcast",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 3,
+    kind: "toggle",
     requirement: "terminal",
-    keywords: ["cwd", "path", "directory", "clipboard"],
+    keywords: ["Toggle group broadcast", "broadcast", "group", "select all", "input"],
+    available: onTerminal,
+    state: terminalState(groupBroadcastOn),
+    run: () => dispatchChanCommand("app.terminal.broadcastToggle"),
+  },
+  {
+    id: "app.terminal.details",
+    title: "Details",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 4,
+    kind: "toggle",
+    requirement: "terminal",
+    keywords: ["Toggle details", "inspector", "info", "program status"],
+    available: onTerminal,
+    state: terminalState((tab) => tab.inspectorOpen === true),
+    run: () => {
+      const tab = activeTerminalTab();
+      if (tab) setTabInspectorOpen(tab, !tab.inspectorOpen);
+    },
+  },
+  {
+    // The terminal's own component holds whether its masking is on, so the
+    // catalog cannot read it: this flips it and reports no state.
+    id: "app.terminal.secretMasking.toggle",
+    title: "Secret masking (this terminal)",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 5,
+    requirement: "terminal",
+    keywords: [
+      "Toggle secret masking for this terminal",
+      "secret",
+      "mask",
+      "credential",
+      "screen share",
+      "demo",
+    ],
+    available: onTerminal,
+    run: () => dispatchChanCommand("app.terminal.secretMasking.toggle"),
+  },
+  {
+    id: "terminal.richPrompt",
+    title: "Rich Prompt",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 9,
+    kind: "toggle",
+    // Rich Prompt drafts into the tenant's drafts store.
+    requirement: "drafts",
+    keywords: ["Show/Hide Rich Prompt", "prompt", "composer"],
+    available: onWorkspaceTerminal,
+    state: terminalState((tab) => isRichPromptVisible(tab.id)),
+    run: () => dispatchChanCommand("terminal.richPrompt"),
+  },
+  {
+    id: "terminal.richPromptToolbar",
+    title: "Rich Prompt style toolbar",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 10,
+    kind: "toggle",
+    // The toolbar lives in the Rich Prompt, so the command is offered only
+    // while the active terminal shows it.
+    requirement: "drafts",
+    keywords: ["Toggle Rich Prompt style toolbar", "style", "toolbar", "format", "markdown"],
+    available: (ctx) => {
+      const t = activeTerminalTab();
+      return onWorkspaceTerminal(ctx) && t !== null && isRichPromptVisible(t.id);
+    },
+    unavailableReason: () => "Needs the Rich Prompt shown",
+    state: terminalState((tab) => isRichPromptToolbarOpen(tab.id)),
+    run: () => {
+      const t = activeTerminalTab();
+      if (t) toggleRichPromptToolbar(t.id);
+    },
+  },
+  {
+    id: "app.terminal.copyCwd",
+    title: "Copy working directory path",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    requirement: "terminal",
+    keywords: ["Copy path to $CWD", "cwd", "path", "directory", "clipboard"],
     // The copy prefers the live absolute cwd the PTY reports and only falls
     // back to the workspace-relative form, so it works in a standalone
     // terminal too.
@@ -234,11 +239,14 @@ registerCommands([
   },
   {
     id: "app.terminal.newFsEntry",
-    title: "New file or directory ($CWD)",
+    title: "New file or directory here",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    kind: "open",
     // Creates entries through the file routes, keyed off the live cwd.
     requirement: "files",
-    keywords: ["new", "file", "directory", "folder", "cwd"],
+    keywords: ["New file or directory ($CWD)", "new", "file", "directory", "folder", "cwd"],
     available: onWorkspaceTerminal,
     run: () => dispatchChanCommand("app.terminal.newFsEntry"),
   },

@@ -7,7 +7,7 @@ import { api } from "../api/client";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import { allCommands } from "../state/commands";
+import { allCommands, commandContext } from "../state/commands";
 import "../state/commands/install";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
@@ -37,9 +37,10 @@ afterEach(async () => {
 });
 
 function choose(color: string): void {
-  const command = allCommands().find((entry) => entry.id === "app.pane.focusColor." + color);
-  expect(command).toBeDefined();
-  command!.run();
+  const command = allCommands().find((entry) => entry.id === "app.pane.focusColor");
+  const option = command?.options?.(commandContext()).find((entry) => entry.id === color);
+  expect(option).toBeDefined();
+  void option!.run();
 }
 
 test("a page exit during extension load flushes the painted layout", async () => {
