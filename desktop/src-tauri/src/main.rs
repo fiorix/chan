@@ -18,6 +18,7 @@ mod native_dialog;
 mod native_transfer;
 mod open_events;
 mod privacy;
+mod raise;
 mod registry;
 mod remote_workspace;
 mod revtunnel;
@@ -4447,15 +4448,11 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
 }
 
 /// Raise the window of a Window menu Open row. The section lists minimized
-/// windows too, and showing and focusing one leaves it minimized on Windows
-/// and the GTK desktops: tao's `set_visible` only sets the window visible
-/// there, and its `set_focus` skips a minimized window on every platform. So
-/// the window is restored first.
+/// windows too, so the row takes the shared raise (`raise.rs`), which
+/// restores a minimized window before it shows and focuses it.
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
-        let _ = w.unminimize();
-        w.show().map_err(err)?;
-        w.set_focus().map_err(err)?;
+        raise::raise_window(&w).map_err(err)?;
     }
     Ok(())
 }
@@ -9224,10 +9221,11 @@ mod tests {
     }
 
     /// The Window menu's Open section lists minimized windows, so a click on
-    /// a row restores its window before showing and focusing it. A source
-    /// pin: it holds the call and its place, not what the platform then does.
+    /// a row takes the shared raise, which restores its window before showing
+    /// and focusing it (`raise.rs` pins that order). A source pin: it holds
+    /// the call, not what the platform then does.
     #[test]
-    fn an_open_window_row_restores_its_window_before_raising_it() {
+    fn an_open_window_row_takes_the_shared_raise() {
         const MAIN_RS: &str = include_str!("main.rs");
         let boundary = "\n#[cfg(test)]\nmod tests {";
         let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
@@ -9242,15 +9240,16 @@ mod tests {
             "\nfn show_window(",
             "\n/// The devserver library id of a watcher-opened devserver window label",
         );
-        let restore = raise.find("w.unminimize()");
-        let show = raise.find("w.show()").expect("the row shows its window");
-        let focus = raise
-            .find("w.set_focus()")
-            .expect("the row focuses its window");
         assert!(
-            restore.is_some_and(|restore| restore < show) && show < focus,
-            "an open window's row must restore a minimized window before it shows and focuses it"
+            raise.contains("raise::raise_window(&w).map_err(err)?;"),
+            "an open window's row must raise through the shared raise: {raise}"
         );
+        for own in ["w.unminimize()", "w.show()", "w.set_focus()"] {
+            assert!(
+                !raise.contains(own),
+                "an open window's row must leave {own} to the shared raise: {raise}"
+            );
+        }
     }
 
     /// The GUI app is built with the launch's argv less its paths, the `Env`
