@@ -112,7 +112,11 @@
   function activate(): void { fbActivateInstance(instanceId); }
   function persist(): void { schedulePersistStateToHash(); scheduleSessionSave(); }
 
+  // A dock's switches go with the dock, which is shown for as long as this
+  // surface is mounted. A tab's outlast the surface, which a pane draws for
+  // its active tab alone: the registry forgets them when the tab closes.
   $effect(() => {
+    if (isTab) return;
     const id = instanceId;
     return () => untrack(() => dropBrowserView(id));
   });
