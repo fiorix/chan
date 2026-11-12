@@ -15,7 +15,7 @@ struct Golden {
 
 #[derive(Debug, Deserialize)]
 struct GoldenCase {
-    lens: String,
+    kind: String,
     depth: u8,
     seed: String,
     visible_node_ids: Vec<String>,
@@ -66,20 +66,20 @@ fn node_id(node: &WorkspaceGraphNode) -> &str {
     }
 }
 
-fn selector_kind(lens: &str) -> WorkspaceSelectorKind {
-    match lens {
+fn selector_kind(kind: &str) -> WorkspaceSelectorKind {
+    match kind {
         "file" => WorkspaceSelectorKind::File,
         "directory" => WorkspaceSelectorKind::Directory,
         "tag" => WorkspaceSelectorKind::Tag,
         "mention" => WorkspaceSelectorKind::Mention,
         "contact" => WorkspaceSelectorKind::Contact,
         "language" => WorkspaceSelectorKind::Language,
-        other => panic!("unknown golden lens {other}"),
+        other => panic!("unknown golden seed kind {other}"),
     }
 }
 
 #[test]
-fn workspace_search_matches_shared_lens_golden() {
+fn workspace_search_matches_the_golden_shared_with_the_graph_tab() {
     let fixture = fixture_root();
     let config = TempDir::new().unwrap();
     let root = TempDir::new().unwrap();
@@ -101,7 +101,7 @@ fn workspace_search_matches_shared_lens_golden() {
     assert_eq!(
         golden.cases.len(),
         18,
-        "golden must pin all 18 lens x depth cases"
+        "golden must pin all 18 seed kind x depth cases"
     );
     for case in golden.cases {
         let value = case
@@ -112,7 +112,7 @@ fn workspace_search_matches_shared_lens_golden() {
         let result = workspace
             .workspace_search(&WorkspaceSearchRequest {
                 from: vec![WorkspaceSelector {
-                    kind: selector_kind(&case.lens),
+                    kind: selector_kind(&case.kind),
                     value,
                 }],
                 depth: Some(case.depth),
@@ -122,7 +122,7 @@ fn workspace_search_matches_shared_lens_golden() {
         assert!(
             result.errors.is_empty(),
             "{}: {:?}",
-            case.lens,
+            case.kind,
             result.errors
         );
 
@@ -135,7 +135,7 @@ fn workspace_search_matches_shared_lens_golden() {
         assert_eq!(
             ids, case.visible_node_ids,
             "{} depth {}",
-            case.lens, case.depth
+            case.kind, case.depth
         );
 
         let mut relationships: Vec<String> = result
@@ -154,7 +154,7 @@ fn workspace_search_matches_shared_lens_golden() {
         assert_eq!(
             relationships, case.relationship_keys,
             "{} depth {}",
-            case.lens, case.depth
+            case.kind, case.depth
         );
     }
 }

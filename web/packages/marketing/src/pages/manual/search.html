@@ -22,5 +22,5 @@
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>cs search --from language:Rust --edge-kind language --json --pretty</b></code>
     {{copyButton}}
-  </div><p>Selectors use <code>type:value</code>, including <code>file</code>, <code>directory</code>, <code>tag</code>, <code>mention</code>, <code>contact</code>, and <code>language</code>. <code>--domain</code> limits the kinds of results, and <code>--from</code> starts traversal from an exact entity. Language queries need code reports. Run <code>cs search --help</code> for limits and direction controls.</p>
+  </div><p>Selectors use <code>type:value</code>, including <code>file</code>, <code>directory</code>, <code>tag</code>, <code>mention</code>, <code>contact</code>, and <code>language</code>. <code>--domain</code> limits the kinds of results, and <code>--from</code> starts traversal from an exact entity. A traversal reaches what <a href="/manual/graph/">the graph</a> shows with that entity selected at the same depth: hops of links, tags and mentions in both directions from a document, a tag, a mention or a contact, and levels of the tree below a directory. Language queries need code reports. Run <code>cs search --help</code> for limits and direction controls.</p>
 </section>
