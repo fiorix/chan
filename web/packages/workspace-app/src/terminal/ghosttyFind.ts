@@ -91,7 +91,7 @@
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
 import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
-import { type MatchRange, type SearchState, type VtSearch, VtTerminal, type VtTrackedCell } from "./ghosttyVt";
+import { type MatchRange, type SearchState, type VtSearch, VtTerminal, type VtTrackedCell } from "@chan/ghostty-web-ng/vt";
 
 /// The find bar's match count. `index` counts from the newest match (1 is
 /// the one closest to the prompt) and is null when it is not knowable;

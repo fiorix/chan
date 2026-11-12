@@ -840,8 +840,12 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	# gateway-spa, which runs vite build alone, so its check + test belong here
 	# for the same reason. Gate web-shared directly too: package-level tests can
 	# cover command-deck behavior without relying on an importing SPA to do so.
+	# @chan/ghostty-web-ng's check and tests cover chan's libghostty-vt binding
+	# in its vt/; the workspace app's suite tests the app's adapters over the
+	# binding, not the binding itself.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/web-shared && $(NPM) run test -w @chan/web-shared \
+		&& $(NPM) run check -w @chan/ghostty-web-ng && $(NPM) run test -w @chan/ghostty-web-ng \
 		&& $(NPM) run check -w @chan/launcher && $(NPM) run test -w @chan/launcher \
 		&& $(NPM) run check -w @chan/workspace-app && $(NPM) run test -w @chan/workspace-app \
 		&& $(NPM) run check -w @chan/profile && $(NPM) run test -w @chan/profile \

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { InputHandler } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "./ghosttyKeys";
-import { GhosttyVt } from "./ghosttyVt";
+import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { isTerminalPasteChord } from "./clipboardChord";
 import { createTerminalKeyboardProtocolState, terminalMetaKeyBytes } from "./keymap";
 import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./xtermKeyboard";
@@ -229,7 +229,7 @@ describe("after AltGr or a dead key", () => {
 // The full path: chan's listener in front of ghostty-web's own InputHandler
 // on Ghostty's wasm key encoder, against what chan's xterm.js path sends.
 
-const WASM = "vendor/ghostty-vt/ghostty-vt.wasm";
+const WASM = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 let vt: GhosttyVt;
 const hosts: HTMLElement[] = [];
 

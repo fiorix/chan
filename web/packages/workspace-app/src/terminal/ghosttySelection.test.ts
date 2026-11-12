@@ -4,9 +4,9 @@ import { CanvasRenderer, SelectionManager, Terminal } from "@chan/ghostty-web-ng
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { installGhosttyClickExtents, installGhosttySelection } from "./ghosttySelection";
-import { GhosttyVt, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 20;
 const ROWS = 4;
 

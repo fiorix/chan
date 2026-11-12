@@ -1,6 +1,5 @@
 import type { GhosttyCell, Terminal } from "@chan/ghostty-web-ng";
-import { copiedText } from "./ghosttyCopy";
-import { VtTerminal } from "./ghosttyVt";
+import { copiedText, VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 // ghostty-web's selection has four defects over chan's binding, and no
 // public call to fix any. Its Select all puts the selection at the absolute

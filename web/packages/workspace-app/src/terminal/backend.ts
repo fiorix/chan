@@ -3,8 +3,9 @@
 ///
 /// A ghostty terminal is ghostty-web's `Terminal` (renderer, input,
 /// selection) over Ghostty's own release build of libghostty-vt, vendored
-/// in `vendor/ghostty-vt/` and bound to the shape ghostty-web expects by
-/// `ghosttyVt.ts`. ghostty-web's bundled wasm is not loaded.
+/// in the widget package's `vendor/ghostty-vt/` and bound to the shape
+/// ghostty-web expects by the package's `vt/ghosttyVt.ts`. ghostty-web's
+/// bundled wasm is not loaded.
 ///
 /// WHY lazy: the wasm is about 1.2MB. A static import would put that
 /// asset on the critical path for every user whose terminals run on
@@ -34,7 +35,7 @@
 /// for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "@chan/ghostty-web-ng";
-import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "./ghosttyVt";
+import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -115,7 +116,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
 async function compileGhosttyKit(forever: (error: unknown) => never): Promise<GhosttyKit> {
   const [mod, wasmUrl] = await Promise.all([
     import("@chan/ghostty-web-ng"),
-    import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
+    import("@chan/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm?url"),
   ]);
   const response = await fetch(wasmUrl.default);
   if (!response.ok) {

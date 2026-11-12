@@ -12,9 +12,9 @@ import { Terminal, type GhosttyCell, type ITheme } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { applyGhosttyTheme } from "./ghosttyTheme";
-import { VtTerminal, GhosttyVt } from "./ghosttyVt";
+import { VtTerminal, GhosttyVt } from "@chan/ghostty-web-ng/vt";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 24;
 const ROWS = 6;
 /// What the software context's measureText reports per character, and the

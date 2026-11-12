@@ -212,7 +212,7 @@
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
-  import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
+  import { ghosttyScrollbackText } from "@chan/ghostty-web-ng/vt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";

@@ -30,7 +30,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { VtTerminal } from "../terminal/ghosttyVt";
+import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
@@ -222,7 +222,7 @@ let clipboard: {
 const tauri = window as unknown as { __TAURI_INTERNALS__?: { invoke: ReturnType<typeof vi.fn> } };
 
 beforeAll(() => {
-  ghostty.module = new WebAssembly.Module(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+  ghostty.module = new WebAssembly.Module(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
 });
 
 beforeEach(() => {

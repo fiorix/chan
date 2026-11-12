@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ABI } from "./ghosttyVt";
+import { ABI } from "@chan/ghostty-web-ng/vt";
 
 /// What the mocked fetch serves; the compiler is mocked too, so the bytes
 /// never reach it.
 const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 /// The vendored core, which the binding accepts when the kit is checked.
-const module = await WebAssembly.compile(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+const module = await WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
 
 type Fn = (...args: number[]) => number;
 
@@ -88,7 +88,7 @@ describe("loadGhosttyKit", () => {
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
     const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementation(refused);
     const { loadGhosttyKit } = await import("./backend");
-    const { GhosttyVtRefusal } = await import("./ghosttyVt");
+    const { GhosttyVtRefusal } = await import("@chan/ghostty-web-ng/vt");
     const first = loadGhosttyKit();
     await expect(first).rejects.toThrow(message);
     await expect(first, "the binding marks its refusal").rejects.toBeInstanceOf(GhosttyVtRefusal);
@@ -139,7 +139,7 @@ describe("loadGhosttyKit", () => {
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
     const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementationOnce(failing).mockImplementationOnce(failing);
     const { loadGhosttyKit } = await import("./backend");
-    const { GhosttyVtRefusal } = await import("./ghosttyVt");
+    const { GhosttyVtRefusal } = await import("@chan/ghostty-web-ng/vt");
     const first = loadGhosttyKit();
     await expect(first).rejects.toThrow(message);
     await expect(first, "no refusal").rejects.not.toBeInstanceOf(GhosttyVtRefusal);
