@@ -17,7 +17,6 @@
 <script lang="ts">
   import PrivateField from "./PrivateField.svelte";
   import { tick } from "svelte";
-  import { shortcutKey } from "../keyboard";
   import { canTakeFocus } from "../modalFocus";
   import type {
     DeckConfirm,
@@ -94,13 +93,11 @@
   const LONE_MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"]);
   /// The deck's keys, as the key list shows them.
   const KEY_LIST: readonly { keys: readonly string[]; does: string }[] = [
-    { keys: ["↑", "↓", "Ctrl+P", "Ctrl+N"], does: "Previous, next row" },
+    { keys: ["↑", "↓"], does: "Previous, next row" },
     { keys: ["PageUp", "PageDown"], does: "One page up, down" },
     { keys: ["Home", "End"], does: "First, last row, on an empty query" },
     { keys: ["Alt+↑", "Alt+↓"], does: "Previous, next section" },
     { keys: ["Tab", "Shift+Tab"], does: "Next, previous scope" },
-    { keys: ["Alt+1..9"], does: "The scope at that position" },
-    { keys: ["Alt+0"], does: "Every scope" },
     { keys: ["Enter"], does: "Run the row, or open it" },
     { keys: ["→"], does: "Open a row that holds more, from the end of the query" },
     { keys: ["←", "Backspace"], does: "Back one level, on an empty query" },
@@ -372,18 +369,6 @@
     const at = availableScopes.findIndex((scope) => scope.id === draft.scope) + 1;
     const next = (at + delta + stops) % stops;
     applyScope(next === 0 ? null : availableScopes[next - 1] ?? null);
-  }
-
-  /// The scope at a rail position, counted from 1 over every orb drawn, so
-  /// a number names the same orb whether or not its neighbours are available.
-  /// Position 0 clears the scope.
-  function scopeAt(position: number): void {
-    if (position === 0) {
-      applyScope(null);
-      return;
-    }
-    const scope = scopes[position - 1];
-    if (scope && scope.available !== false) applyScope(scope);
   }
 
   function pressScope(scope: DeckScope): void {
@@ -810,25 +795,7 @@
       return;
     }
 
-    if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-      const letter = shortcutKey(event)?.key;
-      if (letter === "N" || letter === "P") {
-        event.preventDefault();
-        moveRow(letter === "N" ? 1 : -1);
-      }
-      return;
-    }
-
-    if (event.altKey && !event.ctrlKey && !event.metaKey) {
-      // By physical position: Option changes what a digit key types.
-      const digit = shortcutKey(event)?.key;
-      if (digit && /^[0-9]$/.test(digit)) {
-        event.preventDefault();
-        scopeAt(Number(digit));
-      }
-      return;
-    }
-
+    // Every other chord is the browser's or the host's.
     if (chord) return;
 
     if (event.key === "PageDown" || event.key === "PageUp") {
@@ -1001,7 +968,7 @@
 
         {#if scopes.length}
           <div class="deck-scopes" role="group" aria-label="Scopes">
-            {#each scopes as scope, index (scope.id)}
+            {#each scopes as scope (scope.id)}
               {@const Icon = scope.icon}
               <button
                 class="deck-scope"
@@ -1011,7 +978,7 @@
                 tabindex="-1"
                 aria-label={`${scope.label} scope`}
                 aria-pressed={draft.scope === scope.id}
-                title={index < 9 ? `${scope.label} (Alt+${index + 1})` : scope.label}
+                title={scope.label}
                 onclick={() => pressScope(scope)}
               >
                 <span class="deck-scope-orb">

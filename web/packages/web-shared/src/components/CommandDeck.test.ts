@@ -1314,19 +1314,14 @@ describe("CommandDeck row keys", () => {
     expect(activeTitle()).toBe("Row 1");
   });
 
-  it("moves on Ctrl+N and Ctrl+P as on Down and Up", async () => {
+  it("leaves Ctrl+N and Ctrl+P to the browser: only the arrows move rows", async () => {
     await mountWith({ items: plainRows(3) });
-    const next = await press("n", { ctrlKey: true, code: "KeyN" });
-    expect(activeTitle()).toBe("Row 2");
-    expect(next.defaultPrevented).toBe(true);
-    await press("p", { ctrlKey: true, code: "KeyP" });
-    expect(activeTitle()).toBe("Row 1");
-    await press("p", { ctrlKey: true, code: "KeyP" });
-    expect(activeTitle(), "Ctrl+P wraps as Up does").toBe("Row 3");
-    // Other Ctrl chords stay the browser's.
-    const copy = await press("c", { ctrlKey: true, code: "KeyC" });
-    expect(copy.defaultPrevented).toBe(false);
-    expect(activeTitle()).toBe("Row 3");
+    await press("ArrowDown");
+    for (const [key, code] of [["n", "KeyN"], ["p", "KeyP"], ["c", "KeyC"]] as const) {
+      const chord = await press(key, { ctrlKey: true, code });
+      expect(chord.defaultPrevented, `Ctrl+${key.toUpperCase()}`).toBe(false);
+      expect(activeTitle(), `Ctrl+${key.toUpperCase()}`).toBe("Row 2");
+    }
   });
 
   it("pages by the number of rows the list shows, without wrapping", async () => {
@@ -1466,31 +1461,21 @@ describe("CommandDeck scope keys", () => {
     expect(target.querySelector(".deck-scopes"), "no rail without scopes").toBeNull();
   });
 
-  it("applies the scope at a rail position on Alt+digit and clears on Alt+0", async () => {
+  it("leaves Alt+digit to the browser: a scope is reached by Tab or its orb", async () => {
     const onScope = vi.fn();
     const onClearScope = vi.fn();
     await mountWith({ items: plainRows(2), scopes: railScopes(), onScope, onClearScope });
+    await press("Tab");
+    expect(hostDraft().scope).toBe("app");
 
-    const third = await press("3", { altKey: true, code: "Digit3" });
-    expect(third.defaultPrevented).toBe(true);
-    expect(onScope).toHaveBeenLastCalledWith("window");
-    expect(hostDraft().scope).toBe("window");
-
-    await press("2", { altKey: true, code: "Digit2" });
-    expect(onScope, "an unavailable scope is inert").toHaveBeenCalledTimes(1);
-    expect(hostDraft().scope).toBe("window");
-
-    // Option changes what a digit key types; the position still names the scope.
-    await press("¡", { altKey: true, code: "Digit1" });
-    expect(onScope).toHaveBeenLastCalledWith("app");
-
-    await press("9", { altKey: true, code: "Digit9" });
-    expect(onScope, "no scope sits at position nine").toHaveBeenCalledTimes(2);
-
-    const clear = await press("0", { altKey: true, code: "Digit0" });
-    expect(clear.defaultPrevented).toBe(true);
-    expect(onClearScope).toHaveBeenCalledTimes(1);
-    expect(hostDraft().scope).toBeNull();
+    for (const [key, code] of [["3", "Digit3"], ["¡", "Digit1"], ["0", "Digit0"]] as const) {
+      const chord = await press(key, { altKey: true, code });
+      expect(chord.defaultPrevented, `Alt+${code}`).toBe(false);
+    }
+    expect(onScope).toHaveBeenCalledExactlyOnceWith("app");
+    expect(onClearScope).not.toHaveBeenCalled();
+    expect(hostDraft().scope).toBe("app");
+    expect(orb("Terminal").getAttribute("title"), "an orb's tooltip names no chord").toBe("Terminal");
   });
 });
 
@@ -1646,6 +1631,12 @@ describe("CommandDeck key list", () => {
     const question = await press("?", { shiftKey: true });
     expect(question.defaultPrevented).toBe(true);
     expect(keyList()?.textContent).toContain("Shift+Tab");
+    // Every key the list names is one the deck answers.
+    const named = [...keyList()!.querySelectorAll("kbd")].map((cap) => cap.textContent);
+    expect(named).toEqual([
+      "↑", "↓", "PageUp", "PageDown", "Home", "End", "Alt+↑", "Alt+↓",
+      "Tab", "Shift+Tab", "Enter", "→", "←", "Backspace", "Esc", "?",
+    ]);
     expect(resultRows(), "the rows give way").toHaveLength(0);
     expect(deckInput().hasAttribute("aria-activedescendant")).toBe(false);
     expect(deckInput().value).toBe("");
