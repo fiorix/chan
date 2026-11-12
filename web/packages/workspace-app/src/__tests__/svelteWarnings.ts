@@ -6,7 +6,7 @@
 // component has a parent, so a test that wants to see it mounts the component
 // under the parent the app mounts it under.
 
-import { vi, type MockInstance } from "vitest";
+import { afterEach, beforeEach, expect, vi, type MockInstance } from "vitest";
 
 const CODES = new Set(["ownership_invalid_mutation", "ownership_invalid_binding", "assignment_value_stale"]);
 
@@ -28,4 +28,20 @@ export function ownershipWarnings({ quiet = false }: { quiet?: boolean } = {}): 
       const code = /^\[svelte\] (\w+)$/.exec(head ?? "")?.[1];
       return code && CODES.has(code) ? [`${code}: ${message}`] : [];
     });
+}
+
+/// Fail each test of the calling file that leaves an ownership or
+/// stale-assignment warning: armed before the test and read after it. Call
+/// it after the file's own hooks, so it reads before an afterEach of theirs
+/// restores the console.
+export function failOnOwnershipWarnings(): void {
+  let read: (() => string[]) | null = null;
+  beforeEach(() => {
+    read = ownershipWarnings();
+  });
+  afterEach(() => {
+    const warnings = read?.() ?? [];
+    read = null;
+    expect(warnings, "a component wrote state it does not own").toEqual([]);
+  });
 }

@@ -33,6 +33,8 @@
     openBrowserInActivePane,
     openGraphInActivePane,
     openInActivePane,
+    setGraphPendingSelect,
+    setGraphSelection,
     type GraphTab,
   } from "../state/tabs.svelte";
   import {
@@ -569,7 +571,7 @@
   // load selects its node, or drops it when the node is gone.
   untrack(() => {
     if (tab.pendingSelectId === null && tab.selectedNodeId != null) {
-      tab.pendingSelectId = tab.selectedNodeId;
+      setGraphPendingSelect(tab, tab.selectedNodeId);
     }
   });
   let expansionFitNonce = 0;
@@ -1846,8 +1848,7 @@
     // the graph data finishes reloading (e.g. after a hard
     // reload that round-trips the selection via URL hash).
     const kept = keptSelection(id);
-    tab.selectedNodeId = kept;
-    tab.selectedNodeLabel = kept === null ? null : graphSelectionLabel(kept);
+    setGraphSelection(tab, kept, kept === null ? null : graphSelectionLabel(kept));
   }
 
   function graphSelectionLabel(id: string): string | null {

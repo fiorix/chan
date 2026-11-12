@@ -5920,6 +5920,17 @@ export function issueCaretCommand(tab: FileTab, from: number, to: number): void 
 export function clearTabCaretCommand(tab: FileTab): void {
   tab.caretCommand = undefined;
 }
+/// A graph tab's selection, as its panel reports a click: the node, and the
+/// label the tab strip titles the tab with before the graph has loaded.
+export function setGraphSelection(tab: GraphTab, id: string | null, label: string | null): void {
+  tab.selectedNodeId = id;
+  tab.selectedNodeLabel = label;
+}
+/// A graph tab's selection still waiting on the graph, as its panel hands a
+/// restored or moved tab's selection to the path a reload restores it by.
+export function setGraphPendingSelect(tab: GraphTab, id: string | null): void {
+  tab.pendingSelectId = id;
+}
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {
   tab.content = content;

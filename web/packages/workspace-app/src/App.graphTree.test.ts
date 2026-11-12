@@ -24,6 +24,7 @@ vi.mock("./components/GraphCanvas.svelte", async () =>
 import { api } from "./api/client";
 import { demoData, hostCommand, mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { canvas } from "./__tests__/graphPanel";
+import { failOnOwnershipWarnings } from "./__tests__/svelteWarnings";
 import { resetLayout } from "./__tests__/tabs";
 import { openFsGraphForDirectory } from "./state/store.svelte";
 import type { SerNode, SerTab } from "./state/tabs.svelte";
@@ -54,6 +55,9 @@ afterEach(async () => {
   await unmountApp();
   vi.restoreAllMocks();
 });
+
+// The graph panel in its pane writes no state its pane owns.
+failOnOwnershipWarnings();
 
 function graphTabOf(node: SerNode | null | undefined): SerTab | null {
   if (!node) return null;

@@ -33,6 +33,7 @@ import {
 } from "../__tests__/graphPanel";
 import { invalidateGraph, noteGraphChanged } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, reorderTab, type LeafNode } from "../state/tabs.svelte";
@@ -59,6 +60,9 @@ afterEach(async () => {
   await settle(2);
   timers.release();
 });
+
+// A panel in a pane writes no state its pane owns.
+failOnOwnershipWarnings();
 
 /// A pane with graph tabs one and two, one active.
 async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement[] }> {
