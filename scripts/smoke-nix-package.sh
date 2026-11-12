@@ -12,7 +12,7 @@ chan)
         echo "error: chan is not a standalone executable in $OUT" >&2
         exit 1
     }
-    for name in cs chan-files chan-edit; do
+    for name in cs chan-files chan-edit chan-term; do
         [ -L "$BIN/$name" ] && [ "$(readlink "$BIN/$name")" = "chan" ] || {
             echo "error: $BIN/$name does not point to chan" >&2
             exit 1
@@ -23,6 +23,7 @@ chan)
         "$OUT/share/applications/chan-desktop.desktop" \
         "$OUT/share/applications/chan-files.desktop" \
         "$OUT/share/applications/chan-edit.desktop" \
+        "$OUT/share/applications/chan-term.desktop" \
         "$OUT/share/icons/hicolor"; do
         [ ! -e "$path" ] && [ ! -L "$path" ] || {
             echo "error: headless package contains desktop path: $path" >&2
@@ -35,7 +36,7 @@ chan-desktop)
         echo "error: chan-desktop is not executable in $OUT" >&2
         exit 1
     }
-    for name in chan cs chan-files chan-edit; do
+    for name in chan cs chan-files chan-edit chan-term; do
         [ -L "$BIN/$name" ] || {
             echo "error: $BIN/$name is not a symlink" >&2
             exit 1
@@ -45,7 +46,7 @@ chan-desktop)
             exit 1
         }
     done
-    for entry in chan-desktop chan-files chan-edit; do
+    for entry in chan-desktop chan-files chan-edit chan-term; do
         [ -f "$OUT/share/applications/$entry.desktop" ] || {
             echo "error: desktop entry $entry.desktop missing from $OUT" >&2
             exit 1

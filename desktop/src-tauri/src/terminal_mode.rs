@@ -1,197 +1,49 @@
-//! A default-terminal launch, the command-line contract xdg-terminal-exec
-//! drives through the desktop entry's `X-TerminalArg*` keys:
-//! `chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold]
-//! [-e CMD ARGS... | -- CMD ARGS...]`. One terminal-only window in its own
-//! process, with none of the launcher's boot (shims, library stores, the
-//! handoff listener, the window watcher, gateways, the update check), so a
-//! launch beside a running chan-desktop leaves it alone.
+//! A `chan-term` launch with a command, `--hold`, `--app-id` or `--title`: the
+//! program name a desktop's default terminal runs, with the grammar
+//! xdg-terminal-exec drives through `chan-term.desktop`'s `X-TerminalArg*`
+//! keys (`chan::term`). One terminal-only window in its own process, with
+//! none of the launcher's boot (shims, library stores, the handoff listener,
+//! the window watcher, gateways, the update check), so a launch beside a
+//! running chan-desktop leaves it alone: the command's exit status, the held
+//! window, the app id and the title are the process's.
 //!
-//! The exception is a launch that only runs the user's shell: a bare
-//! `chan-desktop` or one with `--dir` alone. With a chan-desktop already
-//! running it is handed over the handoff socket, and that desktop opens a
-//! throwaway local terminal window in the directory (never saved, so a
-//! relaunch does not restore it). With none running, a `--dir` launch opens
-//! its own window and a bare launch boots the launcher, as before.
+//! A launch that only runs the user's shell, a bare `chan-term` or one with
+//! `--dir` alone, never comes here: it runs as the CLI
+//! (`run_as_chan_if_requested`), which opens a throwaway terminal window of
+//! the running chan-desktop, and starts the desktop with it when none runs.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use chan::term::TerminalLaunch;
 use tauri::RunEvent;
 
 use crate::config::ConfigStore;
 use crate::embedded::EmbeddedServer;
 use crate::{serve, AppState};
 
-/// The Tauri label of the one window a default-terminal launch opens. Its own
+/// The Tauri label of the one window a `chan-term` launch opens. Its own
 /// family: not a watcher label (`local::`, `lib-`), so no bury and no close
 /// prompt, and not a devserver control terminal, so no reaping.
 pub(crate) const WINDOW_LABEL: &str = "terminal-exec";
 
-/// One default-terminal launch, as xdg-terminal-exec spells it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalLaunch {
-    /// `--dir`, as given; a relative path resolves against the process cwd.
-    pub dir: Option<PathBuf>,
-    /// `--app-id`: the Wayland app_id and X11 class on the GTK desktops (Linux
-    /// and FreeBSD).
-    pub app_id: Option<String>,
-    /// `--title`: the OS window title, fixed for the window's life.
-    pub title: Option<String>,
-    /// `--hold`: keep the window after the command exits.
-    pub hold: bool,
-    /// The exact argv after `-e` or `--`; `None` runs the user's shell.
-    pub command: Option<Vec<OsString>>,
-}
+/// The program name GTK gives a window without `--app-id`: the class
+/// `chan-desktop.desktop`'s `StartupWMClass` names, so the window groups
+/// with the desktop's own instead of taking `chan-term` from `argv[0]`.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+const DESKTOP_PROGRAM_NAME: &str = "chan-desktop";
 
-/// Parse argv (without `argv[0]`). `Ok(None)` is not a terminal launch: the GUI
-/// runs, and reads positional arguments (the entry's `%U`) as paths to open
-/// (`launch_paths`) and leaves unknown options alone. Once a
-/// terminal flag has been seen the grammar is strict, and `-e` or `--` ends
-/// it: everything after is the command's argv, verbatim.
-pub fn parse_terminal_launch(
-    args: impl IntoIterator<Item = OsString>,
-) -> Result<Option<TerminalLaunch>, String> {
-    let mut launch = TerminalLaunch {
-        dir: None,
-        app_id: None,
-        title: None,
-        hold: false,
-        command: None,
-    };
-    let mut terminal = false;
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        if arg == "-e" || arg == "--" {
-            let command: Vec<OsString> = args.collect();
-            if command.is_empty() {
-                return Err(format!(
-                    "{} needs a command after it",
-                    arg.to_string_lossy()
-                ));
-            }
-            launch.command = Some(command);
-            return Ok(Some(launch));
-        }
-        if let Some(value) = option_value(&arg, "--hold") {
-            if value.is_some() {
-                return Err("--hold takes no value".to_string());
-            }
-            launch.hold = true;
-            terminal = true;
-            continue;
-        }
-        let mut valued = None;
-        for name in ["--dir", "--app-id", "--title"] {
-            if let Some(inline) = option_value(&arg, name) {
-                let value = match inline {
-                    Some(value) => value.to_os_string(),
-                    None => args.next().ok_or_else(|| format!("{name} needs a value"))?,
-                };
-                if value.is_empty() {
-                    return Err(format!("{name} needs a value"));
-                }
-                valued = Some((name, value));
-                break;
-            }
-        }
-        if let Some((name, value)) = valued {
-            match name {
-                "--dir" => launch.dir = Some(PathBuf::from(value)),
-                "--app-id" => launch.app_id = Some(utf8(name, value)?),
-                _ => launch.title = Some(utf8(name, value)?),
-            }
-            terminal = true;
-            continue;
-        }
-        if !terminal {
-            return Ok(None);
-        }
-        let text = arg.to_string_lossy();
-        if text.starts_with('-') {
-            return Err(format!("unknown option {text}"));
-        }
-        return Err(format!(
-            "unexpected argument {text}: put -e or -- before the command"
-        ));
+/// The launch when this process runs as `chan-term` (`argv[0]`, or `$ARGV0`
+/// under an AppImage), read before any GUI setup: `--help`, `--version` and
+/// a usage error print and exit here ([`chan::term::parse_or_exit`]). `None`
+/// for every other name.
+pub fn launch_if_invoked() -> Option<TerminalLaunch> {
+    if !chan::term::invoked_as_term(&chan_shell::invoked_arg0()) {
+        return None;
     }
-    Ok(terminal.then_some(launch))
-}
-
-/// `Some(None)` for a bare `--name`, `Some(Some(value))` for `--name=value`,
-/// `None` when `arg` is another option or a positional.
-fn option_value<'a>(arg: &'a OsStr, name: &str) -> Option<Option<&'a OsStr>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let bytes = arg.as_bytes();
-        if bytes == name.as_bytes() {
-            return Some(None);
-        }
-        let rest = bytes.strip_prefix(name.as_bytes())?;
-        rest.strip_prefix(b"=")
-            .map(|value| Some(OsStr::from_bytes(value)))
-    }
-    #[cfg(not(unix))]
-    {
-        let text = arg.to_str()?;
-        if text == name {
-            return Some(None);
-        }
-        let rest = text.strip_prefix(name)?;
-        rest.strip_prefix('=').map(|value| Some(OsStr::new(value)))
-    }
-}
-
-/// Whether `arg` is an option of this launch's grammar: `-e`, `--`, or
-/// `--hold`, `--dir`, `--app-id` or `--title`, bare or with `=value`. A GUI
-/// launch that names a path refuses one beside it (`launch_paths`).
-pub(crate) fn is_terminal_option(arg: &OsStr) -> bool {
-    arg == "-e"
-        || arg == "--"
-        || ["--hold", "--dir", "--app-id", "--title"]
-            .iter()
-            .any(|name| option_value(arg, name).is_some())
-}
-
-fn utf8(name: &str, value: OsString) -> Result<String, String> {
-    value
-        .into_string()
-        .map_err(|_| format!("{name} must be valid UTF-8"))
-}
-
-/// Where the terminal starts: `requested` (`--dir`) resolved against the
-/// process cwd, else the process cwd itself, which is the launcher's own
-/// (xdg-terminal-exec inherits it). A path that is not a directory falls back
-/// to `home` with a warning for the caller to log, because a launcher passing
-/// a stale directory must still get a window.
-pub fn resolve_working_dir(
-    requested: Option<&Path>,
-    process_cwd: &Path,
-    home: Option<&Path>,
-    is_dir: impl Fn(&Path) -> bool,
-) -> (PathBuf, Option<String>) {
-    let Some(requested) = requested else {
-        return (process_cwd.to_path_buf(), None);
-    };
-    let dir = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        process_cwd.join(requested)
-    };
-    if is_dir(&dir) {
-        return (dir, None);
-    }
-    let fallback = home
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| process_cwd.to_path_buf());
-    let warning = format!(
-        "{} is not a directory; starting in {}",
-        dir.display(),
-        fallback.display()
-    );
-    (fallback, Some(warning))
+    Some(chan::term::parse_or_exit(std::env::args_os().skip(1)))
 }
 
 /// The process exit code for the command's exit. A signal death reads as 1
@@ -222,9 +74,7 @@ pub fn default_title(launch: &TerminalLaunch) -> String {
 }
 
 /// The argv a New Window sibling starts with: the same directory and app id,
-/// the shell rather than the command, no title and no hold. `--dir` is always
-/// present because a terminal flag is what selects this mode; without one the
-/// sibling would launch the GUI.
+/// the shell rather than the command, no title and no hold.
 pub fn sibling_args(dir: &Path, app_id: Option<&str>) -> Vec<OsString> {
     let mut dir_arg = OsString::from("--dir=");
     dir_arg.push(dir);
@@ -287,7 +137,7 @@ fn executable_file(path: &Path) -> bool {
     }
 }
 
-/// The live state of a default-terminal launch, managed on the Tauri app so
+/// The live state of a `chan-term` launch, managed on the Tauri app so
 /// the exit watcher, the run loop and New Window read one record.
 pub(crate) struct TerminalMode {
     launch: TerminalLaunch,
@@ -300,84 +150,23 @@ pub(crate) struct TerminalMode {
     exit_code: Mutex<Option<i32>>,
 }
 
-/// Whether a launch may be handed to a running chan-desktop instead of
-/// opening its own window. Only a launch that runs the user's shell with no
-/// per-process contract: a command must end the process with its exit code,
-/// `--hold` keeps a window this process owns, and the running desktop can
-/// honor neither a per-process `--app-id` (GTK takes it from the program name)
-/// nor a fixed `--title`. `None` is a bare launch.
-pub fn hands_off(launch: Option<&TerminalLaunch>) -> bool {
-    launch.is_none_or(|launch| {
-        launch.command.is_none()
-            && !launch.hold
-            && launch.app_id.is_none()
-            && launch.title.is_none()
-    })
-}
-
-/// Run as a default terminal when argv asks for it. `Ok(true)` means the
-/// launch was handled (the event loop ends the process, or a running desktop
-/// took it); `Ok(false)` means a plain GUI launch; `Err` is a usage error.
-pub fn run_if_requested() -> Result<bool, String> {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let bare = args.is_empty();
-    let launch = parse_terminal_launch(args)?;
-    if launch.is_none() && !bare {
-        return Ok(false);
+/// Open the launch's window in this process. Ends the process on a failure
+/// before the event loop runs; otherwise returns when the event loop ends.
+pub fn run(launch: TerminalLaunch) {
+    let cwd = chan::term::start_dir(&launch);
+    if let Err(e) = run_window(launch, cwd) {
+        fatal(1, &e);
     }
-    let cwd = start_dir(launch.as_ref());
-    if hands_off(launch.as_ref()) && hand_off(&cwd) {
-        return Ok(true);
-    }
-    match launch {
-        Some(launch) => run(launch, cwd),
-        None => Ok(false),
-    }
-}
-
-/// The launch's start directory (see [`resolve_working_dir`]), logging the
-/// fallback when `--dir` names no directory.
-fn start_dir(launch: Option<&TerminalLaunch>) -> PathBuf {
-    let home = dirs::home_dir();
-    let process_cwd = std::env::current_dir()
-        .ok()
-        .or_else(|| home.clone())
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let (cwd, warning) = resolve_working_dir(
-        launch.and_then(|launch| launch.dir.as_deref()),
-        &process_cwd,
-        home.as_deref(),
-        |dir| dir.is_dir(),
-    );
-    if let Some(warning) = warning {
-        tracing::warn!("{warning}");
-    }
-    cwd
-}
-
-/// Ask a running chan-desktop to open the window. A `cwd` that is not UTF-8
-/// cannot ride the JSON request, so that launch keeps its own window.
-fn hand_off(cwd: &Path) -> bool {
-    let Some(cwd_text) = cwd.to_str() else {
-        return false;
-    };
-    let opened = tauri::async_runtime::block_on(chan_server::handoff::try_open_terminal(cwd_text));
-    if opened {
-        tracing::info!(cwd = %cwd.display(), "the running chan-desktop opened the terminal window");
-    }
-    opened
 }
 
 fn fatal(code: i32, message: &str) -> ! {
-    eprintln!("chan-desktop: {message}");
+    eprintln!("{}: {message}", chan::term::NAME);
     std::process::exit(code)
 }
 
-fn run(launch: TerminalLaunch, cwd: PathBuf) -> Result<bool, String> {
+fn run_window(launch: TerminalLaunch, cwd: PathBuf) -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    if let Some(app_id) = &launch.app_id {
-        set_gtk_program_name(app_id);
-    }
+    set_gtk_program_name(launch.app_id.as_deref().unwrap_or(DESKTOP_PROGRAM_NAME));
     if let Some(argv) = &launch.command {
         if let Err(e) = preflight_command(
             &argv[0],
@@ -460,7 +249,7 @@ fn run(launch: TerminalLaunch, cwd: PathBuf) -> Result<bool, String> {
             let _ = crate::begin_normal_shutdown(app.clone(), crate::ShutdownAction::Exit(code));
         }
     });
-    Ok(true)
+    Ok(())
 }
 
 /// Poll the tenant for the command's exit. The devserver control terminal
@@ -491,13 +280,14 @@ fn spawn_exit_watcher(app: tauri::AppHandle, state: Arc<AppState>, mode: Arc<Ter
     });
 }
 
-/// New Window from a default-terminal window: another process with the same
-/// `--dir` and `--app-id`, which is the contract (one window per process) and
-/// what groups the windows under one class.
+/// New Window from a `chan-term` window: another `chan-term` with the same
+/// `--dir` and `--app-id`. With an app id it is a process of its own, which
+/// groups the windows under one class; without one it is a shell launch, which
+/// opens in the running chan-desktop, or starts it.
 pub(crate) fn spawn_sibling(mode: &TerminalMode) {
-    let exe = sibling_executable();
+    let (exe, appimage) = sibling_executable();
     let args = sibling_args(&mode.cwd, mode.launch.app_id.as_deref());
-    match sibling_command(&exe, &args).spawn() {
+    match sibling_command(&exe, &args, appimage).spawn() {
         Ok(mut child) => {
             // Reap what was spawned so it never lingers as a zombie.
             std::thread::spawn(move || {
@@ -514,36 +304,55 @@ pub(crate) fn spawn_sibling(mode: &TerminalMode) {
 /// reparented away from this process: Omarchy's Super+Return reads the cwd of
 /// the focused window's newest child and expects a shell there, not another
 /// chan-desktop. The argv rides as positional parameters, never as text a
-/// shell re-parses.
-fn sibling_command(exe: &Path, args: &[OsString]) -> std::process::Command {
+/// shell re-parses. The sibling must run as `chan-term`: the dispatch reads
+/// `$ARGV0` first, which the sibling drops once it has dispatched, and an
+/// AppImage's runtime sets `$ARGV0` from the `argv[0]` it is run with, which
+/// bash's `exec -a` chooses (the shim wrappers' route).
+fn sibling_command(exe: &Path, args: &[OsString], appimage: bool) -> std::process::Command {
     #[cfg(unix)]
     {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.arg("-c").arg("\"$0\" \"$@\" &").arg(exe).args(args);
+        let mut command = if appimage {
+            let mut bash = std::process::Command::new("bash");
+            bash.arg("-c")
+                .arg(format!("exec -a {} \"$0\" \"$@\" &", chan::term::NAME));
+            bash
+        } else {
+            let mut sh = std::process::Command::new("/bin/sh");
+            sh.arg("-c").arg("\"$0\" \"$@\" &");
+            sh
+        };
+        command.arg(exe).args(args).env("ARGV0", chan::term::NAME);
         command
     }
     #[cfg(not(unix))]
     {
+        let _ = appimage;
         let mut command = std::process::Command::new(exe);
-        command.args(args);
+        command.args(args).env("ARGV0", chan::term::NAME);
         command
     }
 }
 
-fn sibling_executable() -> PathBuf {
+/// The executable a sibling starts, and whether it is an AppImage: its inner
+/// binary lives on a mount that ends with this process.
+fn sibling_executable() -> (PathBuf, bool) {
     #[cfg(unix)]
     if let Some(appimage) = crate::cs_install::appimage_path() {
-        return appimage;
+        return (appimage, true);
     }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chan-desktop"))
+    (
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("chan-desktop")),
+        false,
+    )
 }
 
 /// Make `app_id` the GLib program name before GTK initialises. tauri passes
 /// no GTK application id, so GTK 3 derives the Wayland app_id and the X11
-/// class from the program name, which GLib otherwise takes from `argv[0]` (the
-/// `chan-desktop` that `StartupWMClass` names). libglib-2.0 is already linked
-/// through gtk-rs's sys crates, so a raw declaration costs no new crate, the
-/// route `linux_gui_stack` takes for `access`.
+/// class from the program name, which GLib otherwise takes from `argv[0]`
+/// (`chan-term`, a name no desktop entry's `StartupWMClass` names).
+/// libglib-2.0 is already linked through gtk-rs's sys crates, so a raw
+/// declaration costs no new crate, the route `linux_gui_stack` takes for
+/// `access`.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn set_gtk_program_name(app_id: &str) {
     use std::ffi::CString;
@@ -567,239 +376,17 @@ fn set_gtk_program_name(app_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chan::term::Invocation;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
     }
 
-    fn parse(items: &[&str]) -> Result<Option<TerminalLaunch>, String> {
-        parse_terminal_launch(args(items))
-    }
-
     fn launch(items: &[&str]) -> TerminalLaunch {
-        parse(items).expect("parses").expect("is a terminal launch")
-    }
-
-    #[test]
-    fn plain_launch_is_not_terminal_mode() {
-        assert_eq!(parse(&[]), Ok(None));
-    }
-
-    #[test]
-    fn positional_arguments_stay_with_the_gui() {
-        for positional in [&["%U"][..], &["chan://x"], &["/home/u/notes"]] {
-            assert_eq!(parse(positional), Ok(None), "{positional:?}");
+        match chan::term::parse(args(items)) {
+            Ok(Invocation::Launch(launch)) => launch,
+            other => panic!("{items:?} is not a launch: {other:?}"),
         }
-    }
-
-    #[test]
-    fn unknown_options_before_a_terminal_flag_stay_with_the_gui() {
-        assert_eq!(parse(&["--foo"]), Ok(None));
-        assert_eq!(parse(&["-x", "--dir=/t"]), Ok(None));
-        assert_eq!(parse(&["--help"]), Ok(None));
-    }
-
-    #[test]
-    fn dash_e_takes_the_rest_as_the_exact_argv() {
-        let script = "for i in 1 2; do echo $i; done";
-        let launch = launch(&["-e", "bash", "-c", script]);
-        assert_eq!(launch.command, Some(args(&["bash", "-c", script])));
-        assert_eq!(launch.dir, None);
-        assert!(!launch.hold);
-    }
-
-    #[test]
-    fn double_dash_takes_the_rest_as_the_exact_argv() {
-        let launch = launch(&["--", "ls", "--color=auto", "--", "-e"]);
-        assert_eq!(
-            launch.command,
-            Some(args(&["ls", "--color=auto", "--", "-e"]))
-        );
-    }
-
-    #[test]
-    fn dash_e_ends_option_parsing() {
-        let launch = launch(&["-e", "printf", "--dir=/x", "--hold"]);
-        assert_eq!(
-            launch.command,
-            Some(args(&["printf", "--dir=/x", "--hold"]))
-        );
-        assert_eq!(launch.dir, None);
-        assert!(!launch.hold);
-    }
-
-    #[test]
-    fn dash_e_alone_is_an_error() {
-        let err = parse(&["-e"]).unwrap_err();
-        assert!(err.contains("command"), "{err}");
-        let err = parse(&["--dir=/x", "-e"]).unwrap_err();
-        assert!(err.contains("command"), "{err}");
-    }
-
-    #[test]
-    fn double_dash_alone_is_an_error() {
-        let err = parse(&["--"]).unwrap_err();
-        assert!(err.contains("command"), "{err}");
-    }
-
-    #[test]
-    fn options_accept_equals_and_separate_values() {
-        assert_eq!(launch(&["--dir=/tmp"]), launch(&["--dir", "/tmp"]));
-        assert_eq!(launch(&["--title=Build"]), launch(&["--title", "Build"]));
-        assert_eq!(
-            launch(&["--app-id=org.x.y"]),
-            launch(&["--app-id", "org.x.y"])
-        );
-        assert_eq!(launch(&["--dir=/tmp"]).dir, Some(PathBuf::from("/tmp")));
-        assert_eq!(launch(&["--title=Build"]).title.as_deref(), Some("Build"));
-        assert_eq!(
-            launch(&["--app-id=org.x.y"]).app_id.as_deref(),
-            Some("org.x.y")
-        );
-    }
-
-    #[test]
-    fn a_value_is_taken_verbatim_even_when_it_looks_like_an_option() {
-        let launch = launch(&["--title", "-e", "-e", "x"]);
-        assert_eq!(launch.title.as_deref(), Some("-e"));
-        assert_eq!(launch.command, Some(args(&["x"])));
-    }
-
-    #[test]
-    fn valued_options_require_a_value() {
-        for bad in [&["--dir"][..], &["--dir="], &["--title="], &["--app-id="]] {
-            let err = parse(bad).unwrap_err();
-            assert!(err.contains("needs a value"), "{bad:?}: {err}");
-        }
-    }
-
-    #[test]
-    fn hold_takes_no_value() {
-        let launch = launch(&["--hold"]);
-        assert!(launch.hold);
-        assert_eq!(launch.command, None);
-        assert!(parse(&["--hold=1"]).is_err());
-    }
-
-    #[test]
-    fn unknown_options_after_a_terminal_flag_are_errors() {
-        let err = parse(&["--hold", "--foo"]).unwrap_err();
-        assert!(err.contains("--foo"), "{err}");
-    }
-
-    #[test]
-    fn positional_arguments_after_a_terminal_flag_are_errors() {
-        let err = parse(&["--dir=/x", "vim"]).unwrap_err();
-        assert!(err.contains("-e"), "{err}");
-    }
-
-    #[test]
-    fn options_alone_run_the_shell() {
-        let launch = launch(&["--dir=/x"]);
-        assert_eq!(launch.command, None);
-        assert_eq!(launch.dir, Some(PathBuf::from("/x")));
-    }
-
-    #[test]
-    fn a_repeated_option_keeps_the_last_value() {
-        assert_eq!(
-            launch(&["--dir=/a", "--dir=/b"]).dir,
-            Some(PathBuf::from("/b"))
-        );
-    }
-
-    #[test]
-    fn a_relative_dir_is_kept_as_given() {
-        assert_eq!(launch(&["--dir=notes"]).dir, Some(PathBuf::from("notes")));
-    }
-
-    #[test]
-    fn dash_e_may_follow_every_option() {
-        let launch = launch(&[
-            "--title=Build",
-            "--hold",
-            "--app-id=a.b",
-            "--dir=/w",
-            "-e",
-            "make",
-            "-j4",
-        ]);
-        assert_eq!(launch.title.as_deref(), Some("Build"));
-        assert!(launch.hold);
-        assert_eq!(launch.app_id.as_deref(), Some("a.b"));
-        assert_eq!(launch.dir, Some(PathBuf::from("/w")));
-        assert_eq!(launch.command, Some(args(&["make", "-j4"])));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn title_and_app_id_must_be_utf8() {
-        use std::os::unix::ffi::OsStringExt;
-        let raw = OsString::from_vec(b"--title=\xff".to_vec());
-        let err = parse_terminal_launch([raw]).unwrap_err();
-        assert!(err.contains("UTF-8"), "{err}");
-        let raw = OsString::from_vec(b"\xff".to_vec());
-        let err = parse_terminal_launch([OsString::from("--app-id"), raw]).unwrap_err();
-        assert!(err.contains("UTF-8"), "{err}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_argv_and_dir_keep_non_utf8_bytes() {
-        use std::os::unix::ffi::OsStringExt;
-        let raw = OsString::from_vec(b"\xff\xfe".to_vec());
-        let launch = parse_terminal_launch([OsString::from("-e"), raw.clone()])
-            .unwrap()
-            .unwrap();
-        assert_eq!(launch.command, Some(vec![raw.clone()]));
-        let dir = OsString::from_vec(b"--dir=/\xff".to_vec());
-        let launch = parse_terminal_launch([dir]).unwrap().unwrap();
-        assert_eq!(
-            launch.dir,
-            Some(PathBuf::from(OsString::from_vec(b"/\xff".to_vec())))
-        );
-    }
-
-    #[test]
-    fn no_dir_means_the_process_cwd() {
-        let (dir, warning) = resolve_working_dir(
-            None,
-            Path::new("/proc-cwd"),
-            Some(Path::new("/home/u")),
-            |_| true,
-        );
-        assert_eq!(dir, PathBuf::from("/proc-cwd"));
-        assert_eq!(warning, None);
-    }
-
-    #[test]
-    fn a_relative_dir_resolves_against_the_process_cwd() {
-        // Joined with the platform's separator, as the resolver joins.
-        let expected = Path::new("/proc-cwd").join("notes");
-        let (dir, warning) = resolve_working_dir(
-            Some(Path::new("notes")),
-            Path::new("/proc-cwd"),
-            Some(Path::new("/home/u")),
-            |dir| dir == expected,
-        );
-        assert_eq!(dir, expected);
-        assert_eq!(warning, None);
-    }
-
-    #[test]
-    fn a_missing_dir_falls_back_to_home_with_a_warning() {
-        let (dir, warning) = resolve_working_dir(
-            Some(Path::new("/gone")),
-            Path::new("/proc-cwd"),
-            Some(Path::new("/home/u")),
-            |_| false,
-        );
-        assert_eq!(dir, PathBuf::from("/home/u"));
-        let warning = warning.expect("a warning names the fallback");
-        assert!(
-            warning.contains("/gone") && warning.contains("/home/u"),
-            "{warning}"
-        );
     }
 
     #[test]
@@ -836,18 +423,70 @@ mod tests {
     }
 
     #[test]
-    fn a_sibling_launch_always_carries_a_terminal_flag_and_no_command() {
+    fn a_sibling_launch_keeps_the_directory_and_app_id_and_runs_the_shell() {
         assert_eq!(
             sibling_args(Path::new("/w"), Some("org.x")),
             args(&["--dir=/w", "--app-id=org.x"])
         );
         assert_eq!(sibling_args(Path::new("/w"), None), args(&["--dir=/w"]));
-        let launch = parse_terminal_launch(sibling_args(Path::new("/w"), Some("org.x")))
-            .unwrap()
-            .expect("a sibling is a terminal launch");
-        assert_eq!(launch.command, None);
-        assert!(!launch.hold);
-        assert_eq!(launch.title, None);
+        let sibling = launch(
+            &sibling_args(Path::new("/w"), Some("org.x"))
+                .iter()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(sibling.dir, Some(PathBuf::from("/w")));
+        assert_eq!(sibling.app_id.as_deref(), Some("org.x"));
+        assert_eq!(sibling.command, None);
+        assert!(!sibling.hold);
+        assert_eq!(sibling.title, None);
+    }
+
+    /// The sibling runs as `chan-term`, reparented: `$ARGV0` names it for the
+    /// dispatch, and an AppImage, whose runtime sets `$ARGV0` from its own
+    /// `argv[0]`, is run under that name by bash's `exec -a`. The argv rides
+    /// as positional parameters.
+    #[cfg(unix)]
+    #[test]
+    fn a_sibling_starts_reparented_as_chan_term() {
+        let argv = args(&["--dir=/w x", "--app-id=org.x"]);
+        let program = |command: &std::process::Command| {
+            let mut all = vec![command.get_program().to_os_string()];
+            all.extend(command.get_args().map(OsStr::to_os_string));
+            all
+        };
+        let argv0 = |command: &std::process::Command| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "ARGV0")
+                .and_then(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        let plain = sibling_command(Path::new("/usr/bin/chan-desktop"), &argv, false);
+        assert_eq!(
+            program(&plain),
+            args(&[
+                "/bin/sh",
+                "-c",
+                "\"$0\" \"$@\" &",
+                "/usr/bin/chan-desktop",
+                "--dir=/w x",
+                "--app-id=org.x"
+            ])
+        );
+        assert_eq!(argv0(&plain), Some(OsString::from("chan-term")));
+        let appimage = sibling_command(Path::new("/opt/Chan.AppImage"), &argv, true);
+        assert_eq!(
+            program(&appimage),
+            args(&[
+                "bash",
+                "-c",
+                "exec -a chan-term \"$0\" \"$@\" &",
+                "/opt/Chan.AppImage",
+                "--dir=/w x",
+                "--app-id=org.x"
+            ])
+        );
+        assert_eq!(argv0(&appimage), Some(OsString::from("chan-term")));
     }
 
     #[test]
@@ -903,8 +542,13 @@ mod tests {
         assert!(err.contains("not found"), "no PATH finds nothing: {err}");
     }
 
+    /// `chan-term` is read before the version probe, so `chan-term
+    /// --version` is its own, and its window opens after the GUI-stack
+    /// preference, whose AppImage re-exec carries `$ARGV0` and the argv, and
+    /// before the GUI's shim install. `$ARGV0` is dropped between the two, so
+    /// neither the window's shells nor anything else it starts inherit it.
     #[test]
-    fn terminal_mode_dispatches_after_the_gui_stack_preference_and_before_the_shims() {
+    fn chan_term_dispatches_around_the_gui_stack_preference_and_before_the_shims() {
         const MAIN_RS: &str = include_str!("main.rs");
         let production = MAIN_RS
             .split("\n#[cfg(test)]\nmod tests {")
@@ -912,19 +556,46 @@ mod tests {
             .expect("main.rs has a test module");
         let main_start = production.find("\nfn main() {").expect("fn main");
         let main_body = &production[main_start..];
-        let gui_stack = main_body
-            .find("linux_gui_stack::prefer_system_gui_stack();")
-            .expect("the GUI stack preference");
-        let dispatch = main_body
-            .find("terminal_mode::run_if_requested()")
-            .expect("the terminal-mode dispatch");
-        let shims = main_body
-            .find("cs_install::install_bin_shims()")
-            .expect("the shim install");
+        let order = [
+            "let terminal_launch = terminal_mode::launch_if_invoked();",
+            "print_version_if_requested()",
+            "linux_gui_stack::prefer_system_gui_stack();",
+            "std::env::remove_var(\"ARGV0\");",
+            "terminal_mode::run(launch);",
+            "cs_install::install_bin_shims()",
+        ];
+        let at: Vec<usize> = order
+            .iter()
+            .map(|needle| {
+                main_body
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("main runs {needle}"))
+            })
+            .collect();
         assert!(
-            gui_stack < dispatch && dispatch < shims,
-            "terminal mode runs after the AppImage re-exec can carry its flags and before the GUI's shim install"
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "main runs {order:?} in that order"
         );
+    }
+
+    /// Without `--app-id` the window keeps the program name that
+    /// `chan-desktop.desktop` names as its `StartupWMClass`, which `argv[0]`
+    /// (`chan-term`) would otherwise replace. A source pin: GTK applies the
+    /// name, which the desktop guest reading observes.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn a_window_without_an_app_id_keeps_the_desktop_entrys_class() {
+        const ENTRY: &str = include_str!("../../../packaging/distros/shared/chan-desktop.desktop");
+        let class = format!("StartupWMClass={DESKTOP_PROGRAM_NAME}");
+        assert!(ENTRY.lines().any(|line| line == class), "{ENTRY}");
+        const SELF: &str = include_str!("terminal_mode.rs");
+        let production = SELF
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("this file has a test module");
+        assert!(production.contains(
+            "set_gtk_program_name(launch.app_id.as_deref().unwrap_or(DESKTOP_PROGRAM_NAME));"
+        ));
     }
 
     #[test]
@@ -938,29 +609,6 @@ mod tests {
         assert!(
             !production.contains("generate_handler!"),
             "one command table, in main.rs"
-        );
-    }
-
-    #[test]
-    fn only_a_shell_launch_with_no_per_process_contract_hands_off() {
-        let launch = |items: &[&str]| parse_terminal_launch(args(items)).unwrap().unwrap();
-        assert!(hands_off(None), "a bare launch");
-        assert!(hands_off(Some(&launch(&["--dir=/tmp"]))));
-        assert!(
-            !hands_off(Some(&launch(&["-e", "htop"]))),
-            "a command owns the exit code"
-        );
-        assert!(
-            !hands_off(Some(&launch(&["--hold"]))),
-            "--hold keeps a window this process owns"
-        );
-        assert!(
-            !hands_off(Some(&launch(&["--dir=/tmp", "--app-id=floating"]))),
-            "the app id is per process"
-        );
-        assert!(
-            !hands_off(Some(&launch(&["--title=Logs"]))),
-            "the running desktop composes its own titles"
         );
     }
 }

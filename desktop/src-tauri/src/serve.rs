@@ -519,7 +519,7 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
 }
 
 /// Open a throwaway standalone terminal window whose first terminal starts in
-/// `cwd`: a default-terminal launch handed over by another chan-desktop
+/// `cwd`: a `chan-term` launch handed over by another chan-desktop
 /// process. Like [`spawn_local_terminal_window`] the watcher opens it at the
 /// shared `/terminal` tenant, but its registry row is never saved, so a
 /// relaunch does not restore it. Refused once a shutdown has started: the

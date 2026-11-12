@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Chan Terminal
+GenericName=Terminal
+Comment=Open a terminal window in Chan
+Exec=chan-term
+Icon=chan-desktop
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=System;TerminalEmulator;
+X-TerminalArgExec=-e
+X-TerminalArgDir=--dir=
+X-TerminalArgAppId=--app-id=
+X-TerminalArgTitle=--title=
+X-TerminalArgHold=--hold

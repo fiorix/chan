@@ -21,7 +21,7 @@ CHECKER = ROOT / "scripts/check-desktop-entries.py"
 SHARED = ROOT / "packaging/distros/shared"
 
 
-ENTRY_NAMES = ("chan-files.desktop", "chan-edit.desktop")
+ENTRY_NAMES = ("chan-files.desktop", "chan-edit.desktop", "chan-term.desktop")
 # The entry Tauri writes for the app, which the bundler links at the root.
 ROOT_ENTRY = """[Desktop Entry]
 Exec=chan-desktop
@@ -44,7 +44,7 @@ def run(*args: str | Path) -> subprocess.CompletedProcess[str]:
 def appimage_tree(directory: Path) -> Path:
     """The parts of the AppImage the checker reads, laid out as it extracts:
     Chan's entry under usr/share/applications and linked at the root, the
-    two entries under usr/share/chan/applications."""
+    three entries under usr/share/chan/applications."""
     tree = directory / "squashfs-root"
     applications = tree / "usr/share/applications"
     carried = tree / "usr/share/chan/applications"
@@ -73,6 +73,16 @@ def removed(name: str):
         (directory / name).unlink()
 
     return apply
+
+
+def desktop_as_a_terminal(directory: Path) -> None:
+    """The app's own entry back as a terminal beside chan-term's."""
+    text = (SHARED / "chan-desktop.desktop").read_text(encoding="utf-8")
+    old = "Categories=Office;TextEditor;System;"
+    if old not in text:
+        raise SystemExit(f"fixture drift: {old!r} not in chan-desktop.desktop")
+    text = text.replace(old, old + "TerminalEmulator;")
+    (directory / "chan-desktop.desktop").write_text(text, encoding="utf-8")
 
 
 CASES = [
@@ -105,6 +115,32 @@ CASES = [
         "entry missing",
         removed("chan-files.desktop"),
         "chan-files.desktop: missing from",
+    ),
+    (
+        "the terminal runs another binary",
+        broken("chan-term.desktop", "Exec=chan-term", "Exec=chan-desktop"),
+        "chan-term.desktop: Exec must run chan-term, got 'chan-desktop'",
+    ),
+    (
+        "no terminal category",
+        broken("chan-term.desktop", "Categories=System;TerminalEmulator;", "Categories=System;"),
+        "chan-term.desktop: Categories lacks TerminalEmulator, so xdg-terminal-exec skips it",
+    ),
+    (
+        "an option mapped onto another",
+        broken("chan-term.desktop", "X-TerminalArgDir=--dir=", "X-TerminalArgDir=--directory="),
+        "chan-term.desktop: X-TerminalArgDir must be '--dir=', got '--directory='",
+    ),
+    (
+        "an option left unmapped",
+        broken("chan-term.desktop", "X-TerminalArgHold=--hold\n", ""),
+        "chan-term.desktop: X-TerminalArgHold must be '--hold', got None",
+    ),
+    (
+        "another entry as a terminal",
+        desktop_as_a_terminal,
+        "chan-desktop.desktop: Categories has TerminalEmulator, which only chan-term.desktop "
+        "may carry",
     ),
 ]
 
@@ -169,7 +205,7 @@ APPIMAGE_CASES = [
         "usr/share/applications holds Chan.desktop, chan-files.desktop; linuxdeploy links",
     ),
     (
-        "both entries under usr/share/applications",
+        "every entry under usr/share/applications",
         moved_to_applications(*ENTRY_NAMES),
         "chan-files.desktop: missing from",
     ),

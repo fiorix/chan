@@ -20,7 +20,7 @@ use crate::{help, ServiceKind, DEFAULT_PORT};
 /// the version substring still match --
 /// `packaging/distros/homebrew/Formula/chan.rb.in:45` asserts it and
 /// `.github/workflows/publish-downstream.yml:905` greps for it.
-const CHAN_VERSION: &str = concat!(
+pub(crate) const CHAN_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (build ",
     env!("CHAN_BUILD_ID"),
@@ -135,6 +135,10 @@ pub(super) enum Command {
         opener: Opener,
         paths: Vec<std::ffi::OsString>,
     },
+    /// `chan-term`, reached by the program name alone. Its arguments are read
+    /// by its own grammar ([`crate::term::parse`]) when it runs.
+    #[command(skip)]
+    Term { args: Vec<std::ffi::OsString> },
     /// Serve a workspace (same as `chan workspace serve`)
     #[command(long_about = SERVE_LONG_ABOUT, visible_alias = "open")]
     #[command(after_long_help = &*SERVE_AFTER_HELP)]
@@ -1208,8 +1212,9 @@ where
 /// argument source. A `cs` stem parses through chan-shell's own `cs` parser,
 /// keeping every front end on the same help and action surface, so `cs terminal
 /// list` is `chan shell terminal list`. A `chan-files` or `chan-edit` stem
-/// parses that name's own usage into [`Command::OpenPaths`]. The original argv
-/// still goes to clap so its program-name slot is untouched.
+/// parses that name's own usage into [`Command::OpenPaths`], and a `chan-term`
+/// stem keeps its arguments for its own grammar in [`Command::Term`]. The
+/// original argv still goes to clap so its program-name slot is untouched.
 pub(super) fn parse_cli_with_arg0<I, T>(argv0_env: Option<std::ffi::OsString>, args: I) -> Cli
 where
     I: IntoIterator<Item = T>,
@@ -1222,6 +1227,14 @@ where
         return Cli {
             verbose,
             command: Command::OpenPaths { opener, paths },
+        };
+    }
+    if crate::term::invoked_as_term(&arg0) {
+        return Cli {
+            verbose: 0,
+            command: Command::Term {
+                args: argv.into_iter().skip(1).collect(),
+            },
         };
     }
     if !chan_shell::invoked_as_cs(&arg0) {
@@ -1490,6 +1503,29 @@ mod tests {
             )),
             (0, Opener::Edit, vec![])
         );
+    }
+
+    /// `chan-term` keeps its arguments for its own grammar, never `chan`'s:
+    /// `ps` is a `chan` subcommand, so a name the dispatch misses parses as
+    /// `chan ps` and fails here rather than exiting on a usage error. An
+    /// AppImage's name arrives in `$ARGV0`.
+    #[test]
+    fn parse_cli_dispatches_chan_term() {
+        for arg0 in ["chan-term", "/usr/bin/chan-term"] {
+            let cli = parse_cli_with_arg0(None, [arg0, "ps"]);
+            let Command::Term { args } = cli.command else {
+                panic!("{arg0}: expected chan-term, got {:?}", cli.command);
+            };
+            assert_eq!(args, ["ps"]);
+        }
+        let cli = parse_cli_with_arg0(
+            Some(std::ffi::OsString::from("chan-term")),
+            ["/tmp/.mount_x/usr/bin/chan-desktop", "ps"],
+        );
+        let Command::Term { args } = cli.command else {
+            panic!("expected chan-term, got {:?}", cli.command);
+        };
+        assert_eq!(args, ["ps"]);
     }
 
     /// An AppImage's `AppRun` drops `argv[0]`, and a Windows shim cannot set

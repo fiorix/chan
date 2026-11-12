@@ -15,8 +15,8 @@
 //! its pipe not created yet, is waited for first. When that desktop does not
 //! answer, or is still shutting down past the wait, the launch says so in a
 //! native message before it exits, unless its stderr is a terminal that has
-//! the log line. The CLI personalities and the default-terminal launch never
-//! reach this: they are dispatched before it in `main`.
+//! the log line. The CLI personalities and the `chan-term` launch never reach
+//! this: they are dispatched before it in `main`.
 //!
 //! The endpoint is per account (the runtime directory on unix, the account's
 //! SID in both pipes' names on Windows), not per `CHAN_HOME`.
@@ -205,13 +205,17 @@ pub(crate) fn decide<C>(
 }
 
 /// Run the check for a GUI launch given `paths` (absolute, from
-/// `launch_paths`): the claimed endpoint for the listener, or `None` to boot
-/// without one. A launch another desktop answers for ends the process here,
-/// its paths handed to that desktop; a launch that boots keeps its paths for
-/// its own boot to open.
-pub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {
+/// `launch_paths`) or the `terminal` a `chan-term` that started it asked for:
+/// the claimed endpoint for the listener, or `None` to boot without one. A
+/// launch another desktop answers for ends the process here, its paths or
+/// its terminal handed to that desktop; a launch that boots keeps them for its
+/// own boot to open.
+pub(crate) fn guard(paths: &[String], terminal: Option<&str>) -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
-        Some(path) => check_at(&path, BOUNDS, paths),
+        Some(path) => match terminal {
+            Some(dir) => check_terminal_at(&path, BOUNDS, dir),
+            None => check_at(&path, BOUNDS, paths),
+        },
         None => Startup::RunWithoutListener {
             why: "no handoff endpoint for this account (no owner-controlled runtime directory \
                   on unix, no readable account SID on Windows)"
@@ -361,9 +365,36 @@ fn show_message(notice: Notice) {
 fn show_message(_: Notice) {}
 
 fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointClaim> {
+    check_with(path, bounds, |budget| {
+        forward_with(
+            paths,
+            budget,
+            bounds.ask,
+            |open, budget| {
+                tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
+            },
+            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+        )
+    })
+}
+
+/// [`check_at`] for a launch that carries a terminal: the holder is asked for
+/// it, an `OpenTerminal`, where a launch without paths asks it to come
+/// forward, since the terminal window it opens is raised.
+fn check_terminal_at(path: &Path, bounds: Bounds, dir: &str) -> Startup<EndpointClaim> {
+    check_with(path, bounds, |budget| {
+        tauri::async_runtime::block_on(handoff::try_open_terminal_at(path, dir, budget))
+    })
+}
+
+fn check_with(
+    path: &Path,
+    bounds: Bounds,
+    forward: impl FnMut(Duration) -> ActivateReply,
+) -> Startup<EndpointClaim> {
     decide(
         claim(path),
-        || ask(path, bounds, paths),
+        || ask(path, bounds, forward),
         |wait| {
             let grace = match wait {
                 Wait::Drain => bounds.drain,
@@ -388,21 +419,15 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     }
 }
 
-fn ask(path: &Path, bounds: Bounds, paths: &[String]) -> Answer<EndpointClaim> {
+fn ask(
+    path: &Path,
+    bounds: Bounds,
+    forward: impl FnMut(Duration) -> ActivateReply,
+) -> Answer<EndpointClaim> {
     ask_with(
         bounds,
         || handoff::endpoint_is_booting_at(path),
-        |budget| {
-            forward_with(
-                paths,
-                budget,
-                bounds.ask,
-                |open, budget| {
-                    tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
-                },
-                |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
-            )
-        },
+        forward,
         || match claim(path) {
             Lock::Taken(claim) => Some(claim),
             Lock::Held | Lock::Unavailable(_) => None,
@@ -1183,7 +1208,9 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("the test module separates the production code");
         let (_, guard) = production
-            .split_once("\npub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {")
+            .split_once(
+                "\npub(crate) fn guard(paths: &[String], terminal: Option<&str>) -> Option<EndpointClaim> {",
+            )
             .expect("guard exists");
         let (guard, _) = guard.split_once("\n}\n").expect("guard ends");
         let reported = guard
@@ -1400,6 +1427,51 @@ mod tests {
             Forward::WindowOnItsWay,
             "a reopen while a minted window has no native window yet opens nothing"
         );
+    }
+
+    /// A launch that carries a `chan-term`'s terminal hands the terminal to
+    /// the desktop it finds, an `OpenTerminal` in its directory, and exits
+    /// without booting; that desktop came forward with the window it opened.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_with_a_terminal_hands_the_terminal_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let (sent, asked) = std::sync::mpsc::channel();
+        let _listener = tauri::async_runtime::block_on(async {
+            handoff::start_listener(sock.clone(), move |req| {
+                let sent = sent.clone();
+                async move {
+                    match req {
+                        handoff::Request::OpenTerminal { cwd, .. } => {
+                            let _ = sent.send(cwd);
+                            Response::TerminalOpened {
+                                desktop_version: "9.9.9".into(),
+                            }
+                        }
+                        _ => Response::Error {
+                            message: "unexpected request".into(),
+                        },
+                    }
+                }
+            })
+        })
+        .unwrap();
+        let startup = check_terminal_at(
+            &sock,
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
+            "/srv/notes",
+        );
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+        assert_eq!(startup.exit_code(), Some(0));
+        assert_eq!(asked.try_iter().collect::<Vec<_>>(), ["/srv/notes"]);
     }
 
     /// The I/O half against a real listener on a temporary endpoint: a launch

@@ -287,7 +287,7 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/test-desktop-package-version.py
 
 .PHONY: desktop-entries-check
-desktop-entries-check: ## Check the chan-files and chan-edit desktop entries (Linux: desktop-file-validate).
+desktop-entries-check: ## Check the chan-files, chan-edit and chan-term desktop entries (Linux: desktop-file-validate).
 	$(LINUX_ONLY)
 	$(PYTHON) scripts/test-check-desktop-entries.py
 	$(PYTHON) scripts/check-desktop-entries.py

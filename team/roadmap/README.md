@@ -23,15 +23,17 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.129.0
 
-Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise waits on the owner's Mac reading before anything is built ([minraise]). The owner adds the release's other rows at planning.
+Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise waits on the owner's Mac reading before anything is built ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
+| [the default terminal is chan-desktop's flags][chanterm] | built | review |
 
 [ghosttyng]: v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [minraise]: v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
+[chanterm]: v0.129.0/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md
 
 ## Completed
 

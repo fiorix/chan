@@ -255,11 +255,13 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
 /// Launch the chan-desktop GUI as a detached process.
 #[cfg(unix)]
 fn spawn_desktop_gui() -> std::io::Result<()> {
-    spawn_desktop_gui_opening(&[]).map(|_| ())
+    spawn_desktop_gui_opening(&[], None).map(|_| ())
 }
 
 /// Launch the chan-desktop GUI as a detached process given `paths`, which its
-/// boot opens in a standalone window as `chan-desktop PATH...` does. The
+/// boot opens in a standalone window as `chan-desktop PATH...` does, or the
+/// start directory of a `chan-term` shell, which its boot opens a terminal
+/// window in ([`chan_server::handoff::OPEN_TERMINAL_ENV`]). The
 /// process started is returned when it is the desktop's own, so a caller can
 /// read its exit: a launch that finds another desktop hands it the paths and
 /// exits from its single-instance guard. On macOS the process is `open`,
@@ -273,7 +275,9 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
 #[cfg(unix)]
 pub(super) fn spawn_desktop_gui_opening(
     paths: &[String],
+    terminal: Option<&str>,
 ) -> std::io::Result<Option<std::process::Child>> {
+    use chan_server::handoff::OPEN_TERMINAL_ENV;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -288,11 +292,16 @@ pub(super) fn spawn_desktop_gui_opening(
     {
         if let Some(bundle) = macos_app_bundle(&exe) {
             let mut open = Command::new("/usr/bin/open");
-            // `-n` with paths: `open --args` aimed at an app that is already
-            // launching drops the arguments, where a new instance runs the
-            // single-instance guard and hands them to the one on its way up.
-            if !paths.is_empty() {
+            // `-n` with paths or a terminal: `open --args` aimed at an app
+            // that is already launching drops the arguments, where a new
+            // instance runs the single-instance guard and hands them to the
+            // one on its way up. LaunchServices starts the app with its own
+            // environment, so the terminal goes through `--env`.
+            if !paths.is_empty() || terminal.is_some() {
                 open.arg("-n");
+            }
+            if let Some(dir) = terminal {
+                open.arg("--env").arg(format!("{OPEN_TERMINAL_ENV}={dir}"));
             }
             open.arg(bundle);
             if !paths.is_empty() {
@@ -315,7 +324,12 @@ pub(super) fn spawn_desktop_gui_opening(
     let target = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .unwrap_or(exe);
-    Command::new(&target)
+    let mut command = Command::new(&target);
+    match terminal {
+        Some(dir) => command.env(OPEN_TERMINAL_ENV, dir),
+        None => command.env_remove(OPEN_TERMINAL_ENV),
+    };
+    command
         // Clean argv0 so the spawned process boots the GUI, not the alias.
         // `$ARGV0` is the name an AppImage wrapper ran THIS process as, and
         // the desktop's dispatch reads it ahead of argv[0], so it is not

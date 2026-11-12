@@ -5,15 +5,17 @@
 //! during its boot. Either way the path lands as `cs open PATH` typed in a
 //! standalone window would. On macOS a file Finder opens comes as an
 //! open-file event's URL instead of an argument (`open_events`), read here by
-//! [`from_urls`] as a launch's file URIs are.
+//! [`from_urls`] as a launch's file URIs are. A desktop that a `chan-term`
+//! started comes with the terminal it asked for instead
+//! ([`take_boot_terminal`]), which its boot opens as a handed-over one.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chan_server::handoff::{self, Response};
 
-use crate::{serve, terminal_mode, AppState};
+use crate::{serve, AppState};
 
 /// What a GUI launch's arguments come to.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -30,26 +32,20 @@ pub(crate) struct LaunchArgs {
 /// old macOS Finder passes `-psn_...`); an empty argument is ignored. Every
 /// other one is read as `chan-files` reads its paths
 /// ([`handoff::launch_arg_path`]), and one that names nothing this desktop can
-/// open is skipped with its reason. `Err` is the sentence for a usage error: a
-/// terminal-mode option (`-e`, `--`, `--dir` and the rest) beside a path,
-/// since a launch either opens paths or runs a terminal, and that one is a
-/// mistake rather than a path.
+/// open is skipped with its reason. `Err` is the sentence for a usage error:
+/// an option of `chan-term`'s launch (`-e`, `--`, `--dir` and the rest), which
+/// runs terminals where chan-desktop opens paths; left alone, the arguments
+/// after `-e` would be read as paths, and a missing one created empty.
 pub(crate) fn from_args(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
 ) -> Result<LaunchArgs, String> {
     let args: Vec<OsString> = args.into_iter().filter(|arg| !arg.is_empty()).collect();
-    if args.iter().any(|arg| !is_option(arg)) {
-        if let Some(option) = args
-            .iter()
-            .find(|arg| terminal_mode::is_terminal_option(arg))
-        {
-            return Err(format!(
-                "{} is a terminal option and the launch also names a path: open paths with one \
-                 chan-desktop and run a terminal with another",
-                option.to_string_lossy()
-            ));
-        }
+    if let Some(option) = args.iter().find(|arg| chan::term::is_launch_option(arg)) {
+        return Err(format!(
+            "{} is a chan-term option: run the terminal with chan-term, which takes it",
+            option.to_string_lossy()
+        ));
     }
     let mut launch = LaunchArgs::default();
     for arg in args.iter().filter(|arg| !is_option(arg)) {
@@ -128,6 +124,43 @@ pub(crate) async fn open_at_boot(state: Arc<AppState>, paths: &[String]) {
             other => {
                 tracing::warn!(%path, reply = ?other, "could not open a path this launch was given")
             }
+        }
+    }
+}
+
+/// The terminal a `chan-term` that started this desktop asked for
+/// ([`handoff::OPEN_TERMINAL_ENV`]): the absolute directory its shell starts
+/// in. Read and dropped before any thread starts, so no child of the desktop
+/// inherits it; a value that is no absolute UTF-8 path names no terminal and
+/// is logged.
+pub(crate) fn take_boot_terminal() -> Option<String> {
+    let value = std::env::var_os(handoff::OPEN_TERMINAL_ENV)?;
+    std::env::remove_var(handoff::OPEN_TERMINAL_ENV);
+    match value.into_string() {
+        Ok(dir) if Path::new(&dir).is_absolute() => Some(dir),
+        other => {
+            tracing::warn!(value = ?other, "ignoring a launch terminal that names no absolute directory");
+            None
+        }
+    }
+}
+
+/// Open the terminal a `chan-term` that started this desktop asked for, as
+/// the handoff's `OpenTerminal` opens one: a throwaway terminal window whose
+/// shell starts in `dir`. `true` when it opened, so the boot opens no other
+/// first window beside it.
+pub(crate) async fn open_terminal_at_boot(state: Arc<AppState>, dir: Option<&str>) -> bool {
+    let Some(dir) = dir else {
+        return false;
+    };
+    match serve::spawn_throwaway_terminal_window(state, PathBuf::from(dir)).await {
+        Ok(label) => {
+            tracing::info!(%dir, %label, "opened the terminal the launch asked for");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%dir, %error, "could not open the terminal the launch asked for");
+            false
         }
     }
 }
@@ -221,32 +254,34 @@ mod tests {
         );
     }
 
-    /// A terminal-mode option beside a path is a mistake, not a path: the
+    /// An option of `chan-term`'s launch is a usage error that points there,
+    /// with a path beside it or none: chan-desktop runs no terminal, and the
     /// arguments after `-e` would otherwise be read as paths, and a missing
     /// one created empty.
     #[test]
-    fn a_terminal_option_beside_a_path_is_a_usage_error() {
+    fn a_chan_term_option_is_a_usage_error() {
         for (argv, option) in [
             (&["notes.md", "-e", "htop"][..], "-e"),
+            (&["-e", "htop"][..], "-e"),
             (&["notes.md", "--", "htop"][..], "--"),
             (&["notes.md", "--title=x"][..], "--title=x"),
-            (&["notes.md", "--dir", "/srv"][..], "--dir"),
-            (&["notes.md", "--hold"][..], "--hold"),
+            (&["--dir", "/srv"][..], "--dir"),
+            (&["--dir=/srv"][..], "--dir=/srv"),
+            (&["--hold"][..], "--hold"),
+            (
+                &["--app-id=TUI.float", "-e", "btop"][..],
+                "--app-id=TUI.float",
+            ),
         ] {
             assert_eq!(
                 from_args(args(argv), Some(Path::new("/srv"))),
                 Err(format!(
-                    "{option} is a terminal option and the launch also names a path: open paths \
-                     with one chan-desktop and run a terminal with another"
+                    "{option} is a chan-term option: run the terminal with chan-term, which \
+                     takes it"
                 )),
                 "{argv:?}"
             );
         }
-        assert_eq!(
-            from_args(args(&["--hold"]), None).unwrap(),
-            LaunchArgs::default(),
-            "with no path there is nothing to refuse"
-        );
     }
 
     /// An open-file event's URLs read as the same URIs given to a launch do:

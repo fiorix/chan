@@ -5193,12 +5193,14 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
 /// CLI in-process with the Desktop personality and EXIT instead of launching
 /// the GUI. This is what makes a desktop install also provide `chan` with no
 /// separate download. The `chan-files` and `chan-edit` names run the same CLI
-/// under their own usage. Mirrors `run_as_cs_if_requested`: a pre-GUI argv
-/// probe that short-circuits `main`. The Desktop personality makes `chan
-/// serve` and the two openers integrate with the running desktop (handoff /
-/// GUI launch) and `chan upgrade` drive the desktop updater rather than
-/// replacing a CLI tarball. Returns `Ok(true)` when it handled the
-/// invocation, `Ok(false)` for a normal GUI launch.
+/// under their own usage, and so does a `chan-term` launch that only runs the
+/// user's shell, which opens in the running desktop's window as their paths
+/// do. Mirrors `run_as_cs_if_requested`: a pre-GUI argv probe that
+/// short-circuits `main`. The Desktop personality makes `chan serve`, the two
+/// openers and `chan-term` integrate with the running desktop (handoff / GUI
+/// launch) and `chan upgrade` drive the desktop updater rather than replacing
+/// a CLI tarball. Returns `Ok(true)` when it handled the invocation,
+/// `Ok(false)` for a normal GUI launch.
 fn run_as_chan_if_requested() -> Result<bool, String> {
     // Stem detection prefers `$ARGV0` (see `chan_shell::invoked_arg0`) so a
     // packaged AppImage invoked via `exec -a chan "$APPIMAGE"` (AppRun drops
@@ -5206,7 +5208,9 @@ fn run_as_chan_if_requested() -> Result<bool, String> {
     // goes to the CLI's parse with the real argv, since an opener's usage is
     // chosen by it and AppRun's argv[0] is the inner binary.
     let arg0 = chan_shell::invoked_arg0();
-    if !chan_shell::invoked_as_chan(&arg0) && !chan::invoked_as_opener(&arg0) {
+    let shell_terminal = chan::term::invoked_as_term(&arg0)
+        && chan::term::is_shell_launch(std::env::args_os().skip(1));
+    if !chan_shell::invoked_as_chan(&arg0) && !chan::invoked_as_opener(&arg0) && !shell_terminal {
         return Ok(false);
     }
     // `chan serve` needs a multi-threaded runtime; everything else runs fine
@@ -5256,6 +5260,7 @@ fn attach_parent_console_for_cli() {
     if !chan_shell::invoked_as_chan(&arg0)
         && !chan_shell::invoked_as_cs(&arg0)
         && !chan::invoked_as_opener(&arg0)
+        && !chan::term::invoked_as_term(&arg0)
     {
         return;
     }
@@ -5571,10 +5576,14 @@ fn main() {
             std::process::exit(1);
         }
     }
+    // `chan-term` (argv[0] stem, `$ARGV0` under an AppImage): read its launch
+    // here, so `chan-term --help`, `--version` and a usage error answer before
+    // any GUI setup. Its window opens below, after the GUI-stack preference.
+    let terminal_launch = terminal_mode::launch_if_invoked();
     // `chan-desktop --version`: print the version and build id and exit. Last
     // of the pre-GUI probes so it cannot shadow `chan --version` reaching the
-    // chan CLI above through a `bin/chan` symlink.
-    if print_version_if_requested() {
+    // chan CLI above through a `bin/chan` symlink, or `chan-term --version`.
+    if terminal_launch.is_none() && print_version_if_requested() {
         return;
     }
     // Linux AppImage only: prefer the host GTK/WebKit/EGL stack over the
@@ -5582,6 +5591,13 @@ fn main() {
     // not abort with EGL_BAD_PARAMETER against a rolling-distro Mesa. No-op
     // off Linux/AppImage and once already applied.
     linux_gui_stack::prefer_system_gui_stack();
+    // The name the dispatch above read is spent. It goes here, after the
+    // GUI-stack re-exec that needs it to dispatch again, so no child of this
+    // process inherits it: `$ARGV0` outranks `argv[0]` in every chan binary's
+    // dispatch, so an inherited `chan-term` (a New Window sibling's) would
+    // turn a `cs` typed in its terminal, or a `chan-files` an `xdg-open` runs,
+    // into a terminal launch.
+    std::env::remove_var("ARGV0");
     init_tracing();
     // The version alone cannot distinguish a branch build from the previous
     // release; the build id can, and this line is where a terminal launch
@@ -5591,23 +5607,21 @@ fn main() {
         build = CHAN_DESKTOP_BUILD_ID,
         "chan-desktop starting"
     );
-    // A default-terminal launch (`-e`, `--dir`, `--app-id`, `--title`,
-    // `--hold`) is one terminal window in its own process with none of the
-    // launcher boot below: no shims, library stores, handoff listener or
-    // window watcher, so it leaves a running chan-desktop alone. It opens a
-    // webview, so it runs after the GUI-stack preference above.
-    match terminal_mode::run_if_requested() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("chan-desktop: {e}");
-            eprintln!(
-                "usage: chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] \
-                 [-e CMD ARGS... | -- CMD ARGS...]"
-            );
-            std::process::exit(2);
-        }
+    // A `chan-term` launch with a command, `--hold`, `--app-id` or `--title`
+    // is one terminal window in its own process with none of the launcher
+    // boot below: no shims, library stores, handoff listener or window
+    // watcher, so it leaves a running chan-desktop alone. A shell-only one ran
+    // as the CLI above. It opens a webview, so it runs after the GUI-stack
+    // preference above.
+    if let Some(launch) = terminal_launch {
+        terminal_mode::run(launch);
+        return;
     }
+    // The terminal a `chan-term` that started this desktop asked for, read
+    // and dropped before any thread starts. The boot opens it where it would
+    // open its first window, and a launch that finds another desktop hands
+    // it over, as it hands over its paths.
+    let boot_terminal = launch_paths::take_boot_terminal();
     // The paths a GUI launch was given (`chan-desktop PATH...`, the desktop
     // entry's file URIs), read before the endpoint so a launch that hands
     // over hands them over too.
@@ -5631,10 +5645,10 @@ fn main() {
     // paths, and exits here, before the shims, the config, the WireGuard
     // fabric or any window. The claim it returns is the endpoint the
     // listener serves once setup runs.
-    let endpoint_claim = single_instance::guard(&launch_paths);
+    let endpoint_claim = single_instance::guard(&launch_paths, boot_terminal.as_deref());
     // Best-effort on boot: own the `~/.local/bin` shims so a desktop install
-    // also provides the `chan` + `cs` CLI (and on unix `chan-files` and
-    // `chan-edit`) without a separate download. Real
+    // also provides the `chan` + `cs` CLI (and on unix `chan-files`,
+    // `chan-edit` and `chan-term`) without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
     // idempotent + marker-guarded + never clobbers a user-written shim. No-op
     // for a dev build / unrecognized layout; never fatal to boot.
@@ -6160,6 +6174,15 @@ fn main() {
                 // brought back takes an open only once it has connected, which
                 // at boot it has not, so the paths get a window of their own.
                 launch_paths::open_at_boot(Arc::clone(&state_for_restore), &launch_paths).await;
+                // The terminal a `chan-term` started this desktop for opens
+                // next, and stands for the boot window below; a throwaway
+                // window still counts as a row, so the first-open rule mints
+                // nothing beside it.
+                let opened_terminal = launch_paths::open_terminal_at_boot(
+                    Arc::clone(&state_for_restore),
+                    boot_terminal.as_deref(),
+                )
+                .await;
                 // The files macOS asked to open before the boot got here, the
                 // one that launched it among them, open next, beside the
                 // launch's own; later ones open as they come.
@@ -6177,8 +6200,10 @@ fn main() {
                 // There is no launcher window, so a boot that opens nothing
                 // would leave no window at all; open one standalone terminal
                 // then, the window the launcher is toggled in.
-                if let Err(e) = ensure_boot_window(Arc::clone(&state_for_restore)).await {
-                    tracing::warn!(error = %e, "ensuring a boot window failed");
+                if !opened_terminal {
+                    if let Err(e) = ensure_boot_window(Arc::clone(&state_for_restore)).await {
+                        tracing::warn!(error = %e, "ensuring a boot window failed");
+                    }
                 }
             });
 
@@ -9094,12 +9119,56 @@ mod tests {
             attach.contains("!chan::invoked_as_opener(&arg0)"),
             "the openers reattach the parent console on Windows as chan and cs do"
         );
+        assert!(
+            attach.contains("!chan::term::invoked_as_term(&arg0)"),
+            "chan-term reattaches it too, for its help and its usage errors"
+        );
+    }
+
+    /// A desktop a `chan-term` started opens that terminal in the boot, after
+    /// the launch's paths and before the first-open rule, and the terminal
+    /// stands for the boot window: one window, not a boot terminal beside it.
+    /// A shell-only `chan-term` runs as the CLI, which starts that desktop.
+    #[test]
+    fn a_launch_terminal_opens_in_place_of_the_boot_window() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let boot = source_region(
+            production,
+            "let queued = queue_boot_restore(&state_for_restore);",
+            "spawn_launch_update_check(app.handle().clone());",
+        );
+        let order = [
+            "launch_paths::open_at_boot(",
+            "launch_paths::open_terminal_at_boot(",
+            "embedded.ensure_first_open_terminal()",
+            "if !opened_terminal {\n                    if let Err(e) = ensure_boot_window(",
+        ];
+        let at: Vec<usize> = order
+            .iter()
+            .map(|needle| {
+                boot.find(needle)
+                    .unwrap_or_else(|| panic!("the boot runs {needle}"))
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "the boot runs {order:?} in that order"
+        );
+        let probe = source_region(
+            production,
+            "\nfn run_as_chan_if_requested(",
+            "\nasync fn run_mcp_proxy(",
+        );
+        assert!(probe.contains("chan::term::is_shell_launch(std::env::args_os().skip(1))"));
+        assert!(probe.contains("&& !shell_terminal"));
     }
 
     /// Only the GUI boot refuses a second instance. Every CLI personality
-    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the default-terminal
-    /// launch returns from `main` before the single-instance guard, so none of
-    /// them claims the handoff endpoint or asks a running desktop anything,
+    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the `chan-term` launch
+    /// returns from `main` before the single-instance guard, so none of them
+    /// claims the handoff endpoint or asks a running desktop to come forward,
     /// and the guard runs before the boot touches what a running desktop owns.
     #[test]
     fn cli_personalities_never_reach_the_single_instance_guard() {
@@ -9113,7 +9182,7 @@ mod tests {
         );
         let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
         let guard = main_body
-            .find("single_instance::guard(&launch_paths)")
+            .find("single_instance::guard(&launch_paths, boot_terminal.as_deref())")
             .expect("main runs the single-instance guard with the launch's paths");
         let paths = main_body
             .find("launch_paths::from_args(")
@@ -9124,7 +9193,7 @@ mod tests {
             "run_as_cs_if_requested()",
             "run_as_chan_if_requested()",
             "print_version_if_requested()",
-            "terminal_mode::run_if_requested()",
+            "terminal_mode::run(launch);",
         ] {
             let at = main_body
                 .find(personality)
@@ -9150,7 +9219,7 @@ mod tests {
         }
         assert!(
             !include_str!("terminal_mode.rs").contains("single_instance"),
-            "the default-terminal launch leaves a running desktop alone"
+            "the chan-term launch leaves a running desktop alone"
         );
     }
 
