@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import {
   alignGhosttyRendererToXterm,
+  type CellDimensions,
   gateGhosttyScrollbarClicks,
   installGhosttyCustomGlyphs,
   installGhosttyOverlayScrollbar,
@@ -12,6 +13,16 @@ import {
 } from "./ghosttyCompat";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
+
+let vendored: WebAssembly.Module;
+
+beforeAll(async () => {
+  vendored = await WebAssembly.compile(readFileSync(VENDORED));
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Ghostty xterm-compatible font metrics", () => {
   test("uses xterm's device-pixel rounding and line height", () => {
@@ -91,72 +102,163 @@ describe("Ghostty xterm-compatible font metrics", () => {
   });
 });
 
+// The glyph and overlay suites below drive the real CanvasRenderer and the
+// real Terminal over chan's binding on the vendored core: each test writes
+// the bytes that make its screen and lets the core hold it. The defects are
+// upstream's own paint order and text hook, so a hand-rolled double would go
+// green while the owner still saw them, and only the real build can tell us
+// the adapter still binds to something that exists.
+
+/// A software context that also keeps what the software canvas does not
+/// model: each text with its style and where it is drawn from, each path
+/// call, each stroke's style, and each fill with its style and alpha at the
+/// moment it is made (alpha is state on the context, so it has to be read
+/// then rather than after the cell is drawn).
+class RecordingCanvasContext extends SoftwareCanvasContext {
+  readonly texts: { text: string; x: number; y: number; style: string }[] = [];
+  readonly paths: [string, ...number[]][] = [];
+  readonly strokes: string[] = [];
+  readonly fills: { rect: number[]; alpha: number; style: string }[] = [];
+
+  override fillText(text = "", x = 0, y = 0): void {
+    this.texts.push({ text, x, y, style: this.fillStyle });
+  }
+
+  override fillRect(x: number, y: number, width: number, height: number): void {
+    this.fills.push({ rect: [x, y, width, height], alpha: this.globalAlpha, style: this.fillStyle });
+    super.fillRect(x, y, width, height);
+  }
+
+  override moveTo(x = 0, y = 0): void {
+    this.paths.push(["moveTo", x, y]);
+  }
+
+  override lineTo(x = 0, y = 0): void {
+    this.paths.push(["lineTo", x, y]);
+  }
+
+  bezierCurveTo(...points: number[]): void {
+    this.paths.push(["bezierCurveTo", ...points]);
+  }
+
+  override stroke(): void {
+    this.strokes.push(this.strokeStyle);
+  }
+}
+
+/// The binding's terminal on its own instance of the vendored core, as
+/// backend.ts's kit hands one to each terminal, and the real renderer wired
+/// the way Terminal.open() wires them, without the DOM and the render loop
+/// open() starts: the test writes the bytes and issues the frames. With
+/// `cell`, the renderer is aligned to that cell the way TerminalTab aligns it
+/// to xterm's grid.
+async function pinnedTerminal(options: {
+  cols: number;
+  rows: number;
+  ratio: number;
+  cell?: CellDimensions;
+}) {
+  const { cols, rows, ratio } = options;
+  const contexts = new WeakMap<HTMLCanvasElement, RecordingCanvasContext>();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    function (this: HTMLCanvasElement) {
+      const existing = contexts.get(this);
+      if (existing) return existing as unknown as CanvasRenderingContext2D;
+      const created = new RecordingCanvasContext(this);
+      contexts.set(this, created);
+      return created as unknown as CanvasRenderingContext2D;
+    } as unknown as typeof HTMLCanvasElement.prototype.getContext,
+  );
+  const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+  const term = new Terminal({ ghostty: vt, cols, rows });
+  const core = vt.createTerminal(cols, rows, { scrollbackLimit: 100 });
+  term.wasmTerm = core;
+  const canvas = document.createElement("canvas");
+  const renderer = new CanvasRenderer(canvas, {
+    devicePixelRatio: ratio,
+    theme: { background: "#101010", foreground: "#e0e0e0" },
+  });
+  renderer.resize(cols, rows);
+  if (options.cell) {
+    expect(alignGhosttyRendererToXterm(renderer, options.cell, cols, rows)).not.toBeNull();
+  }
+  term.renderer = renderer;
+  return {
+    core,
+    term,
+    renderer,
+    context: contexts.get(canvas)!,
+    /// One frame as the widget's render loop issues it, at the given
+    /// overlay opacity, through whatever render the renderer holds now.
+    frame(opacity = 0): void {
+      renderer.render(core, false, term.getViewportY(), term, opacity);
+    },
+  };
+}
+
+// The cells' own colour, so the adapters' strokes and fills can be told
+// from the renderer's background fills and checked against the colour
+// Ghostty resolved for the cell.
+const GLYPH_COLOR = "\x1b[38;2;170;187;204m";
+const GLYPH_STYLE = "rgb(170, 187, 204)";
+
+/// A glyph screen with the custom glyphs installed.
+async function glyphTerminal(cell?: CellDimensions, ratio = 1) {
+  const screen = await pinnedTerminal({ cols: 10, rows: 4, ratio, cell });
+  expect(installGhosttyCustomGlyphs(screen.renderer)).toBe(true);
+  const { context, renderer } = screen;
+  return {
+    ...screen,
+    /// Write `bytes` in the glyph colour and paint the frame they make.
+    paint(bytes: string): void {
+      screen.core.write("\x1b[?25l" + GLYPH_COLOR + bytes);
+      screen.frame();
+    },
+    /// The fills the adapter made in the cells' colour, every frame so far.
+    glyphFills(): { alpha: number; rect: number[] }[] {
+      return context.fills
+        .filter((fill) => fill.style === GLYPH_STYLE)
+        .map(({ alpha, rect }) => ({ alpha, rect }));
+    },
+    /// The texts drawn in the cell at `column`, `row`, as text and style.
+    textsAt(column: number, row: number): { text: string; style: string }[] {
+      const { width, height, baseline } = renderer.getMetrics();
+      return context.texts
+        .filter((t) => t.x === column * width && t.y === row * height + baseline)
+        .map(({ text, style }) => ({ text, style }));
+    },
+  };
+}
+
+/// Move the cursor to a 0-indexed cell. CUP is 1-indexed.
+function cup(column: number, row: number): string {
+  return `\x1b[${row + 1};${column + 1}H`;
+}
+
 describe("Ghostty custom box glyphs", () => {
-  function boxRenderer() {
-    const context = {
-      beginPath: vi.fn(),
-      bezierCurveTo: vi.fn(),
-      fillStyle: "#aabbcc",
-      globalAlpha: 1,
-      lineCap: "butt",
-      lineJoin: "miter",
-      lineTo: vi.fn(),
-      lineWidth: 1,
-      moveTo: vi.fn(),
-      restore: vi.fn(),
-      save: vi.fn(),
-      stroke: vi.fn(),
-      strokeStyle: "#000000",
-    };
-    const original = vi.fn();
-    const renderer = {
-      ctx: context,
-      getMetrics: () => ({ width: 8, height: 19, baseline: 13 }),
-      renderCellText: original,
-      resize: vi.fn(),
-    };
-    return { context, original, renderer };
-  }
+  test("replaces a font horizontal rule with a full-cell path", async () => {
+    const screen = await glyphTerminal();
 
-  function cell(codepoint: number) {
-    return {
-      bg_b: 0,
-      bg_g: 0,
-      bg_r: 0,
-      codepoint,
-      fg_b: 255,
-      fg_g: 255,
-      fg_r: 255,
-      flags: 0,
-      grapheme_len: 0,
-      hyperlink_id: 0,
-      width: 1,
-    };
-  }
+    screen.paint(cup(2, 3) + "\u2500");
 
-  test("replaces a font horizontal rule with a full-cell path", () => {
-    const { context, original, renderer } = boxRenderer();
-    expect(installGhosttyCustomGlyphs(renderer as never)).toBe(true);
-
-    renderer.renderCellText(cell(0x2500), 2, 3);
-
-    expect(original.mock.calls[0][0].codepoint).toBe(32);
-    expect(context.moveTo).toHaveBeenCalledWith(16, 66.5);
-    expect(context.lineTo).toHaveBeenCalledWith(24, 66.5);
-    expect(context.strokeStyle).toBe("#aabbcc");
-    expect(context.stroke).toHaveBeenCalledOnce();
+    // Ghostty paints the cell as a space; the font's rule never reaches it.
+    expect(screen.textsAt(2, 3).map((t) => t.text)).toEqual([" "]);
+    expect(screen.context.texts.filter((t) => t.text === "\u2500")).toEqual([]);
+    expect(screen.context.paths).toContainEqual(["moveTo", 16, 66.5]);
+    expect(screen.context.paths).toContainEqual(["lineTo", 24, 66.5]);
+    expect(screen.context.strokes).toHaveLength(1);
+    // Stroked in the colour Ghostty set for the cell's text.
+    expect(screen.context.strokes[0]).toBe(GLYPH_STYLE);
   });
 
-  test("draws rounded corners and leaves ordinary text on Ghostty", () => {
-    const { context, original, renderer } = boxRenderer();
-    expect(installGhosttyCustomGlyphs(renderer as never)).toBe(true);
+  test("draws rounded corners and leaves ordinary text on Ghostty", async () => {
+    const screen = await glyphTerminal();
 
-    renderer.renderCellText(cell(0x256d), 0, 0);
-    expect(context.bezierCurveTo).toHaveBeenCalled();
+    screen.paint(cup(0, 0) + "\u256dA"); // a rounded corner, then a letter
+    expect(screen.context.paths.some(([call]) => call === "bezierCurveTo")).toBe(true);
 
-    const ordinary = cell("A".codePointAt(0)!);
-    renderer.renderCellText(ordinary, 1, 0);
-    expect(original).toHaveBeenLastCalledWith(ordinary, 1, 0, undefined);
+    expect(screen.textsAt(1, 0)).toEqual([{ text: "A", style: GLYPH_STYLE }]);
+    expect(screen.context.strokes).toHaveLength(1);
   });
 
   test("fails open if ghostty-web changes its private text hook", () => {
@@ -173,167 +275,104 @@ describe("Ghostty custom block glyphs", () => {
   // draws it at the glyph's own ink height, which under chan's 1.2 line
   // height leaves an unpainted strip at each cell boundary, so a bar chart
   // comes out banded. These pin the fill geometry that replaces it.
-  function blockRenderer(cell = { width: 8, height: 19 }, ratio?: number) {
-    const fills: Array<{ rect: number[]; alpha: number }> = [];
-    const context = {
-      beginPath: vi.fn(),
-      bezierCurveTo: vi.fn(),
-      fillRect: vi.fn(),
-      fillStyle: "#aabbcc",
-      globalAlpha: 1,
-      lineCap: "butt",
-      lineJoin: "miter",
-      lineTo: vi.fn(),
-      lineWidth: 1,
-      moveTo: vi.fn(),
-      restore: vi.fn(),
-      save: vi.fn(),
-      stroke: vi.fn(),
-      strokeStyle: "#000000",
-    };
-    // Alpha is state on the context, so it has to be read at the moment of
-    // the fill rather than after the whole cell has been drawn.
-    context.fillRect = vi.fn((x: number, y: number, w: number, h: number) => {
-      fills.push({ alpha: context.globalAlpha, rect: [x, y, w, h] });
-    });
-    const original = vi.fn();
-    const renderer = {
-      ctx: context,
-      devicePixelRatio: ratio,
-      getMetrics: () => ({ ...cell, baseline: 13 }),
-      renderCellText: original,
-      resize: vi.fn(),
-    };
-    return { context, fills, original, renderer };
-  }
 
-  function cell(codepoint: number, flags = 0) {
-    return {
-      bg_b: 0,
-      bg_g: 0,
-      bg_r: 0,
-      codepoint,
-      fg_b: 255,
-      fg_g: 255,
-      fg_r: 255,
-      flags,
-      grapheme_len: 0,
-      hyperlink_id: 0,
-      width: 1,
-    };
-  }
+  test("a full block fills its whole cell", async () => {
+    const screen = await glyphTerminal();
 
-  test("a full block fills its whole cell", () => {
-    const { fills, renderer } = blockRenderer();
-    expect(installGhosttyCustomGlyphs(renderer as never)).toBe(true);
+    screen.paint(cup(2, 3) + "\u2588"); // full block
 
-    renderer.renderCellText(cell(0x2588), 2, 3);
-
-    expect(fills).toEqual([{ alpha: 1, rect: [16, 57, 8, 19] }]);
+    expect(screen.glyphFills()).toEqual([{ alpha: 1, rect: [16, 57, 8, 19] }]);
   });
 
-  test("neighbouring blocks meet on one edge at a fractional cell size", () => {
+  test("neighbouring blocks meet on one edge at a fractional cell size", async () => {
     // The seam this fix is about: at 8.4px per cell an unsnapped right edge
     // lands mid-pixel, the next cell's left edge lands on the same fraction,
     // and both antialias their own half of it.
-    const { fills, renderer } = blockRenderer({ width: 8.4, height: 20.5 });
-    installGhosttyCustomGlyphs(renderer as never);
+    const screen = await glyphTerminal({ width: 8.4, height: 20.5 });
 
-    renderer.renderCellText(cell(0x2588), 0, 0);
-    renderer.renderCellText(cell(0x2588), 1, 0);
-    renderer.renderCellText(cell(0x2588), 0, 1);
+    screen.paint(cup(0, 0) + "\u2588\u2588" + cup(0, 1) + "\u2588"); // full blocks
 
-    const [first, second, below] = fills.map((fill) => fill.rect);
+    const [first, second, below] = screen.glyphFills().map((fill) => fill.rect);
     expect(first[0] + first[2]).toBe(second[0]);
     expect(first[1] + first[3]).toBe(below[1]);
     expect(Number.isInteger(second[0])).toBe(true);
   });
 
-  test("a device pixel ratio snaps to half a CSS pixel", () => {
-    const { fills, renderer } = blockRenderer({ width: 8.4, height: 19 }, 2);
-    installGhosttyCustomGlyphs(renderer as never);
+  test("a device pixel ratio snaps to half a CSS pixel", async () => {
+    const screen = await glyphTerminal({ width: 8.4, height: 19 }, 2);
 
-    renderer.renderCellText(cell(0x2588), 0, 0);
-    renderer.renderCellText(cell(0x2588), 1, 0);
+    screen.paint(cup(0, 0) + "\u2588\u2588"); // full blocks
 
-    const [first, second] = fills.map((fill) => fill.rect);
+    const [first, second] = screen.glyphFills().map((fill) => fill.rect);
     expect(first[2]).toBe(8.5);
     expect(second[0]).toBe(8.5);
   });
 
-  test("partial blocks fill only their own fraction of the cell", () => {
-    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
-    installGhosttyCustomGlyphs(renderer as never);
+  test("partial blocks fill only their own fraction of the cell", async () => {
+    const screen = await glyphTerminal({ width: 8, height: 16 });
 
-    renderer.renderCellText(cell(0x2581), 0, 0); // lower one eighth
-    renderer.renderCellText(cell(0x258c), 0, 0); // left half
-    renderer.renderCellText(cell(0x2580), 0, 0); // upper half
+    // One cell, three frames: each glyph replaces the one before it.
+    screen.paint(cup(0, 0) + "\u2581"); // lower one eighth
+    screen.paint(cup(0, 0) + "\u258c"); // left half
+    screen.paint(cup(0, 0) + "\u2580"); // upper half
 
-    expect(fills.map((fill) => fill.rect)).toEqual([
+    expect(screen.glyphFills().map((fill) => fill.rect)).toEqual([
       [0, 14, 8, 2],
       [0, 0, 4, 16],
       [0, 0, 8, 8],
     ]);
   });
 
-  test("quadrants fill their own corners", () => {
-    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
-    installGhosttyCustomGlyphs(renderer as never);
+  test("quadrants fill their own corners", async () => {
+    const screen = await glyphTerminal({ width: 8, height: 16 });
 
-    renderer.renderCellText(cell(0x259a), 0, 0); // upper left + lower right
+    screen.paint(cup(0, 0) + "\u259a"); // upper left + lower right
 
-    expect(fills.map((fill) => fill.rect)).toEqual([
+    expect(screen.glyphFills().map((fill) => fill.rect)).toEqual([
       [0, 0, 4, 8],
       [4, 8, 4, 8],
     ]);
   });
 
-  test("shades cover the cell at reduced alpha, and faint halves it", () => {
-    const { fills, renderer } = blockRenderer({ width: 8, height: 16 });
-    installGhosttyCustomGlyphs(renderer as never);
+  test("shades cover the cell at reduced alpha, and faint halves it", async () => {
+    const screen = await glyphTerminal({ width: 8, height: 16 });
 
-    renderer.renderCellText(cell(0x2592), 0, 0);
-    // CELL_FLAG_FAINT
-    renderer.renderCellText(cell(0x2592, 128), 0, 0);
+    screen.paint(cup(0, 0) + "\u2592"); // medium shade
+    // SGR 2, faint.
+    screen.paint(cup(0, 0) + "\x1b[2m\u2592");
 
-    expect(fills).toEqual([
+    expect(screen.glyphFills()).toEqual([
       { alpha: 0.5, rect: [0, 0, 8, 16] },
       { alpha: 0.25, rect: [0, 0, 8, 16] },
     ]);
   });
 
-  test("an invisible block paints nothing but still clears its cell", () => {
-    const { fills, original, renderer } = blockRenderer();
-    installGhosttyCustomGlyphs(renderer as never);
+  test("an invisible block paints nothing but still clears its cell", async () => {
+    const screen = await glyphTerminal();
 
-    // CELL_FLAG_INVISIBLE
-    renderer.renderCellText(cell(0x2588, 32), 1, 1);
+    // SGR 8, invisible, over a background of its own.
+    screen.paint(cup(1, 1) + "\x1b[8;48;2;40;80;160m\u2588");
 
-    expect(fills).toEqual([]);
-    // The cell still goes through Ghostty as a space, so its background,
-    // selection and cursor colours are painted like any other cell.
-    expect(original.mock.calls[0][0].codepoint).toBe(32);
+    expect(screen.glyphFills()).toEqual([]);
+    // No text either: the block never reaches the font, and Ghostty draws
+    // no text for an invisible cell. Its background is painted like any
+    // other cell's.
+    expect(screen.textsAt(1, 1)).toEqual([]);
+    expectPixel(screen.context.pixelAt(12, 28), { r: 40, g: 80, b: 160, a: 1 });
   });
 
-  test("ordinary text and box glyphs keep their own paths", () => {
-    const { context, fills, renderer } = blockRenderer();
-    installGhosttyCustomGlyphs(renderer as never);
+  test("ordinary text and box glyphs keep their own paths", async () => {
+    const screen = await glyphTerminal();
 
-    renderer.renderCellText(cell(0x2500), 0, 0);
-    expect(fills).toEqual([]);
-    expect(context.stroke).toHaveBeenCalledOnce();
+    screen.paint(cup(0, 0) + "\u2500"); // a horizontal rule
+    expect(screen.glyphFills()).toEqual([]);
+    expect(screen.context.strokes).toHaveLength(1);
 
-    renderer.renderCellText(cell("A".codePointAt(0)!), 0, 0);
-    expect(fills).toEqual([]);
-    expect(context.stroke).toHaveBeenCalledOnce();
+    screen.paint(cup(0, 0) + "A");
+    expect(screen.glyphFills()).toEqual([]);
+    expect(screen.context.strokes).toHaveLength(1);
   });
 });
-
-// The overlay-scrollbar suites below drive the real CanvasRenderer and the
-// real Terminal from the pinned ghostty-web build. The defect is upstream's
-// own paint order, so a hand-rolled double would go green while the owner
-// still saw the strip, and only the real build can tell us the adapter still
-// binds to something that exists.
 
 const GHOSTTY_COLS = 24;
 const GHOSTTY_ROWS = 8;
@@ -368,12 +407,8 @@ const THUMB_OVER_CONTENT = sourceOver(
 );
 
 describe("Ghostty overlay scrollbar", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  test("upstream erases the columns it covers and leaves them erased", () => {
-    const { renderer, context, screen } = ghosttyScreen();
+  test("upstream erases the columns it covers and leaves them erased", async () => {
+    const { renderer, context, screen } = await ghosttyScreen();
 
     screen.paint(renderer, 0);
     expectPixel(context.pixelAt(ERASED_X, THUMB_Y), CONTENT);
@@ -398,8 +433,8 @@ describe("Ghostty overlay scrollbar", () => {
     expectPixel(context.pixelAt(CONTENT_X, THUMB_Y), CONTENT);
   });
 
-  test("the adapter paints the bar onto the content it covers", () => {
-    const { renderer, context, screen } = ghosttyScreen();
+  test("the adapter paints the bar onto the content it covers", async () => {
+    const { renderer, context, screen } = await ghosttyScreen();
     expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);
 
     screen.paint(renderer, 0);
@@ -417,8 +452,8 @@ describe("Ghostty overlay scrollbar", () => {
     expectPixel(context.pixelAt(STRIP_X, THUMB_Y), CONTENT);
   });
 
-  test("repeated frames composite to one pass, not to an opaque bar", () => {
-    const { renderer, context, screen } = ghosttyScreen();
+  test("repeated frames composite to one pass, not to an opaque bar", async () => {
+    const { renderer, context, screen } = await ghosttyScreen();
     expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);
 
     screen.paint(renderer, 0);
@@ -441,8 +476,8 @@ describe("Ghostty overlay scrollbar", () => {
     ).not.toBeCloseTo(THUMB_OVER_CONTENT.r, 6);
   });
 
-  test("every overlay frame re-reads the rows the bar composites over", () => {
-    const { renderer, screen } = ghosttyScreen();
+  test("every overlay frame re-reads the rows the bar composites over", async () => {
+    const { renderer, screen } = await ghosttyScreen();
     expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);
 
     screen.paint(renderer, 0);
@@ -552,71 +587,38 @@ describe("Ghostty overlay scrollbar clicks", () => {
 });
 
 /// A settled ghostty screen: the real renderer sized the way chan sizes it,
-/// over content the overlay is wide enough to cover, with rows that go clean
-/// after their first paint. A screen whose rows stayed dirty would repaint the
-/// covered columns every frame and hide the defect entirely.
-function ghosttyScreen() {
-  const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    function (this: HTMLCanvasElement) {
-      const existing = contexts.get(this);
-      if (existing) return existing as unknown as CanvasRenderingContext2D;
-      const created = new SoftwareCanvasContext(this);
-      contexts.set(this, created);
-      return created as unknown as CanvasRenderingContext2D;
-    } as unknown as typeof HTMLCanvasElement.prototype.getContext,
-  );
-
-  const canvas = document.createElement("canvas");
-  const renderer = new CanvasRenderer(canvas, {
-    devicePixelRatio: GHOSTTY_DPR,
-    theme: { background: "#101010", foreground: "#e0e0e0" },
+/// over content the overlay is wide enough to cover, with history for the bar
+/// to show and rows that go clean after their first paint. A screen whose
+/// rows stayed dirty would repaint the covered columns every frame and hide
+/// the defect entirely.
+async function ghosttyScreen() {
+  const pinned = await pinnedTerminal({
+    cols: GHOSTTY_COLS,
+    rows: GHOSTTY_ROWS,
+    ratio: GHOSTTY_DPR,
   });
-  renderer.resize(GHOSTTY_COLS, GHOSTTY_ROWS);
-
-  const line = Array.from({ length: GHOSTTY_COLS }, () => ({
-    bg_b: CONTENT.b,
-    bg_g: CONTENT.g,
-    bg_r: CONTENT.r,
-    codepoint: 32,
-    fg_b: 255,
-    fg_g: 255,
-    fg_r: 255,
-    flags: 0,
-    grapheme_len: 0,
-    hyperlink_id: 0,
-    width: 1,
-  }));
-  let dirty = true;
-  let reads = 0;
-  const buffer = {
-    clearDirty: () => {
-      dirty = false;
-    },
-    getCursor: () => ({ x: 0, y: 0, visible: false }),
-    getDimensions: () => ({ cols: GHOSTTY_COLS, rows: GHOSTTY_ROWS }),
-    getLine: () => {
-      reads += 1;
-      return line;
-    },
-    isRowDirty: () => dirty,
-  };
-  const scrollback = {
-    getScrollbackLength: () => SCROLLBACK_LINES,
-    getScrollbackLine: () => line,
-  };
+  // Every cell a space on the content colour, SCROLLBACK_LINES rows more
+  // than the screen holds. The cursor is hidden: it would paint its block
+  // on the last row.
+  const line = `\x1b[48;2;${CONTENT.r};${CONTENT.g};${CONTENT.b}m${" ".repeat(GHOSTTY_COLS)}`;
+  pinned.core.write(
+    "\x1b[?25l" +
+      Array.from({ length: GHOSTTY_ROWS + SCROLLBACK_LINES }, () => line).join("\r\n"),
+  );
+  expect(pinned.term.getScrollbackLength()).toBe(SCROLLBACK_LINES);
+  const reads = vi.spyOn(pinned.core, "getLine");
 
   return {
-    context: contexts.get(canvas)!,
-    renderer,
+    context: pinned.context,
+    renderer: pinned.renderer,
     screen: {
       /// Render one frame at the given overlay opacity, viewport pinned to the
       /// bottom so nothing but the adapter can force a repaint. Returns how
       /// many rows the frame actually rendered.
       paint(target: CanvasRenderer, opacity: number): number {
-        reads = 0;
-        target.render(buffer as never, false, 0, scrollback as never, opacity);
-        return reads;
+        reads.mockClear();
+        target.render(pinned.core, false, 0, pinned.term, opacity);
+        return reads.mock.calls.length;
       },
     },
   };
