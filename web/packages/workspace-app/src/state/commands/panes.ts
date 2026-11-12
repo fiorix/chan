@@ -9,11 +9,10 @@
 // the window.
 //
 // The divider commands are Hybrid Nav's resize keys outside the mode: each
-// moves the divider of the nearest split that holds the focused pane along
-// its axis, by the mode's step and within its bounds, and Equalize panes
-// halves the pane's own split. They change the live layout at once, where
-// the keys stage the move in the mode's draft. A tmux window's layout is
-// tmux's, which Hybrid Nav and a divider drag ask through tmux, so the
+// takes the step the key takes, on the split the key picks, and Equalize
+// panes halves the pane's own split. They change the live layout at once,
+// where the keys stage the move in the mode's draft. A tmux window's layout
+// is tmux's, which Hybrid Nav and a divider drag ask through tmux, so the
 // commands are not offered there. The rest of the Pane scope lives in
 // core.ts.
 
@@ -27,9 +26,11 @@ import {
   scheduleSessionSave,
 } from "../store.svelte";
 import {
+  dividerSplit,
   equalizePane,
   focusColorForWindow,
   layout,
+  stepDivider,
   tmuxPaneTabs,
   type FocusColor,
   type SplitNode,
@@ -51,25 +52,17 @@ function applyFocusColor(color: FocusColor): void {
 
 type Axis = SplitNode["direction"];
 
-/// The share of a split one divider command moves its divider by, and the
-/// share a pane keeps at either end: Hybrid Nav's resize step and bounds.
-const DIVIDER_STEP = 0.02;
-const DIVIDER_MIN = 0.05;
-const DIVIDER_MAX = 0.95;
-
-function parentSplit(childId: string): SplitNode | null {
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind === "split" && (node.a === childId || node.b === childId)) return node;
-  }
-  return null;
+/// The split whose divider the focused pane's commands move along `axis`.
+function focusedSplit(axis: Axis): SplitNode | null {
+  return dividerSplit(layout, layout.activePaneId, axis);
 }
 
-/// The split whose divider the focused pane's commands move along `axis`:
-/// the nearest one that holds the pane and is laid out on that axis.
-function dividerSplit(axis: Axis): SplitNode | null {
-  let split = parentSplit(layout.activePaneId);
-  while (split && split.direction !== axis) split = parentSplit(split.id);
-  return split;
+/// Whether the focused pane sits in a split, which Equalize panes halves.
+function focusedPaneInSplit(): boolean {
+  return Object.values(layout.nodes).some(
+    (node) =>
+      node.kind === "split" && (node.a === layout.activePaneId || node.b === layout.activePaneId),
+  );
 }
 
 /// Whether tmux lays this window's panes out.
@@ -84,19 +77,18 @@ function saveLayout(): void {
   scheduleSessionSave();
 }
 
-/// Move the focused pane's divider along `axis`: toward the right or the
-/// bottom when `forward`, toward the left or the top otherwise.
-function moveDivider(axis: Axis, forward: boolean): void {
+/// Move the focused pane's divider one step along `axis`: toward the right
+/// or the bottom when `forward`, toward the left or the top otherwise.
+function stepFocusedDivider(axis: Axis, forward: boolean): void {
   if (tmuxOwnsLayout()) return;
-  const split = dividerSplit(axis);
+  const split = focusedSplit(axis);
   if (!split) return;
-  const moved = split.ratio + (forward ? DIVIDER_STEP : -DIVIDER_STEP);
-  split.ratio = Math.max(DIVIDER_MIN, Math.min(DIVIDER_MAX, moved));
+  stepDivider(split, forward);
   saveLayout();
 }
 
 function equalizePanes(): void {
-  if (tmuxOwnsLayout() || !parentSplit(layout.activePaneId)) return;
+  if (tmuxOwnsLayout() || !focusedPaneInSplit()) return;
   equalizePane(layout.activePaneId);
   saveLayout();
 }
@@ -121,7 +113,7 @@ function dividerCommand(spec: {
     order: spec.order,
     requirement: "any",
     keywords: [...spec.keywords, "resize", "divider", "split", "size"],
-    available: () => !tmuxOwnsLayout() && dividerSplit(axis) !== null,
+    available: () => !tmuxOwnsLayout() && focusedSplit(axis) !== null,
     unavailableReason: () =>
       tmuxOwnsLayout()
         ? TMUX_REASON
@@ -131,10 +123,10 @@ function dividerCommand(spec: {
     // The share of the split left of or above the divider. Reporting it keeps
     // the launcher open on the row, so the divider moves a step per Enter.
     state: () => {
-      const split = dividerSplit(axis);
+      const split = focusedSplit(axis);
       return split ? `${Math.round(split.ratio * 100)}%` : null;
     },
-    run: () => moveDivider(axis, forward),
+    run: () => stepFocusedDivider(axis, forward),
   };
 }
 
@@ -200,7 +192,7 @@ registerCommands([
     order: 9,
     requirement: "any",
     keywords: ["Equalize siblings", "resize", "divider", "split", "size", "even", "balance", "halves"],
-    available: () => !tmuxOwnsLayout() && parentSplit(layout.activePaneId) !== null,
+    available: () => !tmuxOwnsLayout() && focusedPaneInSplit(),
     unavailableReason: () => (tmuxOwnsLayout() ? TMUX_REASON : "Needs a split pane"),
     run: equalizePanes,
   },

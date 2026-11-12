@@ -5231,7 +5231,10 @@ function swapPaneContentsIn(
   return true;
 }
 
-function nearestAncestorSplit(
+/// The split whose divider a step moves for the pane `leafId` along `axis`:
+/// the nearest one that holds the pane and is laid out on that axis. `state`
+/// is the live layout or Hybrid Nav's draft.
+export function dividerSplit(
   state: LayoutState,
   leafId: string,
   axis: SplitNode["direction"],
@@ -5246,25 +5249,38 @@ function nearestAncestorSplit(
   return null;
 }
 
-/// The share of a split one Hybrid Nav resize key moves its divider by.
-const PANE_MODE_RESIZE_STEP = 0.02;
+/// The share of a split one step moves its divider by.
+const DIVIDER_STEP = 0.02;
+/// The share a pane keeps at either end of its split, so its divider stays
+/// within reach of a pointer.
+const DIVIDER_MARGIN = 0.05;
 
-/// Hybrid Nav resize. `positive=true` shifts the divider toward the
-/// right (row axis) or the bottom (column axis); `positive=false`
-/// shifts it toward the left / top. Bracket-direction equals
-/// divider-direction, independent of which side of the split the
-/// active pane sits on. `ratio` is A's share of the split (A is the
-/// left / top child), so `positive` maps directly to the delta sign.
+/// Move `split`'s divider to `ratio`, the share of the split its left or top
+/// child takes, held within the share a pane keeps. A drag, a Hybrid Nav
+/// resize key and a divider command all move a divider through here, so they
+/// stop at one bound. `tmuxOwned` lifts the bound for a split of a tmux
+/// window: tmux holds a pane to its own minimum, and its next layout shows
+/// where the divider landed.
+export function moveDivider(split: SplitNode, ratio: number, tmuxOwned = false): void {
+  const margin = tmuxOwned ? 0 : DIVIDER_MARGIN;
+  split.ratio = Math.max(margin, Math.min(1 - margin, ratio));
+}
+
+/// Move `split`'s divider one step: toward the right or the bottom when
+/// `forward`, toward the left or the top otherwise, whichever side of the
+/// split the focused pane sits on.
+export function stepDivider(split: SplitNode, forward: boolean, tmuxOwned = false): void {
+  moveDivider(split, split.ratio + (forward ? DIVIDER_STEP : -DIVIDER_STEP), tmuxOwned);
+}
+
+/// Hybrid Nav resize: one step of the focused pane's divider along `axis`,
+/// staged in the mode's draft. A bracket moves the divider the way it points.
 export function paneModeResize(axis: SplitNode["direction"], positive: boolean): void {
   const draft = draftLayout();
   if (!draft) return;
-  const split = nearestAncestorSplit(draft, draft.activePaneId, axis);
+  const split = dividerSplit(draft, draft.activePaneId, axis);
   if (!split || !noteTmuxResize(split)) return;
-  const delta = positive ? PANE_MODE_RESIZE_STEP : -PANE_MODE_RESIZE_STEP;
-  // tmux holds a pane to its own minimum, and its next layout shows where
-  // the divider landed.
-  const [min, max] = paneMode.tmux ? [0, 1] : [0.05, 0.95];
-  split.ratio = Math.max(min, Math.min(max, split.ratio + delta));
+  stepDivider(split, positive, paneMode.tmux !== null);
 }
 
 export function paneModeEqualize(): void {
