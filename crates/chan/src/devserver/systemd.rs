@@ -628,8 +628,11 @@ fn unit_search_path(
 }
 
 /// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
-/// it replaces `installed`: the one `installed` records, verbatim, or one
-/// built from `current`.
+/// it replaces `installed`: the one `installed` records, verbatim but for the
+/// whole AppRun blocks an older release recorded from its AppImage, or one
+/// built from `current`. A recorded block names a mount that is gone, so a
+/// known prior render that holds one no longer matches the render and is
+/// rewritten in place, terminal or not.
 fn with_devserver_unit_search_path(
     unit: chan_systemd::DevserverUnit,
     current: &std::ffi::OsStr,
@@ -638,7 +641,11 @@ fn with_devserver_unit_search_path(
 ) -> chan_systemd::DevserverUnit {
     match installed.and_then(chan_systemd::DevserverUnit::recorded_search_path) {
         Some(recorded) if keeps_recorded_service_path(current, interactive) => {
-            unit.with_environment(format!("PATH={recorded}"))
+            let kept = chan_server::without_apprun_blocks("PATH", std::ffi::OsStr::new(recorded));
+            match kept.to_str() {
+                Some(kept) if !kept.is_empty() => unit.with_environment(format!("PATH={kept}")),
+                _ => unit.with_search_path(current),
+            }
         }
         _ => unit.with_search_path(current),
     }
@@ -1009,6 +1016,54 @@ mod tests {
         let again = write_rendered_devserver_unit(&path, &other_shell, false)
             .expect("the unit chan just wrote is its own");
         assert!(!again.changed, "the same PATH must be a no-op");
+    }
+
+    /// A unit an older release wrote from the AppImage records that mount's
+    /// `PATH` block ahead of the user's `PATH`. chan-systemd's unit text is
+    /// unchanged since v0.128.0, so a render with that `PATH` is the file such
+    /// a release installed. A render without a terminal keeps the recorded
+    /// `PATH` minus the block, which no longer matches the installed unit, so
+    /// the known prior render is rewritten in place, once; a unit written
+    /// from a deb records no block and is left as it is.
+    #[test]
+    fn a_prior_unit_with_an_appimage_block_is_migrated_in_place() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec =
+            || devserver_systemd_unit_spec(Path::new("/home/u/.local/bin/chan"), addr, None, None);
+        let script = std::ffi::OsStr::new("/usr/bin:/bin");
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("/tmp/.mount_ChanOLD/{entry}"))
+            .join(":");
+        let from_appimage = format!("{block}:/home/u/.local/bin:/usr/local/bin:/usr/bin");
+        let installed = spec()
+            .with_search_path(std::ffi::OsStr::new(&from_appimage))
+            .render();
+        assert!(installed.contains(".mount_ChanOLD"), "{installed}");
+        std::fs::write(&path, &installed).expect("seed the prior unit");
+        let render = with_devserver_unit_search_path(spec(), script, Some(&installed), false);
+        let update = write_rendered_devserver_unit(&path, &render, false)
+            .expect("a known prior render is chan's own");
+        assert!(update.changed, "the prior unit must be migrated");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("Environment=\"PATH=/home/u/.local/bin:/usr/local/bin:/usr/bin\"\n"),
+            "{written}"
+        );
+        assert!(!written.contains(".mount_"), "{written}");
+        let again = with_devserver_unit_search_path(spec(), script, Some(&written), false);
+        let update = write_rendered_devserver_unit(&path, &again, false).unwrap();
+        assert!(!update.changed, "a migrated unit is current");
+
+        let from_deb = spec()
+            .with_search_path(std::ffi::OsStr::new("/home/u/.local/bin:/usr/bin"))
+            .render();
+        std::fs::write(&path, &from_deb).expect("seed a deb's unit");
+        let render = with_devserver_unit_search_path(spec(), script, Some(&from_deb), false);
+        let update = write_rendered_devserver_unit(&path, &render, false).unwrap();
+        assert!(!update.changed, "a unit with no block is left as it is");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), from_deb);
     }
 
     #[test]
