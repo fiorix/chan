@@ -410,8 +410,9 @@ export class CanvasRenderer {
   /**
    * Read the row painted at view row `y` into this.cells: scrolled back, the
    * history rows (from the end of the history) above the screen's first
-   * rows. A fractional `viewportY` maps rows as its floor does. False when
-   * the row has nothing to read.
+   * rows. A fractional `viewportY` counts the history rows from its floor,
+   * so the view row at that floor is past the last history row and reads
+   * nothing. False when the row has nothing to read.
    */
   private readViewRow(term: VtTerminal, y: number, viewportY: number, scrollbackLength: number): boolean {
     if (viewportY > 0) {
