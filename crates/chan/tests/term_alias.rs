@@ -85,7 +85,9 @@ impl Fixture {
 }
 
 /// The desktop's endpoint, answering every request with `answer`'s line and
-/// reporting each request it read.
+/// reporting each request it read. A request is reported before it is
+/// answered, so it is waiting in the channel by the time the `chan-term` that
+/// sent it can exit, however late this thread runs.
 fn fake_desktop(f: &Fixture, answer: fn(&Value) -> Response) -> mpsc::Receiver<Value> {
     let listener = UnixListener::bind(f.run.join("chan-desktop.sock")).unwrap();
     let (sent, requests) = mpsc::channel();
@@ -99,10 +101,10 @@ fn fake_desktop(f: &Fixture, answer: fn(&Value) -> Response) -> mpsc::Receiver<V
             let request: Value = serde_json::from_str(&line).unwrap();
             let mut reply = serde_json::to_string(&answer(&request)).unwrap();
             reply.push('\n');
-            let _ = conn.write_all(reply.as_bytes());
             if sent.send(request).is_err() {
                 return;
             }
+            let _ = conn.write_all(reply.as_bytes());
         }
     });
     requests

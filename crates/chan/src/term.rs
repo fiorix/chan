@@ -223,7 +223,8 @@ fn own_window_reason(launch: &TerminalLaunch) -> Option<&'static str> {
 /// process cwd, else the process cwd itself, which is the launcher's own
 /// (xdg-terminal-exec inherits it). A path that is not a directory falls back
 /// to `home` with a warning for the caller to log, because a launcher passing
-/// a stale directory must still get a window.
+/// a stale directory must still get a window; a relative `home` names no
+/// place a window can start, so the fallback is then the process cwd.
 pub fn resolve_working_dir(
     requested: Option<&Path>,
     process_cwd: &Path,
@@ -242,6 +243,7 @@ pub fn resolve_working_dir(
         return (dir, None);
     }
     let fallback = home
+        .filter(|home| home.is_absolute())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| process_cwd.to_path_buf());
     let warning = format!(
@@ -276,7 +278,8 @@ pub fn start_dir(launch: &TerminalLaunch) -> PathBuf {
 /// text: `cwd`, else `home` with a warning for the caller to log, as
 /// [`resolve_working_dir`] falls back for a `--dir` that names no directory,
 /// because a launcher whose directory the request cannot spell must still get
-/// a window. `Err` when neither is UTF-8, or there is no home to fall back to.
+/// a window. `Err` when neither is UTF-8, or there is no absolute home to fall
+/// back to: a relative one names no place the desktop can open a window in.
 fn requested_dir(cwd: PathBuf, home: Option<&Path>) -> Result<(String, Option<String>), String> {
     let cwd = match cwd.into_os_string().into_string() {
         Ok(cwd) => return Ok((cwd, None)),
@@ -286,7 +289,10 @@ fn requested_dir(cwd: PathBuf, home: Option<&Path>) -> Result<(String, Option<St
         "{} is not valid UTF-8, which a request to chan-desktop cannot carry",
         cwd.display()
     );
-    match home.and_then(Path::to_str) {
+    match home
+        .filter(|home| home.is_absolute())
+        .and_then(Path::to_str)
+    {
         Some(home) => Ok((
             home.to_string(),
             Some(format!("{unspellable}; starting in {home}")),
@@ -773,9 +779,29 @@ mod tests {
             "/srv/caf\u{fffd} is not valid UTF-8, which a request to chan-desktop cannot carry";
         assert_eq!(requested_dir(raw(), None), Err(unspellable.to_string()));
         assert_eq!(
+            requested_dir(raw(), Some(Path::new("home/u"))),
+            Err(unspellable.to_string()),
+            "a relative home is no fallback"
+        );
+        assert_eq!(
             requested_dir(raw(), Some(raw().as_path())),
             Err(unspellable.to_string())
         );
+    }
+
+    /// A relative home names no place to start, so a `--dir` that names no
+    /// directory falls back to the process cwd instead.
+    #[test]
+    fn a_relative_home_is_no_fallback_for_a_missing_dir() {
+        let (dir, warning) = resolve_working_dir(
+            Some(Path::new("/gone")),
+            Path::new("/proc-cwd"),
+            Some(Path::new("home/u")),
+            |_| false,
+        );
+        assert_eq!(dir, PathBuf::from("/proc-cwd"));
+        let warning = warning.expect("a warning names the fallback");
+        assert!(warning.contains("starting in /proc-cwd"), "{warning}");
     }
 
     /// The help is what the packages' container smokes grep for, and the

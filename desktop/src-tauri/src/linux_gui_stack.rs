@@ -179,7 +179,7 @@ mod dri {
 #[cfg(target_os = "linux")]
 mod linux {
     use crate::cs_install;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::Command;
@@ -189,7 +189,8 @@ mod linux {
     /// `bundled` (keep today's bundle-first behavior).
     const POLICY_ENV: &str = "CHAN_LINUX_SYSTEM_GUI";
 
-    /// Loop guard, set across the re-exec so the child does not re-exec again.
+    /// Loop guard, set across the re-exec so the re-exec'd process does not
+    /// re-exec again, and consumed there ([`reexec_done`]).
     const APPLIED_ENV: &str = "CHAN_LINUX_SYSTEM_GUI_APPLIED";
 
     /// dma-buf policy knob: `auto` (default, disable only for the NVIDIA
@@ -226,8 +227,7 @@ mod linux {
     /// Prefer the host stack, re-exec'ing once. `force` reflects
     /// `CHAN_LINUX_SYSTEM_GUI=system`.
     fn apply(force: bool) {
-        // The re-exec'd child inherits APPLIED=1 and must not loop.
-        if std::env::var_os(APPLIED_ENV).is_some() {
+        if reexec_done() {
             return;
         }
 
@@ -265,11 +265,7 @@ mod linux {
 
         let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
         // execv replaces the image on success and returns only on failure.
-        let err = Command::new(&exe)
-            .args(&argv)
-            .env("LD_LIBRARY_PATH", &ld_path)
-            .env(APPLIED_ENV, "1")
-            .exec();
+        let err = reexec_command(&exe, &argv, &ld_path).exec();
         // Re-exec failed. Under `system` that is fatal; under `auto` fall
         // through to a normal bundle-first launch rather than aborting.
         if force {
@@ -277,6 +273,35 @@ mod linux {
             std::process::exit(1);
         }
         eprintln!("chan: system-GUI-stack re-exec failed ({err}); continuing on bundled stack");
+    }
+
+    /// Whether this process is the re-exec [`reexec_command`] started: the
+    /// marker is set. Reading it also removes it, since it describes this
+    /// process alone: a New Window sibling, a desktop a `chan-term` starts
+    /// and a `chan-term -e` typed in one of this desktop's shells are
+    /// AppImage launches of their own, which AppRun starts bundle-first
+    /// again, so each must make its own re-exec, and an inherited marker
+    /// would skip it. The environment changes while the process is still
+    /// single-threaded: `main` gets here before the tracing setup and before
+    /// any thread starts, where it also sets the WebKit default and then
+    /// drops `$ARGV0`.
+    fn reexec_done() -> bool {
+        if std::env::var_os(APPLIED_ENV).is_none() {
+            return false;
+        }
+        std::env::remove_var(APPLIED_ENV);
+        true
+    }
+
+    /// The re-exec of this process with `ld_path` as its loader path,
+    /// marked so the new image knows it has had its re-exec.
+    fn reexec_command(exe: &Path, args: &[OsString], ld_path: &OsStr) -> Command {
+        let mut command = Command::new(exe);
+        command
+            .args(args)
+            .env("LD_LIBRARY_PATH", ld_path)
+            .env(APPLIED_ENV, "1");
+        command
     }
 
     fn bail(force: bool, why: &str) {
@@ -372,11 +397,35 @@ mod linux {
         }
     }
 
+    /// Where `ldconfig` is looked for, in order: by name through `PATH`, then
+    /// the two places distributions install it, since a desktop session's
+    /// `PATH` often leaves out the `sbin` directories and the re-exec would
+    /// otherwise be skipped without a word.
+    const LDCONFIG: [&str; 3] = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"];
+
     fn ldconfig_cache() -> Option<String> {
-        let out = Command::new("ldconfig").arg("-p").output().ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        ldconfig_cache_with(|program| Command::new(program).arg("-p").output())
+    }
+
+    /// `ldconfig -p`'s listing through the first of [`LDCONFIG`] that
+    /// resolves; `run` runs one of them. A candidate that does not resolve is
+    /// skipped, and one that runs and fails ends the search.
+    fn ldconfig_cache_with(
+        mut run: impl FnMut(&str) -> std::io::Result<std::process::Output>,
+    ) -> Option<String> {
+        for program in LDCONFIG {
+            match run(program) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+                Ok(out) => {
+                    return out
+                        .status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+                }
+            }
+        }
+        None
     }
 
     // `ldconfig -p` entries look like:
@@ -402,9 +451,13 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            dma_buf_disabled, nvidia_proprietary_driver, renderer_signal, NVIDIA_DRIVER_MARKERS,
+            dma_buf_disabled, ldconfig_cache_with, nvidia_proprietary_driver, reexec_command,
+            reexec_done, renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
         };
+        use std::ffi::{OsStr, OsString};
         use std::fs;
+        use std::path::Path;
+        use std::process::{Command, ExitStatus, Output};
 
         fn root_with(marker: Option<&str>) -> tempfile::TempDir {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -474,6 +527,113 @@ mod linux {
             for policy in ["", "auto", "yes", "1"] {
                 assert!(dma_buf_disabled(policy, || true), "{policy:?} on nvidia");
                 assert!(!dma_buf_disabled(policy, || false), "{policy:?} elsewhere");
+            }
+        }
+
+        /// The re-exec'd process reads the marker and removes it, so no child
+        /// it starts inherits it and each AppImage child makes its own
+        /// re-exec; a process without the marker has had none. It mutates
+        /// the environment, so it runs in a test process of its own.
+        #[test]
+        fn the_reexec_marker_is_consumed_where_it_is_read() {
+            if !crate::embedded::in_own_chan_home(
+                "linux_gui_stack::linux::tests::the_reexec_marker_is_consumed_where_it_is_read",
+            ) {
+                return;
+            }
+            std::env::remove_var(APPLIED_ENV);
+            assert!(!reexec_done(), "without the marker there was no re-exec");
+            std::env::set_var(APPLIED_ENV, "1");
+            assert!(reexec_done(), "the re-exec'd process finds the marker");
+            assert_eq!(std::env::var_os(APPLIED_ENV), None, "and drops it");
+            assert!(!reexec_done(), "it is read once");
+            let child = Command::new("/bin/sh")
+                .args(["-c", "printf %s \"${CHAN_LINUX_SYSTEM_GUI_APPLIED-unset}\""])
+                .output()
+                .expect("run a child shell");
+            assert_eq!(child.stdout, b"unset", "a child inherits no marker");
+        }
+
+        /// A process without the marker re-execs itself with its own
+        /// arguments, the host-first loader path, and the marker set.
+        #[test]
+        fn the_reexec_carries_the_marker_and_the_loader_path() {
+            let args = [OsString::from("--dir=/w x"), OsString::from("notes.md")];
+            let ld_path = OsStr::new("/usr/lib:/tmp/.mount_chan/usr/lib");
+            let command = reexec_command(Path::new("/opt/chan/chan-desktop"), &args, ld_path);
+            assert_eq!(command.get_program(), "/opt/chan/chan-desktop");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["--dir=/w x", "notes.md"]
+            );
+            let env = |key: &str| {
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .and_then(|(_, value)| value.map(OsStr::to_os_string))
+            };
+            assert_eq!(env(APPLIED_ENV), Some(OsString::from("1")));
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(ld_path.to_os_string()));
+        }
+
+        fn ran(code: i32, stdout: &str) -> std::io::Result<Output> {
+            use std::os::unix::process::ExitStatusExt;
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn missing() -> std::io::Result<Output> {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+
+        /// `ldconfig` is run by name first, then from `/sbin` and `/usr/sbin`
+        /// when the name does not resolve, so a `PATH` without the `sbin`
+        /// directories still reaches the listing; the lookup is driven here
+        /// by a fake runner, whatever the host's `PATH` holds.
+        #[test]
+        fn ldconfig_is_found_by_name_then_in_sbin_then_in_usr_sbin() {
+            for (found, tried) in [
+                ("ldconfig", &["ldconfig"][..]),
+                ("/sbin/ldconfig", &["ldconfig", "/sbin/ldconfig"]),
+                (
+                    "/usr/sbin/ldconfig",
+                    &["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"],
+                ),
+            ] {
+                let mut asked = Vec::new();
+                let listing = ldconfig_cache_with(|program| {
+                    asked.push(program.to_string());
+                    if program == found {
+                        ran(0, "listing")
+                    } else {
+                        missing()
+                    }
+                });
+                assert_eq!(listing.as_deref(), Some("listing"), "{found}");
+                assert_eq!(asked, tried, "{found}");
+            }
+            assert_eq!(ldconfig_cache_with(|_| missing()), None, "none resolves");
+        }
+
+        /// An `ldconfig` that resolves and fails, or cannot be run, ends the
+        /// search: only one that does not resolve is passed over.
+        #[test]
+        fn an_ldconfig_that_runs_and_fails_ends_the_search() {
+            for answer in [
+                ran(1, "partial"),
+                Err(std::io::ErrorKind::PermissionDenied.into()),
+            ] {
+                let mut answer = Some(answer);
+                let mut asked = 0;
+                let listing = ldconfig_cache_with(|_| {
+                    asked += 1;
+                    answer.take().unwrap_or_else(|| ran(0, "listing"))
+                });
+                assert_eq!(listing, None);
+                assert_eq!(asked, 1);
             }
         }
 
