@@ -609,6 +609,48 @@ describe("fitting the view", () => {
     expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
   });
 
+  test("by default keeps every node in the canvas while the layout moves on after the fit", () => {
+    // The clock the refit window reads, so the opening fit's window can be
+    // let close; the test's frames take no time of their own.
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const p = props(spine(), { focalIds: [""] });
+    const { api } = render(p);
+    runFrames(60);
+    now += 10_000;
+    runFrames(60);
+    // A re-tune warms the layout with no change to the nodes, so no refit
+    // window opens; the spine grows taller as it settles.
+    p.force = { ...DEFAULT_FORCE, hierarchyYSpacing: 140 };
+    flushSync();
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+    const root = circle(api, "");
+    expect(root.x, "the root stays on its seat").toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+    for (const node of spine().nodes) {
+      const c = circle(api, node.id);
+      expect(c.y - c.r, `${node.id} below the top edge`).toBeGreaterThanOrEqual(0);
+      expect(c.x - c.r, `${node.id} right of the left edge`).toBeGreaterThanOrEqual(0);
+      expect(c.x + c.r, `${node.id} left of the right edge`).toBeLessThanOrEqual(canvasHost.width);
+    }
+  });
+
+  test("an untouched view answers an expansion request with its own fit", () => {
+    const p = props(spine(), { focalIds: [""] });
+    const { api } = render(p);
+    runFrames(60);
+    p.expansionFitRequest = { nonce: 1, ids: ["directory:a/b", "directory:a/b/c"] };
+    flushSync();
+    runFrames(60);
+    const root = circle(api, "");
+    expect(root.x, "the root stays on its seat").toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+  });
+
   test("a resize leaves a view the user has panned where it is", () => {
     const { api, canvas: el } = render(props(spine(), { focalIds: [""] }));
     for (let i = 0; i < 400; i += 1) {

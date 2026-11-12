@@ -83,13 +83,12 @@
     /// the focal instead. "bounds" anchors no node: it frames the drawn
     /// cluster's bounding box in the middle of the canvas, with equal room on
     /// either side of it on both axes at the fit's zoom; the layout still
-    /// pins the focal, so the root stays at the bottom of the spine. Since no
-    /// node holds it in place, the "bounds" fit follows the layout for as
-    /// long as the layout moves, not only through a refit window. The
+    /// pins the focal, so the root stays at the bottom of the spine. The
     /// Dashboard's Search slide uses "bounds"; the graph tab pins the
-    /// workspace's node and takes the default. Under every value the view
-    /// fits again when the canvas changes size, and a user's pan, zoom or
-    /// drag stops the automatic fit.
+    /// workspace's node and takes the default. Under every value the fit
+    /// follows the layout for as long as the layout moves, the view fits
+    /// again when the canvas changes size, and a user's pan, zoom or drag
+    /// stops the automatic fit.
     focalAnchor?: "center" | "bottom" | "bounds";
     /// d3-force tuning. Defaults to DEFAULT_FORCE (../graph/force.ts),
     /// the values the live graph ships with. Only the standalone
@@ -249,11 +248,12 @@
   /// handlers; consumed once per paint pass.
   let transform = { x: 0, y: 0, k: 1 };
 
-  /// Auto-fit state. While `refitUntil` is in the future the rAF
-  /// loop recomputes `fitTarget` each frame from the current bbox
-  /// so the view tracks the cluster as it relaxes after a scope /
-  /// filter / depth change. `fitTarget` is the ease-in destination
-  /// for transform; null = no easing in flight.
+  /// Auto-fit state. While `refitUntil` is in the future, or the
+  /// layout still moves under an untouched view, the rAF loop
+  /// recomputes `fitTarget` each frame from the current bbox so the
+  /// view tracks the cluster as it relaxes after a scope / filter /
+  /// depth change. `fitTarget` is the ease-in destination for
+  /// transform; null = no easing in flight.
   let refitUntil = 0;
   let fitTarget: { x: number; y: number; k: number } | null = null;
   let expansionRefit: { until: number; ids: Set<string> } | null = null;
@@ -1418,12 +1418,11 @@
     // signal: d3-force stops its own timer once alpha decays past
     // alphaMin, and node positions are fixed from then on.
     const simRunning = sim !== null && sim.alpha() > SIM_ALPHA_MIN;
-    // The bounds framing frames every node rather than one pinned in place,
-    // so it follows the layout for as long as the layout moves, including
-    // the small warm-up a content refresh gives it; the other framings hold
-    // their pinned focal and track only during a refit window. Either stops
-    // once the user takes the view.
-    const tracksLayout = focalAnchor === "bounds" && simRunning && !userInteracted;
+    // An untouched view follows the layout for as long as the layout moves,
+    // including the small warm-up a content refresh gives it: a refit
+    // window can close while nodes still spread, and one would end past an
+    // edge of the canvas. It stops once the user takes the view.
+    const tracksLayout = simRunning && !userInteracted;
     // While the refit window is open, retarget every frame so the
     // view tracks the cluster as the sim spreads / contracts. Once
     // the window expires we keep easing toward the last target until
@@ -1804,6 +1803,13 @@
 
   function scheduleExpansionFit(ids: string[], ms: number): void {
     if (ids.length === 0) return;
+    // An untouched view frames every node and follows the layout, so what
+    // the expansion brought is in view under its own fit; framing the
+    // named nodes alone would move it off that fit and back.
+    if (!userInteracted) {
+      scheduleRefit(ms);
+      return;
+    }
     const set = new Set(ids);
     expansionRefit = { until: performance.now() + ms, ids: set };
     const t = computeFitForNodes(32, set, false, transform.k);
@@ -2049,9 +2055,10 @@
 
   /// Directory expansion fit. Runs after the visibility effect above so
   /// `dNodes` contains the newly visible directory children. Unlike the
-  /// normal content refit, this bypasses `userInteracted` because it is a
-  /// direct result of the user's expand gesture. The target caps zoom at the
-  /// current scale, so it can zoom out or pan but never zoom in.
+  /// normal content refit, it moves a view the user has taken, because it is
+  /// a direct result of the user's expand gesture: the target caps zoom at
+  /// the current scale, so it can zoom out or pan but never zoom in. An
+  /// untouched view keeps its own fit, which holds the new nodes too.
   $effect(() => {
     const request = expansionFitRequest;
     if (!request || request.nonce === seenExpansionFitNonce) return;
