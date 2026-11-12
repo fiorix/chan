@@ -1,4 +1,4 @@
-// Environment shim for the vitest jsdom runs.
+// Environment shims for the vitest jsdom runs.
 //
 // A newer Node ships storage globals of its own, and they take precedence
 // over the ones vitest's jsdom environment installs. Node 24+ has a built-in
@@ -17,6 +17,12 @@
 // the page's own stores back wherever the environment has them, and install
 // a Storage where it has none, so the suite reads the same under every Node
 // the gate runs on.
+//
+// The second shim, at the end, ends each file's timers with its page.
+
+import { afterAll } from "vitest";
+
+import { trackTimers } from "./src/demo/timers";
 
 /// The Storage surface the SPA actually uses: `getItem`, `setItem`,
 /// `removeItem`, `clear`, `length`, and `key`. Insertion order carries the
@@ -86,3 +92,17 @@ for (const name of ["localStorage", "sessionStorage"] as const) {
     writable: true,
   });
 }
+
+// A page's timers end with the page, and the jsdom environment's do not: it
+// leaves Node's timers in place, so a debounce, a retry or a poll a module
+// armed for the file's page is still pending when the environment's teardown
+// removes `window`, and the worker runs on until the pool stops it. One that
+// comes due in that gap runs against no window and fails the run with every
+// test passing. End what the file left armed once its last hook has run, as a
+// browser does when the page goes. Under vitest's default `stack` hook order
+// a setup file's `afterAll` runs after the file's own, so the file's
+// teardowns still find their timers.
+const fileTimers = trackTimers();
+afterAll(() => {
+  fileTimers.release();
+});
