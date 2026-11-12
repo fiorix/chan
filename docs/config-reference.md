@@ -25,8 +25,8 @@ The CLI serializes these under the `server.*` namespace, so terminal fields are 
 | `terminal.background_opacity` | `u32` | `100`, clamped `80..=100` | CLI, API, Settings | Settings → Terminal → background opacity; below 100 chan-desktop paints its terminal tabs at this alpha so the desktop shows through. A browser tab stays opaque; Linux needs a compositing window manager |
 | `terminal.mcp_env` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → MCP discovery; whether new non-team terminals export `CHAN_MCP_*` (team spawns follow the team config's own `mcp_env`) |
 | `terminal.mouse_capture` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → mouse capture; off strips the mouse-enable sequences so drag selection keeps working in full-screen programs, for new terminals |
-| `terminal.ghostty` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → ghostty backend; `false` renders with xterm.js, new terminals at once and open ones when their window reloads |
-| `terminal.secret_masking` | `Option<bool>` | unset | CLI, API, Settings | Settings → Terminal → secret masking; unset masks by window kind (on in a control terminal, off elsewhere), `true` or `false` is the user's choice everywhere. The per-tab toggle is ephemeral |
+| `terminal.ghostty` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → Terminal engine (new terminals), a choice of `ghostty` and `xterm`; `false` renders with xterm.js, new terminals at once and open ones when their window reloads |
+| `terminal.secret_masking` | `Option<bool>` | unset | CLI, API, Settings | Settings → Terminal → Secret masking, a choice of `On`, `Off` and `Default`; `Default` clears the key, and unset masks by window kind (on in a control terminal, off elsewhere), while `true` or `false` is the user's choice everywhere. The per-tab toggle, `Secret masking (this terminal)`, is ephemeral |
 | `terminal.program_status` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → Program status (OSC 7501); whether chan reads the reports programs write and marks tabs with them; off clears live records |
 | `terminal.tmux.enabled` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → tmux control mode; whether a terminal honours the marker a `tmux -CC` client prints. A local tmux enters at once; any other foreground program raises a question first |
 | `terminal.tmux.trust` | `Vec<String>` | empty | CLI, API | Not surfaced in Settings; foreground program names (`ssh`, `et`) that enter control mode without the question, matched against the PTY's foreground job |
@@ -91,7 +91,7 @@ The subprocess starts with the config directory as its working directory, inheri
 CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret","singleton":true,"commands":[{"id":"run","title":"Run"}]}
 ```
 
-The URL must use plain HTTP on exactly `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. `singleton` and `commands` are optional; each command declares a lowercase-hyphen local `id`, a title, and a short list of keywords, and registers under Apps as `extension.<id>.<command-id>`.
+The URL must use plain HTTP on exactly `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. `singleton` and `commands` are optional; each command declares a lowercase-hyphen local `id`, a title, and a short list of keywords, and registers as `extension.<id>.<command-id>`, a command of that extension's tab.
 
 The proxy strips browser credential headers on the upstream leg (`Authorization`, cookies, `Referer`, forwarding headers, `X-Chan-*`) and replaces `Origin` with the upstream's own, drops upstream cookies on the response, adds a no-store and no-referrer response policy, stamps every upstream request with `X-Chan-Extension-Scope` equal to the serving instance id (a tenant discriminator, not a secret), bounds the idle gap on proxied bodies in each direction with no total deadline and no size cap, and strips `Location` headers that target loopback rather than reflecting them. Persisted and cross-window tab state carries the extension id and title only, never the capability path, the upstream address, or the token.
 
@@ -147,8 +147,8 @@ The CLI prefixes every leaf below with `editor.`. Every scalar leaf is reachable
 | `pane_widths.browser` | `u32` | `240` | CLI, API, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
 | `pane_widths.search` | `u32` | `280` | CLI, API, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
 | `pane_widths.outline` | `u32` | `220` | CLI, API, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
-| `browser_side_panes.left` | `bool` | `false` | CLI, API, Settings | Settings → File browser → side panes; left pane visibility, also toggled from the file browser |
-| `browser_side_panes.right` | `bool` | `false` | CLI, API, Settings | Settings → File browser → side panes; right pane visibility, also toggled from the file browser |
+| `browser_side_panes.left` | `bool` | `false` | CLI, API, Settings | Settings → File browser → Left file browser dock; whether a file browser is docked at the window's left edge, also a toggle in the command launcher, the file browser's menu and Hybrid Nav |
+| `browser_side_panes.right` | `bool` | `false` | CLI, API, Settings | Settings → File browser → Right file browser dock; the same for the right edge |
 | `line_spacing` | `LineSpacing` | `standard` | CLI, API, Settings | Settings → Editor → line spacing; `standard` or `compact` editor line height (`tight` on disk loads as `compact`) |
 | `date_format` | `String` | `iso` | CLI, API, Settings | Settings → Editor → date format; date rendering across the app |
 | `strip_trailing_whitespace_on_save` | `bool` | `false` | CLI, API, Settings | Settings → Editor → strip on save; editor save hook |
@@ -175,11 +175,11 @@ The CLI prefixes every leaf below with `editor.`. Every scalar leaf is reachable
 | `graph_colors.light.tag` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
 | `graph_colors.light.language` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
 | `graph_colors.light.contact` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `empty_pane_carousel_cycling` | `bool` | `true` | CLI, API, Settings | Settings → Global → Dashboard carousel; whether the Dashboard tab's slides rotate by themselves; the carousel's play/pause button writes the same key |
-| `pane_strip_auto_hide` | `bool` | `false` | CLI, API, Settings | Settings → Global → pane strip; hide a pane's tab strip while the side it shows holds fewer than two tabs; the hidden strip takes its menu and side toggle with it, the keyboard and the launcher still reach everything, and a tab dropped in the pane's centre still lands in the pane, as does a file from the file tree outside an editor, where it types its path (tmux panes and the control terminal are unaffected; a Hybrid Nav side holding a staged row keeps its strip) |
+| `empty_pane_carousel_cycling` | `bool` | `true` | CLI, API, Settings | Settings → Global → Dashboard auto-rotate; whether the Dashboard tab's slides rotate by themselves; the carousel's play/pause button writes the same key |
+| `pane_strip_auto_hide` | `bool` | `false` | CLI, API, Settings | Settings → Global → Pane strip auto-hide; hide a pane's tab strip while the side it shows holds fewer than two tabs; the hidden strip takes its menu and side toggle with it, the keyboard and the launcher still reach everything, and a tab dropped in the pane's centre still lands in the pane, as does a file from the file tree outside an editor, where it types its path (tmux panes and the control terminal are unaffected; a Hybrid Nav side holding a staged row keeps its strip) |
 | `page_width_ratio` | `f64` | `0.8` | CLI, API, Settings | Settings → Editor → page width; editor page-width cap, `0.25..=1.0` |
 | `overlay_maximized` | `bool` | `false` | CLI, API, overlay control | Not surfaced as a Settings row (the overlay header's maximize button is its control); global overlay-maximize preference |
-| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | empty | CLI get, API, Settings | Settings → Keyboard Shortcuts → assignment grid; sparse keymap override layer of opaque chord strings |
+| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | empty | CLI get, API, Settings | Settings → Keyboard Shortcuts → assignment grid; sparse keymap override layer of opaque chord strings. A row saved for a command id the app has retired is left out when a window loads the table, and that window writes the table back without it |
 
 `editor_font_size` is unset by default; the Settings `Use theme` action clears it, restoring the body and source sizes the theme supplies.
 
@@ -315,7 +315,7 @@ Source: `desktop/src-tauri/src/config.rs`. `CHAN_HOME` moves it with the rest of
 | `local_color` | `Option<String>` | unset | the launcher's local colour route | the local library's pane highlight, hex `#rrggbb`; unset is the default accent |
 | `launcher_theme` | `Option<String>` | unset | the launcher's theme route | `dark`, `light`, or follow the OS when absent |
 | `privacy.enabled` | `bool` | `false` | Settings > Global > Privacy mode on | conceal computer/gateway connection details, the host name and chan home path on the Dashboard's Metrics slide, the workspace root path on its Workspace slide, and window and workspace names in the workspace app's command launcher, across desktop windows, with individual reveals where an eye button is shown |
-| `privacy.mask_terminal_secrets` | `bool` | `false` | Settings > Global > Also enable terminal secret masking | enable the existing terminal masker while privacy is on; keep each terminal's previous setting afterwards |
+| `privacy.mask_terminal_secrets` | `bool` | `false` | Settings > Global > Mask terminal secrets in privacy mode | enable the existing terminal masker while privacy is on; keep each terminal's previous setting afterwards |
 | `privacy.revision` | `u64` | `0` | maintained by the desktop | order live updates and invalidate field reveals when privacy settings change |
 | `titlebar_tabs` | `bool` | `true` | Settings → Global → title bar tabs, shown in chan-desktop on macOS and Windows | every window puts its active pane's tabs in the title bar, beside a button that lists the window's panes and tabs; the other panes draw no strip and the pane strip auto-hide row leaves Settings while it is on; applies live to every open window; a config without the key reads on, so only a stored `false` keeps the normal title bar |
 
