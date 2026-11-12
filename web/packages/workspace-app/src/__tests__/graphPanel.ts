@@ -131,8 +131,9 @@ function ancestorChain(path: string): { nodes: FsGraphNode[]; edges: FsGraphEdge
   return { nodes, edges };
 }
 
-/// The fs graph under `path`, down to `depth` levels, as one final batch.
-/// The route refuses a directory scope it cannot walk: 404 for a path that
+/// The fs graph under `path`, down to `depth` levels, as one final batch,
+/// with the target of each symlink in it, as the route's walk gives it. The
+/// route refuses a directory scope it cannot walk: 404 for a path that
 /// is not there, 400 for one that is not a directory.
 export function fsResponse(path: string, depth: number): FsGraphResponse {
   if (path !== "") {
@@ -143,10 +144,18 @@ export function fsResponse(path: string, depth: number): FsGraphResponse {
       throw new ApiError(400, error, { error });
     }
   }
-  const nodes = graphServer.fs.nodes.filter((n) => {
+  // A ghost is a symlink's missing target, never an entry of a directory.
+  const walked = graphServer.fs.nodes.filter((n) => {
     const d = depthBelow(path, n.path);
-    return d >= 0 && d <= depth;
+    return n.kind !== "ghost" && d >= 0 && d <= depth;
   });
+  // A symlink the walk reaches brings its target's node, wherever it lies.
+  const walkedIds = new Set(walked.map((n) => n.id));
+  const symlinks = graphServer.fs.edges.filter((e) => e.kind === "symlink" && walkedIds.has(e.source));
+  const targets = graphServer.fs.nodes.filter(
+    (n) => !walkedIds.has(n.id) && symlinks.some((e) => e.target === n.id),
+  );
+  const nodes = [...walked, ...targets];
   const ids = new Set(nodes.map((n) => n.id));
   const edges = graphServer.fs.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
   return {

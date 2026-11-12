@@ -39,7 +39,7 @@ import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphDa
 import { openedForPath } from "../graph/selectionView";
 import { draftClientPath } from "../api/fileIdentity";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import type { IndexStatus } from "../api/types";
+import type { FsGraphNode, IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
 import {
   activePane,
@@ -563,6 +563,79 @@ describe("watching the directories it shows", () => {
     expect(ids).not.toContain("notes/sub/s.md");
     expect(ids, "the file, under its bare path").toContain("notes/sub");
     expect(ids).not.toContain("directory:notes/sub");
+  });
+
+  /// The canvas's edges as `source>target:kind`, broken ones marked.
+  function drawnEdges(): string[] {
+    return (canvas.props!.edges as Array<{ source: string; target: string; kind: string; broken?: boolean }>).map(
+      (e) => `${e.source}>${e.target}:${e.kind}${e.broken ? " broken" : ""}`,
+    );
+  }
+
+  test("a patch keeps the edges below an opened subdirectory it reads again", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/new.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/new.md")],
+    };
+    const { spines } = await change(["notes/new.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes"]);
+    expect(drawnEdges()).toEqual(
+      expect.arrayContaining([
+        "directory:notes>notes/new.md:contains",
+        "directory:notes/sub>notes/sub/s.md:contains",
+      ]),
+    );
+  });
+
+  test("a change at the root keeps the edges of every top-level directory", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("src"), fsg.file(A), fsg.file("src/main.rs")],
+      edges: [fsg.contains("", "notes"), fsg.contains("", "src"), fsg.contains("notes", A), fsg.contains("src", "src/main.rs")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), src: true } }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("top.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("", "top.md")],
+    };
+    const { spines } = await change(["top.md"]);
+    expect(spines.map((c) => c.path)).toEqual([""]);
+    expect(drawnEdges()).toEqual(
+      expect.arrayContaining([">top.md:contains", `${NOTES}>${A}:contains`, "directory:src>src/main.rs:contains"]),
+    );
+    expect(visibleIds()).toEqual(expect.arrayContaining([A, "src/main.rs", "top.md"]));
+  });
+
+  test("a symlink into a directory a patch reads is read again with its own", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    const target = fsg.file("notes/x.md");
+    const link = { ...fsg.file("links/l.md"), kind: "symlink" as const, target: "../notes/x.md" };
+    const fsTree = (x: FsGraphNode) => ({
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("links"), x, link],
+      edges: [
+        fsg.contains("", "notes"),
+        fsg.contains("", "links"),
+        fsg.contains("notes", "notes/x.md"),
+        fsg.contains("links", "links/l.md"),
+        { source: "links/l.md", target: "notes/x.md", kind: "symlink" as const },
+      ],
+    });
+    graphServer.fs = fsTree(target);
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), links: true } }));
+    expect(drawnEdges()).toContain("links/l.md>notes/x.md:symlink");
+
+    // The target goes; the route answers the link's target as a broken ghost.
+    graphServer.fs = fsTree({ ...target, kind: "ghost", broken: true });
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "notes/x.md" || e.kind === "symlink");
+    const { spines } = await change(["notes/x.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["links", "notes"]);
+    expect(drawnEdges()).toContain("links/l.md>notes/x.md:symlink broken");
   });
 
   test("two changes signalled before the tab looks are a change whose paths are not known", async () => {

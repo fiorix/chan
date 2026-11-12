@@ -1504,10 +1504,20 @@
     const run = async (): Promise<void> => {
       const read = spineRead;
       if (read === null || seq !== spineSeq) return;
+      // A symlink's state is its target's: one into a directory this patch
+      // reads is read again with its own directory.
+      const reading = new Set(dirs);
+      for (const e of read.edges) {
+        if (e.kind !== "symlink") continue;
+        const target = read.nodes.get(e.target);
+        if (!dirs.has(parentDir(target?.path || e.target))) continue;
+        const from = parentDir(e.source);
+        if (spineHoldsChildren(from)) reading.add(from);
+      }
       try {
         // Parents first, so a directory an earlier level of this patch
         // brings is in the spine by the time its own turn comes.
-        for (const dir of [...dirs].sort(byDepth)) {
+        for (const dir of [...reading].sort(byDepth)) {
           // A directory is read only when the spine holds it: what the walk
           // never drew, a patch never draws either.
           if (dir !== "" && !isFsDirectoryNode(read.nodes.get(dir))) continue;
@@ -1534,32 +1544,45 @@
     return n !== undefined && isFsDirectory(n);
   }
 
-  /// Lays the children of `dir` as read now over what `read` held of them:
-  /// what is gone goes, a directory no longer there takes what was below it,
-  /// and `dir`'s children count as read from then on. A null level is a
-  /// directory gone from disk, which takes everything below it.
+  /// Lays the children of `dir` as read now over what `read` held of them.
+  /// An entry no longer there goes, with every edge that touches it, and a
+  /// directory no longer there takes what was below it. An entry still there
+  /// keeps the edges the level does not deliver again: those below an opened
+  /// subdirectory, and those into it from elsewhere. What the level does
+  /// deliver again replaces the old: `dir`'s own `contains` edges, its
+  /// entries' symlink edges and their hardlinks, which are joined anew. A
+  /// null level is a directory gone from disk, which takes everything below
+  /// it. `dir`'s children count as read from then on.
   function applySpineLevel(
     read: NonNullable<typeof spineRead>,
     dir: string,
     level: { nodes: FsGraphNode[]; edges: FsGraphEdge[] } | null,
   ): void {
+    const fresh = new Set(level?.nodes.map((n) => n.id) ?? []);
     // A directory there now, by id; a file where a directory was is not one.
     const freshDirs = new Set(level?.nodes.filter(isFsDirectory).map((n) => n.id) ?? []);
-    const gone = new Set<string>();
+    const entries = new Set<string>();
+    const removed = new Set<string>();
     const dropBelow = (below: string): void => {
-      for (const m of read.nodes.values()) if (spineBelow(below, m)) gone.add(m.id);
+      for (const m of read.nodes.values()) if (spineBelow(below, m)) removed.add(m.id);
       for (const p of read.patched) if (p === below || p.startsWith(`${below}/`)) read.patched.delete(p);
     };
     for (const n of read.nodes.values()) {
-      if (!spineChildOf(dir, n)) continue;
-      gone.add(n.id);
+      // A ghost is a symlink's missing target, which the symlink's own level
+      // delivers, not an entry of the directory it names.
+      if (!spineChildOf(dir, n) || n.kind === "ghost") continue;
+      entries.add(n.id);
+      if (!fresh.has(n.id)) removed.add(n.id);
       if (isFsDirectory(n) && !freshDirs.has(n.id)) dropBelow(n.path);
     }
     if (level === null) dropBelow(dir);
-    for (const id of gone) read.nodes.delete(id);
-    read.edges = read.edges.filter(
-      (e) => !gone.has(e.source) && !gone.has(e.target) && !(e.kind === "contains" && e.source === dir),
-    );
+    for (const id of removed) read.nodes.delete(id);
+    read.edges = read.edges.filter((e) => {
+      if (removed.has(e.source) || removed.has(e.target)) return false;
+      if (e.kind === "contains") return e.source !== dir;
+      if (e.kind === "hardlink") return !entries.has(e.source) && !entries.has(e.target);
+      return !entries.has(e.source);
+    });
     if (level === null) {
       read.patched.delete(dir);
       return;
