@@ -25,12 +25,37 @@ function rectOf(page, selector) {
   });
 }
 
-/// Open the terminal's menu, as a long press does, and tap the row named.
+/// Open the terminal's menu, as a long press does, and tap the row named
+/// once the row is at rest. The menu pops in, scaling up from its top-left
+/// corner, and is placed again a frame after it mounts, so a row's box read
+/// early lies above the row's place a few frames later: a tap aimed from
+/// that box and landing late, as on a busy machine, reaches the row above,
+/// which closes the menu without the named row's command. At rest is no
+/// animation running or waiting to start in the menu, and the row's box the
+/// same on two frames in a row.
 async function tapMenuRow(page, label) {
   await page.$eval(".terminal-tab.active", (el) => el.dispatchEvent(new MouseEvent("contextmenu", {
     bubbles: true, cancelable: true, clientX: 40, clientY: 160,
   })));
   await page.waitForSelector("button.mbtn", { visible: true, timeout: 10_000 });
+  await page.evaluate(() => { delete window.__check177RowBox; });
+  await page.waitForFunction((label) => {
+    const menu = document.querySelector(".terminal-tab-menu-bubble");
+    const row = [...document.querySelectorAll("button.mbtn")]
+      .find((b) => b.querySelector(".mbtn-label")?.textContent?.trim() === label);
+    if (!menu) return false;
+    // A missing row is the assertion's to report, below.
+    if (!row) return true;
+    if (menu.getAnimations({ subtree: true }).some((a) => a.pending || a.playState === "running")) {
+      delete window.__check177RowBox;
+      return false;
+    }
+    const r = row.getBoundingClientRect();
+    const box = `${r.left},${r.top},${r.width},${r.height}`;
+    const still = window.__check177RowBox === box;
+    window.__check177RowBox = box;
+    return still;
+  }, { timeout: 10_000, polling: "raf" }, label);
   const row = (await page.evaluateHandle((label) => [...document.querySelectorAll("button.mbtn")]
     .find((b) => b.querySelector(".mbtn-label")?.textContent?.trim() === label) ?? null, label)).asElement();
   assert.ok(row, `the terminal menu has a "${label}" row`);
