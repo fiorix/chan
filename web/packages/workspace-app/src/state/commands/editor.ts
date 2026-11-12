@@ -39,8 +39,8 @@ import {
   forceReloadFromDisk,
   isDirty,
   openTerminalInActivePane,
-  saveDraftEdits,
   saveDraftTabToWorkspace,
+  saveTabEdits,
   setTabHighlightTrailingWhitespace,
   setTabInspectorOpen,
   setTabOutlineOpen,
@@ -122,7 +122,7 @@ export async function duplicateFile(tab: FileTab): Promise<void> {
 /// commits the input it buffers, and a tab that then holds unsaved text is
 /// saved. A tab level with the server answers `true` itself, with no
 /// promise to wait on, so its action starts inside the gesture that asked.
-/// A save that fails leaves its reason on the status line (`saveDraftEdits`)
+/// A save that fails leaves its reason on the status line (`saveTabEdits`)
 /// and so does a commit that throws, and either answers no: the action is
 /// refused rather than run on the older text.
 function serverHoldsEditorText(tab: FileTab): boolean | Promise<boolean> {
@@ -132,7 +132,7 @@ function serverHoldsEditorText(tab: FileTab): boolean | Promise<boolean> {
     notify(`${tabLabel(tab)} was not saved because its editor could not commit its input (${(err as Error).message}).`);
     return false;
   }
-  return isDirty(tab) ? saveDraftEdits(tab) : true;
+  return isDirty(tab) ? saveTabEdits(tab) : true;
 }
 
 /// Download the tab's file as the editor shows it, a draft's too: the
