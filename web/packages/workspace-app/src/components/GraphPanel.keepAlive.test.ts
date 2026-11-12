@@ -180,28 +180,30 @@ describe("graph tabs in a pane", () => {
     const spines = graphServer.fsGraphCalls.length;
     const ids = (c: typeof one) => c!.nodes.map((n) => n.id);
 
+    // A file at the root, whose level every tab's spine holds.
     graphServer.view = {
-      nodes: [...graphServer.view.nodes, g.file("notes/new.md")],
-      edges: [...graphServer.view.edges, g.edge("directory:notes", "notes/new.md", "contains")],
+      nodes: [...graphServer.view.nodes, g.file("new.md")],
+      edges: [...graphServer.view.edges, g.edge("", "new.md", "contains")],
     };
     // The store's two cues for a change: the shared graph's quiet window,
     // and the signal the graph tabs take.
     noteGraphChanged(() => true);
-    graphReloadSignal.paths = ["notes/new.md"];
+    graphReloadSignal.paths = ["new.md"];
     graphReloadSignal.nonce += 1;
     await settle();
     await new Promise((r) => setTimeout(r, 300));
     await settle();
     expect(graphServer.graphStreamCalls - streams, "one stream, whatever the tabs").toBe(1);
     expect(graphServer.fsGraphCalls.length - spines, "the shown tab's spine; the hidden one waits").toBe(1);
-    expect(ids(one)).toContain("notes/new.md");
-    expect(ids(two), "the hidden tab keeps what it drew").not.toContain("notes/new.md");
+    expect(ids(one)).toContain("new.md");
+    expect(ids(two), "the hidden tab keeps what it drew").not.toContain("new.md");
 
     pane.activeTabId = "two";
     await settle();
     expect(graphServer.graphStreamCalls - streams, "showing it asks for no graph").toBe(1);
     expect(graphServer.fsGraphCalls.length - spines, "and for its own spine").toBe(2);
-    expect(ids(two)).toContain("notes/new.md");
+    expect(graphServer.fsGraphCalls.at(-1), "the level the change touched").toMatchObject({ path: "", depth: 1 });
+    expect(ids(two)).toContain("new.md");
     expect(two!.nodes, "the window's one copy again").toBe(one!.nodes);
   });
 

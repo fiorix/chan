@@ -36,6 +36,7 @@ import {
   visibleIds,
 } from "../__tests__/graphPanel";
 import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphData.svelte";
+import { openedForPath } from "../graph/selectionView";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
@@ -404,8 +405,24 @@ describe("watching the directories it shows", () => {
     expect(fbTreeInstance(id)).toBeNull();
   });
 
-  test("a change anywhere in the workspace costs one stream and one spine request, whatever is selected", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
+  test("a change costs one stream, and the spine reads again only the directory it touched", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes", expanded: openedForPath("notes") }));
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/other.md")],
+      edges: [...graphServer.view.edges, g.edge(NOTES, "notes/other.md", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/other.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/other.md")],
+    };
+    const { streams, spines } = await change(["notes/other.md"]);
+    expect(streams, "the window's graph, once").toBe(1);
+    expect(spines, "notes/, one level").toEqual([{ path: "notes", depth: 1, cursor: undefined }]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/other.md");
+  });
+
+  test("a change below a directory the spine does not hold reads none of it", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab());
     graphServer.view = {
       nodes: [...graphServer.view.nodes, g.dir("src"), g.file("src/other.rs")],
       edges: [
@@ -414,23 +431,106 @@ describe("watching the directories it shows", () => {
         g.edge("directory:src", "src/other.rs", "contains"),
       ],
     };
-    // Both reloads are debounced; run every timer a change schedules, however
-    // long its delay.
-    vi.useFakeTimers();
-    try {
-      const streams = graphServer.graphStreamCalls;
-      const spines = graphServer.fsGraphCalls.length;
-      // The store's two cues for a change: the shared graph's quiet window,
-      // and the signal the graph tabs take.
-      noteGraphChanged(() => true);
-      graphReloadSignal.paths = ["src/other.rs"];
-      graphReloadSignal.nonce += 1;
-      await vi.runAllTimersAsync();
-      expect(graphServer.graphStreamCalls - streams, "the window's graph, once").toBe(1);
-      expect(graphServer.fsGraphCalls.length - spines, "the tab's spine, once").toBe(1);
-      expect(canvas.props!.nodes.map((n) => n.id)).toContain("src/other.rs");
-    } finally {
-      vi.useRealTimers();
-    }
+    const { streams, spines } = await change(["src/other.rs"]);
+    expect(streams).toBe(1);
+    expect(spines, "src/ is closed and its files come with the window's graph").toEqual([]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("src/other.rs");
+  });
+
+  test("a save six levels down reads that directory again, not the tree", async () => {
+    // A tree with siblings at every level, and the directory six levels down
+    // opened with every directory above it.
+    const DIR = "a/b/c/d/e/f";
+    const dirs = DIR.split("/").map((_, i, parts) => parts.slice(0, i + 1).join("/"));
+    const siblings = dirs.map((d) => `${d}-sibling`);
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        ...[...dirs, ...siblings].map(fsg.dir),
+        ...[...dirs, ...siblings].map((d) => fsg.file(`${d}/file.md`)),
+      ],
+      edges: [
+        ...[...dirs, ...siblings].map((d) => fsg.contains(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : "", d)),
+        ...[...dirs, ...siblings].map((d) => fsg.contains(d, `${d}/file.md`)),
+      ],
+    };
+    graphServer.fsPageSize = 4;
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: DIR, expanded: openedForPath(DIR) }));
+    expect(visibleIds()).toContain(`${DIR}/file.md`);
+
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file(`${DIR}/saved.md`)],
+      edges: [...graphServer.fs.edges, fsg.contains(DIR, `${DIR}/saved.md`)],
+    };
+    const { spines } = await change([`${DIR}/saved.md`]);
+    expect(spines, "one level of the directory saved in").toEqual([{ path: DIR, depth: 1, cursor: undefined }]);
+    expect(visibleIds()).toContain(`${DIR}/saved.md`);
+    expect(visibleIds(), "what it held elsewhere stays").toContain("a/file.md");
+  });
+
+  test("a file deleted from an opened directory leaves the graph, and a directory takes what was below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        fsg.dir("notes"),
+        fsg.file(A),
+        fsg.file("notes/old.md"),
+        fsg.dir("notes/sub"),
+        fsg.file("notes/sub/s.md"),
+      ],
+      edges: [
+        fsg.contains("", "notes"),
+        fsg.contains("notes", A),
+        fsg.contains("notes", "notes/old.md"),
+        fsg.contains("notes", "notes/sub"),
+        fsg.contains("notes/sub", "notes/sub/s.md"),
+      ],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    expect(visibleIds()).toEqual(expect.arrayContaining([A, "notes/old.md", "directory:notes/sub", "notes/sub/s.md"]));
+
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.file(A)],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", A)],
+    };
+    const { spines } = await change(["notes/old.md", "notes/sub"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes"]);
+    const ids = canvas.props!.nodes.map((n) => n.id);
+    expect(ids).toContain(A);
+    expect(ids).not.toContain("notes/old.md");
+    expect(ids).not.toContain("directory:notes/sub");
+    expect(ids, "under the directory that went").not.toContain("notes/sub/s.md");
+  });
+
+  test("a change that names no path fetches the spine whole", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab());
+    const { spines } = await change([]);
+    expect(spines).toEqual([{ path: "", depth: 1, cursor: undefined }]);
   });
 });
+
+/// A change at `paths`, as the store signals it, with every timer it
+/// schedules run however long its delay: the shared graph's quiet window and
+/// the tab's own. Answers the streams and the spine requests it cost.
+async function change(paths: string[]): Promise<{
+  streams: number;
+  spines: Array<{ path: string; depth: number; cursor?: string }>;
+}> {
+  vi.useFakeTimers();
+  try {
+    const streams = graphServer.graphStreamCalls;
+    const spines = graphServer.fsGraphCalls.length;
+    noteGraphChanged(() => true);
+    graphReloadSignal.paths = paths;
+    graphReloadSignal.nonce += 1;
+    await vi.runAllTimersAsync();
+    return {
+      streams: graphServer.graphStreamCalls - streams,
+      spines: graphServer.fsGraphCalls.slice(spines),
+    };
+  } finally {
+    vi.useRealTimers();
+  }
+}
