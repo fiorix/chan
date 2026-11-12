@@ -295,6 +295,13 @@ describe("the ghostty renderer's partial redraws", () => {
     ]);
   });
 
+  test("a blinking cursor through its phases, a write and a move", async () => {
+    // The renderer blinks on an interval it starts when it is built.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const blink = () => vi.advanceTimersByTime(530);
+    await run("$ ", [blink, blink, "x", blink, "\x1b[2;3H", blink, blink, "y"], { cursorBlink: true });
+  });
+
   test("the cursor moves without a write", async () => {
     await run(lines(ROWS - 2), ["\x1b[2;2H", "\x1b[2;8H", "\x1b[7;1H", "\x1b[1;20H", "\x1b[A", "\x1b[3B"]);
   });
