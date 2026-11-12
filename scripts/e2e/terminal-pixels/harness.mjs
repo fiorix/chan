@@ -177,6 +177,37 @@ const SCROLLBACK_LINES = 40;
 const SCROLLBACK_WRAP_LINE = 14;
 const SCROLLBACK_SHOWN = 12;
 
+/// History for the partial-scroll pattern, viewed scrolled back by fewer
+/// rows than the screen holds: history on the top rows of the view, the
+/// screen's first rows below them. Every line holds two clusters at columns
+/// that move from line to line, so a row that drew the clusters of another
+/// row would show that row's letters in their place.
+const PARTIAL_LINES = 30;
+const PARTIAL_SHOWN = 6;
+const PARTIAL_LAST_COL = 47;
+
+/// Scroll a terminal back `rows` rows and wait for the overlay scrollbar the
+/// scroll shows to hide again.
+async function scrollBack(term, rows) {
+  term.scrollLines(-rows);
+  if (term.getViewportY() !== rows) {
+    throw new Error(`scrolled back ${term.getViewportY()} rows, not ${rows}`);
+  }
+  // A scroll shows the widget's overlay scrollbar, which fades in and then
+  // hides itself on a timer. A frame taken mid-fade would not reproduce, so
+  // the snapshot waits for it to be gone.
+  const deadline = performance.now() + 10000;
+  while (term.scrollbarVisible !== false) {
+    if (typeof term.scrollbarVisible !== "boolean") {
+      throw new Error("the widget's scrollbar state is unreadable");
+    }
+    if (performance.now() > deadline) {
+      throw new Error("the overlay scrollbar never hid");
+    }
+    await nextFrame();
+  }
+}
+
 /// Where the cursor patterns park the cursor: on the W of row 2, or on a
 /// cell of row 6 nothing is written to.
 const CURSOR_GLYPH = { col: 21, row: 2 };
@@ -185,12 +216,13 @@ const CURSOR_BLANK = { col: 30, row: 6 };
 /// The reference patterns, by the scenario's `pattern`. The grid pattern
 /// above is the one the ink measures read; these paint the paths it never
 /// reaches (cell colours and attributes, wide and combined glyphs, each
-/// cursor style, history rows, the selection), so that a change to the
-/// renderer can be held to byte-identical PNGs against a run before it. They
-/// record what the renderer paints, not what it ought to: each declares only
-/// where it wrote, which must carry ink so that a page that drew nothing
-/// cannot pass for a match, and a region nothing writes. Every one starts on
-/// a fresh terminal and hides the cursor unless the cursor is its subject.
+/// cursor style, history rows, a view part history and part screen, the
+/// selection), so that a change to the renderer can be held to byte-identical
+/// PNGs against a run before it. They record what the renderer paints, not
+/// what it ought to: each declares only where it wrote, which must carry ink
+/// so that a page that drew nothing cannot pass for a match, and a region
+/// nothing writes. Every one starts on a fresh terminal and hides the cursor
+/// unless the cursor is its subject.
 const PATTERNS = {
   // Colours and attributes. Row 1 sets explicit black backgrounds beside
   // default ones: the palette's black and RGB (1,1,1), which the renderer
@@ -299,29 +331,44 @@ const PATTERNS = {
       return "\x1b[?25l" + lines.join("\r\n");
     },
     async settle(term) {
-      term.scrollLines(-SCROLLBACK_SHOWN);
-      if (term.getViewportY() !== SCROLLBACK_SHOWN) {
-        throw new Error(
-          `scrolled back ${term.getViewportY()} rows, not ${SCROLLBACK_SHOWN}`,
-        );
-      }
-      // A scroll shows the widget's overlay scrollbar, which fades in and
-      // then hides itself on a timer. A frame taken mid-fade would not
-      // reproduce, so the snapshot waits for it to be gone.
-      const deadline = performance.now() + 10000;
-      while (term.scrollbarVisible !== false) {
-        if (typeof term.scrollbarVisible !== "boolean") {
-          throw new Error("the widget's scrollbar state is unreadable");
-        }
-        if (performance.now() > deadline) {
-          throw new Error("the overlay scrollbar never hid");
-        }
-        await nextFrame();
-      }
+      await scrollBack(term, SCROLLBACK_SHOWN);
     },
     regions: () => ({
       painted: { firstCol: 0, lastCol: 39, firstRow: 0, lastRow: ROWS - 1 },
       blank: { firstCol: 40, lastCol: 55, firstRow: 7, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A view scrolled back by fewer rows than the screen holds: history rows
+  // on top, screen rows below, each with an e and a combining acute and an n
+  // and a combining tilde between letters. A cluster moves three and five
+  // columns a line, so no two lines PARTIAL_SHOWN apart hold one in the same
+  // column.
+  "partial-scroll": {
+    bytes() {
+      const lines = [];
+      for (let i = 0; i < PARTIAL_LINES; i += 1) {
+        const acute = 8 + ((i * 3) % 40);
+        const tilde = 8 + ((i * 5 + 17) % 40);
+        let line = `line ${String(i).padStart(2, "0")} `;
+        for (let col = line.length; col <= PARTIAL_LAST_COL; col += 1) {
+          line +=
+            col === acute
+              ? "e\u0301"
+              : col === tilde
+                ? "n\u0303"
+                : String.fromCharCode(97 + (col % 26));
+        }
+        lines.push(line);
+      }
+      return "\x1b[?25l" + lines.join("\r\n");
+    },
+    async settle(term) {
+      await scrollBack(term, PARTIAL_SHOWN);
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: PARTIAL_LAST_COL, firstRow: 0, lastRow: ROWS - 1 },
+      blank: { firstCol: PARTIAL_LAST_COL + 3, lastCol: 55, firstRow: 0, lastRow: ROWS - 1 },
     }),
   },
 

@@ -20,11 +20,12 @@ a chain or palette edit moves the measurement with it.
 
 The ghostty pattern arms paint what the grid pattern never reaches: cell
 colours and attributes, wide and combined glyphs, each cursor style, history
-rows and the selection. Nothing is measured on them beyond a liveness and a
-blank region; they are byte-level references, and --compare holds a run's
-PNGs to an earlier run's, which is how a renderer change is accepted. A PNG
-of the earlier run that names no scenario this driver has fails too, so a
-scenario cannot drop out between the two runs unseen.
+rows, a view part history and part screen, and the selection. Nothing is
+measured on them beyond a liveness and a blank region; they are byte-level
+references, and --compare holds a run's PNGs to an earlier run's, which is
+how a renderer change is accepted. A PNG of the earlier run that names no
+scenario this driver has fails too, so a scenario cannot drop out between
+the two runs unseen.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
@@ -607,6 +608,7 @@ PATTERN_SCENARIOS = [
     Scenario("ghostty", "os-default", pattern="attrs"),
     Scenario("ghostty", "os-default", pattern="glyphs"),
     Scenario("ghostty", "os-default", pattern="scrollback"),
+    Scenario("ghostty", "os-default", pattern="partial-scroll"),
     Scenario("ghostty", "os-default", pattern="selection"),
 ] + [
     Scenario("ghostty", "os-default", pattern=f"cursor-{where}", cursor_style=style)
