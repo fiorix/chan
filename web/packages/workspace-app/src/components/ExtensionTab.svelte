@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { Maximize2, Minimize2, RefreshCw, Settings2, X } from "@lucide/svelte";
+  import { Check, Command as CommandIcon, Maximize2, Minimize2, RefreshCw, Settings2, X } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
   import { sessionWindowId } from "../api/client";
   import { apiPath } from "../api/transport";
-  import { allCommands } from "../state/commands";
+  import {
+    allCommands,
+    commandContext,
+    commandState,
+    commandTitle,
+    type CommandContext,
+  } from "../state/commands";
+  // The menu names its rows through the catalog, which this fills.
+  import "../state/commands/install";
   import {
     EXTENSION_KEYMAP_MESSAGE,
     EXTENSION_SESSION_CONTEXT_MESSAGE,
@@ -20,20 +28,26 @@
     EXTENSION_READY_MESSAGE,
     extensionHasCapability,
     extensionFor,
+    extensionPresenting,
     extensionsReady,
     isExtensionCommandResult,
     markExtensionFrameReady,
-    refreshExtensions,
     registerExtensionFrame,
+    reloadExtensionTab,
     resetExtensionFrame,
+    setExtensionPresenting,
+    toggleExtensionPresentation,
   } from "../state/extensions.svelte";
   import { extensionPresentationLayer } from "../state/extensionPresentation";
   import { notify } from "../state/notify.svelte";
   import { sessionState } from "../state/session.svelte";
+  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { openCommandLauncherFromMenu } from "../state/store.svelte";
   import {
     closeTab,
     flipHybrid,
     layout,
+    panesHaveSides,
     type ExtensionTab,
   } from "../state/tabs.svelte";
   import { closeTabMenu, tabMenu } from "../state/tabMenu.svelte";
@@ -55,16 +69,45 @@
   let frame: HTMLIFrameElement | undefined = $state();
   let menu: HamburgerMenu | undefined = $state();
   let menuOpen = $state(false);
-  let presenting = $state(false);
+  // Whether the tab is shown in presentation is state the launcher's toggle
+  // reads and flips too, so it lives with the frame registry.
+  const presenting = $derived(extensionPresenting(tab.id));
+  const presents = $derived(extensionHasCapability(extension, "presentation"));
   let unregisterFrame: (() => void) | undefined;
   // Fail-closed until the first postHostKeys: only a relayed chord whose
   // identity matches an advertised host key is dispatched locally.
   let advertisedKeys = new Set<string>();
 
-  async function reload(): Promise<void> {
-    menu?.close();
-    await refreshExtensions();
+  // The command context as it reads with this tab focused: a row's check is
+  // the catalog's state for the tab the menu belongs to.
+  const menuContext = $derived<CommandContext>({
+    ...commandContext(),
+    activeSurface: "extension",
+    activeTabId: tab.id,
+    activeExtensionId: tab.extensionId,
+  });
+
+  // The launcher's own toggle has no catalog row; the shortcut table names it.
+  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+
+  function chordLabel(id: string): string {
+    return chordFor(id) ?? "";
+  }
+
+  // First-placement estimate for the menu, which measures itself once open.
+  const menuHeight = $derived(
+    42 + 36 * (2 + (presents ? 1 : 0) + (panesHaveSides() ? 1 : 0) + (presenting ? 0 : 1)),
+  );
+
+  // The catalog is resolved again before the frame loads, so an extension
+  // that exited shows its status instead of a dead frame.
+  function reloadFrame(): void {
     if (frame && frameSrc) frame.src = frameSrc;
+  }
+
+  function reload(): void {
+    menu?.close();
+    void reloadExtensionTab(tab.id);
   }
 
   function doFlip(): void {
@@ -74,13 +117,19 @@
 
   function togglePresentation(): void {
     menu?.close();
-    if (!extensionHasCapability(extension, "presentation")) return;
-    presenting = !presenting;
+    toggleExtensionPresentation(tab.id, tab.extensionId);
   }
 
-  function closePresentedTab(): void {
-    presenting = false;
+  function closeOwnTab(): void {
+    menu?.close();
+    setExtensionPresenting(tab.id, false);
     void closeTab(paneId, tab.id);
+  }
+
+  function openCommands(event: MouseEvent): void {
+    const row = event.currentTarget as Element;
+    menu?.close();
+    openCommandLauncherFromMenu(row);
   }
 
   function onContextMenu(event: MouseEvent): void {
@@ -165,13 +214,13 @@
       return;
     }
     const presentation = extensionPresentationAction(event.data);
-    if (!presentation || !extensionHasCapability(extension, "presentation")) return;
-    if (presentation === "toggle") presenting = !presenting;
-    else presenting = presentation === "enter";
+    if (!presentation || !presents) return;
+    if (presentation === "toggle") toggleExtensionPresentation(tab.id, tab.extensionId);
+    else setExtensionPresenting(tab.id, presentation === "enter");
   }
 
   onMount(() => {
-    unregisterFrame = registerExtensionFrame(tab.id, postCommand);
+    unregisterFrame = registerExtensionFrame(tab.id, postCommand, reloadFrame);
     window.addEventListener("message", onFrameMessage);
     document.addEventListener("visibilitychange", postViewState);
   });
@@ -197,7 +246,7 @@
   });
 
   // Pane.svelte forwards a tab-title right click through the shared tab-menu
-  // bus. Consume it here so title and body expose the same two actions.
+  // bus. Consume it here so title and body expose the same actions.
   $effect(() => {
     if (tabMenu.openForTabId !== tab.id || !tabMenu.anchor || !menu) return;
     const { left, top } = tabMenu.anchor;
@@ -221,30 +270,55 @@
     bind:open={menuOpen}
     showTrigger={false}
     width={210}
-    height={extensionHasCapability(extension, "presentation") ? 132 : 96}
+    height={menuHeight}
   >
-    <li>
-      <button role="menuitem" onclick={doFlip}>
-        <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>Flip</span>
-      </button>
-    </li>
+    <!-- The extension's own rows, then the tail every tab menu ends with
+         (Flip pane where the window's panes have sides, Close tab) and the
+         launcher row. A presented frame covers the launcher, so its row is
+         left out while the tab presents. -->
     <li>
       <button role="menuitem" onclick={reload} disabled={!extension}>
         <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>Reload extension</span>
+        <span class="menu-row-label">{commandTitle("app.extension.reload")}</span>
       </button>
     </li>
-    {#if extensionHasCapability(extension, "presentation")}
+    {#if presents}
+      {@const on = commandState("app.extension.present", menuContext) === true}
       <li>
-        <button role="menuitem" onclick={togglePresentation}>
-          {#if presenting}
-            <Minimize2 size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span>Restore extension</span>
+        <button role="menuitemcheckbox" aria-checked={on} onclick={togglePresentation}>
+          {#if on}
+            <Check size={16} strokeWidth={2} aria-hidden="true" />
           {:else}
             <Maximize2 size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span>Present extension</span>
           {/if}
+          <span class="menu-row-label">{commandTitle("app.extension.present")}</span>
+        </button>
+      </li>
+    {/if}
+    <li class="sep" role="separator"></li>
+    {#if panesHaveSides()}
+      <li>
+        <button role="menuitem" onclick={doFlip}>
+          <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span class="menu-row-label">{commandTitle("app.pane.flip")}</span>
+          <span class="menu-row-chord">{chordLabel("app.pane.flip")}</span>
+        </button>
+      </li>
+    {/if}
+    <li>
+      <button role="menuitem" onclick={closeOwnTab}>
+        <X size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span class="menu-row-label">{commandTitle("app.tab.close")}</span>
+        <span class="menu-row-chord">{chordLabel("app.tab.close")}</span>
+      </button>
+    </li>
+    {#if !presenting}
+      <li class="sep" role="separator"></li>
+      <li>
+        <button role="menuitem" onclick={openCommands}>
+          <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span class="menu-row-label">{launcherLabel}</span>
+          <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
         </button>
       </li>
     {/if}
@@ -254,13 +328,15 @@
     <div class="presentation-chrome" aria-label="Extension presentation controls">
       <strong>{tab.title}</strong>
       <div>
+        <!-- Restore is this bar's way out of presentation and keeps its own
+             word: the toggle's name would read as entering it. -->
         <button type="button" onclick={togglePresentation} aria-label="Restore extension">
           <Minimize2 size={17} aria-hidden="true" />
           <span>Restore</span>
         </button>
-        <button type="button" onclick={closePresentedTab} aria-label="Close extension tab">
+        <button type="button" onclick={closeOwnTab} aria-label={commandTitle("app.tab.close")}>
           <X size={17} aria-hidden="true" />
-          <span>Close</span>
+          <span>{commandTitle("app.tab.close")}</span>
         </button>
       </div>
     </div>

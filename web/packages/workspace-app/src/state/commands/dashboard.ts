@@ -2,11 +2,11 @@
 // active surface. Slide commands move the controlled carousel index on
 // the active DashboardTab (its fields are $state) and persist the
 // session, matching the carousel's own arrows: step next and previous, or
-// jump straight to a named slide. The slides and their order are the
-// dashboard menu's.
+// jump straight to a named slide. The dashboard menu's slide rows are the
+// options of Shown slides, built here for the menu's own tab.
 // See state/commands.ts for the Command shape and the onSurface helper.
 
-import { openChoice, registerCommands, onSurface } from "../commands";
+import { openChoice, registerCommands, onSurface, type CommandOption } from "../commands";
 import { scheduleSessionSave } from "../store.svelte";
 import {
   activeDashboardTab,
@@ -44,10 +44,29 @@ function currentSlot(tab: DashboardTab): number {
   return dashboardSlotEnabled(tab, slide) ? slide : firstEnabledSlot(tab);
 }
 
+/// One option per slide `tab` can show, with a check on each that is shown.
+/// Choosing one switches that slide on or off; the last shown slide stays
+/// on. The launcher lists these for the focused dashboard and the dashboard
+/// menu for the tab it belongs to.
+export function shownSlideOptions(tab: DashboardTab): CommandOption[] {
+  return availableSlots().map((slot) => ({
+    id: String(slot),
+    label: DASHBOARD_SLOT_LABELS[slot],
+    checked: dashboardSlotEnabled(tab, slot),
+    run: () => {
+      toggleDashboardSlot(tab, slot);
+      // A cursor left on a slide just switched off moves to the first one
+      // still shown, so the saved slide stays valid.
+      if (!dashboardSlotEnabled(tab, tab.carouselSlide ?? 0)) {
+        tab.carouselSlide = firstEnabledSlot(tab);
+      }
+      scheduleSessionSave();
+    },
+  }));
+}
+
 registerCommands([
   {
-    // One row per slide with a check on each that is shown, as the
-    // dashboard menu lists them. The last shown slide stays on.
     id: "app.dashboard.slides",
     title: "Shown slides",
     category: "Dashboard",
@@ -66,19 +85,7 @@ registerCommands([
     },
     options: () => {
       const tab = activeDashboardTab();
-      if (!tab) return [];
-      return availableSlots().map((slot) => ({
-        id: String(slot),
-        label: DASHBOARD_SLOT_LABELS[slot],
-        checked: dashboardSlotEnabled(tab, slot),
-        run: () => {
-          toggleDashboardSlot(tab, slot);
-          // A cursor left on a slide just switched off moves to the first
-          // one still shown, as the dashboard menu moves it.
-          tab.carouselSlide = currentSlot(tab);
-          scheduleSessionSave();
-        },
-      }));
+      return tab ? shownSlideOptions(tab) : [];
     },
     run: () => openChoice("app.dashboard.slides"),
   },
