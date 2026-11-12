@@ -32,6 +32,7 @@ import {
   topOverlay,
 } from "../state/store.svelte";
 import { registerCommands } from "../state/commands";
+import { clearRecentCommands } from "../state/commands/recent.svelte";
 import {
   type BrowserTab,
   type ExtensionTab,
@@ -54,12 +55,13 @@ let showBulk = false;
 let showFullApplications = false;
 
 const APPLICATION_TITLES = {
-  Terminal: ["Show/Hide Rich Prompt", "Terminal engine", ...Array.from({ length: 8 }, (_, i) => `Terminal theme ${i}`)],
-  Editor: ["Preview slide deck", "Reload from disk", ...Array.from({ length: 8 }, (_, i) => `Editor theme ${i}`)],
+  Terminal: ["Rich Prompt", "Details", ...Array.from({ length: 8 }, (_, i) => `Terminal option ${i}`)],
+  Editor: ["Preview slide deck", "Reload from disk", ...Array.from({ length: 8 }, (_, i) => `Editor option ${i}`)],
 };
 
 registerCommands((["Terminal", "Editor"] as const).flatMap((category) => APPLICATION_TITLES[category].map((title, i) => ({
   id: `app.${category.toLowerCase()}.complete${i}`, title, category, requirement: "any" as const,
+  scope: "app" as const, surface: category === "Terminal" ? "terminal" as const : "file" as const,
   keywords: ["unbounded-match"], available: () => showFullApplications, run: () => {},
 }))));
 
@@ -68,6 +70,7 @@ registerCommands([
     id: "app.window.reload",
     title: "Search",
     category: "Global",
+    scope: "window",
     requirement: "any",
     keywords: ["find"],
     available: () => true,
@@ -77,6 +80,8 @@ registerCommands([
     id: "app.file.new",
     title: "New file",
     category: "Editor",
+    scope: "app",
+    surface: "file",
     requirement: "any",
     keywords: ["create"],
     available: () => true,
@@ -86,6 +91,8 @@ registerCommands([
     id: "app.browser.alpha",
     title: "Alpha browser",
     category: "File Browser",
+    scope: "app",
+    surface: "browser",
     requirement: "any",
     keywords: ["files"],
     available: () => true,
@@ -95,6 +102,8 @@ registerCommands([
     id: "app.browser.zoom",
     title: "Zoom browser",
     category: "File Browser",
+    scope: "app",
+    surface: "browser",
     requirement: "any",
     keywords: ["files"],
     available: () => true,
@@ -103,7 +112,9 @@ registerCommands([
   {
     id: "app.pane.flip",
     title: "Flip pane",
-    category: "Global",
+    category: "Panes",
+    scope: "pane",
+    group: "Pane",
     requirement: "any",
     available: () => showFlip,
     run: () => {
@@ -128,6 +139,8 @@ registerCommands([
     id: `app.browser.bulk${index}`,
     title,
     category: "File Browser" as const,
+    scope: "app" as const,
+    surface: "browser" as const,
     requirement: "any" as const,
     available: () => showBulk,
     run: () => {},
@@ -136,14 +149,18 @@ registerCommands([
     id: "app.tab.close",
     title: "Close tab",
     category: "Tabs",
+    scope: "pane",
+    group: "Tab",
     requirement: "any",
     available: () => showBulk,
     run: () => {},
   },
   {
     id: "app.terminal.copyCwd",
-    title: "Copy path to $CWD",
+    title: "Copy working directory path",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
     requirement: "any",
     available: () => showBulk,
     run: () => {},
@@ -152,10 +169,14 @@ registerCommands([
     id: "app.terminal.restart",
     title: "Restart terminal",
     category: "Terminal",
+    scope: "app",
+    surface: "terminal",
     requirement: "any",
     available: () => showBulk,
     run: () => {},
   },
+  // The extension catalog registers its rows with no scope: the app's own
+  // entry is a spawner, and a command of the app belongs to that app's tab.
   {
     id: "extension.alpha",
     title: "Alpha app",
@@ -251,8 +272,6 @@ function setActiveBrowserTab(): void {
   pane.activeTabId = tab.id;
 }
 
-// "Tabs" sorts before "Terminal" alphabetically, so a terminal is the surface
-// that proves the app-first rank rather than plain category order.
 function setActiveTerminalTab(): void {
   const pane = resetLayout();
   const tab: TerminalTab = {
@@ -305,8 +324,9 @@ function row(target: HTMLElement, title: string): HTMLButtonElement {
   return found;
 }
 
-async function openTabScope(target: HTMLElement): Promise<void> {
-  (target.querySelector('[aria-label="Tab scope"]') as HTMLButtonElement).click();
+/// Apply the App scope, whose orb is named after the focused tab's app.
+async function openAppScope(target: HTMLElement, app: string): Promise<void> {
+  (target.querySelector(`[aria-label="${app} scope"]`) as HTMLButtonElement).click();
   await tick();
 }
 
@@ -378,6 +398,8 @@ async function key(target: HTMLElement, value: string): Promise<void> {
 
 beforeEach(() => {
   sessionStorage.clear();
+  // A command an earlier test ran would lead the next test's list.
+  clearRecentCommands();
   clearLauncherDraft();
   launcherPanel.open = false;
   resetLayout();
@@ -411,12 +433,17 @@ describe("contextual command deck", () => {
     expect(target.querySelector(".deck-shell")).toBeNull();
   });
 
-  test("opens focused with contextual results and four persistent scope orbs", async () => {
+  test("opens focused with the window's commands, this machine's rows and six scope orbs", async () => {
     const target = openLauncher();
     await flush();
     expect(document.activeElement).toBe(input(target));
-    expect(titles(target)).toEqual(["New file", "Alpha browser", "Zoom browser", "Search"]);
-    expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
+    // No tab is focused, so no app's commands are listed: the editor's and
+    // the file browser's wait for their tab.
+    expect(titles(target)).toEqual(["Search", "New terminal window", "New window", "Windows"]);
+    expect([...target.querySelectorAll(".deck-scope")].map((orb) => orb.getAttribute("aria-label"))).toEqual([
+      "App scope", "Pane scope", "Window scope", "Workspace scope", "Settings scope", "Computers scope",
+    ]);
+    expect(target.querySelector('[aria-label="App scope"]')?.hasAttribute("disabled")).toBe(true);
     expect(target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled")).toBe(false);
   });
 
@@ -461,39 +488,33 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     expect(titles(target).slice(0, 2)).toEqual(["Alpha browser", "Zoom browser"]);
-    expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › File Browser");
+    expect(target.querySelector('[aria-label="File browser scope"]')).not.toBeNull();
   });
 
-  test("the Tab scope lists every command for the active application", async () => {
+  test("the App scope lists every command of the focused app, and nothing of the pane's", async () => {
     showBulk = true;
     setActiveBrowserTab();
     const target = openLauncher();
     await flush();
-    const root = titles(target);
-    expect(root.slice(0, 10)).toEqual([...BULK_BROWSER_TITLES, "Alpha browser", "Zoom browser"].sort((a, b) => a.localeCompare(b)).concat("Close tab"));
+    const own = [...BULK_BROWSER_TITLES, "Alpha browser", "Zoom browser"].sort((a, b) => a.localeCompare(b));
+    // The app's commands lead; the pane's follow, spawners first, then the
+    // tab's own.
+    expect(titles(target).slice(0, 11)).toEqual([...own, "Alpha app", "Close tab"]);
 
-    await openTabScope(target);
-    const shown = titles(target);
-    for (const title of [...BULK_BROWSER_TITLES, "Alpha browser", "Zoom browser", "Close tab"]) {
-      expect(shown).toContain(title);
-    }
-    expect(shown).toHaveLength(10);
+    await openAppScope(target, "File browser");
+    expect(titles(target)).toEqual(own);
   });
 
-  test("the active application's commands lead the generic tab commands", async () => {
+  test("the Pane scope lists the spawners, then the tab's commands", async () => {
     showBulk = true;
     setActiveTerminalTab();
     const target = openLauncher();
     await flush();
-    await openTabScope(target);
-    // Plain category order would put "Tabs" above "Terminal" and bury the
-    // terminal's own actions, which is what made them search-only.
-    expect(titles(target)).toEqual([
-      "Copy path to $CWD",
-      "Restart terminal",
-      "Close tab",
-    ]);
-    expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › Terminal");
+    (target.querySelector('[aria-label="Pane scope"]') as HTMLButtonElement).click();
+    await tick();
+    expect(titles(target)).toEqual(["Alpha app", "Close tab"]);
+    await openAppScope(target, "Terminal");
+    expect(titles(target)).toEqual(["Copy working directory path", "Restart terminal"]);
   });
 
   for (const application of ["Terminal", "Editor"] as const) {
@@ -510,12 +531,12 @@ describe("contextual command deck", () => {
       const target = openLauncher();
       await flush();
       const root = titles(target);
-      const expected = [...APPLICATION_TITLES[application], ...(application === "Terminal" ? ["Copy path to $CWD", "Restart terminal"] : ["New file"])].sort((a, b) => a.localeCompare(b));
+      const expected = [...APPLICATION_TITLES[application], ...(application === "Terminal" ? ["Copy working directory path", "Restart terminal"] : ["New file"])].sort((a, b) => a.localeCompare(b));
       expect(root.slice(0, expected.length)).toEqual(expected);
-      expect(root[expected.length]).toBe("Close tab");
+      expect(root[expected.length]).toBe("Alpha app");
       expect(launcherDraft.scope).toBeNull();
-      await openTabScope(target);
-      expect(titles(target)).toEqual([...expected, "Close tab"]);
+      await openAppScope(target, application);
+      expect(titles(target)).toEqual(expected);
     });
   }
 
@@ -528,18 +549,26 @@ describe("contextual command deck", () => {
     expect(titles(target)).toHaveLength(20);
   });
 
-  test("an extension tab's Tab scope holds only that extension's commands", async () => {
+  test("an extension tab's App scope holds only that extension's commands", async () => {
     showBulk = true;
     setActiveExtensionTab();
     const target = openLauncher();
     await flush();
-    await openTabScope(target);
-    const shown = titles(target);
-    expect(shown).toContain("Run alpha");
-    // Another extension's command, and the entry that merely opens this one,
-    // are spawn actions for the window rather than options of this tab.
-    expect(shown).not.toContain("Run beta");
-    expect(shown).not.toContain("Alpha app");
+    // The orb is named after the extension, which the tab's title carries.
+    await openAppScope(target, "Alpha app");
+    // Another extension's command belongs to its own tab, and the entry that
+    // merely opens this one is a spawner of the pane.
+    expect(titles(target)).toEqual(["Run alpha"]);
+  });
+
+  test("another extension's command is found by a typed query from any tab", async () => {
+    showBulk = true;
+    setActiveExtensionTab();
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "run beta");
+    expect(titles(target)[0]).toBe("Run beta");
+    expect(row(target, "Run beta").hasAttribute("disabled")).toBe(false);
   });
 
   test("fuzzy search crosses into Computers leaves without opening a submenu", async () => {
@@ -608,8 +637,7 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "shell");
-    expect(titles(target)[0]).toBe("This library");
-    await key(target, "ArrowDown");
+    expect(titles(target)[0]).toBe("New terminal window");
     await key(target, "Enter");
     await flush();
 
@@ -624,9 +652,10 @@ describe("contextual command deck", () => {
     await flush();
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await tick();
-    // One Windows branch instead of a Focus/Hide/Show/Close quartet that
-    // listed the same roster four times through four filters.
-    expect(titles(target)).toEqual(["New terminal", "New window", "Windows"]);
+    // A new terminal window runs at once; one Windows branch instead of a
+    // Focus/Hide/Show/Close quartet that listed the same roster four times
+    // through four filters.
+    expect(titles(target)).toEqual(["New terminal window", "New window", "Windows"]);
 
     const newWindow = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
       (row) => row.querySelector(".deck-result-title")?.textContent === "New window",
@@ -638,7 +667,7 @@ describe("contextual command deck", () => {
 
     await key(target, "ArrowLeft");
     expect(launcherDraft.path).toEqual([]);
-    expect(titles(target)).toContain("New terminal");
+    expect(titles(target)).toContain("New terminal window");
   });
 
   test("the New window branch leaves out a mount that cannot read its root", async () => {
@@ -690,8 +719,7 @@ describe("contextual command deck", () => {
     await openWindowList(target);
     expect(launcherDraft.path).toEqual(["windows"]);
     expect(titles(target)).toEqual(["Control terminal", "Window 2 [release checks]"]);
-    // Open versus hidden rides the breadcrumb: the deck is a flat listbox
-    // with no section headers to group under.
+    // Open versus hidden rides the breadcrumb.
     const paths = [...target.querySelectorAll(".deck-result-path")].map((n) => n.textContent ?? "");
     expect(paths[0]).toContain("Computers › Windows › Open");
     expect(paths[1]).toContain("Computers › Windows › Hidden");
@@ -1215,26 +1243,29 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     expect(launcherDraft.path).toEqual([]);
-    expect(titles(target)).toEqual(["New terminal", "New window", "Windows"]);
+    expect(titles(target)).toEqual(["New terminal window", "New window", "Windows"]);
     expect(launcherDraft.contextChanged).toBe(true);
   });
 
-  test("ArrowUp enters the scope rail and horizontal arrows activate adjacent scopes", async () => {
+  test("an orb applies its scope and the list narrows to it", async () => {
+    showFlip = true;
     const target = openLauncher();
     await flush();
-    await key(target, "ArrowUp");
-    expect(target.querySelector(".deck-scope.focused")?.getAttribute("aria-label")).toBe("Tab scope");
-    await key(target, "ArrowRight");
-    expect(target.querySelector(".deck-scope.focused")?.getAttribute("aria-label")).toBe("Pane scope");
+    (target.querySelector('[aria-label="Window scope"]') as HTMLButtonElement).click();
+    await tick();
+    expect(launcherDraft.scope).toBe("window");
+    expect(titles(target)).toEqual(["Search"]);
+    (target.querySelector('[aria-label="Pane scope"]') as HTMLButtonElement).click();
+    await tick();
     expect(launcherDraft.scope).toBe("pane");
+    expect(titles(target)).toEqual(["Flip pane"]);
   });
 
-  test("ArrowRight executes the highlighted contextual command and clears the draft", async () => {
+  test("Enter runs the highlighted command and clears the draft", async () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "Search");
-    await key(target, "ArrowDown");
-    await key(target, "ArrowRight");
+    await key(target, "Enter");
     expect(runSearch).toHaveBeenCalledTimes(1);
     expect(launcherPanel.open).toBe(false);
     expect(launcherDraft.query).toBe("");
@@ -1279,11 +1310,46 @@ describe("contextual command deck", () => {
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("draws its scope orb through the deck's blob filter", async () => {
+  test("the deck draws the list under its section headings, in order", async () => {
+    showBulk = true;
+    setActiveTerminalTab();
     const target = openLauncher();
     await flush();
+    // Settings holds the branch into the terminal's own section of the
+    // settings index.
+    expect([...target.querySelectorAll(".deck-section-title")].map((node) => node.textContent)).toEqual([
+      "Terminal", "New tab", "Tab", "Window", "Settings", "Computers",
+    ]);
+    expect(titles(target)).toContain("Terminal settings");
+    // A typed query is flat: rows from every section interleave by rank.
+    await typeQuery(target, "restart");
+    expect(target.querySelectorAll(".deck-section-title")).toHaveLength(0);
+    expect(titles(target)[0]).toBe("Restart terminal");
+  });
 
-    expect(target.querySelector("filter#chan-command-orb-blob")).not.toBeNull();
-    expect(target.querySelector(".deck-scopes")?.getAttribute("style")).toContain("url(#chan-command-orb-blob)");
+  test("Tab steps through the scopes this window offers", async () => {
+    showFlip = true;
+    const target = openLauncher();
+    await flush();
+    // No tab is focused, so the App scope is skipped.
+    await key(target, "Tab");
+    expect(launcherDraft.scope).toBe("pane");
+    expect(titles(target)).toEqual(["Flip pane"]);
+    await key(target, "Tab");
+    expect(launcherDraft.scope).toBe("window");
+    expect(titles(target)).toEqual(["Search"]);
+  });
+
+  test("Escape leaves a branch before it closes the launcher", async () => {
+    const target = openLauncher();
+    await flush();
+    row(target, "Windows").click();
+    await tick();
+    expect(launcherDraft.path).toEqual(["windows"]);
+    await key(target, "Escape");
+    expect(launcherDraft.path).toEqual([]);
+    expect(launcherPanel.open).toBe(true);
+    await key(target, "Escape");
+    expect(launcherPanel.open).toBe(false);
   });
 });

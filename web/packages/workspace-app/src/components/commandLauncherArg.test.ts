@@ -32,9 +32,12 @@ const runOther = vi.fn();
 registerCommands([
   {
     id: "app.open.path",
-    title: "Open",
+    title: "Open...",
     category: "Global",
+    scope: "pane",
+    group: "New tab",
     requirement: "any",
+    keywords: ["Open"],
     available: () => true,
     acceptsArg: true,
     run: runOpen,
@@ -43,6 +46,7 @@ registerCommands([
     id: "app.other.plain",
     title: "Other",
     category: "Global",
+    scope: "window",
     requirement: "any",
     available: () => true,
     run: runOther,
@@ -108,7 +112,8 @@ describe("launcher argument forwarding", () => {
     const target = await openLauncher();
     await typeQuery(target, "open notes/My File.md");
     // The full query matches nothing, but the head token "open" matches
-    // the acceptsArg command, so it floats into Results with its arg.
+    // the acceptsArg command, so it floats into Results with its arg, the
+    // title's trailing dots giving way to it.
     expect(resultTitles(target)).toEqual(["Open notes/My File.md"]);
     await pressEnter(target);
     expect(runOpen).toHaveBeenCalledExactlyOnceWith("notes/My File.md");

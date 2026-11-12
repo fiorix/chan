@@ -1,4 +1,4 @@
-// New diagram command (Apps category): creates a seeded .excalidraw
+// New diagram command (the Pane scope's New tab group): creates a seeded .excalidraw
 // board through the server's diagram endpoint and opens it in the active
 // pane, mirroring New draft (createDraftAndOpen). isExcalidraw(path)
 // routes it to canvas mode. Availability follows the drafts gate. See
@@ -35,6 +35,9 @@ registerCommands([
     id: "app.diagram.new",
     title: "New diagram",
     category: "Apps",
+    scope: "pane",
+    group: "New tab",
+    order: 8,
     requirement: "drafts",
     keywords: ["excalidraw", "draw", "whiteboard", "canvas", "board"],
     available: (ctx) => allowedInWindow("app.diagram.new", ctx),

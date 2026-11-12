@@ -102,7 +102,7 @@ describe("Show Source Code", () => {
 describe("the chord", () => {
   test("is Mod+E in the Editor group of the shortcut table", () => {
     expect(SHORTCUTS.find((shortcut) => shortcut.id === "app.editor.toggleMode")).toMatchObject({
-      label: "Show Source Code (toggle rendered/source)",
+      label: "Source mode",
       web: "Mod+E",
       native: "Mod+E",
       group: "Editor",
@@ -121,6 +121,6 @@ describe("the chord", () => {
 
     const menu = document.querySelector('[aria-label="tab menu"]')!;
     expect(menu).not.toBeNull();
-    expect(menu.textContent).not.toContain("Show Source Code");
+    expect(menu.textContent).not.toContain("Source mode");
   });
 });

@@ -12,6 +12,9 @@ registerCommands([
     id: PANE_TREE_COMMAND_ID,
     title: "Show panes and tabs",
     category: "Panes",
+    scope: "window",
+    order: 7,
+    kind: "open",
     // Pure layout state: every window kind has panes and tabs to list.
     requirement: "any",
     keywords: ["tab search", "switch", "tabs", "panes", "sides", "tree", "find", "go to"],

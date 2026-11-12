@@ -1,4 +1,4 @@
-// New slide deck command (Apps category): creates a slides-seeded draft
+// New slide deck command (the Pane scope's New tab group): creates a slides-seeded draft
 // through the create-draft endpoint's `kind` body and opens it in the
 // active pane, mirroring New diagram (createDiagramAndOpen). The seed's
 // `chan: kind: slides` frontmatter routes the editor straight into the
@@ -66,6 +66,9 @@ registerCommands([
     id: "app.slides.new",
     title: "New slide deck",
     category: "Apps",
+    scope: "pane",
+    group: "New tab",
+    order: 7,
     // Deck creation drafts through the tenant's drafts store, like New
     // draft.
     requirement: "drafts",
@@ -85,6 +88,8 @@ registerCommands([
     id: "app.slides.preview",
     title: "Preview slide deck",
     category: "Editor",
+    scope: "app",
+    surface: "file",
     requirement: "files",
     keywords: ["slides", "preview", "deck", "presentation"],
     available: (ctx) => onSurface(ctx, "file"),
@@ -95,10 +100,12 @@ registerCommands([
   },
   {
     id: "app.slides.present",
-    title: "Present slide deck fullscreen",
+    title: "Present slide deck",
     category: "Editor",
+    scope: "app",
+    surface: "file",
     requirement: "files",
-    keywords: ["slides", "present", "deck", "fullscreen", "play"],
+    keywords: ["Present slide deck fullscreen", "slides", "deck", "play"],
     available: (ctx) => onSurface(ctx, "file"),
     run: () => {
       const tab = activeFileTab();

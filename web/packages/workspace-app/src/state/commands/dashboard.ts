@@ -1,19 +1,23 @@
 // Dashboard surface commands: available when a dashboard tab is the
 // active surface. Slide commands move the controlled carousel index on
 // the active DashboardTab (its fields are $state) and persist the
-// session, matching the carousel's own arrows: step next/prev, or jump
-// straight to a named slot (Metrics / Workspace status / Indexing status /
-// About).
+// session, matching the carousel's own arrows: step next and previous, or
+// jump straight to a named slide. The slides and their order are the
+// dashboard menu's.
 // See state/commands.ts for the Command shape and the onSurface helper.
 
-import { registerCommands, onSurface, type Command } from "../commands";
-import { scheduleSessionSave, setHybridSurfaceTheme } from "../store.svelte";
+import { openChoice, registerCommands, onSurface } from "../commands";
+import { scheduleSessionSave } from "../store.svelte";
 import {
   activeDashboardTab,
+  DASHBOARD_SLOT_LABELS,
+  DASHBOARD_SLOT_ORDER,
+  dashboardSlotAvailable,
   dashboardSlotEnabled,
   firstEnabledSlot,
   nextEnabledSlot,
   prevEnabledSlot,
+  toggleDashboardSlot,
   type DashboardTab,
 } from "../tabs.svelte";
 
@@ -26,59 +30,103 @@ function onDashboard(fn: (tab: DashboardTab) => void): () => void {
   };
 }
 
-/// A jump-to-slot command, offered whenever a dashboard is the active
-/// surface (same gate as next/prev). A target the user switched off in
-/// the Dashboard tab menu re-clamps to the first enabled slot, matching
-/// how the persisted cursor is restored. The slot indices are the stable
-/// ids the carousel's `slideIndex` guards read: 0 Workspace, 1
-/// Indexing/Search, 2 About, 3 Metrics. The first two need a workspace;
-/// About and Metrics are offered in any window that holds a Dashboard.
-function slideCommand(
-  id: string,
-  title: string,
-  slot: number,
-  keywords: string[],
-): Command {
-  return {
-    id,
-    title,
-    category: "Dashboard",
-    requirement: slot < 2 ? "workspace" : "any",
-    keywords,
-    available: (ctx) => onSurface(ctx, "dashboard"),
-    run: onDashboard((tab) => {
-      tab.carouselSlide = dashboardSlotEnabled(tab, slot)
-        ? slot
-        : firstEnabledSlot(tab);
-      scheduleSessionSave();
-    }),
-  };
+/// The slides this window can show, in the dashboard menu's order. The
+/// first two need a workspace; About and Metrics are offered in any window
+/// that holds a Dashboard.
+function availableSlots(): number[] {
+  return DASHBOARD_SLOT_ORDER.filter(dashboardSlotAvailable);
+}
+
+/// The slide the carousel shows: the tab's cursor, or the first shown
+/// slide while the cursor points at one switched off.
+function currentSlot(tab: DashboardTab): number {
+  const slide = tab.carouselSlide ?? 0;
+  return dashboardSlotEnabled(tab, slide) ? slide : firstEnabledSlot(tab);
 }
 
 registerCommands([
-  slideCommand("app.dashboard.slide.metrics", "Go to Metrics", 3, ["process", "cpu", "memory", "stats"]),
   {
-    id: "app.dashboard.surfaceTheme.light",
-    title: "Dashboard theme: light",
+    // One row per slide with a check on each that is shown, as the
+    // dashboard menu lists them. The last shown slide stays on.
+    id: "app.dashboard.slides",
+    title: "Shown slides",
     category: "Dashboard",
+    scope: "app",
+    surface: "dashboard",
+    order: 0,
+    kind: "choice",
     requirement: "any",
-    keywords: ["theme", "light", "appearance"],
+    keywords: ["slide", "carousel", "show", "hide", "rotation"],
     available: (ctx) => onSurface(ctx, "dashboard"),
-    run: () => setHybridSurfaceTheme("dashboard", "light"),
+    state: () => {
+      const tab = activeDashboardTab();
+      if (!tab) return null;
+      const slots = availableSlots();
+      return `${slots.filter((slot) => dashboardSlotEnabled(tab, slot)).length} of ${slots.length}`;
+    },
+    options: () => {
+      const tab = activeDashboardTab();
+      if (!tab) return [];
+      return availableSlots().map((slot) => ({
+        id: String(slot),
+        label: DASHBOARD_SLOT_LABELS[slot],
+        checked: dashboardSlotEnabled(tab, slot),
+        run: () => {
+          toggleDashboardSlot(tab, slot);
+          // A cursor left on a slide just switched off moves to the first
+          // one still shown, as the dashboard menu moves it.
+          tab.carouselSlide = currentSlot(tab);
+          scheduleSessionSave();
+        },
+      }));
+    },
+    run: () => openChoice("app.dashboard.slides"),
   },
   {
-    id: "app.dashboard.surfaceTheme.dark",
-    title: "Dashboard theme: dark",
+    // A slide the user switched off in the dashboard menu re-clamps to the
+    // first shown one, matching how the persisted cursor is restored.
+    id: "app.dashboard.slide",
+    title: "Go to slide",
     category: "Dashboard",
+    scope: "app",
+    surface: "dashboard",
+    kind: "choice",
     requirement: "any",
-    keywords: ["theme", "dark", "appearance"],
+    keywords: [
+      "Go to Metrics",
+      "Go to Workspace status",
+      "Go to Indexing status",
+      "Go to About chan",
+      "slide",
+      "carousel",
+      "jump",
+    ],
     available: (ctx) => onSurface(ctx, "dashboard"),
-    run: () => setHybridSurfaceTheme("dashboard", "dark"),
+    state: () => {
+      const tab = activeDashboardTab();
+      return tab ? DASHBOARD_SLOT_LABELS[currentSlot(tab)] : null;
+    },
+    options: () => {
+      const tab = activeDashboardTab();
+      if (!tab) return [];
+      return availableSlots().map((slot) => ({
+        id: String(slot),
+        label: DASHBOARD_SLOT_LABELS[slot],
+        checked: currentSlot(tab) === slot,
+        run: () => {
+          tab.carouselSlide = dashboardSlotEnabled(tab, slot) ? slot : firstEnabledSlot(tab);
+          scheduleSessionSave();
+        },
+      }));
+    },
+    run: () => openChoice("app.dashboard.slide"),
   },
   {
     id: "app.dashboard.nextSlide",
     title: "Next slide",
     category: "Dashboard",
+    scope: "app",
+    surface: "dashboard",
     requirement: "any",
     keywords: ["slide", "carousel", "next", "forward"],
     available: (ctx) => onSurface(ctx, "dashboard"),
@@ -91,6 +139,8 @@ registerCommands([
     id: "app.dashboard.prevSlide",
     title: "Previous slide",
     category: "Dashboard",
+    scope: "app",
+    surface: "dashboard",
     requirement: "any",
     keywords: ["slide", "carousel", "previous", "back"],
     available: (ctx) => onSurface(ctx, "dashboard"),
@@ -99,26 +149,4 @@ registerCommands([
       scheduleSessionSave();
     }),
   },
-  slideCommand("app.dashboard.slide.workspace", "Go to Workspace status", 0, [
-    "slide",
-    "carousel",
-    "jump",
-    "workspace",
-    "status",
-  ]),
-  slideCommand("app.dashboard.slide.indexing", "Go to Indexing status", 1, [
-    "slide",
-    "carousel",
-    "jump",
-    "indexing",
-    "search",
-    "status",
-  ]),
-  slideCommand("app.dashboard.slide.about", "Go to About chan", 2, [
-    "slide",
-    "carousel",
-    "jump",
-    "about",
-    "version",
-  ]),
 ]);

@@ -380,7 +380,7 @@ describe("focus when the launcher closes", () => {
 
   test("a cancelled Open from the launcher hands focus back to the element the launcher opened from", async () => {
     const target = await openFromOrigin();
-    await runFromLauncher(target, "Open");
+    await runFromLauncher(target, "Open...");
     expect(launcherPanel.open).toBe(false);
     await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
     const dialog = document.querySelector('[role="dialog"][aria-modal="true"]') as HTMLElement | null;
