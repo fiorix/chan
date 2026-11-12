@@ -13,6 +13,7 @@
     items,
     scopes = [],
     crumbs,
+    placeholder,
     initialDraft = {},
     onChoose = () => {},
     onSuccess,
@@ -28,6 +29,7 @@
     items: DeckItem[];
     scopes?: DeckScope[];
     crumbs?: string[];
+    placeholder?: string;
     /// Fields the draft starts with, as a host that restored one would.
     initialDraft?: Partial<DeckDraft>;
     onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
@@ -81,6 +83,7 @@
   items={replacementItems ?? items}
   {scopes}
   {crumbs}
+  {placeholder}
   onClose={() => {
     draft.visible = false;
     onClose?.();
