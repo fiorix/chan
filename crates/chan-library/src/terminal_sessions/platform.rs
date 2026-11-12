@@ -429,14 +429,19 @@ pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, S
 /// AppImage process gets each of them again from its own runtime.
 const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD"];
 
-/// Keys linuxdeploy's GTK hook reads or sets whose value holds no mount path.
-/// A terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK
-/// children to X11, which drops every GTK app launched from a terminal onto
-/// XWayland, and `GTK_THEME` is the bundle's theme. A child AppImage process
-/// keeps them, since its own hook reads `APPIMAGE_GTK_THEME` as the user's
-/// override and sets `GTK_THEME` again, and a `GDK_BACKEND` the hook no
-/// longer sets is the user's.
-const APPIMAGE_GTK_KEYS: &[&str] = &["APPIMAGE_GTK_THEME", "GDK_BACKEND", "GTK_THEME"];
+/// Keys linuxdeploy's GTK hook reads whose value holds no mount path. A
+/// terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK children
+/// to X11, which drops every GTK app launched from a terminal onto XWayland.
+/// A child AppImage process keeps them, since its own hook reads
+/// `APPIMAGE_GTK_THEME` as the user's override, and a `GDK_BACKEND` the hook
+/// no longer sets is the user's.
+const APPIMAGE_GTK_KEYS: &[&str] = &["APPIMAGE_GTK_THEME", "GDK_BACKEND"];
+
+/// The theme linuxdeploy's GTK hook sets, the bundle's, which no child keeps:
+/// a child AppImage process's own hook sets it again, and a child that is no
+/// AppImage process (the devserver daemon through a native `chan`) would hand
+/// it to its terminals with no scrub of its own to drop it.
+const APPIMAGE_GTK_THEME_KEY: &str = "GTK_THEME";
 
 /// Who is handed the environment the user had before a chan AppImage process
 /// started.
@@ -517,6 +522,7 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
     }
     if APPIMAGE_RUNTIME_KEYS.contains(&key)
         || APPIMAGE_GTK_KEYS.contains(&key)
+        || key == APPIMAGE_GTK_THEME_KEY
         || entry_in_bundle(appdir, value)
     {
         return Some(Scrub::Remove);
@@ -973,13 +979,14 @@ mod appimage_env_tests {
     /// The values exactly as the AppImage's AppRun writes them, with the
     /// `:` separator of its format strings, so only on unix, where AppImages
     /// run.
-    /// A child AppImage process keeps the GTK hook's keys, which its own hook
-    /// reads or sets again, and a terminal loses them; the runtime's keys go
-    /// for both, since every AppImage process's runtime sets them again.
+    /// A child AppImage process keeps the GTK hook's keys its own hook reads,
+    /// and a terminal loses them; the runtime's keys and the hook's theme go
+    /// for both, since every AppImage process's runtime and hook set them
+    /// again.
     #[test]
     fn a_child_appimage_keeps_the_gtk_keys_a_terminal_loses() {
         let appdir = Path::new(APPDIR);
-        for key in ["GDK_BACKEND", "GTK_THEME", "APPIMAGE_GTK_THEME"] {
+        for key in ["GDK_BACKEND", "APPIMAGE_GTK_THEME"] {
             let value = OsString::from("x11");
             assert_eq!(
                 scrub_var(appdir, key, &value, HostEnvFor::Terminal),
@@ -992,7 +999,7 @@ mod appimage_env_tests {
                 "{key}"
             );
         }
-        for key in ["APPIMAGE", "ARGV0", "OWD"] {
+        for key in ["APPIMAGE", "ARGV0", "OWD", "GTK_THEME"] {
             let value = OsString::from("value");
             for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
                 assert_eq!(
