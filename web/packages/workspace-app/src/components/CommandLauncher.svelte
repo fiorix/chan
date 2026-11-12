@@ -166,6 +166,14 @@
   // again when its state lives outside the reactive graph.
   let revision = $state(0);
 
+  /// How long a row that changes in place keeps the deck waiting for its
+  /// result. Within it a refusal lands on the deck's card. A write that
+  /// takes longer, such as one that downloads a model first, settles on its
+  /// own: it holds neither the deck nor the focus the deck hands back when
+  /// it closes, and its refusal goes where the deck reports a run it no
+  /// longer shows.
+  const IN_PLACE_WAIT_MS = 400;
+
   const ctx = $derived(commandContext());
   // A path the catalog builders own is a choice's options or a Settings
   // section. Any other non-empty path is a Computers branch: `windows`
@@ -796,6 +804,34 @@
     }
   }
 
+  /// Run a toggle, an option or a stepped value: the deck stays on the row
+  /// and reads its new state once the run settles.
+  async function runInPlace(entry: Entry, item: DeckItem): Promise<void> {
+    let waiting = true;
+    const settled = (async () => {
+      await entry.run?.();
+    })().then(
+      () => {
+        revision += 1;
+      },
+      (error: unknown) => {
+        revision += 1;
+        if (waiting) throw error;
+        commandFailed(item, error);
+      },
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, IN_PLACE_WAIT_MS);
+    });
+    try {
+      await Promise.race([settled, bound]);
+    } finally {
+      waiting = false;
+      clearTimeout(timer);
+    }
+  }
+
   async function choose(item: DeckItem): Promise<void | DeckConfirm> {
     const entry = visibleEntries.find((candidate) => candidate.id === item.id);
     if (!entry) return;
@@ -810,13 +846,7 @@
     }
     if (entry.recent) noteCommandRun(entry.recent);
     if (entry.after === "stay") {
-      // A toggle, an option or a stepped value changes in place: the deck
-      // stays on the row and reads its new state.
-      try {
-        await entry.run?.();
-      } finally {
-        revision += 1;
-      }
+      await runInPlace(entry, item);
       return;
     }
     if (entry.after === "close") {

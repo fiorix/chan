@@ -37,16 +37,29 @@
     onError: (item: DeckItem, error: unknown) => void;
   } = $props();
 
+  // Runs the launcher has not answered yet, as the deck holds a row's run
+  // until its promise settles.
+  let pending = $state(0);
+
   function choose(item: DeckItem): void {
     if (item.disabled) return;
+    pending += 1;
     void Promise.resolve()
       .then(() => onChoose(item))
-      .catch((error: unknown) => onError(item, error));
+      .catch((error: unknown) => onError(item, error))
+      .finally(() => {
+        pending -= 1;
+      });
   }
 </script>
 
 {#if open}
-  <div class="probe" data-crumbs={(crumbs ?? []).join(" > ")} data-placeholder={placeholder}>
+  <div
+    class="probe"
+    data-crumbs={(crumbs ?? []).join(" > ")}
+    data-placeholder={placeholder}
+    data-pending={pending}
+  >
     <input
       class="probe-query"
       value={draft.query}

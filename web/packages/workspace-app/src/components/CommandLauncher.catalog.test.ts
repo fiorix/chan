@@ -32,6 +32,7 @@ import CommandLauncher from "./CommandLauncher.svelte";
 import type { SettingSpec } from "./settings/settingsIndex";
 import { loadSessionDeckDraft } from "@chan/web-shared/command-deck";
 import { registerCommands, type CommandContext } from "../state/commands";
+import * as statusBus from "../state/notify.svelte";
 import { clearRecentCommands } from "../state/commands/recent.svelte";
 import {
   clearLauncherDraft,
@@ -144,6 +145,10 @@ function settingSpecs(): SettingSpec[] {
     {
       id: "terminal.scrollback", section: "terminal", label: "Scrollback", kind: "open",
       read: () => "10000 lines", available: () => true,
+    },
+    {
+      id: "shortcuts.grid", section: "shortcuts", label: "Keyboard Shortcuts", kind: "open",
+      read: () => "", available: () => true,
     },
     {
       id: "browser.left", section: "browser", label: "Left file browser dock", kind: "toggle",
@@ -459,7 +464,7 @@ describe("the Settings scope", () => {
     fake.specs = settingSpecs();
   });
 
-  test("lists the index by rail section, then Settings and Keyboard Shortcuts last", async () => {
+  test("lists the index by rail section, then the Settings row", async () => {
     await open();
     await scope("settings");
     expect(rows().map((r) => `${r.dataset.section}: ${r.textContent} = ${r.dataset.value}`)).toEqual([
@@ -467,8 +472,8 @@ describe("the Settings scope", () => {
       "Terminal: Mouse capture = off",
       "Terminal: Scrollback = 10000 lines",
       "File browser: Left file browser dock = off",
+      "Keyboard Shortcuts: Keyboard Shortcuts = ",
       "Settings: Settings = ",
-      "Settings: Keyboard Shortcuts = ",
     ]);
   });
 
@@ -507,7 +512,50 @@ describe("the Settings scope", () => {
     await scope("settings");
     await click("Keyboard Shortcuts");
     expect(launcherPanel.open).toBe(false);
-    expect(settingsPanel.target).toEqual({ section: "shortcuts", field: undefined });
+    expect(settingsPanel.target).toEqual({ section: "shortcuts", field: "shortcuts.grid" });
+  });
+
+  test("a refused write goes through the deck's error path and the row reads the kept value", async () => {
+    const notified = vi.spyOn(statusBus, "notify");
+    fake.specs = settingSpecs().map((spec) =>
+      spec.id === "terminal.mouse"
+        ? { ...spec, write: async () => { throw new Error("configuration is locked"); } }
+        : spec,
+    );
+    await open();
+    await scope("settings");
+    await click("Mouse capture");
+    expect(notified).toHaveBeenCalledExactlyOnceWith("Mouse capture: configuration is locked");
+    expect(row("Mouse capture").dataset.value).toBe("off");
+    expect(launcherPanel.open).toBe(true);
+  });
+
+  test("a write that takes long holds the deck for a moment only, and its refusal still shows", async () => {
+    const notified = vi.spyOn(statusBus, "notify");
+    let refuse!: (error: Error) => void;
+    fake.specs = settingSpecs().map((spec) =>
+      spec.id === "terminal.mouse"
+        ? { ...spec, write: () => new Promise<void>((_, reject) => { refuse = reject; }) }
+        : spec,
+    );
+    await open();
+    await scope("settings");
+    const probe = target.querySelector(".probe") as HTMLElement;
+    vi.useFakeTimers();
+    try {
+      row("Mouse capture").click();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(probe.dataset.pending, "the deck waits on a write that has just started").toBe("1");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(probe.dataset.pending, "the deck is released while the write goes on").toBe("0");
+      expect(notified).not.toHaveBeenCalled();
+
+      refuse(new Error("model download failed"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notified).toHaveBeenCalledExactlyOnceWith("Mouse capture: model download failed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("the unscoped list offers the focused app's section as a branch", async () => {

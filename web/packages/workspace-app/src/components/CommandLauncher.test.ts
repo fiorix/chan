@@ -1315,9 +1315,12 @@ describe("contextual command deck", () => {
     setActiveTerminalTab();
     const target = openLauncher();
     await flush();
+    // Settings holds the branch into the terminal's own section of the
+    // settings index.
     expect([...target.querySelectorAll(".deck-section-title")].map((node) => node.textContent)).toEqual([
-      "Terminal", "New tab", "Tab", "Window", "Computers",
+      "Terminal", "New tab", "Tab", "Window", "Settings", "Computers",
     ]);
+    expect(titles(target)).toContain("Terminal settings");
     // A typed query is flat: rows from every section interleave by rank.
     await typeQuery(target, "restart");
     expect(target.querySelectorAll(".deck-section-title")).toHaveLength(0);

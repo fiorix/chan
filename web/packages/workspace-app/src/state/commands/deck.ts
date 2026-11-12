@@ -360,7 +360,7 @@ function settingRow(
   }
   // Every other field is edited in the overlay, which lands on it.
   row.kind = "action";
-  if (typeof current === "string") row.value = current;
+  if (typeof current === "string" && current !== "") row.value = current;
   row.after = "close";
   row.run = () => open(spec.section, spec.id);
   return row;
@@ -382,28 +382,6 @@ function settingOptionRows(source: DeckSource, spec: SettingSpec, leaf: boolean)
     after: "stay" as const,
     run: () => write(option.value),
   }));
-}
-
-/// The row that opens the Keyboard Shortcuts section, which holds a grid and
-/// no field of its own. Null when the rail has no such section.
-function shortcutsRow(
-  source: DeckSource,
-  open: (section: string, field?: string) => void,
-  sectioned: boolean,
-): DeckRow | null {
-  const section = source.sections.find((candidate) => candidate.id === "shortcuts");
-  if (!section) return null;
-  return {
-    id: "settings:shortcuts",
-    title: section.label,
-    breadcrumb: SETTINGS_LABEL,
-    searchText: `${section.label} ${SETTINGS_LABEL} keys chords bindings keymap`,
-    scope: "settings",
-    kind: "action",
-    after: "close",
-    run: () => open(section.id),
-    ...(sectioned ? { section: SETTINGS_LABEL } : {}),
-  };
 }
 
 /// The Settings section the focused app's preferences live in, when it has
@@ -438,7 +416,7 @@ function settingsSummaryRows(source: DeckSource): DeckRow[] {
 }
 
 /// The whole Settings scope: each rail section's fields under its name, then
-/// the row that opens the overlay and, last, Keyboard Shortcuts.
+/// the row that opens the overlay where it was last left.
 function settingsScopeRows(
   source: DeckSource,
   open: (section: string, field?: string) => void,
@@ -449,8 +427,6 @@ function settingsScopeRows(
     ),
   );
   rows.push(...scopeRows(source, "settings"));
-  const shortcuts = shortcutsRow(source, open, true);
-  if (shortcuts) rows.push(shortcuts);
   return rows;
 }
 
@@ -543,8 +519,6 @@ export function searchRows(
       enabled.push(settingRow(source, spec, open));
       enabled.push(...settingOptionRows(source, spec, true));
     }
-    const shortcuts = shortcutsRow(source, open, false);
-    if (shortcuts) enabled.push(shortcuts);
   }
 
   return [

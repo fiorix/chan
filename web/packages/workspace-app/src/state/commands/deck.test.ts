@@ -320,6 +320,10 @@ function settings(values: Record<string, boolean | string | null>): SettingSpec[
       read: () => "10000 lines", available: () => true,
     },
     toggle("terminal.hidden", "terminal", "Hidden here", { available: () => false }),
+    {
+      id: "shortcuts.grid", section: "shortcuts", label: "Keyboard Shortcuts", kind: "open",
+      read: () => "", available: () => true,
+    },
     toggle("browser.left", "workspace", "Left file browser dock", { command: "w.dock" }),
   ];
 }
@@ -329,18 +333,19 @@ describe("settings", () => {
     "global.theme": "dark", "global.privacy": false, "terminal.mouse": true, "browser.left": false,
   });
 
-  test("the Settings scope lists each rail section's fields, then Settings and Keyboard Shortcuts last", () => {
+  test("the Settings scope lists each rail section's fields in rail order, then Settings", () => {
     const rows = browseRows(source({ settings: settings(values()) }), "settings", openSettings);
     expect(outline(rows)).toEqual([
       "Global: Theme",
       "Global: Privacy mode on",
       "Terminal: Mouse capture: Allow in new terminals",
       "Terminal: Scrollback",
+      "Keyboard Shortcuts: Keyboard Shortcuts",
       "This workspace: Left file browser dock",
       "Settings: Settings",
-      "Settings: Keyboard Shortcuts",
     ]);
-    expect(rows.map((row) => row.value)).toEqual(["Dark", "off", "on", "10000 lines", "off", undefined, undefined]);
+    // A field with nothing to show has no value, as one that shows a state has.
+    expect(rows.map((row) => row.value)).toEqual(["Dark", "off", "on", "10000 lines", undefined, "off", undefined]);
   });
 
   test("a toggle flips in place and reads back", () => {
@@ -382,12 +387,14 @@ describe("settings", () => {
     expect(open).toHaveBeenCalledExactlyOnceWith("terminal", "terminal.scrollback");
   });
 
-  test("Keyboard Shortcuts opens its section", () => {
+  test("Keyboard Shortcuts is the index's own entry, listed once", () => {
     const open = vi.fn();
-    const row = titled(browseRows(source(), "settings", open), "Keyboard Shortcuts");
+    const rows = browseRows(source({ settings: settings(values()) }), "settings", open);
+    expect(rows.filter((row) => row.title === "Keyboard Shortcuts")).toHaveLength(1);
+    const row = titled(rows, "Keyboard Shortcuts");
     expect(row.after).toBe("close");
     row.run?.();
-    expect(open).toHaveBeenCalledExactlyOnceWith("shortcuts");
+    expect(open).toHaveBeenCalledExactlyOnceWith("shortcuts", "shortcuts.grid");
   });
 
   test("the unscoped list offers the focused app's section as a branch when it has a field", () => {
