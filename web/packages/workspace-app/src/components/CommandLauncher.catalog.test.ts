@@ -567,11 +567,14 @@ describe("a typed query", () => {
     expect(launcherPanel.open).toBe(true);
   });
 
-  test("is flat: no row carries a section", async () => {
+  test("is flat: no row carries a section, this machine's among them", async () => {
     await open();
     await type("reload");
     expect(row("Reload window").dataset.section).toBe("");
     expect(row("Reload window").dataset.breadcrumb).toBe("Window");
+    await type("terminal");
+    expect(titles()).toEqual(expect.arrayContaining(["New terminal", "Restart terminal", "New terminal window"]));
+    expect(sections()).toEqual([""]);
   });
 });
 

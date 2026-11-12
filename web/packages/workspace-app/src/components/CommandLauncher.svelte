@@ -366,7 +366,6 @@
       breadcrumb: `Computers › ${description}`,
       searchText: `${title} ${description} ${keywords}`,
       scope: "computers",
-      section: COMPUTERS_SECTION,
       icon,
       kind: "branch",
       next: [id],
@@ -572,7 +571,6 @@
     breadcrumb: "Computers › This machine",
     searchText: "new terminal window this machine computer library shell",
     scope: "computers",
-    section: COMPUTERS_SECTION,
     icon: Terminal,
     awaitResult: true,
     dismissImmediatelyOnSuccess: true,
@@ -632,11 +630,17 @@
     ];
   });
 
+  /// The Computers root as browsing lists it, under its heading. A typed
+  /// query lists the same rows flat, with no heading.
+  const computerSectionEntries = $derived(
+    computerRootEntries.map((entry): Entry => ({ ...entry, section: COMPUTERS_SECTION })),
+  );
+
   /// The Computers scope's own list: the root while browsing, and every
   /// level flattened under a typed query.
   function computerScopeEntries(query: string): Entry[] {
     if (!scopedLibrary) return [computerStatusEntry];
-    if (!query) return computerRootEntries;
+    if (!query) return computerSectionEntries;
     const branches = computerRootEntries.filter((entry) => entry.next !== undefined);
     return rankDeckItems([...branches, ...computerDeepEntries], query) as Entry[];
   }
@@ -667,7 +671,7 @@
       // Browsing ends with this machine's Computers rows; a scope shows its
       // own sections alone.
       const rows = browseRows(source, scope, openSettingsAt).map(withIcon);
-      return scope === null ? [...rows, ...computerRootEntries] : rows;
+      return scope === null ? [...rows, ...computerSectionEntries] : rows;
     }
     // Typed search crosses menu levels and includes this invoking library's
     // leaves.

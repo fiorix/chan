@@ -32,6 +32,7 @@ import {
   topOverlay,
 } from "../state/store.svelte";
 import { registerCommands } from "../state/commands";
+import { clearRecentCommands } from "../state/commands/recent.svelte";
 import {
   type BrowserTab,
   type ExtensionTab,
@@ -397,6 +398,8 @@ async function key(target: HTMLElement, value: string): Promise<void> {
 
 beforeEach(() => {
   sessionStorage.clear();
+  // A command an earlier test ran would lead the next test's list.
+  clearRecentCommands();
   clearLauncherDraft();
   launcherPanel.open = false;
   resetLayout();
@@ -1307,11 +1310,41 @@ describe("contextual command deck", () => {
     expect(runFlip).toHaveBeenCalledTimes(1);
   });
 
-  test("draws its scope orb through the deck's blob filter", async () => {
+  test("the deck draws the list under its section headings, in order", async () => {
+    showBulk = true;
+    setActiveTerminalTab();
     const target = openLauncher();
     await flush();
+    expect([...target.querySelectorAll(".deck-section-title")].map((node) => node.textContent)).toEqual([
+      "Terminal", "New tab", "Tab", "Window", "Computers",
+    ]);
+    // A typed query is flat: rows from every section interleave by rank.
+    await typeQuery(target, "restart");
+    expect(target.querySelectorAll(".deck-section-title")).toHaveLength(0);
+    expect(titles(target)[0]).toBe("Restart terminal");
+  });
 
-    expect(target.querySelector("filter#chan-command-orb-blob")).not.toBeNull();
-    expect(target.querySelector(".deck-scopes")?.getAttribute("style")).toContain("url(#chan-command-orb-blob)");
+  test("Tab steps through the scopes this window offers", async () => {
+    const target = openLauncher();
+    await flush();
+    // No tab is focused, so the App scope is skipped.
+    await key(target, "Tab");
+    expect(launcherDraft.scope).toBe("pane");
+    await key(target, "Tab");
+    expect(launcherDraft.scope).toBe("window");
+    expect(titles(target)).toEqual(["Search"]);
+  });
+
+  test("Escape leaves a branch before it closes the launcher", async () => {
+    const target = openLauncher();
+    await flush();
+    row(target, "Windows").click();
+    await tick();
+    expect(launcherDraft.path).toEqual(["windows"]);
+    await key(target, "Escape");
+    expect(launcherDraft.path).toEqual([]);
+    expect(launcherPanel.open).toBe(true);
+    await key(target, "Escape");
+    expect(launcherPanel.open).toBe(false);
   });
 });
