@@ -729,6 +729,30 @@ describe("watching the directories it shows", () => {
     const { spines } = await change([]);
     expect(spines).toEqual([{ path: "", depth: 1, cursor: undefined }]);
   });
+
+  test("a change naming more than a thousand paths fetches the spine whole", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
+    const paths = Array.from({ length: 1001 }, (_, i) => `notes/f${i}.md`);
+    const { spines } = await change(paths);
+    expect(spines.map((c) => c.path), "the root's level and the opened directory's").toEqual(["", "notes"]);
+  });
+
+  test("a patch never reads more directories than a whole fetch", async () => {
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("docs"), fsg.file("docs/d.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("", "docs"), fsg.contains("docs", "docs/d.md")],
+    };
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { ...openedForPath("notes"), docs: true } }),
+    );
+    // Closed, docs/ stays in the spine: a patch would read it again.
+    delete tab.expanded.docs;
+    await settle();
+    const { spines } = await change(["top.md", "notes/new.md", "docs/new.md"]);
+    expect(spines.map((c) => c.path), "the tree the tab draws, not docs/").toEqual(["", "notes"]);
+  });
 });
 
 /// A change at `paths`, as the store signals it, with every timer it

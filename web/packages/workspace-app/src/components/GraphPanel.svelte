@@ -472,6 +472,10 @@
   /// The paths of the changes the spine has not taken yet, or null when one
   /// of them named no path and only a whole fetch takes it.
   let spineChanges: Set<string> | null = new Set();
+  /// Past this many paths not taken yet (a branch switch, a hidden tab's
+  /// long wait) the changes are dropped for a whole fetch, which reads the
+  /// tree the tab draws whatever changed below it.
+  const SPINE_CHANGES_MAX = 1000;
   // GraphCanvas `open` must LATCH true once the graph has been shown,
   // never track `active` directly: GraphCanvas.start() resets the
   // pan/zoom transform and stop() discards the sim + node arrays, so
@@ -1501,8 +1505,10 @@
   /// directory in `dirs` are read again, one level each, and take the place
   /// of what the spine held of them, so a save costs a request per
   /// directory it touched, not a walk of the tree. A directory gone from
-  /// disk takes everything below it. A whole fetch begun since drops it,
-  /// and a read that fails for another reason hands the change to one.
+  /// disk takes everything below it. A patch that would read as many
+  /// directories as a whole fetch reads is one, so a change never costs more
+  /// than the tree the tab draws. A whole fetch begun since drops it, and a
+  /// read that fails for another reason hands the change to one.
   function patchSpine(dirs: ReadonlySet<string>): Promise<void> {
     if (dirs.size === 0) return spinePatches;
     const seq = spineSeq;
@@ -1518,6 +1524,10 @@
         if (!dirs.has(parentDir(target?.path || e.target))) continue;
         const from = parentDir(e.source);
         if (spineHoldsChildren(from)) reading.add(from);
+      }
+      if (reading.size >= openedSpineDirs().length) {
+        void loadSpine();
+        return;
       }
       try {
         // Parents first, so a directory an earlier level of this patch
@@ -1858,6 +1868,7 @@
       const paths = graphReloadSignal.paths;
       if (skipped || paths.length === 0) spineChanges = null;
       else if (spineChanges !== null) for (const path of paths) spineChanges.add(path);
+      if (spineChanges !== null && spineChanges.size > SPINE_CHANGES_MAX) spineChanges = null;
     });
     if (!visible) {
       // Hidden: don't reload in the background. Remember it so the next
