@@ -440,9 +440,16 @@ const APPIMAGE_OPAQUE_KEYS: &[&str] = &[
 ];
 
 /// Search paths the runtime prepends its own entries to rather than inventing
-/// outright. These are filtered entry by entry, never dropped: removing `PATH`
-/// would leave the shell unable to resolve a command at all.
+/// outright. Its AppRun writes each as its block of mount entries, then a
+/// separator, then the value the user had, empty when there was none, so the
+/// user's value is exactly what follows the last mount entry ([`host_value`]).
+/// They are rewritten to that value, never dropped while it holds anything:
+/// removing `PATH` would leave the shell unable to resolve a command at all.
 const APPIMAGE_PREPENDED_KEYS: &[&str] = &["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS"];
+
+/// The host entry linuxdeploy's GTK hook writes right after its own mount
+/// entry, ahead of the user's value: `$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS`.
+const GTK_HOOK_XDG_DATA_DIR: &str = "/usr/share";
 
 /// What scrubbing one variable does to it.
 #[derive(Debug, PartialEq, Eq)]
@@ -470,22 +477,14 @@ fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
 /// to forget to update. Only the keys whose value hides the mount need naming.
 fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
     if APPIMAGE_PREPENDED_KEYS.contains(&key) {
-        let mut dropped = false;
-        let kept: Vec<PathBuf> = std::env::split_paths(value)
-            .filter(|entry| {
-                let keep = !entry.starts_with(appdir);
-                dropped |= !keep;
-                keep
-            })
-            .collect();
-        if !dropped {
-            return None;
-        }
-        // Nothing left means the runtime created the variable outright (it
-        // does this for LD_LIBRARY_PATH on hosts that had none), so the host
-        // state to restore is "unset", not "empty" -- an empty LD_LIBRARY_PATH
-        // is not the same thing to the loader.
-        return Some(match std::env::join_paths(kept) {
+        let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
+        let host = host_value(appdir, key, &entries)?;
+        // Nothing left, or the lone empty entry AppRun's separator leaves
+        // when the user had no value, means the runtime created the variable
+        // outright (it does this for LD_LIBRARY_PATH and XDG_DATA_DIRS on
+        // hosts that had none), so the host state to restore is "unset", not
+        // empty: the loader reads an empty entry as the current directory.
+        return Some(match std::env::join_paths(host) {
             Ok(joined) if !joined.is_empty() => Scrub::Rewrite(joined),
             _ => Scrub::Remove,
         });
@@ -494,6 +493,30 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
         return Some(Scrub::Remove);
     }
     None
+}
+
+/// The entries of a prepended key the user had: those after its last entry
+/// inside the mount, or `None` when no entry is inside it (the value is the
+/// user's as it stands). Whatever comes before that entry is not the user's:
+/// the runtime's own block, and what chan prepended to it afterwards, the
+/// host library directory the AppImage's GUI-stack re-exec puts first in
+/// `LD_LIBRARY_PATH` among them. Everything after it is the user's value as
+/// they wrote it, an empty entry of theirs included. For `XDG_DATA_DIRS` the
+/// GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] directly after the mount entries is
+/// the hook's too.
+fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'a [PathBuf]> {
+    let last = entries
+        .iter()
+        .rposition(|entry| entry.starts_with(appdir))?;
+    let host = &entries[last + 1..];
+    Some(match host.split_first() {
+        Some((first, rest))
+            if key == "XDG_DATA_DIRS" && first.as_path() == Path::new(GTK_HOOK_XDG_DATA_DIR) =>
+        {
+            rest
+        }
+        _ => host,
+    })
 }
 
 /// Strip the AppImage bundle environment from a terminal spawn.
@@ -719,5 +742,145 @@ mod appimage_env_tests {
         assert_eq!(scrub("HOME", &OsString::from("/home/user")), None);
         assert_eq!(scrub("EDITOR", &OsString::from("vim")), None);
         assert_eq!(scrub("TERM", &OsString::from("xterm-256color")), None);
+    }
+
+    /// Whatever comes before the last mount entry is the runtime's or
+    /// chan's, wherever mount entries sit among the others.
+    #[test]
+    fn entries_before_the_last_mount_entry_are_not_the_users() {
+        let value = joined(&[
+            "/usr/lib/x86_64-linux-gnu",
+            "/tmp/.mount_chanAA/usr/lib",
+            "/opt/stray",
+            "/tmp/.mount_chanAA/lib64",
+            "/opt/a",
+        ]);
+        assert_eq!(
+            scrub("LD_LIBRARY_PATH", &value),
+            Some(Scrub::Rewrite("/opt/a".into())),
+        );
+    }
+
+    /// The values exactly as the AppImage's AppRun writes them, with the
+    /// `:` separator of its format strings, so only on unix, where AppImages
+    /// run.
+    #[cfg(unix)]
+    mod apprun_shapes {
+        use super::{scrub, Scrub, APPDIR};
+        use std::ffi::OsString;
+
+        /// The host library directory the AppImage's GUI-stack re-exec puts
+        /// first in the desktop's `LD_LIBRARY_PATH`.
+        const HOST_LIB: &str = "/usr/lib/x86_64-linux-gnu";
+
+        /// A value as the AppImage's AppRun writes it: its mount entries, a
+        /// separator, and the user's value, empty when there was none. The
+        /// formats are AppRun.wrapped's and the GTK hook's, read from the
+        /// AppImage and run in a throwaway AppDir.
+        fn apprun(block: &[&str], user: &str) -> String {
+            let block: Vec<String> = block
+                .iter()
+                .map(|entry| format!("{APPDIR}/{entry}"))
+                .collect();
+            format!("{}:{user}", block.join(":"))
+        }
+
+        fn apprun_ld(user: &str) -> String {
+            apprun(
+                &[
+                    "usr/lib/",
+                    "usr/lib/i386-linux-gnu/",
+                    "usr/lib/x86_64-linux-gnu/",
+                    "usr/lib32/",
+                    "usr/lib64/",
+                    "lib/",
+                    "lib/i386-linux-gnu/",
+                    "lib/x86_64-linux-gnu/",
+                    "lib32/",
+                    "lib64/",
+                ],
+                user,
+            )
+        }
+
+        /// The desktop's `LD_LIBRARY_PATH` once the re-exec put the host first.
+        fn reexeced_ld(user: &str) -> OsString {
+            OsString::from(format!("{HOST_LIB}:{}", apprun_ld(user)))
+        }
+
+        #[test]
+        fn a_user_who_had_no_library_path_gets_none() {
+            // The verifier's shell got `/usr/lib/x86_64-linux-gnu:`: the
+            // re-exec's directory and the empty entry AppRun's separator leaves.
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &reexeced_ld("")),
+                Some(Scrub::Remove)
+            );
+            let no_reexec = OsString::from(apprun_ld(""));
+            assert_eq!(scrub("LD_LIBRARY_PATH", &no_reexec), Some(Scrub::Remove));
+        }
+
+        #[test]
+        fn a_user_who_had_a_library_path_gets_their_entries_in_order() {
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &reexeced_ld("/opt/b/lib:/opt/a/lib")),
+                Some(Scrub::Rewrite("/opt/b/lib:/opt/a/lib".into())),
+            );
+        }
+
+        /// Everything after the mount entries is the value the user wrote, so an
+        /// empty entry there is theirs and stays where they put it.
+        #[test]
+        fn an_empty_entry_the_user_wrote_stays_as_written() {
+            for user in ["/opt/a::/opt/b", "/opt/a:", ":/opt/a"] {
+                assert_eq!(
+                    scrub("LD_LIBRARY_PATH", &reexeced_ld(user)),
+                    Some(Scrub::Rewrite(user.into())),
+                    "{user}"
+                );
+            }
+        }
+
+        /// The re-exec's directory is dropped by its place, ahead of the mount
+        /// entries, not by its name: a user who named it gets it back, once.
+        #[test]
+        fn the_reexec_directory_goes_and_the_users_own_copy_stays() {
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &reexeced_ld(HOST_LIB)),
+                Some(Scrub::Rewrite(HOST_LIB.into())),
+            );
+        }
+
+        /// The GTK hook writes `$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS`
+        /// and AppRun prepends its own entry, so a user with no `XDG_DATA_DIRS`
+        /// got `/usr/share:` back, losing the spec's default, and one with a
+        /// value got `/usr/share` ahead of it.
+        #[test]
+        fn data_dirs_lose_the_hooks_entry_and_the_empty_one() {
+            let xdg = |user: &str| {
+                OsString::from(format!(
+                    "{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:{user}"
+                ))
+            };
+            assert_eq!(scrub("XDG_DATA_DIRS", &xdg("")), Some(Scrub::Remove));
+            assert_eq!(
+                scrub("XDG_DATA_DIRS", &xdg("/usr/local/share:/usr/share")),
+                Some(Scrub::Rewrite("/usr/local/share:/usr/share".into())),
+            );
+        }
+
+        /// `PATH` is always set, so AppRun's separator is followed by the user's
+        /// own value and leaves no empty entry.
+        #[test]
+        fn path_gets_the_users_value() {
+            let value = OsString::from(apprun(
+                &["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"],
+                "/usr/local/bin:/usr/bin",
+            ));
+            assert_eq!(
+                scrub("PATH", &value),
+                Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into())),
+            );
+        }
     }
 }
