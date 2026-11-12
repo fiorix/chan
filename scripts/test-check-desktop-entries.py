@@ -3,7 +3,9 @@
 
 Each case copies the shared entries into a scratch directory, breaks one the
 way a packaging mistake would, and expects the checker's exit status and the
-finding it names. Needs desktop-file-validate, as the checker does.
+finding it names. The AppImage cases do the same to a tree laid out as the
+AppImage extracts, read with `--appdir`. Needs desktop-file-validate, as the
+checker does.
 """
 
 from __future__ import annotations
@@ -19,13 +21,40 @@ CHECKER = ROOT / "scripts/check-desktop-entries.py"
 SHARED = ROOT / "packaging/distros/shared"
 
 
-def run(directory: Path) -> subprocess.CompletedProcess[str]:
+ENTRY_NAMES = ("chan-files.desktop", "chan-edit.desktop")
+# The entry Tauri writes for the app, which the bundler links at the root.
+ROOT_ENTRY = """[Desktop Entry]
+Exec=chan-desktop
+Icon=chan-desktop
+Name=Chan
+Terminal=false
+Type=Application
+"""
+
+
+def run(*args: str | Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(CHECKER), str(directory)],
+        [sys.executable, str(CHECKER), *map(str, args)],
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def appimage_tree(directory: Path) -> Path:
+    """The parts of the AppImage the checker reads, laid out as it extracts:
+    Chan's entry under usr/share/applications and linked at the root, the
+    two entries under usr/share/chan/applications."""
+    tree = directory / "squashfs-root"
+    applications = tree / "usr/share/applications"
+    carried = tree / "usr/share/chan/applications"
+    for d in (applications, carried):
+        d.mkdir(parents=True)
+    (applications / "Chan.desktop").write_text(ROOT_ENTRY, encoding="utf-8")
+    (tree / "Chan.desktop").symlink_to("usr/share/applications/Chan.desktop")
+    for name in ENTRY_NAMES:
+        shutil.copy(SHARED / name, carried / name)
+    return tree
 
 
 def broken(name: str, old: str, new: str):
@@ -80,6 +109,73 @@ CASES = [
 ]
 
 
+def linked_at_root(name: str):
+    def apply(tree: Path) -> None:
+        (tree / name).symlink_to(f"usr/share/chan/applications/{name}")
+
+    return apply
+
+
+def moved_to_applications(*names: str):
+    def apply(tree: Path) -> None:
+        for name in names:
+            (tree / "usr/share/chan/applications" / name).rename(
+                tree / "usr/share/applications" / name
+            )
+
+    return apply
+
+
+def root_runs(binary: str):
+    def apply(tree: Path) -> None:
+        path = tree / "usr/share/applications/Chan.desktop"
+        path.write_text(ROOT_ENTRY.replace("Exec=chan-desktop", f"Exec={binary}"), encoding="utf-8")
+
+    return apply
+
+
+def root_unlinked(tree: Path) -> None:
+    (tree / "Chan.desktop").unlink()
+
+
+def root_dangling(tree: Path) -> None:
+    (tree / "usr/share/applications/Chan.desktop").unlink()
+
+
+APPIMAGE_CASES = [
+    (
+        "a second desktop file in the root",
+        linked_at_root("chan-edit.desktop"),
+        "the AppImage root holds 2 desktop files (Chan.desktop, chan-edit.desktop)",
+    ),
+    (
+        "no desktop file in the root",
+        root_unlinked,
+        "the AppImage root holds 0 desktop files (none)",
+    ),
+    (
+        "a root link that leads to no file",
+        root_dangling,
+        "Chan.desktop in the AppImage root leads to no file",
+    ),
+    (
+        "a root entry that runs another binary",
+        root_runs("chan-edit %U"),
+        "Chan.desktop in the AppImage root must run chan-desktop, got 'chan-edit %U'",
+    ),
+    (
+        "an entry beside Chan's under usr/share/applications",
+        moved_to_applications("chan-files.desktop"),
+        "usr/share/applications holds Chan.desktop, chan-files.desktop; linuxdeploy links",
+    ),
+    (
+        "both entries under usr/share/applications",
+        moved_to_applications(*ENTRY_NAMES),
+        "chan-files.desktop: missing from",
+    ),
+]
+
+
 def main() -> int:
     if shutil.which("desktop-file-validate") is None:
         print(
@@ -94,7 +190,7 @@ def main() -> int:
     for label, apply, expected in CASES:
         with tempfile.TemporaryDirectory(prefix="chan-entries-test-") as scratch:
             directory = Path(scratch)
-            for name in ("chan-files.desktop", "chan-edit.desktop"):
+            for name in ENTRY_NAMES:
                 shutil.copy(SHARED / name, directory / name)
             apply(directory)
             result = run(directory)
@@ -104,19 +200,32 @@ def main() -> int:
                 f"{result.returncode}: {result.stderr.strip()!r}"
             )
     with tempfile.TemporaryDirectory(prefix="chan-entries-test-") as scratch:
+        laid_out = run("--appdir", appimage_tree(Path(scratch)))
+    if laid_out.returncode != 0:
+        failures.append(
+            f"the AppImage tree: exit {laid_out.returncode}: {laid_out.stderr.strip()}"
+        )
+    for label, apply, expected in APPIMAGE_CASES:
+        with tempfile.TemporaryDirectory(prefix="chan-entries-test-") as scratch:
+            tree = appimage_tree(Path(scratch))
+            apply(tree)
+            result = run("--appdir", tree)
+        if result.returncode != 1 or expected not in result.stderr:
+            failures.append(
+                f"{label}: expected exit 1 naming {expected!r}, got exit "
+                f"{result.returncode}: {result.stderr.strip()!r}"
+            )
+    with tempfile.TemporaryDirectory(prefix="chan-entries-test-") as scratch:
         broken_image = Path(scratch) / "broken.AppImage"
         broken_image.write_text("#!/bin/sh\necho 'not an AppImage' >&2\nexit 1\n", encoding="utf-8")
         broken_image.chmod(0o755)
-        for label, image, expected in (
-            ("an AppImage that will not extract", broken_image, "--appimage-extract failed"),
-            ("no AppImage", Path(scratch) / "absent.AppImage", "no AppImage at"),
+        for label, mode, image, expected in (
+            ("an AppImage that will not extract", "--appimage", broken_image,
+             "--appimage-extract failed"),
+            ("no AppImage", "--appimage", Path(scratch) / "absent.AppImage", "no AppImage at"),
+            ("no extracted tree", "--appdir", Path(scratch) / "absent", "no directory at"),
         ):
-            result = subprocess.run(
-                [sys.executable, str(CHECKER), "--appimage", str(image)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = run(mode, image)
             if (
                 result.returncode != 2
                 or expected not in result.stderr
@@ -131,8 +240,9 @@ def main() -> int:
     if failures:
         return 1
     print(
-        f"check-desktop-entries: shared entries pass, {len(CASES)} breaks refused, "
-        "2 unreadable AppImages refused with exit 2"
+        f"check-desktop-entries: shared entries pass, {len(CASES)} breaks refused; "
+        f"the AppImage tree passes, {len(APPIMAGE_CASES)} breaks refused; "
+        "2 unreadable AppImages and a missing tree refused with exit 2"
     )
     return 0
 
