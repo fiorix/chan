@@ -22,14 +22,20 @@ import CommandLauncher from "./CommandLauncher.svelte";
 import { SETTINGS_SECTIONS } from "./settings/sections";
 import { resetShownPreferencesForTests } from "./settings/preferenceState.svelte";
 import { settingEntry, settingsIndex } from "./settings/settingsIndex";
-import { resetWorkspaceStateForTests } from "./settings/workspace/workspaceState.svelte";
+import {
+  WORKSPACE_STATE_MAX_AGE_MS,
+  resetWorkspaceStateForTests,
+} from "./settings/workspace/workspaceState.svelte";
+import { api } from "../api/client";
 import type { Preferences } from "../api/types";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import { settingsPreferences } from "../__tests__/settings";
 import { resetLayout } from "../__tests__/tabs";
+import { demoWorkspaceInfo } from "../demo/data";
 import { allCommands, commandContext } from "../state/commands";
 import { clearRecentCommands } from "../state/commands/recent.svelte";
 import * as statusBus from "../state/notify.svelte";
+import { screensaver } from "../state/screensaver.svelte";
 import {
   __testSetStandalonePreferences,
   clearLauncherDraft,
@@ -37,6 +43,7 @@ import {
   launcherPanel,
   openCommandLauncher,
   ui,
+  workspace,
 } from "../state/store.svelte";
 
 const REFUSAL = "configuration is locked";
@@ -61,6 +68,29 @@ function serve(preferences: Preferences, refusing: () => boolean = () => false) 
   __testSetStandalonePreferences(preferences);
   return { writes };
 }
+
+/// Serve `preferences` to a window with a workspace behind it, which holds
+/// them as part of its workspace record.
+function serveWorkspace(preferences: Preferences) {
+  const config = serve(preferences);
+  workspace.info = demoWorkspaceInfo(
+    {
+      metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    },
+    preferences,
+  );
+  return config;
+}
+
+const LOCK_UNLOADED = {
+  enabled: false,
+  timeout_secs: 300,
+  theme: "plain",
+  pin_set: false,
+  locked: false,
+  loaded: false,
+} as const;
 
 const startTheme = { choice: ui.themeChoice, theme: ui.theme };
 let component: Record<string, unknown> | null = null;
@@ -116,10 +146,13 @@ afterEach(() => {
   document.body.innerHTML = "";
   stopRecordingRequests();
   __testSetStandalonePreferences(null);
+  workspace.info = null;
+  Object.assign(screensaver, LOCK_UNLOADED);
   resetShownPreferencesForTests();
   resetWorkspaceStateForTests();
   ui.themeChoice = startTheme.choice;
   ui.theme = startTheme.theme;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -140,6 +173,30 @@ describe("the Settings scope over the settings index", () => {
     ]);
     // Keyboard Shortcuts is the index's own entry, listed once.
     expect(rows().filter((r) => r.textContent === "Keyboard Shortcuts")).toHaveLength(1);
+  });
+
+  test("lists the two docks among the File browser fields over a workspace, and not without one", async () => {
+    const docks = ["browser.leftDock", "browser.rightDock"].map((id) => `setting:${id}`);
+    const listed = (): (string | undefined)[] =>
+      rows()
+        .filter((r) => r.dataset.section === "File browser")
+        .map((r) => r.dataset.id);
+
+    // This window has no workspace, so nothing mirrors a stored dock into
+    // its own.
+    serve(settingsPreferences());
+    await openSettingsScope();
+    expect(listed()).toEqual(["setting:browser.vim", "setting:browser.bodyTheme"]);
+
+    workspace.info = demoWorkspaceInfo(
+      {
+        metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+        files: [],
+      },
+      settingsPreferences(),
+    );
+    await flush();
+    expect(listed()).toEqual([...docks, "setting:browser.vim", "setting:browser.bodyTheme"]);
   });
 
   test("a toggle flips in place, sends its slice and shows the new value", async () => {
@@ -185,6 +242,53 @@ describe("the Settings scope over the settings index", () => {
   });
 });
 
+describe("a setting of this workspace, pressed in the Settings scope", () => {
+  test("the press sends no read beside its write, and the row keeps the write's answer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The server: a write takes effect as it is answered, and a read sees
+    // the state as it arrives. A read that arrives while the write is still
+    // unanswered is answered after it, as a slower connection would.
+    let enabled = false;
+    let writeSent = false;
+    let answerWrite = (): void => {};
+    const besideTheWrite: (() => void)[] = [];
+    vi.spyOn(api, "reportsState").mockImplementation(async () => {
+      const seen = { enabled };
+      if (writeSent && !enabled) await new Promise<void>((resolve) => besideTheWrite.push(resolve));
+      return seen;
+    });
+    vi.spyOn(api, "reportsEnable").mockImplementation(async () => {
+      writeSent = true;
+      await new Promise<void>((resolve) => (answerWrite = resolve));
+      enabled = true;
+      return { enabled };
+    });
+    vi.spyOn(api, "buildInfo").mockResolvedValue({
+      version: "0",
+      build: "test",
+      features: { embeddings: false },
+    });
+    serveWorkspace(settingsPreferences());
+    const reports = settingEntry("workspace.reports");
+    await openSettingsScope();
+    await vi.waitFor(() => expect(row(reports.label).dataset.value).toBe("off"));
+
+    // The row has been on screen past the age at which a read asks again.
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    row(reports.label).click();
+    await vi.waitFor(() => expect(writeSent).toBe(true));
+    await flush();
+    answerWrite();
+    await vi.waitFor(() => expect(row(reports.label).dataset.value).toBe("on"));
+
+    for (const answer of besideTheWrite) answer();
+    await flush();
+    expect(row(reports.label).dataset.value).toBe("on");
+    expect(besideTheWrite, "reads sent while the write was unanswered").toHaveLength(0);
+    expect(launcherPanel.open).toBe(true);
+  });
+});
+
 describe("a typed query over the settings index", () => {
   test("applies a theme by its option word in one step", async () => {
     const config = serve(settingsPreferences());
@@ -201,13 +305,25 @@ describe("a typed query over the settings index", () => {
   });
 
   test("leaves a setting to the command that also changes it", async () => {
-    serve(settingsPreferences());
+    // A workspace window with its screen lock on offers every such setting,
+    // so only the rule can keep one out of the typed list.
+    serveWorkspace(settingsPreferences());
+    Object.assign(screensaver, { ...LOCK_UNLOADED, enabled: true, loaded: true });
     const twins = settingsIndex().filter((spec) => spec.command !== undefined);
     expect(twins.map((spec) => spec.command).sort()).toEqual([
       "app.browser.toggleLeftDock",
       "app.browser.toggleRightDock",
       "app.screensaver.setPin",
     ]);
+    for (const spec of twins) expect(spec.available(), spec.id).toBe(true);
+
+    // The Settings scope lists each as a field of its own.
+    await openSettingsScope();
+    const browsed = rows().map((r) => r.dataset.id);
+    for (const spec of twins) expect(browsed, spec.id).toContain(`setting:${spec.id}`);
+    (target.querySelector(".probe-clear") as HTMLButtonElement).click();
+    await flush();
+
     const ctx = commandContext();
     for (const spec of twins) {
       const command = allCommands().find((candidate) => candidate.id === spec.command)!;

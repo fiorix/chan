@@ -3,8 +3,9 @@
   // workspace view after inactivity with an optional local PIN (salted by the
   // workspace root, so it is per-workspace). It owns enable/timeout/theme
   // patches, the PIN set/confirm/clear dialog, a Test action, and the theme
-  // preview. What it shows is the running lock's own state, which every
-  // write here reloads and which the settings index reads and writes too.
+  // preview. What it shows is the running lock's own state, which takes the
+  // answer of every write here and which the settings index reads and writes
+  // too.
 
   import { onMount } from "svelte";
   import {
@@ -14,6 +15,7 @@
     type ScreensaverTheme,
   } from "../../../state/screensaver";
   import {
+    applyScreensaverState,
     loadScreensaverState,
     lockNow,
     screensaver,
@@ -121,9 +123,8 @@
     try {
       const salt = workspace.info?.root ?? "";
       const hash = await hashPin(pin1, salt);
-      await api.screensaverSetPin(hash);
+      applyScreensaverState(await api.screensaverSetPin(hash));
       pinDialog = null;
-      await loadScreensaverState();
     } catch (err) {
       screensaverError = `PIN save failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -136,8 +137,7 @@
     screensaverBusy = true;
     screensaverError = null;
     try {
-      await api.screensaverClearPin();
-      await loadScreensaverState();
+      applyScreensaverState(await api.screensaverClearPin());
     } catch (err) {
       screensaverError = `PIN clear failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -148,8 +148,8 @@
   async function testScreenLock(): Promise<void> {
     if (screensaverBusy) return;
     screensaverError = null;
-    await loadScreensaverState();
-    if (!screensaver.loaded) {
+    // A test locks on the settings the server holds now, or not at all.
+    if (!(await loadScreensaverState())) {
       screensaverError = "screen lock state unavailable";
       return;
     }
@@ -169,7 +169,7 @@
         screensaver.timeout_secs !== served.timeout_secs ||
         screensaver.theme !== served.theme ||
         screensaver.pin_set !== served.pin_set;
-      if (differs) await loadScreensaverState();
+      if (differs) applyScreensaverState(served);
     } catch (err) {
       screensaverError = `screensaver: ${(err as Error).message ?? err}`;
     }

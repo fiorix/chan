@@ -10,7 +10,9 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import SettingsOverlay from "./SettingsOverlay.svelte";
-import { settingsPanel } from "../state/store.svelte";
+import type { Preferences } from "../api/types";
+import { demoWorkspaceInfo } from "../demo/data";
+import { settingsPanel, workspace } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
 import {
@@ -91,6 +93,18 @@ function openSurface(): HTMLElement {
   return target;
 }
 
+/// Put a workspace behind this window, holding the served preferences as
+/// part of its record. The docks are offered only there.
+function overWorkspace(): void {
+  workspace.info = demoWorkspaceInfo(
+    {
+      metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    },
+    server.preferences as unknown as Preferences,
+  );
+}
+
 function clickTab(target: HTMLElement, label: string): void {
   const tab = [...target.querySelectorAll(".section-tab")].find(
     (e) => e.textContent?.trim() === label,
@@ -164,6 +178,7 @@ afterEach(() => {
   document.documentElement.style.removeProperty("--chan-editor-body-size");
   document.documentElement.style.removeProperty("--chan-editor-source-size");
   settingsPanel.open = false;
+  workspace.info = null;
   vi.restoreAllMocks();
 });
 
@@ -519,13 +534,14 @@ describe("settings surface render", () => {
     await flush();
 
     // An image lands beside its document or in its draft: there is no
-    // folder to configure. The docks show that the section rendered.
-    expect(target.textContent).toContain("Left file browser dock");
+    // folder to configure. The Vim field shows that the section rendered.
+    expect(target.textContent).toContain("Vim navigation");
     expect.soft(target.textContent).not.toContain("Attachments folder");
     expect.soft(target.querySelector('[aria-label="Attachments folder"]')).toBeNull();
   });
 
   test("the File browser section toggles one dock at a time", async () => {
+    overWorkspace();
     const target = openSurface();
     await flush();
     clickTab(target, "File browser");
@@ -652,6 +668,8 @@ describe("settings surface render", () => {
   });
 
   test("one control per section writes a body falling on exactly one owner", async () => {
+    // Over a workspace, where the File browser section offers its docks.
+    overWorkspace();
     const target = openSurface();
     await flush();
 
