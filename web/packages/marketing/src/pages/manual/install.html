@@ -59,7 +59,7 @@
   </div>
   <p>How <code>chan-term</code> takes each launch:</p>
   <ul>
-    <li>A launch with no command, like Omarchy's Super+Return, opens your shell in the directory <code>--dir</code> names, or in the current one. The shell opens in a new terminal window of Chan Desktop, one that is not restored at its next launch; when Chan Desktop is not running, the launch starts it, and that terminal is its first window.</li>
+    <li>A launch with no command, like Omarchy's Super+Return, opens your shell in the directory <code>--dir</code> names, or in the current one. The shell opens in a new terminal window of Chan Desktop, one that is not restored at its next launch; when Chan Desktop is not running, the launch starts it, and that terminal is its first window. Over SSH, or with <code>CHAN_NO_DESKTOP_HANDOFF</code> set, such a launch opens nothing and says why.</li>
     <li>A launch with a command runs it in a window and process of its own, apart from a running Chan Desktop, and exits with the command's exit code when it ends. <code>--hold</code> keeps the window open after the command exits, until you close it. A command that is not on your <code>PATH</code> exits with status 127 and opens no window.</li>
     <li><code>--app-id</code> sets the window's Wayland app id, or its X11 class, so compositor window rules can match it: Omarchy floats <code>TUI.float</code>. <code>--title</code> sets the window title. Either one also gives the launch a process of its own.</li>
   </ul>
