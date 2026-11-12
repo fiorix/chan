@@ -608,16 +608,36 @@ fn write_devserver_unit(
             devserver_chan_home().as_deref(),
             tunnel.as_ref(),
         ),
-        &std::env::var_os("PATH").unwrap_or_default(),
+        &unit_search_path(std::env::vars_os()),
         installed.as_deref(),
         std::io::stdin().is_terminal(),
     );
     write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
 }
 
+/// The `PATH` a unit written from `parent`, this process's environment,
+/// records: as the user had it. A `chan devserver start` run from the
+/// AppImage, through its `chan` wrapper, has its mount's entries ahead of the
+/// user's `PATH`, and the unit outlives that mount: recorded, its entries
+/// would name directories under `/tmp` that no longer exist, searched first
+/// at every service start ([`chan_server::appimage_host_var`]). A process
+/// that is no AppImage's, a deb's `chan` in a shell of an older chan
+/// AppImage's terminal, can still hold a whole AppRun block, which goes too,
+/// as the recorded `PATH` loses it ([`with_devserver_unit_search_path`]), so
+/// the two renders agree.
+fn unit_search_path(
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::ffi::OsString {
+    let path = chan_server::appimage_host_var("PATH", parent).unwrap_or_default();
+    chan_server::without_apprun_blocks("PATH", &path)
+}
+
 /// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
-/// it replaces `installed`: the one `installed` records, verbatim, or one
-/// built from `current`.
+/// it replaces `installed`: the one `installed` records, verbatim but for the
+/// whole AppRun blocks an older release recorded from its AppImage, or one
+/// built from `current`. A recorded block names a mount that is gone, so a
+/// known prior render that holds one no longer matches the render and is
+/// rewritten in place, terminal or not.
 fn with_devserver_unit_search_path(
     unit: chan_systemd::DevserverUnit,
     current: &std::ffi::OsStr,
@@ -626,7 +646,11 @@ fn with_devserver_unit_search_path(
 ) -> chan_systemd::DevserverUnit {
     match installed.and_then(chan_systemd::DevserverUnit::recorded_search_path) {
         Some(recorded) if keeps_recorded_service_path(current, interactive) => {
-            unit.with_environment(format!("PATH={recorded}"))
+            let kept = chan_server::without_apprun_blocks("PATH", std::ffi::OsStr::new(recorded));
+            match kept.to_str() {
+                Some(kept) if !kept.is_empty() => unit.with_environment(format!("PATH={kept}")),
+                _ => unit.with_search_path(current),
+            }
         }
         _ => unit.with_search_path(current),
     }
@@ -826,6 +850,88 @@ mod tests {
     use super::*;
     use crate::devserver::persisted::devserver_addr_from_persisted_args;
 
+    /// A unit written from an AppImage records the user's `PATH`, none of
+    /// the mount's entries ahead of it; off an AppImage, the `PATH` as it is
+    /// but for a whole AppRun block, which goes there too.
+    #[test]
+    fn a_unit_written_from_the_appimage_records_the_users_path() {
+        let mount = "/tmp/.mount_ChanCLI";
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("{mount}/{entry}"))
+            .join(":");
+        let appimage: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".to_string()),
+            ("PATH", format!("{block}:/usr/local/bin:/usr/bin")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        assert_eq!(
+            unit_search_path(appimage.clone()),
+            "/usr/local/bin:/usr/bin"
+        );
+        let plain: Vec<_> = appimage
+            .into_iter()
+            .filter(|(key, _)| key != "APPDIR")
+            .collect();
+        assert_eq!(unit_search_path(plain), "/usr/local/bin:/usr/bin");
+        let users = vec![(
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("/opt/x/usr/bin/:/usr/bin"),
+        )];
+        assert_eq!(unit_search_path(users), "/opt/x/usr/bin/:/usr/bin");
+    }
+
+    /// A process that is no AppImage's, with a whole AppRun block in its
+    /// `PATH` (a deb's `chan` in a shell an older chan AppImage started),
+    /// records the `PATH` without it, as a render without a terminal keeps
+    /// it: an interactive start, a scripted one and an interactive one again
+    /// write the unit once and leave it alone after.
+    #[test]
+    fn the_renders_agree_on_a_path_holding_a_block() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec =
+            || devserver_systemd_unit_spec(Path::new("/home/u/.local/bin/chan"), addr, None, None);
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("/tmp/.mount_ChanOLD/{entry}"))
+            .join(":");
+        let shell: Vec<(std::ffi::OsString, std::ffi::OsString)> = vec![(
+            "PATH".into(),
+            format!("{block}:/home/u/.local/bin:/usr/bin").into(),
+        )];
+        let current = unit_search_path(shell);
+        let mut renders = Vec::new();
+        for interactive in [true, false, true] {
+            let installed = std::fs::read_to_string(&path).ok();
+            let render = with_devserver_unit_search_path(
+                spec(),
+                &current,
+                installed.as_deref(),
+                interactive,
+            );
+            let update =
+                write_rendered_devserver_unit(&path, &render, false).expect("chan's own unit");
+            let written = std::fs::read_to_string(&path).unwrap();
+            let line = written
+                .lines()
+                .find(|line| line.starts_with("Environment=\"PATH="))
+                .map(str::to_string);
+            renders.push((interactive, update.changed, line));
+        }
+        let line = Some("Environment=\"PATH=/home/u/.local/bin:/usr/bin\"".to_string());
+        assert_eq!(
+            renders,
+            [
+                (true, true, line.clone()),
+                (false, false, line.clone()),
+                (true, false, line)
+            ]
+        );
+    }
+
     #[test]
     fn a_fresh_systemd_marker_uses_the_running_or_pinned_address() {
         let requested: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -967,6 +1073,54 @@ mod tests {
         let again = write_rendered_devserver_unit(&path, &other_shell, false)
             .expect("the unit chan just wrote is its own");
         assert!(!again.changed, "the same PATH must be a no-op");
+    }
+
+    /// A unit an older release wrote from the AppImage records that mount's
+    /// `PATH` block ahead of the user's `PATH`. chan-systemd's unit text is
+    /// unchanged since v0.128.0, so a render with that `PATH` is the file such
+    /// a release installed. A render without a terminal keeps the recorded
+    /// `PATH` minus the block, which no longer matches the installed unit, so
+    /// the known prior render is rewritten in place, once; a unit written
+    /// from a deb records no block and is left as it is.
+    #[test]
+    fn a_prior_unit_with_an_appimage_block_is_migrated_in_place() {
+        let dir = tempfile::tempdir().expect("unit dir");
+        let path = dir.path().join(DEVSERVER_SYSTEMD_UNIT);
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let spec =
+            || devserver_systemd_unit_spec(Path::new("/home/u/.local/bin/chan"), addr, None, None);
+        let script = std::ffi::OsStr::new("/usr/bin:/bin");
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("/tmp/.mount_ChanOLD/{entry}"))
+            .join(":");
+        let from_appimage = format!("{block}:/home/u/.local/bin:/usr/local/bin:/usr/bin");
+        let installed = spec()
+            .with_search_path(std::ffi::OsStr::new(&from_appimage))
+            .render();
+        assert!(installed.contains(".mount_ChanOLD"), "{installed}");
+        std::fs::write(&path, &installed).expect("seed the prior unit");
+        let render = with_devserver_unit_search_path(spec(), script, Some(&installed), false);
+        let update = write_rendered_devserver_unit(&path, &render, false)
+            .expect("a known prior render is chan's own");
+        assert!(update.changed, "the prior unit must be migrated");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("Environment=\"PATH=/home/u/.local/bin:/usr/local/bin:/usr/bin\"\n"),
+            "{written}"
+        );
+        assert!(!written.contains(".mount_"), "{written}");
+        let again = with_devserver_unit_search_path(spec(), script, Some(&written), false);
+        let update = write_rendered_devserver_unit(&path, &again, false).unwrap();
+        assert!(!update.changed, "a migrated unit is current");
+
+        let from_deb = spec()
+            .with_search_path(std::ffi::OsStr::new("/home/u/.local/bin:/usr/bin"))
+            .render();
+        std::fs::write(&path, &from_deb).expect("seed a deb's unit");
+        let render = with_devserver_unit_search_path(spec(), script, Some(&from_deb), false);
+        let update = write_rendered_devserver_unit(&path, &render, false).unwrap();
+        assert!(!update.changed, "a unit with no block is left as it is");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), from_deb);
     }
 
     #[test]

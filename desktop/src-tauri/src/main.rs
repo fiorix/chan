@@ -3754,6 +3754,73 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed:
     });
 }
 
+/// Start this desktop again once a shutdown's drain is done, as Tauri's
+/// restart does: under this process's own AppImage
+/// ([`cs_install::appimage_path`]), the image with the managed `Env`'s
+/// arguments, then exit. Tauri's own restart hands the new process this
+/// process's environment, whose search paths name this process's mount, which
+/// goes with it; here the new process gets the environment the user had
+/// ([`appimage_relaunch_command`]), so its own runtime builds on the user's.
+/// Off an AppImage, and when that start fails, Tauri's restart.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn relaunch(app: tauri::AppHandle) {
+    #[cfg(target_os = "linux")]
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
+    #[cfg(not(target_os = "linux"))]
+    let appimage = None;
+    relaunch_with(
+        appimage,
+        std::env::vars_os(),
+        |mut command| command.spawn().map(drop),
+        || app.exit(0),
+        || app.restart(),
+    );
+}
+
+/// [`relaunch`]'s route, with the start of the new process, the exit and
+/// Tauri's restart passed in, so a test can drive it without a desktop: an
+/// `appimage` (the image and this process's arguments) is started through
+/// [`appimage_relaunch_command`] from `parent`, and a start that works is
+/// followed by the exit; with no image, or when the start fails, Tauri's
+/// restart.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn relaunch_with(
+    appimage: Option<(std::ffi::OsString, Vec<std::ffi::OsString>)>,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    spawn: impl FnOnce(std::process::Command) -> std::io::Result<()>,
+    exit: impl FnOnce(),
+    restart: impl FnOnce(),
+) {
+    if let Some((image, args)) = appimage {
+        match spawn(appimage_relaunch_command(Path::new(&image), &args, parent)) {
+            Ok(()) => return exit(),
+            Err(error) => tracing::error!(
+                %error,
+                "relaunching the AppImage failed; falling back to the restart that keeps this \
+                 environment"
+            ),
+        }
+    }
+    restart()
+}
+
+/// The relaunch of an AppImage desktop: the image at `appimage` with `args`
+/// past `argv[0]`, as Tauri's restart starts it, handed the environment the
+/// user had rather than `parent`, this process's
+/// ([`chan_server::hand_appimage_host_env`]).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn appimage_relaunch_command(
+    appimage: &Path,
+    args: &[std::ffi::OsString],
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(appimage);
+    command.args(args.iter().skip(1));
+    chan_server::hand_appimage_host_env(&mut command, parent);
+    command
+}
+
 /// The launcher update dialog's Restart, answered by the in-window launcher's
 /// IPC (launcher_panel.rs).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -7731,7 +7798,7 @@ fn begin_normal_shutdown(
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             ShutdownAction::Restart => {
                 single_instance::release_endpoint(&state);
-                app.restart()
+                relaunch(app)
             }
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
@@ -9271,6 +9338,165 @@ mod tests {
     /// The GUI app is built with the launch's argv less its paths, the `Env`
     /// Tauri's restart relaunches with, so an update's relaunch does not open
     /// the paths again.
+    /// An AppImage desktop relaunches as Tauri's restart starts it, the image
+    /// with the arguments past `argv[0]`, but from the user's environment:
+    /// none of this process's mount reaches the new one, whose own runtime
+    /// adds one block. `relaunch` takes that route before Tauri's restart.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_relaunch_starts_from_the_users_environment() {
+        use std::ffi::{OsStr, OsString};
+        let mount = "/tmp/.mount_ChanOLD";
+        let ld = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]
+        .map(|entry| format!("{mount}/{entry}"))
+        .join(":");
+        let parent: Vec<(OsString, OsString)> = [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".to_string()),
+            (
+                "LD_LIBRARY_PATH",
+                format!("/usr/lib/x86_64-linux-gnu:{ld}:/opt/a/lib"),
+            ),
+            ("GTK_PATH", format!("{mount}//usr/lib/gtk-3.0")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let args: Vec<OsString> = vec![
+            format!("{mount}/usr/bin/chan-desktop").into(),
+            "--flag".into(),
+        ];
+        let image = Path::new("/home/u/Applications/Chan.AppImage");
+        let command = appimage_relaunch_command(image, &args, parent);
+        assert_eq!(command.get_program(), image.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [OsStr::new("--flag")]
+        );
+        let env = |key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        assert_eq!(env("LD_LIBRARY_PATH"), Some(Some("/opt/a/lib".into())));
+        for gone in ["APPDIR", "APPIMAGE", "GTK_PATH"] {
+            assert_eq!(env(gone), Some(None), "{gone}");
+        }
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let relaunch = source_region(
+            production,
+            "\nfn relaunch(app: tauri::AppHandle) {",
+            "\n/// [`relaunch`]'s route,",
+        );
+        // The image is this process's own, and the call's arguments are
+        // pinned in order: the exit follows a start that worked, Tauri's
+        // restart one that failed.
+        let wiring = "
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
+    #[cfg(not(target_os = \"linux\"))]
+    let appimage = None;
+    relaunch_with(
+        appimage,
+        std::env::vars_os(),
+        |mut command| command.spawn().map(drop),
+        || app.exit(0),
+        || app.restart(),
+    );
+}";
+        assert!(
+            relaunch.trim_end().ends_with(wiring),
+            "relaunch passes, in order:{wiring}"
+        );
+    }
+
+    /// The route itself, driven with stand-ins for the start, the exit and
+    /// Tauri's restart: an AppImage relaunch starts the image from the user's
+    /// environment and then exits, without Tauri's restart; a start that
+    /// fails falls back to that restart and does not exit; with no image it
+    /// is Tauri's restart alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_relaunch_route_starts_the_image_then_exits_else_restarts() {
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        let mount = "/tmp/.mount_ChanOLD";
+        let parent = || -> Vec<(OsString, OsString)> {
+            vec![
+                ("APPDIR".into(), mount.into()),
+                (
+                    "APPIMAGE".into(),
+                    "/home/u/Applications/Chan.AppImage".into(),
+                ),
+                (
+                    "GTK_PATH".into(),
+                    format!("{mount}//usr/lib/gtk-3.0").into(),
+                ),
+            ]
+        };
+        let image = || {
+            Some((
+                OsString::from("/home/u/Applications/Chan.AppImage"),
+                vec![OsString::from("chan-desktop"), OsString::from("--flag")],
+            ))
+        };
+        for spawn_works in [true, false] {
+            let events = RefCell::new(Vec::new());
+            relaunch_with(
+                image(),
+                parent(),
+                |command| {
+                    let gtk_path_removed = command
+                        .get_envs()
+                        .any(|(key, value)| key == "GTK_PATH" && value.is_none());
+                    events.borrow_mut().push(format!(
+                        "spawn {} {:?} gtk_path_removed={gtk_path_removed}",
+                        command.get_program().to_string_lossy(),
+                        command.get_args().collect::<Vec<_>>()
+                    ));
+                    if spawn_works {
+                        Ok(())
+                    } else {
+                        Err(std::io::ErrorKind::NotFound.into())
+                    }
+                },
+                || events.borrow_mut().push("exit".to_string()),
+                || events.borrow_mut().push("restart".to_string()),
+            );
+            let spawned =
+                "spawn /home/u/Applications/Chan.AppImage [\"--flag\"] gtk_path_removed=true";
+            let then = if spawn_works { "exit" } else { "restart" };
+            assert_eq!(
+                events.into_inner(),
+                [spawned.to_string(), then.to_string()],
+                "spawn_works={spawn_works}"
+            );
+        }
+        let events = RefCell::new(Vec::new());
+        relaunch_with(
+            None,
+            parent(),
+            |_| panic!("no image, no start"),
+            || events.borrow_mut().push("exit"),
+            || events.borrow_mut().push("restart"),
+        );
+        assert_eq!(events.into_inner(), ["restart"]);
+    }
+
     #[test]
     fn a_relaunch_does_not_replay_the_launch_paths() {
         const MAIN_RS: &str = include_str!("main.rs");
@@ -9314,7 +9540,9 @@ mod tests {
         let restarts: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.starts_with("app.restart()"))
+            .filter(|(_, line)| {
+                line.starts_with("app.restart()") || line.starts_with("relaunch(app)")
+            })
             .map(|(at, _)| at)
             .collect();
         assert_eq!(restarts.len(), 2, "both relaunches are pinned");

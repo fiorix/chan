@@ -98,7 +98,9 @@ impl Fixture {
 }
 
 /// A fake listener at `socket` that answers every connection's request line
-/// with `answer`'s line and reports each request it read.
+/// with `answer`'s line and reports each request it read. A request is
+/// reported before it is answered, so it is waiting in the channel by the time
+/// the opener that sent it can exit, however late this thread runs.
 fn fake(socket: PathBuf, answer: fn(&Value) -> String) -> mpsc::Receiver<Value> {
     let listener = UnixListener::bind(&socket).unwrap();
     let (sent, requests) = mpsc::channel();
@@ -112,10 +114,10 @@ fn fake(socket: PathBuf, answer: fn(&Value) -> String) -> mpsc::Receiver<Value> 
             let request: Value = serde_json::from_str(&line).unwrap();
             let mut reply = answer(&request);
             reply.push('\n');
-            let _ = conn.write_all(reply.as_bytes());
             if sent.send(request).is_err() {
                 return;
             }
+            let _ = conn.write_all(reply.as_bytes());
         }
     });
     requests
@@ -514,9 +516,11 @@ fn a_busy_desktop_is_asked_again_and_waited_for() {
         let mut line = String::new();
         BufReader::new(&conn).read_line(&mut line).unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
-        std::thread::sleep(Duration::from_millis(3500));
-        let _ = conn.write_all(format!("{}\n", opened(&request)).as_bytes());
+        let reply = format!("{}\n", opened(&request));
+        // Reported before the slow answer, as `fake` reports.
         let _ = sent.send(request);
+        std::thread::sleep(Duration::from_millis(3500));
+        let _ = conn.write_all(reply.as_bytes());
     });
     let output = f.command("chan-edit").arg("notes.md").output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));

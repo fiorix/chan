@@ -211,6 +211,14 @@ mod linux {
             return;
         }
 
+        // A desktop an older release started holds that release's mount
+        // blocks after its own in each search path AppRun prepends to,
+        // directories under /tmp that go when that process exits and that
+        // every child of this one would search (WebKit's processes, Qt and
+        // Python helpers). Dropped here, single-threaded, where the marker is
+        // consumed too; LD_LIBRARY_PATH once no re-exec has taken it.
+        drop_foreign_apprun_blocks(|key| key != "LD_LIBRARY_PATH");
+
         // Independent, cheap layer: keep WebKit off the dma-buf renderer path
         // that aborts with EGL_BAD_PARAMETER on the affected GPUs. WebKit reads
         // this lazily at webview init (no re-exec needed) and it is inherited
@@ -221,6 +229,27 @@ mod linux {
             "bundled" => {}
             "system" => apply(true),
             _ => apply(false), // auto (default)
+        }
+
+        // Here when no re-exec was made, or in the image a re-exec started,
+        // whose loader path the re-exec already wrote without them.
+        drop_foreign_apprun_blocks(|key| key == "LD_LIBRARY_PATH");
+    }
+
+    /// Put in place of each of the [`chan_server::APPRUN_SEARCH_PATHS`] that
+    /// `keys` takes the value without an older parent's blocks
+    /// ([`chan_server::without_foreign_apprun_blocks`]), where it holds any.
+    /// Only while the process is single-threaded.
+    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {
+        for key in chan_server::APPRUN_SEARCH_PATHS {
+            if !keys(key) {
+                continue;
+            }
+            if let Some(value) =
+                chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)
+            {
+                std::env::set_var(key, value);
+            }
         }
     }
 
@@ -252,16 +281,7 @@ mod linux {
             Err(e) => return bail(force, &format!("current_exe() failed: {e}")),
         };
 
-        // Prepend the host lib dir so the loader resolves libgtk /
-        // libwebkit2gtk / libEGL / libgbm to the host copies, falling back to
-        // the bundle for anything the host lacks.
-        let mut ld_path = system_dir;
-        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-            if !existing.is_empty() {
-                ld_path.push(":");
-                ld_path.push(existing);
-            }
-        }
+        let ld_path = reexec_ld_path(system_dir, std::env::vars_os());
 
         let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
         // execv replaces the image on success and returns only on failure.
@@ -273,6 +293,39 @@ mod linux {
             std::process::exit(1);
         }
         eprintln!("chan: system-GUI-stack re-exec failed ({err}); continuing on bundled stack");
+    }
+
+    /// The loader path the re-exec hands its new image: the host lib dir
+    /// first, so the loader resolves libgtk / libwebkit2gtk / libEGL / libgbm
+    /// to the host copies, then this process's `LD_LIBRARY_PATH` falling back
+    /// to the bundle for anything the host lacks, without the block of any
+    /// mount but this one's, which an older release that started this process
+    /// handed down, its re-exec directory ahead of its block included, and
+    /// without the empty entry AppRun's separator leaves when the user had no
+    /// `LD_LIBRARY_PATH`, which would have the desktop and its WebKit
+    /// processes search their current directory for libraries
+    /// ([`chan_server::own_apprun_value`]).
+    fn reexec_ld_path(
+        system_dir: OsString,
+        vars: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> OsString {
+        let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+        let existing = chan_server::own_apprun_value(
+            "LD_LIBRARY_PATH",
+            vars.iter().cloned(),
+            Some(system_dir.as_os_str()),
+        )
+        .or_else(|| {
+            vars.into_iter()
+                .find(|(key, _)| key == "LD_LIBRARY_PATH")
+                .map(|(_, value)| value)
+        });
+        let mut ld_path = system_dir;
+        if let Some(existing) = existing.filter(|existing| !existing.is_empty()) {
+            ld_path.push(":");
+            ld_path.push(existing);
+        }
+        ld_path
     }
 
     /// Whether this process is the re-exec [`reexec_command`] started: the
@@ -452,7 +505,7 @@ mod linux {
     mod tests {
         use super::{
             dma_buf_disabled, ldconfig_cache_with, nvidia_proprietary_driver, reexec_command,
-            reexec_done, renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
+            reexec_done, reexec_ld_path, renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
         };
         use std::ffi::{OsStr, OsString};
         use std::fs;
@@ -552,6 +605,114 @@ mod linux {
                 .output()
                 .expect("run a child shell");
             assert_eq!(child.stdout, b"unset", "a child inherits no marker");
+        }
+
+        /// The re-exec's loader path puts the host directory first, then this
+        /// process's value without an older parent's chained block; a value
+        /// with nothing foreign follows as it is, and none gives the host
+        /// directory alone.
+        #[test]
+        fn the_reexec_loader_path_drops_an_older_parents_block() {
+            let mount = "/tmp/.mount_ChanNEW";
+            let block = |dir: &str| {
+                [
+                    "usr/lib/",
+                    "usr/lib/i386-linux-gnu/",
+                    "usr/lib/x86_64-linux-gnu/",
+                    "usr/lib32/",
+                    "usr/lib64/",
+                    "lib/",
+                    "lib/i386-linux-gnu/",
+                    "lib/x86_64-linux-gnu/",
+                    "lib32/",
+                    "lib64/",
+                ]
+                .map(|entry| format!("{dir}/{entry}"))
+                .join(":")
+            };
+            let host = "/usr/lib/x86_64-linux-gnu";
+            let vars = |ld: String| -> Vec<(OsString, OsString)> {
+                vec![
+                    ("APPDIR".into(), mount.into()),
+                    ("LD_LIBRARY_PATH".into(), ld.into()),
+                ]
+            };
+            let handed = format!(
+                "{}:{host}:{}:/opt/a/lib",
+                block(mount),
+                block("/tmp/.mount_ChanOLD")
+            );
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(handed)),
+                OsString::from(format!("{host}:{}:/opt/a/lib", block(mount)))
+            );
+            let own = format!("{}:/opt/a/lib", block(mount));
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(own.clone())),
+                OsString::from(format!("{host}:{own}"))
+            );
+            // A user with no LD_LIBRARY_PATH: AppRun's trailing separator
+            // goes, so the loader does not search the current directory; one
+            // the user wrote stays.
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(format!("{}:", block(mount)))),
+                OsString::from(format!("{host}:{}", block(mount)))
+            );
+            assert_eq!(
+                reexec_ld_path(host.into(), vars(format!("{}::/opt/a/lib", block(mount)))),
+                OsString::from(format!("{host}:{}::/opt/a/lib", block(mount)))
+            );
+            assert_eq!(
+                reexec_ld_path(host.into(), Vec::new()),
+                OsString::from(host)
+            );
+        }
+
+        /// `prefer_system_gui_stack` drops an older parent's blocks from each
+        /// search path of this process's own but `LD_LIBRARY_PATH` before
+        /// anything else it does, while single-threaded, and from
+        /// `LD_LIBRARY_PATH` once no re-exec has taken it; each key's value is
+        /// `without_foreign_apprun_blocks`', tested in chan-library. A source
+        /// pin.
+        #[test]
+        fn the_boot_drops_an_older_parents_blocks_from_each_search_path() {
+            const SELF: &str = include_str!("linux_gui_stack.rs");
+            let boot = SELF
+                .split_once("    pub fn prefer_system_gui_stack() {")
+                .expect("the boot")
+                .1;
+            let boot = boot
+                .split_once("\n    fn apply(force: bool) {")
+                .expect("apply follows the boot")
+                .0;
+            let order = [
+                "drop_foreign_apprun_blocks(|key| key != \"LD_LIBRARY_PATH\");",
+                "set_webkit_env_defaults();",
+                "match std::env::var(POLICY_ENV)",
+                "drop_foreign_apprun_blocks(|key| key == \"LD_LIBRARY_PATH\");",
+            ];
+            let at: Vec<usize> = order
+                .iter()
+                .map(|step| {
+                    boot.find(step)
+                        .unwrap_or_else(|| panic!("the boot runs {step}"))
+                })
+                .collect();
+            assert!(
+                at.windows(2).all(|pair| pair[0] < pair[1]),
+                "{order:?} in order"
+            );
+            let helper = boot
+                .split_once("    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {")
+                .expect("the helper")
+                .1;
+            for step in [
+                "for key in chan_server::APPRUN_SEARCH_PATHS {",
+                "chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)",
+                "std::env::set_var(key, value);",
+            ] {
+                assert!(helper.contains(step), "the helper runs {step}");
+            }
         }
 
         /// A process without the marker re-execs itself with its own

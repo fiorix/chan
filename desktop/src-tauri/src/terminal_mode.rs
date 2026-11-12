@@ -287,7 +287,7 @@ fn spawn_exit_watcher(app: tauri::AppHandle, state: Arc<AppState>, mode: Arc<Ter
 pub(crate) fn spawn_sibling(mode: &TerminalMode) {
     let (exe, appimage) = sibling_executable();
     let args = sibling_args(&mode.cwd, mode.launch.app_id.as_deref());
-    match sibling_command(&exe, &args, appimage).spawn() {
+    match sibling_command(&exe, &args, appimage, std::env::vars_os()).spawn() {
         Ok(mut child) => {
             // Reap what was spawned so it never lingers as a zombie.
             std::thread::spawn(move || {
@@ -307,8 +307,16 @@ pub(crate) fn spawn_sibling(mode: &TerminalMode) {
 /// shell re-parses. The sibling must run as `chan-term`: the dispatch reads
 /// `$ARGV0` first, which the sibling drops once it has dispatched, and an
 /// AppImage's runtime sets `$ARGV0` from the `argv[0]` it is run with, which
-/// bash's `exec -a` chooses (the shim wrappers' route).
-fn sibling_command(exe: &Path, args: &[OsString], appimage: bool) -> std::process::Command {
+/// bash's `exec -a` chooses (the shim wrappers' route). An AppImage sibling
+/// is the AppImage again, so it is handed the environment the user had
+/// rather than `parent`, this process's, whose search paths name this
+/// process's mount ([`chan_server::hand_appimage_host_env`]).
+fn sibling_command(
+    exe: &Path,
+    args: &[OsString],
+    appimage: bool,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) -> std::process::Command {
     #[cfg(unix)]
     {
         let mut command = if appimage {
@@ -321,12 +329,13 @@ fn sibling_command(exe: &Path, args: &[OsString], appimage: bool) -> std::proces
             sh.arg("-c").arg("\"$0\" \"$@\" &");
             sh
         };
+        chan_server::hand_appimage_host_env(&mut command, parent);
         command.arg(exe).args(args).env("ARGV0", chan::term::NAME);
         command
     }
     #[cfg(not(unix))]
     {
-        let _ = appimage;
+        let _ = (appimage, parent.into_iter());
         let mut command = std::process::Command::new(exe);
         command.args(args).env("ARGV0", chan::term::NAME);
         command
@@ -461,7 +470,7 @@ mod tests {
                 .find(|(key, _)| *key == "ARGV0")
                 .and_then(|(_, value)| value.map(OsStr::to_os_string))
         };
-        let plain = sibling_command(Path::new("/usr/bin/chan-desktop"), &argv, false);
+        let plain = sibling_command(Path::new("/usr/bin/chan-desktop"), &argv, false, Vec::new());
         assert_eq!(
             program(&plain),
             args(&[
@@ -474,7 +483,7 @@ mod tests {
             ])
         );
         assert_eq!(argv0(&plain), Some(OsString::from("chan-term")));
-        let appimage = sibling_command(Path::new("/opt/Chan.AppImage"), &argv, true);
+        let appimage = sibling_command(Path::new("/opt/Chan.AppImage"), &argv, true, Vec::new());
         assert_eq!(
             program(&appimage),
             args(&[
@@ -487,6 +496,78 @@ mod tests {
             ])
         );
         assert_eq!(argv0(&appimage), Some(OsString::from("chan-term")));
+    }
+
+    /// An AppImage sibling is the AppImage again: it gets the user's search
+    /// paths and none of this process's mount, after the parent's own re-exec
+    /// directory too, with and without a user `LD_LIBRARY_PATH`, and still
+    /// runs as `chan-term`. A sibling of a desktop that is no AppImage keeps
+    /// the parent's environment but `ARGV0`.
+    #[cfg(unix)]
+    #[test]
+    fn an_appimage_sibling_gets_the_users_environment_not_this_mount() {
+        let mount = "/tmp/.mount_ChanPAR";
+        let ld = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]
+        .map(|entry| format!("{mount}/{entry}"))
+        .join(":");
+        let parent = |user_ld: &str| -> Vec<(OsString, OsString)> {
+            [
+                ("APPDIR", mount.to_string()),
+                ("APPIMAGE", "/opt/Chan.AppImage".to_string()),
+                ("ARGV0", "chan-term".to_string()),
+                (
+                    "LD_LIBRARY_PATH",
+                    format!("/usr/lib/x86_64-linux-gnu:{ld}:{user_ld}"),
+                ),
+                (
+                    "XDG_DATA_DIRS",
+                    format!("{mount}/usr/share/:{mount}/usr/share:/usr/share:/usr/local/share"),
+                ),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect()
+        };
+        let argv = args(&["--dir=/w", "--app-id=org.x"]);
+        for (user_ld, want) in [
+            ("", None),
+            ("/opt/a/lib", Some(OsString::from("/opt/a/lib"))),
+        ] {
+            let command = sibling_command(
+                Path::new("/opt/Chan.AppImage"),
+                &argv,
+                true,
+                parent(user_ld),
+            );
+            let env = |key: &str| {
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.map(OsStr::to_os_string))
+            };
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(want), "{user_ld:?}");
+            assert_eq!(
+                env("XDG_DATA_DIRS"),
+                Some(Some(OsString::from("/usr/local/share")))
+            );
+            assert_eq!(env("APPDIR"), Some(None));
+            assert_eq!(env("APPIMAGE"), Some(None));
+            assert_eq!(env("ARGV0"), Some(Some(OsString::from("chan-term"))));
+        }
+        let plain = sibling_command(Path::new("/usr/bin/chan-desktop"), &argv, false, Vec::new());
+        let keys: Vec<&OsStr> = plain.get_envs().map(|(key, _)| key).collect();
+        assert_eq!(keys, [OsStr::new("ARGV0")]);
     }
 
     #[test]

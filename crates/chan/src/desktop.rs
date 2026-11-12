@@ -281,7 +281,9 @@ pub(super) fn spawn_desktop_gui_opening(
 ) -> std::io::Result<Option<std::process::Child>> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().ok();
-    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    // This process's own AppImage only: a deb's chan started under another
+    // application's AppImage environment must not start that AppImage.
+    let appimage = chan_server::own_appimage();
     let start = desktop_start(
         &exe,
         resolved.as_deref(),
@@ -292,9 +294,11 @@ pub(super) fn spawn_desktop_gui_opening(
         DesktopStart::Bundle(bundle) => macos_open_command(&bundle, paths, terminal)
             .spawn()
             .map(|_| None),
-        DesktopStart::Binary(target) => desktop_gui_command(&target, paths, terminal)
-            .spawn()
-            .map(Some),
+        DesktopStart::Binary(target) => {
+            desktop_gui_command(&target, paths, terminal, std::env::vars_os())
+                .spawn()
+                .map(Some)
+        }
     }
 }
 
@@ -416,18 +420,23 @@ fn macos_open_command(
 /// or the `terminal` a `chan-term` asked for, which goes in
 /// [`OPEN_TERMINAL_ENV`](chan_server::handoff::OPEN_TERMINAL_ENV) and is
 /// removed from the environment otherwise, so an inherited one never opens a
-/// terminal nobody asked for.
+/// terminal nobody asked for. Under an AppImage the target is the AppImage
+/// again, so the desktop is handed the environment the user had rather than
+/// `parent`, this process's, whose search paths name this process's mount
+/// ([`chan_server::hand_appimage_host_env`]).
 #[cfg(unix)]
 fn desktop_gui_command(
     target: &Path,
     paths: &[String],
     terminal: Option<&str>,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> std::process::Command {
     use chan_server::handoff::OPEN_TERMINAL_ENV;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let mut command = Command::new(target);
+    chan_server::hand_appimage_host_env(&mut command, parent);
     match terminal {
         Some(dir) => command.env(OPEN_TERMINAL_ENV, dir),
         None => command.env_remove(OPEN_TERMINAL_ENV),
@@ -749,7 +758,7 @@ mod tests {
                 .map(|(_, value)| value.map(OsStr::to_os_string))
         };
         let target = Path::new("/usr/bin/chan-desktop");
-        let terminal = desktop_gui_command(target, &[], Some("/srv/notes"));
+        let terminal = desktop_gui_command(target, &[], Some("/srv/notes"), Vec::new());
         assert_eq!(terminal.get_program(), target.as_os_str());
         assert_eq!(terminal.get_args().count(), 0);
         assert_eq!(
@@ -758,7 +767,7 @@ mod tests {
         );
         assert_eq!(env(&terminal, "ARGV0"), Some(None), "ARGV0 is removed");
         let paths = ["/srv/a.md".to_string(), "/srv/docs".to_string()];
-        let opener = desktop_gui_command(target, &paths, None);
+        let opener = desktop_gui_command(target, &paths, None, Vec::new());
         assert_eq!(
             opener.get_args().collect::<Vec<_>>(),
             ["/srv/a.md", "/srv/docs"]
@@ -1011,6 +1020,110 @@ mod tests {
                 "an inherited carrier is removed"
             );
         }
+    }
+
+    /// An AppImage desktop's environment as its runtime, the GTK hook and
+    /// the GUI-stack re-exec leave it, over a user `PATH` and, when given,
+    /// `LD_LIBRARY_PATH`: the entries are AppRun's format strings.
+    #[cfg(unix)]
+    fn appimage_parent(
+        appdir: &str,
+        user_ld: Option<&str>,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let block = |entries: &[&str]| {
+            entries
+                .iter()
+                .map(|entry| format!("{appdir}/{entry}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        let ld = block(&[
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]);
+        let path = block(&["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]);
+        [
+            ("APPDIR", appdir.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+            ("ARGV0", "chan-term".into()),
+            ("OWD", "/home/u".into()),
+            ("PATH", format!("{path}:/usr/local/bin:/usr/bin")),
+            (
+                "LD_LIBRARY_PATH",
+                format!("/usr/lib/x86_64-linux-gnu:{ld}:{}", user_ld.unwrap_or("")),
+            ),
+            (
+                "XDG_DATA_DIRS",
+                format!("{appdir}/usr/share/:{appdir}/usr/share:/usr/share:"),
+            ),
+            ("GTK_PATH", format!("{appdir}//usr/lib/gtk-3.0")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    /// The desktop a command starts from an AppImage is the AppImage again,
+    /// and gets the user's search paths and nothing of this process's
+    /// mount, with and without a user `LD_LIBRARY_PATH`; its own runtime
+    /// then adds one block. A parent that is no AppImage process hands its
+    /// environment on unchanged: the command touches only its own keys.
+    #[cfg(unix)]
+    #[test]
+    fn the_started_desktop_gets_the_users_environment_not_this_mount() {
+        use std::ffi::{OsStr, OsString};
+        let appdir = "/tmp/.mount_ChanCLI";
+        let target = Path::new("/home/u/Applications/Chan.AppImage");
+        for (user_ld, want_ld) in [(None, None), (Some("/opt/a/lib"), Some("/opt/a/lib"))] {
+            let command = desktop_gui_command(
+                target,
+                &[],
+                Some("/srv/notes"),
+                appimage_parent(appdir, user_ld),
+            );
+            let envs: Vec<(OsString, Option<OsString>)> = command
+                .get_envs()
+                .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
+                .collect();
+            let env = |key: &str| {
+                envs.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(env("PATH"), Some(Some("/usr/local/bin:/usr/bin".into())));
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(want_ld.map(OsString::from)));
+            assert_eq!(env("XDG_DATA_DIRS"), Some(None));
+            for gone in ["APPDIR", "APPIMAGE", "OWD", "GTK_PATH", "ARGV0"] {
+                assert_eq!(env(gone), Some(None), "{gone}");
+            }
+            for (key, value) in &envs {
+                assert!(
+                    !value
+                        .as_ref()
+                        .is_some_and(|value| value.to_string_lossy().contains(appdir)),
+                    "{key:?} keeps the parent's mount"
+                );
+            }
+        }
+        let host: Vec<(OsString, OsString)> = appimage_parent(appdir, Some("/opt/a/lib"))
+            .into_iter()
+            .filter(|(key, _)| key != "APPDIR" && key != "APPIMAGE")
+            .collect();
+        let command = desktop_gui_command(target, &[], None, host);
+        let keys: Vec<&OsStr> = command.get_envs().map(|(key, _)| key).collect();
+        assert_eq!(
+            keys.len(),
+            2,
+            "only the carrier and ARGV0 are removed: {keys:?}"
+        );
     }
 
     #[cfg(unix)]

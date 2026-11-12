@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -349,8 +348,6 @@ fn default_profile(id: &str, name: &str, program: PathBuf, kind: ShellKind) -> S
 ///   4. `%ComSpec%` / `cmd.exe`.
 #[cfg(windows)]
 fn resolve_windows_shell() -> ShellProfile {
-    use std::process::Command;
-
     // 1. Explicit override.
     if let Some(raw) = std::env::var_os("CHAN_SHELL").filter(|v| !v.is_empty()) {
         let program = PathBuf::from(raw);
@@ -425,34 +422,118 @@ pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, S
     ])
 }
 
-/// Keys the AppImage runtime and linuxdeploy's GTK hook invent whose value
-/// holds no mount path, so the value scan in [`scrub_var`] cannot see them.
-/// `GDK_BACKEND` pins GTK children to X11, which drops every GTK app launched
-/// from a terminal onto XWayland; `ARGV0` is read ahead of `argv[0]` by
-/// `chan_shell::invoked_arg0`, so an inherited copy misnames a re-exec'd chan.
-const APPIMAGE_OPAQUE_KEYS: &[&str] = &[
-    "APPIMAGE",
-    "APPIMAGE_GTK_THEME",
-    "ARGV0",
-    "GDK_BACKEND",
-    "GTK_THEME",
-    "OWD",
-];
+/// Keys the AppImage runtime and its AppRun set for every process they start,
+/// whose value holds no mount path, so the value scan in [`scrub_var`] cannot
+/// see them. `ARGV0` is read ahead of `argv[0]` by `chan_shell::invoked_arg0`,
+/// so an inherited copy misnames a re-exec'd chan. AppRun sets
+/// `PYTHONDONTWRITEBYTECODE=1` over whatever the user had, so a terminal's
+/// Python would stop writing bytecode caches; the user's own value is lost
+/// before chan runs, and a terminal gets none. A child that is itself an
+/// AppImage process gets each of them again from its own runtime.
+const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD", "PYTHONDONTWRITEBYTECODE"];
+
+/// Keys linuxdeploy's GTK hook reads whose value holds no mount path. A
+/// terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK children
+/// to X11, which drops every GTK app launched from a terminal onto XWayland.
+/// A child AppImage process keeps them, since its own hook reads
+/// `APPIMAGE_GTK_THEME` as the user's override, and a `GDK_BACKEND` the hook
+/// no longer sets is the user's.
+const APPIMAGE_GTK_KEYS: &[&str] = &["APPIMAGE_GTK_THEME", "GDK_BACKEND"];
+
+/// The theme linuxdeploy's GTK hook sets, the bundle's, which no child keeps:
+/// a child AppImage process's own hook sets it again, and a child that is no
+/// AppImage process (the devserver daemon through a native `chan`) would hand
+/// it to its terminals with no scrub of its own to drop it.
+const APPIMAGE_GTK_THEME_KEY: &str = "GTK_THEME";
+
+/// Who is handed the environment the user had before a chan AppImage process
+/// started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostEnvFor {
+    /// A terminal's shell or command.
+    Terminal,
+    /// Another AppImage process of chan's, whose own runtime and GTK hook
+    /// build the AppImage's environment again on top of the user's.
+    AppImage,
+}
 
 /// Search paths the runtime prepends its own entries to rather than inventing
 /// outright. Its AppRun writes each as its block of mount entries, then a
-/// separator, then the value the user had, empty when there was none, so the
-/// user's value is exactly what follows the last mount entry ([`host_value`]).
+/// separator, then the value it was handed, empty when there was none, so the
+/// user's value is what follows this mount's block and the blocks that chain
+/// from it ([`host_value`]).
 /// They are rewritten to that value, never dropped while it holds anything:
 /// removing `PATH` would leave the shell unable to resolve a command at all.
-const APPIMAGE_PREPENDED_KEYS: &[&str] = &["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS"];
+/// Two keys AppRun writes look alike and are not here, so the value scan drops
+/// them whole: the GTK hook sets `GSETTINGS_SCHEMA_DIR` outright, losing the
+/// user's value before AppRun prepends to it, and AppRun follows its
+/// `GST_PLUGIN_SYSTEM_PATH` and `GST_PLUGIN_SYSTEM_PATH_1_0` entries with the
+/// user's `QT_PLUGIN_PATH`, not their own value.
+const APPIMAGE_PREPENDED_KEYS: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "XDG_DATA_DIRS",
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
+];
+
+/// The search paths AppRun writes as a block of mount entries ahead of a
+/// value it was handed: `PATH`, `LD_LIBRARY_PATH`, `XDG_DATA_DIRS`,
+/// `PYTHONPATH`, `PERLLIB` and `QT_PLUGIN_PATH`, whose value there is the
+/// user's, and the two GStreamer paths, which AppRun follows with the
+/// `QT_PLUGIN_PATH` it was handed instead. A desktop an older release started
+/// holds that release's blocks after its own in each of them
+/// ([`without_foreign_apprun_blocks`]).
+pub const APPRUN_SEARCH_PATHS: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "XDG_DATA_DIRS",
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+];
 
 /// The host entry linuxdeploy's GTK hook writes right after its own mount
 /// entry, ahead of the user's value: `$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS`.
 const GTK_HOOK_XDG_DATA_DIR: &str = "/usr/share";
 
+/// This AppImage process's mount, or its extract-and-run directory, under the
+/// two names its entries use. The runtime names the directory under `$TMPDIR`
+/// as given, so through a link when `$TMPDIR` is one, and sets `$APPDIR` to
+/// that name, which the GTK hook's entries follow; AppRun.wrapped builds its
+/// own entries (the `PATH`, `LD_LIBRARY_PATH`, Python, Perl, Qt and GStreamer
+/// blocks, `PYTHONHOME`, and the first `XDG_DATA_DIRS` entry) from its
+/// resolved executable path. An entry under either name is this mount's.
+struct Mount {
+    named: PathBuf,
+    resolved: Option<PathBuf>,
+}
+
+impl Mount {
+    /// The mount `$APPDIR` names, resolved when it can be.
+    fn new(appdir: &OsStr) -> Self {
+        let named = PathBuf::from(appdir);
+        let resolved = named.canonicalize().ok();
+        Self { named, resolved }
+    }
+
+    /// Whether `entry` lies inside this mount, under either of its names.
+    /// The match is by path component, so a second AppImage whose mount id
+    /// merely starts with this one's is not mistaken for this one.
+    fn holds(&self, entry: &Path) -> bool {
+        entry.starts_with(&self.named)
+            || self
+                .resolved
+                .as_deref()
+                .is_some_and(|resolved| entry.starts_with(resolved))
+    }
+}
+
 /// What scrubbing one variable does to it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Scrub {
     /// Drop the key: it exists only to point at the bundle.
     Remove,
@@ -460,12 +541,9 @@ enum Scrub {
     Rewrite(OsString),
 }
 
-/// Whether any `PATH`-style entry of `value` resolves inside the mount.
-/// Splitting before comparing keeps the match component-aware, so a second
-/// AppImage whose mount id merely starts with this one's is not mistaken for
-/// part of this bundle.
-fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
-    std::env::split_paths(value).any(|entry| entry.starts_with(appdir))
+/// Whether any `PATH`-style entry of `value` lies inside the mount.
+fn entry_in_bundle(mount: &Mount, value: &OsStr) -> bool {
+    std::env::split_paths(value).any(|entry| mount.holds(&entry))
 }
 
 /// Plan the scrub for one variable, or `None` to leave it alone. Pure, so the
@@ -475,10 +553,10 @@ fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
 /// honest across a Tauri or linuxdeploy bump: a plugin that starts exporting
 /// some new bundle-scoped key is caught the day it appears, with no list here
 /// to forget to update. Only the keys whose value hides the mount need naming.
-fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
+fn scrub_var(mount: &Mount, key: &str, value: &OsStr, to: HostEnvFor) -> Option<Scrub> {
     if APPIMAGE_PREPENDED_KEYS.contains(&key) {
         let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
-        let host = host_value(appdir, key, &entries)?;
+        let host = host_value(mount, key, &entries, None)?;
         // Nothing left, or the lone empty entry AppRun's separator leaves
         // when the user had no value, means the runtime created the variable
         // outright (it does this for LD_LIBRARY_PATH and XDG_DATA_DIRS on
@@ -489,34 +567,309 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
             _ => Scrub::Remove,
         });
     }
-    if APPIMAGE_OPAQUE_KEYS.contains(&key) || entry_in_bundle(appdir, value) {
+    if to == HostEnvFor::AppImage && APPIMAGE_GTK_KEYS.contains(&key) {
+        return None;
+    }
+    if APPIMAGE_RUNTIME_KEYS.contains(&key)
+        || APPIMAGE_GTK_KEYS.contains(&key)
+        || key == APPIMAGE_GTK_THEME_KEY
+        || entry_in_bundle(mount, value)
+    {
         return Some(Scrub::Remove);
     }
     None
 }
 
-/// The entries of a prepended key the user had: those after its last entry
-/// inside the mount, or `None` when no entry is inside it (the value is the
-/// user's as it stands). Whatever comes before that entry is not the user's:
-/// the runtime's own block, and what chan prepended to it afterwards, the
-/// host library directory the AppImage's GUI-stack re-exec puts first in
-/// `LD_LIBRARY_PATH` among them. Everything after it is the user's value as
-/// they wrote it, an empty entry of theirs included. For `XDG_DATA_DIRS` the
-/// GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] directly after the mount entries is
-/// the hook's too.
-fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'a [PathBuf]> {
-    let last = entries
-        .iter()
-        .rposition(|entry| entry.starts_with(appdir))?;
-    let host = &entries[last + 1..];
-    Some(match host.split_first() {
-        Some((first, rest))
-            if key == "XDG_DATA_DIRS" && first.as_path() == Path::new(GTK_HOOK_XDG_DATA_DIR) =>
-        {
-            rest
+/// The entries of a prepended key the user had, or `None` when the value is
+/// the user's as it stands. AppRun writes the key as this mount's block, then
+/// the value it was handed; chan's GUI-stack re-exec then puts its host
+/// library directory first in `LD_LIBRARY_PATH`. So everything up to this
+/// mount's last entry is the runtime's or chan's. A chan process of an older
+/// release that started this one handed down its own environment, whose block
+/// follows this one's: whole AppRun blocks that chain on from this mount's
+/// ([`apprun_block_at`]), with only the re-exec's directory between them in
+/// the sibling shape, are that process's and go too. That directory is the
+/// entry ahead of this mount's block once this process has re-exec'd, or
+/// `reexec_dir`, the one the re-exec is about to prepend, before it has; for
+/// `XDG_DATA_DIRS`
+/// the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] after each block is the hook's.
+/// What follows is the user's value as they wrote it, an empty entry of
+/// theirs included, minus any whole AppRun block another AppImage leaked into
+/// it, which goes by its own entries so the user's entries around it stay.
+/// The blocks that chain on, and the leaked ones, are `key`'s own, but for
+/// the two GStreamer paths, whose tail is the `QT_PLUGIN_PATH` AppRun was
+/// handed ([`chained_block_key`]).
+fn host_value(
+    mount: &Mount,
+    key: &str,
+    entries: &[PathBuf],
+    reexec_dir: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
+    let tail = chained_block_key(key);
+    let start = match entries.iter().rposition(|entry| mount.holds(entry)) {
+        Some(last) => {
+            let first = entries
+                .iter()
+                .position(|entry| mount.holds(entry))
+                .unwrap_or(last);
+            // The directory the re-exec prepends ahead of this mount's block.
+            let reexec = (key == "LD_LIBRARY_PATH")
+                .then(|| {
+                    reexec_dir.or_else(|| first.checked_sub(1).map(|at| entries[at].as_path()))
+                })
+                .flatten();
+            let mut at = after_gtk_hook(key, entries, last + 1);
+            loop {
+                let next = match reexec {
+                    Some(dir) if entries.get(at).map(PathBuf::as_path) == Some(dir) => at + 1,
+                    _ => at,
+                };
+                match apprun_block_at(tail, entries, next) {
+                    Some(end) => at = after_gtk_hook(key, entries, end + 1),
+                    None => break,
+                }
+            }
+            at
         }
-        _ => host,
-    })
+        None => 0,
+    };
+    let rest = &entries[start..];
+    let user = without_whole_blocks(tail, rest);
+    (start > 0 || user.len() < rest.len()).then_some(user)
+}
+
+/// The key whose AppRun blocks follow this mount's block in `key`: AppRun
+/// writes `GST_PLUGIN_SYSTEM_PATH` and `GST_PLUGIN_SYSTEM_PATH_1_0` as one
+/// entry of its mount and then the `QT_PLUGIN_PATH` it was handed, so an
+/// older parent's Qt block, then the user's `QT_PLUGIN_PATH`, follow there.
+fn chained_block_key(key: &str) -> &str {
+    match key {
+        "GST_PLUGIN_SYSTEM_PATH" | "GST_PLUGIN_SYSTEM_PATH_1_0" => "QT_PLUGIN_PATH",
+        _ => key,
+    }
+}
+
+/// `at`, or past the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] when that is the
+/// entry at `at` of `XDG_DATA_DIRS`.
+fn after_gtk_hook(key: &str, entries: &[PathBuf], at: usize) -> usize {
+    match entries.get(at) {
+        Some(entry)
+            if key == "XDG_DATA_DIRS" && entry.as_path() == Path::new(GTK_HOOK_XDG_DATA_DIR) =>
+        {
+            at + 1
+        }
+        _ => at,
+    }
+}
+
+/// `entries` without the whole AppRun blocks of `key` in it, each removed by
+/// its own entries, whatever directory it names.
+fn without_whole_blocks(key: &str, entries: &[PathBuf]) -> Vec<PathBuf> {
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut at = 0;
+    while at < entries.len() {
+        match apprun_block_at(key, entries, at) {
+            Some(end) => at = end + 1,
+            None => {
+                kept.push(entries[at].clone());
+                at += 1;
+            }
+        }
+    }
+    kept
+}
+
+/// `value`, a search path for `key`, without the whole AppRun blocks of any
+/// AppImage's mount in it, the entries around them kept in order. For a
+/// value chan recorded from an AppImage process before it knew to hand on the
+/// user's, such as the `PATH` an older release wrote into the devserver's
+/// systemd unit: the mount it names is gone, and its directories under `/tmp`
+/// are anyone's to create.
+pub fn without_apprun_blocks(key: &str, value: &OsStr) -> OsString {
+    let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
+    let kept = without_whole_blocks(key, &entries);
+    if kept.len() == entries.len() {
+        return value.to_os_string();
+    }
+    std::env::join_paths(kept).unwrap_or_default()
+}
+
+/// `key` of `vars`, this process's environment, without the AppRun blocks of
+/// any mount but this process's own: everything up to this mount's last
+/// entry kept (with the GTK hook's `/usr/share` after it in
+/// `XDG_DATA_DIRS`), and the rest as the user had it, as a terminal gets it.
+/// `None` when there is nothing to drop, and off an AppImage. A desktop an
+/// older release started still holds that release's blocks after its own in
+/// each of the [`APPRUN_SEARCH_PATHS`], naming a mount that goes when that
+/// process exits; this is the value to put in their place, the one AppRun
+/// would have written from the user's environment. `reexec_dir` is the
+/// directory the GUI-stack re-exec is about to put ahead of this mount's
+/// block in `LD_LIBRARY_PATH`, which the older release's re-exec put ahead of
+/// its block too.
+pub fn without_foreign_apprun_blocks(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<OsString> {
+    let (own, user, len) = own_and_users_entries(key, vars, reexec_dir)?;
+    if own.len() + user.len() == len {
+        return None;
+    }
+    std::env::join_paths(own.into_iter().chain(user)).ok()
+}
+
+/// `key` of `vars` as [`without_foreign_apprun_blocks`] gives it, or as it
+/// stands when there is nothing to drop, and without the lone empty entry
+/// AppRun's separator leaves after this mount's block when the user had no
+/// value of their own: for a process this one re-execs into, whose loader
+/// would read that entry as its current directory. AppRun writes the key as
+/// its block, a separator, then the user's value, so what the user wrote
+/// follows the separator: one empty entry and nothing else there is
+/// AppRun's; an empty entry next to another one, or to an entry of theirs, is
+/// the user's and stays. A user who set the key to the empty string cannot be
+/// told from one who left it unset, and to the loader the two are alike.
+/// `None` off an AppImage or when the key holds no entry of this mount.
+pub fn own_apprun_value(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<OsString> {
+    let (own, mut user, _) = own_and_users_entries(key, vars, reexec_dir)?;
+    if user == [PathBuf::new()] {
+        user.clear();
+    }
+    std::env::join_paths(own.into_iter().chain(user)).ok()
+}
+
+/// `key` of `vars` split into this process's own entries, up to its mount's
+/// last one, and the user's after the blocks that chain on from them, with
+/// the number of entries the value had. `None` off an AppImage, or when the
+/// key holds no entry of this mount.
+fn own_and_users_entries(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<(Vec<PathBuf>, Vec<PathBuf>, usize)> {
+    let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+    let value_of = |name: &str| {
+        vars.iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty())
+    };
+    let mount = Mount::new(value_of("APPDIR")?);
+    let entries: Vec<PathBuf> = std::env::split_paths(value_of(key)?).collect();
+    let own_last = entries.iter().rposition(|entry| mount.holds(entry))?;
+    let own = entries[..after_gtk_hook(key, &entries, own_last + 1)].to_vec();
+    let user = host_value(&mount, key, &entries, reexec_dir.map(Path::new))?;
+    Some((own, user, entries.len()))
+}
+
+/// AppRun's block for `key`: the entries it writes ahead of the user's value,
+/// each one directory of its mount followed by these suffixes in this order
+/// (its format strings, and for `XDG_DATA_DIRS` the GTK hook's entry after
+/// its own).
+fn apprun_block(key: &str) -> &'static [&'static str] {
+    match key {
+        "LD_LIBRARY_PATH" => &[
+            "/usr/lib/",
+            "/usr/lib/i386-linux-gnu/",
+            "/usr/lib/x86_64-linux-gnu/",
+            "/usr/lib32/",
+            "/usr/lib64/",
+            "/lib/",
+            "/lib/i386-linux-gnu/",
+            "/lib/x86_64-linux-gnu/",
+            "/lib32/",
+            "/lib64/",
+        ],
+        "PATH" => &["/usr/bin/", "/usr/sbin/", "/usr/games/", "/bin/", "/sbin/"],
+        "XDG_DATA_DIRS" => &["/usr/share/", "/usr/share"],
+        "PYTHONPATH" => &["/usr/share/pyshared/"],
+        "PERLLIB" => &["/usr/share/perl5/", "/usr/lib/perl5/"],
+        "QT_PLUGIN_PATH" => &[
+            "/usr/lib/qt4/plugins/",
+            "/usr/lib/i386-linux-gnu/qt4/plugins/",
+            "/usr/lib/x86_64-linux-gnu/qt4/plugins/",
+            "/usr/lib32/qt4/plugins/",
+            "/usr/lib64/qt4/plugins/",
+            "/usr/lib/qt5/plugins/",
+            "/usr/lib/i386-linux-gnu/qt5/plugins/",
+            "/usr/lib/x86_64-linux-gnu/qt5/plugins/",
+            "/usr/lib32/qt5/plugins/",
+            "/usr/lib64/qt5/plugins/",
+        ],
+        _ => &[],
+    }
+}
+
+/// The index of the last entry of the whole AppRun block of `key` that
+/// starts at `at`, under any one directory other than the root, or `None`.
+/// A user does not write a whole block: every one of its entries, in
+/// AppRun's order, with its trailing separators; for `PYTHONPATH`, whose block
+/// is a lone entry, that entry with its trailing separator under a directory
+/// other than the root, which is a Python import path inside some mount.
+/// `XDG_DATA_DIRS`' second entry is the GTK hook's, under the mount as
+/// `$APPDIR` names it, where AppRun's first is under the mount resolved: the
+/// two names differ ahead of the mount's own (a `TMPDIR` that is a link, or
+/// ends in a separator) and end in that same name.
+fn apprun_block_at(key: &str, entries: &[PathBuf], at: usize) -> Option<usize> {
+    let block = apprun_block(key);
+    let run = entries
+        .get(at..at + block.len())
+        .filter(|_| !block.is_empty())?;
+    let dir = run[0].to_str()?.strip_suffix(block[0])?;
+    let whole = dir.len() > 1
+        && dir.starts_with('/')
+        && run
+            .iter()
+            .zip(block)
+            .enumerate()
+            .all(|(index, (entry, suffix))| {
+                let Some(under) = entry.to_str().and_then(|entry| entry.strip_suffix(suffix))
+                else {
+                    return false;
+                };
+                under == dir
+                    || (key == "XDG_DATA_DIRS"
+                        && index == 1
+                        && under.starts_with('/')
+                        && Path::new(under).file_name().is_some()
+                        && Path::new(under).file_name() == Path::new(dir).file_name())
+            });
+    whole.then(|| at + block.len() - 1)
+}
+
+/// This process's own AppImage: `$APPIMAGE`, when this process runs from the
+/// mount (or the extract-and-run directory) that AppImage's runtime names in
+/// `$APPDIR`, else `None`. A chan of another install started from a shell
+/// inside some other application's AppImage inherits that AppImage's
+/// `$APPIMAGE` and `$APPDIR`, and must neither start that AppImage as chan's
+/// desktop nor point chan's shims at it. The `~/.local/bin` wrappers exec the
+/// AppImage, whose runtime sets both for the process it starts, so chan run
+/// through one finds its own.
+pub fn own_appimage() -> Option<PathBuf> {
+    own_appimage_of(
+        std::env::var_os("APPIMAGE"),
+        std::env::var_os("APPDIR"),
+        std::env::current_exe().ok(),
+    )
+}
+
+/// [`own_appimage`] over the values it reads. The executable path is resolved
+/// already on Linux, and the mount is matched under either of its names
+/// ([`Mount`]), since a mount or extraction directory under a `TMPDIR` that is
+/// a link is named unresolved.
+fn own_appimage_of(
+    appimage: Option<OsString>,
+    appdir: Option<OsString>,
+    exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let appimage = appimage.filter(|value| !value.is_empty())?;
+    let mount = Mount::new(&appdir.filter(|value| !value.is_empty())?);
+    let exe = exe?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    mount.holds(&exe).then(|| PathBuf::from(appimage))
 }
 
 /// Strip the AppImage bundle environment from a terminal spawn.
@@ -534,22 +887,79 @@ fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'
 /// runtime, so the dev binary, the macOS bundle, and the deb/rpm install never
 /// enter the branch.
 pub(super) fn clear_appimage_env(cmd: &mut CommandBuilder) {
-    let Some(appdir) = std::env::var_os("APPDIR").filter(|dir| !dir.is_empty()) else {
-        return;
-    };
-    if std::env::var_os("APPIMAGE").is_none_or(|path| path.is_empty()) {
-        return;
-    }
-    let appdir = PathBuf::from(appdir);
-    for (key, value) in std::env::vars_os() {
-        let Some(key) = key.to_str() else {
-            continue;
-        };
-        match scrub_var(&appdir, key, &value) {
-            Some(Scrub::Remove) => cmd.env_remove(key),
-            Some(Scrub::Rewrite(filtered)) => cmd.env(key, filtered),
-            None => {}
+    for (key, scrub) in appimage_host_env(std::env::vars_os(), HostEnvFor::Terminal) {
+        match scrub {
+            Scrub::Remove => cmd.env_remove(key),
+            Scrub::Rewrite(value) => cmd.env(key, value),
         }
+    }
+}
+
+/// What turns `vars`, a process's environment, back into the one the user
+/// had before the chan AppImage process it belongs to started, for `to`:
+/// each variable the AppImage runtime, its GTK hook or chan put there, with
+/// what to do to it. Empty when `vars` is no AppImage process's: `$APPDIR`
+/// and `$APPIMAGE` are set only by that runtime, so the dev binary, the macOS
+/// bundle and the deb/rpm install hand their environment on unchanged.
+fn appimage_host_env(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    to: HostEnvFor,
+) -> Vec<(String, Scrub)> {
+    let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+    let value_of = |name: &str| {
+        vars.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(appdir), Some(_)) = (value_of("APPDIR"), value_of("APPIMAGE")) else {
+        return Vec::new();
+    };
+    let mount = Mount::new(appdir);
+    vars.iter()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            Some((key.to_string(), scrub_var(&mount, key, value, to)?))
+        })
+        .collect()
+}
+
+/// Give `cmd`, which starts chan's AppImage again (a New Window sibling, a
+/// desktop a command starts, the devserver daemon, a relaunch), the
+/// environment the user had before `parent`, this process's environment, was
+/// built: its search paths as the user had them and none of this mount's
+/// entries, so the child's own runtime adds exactly one block of its own on
+/// top. A parent that is no AppImage process changes nothing.
+pub fn hand_appimage_host_env(
+    cmd: &mut Command,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    for (key, scrub) in appimage_host_env(parent, HostEnvFor::AppImage) {
+        match scrub {
+            Scrub::Remove => cmd.env_remove(key),
+            Scrub::Rewrite(value) => cmd.env(key, value),
+        };
+    }
+}
+
+/// The value of `name` a process chan starts should get from `parent`, this
+/// process's environment: as the user had it before chan's AppImage built
+/// `parent` (`None` when they had none), or as `parent` has it off an
+/// AppImage. For a value chan records for later processes, such as the
+/// `PATH` of the devserver's systemd unit.
+pub fn appimage_host_var(
+    name: &str,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Option<OsString> {
+    let parent: Vec<(OsString, OsString)> = parent.into_iter().collect();
+    let host = appimage_host_env(parent.iter().cloned(), HostEnvFor::AppImage);
+    match host.into_iter().find(|(key, _)| key == name) {
+        Some((_, Scrub::Remove)) => None,
+        Some((_, Scrub::Rewrite(value))) => Some(value),
+        None => parent
+            .into_iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value),
     }
 }
 
@@ -645,9 +1055,9 @@ mod tests {
 
 #[cfg(test)]
 mod appimage_env_tests {
-    use super::{scrub_var, Scrub};
+    use super::{scrub_var, HostEnvFor, Mount, Scrub};
     use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     const APPDIR: &str = "/tmp/.mount_chanAA";
 
@@ -658,7 +1068,12 @@ mod appimage_env_tests {
     }
 
     fn scrub(key: &str, value: &OsString) -> Option<Scrub> {
-        scrub_var(Path::new(APPDIR), key, value)
+        scrub_var(
+            &Mount::new(APPDIR.as_ref()),
+            key,
+            value,
+            HostEnvFor::Terminal,
+        )
     }
 
     #[test]
@@ -764,10 +1179,100 @@ mod appimage_env_tests {
     /// The values exactly as the AppImage's AppRun writes them, with the
     /// `:` separator of its format strings, so only on unix, where AppImages
     /// run.
+    /// `$APPIMAGE` is this process's own only when this process's executable
+    /// lies inside the `$APPDIR` the runtime set, also when that directory is
+    /// named through a link; a deb's chan under another application's
+    /// AppImage environment, or a value half set, is no AppImage of its own.
+    #[cfg(unix)]
+    #[test]
+    fn only_this_processs_own_appimage_counts() {
+        use super::own_appimage_of;
+        let os = |value: &str| Some(OsString::from(value));
+        let image = os("/home/u/Applications/Chan.AppImage");
+        let mount = "/tmp/.mount_ChanAB";
+        let exe = || Some(PathBuf::from(format!("{mount}/usr/bin/chan-desktop")));
+        assert_eq!(
+            own_appimage_of(image.clone(), os(mount), exe()),
+            Some(PathBuf::from("/home/u/Applications/Chan.AppImage"))
+        );
+        let foreign = os("/tmp/.mount_TermXY");
+        assert_eq!(
+            own_appimage_of(image.clone(), foreign, Some("/usr/bin/chan-desktop".into())),
+            None,
+            "a deb's chan inside another AppImage's environment"
+        );
+        assert_eq!(own_appimage_of(image.clone(), None, exe()), None);
+        assert_eq!(own_appimage_of(None, os(mount), exe()), None);
+        assert_eq!(own_appimage_of(os(""), os(mount), exe()), None);
+        assert_eq!(own_appimage_of(image.clone(), os(mount), None), None);
+        // Extract-and-run under a TMPDIR that is a link: $APPDIR names the
+        // directory through the link, the executable path is resolved.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        let extracted = real.join("appimage_extracted_0123");
+        std::fs::create_dir_all(extracted.join("usr/bin")).expect("extraction dir");
+        std::os::unix::fs::symlink(&real, tmp.path().join("link")).expect("link");
+        let through_link = tmp.path().join("link/appimage_extracted_0123");
+        let resolved_exe = extracted
+            .canonicalize()
+            .expect("resolve")
+            .join("usr/bin/chan-desktop");
+        assert_eq!(
+            own_appimage_of(
+                image.clone(),
+                Some(through_link.into_os_string()),
+                Some(resolved_exe)
+            ),
+            Some(PathBuf::from("/home/u/Applications/Chan.AppImage"))
+        );
+    }
+
+    /// A child AppImage process keeps the GTK hook's keys its own hook reads,
+    /// and a terminal loses them; the runtime's keys and the hook's theme go
+    /// for both, since every AppImage process's runtime and hook set them
+    /// again.
+    #[test]
+    fn a_child_appimage_keeps_the_gtk_keys_a_terminal_loses() {
+        let mount = &Mount::new(APPDIR.as_ref());
+        for key in ["GDK_BACKEND", "APPIMAGE_GTK_THEME"] {
+            let value = OsString::from("x11");
+            assert_eq!(
+                scrub_var(mount, key, &value, HostEnvFor::Terminal),
+                Some(Scrub::Remove),
+                "{key}"
+            );
+            assert_eq!(
+                scrub_var(mount, key, &value, HostEnvFor::AppImage),
+                None,
+                "{key}"
+            );
+        }
+        for key in [
+            "APPIMAGE",
+            "ARGV0",
+            "OWD",
+            "GTK_THEME",
+            "PYTHONDONTWRITEBYTECODE",
+        ] {
+            let value = OsString::from("value");
+            for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
+                assert_eq!(
+                    scrub_var(mount, key, &value, to),
+                    Some(Scrub::Remove),
+                    "{key} {to:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     mod apprun_shapes {
-        use super::{scrub, Scrub, APPDIR};
-        use std::ffi::OsString;
+        use super::super::{
+            appimage_host_env, appimage_host_var, hand_appimage_host_env, own_apprun_value,
+            without_apprun_blocks, without_foreign_apprun_blocks,
+        };
+        use super::{scrub, HostEnvFor, Scrub, APPDIR};
+        use std::ffi::{OsStr, OsString};
 
         /// The host library directory the AppImage's GUI-stack re-exec puts
         /// first in the desktop's `LD_LIBRARY_PATH`.
@@ -880,6 +1385,752 @@ mod appimage_env_tests {
             assert_eq!(
                 scrub("PATH", &value),
                 Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into())),
+            );
+        }
+
+        /// AppRun writes `PYTHONPATH`, `PERLLIB` and `QT_PLUGIN_PATH` in the
+        /// same shape as `LD_LIBRARY_PATH`, so a terminal gets the user's value
+        /// of each, or none; `GSETTINGS_SCHEMA_DIR` and the GStreamer paths do
+        /// not carry the user's own value after the mount entries and are
+        /// dropped whole.
+        #[test]
+        fn the_other_apprun_paths_give_back_the_users_value() {
+            let qt: Vec<String> = ["qt4", "qt5"]
+                .iter()
+                .flat_map(|qt| {
+                    [
+                        "usr/lib",
+                        "usr/lib/i386-linux-gnu",
+                        "usr/lib/x86_64-linux-gnu",
+                        "usr/lib32",
+                        "usr/lib64",
+                    ]
+                    .map(|lib| format!("{lib}/{qt}/plugins/"))
+                })
+                .collect();
+            let qt: Vec<&str> = qt.iter().map(String::as_str).collect();
+            for (key, block) in [
+                ("PYTHONPATH", &["usr/share/pyshared/"][..]),
+                ("PERLLIB", &["usr/share/perl5/", "usr/lib/perl5/"]),
+                ("QT_PLUGIN_PATH", &qt),
+            ] {
+                assert_eq!(
+                    scrub(key, &apprun(block, "/opt/mine").into()),
+                    Some(Scrub::Rewrite("/opt/mine".into())),
+                    "{key}"
+                );
+                assert_eq!(
+                    scrub(key, &apprun(block, "").into()),
+                    Some(Scrub::Remove),
+                    "{key}"
+                );
+            }
+            let schemas = format!(
+                "{APPDIR}/usr/share/glib-2.0/schemas/:{APPDIR}//usr/share/glib-2.0/schemas"
+            );
+            assert_eq!(
+                scrub("GSETTINGS_SCHEMA_DIR", &schemas.into()),
+                Some(Scrub::Remove)
+            );
+            for key in ["GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0"] {
+                // The user's QT_PLUGIN_PATH, which AppRun writes there.
+                let gst = format!("{APPDIR}/usr/lib/gstreamer:/opt/qt");
+                assert_eq!(scrub(key, &gst.into()), Some(Scrub::Remove), "{key}");
+            }
+        }
+
+        /// A block of the given entries under `dir`, as AppRun writes it.
+        fn block_under(dir: &str, block: &[&str]) -> String {
+            block
+                .iter()
+                .map(|entry| format!("{dir}/{entry}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+
+        const LD_BLOCK: [&str; 10] = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ];
+
+        /// What a parent of an older release hands down, which still reaches
+        /// this release's terminal scrub: a desktop a CLI started holds the
+        /// CLI's block after its own, and an own-process sibling holds its
+        /// parent's re-exec directory and block after its own. In FUSE mode
+        /// those blocks name another mount, so the own-mount rule alone kept
+        /// them; a whole AppRun block under any directory is not the user's.
+        #[test]
+        fn an_older_parents_block_is_not_the_users() {
+            let other = "/tmp/.mount_chanZZ";
+            for user in ["", "/opt/a/lib"] {
+                let want = if user.is_empty() {
+                    Scrub::Remove
+                } else {
+                    Scrub::Rewrite(user.into())
+                };
+                let cold_start = format!(
+                    "{HOST_LIB}:{}:{}:{user}",
+                    block_under(APPDIR, &LD_BLOCK),
+                    block_under(other, &LD_BLOCK)
+                );
+                let sibling = format!(
+                    "{HOST_LIB}:{}:{HOST_LIB}:{}:{user}",
+                    block_under(APPDIR, &LD_BLOCK),
+                    block_under(other, &LD_BLOCK)
+                );
+                for value in [cold_start, sibling] {
+                    assert_eq!(
+                        scrub("LD_LIBRARY_PATH", &value.clone().into()),
+                        Some(want.clone()),
+                        "{value}"
+                    );
+                }
+            }
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let path = format!(
+                "{}:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under(other, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &path.into()),
+                Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into()))
+            );
+            let xdg = format!(
+                "{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:\
+                 {other}/usr/share/:{other}/usr/share:/usr/share:"
+            );
+            assert_eq!(scrub("XDG_DATA_DIRS", &xdg.into()), Some(Scrub::Remove));
+        }
+
+        /// An older release's `PYTHONPATH` entry follows this mount's, a lone
+        /// entry of AppRun's shape: it goes, with or without a user value,
+        /// and so does one another AppImage leaked among the user's entries.
+        /// `PERLLIB`'s two-entry block chains the same way.
+        #[test]
+        fn an_older_parents_python_and_perl_entries_are_not_the_users() {
+            let other = "/tmp/.mount_chanZZ";
+            let py = |user: &str| {
+                OsString::from(format!(
+                    "{APPDIR}/usr/share/pyshared/:{other}/usr/share/pyshared/:{user}"
+                ))
+            };
+            assert_eq!(scrub("PYTHONPATH", &py("")), Some(Scrub::Remove));
+            assert_eq!(
+                scrub("PYTHONPATH", &py("/opt/py")),
+                Some(Scrub::Rewrite("/opt/py".into()))
+            );
+            let leaked = OsString::from(format!(
+                "{APPDIR}/usr/share/pyshared/:/opt/py:/tmp/.mount_TermAB/usr/share/pyshared/:/opt/py2"
+            ));
+            assert_eq!(
+                scrub("PYTHONPATH", &leaked),
+                Some(Scrub::Rewrite("/opt/py:/opt/py2".into()))
+            );
+            let perl = format!(
+                "{APPDIR}/usr/share/perl5/:{APPDIR}/usr/lib/perl5/:\
+                 {other}/usr/share/perl5/:{other}/usr/lib/perl5/:/opt/perl"
+            );
+            assert_eq!(
+                scrub("PERLLIB", &perl.into()),
+                Some(Scrub::Rewrite("/opt/perl".into()))
+            );
+        }
+
+        /// Another application's AppImage can leak its block into the
+        /// environment chan is started from, after entries the user's shell
+        /// put ahead of it. That block goes by its own entries; the user's
+        /// entries on either side of it stay, in order.
+        #[test]
+        fn a_leaked_block_goes_and_the_users_entries_around_it_stay() {
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let term = "/tmp/.mount_TermAB";
+            let path = format!(
+                "{}:/home/u/.local/bin:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under(term, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &path.into()),
+                Some(Scrub::Rewrite(
+                    "/home/u/.local/bin:/usr/local/bin:/usr/bin".into()
+                ))
+            );
+            let ld = format!(
+                "{HOST_LIB}:{}:/opt/a/lib:{}:/opt/b/lib",
+                block_under(APPDIR, &LD_BLOCK),
+                block_under(term, &LD_BLOCK)
+            );
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &ld.into()),
+                Some(Scrub::Rewrite("/opt/a/lib:/opt/b/lib".into()))
+            );
+            // With no entry of this mount at all, the leaked block still goes.
+            let no_own = format!(
+                "/home/u/.local/bin:{}:/usr/bin",
+                block_under(term, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &no_own.into()),
+                Some(Scrub::Rewrite("/home/u/.local/bin:/usr/bin".into()))
+            );
+        }
+
+        /// A `PATH` an older release recorded from its AppImage loses that
+        /// mount's block and keeps the rest in order; one with no block is
+        /// returned as it is.
+        #[test]
+        fn a_recorded_path_loses_whole_blocks_only() {
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let recorded = format!(
+                "{}:/home/u/.local/bin:/usr/local/bin:/usr/bin",
+                block_under("/tmp/.mount_ChanOLD", &path_block)
+            );
+            assert_eq!(
+                without_apprun_blocks("PATH", OsStr::new(&recorded)),
+                "/home/u/.local/bin:/usr/local/bin:/usr/bin"
+            );
+            let plain = OsStr::new("/home/u/.local/bin:/opt/x/usr/bin/:/usr/bin");
+            assert_eq!(without_apprun_blocks("PATH", plain), plain);
+        }
+
+        /// The process's own value loses an older parent's chained block and a
+        /// leaked one, and keeps this mount's block and what is ahead of it;
+        /// a value with nothing foreign, or a process that is no AppImage,
+        /// gives `None`.
+        #[test]
+        fn a_process_keeps_its_own_block_and_loses_the_others() {
+            let vars = |key: &str, value: String| -> Vec<(OsString, OsString)> {
+                vec![("APPDIR".into(), APPDIR.into()), (key.into(), value.into())]
+            };
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let old = block_under("/tmp/.mount_chanZZ", &LD_BLOCK);
+            let relaunched = format!("{HOST_LIB}:{own}:{HOST_LIB}:{old}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", relaunched),
+                    None
+                ),
+                Some(OsString::from(format!("{HOST_LIB}:{own}:/opt/a/lib")))
+            );
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let path = format!(
+                "{}:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under("/tmp/.mount_chanZZ", &path_block)
+            );
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", vars("PATH", path), None),
+                Some(OsString::from(format!(
+                    "{}:/usr/local/bin:/usr/bin",
+                    block_under(APPDIR, &path_block)
+                )))
+            );
+            let clean = format!("{}:/usr/bin", block_under(APPDIR, &path_block));
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", vars("PATH", clean), None),
+                None
+            );
+            let no_appimage = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", no_appimage, None),
+                None
+            );
+            // Before this process's own re-exec the older parent's directory
+            // ahead of its block is the one the re-exec is about to prepend.
+            let before_reexec = format!("{own}:{HOST_LIB}:{old}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", before_reexec.clone()),
+                    Some(OsStr::new(HOST_LIB))
+                ),
+                Some(OsString::from(format!("{own}:/opt/a/lib")))
+            );
+            // A user whose own first entry is that directory keeps it.
+            let users_own = format!("{own}:{HOST_LIB}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", users_own),
+                    Some(OsStr::new(HOST_LIB))
+                ),
+                None
+            );
+        }
+
+        /// Only a whole block counts: a user's entry that looks like one of
+        /// its entries, or a block cut short, stays the user's.
+        #[test]
+        fn part_of_a_block_is_the_users() {
+            let partial = format!(
+                "{}:/opt/x/usr/lib/:/opt/x/usr/lib/i386-linux-gnu/:/opt/a",
+                block_under(APPDIR, &LD_BLOCK)
+            );
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &partial.into()),
+                Some(Scrub::Rewrite(
+                    "/opt/x/usr/lib/:/opt/x/usr/lib/i386-linux-gnu/:/opt/a".into()
+                ))
+            );
+        }
+
+        fn apprun_path(user: &str) -> String {
+            apprun(
+                &["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"],
+                user,
+            )
+        }
+
+        /// A chan AppImage desktop's environment as its runtime, the GTK hook
+        /// and the re-exec leave it, over a user's `PATH` and, when given,
+        /// `LD_LIBRARY_PATH`.
+        fn appimage_desktop(user_ld: Option<&str>) -> Vec<(OsString, OsString)> {
+            let pair = |key: &str, value: String| (OsString::from(key), OsString::from(value));
+            vec![
+                pair("APPDIR", APPDIR.to_string()),
+                pair("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+                pair("ARGV0", "chan-desktop".into()),
+                pair("OWD", "/home/u".into()),
+                pair("HOME", "/home/u".into()),
+                pair("PATH", apprun_path("/usr/local/bin:/usr/bin")),
+                pair(
+                    "LD_LIBRARY_PATH",
+                    reexeced_ld(user_ld.unwrap_or("")).into_string().unwrap(),
+                ),
+                pair(
+                    "XDG_DATA_DIRS",
+                    format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:"),
+                ),
+                pair("GTK_PATH", format!("{APPDIR}//usr/lib/gtk-3.0")),
+                pair("GDK_BACKEND", "x11".into()),
+            ]
+        }
+
+        /// What a child AppImage process is handed: the user's search paths,
+        /// none of the runtime's keys, nothing inside the parent's mount, and
+        /// the GTK keys its own hook reads; a variable the AppImage did not
+        /// touch is left to be inherited.
+        #[test]
+        fn a_child_appimage_gets_the_users_environment() {
+            for (user_ld, ld) in [
+                (None, None),
+                (Some("/opt/a/lib"), Some(OsString::from("/opt/a/lib"))),
+            ] {
+                let host = appimage_host_env(appimage_desktop(user_ld), HostEnvFor::AppImage);
+                let get = |name: &str| {
+                    host.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, scrub)| scrub.clone())
+                };
+                let rewrite = |value: &str| Some(Scrub::Rewrite(value.into()));
+                assert_eq!(get("PATH"), rewrite("/usr/local/bin:/usr/bin"));
+                assert_eq!(
+                    get("LD_LIBRARY_PATH"),
+                    Some(ld.map_or(Scrub::Remove, Scrub::Rewrite)),
+                    "{user_ld:?}"
+                );
+                assert_eq!(get("XDG_DATA_DIRS"), Some(Scrub::Remove));
+                for gone in ["APPDIR", "APPIMAGE", "ARGV0", "OWD", "GTK_PATH"] {
+                    assert_eq!(get(gone), Some(Scrub::Remove), "{gone}");
+                }
+                assert_eq!(get("GDK_BACKEND"), None, "the user's backend is kept");
+                assert_eq!(get("HOME"), None, "an untouched variable is inherited");
+            }
+        }
+
+        /// A parent that is no AppImage process, by `$APPDIR` and `$APPIMAGE`
+        /// both, hands its environment on as it is.
+        #[test]
+        fn a_parent_that_is_no_appimage_hands_its_environment_on() {
+            let mut env = appimage_desktop(Some("/opt/a/lib"));
+            for drop in ["APPDIR", "APPIMAGE"] {
+                let without: Vec<_> = env.iter().filter(|(key, _)| key != drop).cloned().collect();
+                assert_eq!(
+                    appimage_host_env(without, HostEnvFor::AppImage),
+                    Vec::new(),
+                    "{drop}"
+                );
+            }
+            env.retain(|(key, _)| key != "APPDIR" && key != "APPIMAGE");
+            let mut command = std::process::Command::new("/bin/true");
+            hand_appimage_host_env(&mut command, env.clone());
+            assert_eq!(command.get_envs().count(), 0, "nothing set or removed");
+            assert_eq!(
+                appimage_host_var("PATH", env),
+                Some(OsString::from(apprun_path("/usr/local/bin:/usr/bin")))
+            );
+        }
+
+        /// A command handed the host environment sets the user's values and
+        /// removes the rest, and the single-variable read agrees with it.
+        #[test]
+        fn a_command_is_handed_the_users_values() {
+            let mut command = std::process::Command::new("/bin/true");
+            hand_appimage_host_env(&mut command, appimage_desktop(None));
+            let env = |key: &str| {
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.map(OsStr::to_os_string))
+            };
+            assert_eq!(
+                env("PATH"),
+                Some(Some(OsString::from("/usr/local/bin:/usr/bin")))
+            );
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(None));
+            assert_eq!(env("APPIMAGE"), Some(None));
+            assert_eq!(env("GDK_BACKEND"), None);
+            assert_eq!(
+                appimage_host_var("PATH", appimage_desktop(None)),
+                Some(OsString::from("/usr/local/bin:/usr/bin"))
+            );
+            assert_eq!(
+                appimage_host_var("LD_LIBRARY_PATH", appimage_desktop(None)),
+                None
+            );
+            assert_eq!(
+                appimage_host_var("HOME", appimage_desktop(None)),
+                Some(OsString::from("/home/u"))
+            );
+        }
+
+        const PATH_BLOCK: [&str; 5] = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+
+        /// A tempdir holding an extraction directory reached through a
+        /// link, as an extract-and-run start under a `TMPDIR` that is one
+        /// names it: (the tempdir, the link, the directory resolved).
+        fn linked_extraction() -> (tempfile::TempDir, String, String) {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let real = tmp.path().join("real");
+            let extracted = real.join("appimage_extracted_0123");
+            std::fs::create_dir_all(extracted.join("usr/bin")).expect("extraction dir");
+            std::os::unix::fs::symlink(&real, tmp.path().join("link")).expect("link");
+            let link = tmp.path().join("link").to_str().expect("utf-8").to_string();
+            let resolved = extracted.canonicalize().expect("resolve");
+            let resolved = resolved.to_str().expect("utf-8").to_string();
+            (tmp, link, resolved)
+        }
+
+        /// The directory `resolved` lies in.
+        fn resolved_parent(resolved: &str) -> &str {
+            std::path::Path::new(resolved)
+                .parent()
+                .and_then(std::path::Path::to_str)
+                .expect("utf-8 parent")
+        }
+
+        /// The names the runtime gives that directory through the link: as
+        /// `$TMPDIR` is spelled, with the doubled separator a `TMPDIR` that
+        /// ends in one gives, and with a trailing separator.
+        fn names_through(link: &str) -> [String; 3] {
+            [
+                format!("{link}/appimage_extracted_0123"),
+                format!("{link}//appimage_extracted_0123"),
+                format!("{link}/appimage_extracted_0123/"),
+            ]
+        }
+
+        /// A desktop's environment as the 0.128.0 AppImage's runtime, GTK
+        /// hook and AppRun.wrapped write it, read in an extract-and-run start
+        /// under a `TMPDIR` that is a link, then the GUI-stack re-exec's host
+        /// directory, for a user who had a `PATH` and nothing else: `$APPDIR`
+        /// as `named`, the hook's entries under it as the hook spells them
+        /// (`$APPDIR/usr/share`, `$APPDIR//usr/lib/gtk-3.0`), AppRun's under
+        /// `resolved`, each followed by AppRun's separator.
+        fn linked_desktop(named: &str, resolved: &str) -> Vec<(OsString, OsString)> {
+            let pair = |key: &str, value: String| (OsString::from(key), OsString::from(value));
+            vec![
+                pair("APPDIR", named.to_string()),
+                pair("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+                pair("ARGV0", "/home/u/Applications/Chan.AppImage".into()),
+                pair(
+                    "PATH",
+                    format!(
+                        "{}:/usr/local/bin:/usr/bin",
+                        block_under(resolved, &PATH_BLOCK)
+                    ),
+                ),
+                pair(
+                    "LD_LIBRARY_PATH",
+                    format!("{HOST_LIB}:{}:", block_under(resolved, &LD_BLOCK)),
+                ),
+                pair("PYTHONPATH", format!("{resolved}/usr/share/pyshared/:")),
+                pair("PYTHONHOME", format!("{resolved}/usr/")),
+                pair(
+                    "GST_PLUGIN_SYSTEM_PATH_1_0",
+                    format!("{resolved}/usr/lib/gstreamer-1.0:"),
+                ),
+                pair(
+                    "XDG_DATA_DIRS",
+                    format!("{resolved}/usr/share/:{named}/usr/share:/usr/share:"),
+                ),
+                pair(
+                    "GSETTINGS_SCHEMA_DIR",
+                    format!(
+                        "{resolved}/usr/share/glib-2.0/schemas/:{named}//usr/share/glib-2.0/schemas"
+                    ),
+                ),
+                pair("GTK_PATH", format!("{named}//usr/lib/gtk-3.0")),
+            ]
+        }
+
+        /// Under a `TMPDIR` that is a link the runtime names the mount
+        /// through it and AppRun.wrapped's entries are under the resolved
+        /// directory: this mount's block is found under either name, so a
+        /// terminal gets no `LD_LIBRARY_PATH` (not the re-exec's directory
+        /// and an empty entry, the current directory), no `PYTHONHOME` and no
+        /// GStreamer path, a sibling is handed none of them, and the
+        /// process's own clean-up finds its block ahead of an older
+        /// parent's.
+        #[test]
+        fn a_mount_named_through_a_link_is_this_mounts_under_either_name() {
+            let (_tmp, link, resolved) = linked_extraction();
+            for named in names_through(&link) {
+                let env = linked_desktop(&named, &resolved);
+                for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
+                    let host = appimage_host_env(env.clone(), to);
+                    let get = |name: &str| {
+                        host.iter()
+                            .find(|(key, _)| key == name)
+                            .map(|(_, scrub)| scrub.clone())
+                    };
+                    for gone in [
+                        "LD_LIBRARY_PATH",
+                        "PYTHONHOME",
+                        "GST_PLUGIN_SYSTEM_PATH_1_0",
+                        "PYTHONPATH",
+                        "XDG_DATA_DIRS",
+                        "GSETTINGS_SCHEMA_DIR",
+                        "GTK_PATH",
+                        "APPDIR",
+                    ] {
+                        assert_eq!(get(gone), Some(Scrub::Remove), "{gone} {to:?} {named}");
+                    }
+                    assert_eq!(
+                        get("PATH"),
+                        Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into())),
+                        "{to:?} {named}"
+                    );
+                }
+                let with = |key: &str, value: String| {
+                    let mut vars = env.clone();
+                    vars.retain(|(name, _)| name != key);
+                    vars.push((key.into(), value.into()));
+                    vars
+                };
+                let own_ld = format!("{HOST_LIB}:{}", block_under(&resolved, &LD_BLOCK));
+                let relaunched = format!(
+                    "{own_ld}:{HOST_LIB}:{}:/opt/a/lib",
+                    block_under("/tmp/.mount_chanZZ", &LD_BLOCK)
+                );
+                assert_eq!(
+                    without_foreign_apprun_blocks(
+                        "LD_LIBRARY_PATH",
+                        with("LD_LIBRARY_PATH", relaunched),
+                        None
+                    ),
+                    Some(OsString::from(format!("{own_ld}:/opt/a/lib"))),
+                    "{named}"
+                );
+                let own_path = block_under(&resolved, &PATH_BLOCK);
+                let started = format!(
+                    "{own_path}:{}:/usr/local/bin:/usr/bin",
+                    block_under("/tmp/.mount_chanZZ", &PATH_BLOCK)
+                );
+                assert_eq!(
+                    without_foreign_apprun_blocks("PATH", with("PATH", started), None),
+                    Some(OsString::from(format!(
+                        "{own_path}:/usr/local/bin:/usr/bin"
+                    ))),
+                    "{named}"
+                );
+            }
+        }
+
+        /// An older parent started through the same link wrote its
+        /// `XDG_DATA_DIRS` block as AppRun's entry under its resolved
+        /// directory and the GTK hook's under its `$APPDIR`: the two name the
+        /// same mount, so the block is that parent's whole and goes, as it
+        /// does with no link.
+        #[test]
+        fn an_older_parents_data_dirs_named_through_a_link_are_not_the_users() {
+            let (_tmp, link, resolved) = linked_extraction();
+            // Its directory need not exist: a block is told by its shape.
+            let old_resolved = format!("{}/appimage_extracted_0456", resolved_parent(&resolved));
+            for named in names_through(&link) {
+                for old_named in [
+                    format!("{link}/appimage_extracted_0456"),
+                    format!("{link}//appimage_extracted_0456"),
+                    format!("{link}/appimage_extracted_0456/"),
+                ] {
+                    let chained = |user: &str| {
+                        OsString::from(format!(
+                            "{resolved}/usr/share/:{named}/usr/share:/usr/share:\
+                             {old_resolved}/usr/share/:{old_named}/usr/share:/usr/share:{user}"
+                        ))
+                    };
+                    let vars = |user: &str| {
+                        let mut vars = linked_desktop(&named, &resolved);
+                        vars.retain(|(name, _)| name != "XDG_DATA_DIRS");
+                        vars.push(("XDG_DATA_DIRS".into(), chained(user)));
+                        vars
+                    };
+                    let host = |user: &str| {
+                        appimage_host_env(vars(user), HostEnvFor::Terminal)
+                            .into_iter()
+                            .find(|(key, _)| key == "XDG_DATA_DIRS")
+                            .map(|(_, scrub)| scrub)
+                    };
+                    assert_eq!(host(""), Some(Scrub::Remove), "{old_named}");
+                    assert_eq!(
+                        host("/usr/local/share:/usr/share"),
+                        Some(Scrub::Rewrite("/usr/local/share:/usr/share".into())),
+                        "{old_named}"
+                    );
+                    assert_eq!(
+                        without_foreign_apprun_blocks("XDG_DATA_DIRS", vars("/opt/share"), None),
+                        Some(OsString::from(format!(
+                            "{resolved}/usr/share/:{named}/usr/share:/usr/share:/opt/share"
+                        ))),
+                        "{old_named}"
+                    );
+                }
+            }
+            // Two directories of other names are not one mount's block.
+            let unrelated = OsString::from(format!(
+                "{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:/opt/a/usr/share/:/opt/b/usr/share"
+            ));
+            assert_eq!(
+                scrub("XDG_DATA_DIRS", &unrelated),
+                Some(Scrub::Rewrite("/opt/a/usr/share/:/opt/b/usr/share".into()))
+            );
+        }
+
+        /// AppRun's Qt block, under `dir`.
+        fn qt_block(dir: &str) -> String {
+            ["qt4", "qt5"]
+                .iter()
+                .flat_map(|qt| {
+                    [
+                        "usr/lib",
+                        "usr/lib/i386-linux-gnu",
+                        "usr/lib/x86_64-linux-gnu",
+                        "usr/lib32",
+                        "usr/lib64",
+                    ]
+                    .map(|lib| format!("{dir}/{lib}/{qt}/plugins/"))
+                })
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+
+        /// What a desktop an older release started holds in each search path
+        /// AppRun prepends to, as AppRun writes it over the older release's
+        /// environment (read with the 0.128.0 AppImage's AppRun, its parent's
+        /// block chained after its own): each loses the older block and
+        /// keeps its own and the user's value, AppRun's separator included
+        /// when the user had none, as AppRun would write it from the user's
+        /// environment. The GStreamer paths' tail is the `QT_PLUGIN_PATH`
+        /// AppRun was handed, the older Qt block and then the user's.
+        #[test]
+        fn an_older_parents_blocks_leave_each_search_path() {
+            let old = "/tmp/.mount_chanZZ";
+            let perl = |dir: &str| format!("{dir}/usr/share/perl5/:{dir}/usr/lib/perl5/");
+            let xdg = |dir: &str| format!("{dir}/usr/share/:{dir}/usr/share:/usr/share");
+            for user in ["", "/opt/u"] {
+                let cases = [
+                    (
+                        "PYTHONPATH",
+                        format!("{APPDIR}/usr/share/pyshared/"),
+                        format!("{old}/usr/share/pyshared/"),
+                    ),
+                    ("PERLLIB", perl(APPDIR), perl(old)),
+                    ("QT_PLUGIN_PATH", qt_block(APPDIR), qt_block(old)),
+                    (
+                        "GST_PLUGIN_SYSTEM_PATH",
+                        format!("{APPDIR}/usr/lib/gstreamer"),
+                        qt_block(old),
+                    ),
+                    (
+                        "GST_PLUGIN_SYSTEM_PATH_1_0",
+                        format!("{APPDIR}/usr/lib/gstreamer-1.0"),
+                        qt_block(old),
+                    ),
+                    ("XDG_DATA_DIRS", xdg(APPDIR), xdg(old)),
+                ];
+                for (key, own, older) in cases {
+                    let vars = vec![
+                        (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                        (key.into(), format!("{own}:{older}:{user}").into()),
+                    ];
+                    assert_eq!(
+                        without_foreign_apprun_blocks(key, vars, None),
+                        Some(OsString::from(format!("{own}:{user}"))),
+                        "{key} {user:?}"
+                    );
+                }
+            }
+            for key in super::super::APPRUN_SEARCH_PATHS {
+                let fresh = vec![
+                    (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                    (key.into(), format!("{APPDIR}/usr/x/:/opt/u").into()),
+                ];
+                assert_eq!(
+                    without_foreign_apprun_blocks(key, fresh, None),
+                    None,
+                    "{key}"
+                );
+            }
+        }
+
+        /// A process the re-exec starts gets this mount's block and the
+        /// user's value, without the lone empty entry AppRun's separator
+        /// leaves when the user had none, which the loader reads as the
+        /// current directory; an empty entry the user wrote is theirs and
+        /// stays where they put it.
+        #[test]
+        fn a_reexec_gets_no_empty_entry_the_user_did_not_write() {
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let vars = |value: String| {
+                vec![
+                    (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                    (OsString::from("LD_LIBRARY_PATH"), OsString::from(value)),
+                ]
+            };
+            let reexec = |value: String| {
+                own_apprun_value("LD_LIBRARY_PATH", vars(value), Some(OsStr::new(HOST_LIB)))
+            };
+            assert_eq!(reexec(format!("{own}:")), Some(OsString::from(&own)));
+            for user in [":", ":/opt/a", "/opt/a:", "/opt/a::/opt/b", "/opt/a"] {
+                assert_eq!(
+                    reexec(format!("{own}:{user}")),
+                    Some(OsString::from(format!("{own}:{user}"))),
+                    "{user:?}"
+                );
+            }
+            let older = format!(
+                "{own}:{HOST_LIB}:{}:",
+                block_under("/tmp/.mount_chanZZ", &LD_BLOCK)
+            );
+            assert_eq!(reexec(older), Some(OsString::from(&own)));
+            assert_eq!(
+                own_apprun_value(
+                    "LD_LIBRARY_PATH",
+                    vec![(OsString::from("LD_LIBRARY_PATH"), OsString::from("/opt/a"))],
+                    None
+                ),
+                None,
+                "no AppImage"
             );
         }
     }
