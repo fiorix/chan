@@ -431,9 +431,15 @@
   const loading = $derived(spineLoading || graphData.loading);
   const error = $derived(spineError ?? graphData.error);
   /// The tab draws a whole graph: its spine is in, and the shared graph it
-  /// took is complete and is the one the window holds now.
+  /// took is complete and is the one the window holds now. An answer marked
+  /// gated is the empty graph of an index being rebuilt, which says nothing
+  /// of what the workspace holds.
   const graphWhole = $derived(
-    !loading && taken !== null && !taken.partial && taken.view === graphData.view,
+    !loading &&
+      taken !== null &&
+      !taken.partial &&
+      taken.view === graphData.view &&
+      !graphData.gated,
   );
   /// Set once `showSelectedDirectoryFiles` has had its one run.
   let shownDirectoryFiles = false;
@@ -1425,7 +1431,9 @@
 
   // A selection waiting on the graph (`pendingSelectId`: an opener's, or the
   // one a reload or a moved tab restores) lands as soon as the drawn graph
-  // holds its node, and is dropped when the whole graph does not hold it.
+  // holds its node, and is dropped when the whole graph does not hold it. A
+  // tag, mention or language is known only to the index, so it waits out a
+  // gated answer for the graph the window fetches once the index is ready.
   $effect(() => {
     const byId = nodeById;
     const whole = graphWhole;

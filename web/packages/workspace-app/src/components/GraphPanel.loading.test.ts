@@ -39,7 +39,14 @@ import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphDa
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
-import { layout, type LeafNode } from "../state/tabs.svelte";
+import {
+  activePane,
+  graphTabLabel,
+  layout,
+  restoreLayout,
+  type GraphTab,
+  type LeafNode,
+} from "../state/tabs.svelte";
 
 installGraphDom();
 
@@ -304,6 +311,58 @@ describe("while the workspace index is not ready", () => {
     await settle();
     expect(graphServer.graphStreamCalls).toBe(2);
     expect(canvas.props!.nodes.map((n) => n.id)).toContain("#late");
+  });
+});
+
+// While a full rebuild holds the index, the route answers the empty graph
+// marked gated, and the window fetches the graph again once the index poll
+// reads idle. A tag, a mention or a language is known only to the index, so
+// a selection of one waits for that graph; a file or a directory resolves
+// from the spine meanwhile.
+describe("a selection the index has to answer, while the graph is gated", () => {
+  function serveGated(): void {
+    graphServer.gated = true;
+    graphServer.view = { nodes: [], edges: [] };
+  }
+
+  async function indexReady(): Promise<void> {
+    graphServer.gated = false;
+    serveGraph();
+    // What the index poll does on the way to idle.
+    await reloadGraph();
+    await settle();
+  }
+
+  test("an opener's tag waits, and is selected once the index answers", async () => {
+    serveGated();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "#t" }));
+    expect(canvas.props!.nodes.map((n) => n.id), "the spine is drawn").toContain(NOTES);
+    expect(canvas.props!.selectedId).toBeNull();
+    expect(tab.pendingSelectId, "still waiting").toBe("#t");
+
+    await indexReady();
+    expect(canvas.props!.selectedId).toBe("#t");
+    expect(tab.pendingSelectId).toBeNull();
+    expect(visibleIds(), "the note that carries it").toContain(A);
+  });
+
+  test("a restored tab titled after its tag has the tag selected once the index answers", async () => {
+    serveGated();
+    await restoreLayout({ k: "l", t: [{ k: "g", gn: "#t", gnl: "#t", gf: "" }] });
+    const restored = activePane().tabs[0] as GraphTab;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, restored);
+    expect(graphTabLabel(tab)).toBe("path=#t");
+
+    await indexReady();
+    expect(canvas.props!.selectedId).toBe("#t");
+    expect(tab.selectedNodeId).toBe("#t");
+    expect(graphTabLabel(tab)).toBe("path=#t");
+  });
+
+  test("a directory resolves from the spine meanwhile", async () => {
+    serveGated();
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
+    expect(canvas.props!.selectedId).toBe(NOTES);
   });
 });
 

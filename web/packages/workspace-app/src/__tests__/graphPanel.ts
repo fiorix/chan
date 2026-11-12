@@ -80,6 +80,10 @@ export const graphServer = {
   fsPageSize: null as number | null,
   /// When set, graphStream waits on it before it delivers anything.
   streamGate: null as Promise<void> | null,
+  /// When set, graphStream's `meta` event says `gated`, as the route's does
+  /// while a full rebuild holds the index; the test serves the empty view
+  /// that answer carries.
+  gated: false,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
   /// What languageGraph answers for a single language's detail, which a
@@ -94,6 +98,7 @@ export function resetGraphServer(): void {
   graphServer.fs = { nodes: [], edges: [] };
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
+  graphServer.gated = false;
   graphServer.fsGate = null;
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
@@ -140,6 +145,13 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         async (
           _scope: unknown,
           opts: {
+            onMeta?: (meta: {
+              type: "meta";
+              scope: "workspace";
+              path: string;
+              depth: number;
+              gated?: true;
+            }) => void;
             onNodes?: (n: GraphViewNode[], view: GraphView) => void;
             onEdges?: (e: GraphViewEdge[], view: GraphView) => void;
           } = {},
@@ -147,6 +159,14 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
           graphServer.graphStreamCalls += 1;
           await Promise.resolve();
           if (graphServer.streamGate) await graphServer.streamGate;
+          // The route's first event, as it sends it for the window's graph.
+          opts.onMeta?.({
+            type: "meta",
+            scope: "workspace",
+            path: "",
+            depth: 6,
+            ...(graphServer.gated ? { gated: true as const } : {}),
+          });
           // One batch of each, with the view accumulated so far beside it,
           // as graphStream passes them.
           const { nodes, edges } = graphServer.view;
