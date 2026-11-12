@@ -1112,9 +1112,11 @@ describe("command success ownership", () => {
       expect(draft().operation).toBeNull();
     });
 
-    it(`a command ${shape} hidden and reopened under its own card still shows its success`, async () => {
+    // A close is the user leaving the command, whatever the host does with
+    // the card: this harness keeps it across a reopen, both hosts clear it.
+    it(`a command ${shape} hidden and reopened under its own card retires the card and closes nothing`, async () => {
       const running = deferred<void>();
-      const { entry, onSuccess } = start(card, () => running.promise);
+      const { onSuccess } = start(card, () => running.promise);
       await flush();
       host("close");
       await flush();
@@ -1123,9 +1125,75 @@ describe("command success ownership", () => {
       expect(target.querySelector(".deck-operation")?.textContent).toContain("Working");
       running.resolve();
       await settle();
-      expect(onSuccess).toHaveBeenCalledExactlyOnceWith(entry);
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(target.querySelector(".deck-operation")).toBeNull();
+      expect(closeResult()).not.toBeNull();
     });
+
+    const dismissals: [string, () => Promise<void>][] = [
+      ["a click on the scrim", async () => {
+        (target.querySelector(".deck-backdrop") as HTMLButtonElement).click();
+      }],
+      ["the host hiding the deck", async () => host("close")],
+      ["Escape on its card and Escape again", async () => {
+        escape();
+        await flush();
+        expect(target.querySelector(".deck-shell"), "the first Escape releases the card").not.toBeNull();
+        escape();
+      }],
+    ];
+    for (const [how, dismiss] of dismissals) {
+      it(`a command ${shape} dismissed by ${how} answers nothing in the deck opened after it`, async () => {
+        const running = deferred<void>();
+        const { onSuccess } = start(card, () => running.promise);
+        await flush();
+        await dismiss();
+        await flush();
+        expect(target.querySelector(".deck-shell")).toBeNull();
+        // Both hosts open the deck again at the root with the card cleared.
+        draft().operation = null;
+        host("open");
+        await flush();
+        await typeQuery("clo");
+        running.resolve();
+        await settle();
+        expect(onSuccess, "the host is not told to close the deck").not.toHaveBeenCalled();
+        expect(target.querySelector(".deck-operation"), "no card of the earlier run").toBeNull();
+        expect(draft().query, "what was typed since stays").toBe("clo");
+        expect(closeResult()).not.toBeNull();
+      });
+    }
   }
+
+  it("a command dismissed and reopened puts no question it answers with", async () => {
+    const running = deferred<DeckConfirm>();
+    start(true, () => running.promise as unknown as Promise<void>);
+    await flush();
+    host("close");
+    await flush();
+    draft().operation = null;
+    host("open");
+    await flush();
+    running.resolve(confirmation("A question nobody is waiting for"));
+    await settle();
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(closeResult()).not.toBeNull();
+  });
+
+  it("a command whose host closed the deck as it started answers nothing after a reopen before effects", async () => {
+    const running = deferred<void>();
+    const { onSuccess } = start(true, () => {
+      // Closed and reopened before Svelte can observe a closed prop in an effect.
+      host("close");
+      return running.promise;
+    });
+    host("open");
+    await flush();
+    running.resolve();
+    await settle();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-operation")).toBeNull();
+  });
 
   it("a command that still owns its card shows its success, then runs the host's handler", async () => {
     const running = deferred<void>();

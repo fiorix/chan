@@ -539,14 +539,17 @@
       executionDraft.operation === pendingOperation &&
       executionDraft.operation?.kind === "pending" &&
       executionDraft.operation.itemId === item.id;
-    // Where a run may still answer: the open deck, on the draft that started
-    // it, while no later run, question or release has taken its token.
+    // Where a run may still answer: the deck as it was opened when the run
+    // started, on the draft that started it, while no later run, question or
+    // release has taken its token. A close is the user leaving the command,
+    // so a run that saw one answers nothing in a deck opened after it: it
+    // paints no card there and does not close it.
     const holdsDeck = (): boolean =>
-      open && draft === executionDraft && executionToken === token;
+      open && draft === executionDraft && executionToken === token &&
+      closeVersion === executionCloseVersion && !closedDuringChoose;
 
     function reject(error: unknown): void {
-      if (holdsDeck() && (!item.awaitResult || ownsPending()) &&
-          closeVersion === executionCloseVersion && !closedDuringChoose) {
+      if (holdsDeck() && (!item.awaitResult || ownsPending())) {
         executionDraft.operation = {
           kind: "error",
           itemId: item.id,
@@ -587,9 +590,12 @@
       closedDuringChoose = !open;
       const result = await chosen;
       if (result) {
-        // A follow-up confirmation belongs to the draft that started the
-        // command, and only the current card owner can offer it.
-        if (draft !== executionDraft || executionToken !== token) return;
+        // A follow-up confirmation is an answer like any other: only a run
+        // that still holds the deck can put it.
+        if (!holdsDeck()) {
+          if (ownsPending()) executionDraft.operation = null;
+          return;
+        }
         executionDraft.operation = {
           kind: "confirm",
           itemId: item.id,
@@ -604,8 +610,9 @@
       // A success shows only while the run holds the deck. It asks for the
       // token and not the card: a host clears the card itself when the
       // command's own effect changes what the deck lists, and that is not the
-      // user leaving the command. A run that lost the deck retires its own
-      // spinner, on a hidden or replaced draft too, and leaves the rest.
+      // user leaving the command, where a close is. A run that lost the deck
+      // retires its own spinner, on a hidden or replaced draft too, and
+      // leaves the rest.
       if (!holdsDeck()) {
         if (ownsPending()) executionDraft.operation = null;
         return;

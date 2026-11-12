@@ -25,8 +25,10 @@ import { ApiError } from "../api/errors";
 import * as statusBus from "../state/notify.svelte";
 import {
   clearLauncherDraft,
+  closeCommandLauncher,
   launcherDraft,
   launcherPanel,
+  openCommandLauncher,
   overlayStack,
   searchPanel,
   syncOverlayStack,
@@ -1245,6 +1247,48 @@ describe("contextual command deck", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await flush();
     expect(launcherPanel.open).toBe(false);
+  });
+
+  test.each<[string, (target: HTMLElement) => Promise<void>]>([
+    ["a click on the scrim", async (target) => {
+      (target.querySelector(".deck-backdrop") as HTMLButtonElement).click();
+    }],
+    ["the window hiding the launcher", async () => closeCommandLauncher()],
+    ["Escape on its card, then out of the page and the launcher", async (target) => {
+      await key(target, "Escape");
+      expect(launcherPanel.open, "the first Escape releases the card").toBe(true);
+      await key(target, "Escape");
+      await key(target, "Escape");
+    }],
+  ])("Hide dismissed by %s leaves the launcher opened after it alone when it succeeds", async (_how, dismiss) => {
+    stubPopup();
+    let finishHide!: () => void;
+    scopedLibrary.run.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishHide = () => resolve();
+        }),
+    );
+    const target = openLauncher();
+    await flush();
+    await openWindowPage(target);
+    row(target, "Hide window").click();
+    await flush();
+    expect(operation(target), "the action holds the card").toContain("Working");
+    await dismiss(target);
+    await flush();
+    expect(launcherPanel.open).toBe(false);
+
+    openCommandLauncher();
+    await flush();
+    await typeQuery(target, "project");
+    finishHide();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flush();
+    expect(launcherPanel.open, "the launcher opened since stays open").toBe(true);
+    expect(launcherDraft.query, "with what was typed into it").toBe("project");
+    expect(input(target).value).toBe("project");
+    expect(operation(target), "and no card of the earlier action").toBe("");
   });
 
   test("Close shows its success and closes the deck when the roster drops the window", async () => {

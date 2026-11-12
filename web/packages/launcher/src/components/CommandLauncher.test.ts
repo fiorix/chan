@@ -847,6 +847,42 @@ describe("Computers command deck", () => {
     expect(target.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it.each<[string, () => Promise<void>]>([
+    ["a click on the scrim", async () => {
+      (target.querySelector(".deck-backdrop") as HTMLButtonElement).click();
+    }],
+    ["the page hiding the deck", async () => closeCommandLauncher()],
+    ["Escape on its card and Escape again", async () => {
+      await key("Escape");
+      await key("Escape");
+    }],
+  ])("leaves the deck opened after a launch dismissed by %s alone when the launch succeeds", async (_how, dismiss) => {
+    let finishLaunch!: () => void;
+    actions.newTerminal.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLaunch = resolve;
+        }),
+    );
+    open();
+    await query("ter");
+    result("New terminal").click();
+    await tick();
+    expect(card(), "the launch holds the card").toContain("Working");
+    await dismiss();
+    flushSync();
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+
+    open();
+    await query("project");
+    finishLaunch();
+    await settle();
+    expect(activeCommandLauncherDraft().visible, "the deck opened since stays open").toBe(true);
+    expect(activeCommandLauncherDraft().query, "with what was typed into it").toBe("project");
+    expect(input().value).toBe("project");
+    expect(card(), "and no card of the earlier launch").toBe("");
+  });
+
   it("clears the query of a command that ran", async () => {
     open();
     await query("deploy shell focus");
