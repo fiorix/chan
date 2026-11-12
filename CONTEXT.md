@@ -5,35 +5,39 @@ Canonical product language for the user-facing Chan runtime and its surfaces.
 ## Language
 
 **Command launcher**:
-Chan's single searchable action surface. It presents actions for the invoking window and its focused pane and tab before broader Computers actions.
+Chan's single searchable action surface. It presents actions for the focused tab, its pane, the invoking window and its workspace, then settings, before broader Computers actions.
 _Avoid_: Computers command launcher, workspace command launcher
 
+**Command title**:
+The one name an action carries in the command launcher, in every menu, in the shortcut list and in Hybrid Nav help: a verb and its object in sentence case. A toggle is named for the thing and shows its state, and a setting carries its Settings label.
+_Avoid_: Toggle X, Show/Hide X, a second name for one action
+
 **Contextual deck**:
-The command launcher's empty-query view. It orders actions for the focused tab, focused pane, and invoking window before Computers actions, and shows only the leading few. Choosing a scope lists that scope completely.
+The command launcher's empty-query view with no scope chosen. Under a heading each, it lists the commands run recently, then every command that can run for the focused tab's application, its pane, the invoking window and its workspace, and ends with the ways into Settings and into Computers. The Settings and Computers scopes list in full what it only leads into.
 _Avoid_: Empty state, default results
 
-**Tab scope**:
-The command launcher scope holding the focused tab's actions: the tab-specific options of the application it is running, ordered first, followed by the actions any tab has. An extension tab contributes the commands that extension declares.
-_Avoid_: Surface scope, app scope
+**App scope**:
+The command launcher scope holding the actions of the application the focused tab runs, and named after that application. An extension tab contributes the commands that extension declares. What any tab can do (close, next, send to a side) belongs to the Pane scope.
+_Avoid_: Tab scope, surface scope
+
+**Settings scope**:
+The command launcher scope listing every field of Settings under its section, in the field's own words. A toggle or a choice changes in place; any other field opens Settings on it.
+_Avoid_: Preferences scope
 
 **Computers scope**:
-The computers, workspaces, and windows available to the command launcher. Outside Chan Desktop it is the invoking library; inside Chan Desktop it is the desktop's aggregate inventory.
+The computers, workspaces, windows, and gateways the command launcher lists. In a window it is the invoking library alone, as one machine; on the Computers screen it is everything that screen lists, which in Chan Desktop is the desktop's aggregate inventory. A Chan Desktop window leads from the first to the second through All computers.
 _Avoid_: Global scope, remote desktop library
 
 **Window list**:
-The Computers scope's roster of the windows that exist, each listed once and carrying whether it is open or hidden. Choosing a window offers the actions that window can take, which is not the same set for every window.
+The Computers scope's roster of the windows that exist, each listed once and carrying whether it is hidden. Choosing a window runs the first action that window offers, which is not the same for every window; the window's page, one level down, holds the rest.
 _Avoid_: Window menu, Focus list
 
 **Control terminal**:
 A Desktop-owned terminal that runs a devserver's configured connect script and remains its diagnostic surface while the script is running or has failed.
 _Avoid_: Remote terminal, devserver terminal
 
-**Launcher entry mode**:
-The initial scope requested when opening the command launcher. Contextual mode starts with the invoking tab, pane, and window; Computers mode starts with the Computers scope.
-_Avoid_: Separate launcher, Computers launcher
-
 **Launcher draft**:
-The in-progress visibility, query, navigation path, selection, and recoverable action state associated with an invoking window and launcher entry mode. It survives hiding and webview reloads, but not closure of that window or Chan Desktop.
+The in-progress visibility, query, scope, navigation path, selection, and recoverable action state of one window's command launcher. A webview reload restores an open launcher as it stood. Opening it again after a dismissal starts at the root and keeps the query alone, and a command that ran clears that too. It does not survive closure of that window or Chan Desktop.
 _Avoid_: Saved search, persistent launcher
 
 **Deep search**:
