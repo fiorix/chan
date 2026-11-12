@@ -562,8 +562,27 @@ describe("a window's page", () => {
     ]);
     await row(deck, "Hide window").run?.();
     expect(commands).toEqual([{ target: "window", key: "n", action: "hide" }]);
-    expect(row(deck, "Focus window").dismissImmediatelyOnSuccess).toBe(true);
-    expect(row(deck, "Hide window").dismissImmediatelyOnSuccess).toBeFalsy();
+  });
+
+  it("leaves at once on the actions that bring a window to the front", () => {
+    const model = devserverModel({
+      machines: [local({ windows: [win("n", { actions: ["focus", "show", "hide", "open", "close"] })] })],
+    });
+    const deck = build(model, { path: ["window:n"] });
+    expect(
+      deck.entries.map((entry) => [entry.title, entry.dismissImmediatelyOnSuccess === true]),
+    ).toEqual([
+      ["Focus window", true],
+      ["Show window", true],
+      ["Hide window", false],
+      ["Open window", true],
+      ["Close window", false],
+    ]);
+    // A hidden window's own row runs Show, and leaves the same way.
+    const hidden = devserverModel({
+      machines: [local({ windows: [win("h", { hidden: true, actions: ["show", "close"] })] })],
+    });
+    expect(row(build(hidden), "h").dismissImmediatelyOnSuccess).toBe(true);
   });
 
   it("asks before Close with the live count, then closes through the bridge", async () => {
@@ -646,8 +665,25 @@ describe("chained actions", () => {
   it("offers an off workspace nothing to open where the host cannot turn it on", () => {
     const model = desktopModel({ may: { terminal: true, window: true } });
     expect(titles(build(model, { path: ["workspace:local:notes"] }))).toEqual([]);
+    // Its page would be empty, so the row opens nothing and says where the
+    // workspace can be turned on.
     const notes = row(build(model, { filter: "workspaces" }), "notes");
-    expect([notes.kind, notes.run]).toEqual(["branch", undefined]);
+    expect([notes.disabled, notes.subtitle, notes.value, notes.next, notes.run]).toEqual([
+      true,
+      COMPUTERS_REASONS.off,
+      "off",
+      undefined,
+      undefined,
+    ]);
+    const typed = build(model, { query: "notes" }).entries.filter((entry) => entry.title.includes("notes"));
+    expect(typed.map((entry) => [entry.title, entry.disabled])).toEqual([["notes", true]]);
+  });
+
+  it("keeps the page of an off workspace that still lists a window", () => {
+    const model = desktopModel({ may: { terminal: true, window: true } });
+    model.machines[0].workspaces[1].windows = [win("local:w-9", { name: "Window 9", kind: "workspace" })];
+    const notes = row(build(model, { filter: "workspaces" }), "notes");
+    expect([notes.disabled, notes.kind, notes.next]).toEqual([undefined, "branch", ["workspace:local:notes"]]);
   });
 
   it("connects a disconnected devserver and opens its terminal", async () => {
@@ -1077,6 +1113,63 @@ describe("a host that holds one machine's snapshot", () => {
     expect(terminal.next).toBeUndefined();
     await terminal.run?.();
     expect(commands).toEqual([{ target: "machine", key: "local", action: "new-terminal" }]);
+  });
+});
+
+// ---- The way to every computer ---------------------------------------------------------------
+
+describe("a host beside a screen that lists every computer", () => {
+  const scopes = { windows: "computers", workspaces: "computers", machines: "computers", gateways: "computers" };
+
+  function beside(view: Partial<ComputersView> = {}): { deck: ComputersDeck; commands: ComputersCommand[] } {
+    const { ctx, commands } = harness();
+    const model: ComputersModel = {
+      machines: [
+        local({
+          workspaces: [space("ws-1", { name: "chan" })],
+          windows: [win("w-2", { name: "Terminal Window 2" })],
+        }),
+      ],
+      may: { terminal: true, window: true, allComputers: true },
+    };
+    return { deck: build(model, view, { ...ctx, scopes, terminalTitle: "New terminal window" }), commands };
+  }
+
+  it("ends its root with the way there", async () => {
+    const { deck, commands } = beside();
+    expect(outline(deck)).toEqual([
+      "Workspaces: chan",
+      "Windows: Terminal Window 2",
+      "New: New terminal window",
+      "Chan Desktop: All computers...",
+    ]);
+    const all = row(deck, "All computers...");
+    // The screen covers the deck's page, so the row leaves as it starts.
+    expect([all.scope, all.awaitResult, all.next]).toEqual(["computers", false, undefined]);
+    await all.run?.();
+    expect(commands).toEqual([{ target: "app", action: "all-computers" }]);
+  });
+
+  it("marks the row as the one a typed list ends with, whatever the query", () => {
+    const typed = beside({ query: "terminal" }).deck.entries;
+    expect(typed.filter((entry) => entry.pinned).map((entry) => entry.title)).toEqual(["All computers..."]);
+    expect(typed.at(-1)?.title).toBe("All computers...");
+    // No other row of the tree is pinned.
+    expect(beside().deck.entries.filter((entry) => entry.pinned)).toHaveLength(1);
+  });
+
+  it("leaves the row off a page, which lists one object", () => {
+    expect(titles(beside({ path: ["workspace:ws-1"] }).deck)).toEqual(["New window"]);
+    expect(titles(beside({ path: ["workspace:ws-1"], query: "all" }).deck)).not.toContain("All computers...");
+  });
+
+  it("offers no such row where the host has no such screen", () => {
+    const listed = [
+      ...build(devserverModel()).entries,
+      ...build(devserverModel(), { query: "all computers" }).entries,
+      ...build(desktopModel()).entries,
+    ];
+    expect(listed.filter((entry) => entry.pinned || entry.title === "All computers...")).toEqual([]);
   });
 });
 

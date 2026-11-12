@@ -153,6 +153,9 @@ export interface ComputersMay {
   renameGateway?: boolean;
   /** The host can bring a machine's card to the front of its screen. */
   showCard?: boolean;
+  /** The host is a window of an app whose own screen lists every computer,
+   * and can show that screen. Its tree then ends with the way there. */
+  allComputers?: boolean;
 }
 
 /** The app that hosts the Computers screen, where one has commands of its
@@ -194,7 +197,14 @@ export type MachineActionId =
 
 export type GatewayActionId = "connect" | "disconnect" | "rename" | "copy-wireguard-key";
 
-export type AppActionId = "new-workspace" | "add-devserver" | "add-gateway" | "theme" | "select" | "quit";
+export type AppActionId =
+  | "new-workspace"
+  | "add-devserver"
+  | "add-gateway"
+  | "theme"
+  | "select"
+  | "quit"
+  | "all-computers";
 
 export type ComputersCommand =
   | { target: "window"; key: string; action: WindowActionId }
@@ -294,6 +304,9 @@ export interface ComputersEntry extends DeckItem {
   next?: string[];
   /** The page Right opens, on a row Enter runs. */
   page?: string[];
+  /** The row ends a ranked list whatever was typed: it leads out of the
+   * model, to where what a query names may be. */
+  pinned?: boolean;
   run?: () => void | DeckConfirm | Promise<void | DeckConfirm>;
 }
 
@@ -318,6 +331,7 @@ export const COMPUTERS_REASONS = {
   lockUnknown: "Could not read this workspace's lock state",
   unavailable: "Workspace unavailable",
   controlOpen: "Close the control terminal to reconnect",
+  off: "Turn the workspace on from the Computers screen",
 } as const;
 
 export const COMPUTERS_SECTIONS = {
@@ -525,7 +539,9 @@ function windowActs(b: Builder, window: ComputersWindow): Act[] {
       phrase: `${words.verb} ${window.name}`,
       icon: action,
       keywords: words.keywords,
-      quick: action === "focus" || action === "open",
+      // A window that is shown comes to the front on most hosts, as one that
+      // is focused or opened does.
+      quick: action === "focus" || action === "show" || action === "open",
       run: () => b.ctx.bridge.run({ target: "window", key: window.key, action }),
     };
     if (action !== "close") return act;
@@ -723,9 +739,14 @@ function workspaceEntry(b: Builder, placed: PlacedWorkspace, section?: string, n
   if (note) layout.subtitle = joined(note, layout.subtitle);
   const acts = workspaceActs(b, workspace);
   const opens = acts[0]?.id === "new-window" || acts[0]?.id === "turn-on-and-open";
+  // A host that may not turn a workspace on offers nothing on one that is
+  // off, and its page would be empty.
+  const inert = acts.length === 0 && workspace.windows.length === 0;
   return objectEntry(b, "workspace", workspace.key, workspace.name, "workspace", layout, {
     primary: opens ? acts[0] : undefined,
     value: workspaceStateWord(workspace),
+    inert,
+    reason: inert ? COMPUTERS_REASONS.off : undefined,
     keywords: "workspace",
   });
 }
@@ -1084,6 +1105,18 @@ function desktopEntries(b: Builder, section?: string): ComputersEntry[] {
   return acts.map((act) => actEntry(b, act, undefined, act.label, layout));
 }
 
+/** The way from a tree that holds one machine to the screen that holds every
+ * one. */
+function allComputersEntries(b: Builder, section?: string): ComputersEntry[] {
+  if (!b.model.may.allComputers) return [];
+  const act: Act = {
+    ...appAct(b, "all-computers", "All computers...", "every machine devserver gateway screen"),
+    icon: "computers",
+  };
+  const layout = { section, breadcrumb: COMPUTERS_SECTIONS.desktop, scope: b.scopes.machines };
+  return [{ ...actEntry(b, act, undefined, act.label, layout), pinned: true }];
+}
+
 // ---- Lists ------------------------------------------------------------------
 
 function everyWindow(model: ComputersModel): PlacedWindow[] {
@@ -1148,6 +1181,7 @@ function rootEntries(b: Builder): ComputersEntry[] {
   }
   appendOnce(rows, createEntries(b, COMPUTERS_SECTIONS.create).map((created) => created.entry));
   appendOnce(rows, desktopEntries(b, COMPUTERS_SECTIONS.desktop));
+  appendOnce(rows, allComputersEntries(b, COMPUTERS_SECTIONS.desktop));
   return rows;
 }
 
@@ -1214,7 +1248,7 @@ function searchEntries(b: Builder, filter: ComputersFilter | null): ComputersEnt
       .filter((created) => all || created.filter === filter)
       .map((created) => created.entry),
   );
-  if (all) rows.push(...desktopEntries(b));
+  if (all) rows.push(...desktopEntries(b), ...allComputersEntries(b));
   return rows;
 }
 
