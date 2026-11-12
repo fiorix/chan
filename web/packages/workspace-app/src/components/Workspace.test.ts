@@ -21,6 +21,7 @@ import {
   restoreLayout,
   serializeLayout,
   splitPane,
+  stepDivider,
 } from "../state/tabs.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { onWatchEvent } from "../state/store.svelte";
@@ -223,5 +224,25 @@ describe("pane sizes across a reload", () => {
     expect(split.ratio).toBeCloseTo(0.95);
     expect(schedulePersistStateToHash).toHaveBeenCalledTimes(1);
     expect(scheduleSessionSave).toHaveBeenCalledTimes(1);
+  });
+
+  test("a drag past either edge stops where a divider step stops", () => {
+    const split = emptySplit();
+    const divider = mountDivider();
+    const dragFrom = (from: number, to: number): number => {
+      divider.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: from }));
+      window.dispatchEvent(new MouseEvent("mousemove", { clientX: to }));
+      window.dispatchEvent(new MouseEvent("mouseup"));
+      return split.ratio;
+    };
+    const stepped = (forward: boolean): number => {
+      const probe: SplitNode = { ...split, id: "probe", ratio: 0.5 };
+      for (let step = 0; step < 40; step += 1) stepDivider(probe, forward);
+      return probe.ratio;
+    };
+
+    expect(dragFrom(500, 5000)).toBe(stepped(true));
+    expect(dragFrom(950, -5000)).toBe(stepped(false));
+    expect([stepped(false), stepped(true)]).toEqual([0.05, 0.95]);
   });
 });

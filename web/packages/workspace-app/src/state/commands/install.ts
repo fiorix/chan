@@ -17,3 +17,4 @@ import "./dashboard";
 import "./graph";
 import "./panes";
 import "./paneTree";
+import "./extension";

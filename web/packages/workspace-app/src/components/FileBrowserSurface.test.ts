@@ -34,7 +34,13 @@ import { settingEntry } from "./settings/settingsIndex";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { browserBindings } from "../state/browserKeymap";
-import { commandById, commandState } from "../state/commands";
+import {
+  commandById,
+  commandContext,
+  commandPlacement,
+  commandState,
+  commandUnavailableReason,
+} from "../state/commands";
 import { chordFor, SHORTCUTS } from "../state/shortcuts";
 import {
   browserSelection,
@@ -51,6 +57,7 @@ import {
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, paneSide, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
+import { terminalTab } from "../__tests__/tabs";
 
 class TestResizeObserver {
   observe() {}
@@ -166,6 +173,23 @@ const SELECTION_ACTIONS: Words = {
   because: "opens the tree's row menu, whose rows are the catalog commands; a launcher row would list them twice",
 };
 
+const DETAILS = "app.browser.details";
+
+/// The toolbar's Details button, found by the name its command gives it.
+function detailsButton(target: HTMLElement): HTMLButtonElement {
+  const button = target.querySelector<HTMLButtonElement>(
+    `.browser-toolbar button[aria-label="${title(DETAILS)}"]`,
+  );
+  if (!button) throw new Error("no Details button in the toolbar");
+  return button;
+}
+
+/// The browser tabs of the focused pane other than `except`.
+function openedTabs(except: string): BrowserTab[] {
+  const tabs = (layout.nodes[layout.activePaneId] as LeafNode).tabs;
+  return tabs.filter((tab): tab is BrowserTab => tab.kind === "browser" && tab.id !== except);
+}
+
 async function openFromTabStrip(tab: BrowserTab): Promise<void> {
   openTabMenu(tab.id, { left: 40, top: 30, right: 40, bottom: 30 });
   await settle();
@@ -227,7 +251,7 @@ describe("the tab variant", () => {
     await openFromTabStrip(tab);
     expect(menuRows()).toEqual([
       "New file or directory", "Upload", "Selection actions", "Select multiple", "---",
-      "Hidden files", "Keyboard navigation: Vim navigation", "Keyboard shortcuts (file browser)", "---",
+      "Hidden files", settingEntry("browser.vim").label, "Keyboard shortcuts (file browser)", "---",
       "Workspace details", "Left file browser dock", "Right file browser dock", "Close tab", "---",
       "Command launcher",
     ]);
@@ -383,33 +407,126 @@ describe("the menu's words", () => {
     expect(button.title).toBe(title("app.browser.newFsEntry"));
   });
 
+  test("the toolbar's Details button is named by the command it runs, with the key that runs it", async () => {
+    const target = await render({ variant: "tab", tab: seat(browserTab()) });
+    const button = detailsButton(target);
+
+    expect(title(DETAILS)).toBe("Details");
+    expect(button.getAttribute("aria-label")).toBe(title(DETAILS));
+    expect(button.title).toBe(`${title(DETAILS)} (Mod+Y)`);
+  });
+
+  // The keys that run a catalog command. Every other key moves the cursor
+  // or the selection, which the catalog does not list.
+  const KEY_COMMANDS: Record<string, string> = {
+    open: "app.browser.open",
+    rename: "app.browser.renameSelection",
+    copy: "app.browser.copySelection",
+    cut: "app.browser.cutSelection",
+    paste: "app.browser.pasteSelection",
+    delete: "app.browser.deleteSelection",
+    selectMode: "app.browser.selectMultiple",
+  };
+  const KEY_WORDS: Record<string, string> = {
+    previous: "Previous", next: "Next", parent: "Parent", child: "Child", first: "First", last: "Last",
+    pagePrevious: "Page previous", pageNext: "Page next", menu: wordsOf(SELECTION_ACTIONS),
+    filter: "Filter", toggle: "Toggle", selectAll: "Select all", clear: "Clear",
+  };
+
+  function keyList(target: HTMLElement): (string | null)[] {
+    return [...target.querySelectorAll(".keyboard-help dt")].map((dt) => dt.textContent);
+  }
+
+  function keyWords(commands: Record<string, string>): string[] {
+    return Object.keys(browserBindings).map((key) => (commands[key] ? title(commands[key]) : KEY_WORDS[key]!));
+  }
+
   test("the key list words a key by the command it runs, and the rest by what the key does", async () => {
-    // The keys that run a catalog command. Every other key moves the cursor
-    // or the selection, which the catalog does not list.
-    const commands: Record<string, string> = {
-      open: "app.browser.open",
-      rename: "app.browser.renameSelection",
-      copy: "app.browser.copySelection",
-      cut: "app.browser.cutSelection",
-      paste: "app.browser.pasteSelection",
-      delete: "app.browser.deleteSelection",
-      selectMode: "app.browser.selectMultiple",
-    };
-    const own: Record<string, string> = {
-      previous: "Previous", next: "Next", parent: "Parent", child: "Child", first: "First", last: "Last",
-      pagePrevious: "Page previous", pageNext: "Page next", menu: wordsOf(SELECTION_ACTIONS), preview: "Preview",
-      filter: "Filter", toggle: "Toggle", selectAll: "Select all", clear: "Clear",
-    };
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab });
     await openFromTabStrip(tab);
     menuButton(title("app.browser.keyboardHelp")).click();
     await settle();
 
-    const listed = [...target.querySelectorAll(".keyboard-help dt")].map((dt) => dt.textContent);
-    expect(listed).toEqual(
-      Object.keys(browserBindings).map((key) => (commands[key] ? title(commands[key]) : own[key])),
-    );
+    // In a tab the key that previews the selection shows its Details.
+    expect(keyList(target)).toEqual(keyWords({ ...KEY_COMMANDS, preview: DETAILS }));
+  });
+
+  test("a dock's key list words the preview key by what it runs there", async () => {
+    const target = await render({ variant: "dock", side: "left" });
+    target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await settle();
+    menuButton(title("app.browser.keyboardHelp")).click();
+    await settle();
+
+    // A dock has no Details: the key opens the selection in a tab.
+    expect(keyList(target)).toEqual(keyWords({ ...KEY_COMMANDS, preview: "app.browser.openInBrowser" }));
+  });
+});
+
+describe("Details", () => {
+  function shown(target: HTMLElement): boolean {
+    return target.querySelector(".inspector") !== null;
+  }
+
+  test("the button, the key and the command flip one switch, and each shows the others' change", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const command = commandById(DETAILS)!;
+    const button = detailsButton(target);
+    expect(command.kind).toBe("toggle");
+    expect([commandState(DETAILS), button.getAttribute("aria-pressed"), shown(target)]).toEqual([false, "false", false]);
+
+    button.click();
+    await settle();
+    expect([tab.inspectorOpen, commandState(DETAILS), button.getAttribute("aria-pressed"), shown(target)]).toEqual([
+      true, true, "true", true,
+    ]);
+
+    command.run();
+    await settle();
+    expect([tab.inspectorOpen, commandState(DETAILS), button.getAttribute("aria-pressed"), shown(target)]).toEqual([
+      false, false, "false", false,
+    ]);
+
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    list.dispatchEvent(new KeyboardEvent("keydown", { key: "y", ctrlKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect([commandState(DETAILS), shown(target)]).toEqual([true, true]);
+
+    command.run();
+    await settle();
+    expect([button.getAttribute("aria-pressed"), shown(target)]).toEqual(["false", false]);
+  });
+
+  test("the command acts on the active file browser tab alone", async () => {
+    const tab = seat(browserTab());
+    await render({ variant: "tab", tab });
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push({ kind: "browser", id: "fb-2", title: "Files 2", inspectorOpen: true });
+    pane.activeTabId = "fb-2";
+    const command = commandById(DETAILS)!;
+
+    expect(commandState(DETAILS)).toBe(true);
+    command.run();
+    expect((pane.tabs[1] as BrowserTab).inspectorOpen).toBe(false);
+    expect(tab.inspectorOpen).toBe(false);
+    expect(commandState(DETAILS)).toBe(false);
+  });
+
+  test("the command is offered on a file browser tab, and elsewhere says which tab it needs", async () => {
+    await render({ variant: "tab", tab: seat(browserTab()) });
+    const command = commandById(DETAILS)!;
+
+    expect(command.available(commandContext())).toBe(true);
+    expect(commandPlacement(command)).toEqual({ scope: "app", surfaces: ["browser"], group: null });
+
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push(terminalTab({ id: "term-1" }));
+    pane.activeTabId = "term-1";
+    expect(command.available(commandContext())).toBe(false);
+    expect(commandUnavailableReason(command, commandContext())).toBe("Needs a file browser tab");
+    expect(commandState(DETAILS)).toBeNull();
   });
 });
 
@@ -593,6 +710,56 @@ describe("the launcher's Open", () => {
   });
 });
 
+describe("the launcher's Open in new file browser", () => {
+  function open(): void {
+    commandById("app.browser.openInBrowser")!.run();
+  }
+
+  /// A seated tab listing the root, with `paths` selected in it.
+  async function select(paths: string[]): Promise<BrowserTab> {
+    const tab = seat(browserTab({ id: "existing", selected: paths.at(-1), selectedPaths: paths }));
+    await render({ variant: "tab", tab });
+    return tab;
+  }
+
+  test("reveals the selected file in a new tab, in its folder with Details shown", async () => {
+    await select(["notes/a.md"]);
+
+    open();
+    const [opened] = openedTabs("existing");
+    expect(opened).toMatchObject({ directory: "notes", selected: "notes/a.md", inspectorOpen: true });
+    expect(opened!.showWorkspace).toBeFalsy();
+  });
+
+  test("reveals a selected directory in the folder that holds it", async () => {
+    await select(["notes"]);
+
+    open();
+    expect(openedTabs("existing")[0]).toMatchObject({ directory: "", selected: "notes", inspectorOpen: true });
+  });
+
+  test("with nothing selected opens on the workspace, with its details", async () => {
+    await select([]);
+
+    open();
+    const [opened] = openedTabs("existing");
+    expect(opened).toMatchObject({ showWorkspace: true, inspectorOpen: true });
+    expect(opened!.selected).toBeUndefined();
+  });
+
+  test("leaves the tab it was run from as it was", async () => {
+    const tab = await select(["notes", "README.md"]);
+    const source = fbTreeInstance("fb-tab-existing")!.selection;
+    expect(source.paths).toEqual(["notes", "README.md"]);
+
+    open();
+    await settle();
+    expect(source.paths).toEqual(["notes", "README.md"]);
+    expect(source.showWorkspace).toBe(false);
+    expect(tab.selectedPaths).toEqual(["notes", "README.md"]);
+  });
+});
+
 describe("clicking a row", () => {
   function clickRow(target: HTMLElement, name: string): void {
     const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
@@ -609,7 +776,7 @@ describe("clicking a row", () => {
     await settle();
     expect(tab.inspectorOpen).toBe(false);
     expect(target.querySelector(".inspector")).toBeNull();
-    target.querySelector<HTMLButtonElement>('[aria-label="Toggle details"]')!.click();
+    detailsButton(target).click();
     await settle();
     expect(tab.inspectorOpen).toBe(true);
     expect(target.querySelector(".inspector")).not.toBeNull();
@@ -744,23 +911,58 @@ describe("the dock variant", () => {
     expect(rows).not.toContain("Flip pane");
   });
 
-  test("Open in new file browser opens a tab in the selection's directory", async () => {
+  /// A left dock beside a seated tab, with `path` selected in the dock, and
+  /// its Open in new file browser row clicked.
+  async function openFromDock(path: string | null): Promise<BrowserTab> {
     seat(browserTab({ id: "existing" }));
     const target = await render({ variant: "dock", side: "left" });
     target.querySelector<HTMLElement>('[role="tree"]')!.focus();
-    browserSelection.path = "notes/a.md";
+    browserSelection.path = path;
+    browserSelection.paths = path ? [path] : [];
     target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await settle();
 
-    menuButton("Open in new file browser").click();
+    menuButton(title("app.browser.openInBrowser")).click();
     await settle();
-    const tabs = (layout.nodes[layout.activePaneId] as LeafNode).tabs;
-    const opened = tabs.find((t) => t.kind === "browser" && t.id !== "existing") as BrowserTab;
-    expect(opened).toBeDefined();
+    const opened = openedTabs("existing");
+    expect(opened).toHaveLength(1);
+    return opened[0]!;
+  }
+
+  test("Open in new file browser opens a tab in the selection's directory", async () => {
+    const opened = await openFromDock("notes/a.md");
+
     expect(opened.inspectorOpen).toBe(true);
     expect(opened.directory).toBe("notes");
+    expect(opened.selected).toBe("notes/a.md");
     expect(opened.showWorkspace).toBeFalsy();
-    expect(browserSelection.path).toBe("notes/a.md");
+    expect(fbTreeInstance("fb-dock-left")!.selection.path, "the dock keeps its selection").toBe("notes/a.md");
+    expect(menu()).toBeNull();
+  });
+
+  test("Open in new file browser opens a selected directory itself", async () => {
+    const opened = await openFromDock("notes");
+
+    expect(opened.directory).toBe("notes");
+    expect(opened.showWorkspace).toBeFalsy();
+  });
+
+  test("Open in new file browser with nothing selected opens a file browser on the root", async () => {
+    const opened = await openFromDock(null);
+
+    expect(opened.directory ?? "").toBe("");
+    expect(opened.selected).toBeUndefined();
+    expect(opened.showWorkspace).toBeFalsy();
+  });
+
+  test("the tab a dock opens shows Details by the screen's width, as a new file browser does", async () => {
+    const width = window.innerWidth;
+    try {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+      expect((await openFromDock("notes/a.md")).inspectorOpen).toBe(false);
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    }
   });
 
   test("the workspace path row opens a tab on the workspace", async () => {

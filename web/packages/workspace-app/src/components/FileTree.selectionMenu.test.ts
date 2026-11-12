@@ -16,7 +16,8 @@
 // the catalog command that does the same for the selection, to the shortcut
 // table's label for the launcher, or to a named exemption. The commands the
 // rows are worded from are offered for a selection when the menu offers the
-// row for it.
+// row for it, and a row runs for its entry what its command runs for the
+// selection.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -255,6 +256,14 @@ describe("a file's menu", () => {
     await vi.waitFor(() => expect(tabs().at(-1)).toMatchObject({ kind: "file", path: "a.md" }));
   });
 
+  test("Open in new file browser opens a Files tab on the file's folder with the file selected", async () => {
+    item(await menuFor("a.md"), "Open in new file browser").click();
+    await settle();
+
+    expect(tabs().at(-1)).toMatchObject({ kind: "browser", directory: "", selected: "a.md", inspectorOpen: true });
+    expect(document.querySelector(".ctx")).toBeNull();
+  });
+
   test("View opens a video in its viewer", async () => {
     item(await menuFor("clip.mp4"), "View").click();
     await settle();
@@ -402,6 +411,40 @@ describe("the commands the rows are worded from", () => {
     command("app.browser.exportPdf").run();
 
     await vi.waitFor(() => expect(downloadBytes).toHaveBeenCalledWith(PDF, "a.pdf", "application/pdf"));
+  });
+
+  test("Copy path copies the selection's path and reports as its row does: copied, or why not", async () => {
+    const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const viaCommand = async (): Promise<string> => {
+      ui.status = "";
+      fbSelectSingle("a.md");
+      command("app.browser.copyPath").run();
+      await settle();
+      return ui.status;
+    };
+    const viaRow = async (): Promise<string> => {
+      ui.status = "";
+      item(await menuFor("a.md"), "Copy path").click();
+      await settle();
+      return ui.status;
+    };
+    try {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+      expect([await viaCommand(), await viaRow()]).toEqual([
+        "copy failed: Clipboard unavailable", "copy failed: Clipboard unavailable",
+      ]);
+
+      const writeText = vi.fn(async (_text: string): Promise<void> => { throw new Error("denied"); });
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+      expect([await viaCommand(), await viaRow()]).toEqual(["copy failed: denied", "copy failed: denied"]);
+
+      writeText.mockResolvedValue(undefined);
+      expect([await viaCommand(), await viaRow()]).toEqual(["Copied path", "Copied path"]);
+      expect(writeText.mock.calls.slice(-2)).toEqual([["a.md"], ["a.md"]]);
+    } finally {
+      if (original) Object.defineProperty(navigator, "clipboard", original);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
   });
 });
 
