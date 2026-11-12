@@ -1,12 +1,12 @@
 // Pure per-path action applicability shared by the inspector
 // (FileInfoBody) and the file browser context menu (FileTree).
 // One policy, two renderers: each surface maps the returned action
-// identifiers to its own handlers and labels, so applicability can
-// never drift between the inspector pill/dropdown and the right-click
-// menu. Destructive and path-mutation rows (Copy path, Rename or move,
-// Delete) are NOT actions in this model; they belong to FileTree's
-// separate policy and confirmation flow, and this module never emits
-// them.
+// identifiers to its own handlers and to the catalog commands whose
+// titles word its rows, so applicability can never drift between the
+// inspector pill/dropdown and the right-click menu. Destructive and
+// path-mutation rows (Copy path, Rename or move, Delete) are NOT
+// actions in this model; they belong to FileTree's separate policy and
+// confirmation flow, and this module never emits them.
 
 import type { TreeEntry } from "../api/types";
 import { isAudio, isImage, isMarkdown, isPdf, isVideo } from "./fileTypes";
@@ -19,8 +19,9 @@ export type FileActionId =
   /// Open the file in the editor, or enter the directory in a file
   /// browser (the inspector's directory "Open" routes the same way).
   | "open"
-  /// Reveal the entry in a file browser (inspector: "Show file";
-  /// tree: "Open in new file browser").
+  /// Reveal the entry in a file browser (the editor's inspector: "Show in
+  /// file browser"; the tree and every other inspector: "Open in new file
+  /// browser").
   | "showFile"
   /// View an image (zoom), video, audio, or PDF in its viewer.
   | "viewMedia"

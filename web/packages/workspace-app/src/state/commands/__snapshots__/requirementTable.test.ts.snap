@@ -39,6 +39,8 @@ app.draft.save drafts
 app.editor.copyParentPath files
 app.editor.copyPath files
 app.editor.details files
+app.editor.download files
+app.editor.exportPdf files
 app.editor.graphFromHere workspace
 app.editor.outline files
 app.editor.reloadFromDisk files
@@ -192,6 +194,8 @@ app.dashboard.slides any
 app.editor.copyParentPath files
 app.editor.copyPath files
 app.editor.details files
+app.editor.download files
+app.editor.exportPdf files
 app.editor.outline files
 app.editor.reloadFromDisk files
 app.editor.showInBrowser files
@@ -283,6 +287,8 @@ app.draft.save drafts
 app.editor.copyParentPath files
 app.editor.copyPath files
 app.editor.details files
+app.editor.download files
+app.editor.exportPdf files
 app.editor.outline files
 app.editor.reloadFromDisk files
 app.editor.showInBrowser files

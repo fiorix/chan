@@ -633,11 +633,11 @@ describe("graphs from the browser", () => {
     return [...target.querySelectorAll(".inspector .action-menu-item")].map((b) => b.textContent?.trim() ?? "");
   }
 
-  test("the workspace's Graph from here opens the workspace graph in a new tab", async () => {
+  test("the workspace's New graph here opens the workspace graph in a new tab", async () => {
     const target = await workspaceInspector();
-    expect(await inspectorActions(target)).toContain("Graph from here");
+    expect(await inspectorActions(target)).toContain("New graph here");
     [...target.querySelectorAll<HTMLButtonElement>(".inspector .action-menu-item")]
-      .find((b) => b.textContent?.trim() === "Graph from here")!
+      .find((b) => b.textContent?.trim() === "New graph here")!
       .click();
     await settle();
     const graph = (layout.nodes[PANE] as LeafNode).tabs.find((t) => t.kind === "graph");
@@ -647,7 +647,7 @@ describe("graphs from the browser", () => {
   test("a window without a workspace offers no graph from the inspector or the tree", async () => {
     caps.workspace = false;
     const target = await workspaceInspector();
-    expect(await inspectorActions(target)).not.toContain("Graph from here");
+    expect(await inspectorActions(target)).not.toContain("New graph here");
 
     const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
       (el) => el.querySelector(".name")?.textContent?.trim() === "notes",
@@ -665,8 +665,8 @@ describe("graphs from the browser", () => {
     readme!.querySelector<HTMLElement>(".name")!.click();
     await settle();
     const fileActions = await inspectorActions(target);
-    expect(fileActions).toContain("Download file");
-    expect(fileActions).not.toContain("Graph from here");
+    expect(fileActions).toContain("Download");
+    expect(fileActions).not.toContain("New graph here");
   });
 });
 

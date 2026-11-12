@@ -198,7 +198,7 @@ describe("the inspector's transfer actions", () => {
   test("Download hands the browser the entry's download link", async () => {
     await inspect("a.md");
 
-    (await action("Download file")).click();
+    (await action("Download")).click();
     await settle();
 
     expect(clicked.map((link) => link.getAttribute("href"))).toEqual([api.downloadUrl("a.md")]);
@@ -207,7 +207,7 @@ describe("the inspector's transfer actions", () => {
   test("Upload on a folder uploads into it", async () => {
     await inspect("docs");
 
-    (await action("Upload file here")).click();
+    (await action("Upload")).click();
     const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')];
     pick(inputs[inputs.length - 1], new File(["fresh"], "d.md"));
 
