@@ -173,7 +173,7 @@
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
-  import { isTauriDesktop, reloadWindow } from "./api/desktop";
+  import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
   import {
@@ -1913,7 +1913,7 @@
 <DraftCloseModal />
 <WorkspaceWarningsModal />
 <SearchPanel />
-<CommandLauncher />
+<CommandLauncher allComputers={isTauriDesktop() ? () => toggleLauncherPanel() : undefined} />
 <!-- Every pane of this window, its sides and their tabs. -->
 <PaneTreeOverlay />
 <SettingsOverlay />
