@@ -66,7 +66,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage Dashboard",
       "Stage New Draft",
       "Stage Excalidraw",
-      "Toggle right-side file browser dock",
+      "Right file browser dock",
     ]) {
       expect(actions, action).toContain(action);
     }
@@ -76,8 +76,8 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     const actions = await actionsFor("terminal", true);
     // The file surface this window really has, and the Dashboard it opens.
     expect(actions).toContain("Stage File Browser");
-    expect(actions).toContain("Toggle right-side file browser dock");
-    expect(actions).toContain("Toggle left-side file browser dock");
+    expect(actions).toContain("Right file browser dock");
+    expect(actions).toContain("Left file browser dock");
     expect(actions).toContain("Stage Dashboard");
     // The workspace surfaces it does not: App.svelte returns early on each of
     // these, so advertising them would be advertising dead keys.
@@ -117,7 +117,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage Graph",
       "Stage New Draft",
       "Stage Excalidraw",
-      "Toggle right-side file browser dock",
+      "Right file browser dock",
     ]) {
       expect(actions, action).not.toContain(action);
     }
@@ -130,7 +130,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
 
   test("a tmux window lists the splits and resizes, and no tile swap, staged tab or side flip", async () => {
     const actions = await actionsFor("terminal", true, true, true);
-    for (const action of ["Move focus", "Split right", "Split down", "Move divider left / right", "Commit draft"]) {
+    for (const action of ["Move focus", "Split right", "Split down", "Move divider left", "Equalize panes", "Commit draft"]) {
       expect(actions, action).toContain(action);
     }
     for (const action of [
@@ -139,7 +139,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage File Browser",
       "Stage Dashboard",
       "Stage New Draft",
-      "Flip side",
+      "Flip pane",
     ]) {
       expect(actions, action).not.toContain(action);
     }

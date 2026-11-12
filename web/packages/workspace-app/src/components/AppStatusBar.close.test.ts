@@ -107,15 +107,15 @@ test("the transfers launcher hides through progress and returns with a new trans
   const first = beginTransfer({ kind: "upload", filename: "a.bin", cancel: null });
   mountBar();
   close("hide file transfers");
-  expect(shown("show file transfers")).toBe(false);
+  expect(shown("Show transfers")).toBe(false);
 
   setTransferProgress(first, 0.5);
   flushSync();
-  expect(shown("show file transfers"), "progress is not new content").toBe(false);
+  expect(shown("Show transfers"), "progress is not new content").toBe(false);
 
   beginTransfer({ kind: "upload", filename: "b.bin", cancel: null });
   flushSync();
-  expect(shown("show file transfers")).toBe(true);
+  expect(shown("Show transfers")).toBe(true);
 });
 
 test("workspace warnings hide until a new warning arrives", () => {
@@ -125,11 +125,11 @@ test("workspace warnings hide until a new warning arrives", () => {
   ui.statusAction = { kind: "workspace-warnings", label: "Workspace warnings" };
   mountBar();
   close("hide workspace warnings");
-  expect(shown("open workspace warnings")).toBe(false);
+  expect(shown("Show workspace warnings")).toBe(false);
 
   workspaceWarningsDialog.warnings = [warning("a"), warning("b")];
   flushSync();
-  expect(shown("open workspace warnings")).toBe(true);
+  expect(shown("Show workspace warnings")).toBe(true);
 });
 
 test("hidden workspace warnings stay hidden when they re-assert after a confirmation", () => {
@@ -150,7 +150,7 @@ test("hidden workspace warnings stay hidden when they re-assert after a confirma
   ui.statusAction = null;
   flushSync();
   assertWarnings();
-  expect(shown("open workspace warnings"), "the same warnings stay hidden").toBe(false);
+  expect(shown("Show workspace warnings"), "the same warnings stay hidden").toBe(false);
 });
 
 test("the session role badge hides until the roster changes", () => {

@@ -437,6 +437,17 @@ export async function focusNativeLibraryWindow(windowId: string): Promise<void> 
   await tauriInvoke("focus_library_window", { windowId });
 }
 
+/// Show the desktop's Computers launcher over THIS window, or hide it when it
+/// is shown: the panel that lists every computer, where the window's own
+/// launcher reaches its own library alone. It is the command the desktop's
+/// key bridge sends for the launcher chord, so the two cannot differ. Throws
+/// off-desktop and when the desktop refuses, as it does for a window that
+/// cannot host the panel.
+export async function toggleLauncherPanel(): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("toggle_launcher_panel");
+}
+
 /// What the installed app advertises about itself: the command vocabulary its
 /// gateway grant carries and the build it was compiled from. The field names
 /// are the desktop-side contract (`native_vocabulary` in main.rs).

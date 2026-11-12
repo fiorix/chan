@@ -1,6 +1,8 @@
 // Process-ready local extensions and their dynamic launcher commands. The
 // capability-scoped entry path lives only in this in-memory catalog: tabs persist the
-// stable extension id + display name, never credentials.
+// stable extension id + display name, never credentials. The state the
+// commands every extension tab has (Reload extension, Present extension in
+// state/commands/extension.ts) read lives here too.
 
 import { api } from "../api/client";
 import { isTransientApiError } from "../api/errors";
@@ -25,6 +27,8 @@ export type PendingExtensionCommand = {
 type ExtensionFrameTarget = {
   ready: boolean;
   post: (command: PendingExtensionCommand) => void;
+  /// Load the tab's frame again from its current entry path.
+  reload?: () => void;
 };
 
 let catalog = $state<ExtensionInfo[]>([]);
@@ -33,6 +37,9 @@ let loadPromise: Promise<void> | null = null;
 let refreshPromise: Promise<void> | null = null;
 const frameTargets = new Map<string, ExtensionFrameTarget>();
 const commandQueues = new Map<string, PendingExtensionCommand[]>();
+/// The extension tabs shown in presentation, by tab id. Held here so the
+/// tab's menu row and the launcher's toggle read one state.
+const presentingTabs = $state<Record<string, true>>({});
 
 /// Fetch + validate the catalog and (re-)register launcher commands.
 /// Throws on a failed fetch; the caller owns failure policy (the initial
@@ -47,9 +54,13 @@ async function resolveCatalog(): Promise<void> {
   registerCommands(
     entries.flatMap((extension) => [
       {
+        // The extension's own row opens or focuses its tab: a spawner like
+        // the rest of New tab, listed after the built-in ones.
         id: `extension.${extension.id}`,
         title: extension.name,
         category: "Apps" as const,
+        scope: "pane" as const,
+        group: "New tab",
         // Extension frames are served by the workspace tenant, so their
         // launcher entries need a workspace window.
         requirement: "workspace" as const,
@@ -58,9 +69,12 @@ async function resolveCatalog(): Promise<void> {
         run: () => invokeExtension(extension),
       },
       ...(extension.commands ?? []).map((command) => ({
+        // A command the extension declares acts inside its tab.
         id: `extension.${extension.id}.${command.id}`,
         title: command.title,
         category: "Apps" as const,
+        scope: "app" as const,
+        surface: "extension" as const,
         requirement: "workspace" as const,
         keywords: [
           "extension",
@@ -148,12 +162,42 @@ export function extensionHasCapability(
 export function registerExtensionFrame(
   tabId: string,
   post: (command: PendingExtensionCommand) => void,
+  reload?: () => void,
 ): () => void {
-  frameTargets.set(tabId, { ready: false, post });
+  frameTargets.set(tabId, { ready: false, post, reload });
   return () => {
     frameTargets.delete(tabId);
     commandQueues.delete(tabId);
+    delete presentingTabs[tabId];
   };
+}
+
+/// Reload the extension tab `tabId`: resolve the catalog again, which picks
+/// up an extension that exited or whose entry path was re-minted, then load
+/// the tab's frame again. The tab's menu row and the launcher both call this.
+export async function reloadExtensionTab(tabId: string): Promise<void> {
+  await refreshExtensions();
+  frameTargets.get(tabId)?.reload?.();
+}
+
+/// Whether the extension tab `tabId` is shown in presentation.
+export function extensionPresenting(tabId: string | null): boolean {
+  return tabId !== null && presentingTabs[tabId] === true;
+}
+
+/// Put the extension tab `tabId` in or out of presentation, whatever its
+/// extension declares. The callers that take a request check the capability.
+export function setExtensionPresenting(tabId: string, on: boolean): void {
+  if (on) presentingTabs[tabId] = true;
+  else delete presentingTabs[tabId];
+}
+
+/// Flip the presentation of the tab `tabId`, which shows `extensionId`.
+/// Refused for an extension that does not declare the capability. The tab's
+/// menu row, the launcher's toggle and the frame's own request call this.
+export function toggleExtensionPresentation(tabId: string, extensionId: string): void {
+  if (!extensionHasCapability(extensionFor(extensionId), "presentation")) return;
+  setExtensionPresenting(tabId, !extensionPresenting(tabId));
 }
 
 export function resetExtensionFrame(tabId: string): void {

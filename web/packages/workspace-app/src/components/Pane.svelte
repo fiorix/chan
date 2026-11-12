@@ -56,7 +56,6 @@
     setTerminalActivity,
     shouldCloseTabAfterDragEnd,
     type PaneSide,
-    type FocusColor,
     type LeafNode,
     type SerTab,
     type Tab,
@@ -101,7 +100,6 @@
   import GraphPanel from "./GraphPanel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
-    chooseWindowFocusColor,
     currentPreferences,
     modalDialogOpen,
     openCommandLauncherFromMenu,
@@ -124,7 +122,7 @@
     terminalBroadcastReachCount,
   } from "../state/tabs.svelte";
   import type { BrowserLabelCtx } from "../state/tabs.svelte";
-  import { chordFor, webInspectorChordLabel } from "../state/shortcuts";
+  import { chordFor, SHORTCUTS, webInspectorChordLabel } from "../state/shortcuts";
   import { openTabMenu, tabMenu } from "../state/tabMenu.svelte";
   import {
     defaultShellProfileId,
@@ -132,21 +130,26 @@
     shellProfiles,
   } from "../state/shellProfiles.svelte";
   import {
-    api,
     dragScopeMimeToken,
     sessionWindowId,
     windowDragScope,
     windowLibraryId,
   } from "../api/client";
   import { persistedPath, revivedPath } from "../api/fileIdentity";
-  import { ApiError } from "../api/errors";
-  import { applyNamedFocusColor } from "../state/paneColor";
   import { onDestroy, onMount, untrack } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
   import { paneBodyDropZone, type PaneBodyDropZone } from "../state/paneDropZone";
-  import { dispatchAllowsCommand } from "../state/commands";
+  import {
+    commandById,
+    commandContext,
+    commandTitle,
+    dispatchAllowsCommand,
+    type CommandOption,
+  } from "../state/commands";
+  // The pane's menus name their rows through the catalog, which this fills.
+  import "../state/commands/install";
   import { windowModeAllowsCommand } from "../state/windowMode";
   import { programSummary, programVisual } from "../state/programStatus";
   import { windowTabBar, windowTabBarTitleSlot } from "../state/windowTabBar.svelte";
@@ -278,8 +281,6 @@
     ),
   );
 
-  const paneFocusColors: FocusColor[] = ["blue", "orange", "green", "pink", "grey"];
-
   /// Resolve a command's chord for the pane chrome menus, override-aware
   /// (user assignment first, then the built-in), empty when unbound.
   function chordLabel(id: string | undefined): string {
@@ -287,15 +288,26 @@
   }
   const flipChord = $derived(chordLabel("app.pane.flip"));
   const sideToggleTitle = $derived(
-    `Flip to side ${visibleSide === "a" ? "B" : "A"}${flipChord ? ` (${flipChord})` : ""}`,
+    `${commandTitle("app.pane.flip")} to side ${visibleSide === "a" ? "B" : "A"}${flipChord ? ` (${flipChord})` : ""}`,
   );
 
-  /// The pane's right-click menu: Commands, Reload and, on the desktop, Open
-  /// Inspector, each with its chord. It opens over the strip's empty stretch
-  /// and over the body of a side with no tab, where nothing else draws a menu
-  /// and the browser's own would offer Back and Inspect Element instead. The
-  /// pane hamburger and the command launcher stay the discovery surfaces for
-  /// spawn actions; the hamburger also keeps the pane-local chrome controls.
+  // The launcher's own toggle has no catalog row; the shortcut table names it.
+  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+
+  /// The options a choice command offers now. The hamburger's focus colour
+  /// rows and shell rows are the options of the commands that list them in
+  /// the launcher, so a row and its option are one label and one action.
+  function choiceOptions(id: string): readonly CommandOption[] {
+    return commandById(id)?.options?.(commandContext()) ?? [];
+  }
+
+  /// The pane's right-click menu: the launcher row, Reload window and, on
+  /// the desktop, Open Inspector, each with its chord. It opens over the
+  /// strip's empty stretch and over the body of a side with no tab, where
+  /// nothing else draws a menu and the browser's own would offer Back and
+  /// Inspect Element instead. The pane hamburger and the command launcher
+  /// stay the discovery surfaces for spawn actions; the hamburger also keeps
+  /// the pane-local chrome controls.
 
   /// Pane chrome menu: the ⋮ in the tab strip that replaces the
   /// per-button split / close controls.
@@ -310,7 +322,7 @@
   });
   let paneContextMenu: HamburgerMenu | undefined = $state();
   let paneContextMenuOpen = $state(false);
-  // What held focus as the right-click menu opened, for its Commands row to
+  // What held focus as the right-click menu opened, for its launcher row to
   // hand back before the launcher opens; see openCommandLauncherFromMenu.
   let paneContextOpener: HTMLElement | null = null;
   const inspectorChord = $derived(webInspectorChordLabel());
@@ -531,23 +543,12 @@
     });
   }
 
-  function doSetFocusColor(color: FocusColor): void {
+  /// A focus colour row or a shell row: run the option the launcher lists
+  /// under the same command. The colour option recolours this document and
+  /// sends the local-colour PUT that updates other library windows.
+  function runChoiceOption(option: CommandOption): void {
     closePaneMenus();
-    // The pane menu and launcher share this choice path: it recolours this
-    // document and sends the local-colour PUT that updates other library windows.
-    // Once the app's initial load has finished, the store writes the layout to
-    // the address and schedules the session save.
-    applyNamedFocusColor(color, chooseWindowFocusColor, (hex) => {
-      // Best-effort: a read-only / no-store serving surface answers 403/404.
-      // Swallow it -- a failed persist must never break the menu or throw -- but LOG
-      // the status so a persist FAILURE on a surface that DOES have a store (e.g. a
-      // local desktop window whose per-tenant token is rejected by the launcher
-      // bearer gate) is visible instead of silently lost.
-      void api.setLocalColor(hex).catch((err: unknown) => {
-        const status = err instanceof ApiError ? err.status : "?";
-        console.warn(`setLocalColor failed (status ${status}); colour not persisted`, err);
-      });
-    });
+    void option.run();
   }
 
   /// A side with no tab shows a placeholder that draws no menu of its own,
@@ -581,14 +582,6 @@
     );
   }
 
-  /// New terminal on a named shell profile. Routed through the same command
-  /// the plain "New terminal" row and the Ctrl+Shift+T chord use, so a picked
-  /// shell still gets the workspace-root guard and the resolved spawn cwd.
-  function runTerminalProfile(profile: string): void {
-    closePaneHamburgerMenu();
-    dispatchCommand("app.terminal.toggle", { profile });
-  }
-
   /// First-placement height estimate for the pane hamburger. The menu
   /// re-measures itself on rAF, so this only decides the initial above/below
   /// flip -- but a stale value makes it visibly jump, so count the profile
@@ -603,19 +596,23 @@
   type IconComponent = typeof LayoutGrid;
   type AppRow = { id: string; title: string; icon: IconComponent };
 
-  // One row per spawnable app surface, alphabetical by title. Six ids are
-  // the chorded spawn commands; New diagram / New slide deck are the
-  // chordless catalog entries runCommand also routes (App.svelte).
-  const appRows: AppRow[] = [
-    { id: "app.dashboard.open", title: "New dashboard", icon: ChartNoAxesColumn },
-    { id: "app.diagram.new", title: "New diagram", icon: Shapes },
-    { id: "app.draft.new", title: "New draft", icon: FileText },
-    { id: "app.files.toggle", title: "New file browser", icon: Folder },
-    { id: "app.graph.toggle", title: "New graph", icon: Network },
-    { id: "app.slides.new", title: "New slide deck", icon: Presentation },
-    { id: "app.terminal.teamWork", title: "New team", icon: Users },
-    { id: "app.terminal.toggle", title: "New terminal", icon: Terminal },
-  ];
+  // One row per spawnable app surface, each named by its command and listed
+  // alphabetically by that title. Six ids are the chorded spawn commands;
+  // New diagram / New slide deck are the chordless catalog entries
+  // runCommand also routes (App.svelte).
+  const APP_ROW_ICONS: Record<string, IconComponent> = {
+    "app.dashboard.open": ChartNoAxesColumn,
+    "app.diagram.new": Shapes,
+    "app.draft.new": FileText,
+    "app.files.toggle": Folder,
+    "app.graph.toggle": Network,
+    "app.slides.new": Presentation,
+    "app.terminal.teamWork": Users,
+    "app.terminal.toggle": Terminal,
+  };
+  const appRows: AppRow[] = Object.entries(APP_ROW_ICONS)
+    .map(([id, icon]) => ({ id, title: commandTitle(id), icon }))
+    .sort((a, b) => a.title.localeCompare(b.title));
   const availableAppRows = $derived(appRows.filter((row) =>
     windowModeAllowsCommand(row.id, ui) && dispatchAllowsCommand(row.id, windowCaps),
   ));
@@ -1398,26 +1395,28 @@
 <!--
   Shell profiles, rendered directly beneath the hamburger's "New terminal" row
   as indented siblings rather than a submenu: one click to a named shell, and
-  the plain row above still spawns the default.
+  the plain row above still spawns the default. Each row is an option of the
+  launcher's New terminal with profile, which routes through the command the
+  plain row and the chord use, so a picked shell still gets the
+  workspace-root guard and the resolved spawn cwd.
 
-  A snippet because both window kinds need it -- the workspace window's
-  `appRows` loop and the terminal-only window's hardcoded row. Nothing renders
-  when the server offers fewer than two profiles: with one shell there is
-  nothing to choose, and an empty list means an older server with no
-  `/api/terminal/shells`.
+  Nothing renders when the server offers fewer than two profiles: with one
+  shell there is nothing to choose, and an empty list means an older server
+  with no `/api/terminal/shells`.
 -->
 {#snippet terminalProfileRows()}
-  {#if shellProfiles().length > 1}
-    {#each shellProfiles() as profile (profile.id)}
+  {@const options = choiceOptions("app.terminal.profile")}
+  {#if options.length > 1}
+    {#each options as option (option.id)}
       <li>
         <button
           role="menuitem"
           class="menu-row-indent"
-          onclick={() => runTerminalProfile(profile.id)}
-          title={profile.program}
+          onclick={() => runChoiceOption(option)}
+          title={shellProfiles().find((profile) => profile.id === option.id)?.program}
         >
-          <span class="menu-row-label">{profile.name}</span>
-          {#if profile.id === defaultShellProfileId()}
+          <span class="menu-row-label">{option.label}</span>
+          {#if option.id === defaultShellProfileId()}
             <span class="menu-row-chord">default</span>
           {/if}
         </button>
@@ -1759,7 +1758,7 @@
       <div class="drop-bar" aria-hidden="true"></div>
     {/if}
     {#each paneModeStagedEditors as intent (intent.id)}
-      {@const label = intent.kind === "diagram" ? "New diagram" : "New draft"}
+      {@const label = commandTitle(intent.kind === "diagram" ? "app.diagram.new" : "app.draft.new")}
       <div
         class="tab staged staged-editor"
         class:stale={paneMode.stale}
@@ -1817,8 +1816,10 @@
       </button>
       <!-- Pane chrome menu: command launcher, Hybrid Nav and workspace
            search (where the window can search), the Apps
-           spawn rows, pane-local focus border colour, then Close pane
-           last (launcher parity). -->
+           spawn rows, the window's focus border colour, then Close pane
+           last (launcher parity). Every row takes its words from the
+           command it runs; the launcher row, which has no command, from the
+           shortcut table. -->
       <HamburgerMenu
         bind:this={paneMenu}
         bind:open={paneMenuOpen}
@@ -1829,14 +1830,14 @@
         <li>
           <button role="menuitem" onclick={() => { dispatchCommand("app.launcher.toggle"); closePaneHamburgerMenu(); }}>
             <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="menu-row-label">Commands</span>
+            <span class="menu-row-label">{launcherLabel}</span>
             <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
           </button>
         </li>
         <li>
           <button role="menuitem" onclick={() => { closePaneHamburgerMenu(); enterPaneMode(); }}>
             <LayoutGrid size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="menu-row-label">Hybrid Nav</span>
+            <span class="menu-row-label">{commandTitle("app.pane.mode")}</span>
             <span class="menu-row-chord">{chordLabel("app.pane.mode")}</span>
           </button>
         </li>
@@ -1844,7 +1845,7 @@
           <li>
             <button role="menuitem" onclick={() => { dispatchCommand("app.search.toggle"); closePaneHamburgerMenu(); }}>
               <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
-              <span class="menu-row-label">Search workspace</span>
+              <span class="menu-row-label">{commandTitle("app.search.toggle")}</span>
               <span class="menu-row-chord">{chordLabel("app.search.toggle")}</span>
             </button>
           </li>
@@ -1867,14 +1868,14 @@
         <li class="sep" role="separator"></li>
         <li class="menu-label">
           <Palette size={16} strokeWidth={1.75} aria-hidden="true" />
-          <span>Focus border colour</span>
+          <span>{commandTitle("app.pane.focusColor")}</span>
         </li>
-        {#each paneFocusColors as color}
+        {#each choiceOptions("app.pane.focusColor") as option (option.id)}
           <li>
-            <button role="menuitem" onclick={() => doSetFocusColor(color)}>
-              <span class={`color-dot ${color}`} aria-hidden="true"></span>
-              <span>{color}</span>
-              {#if focusColorForWindow() === color}
+            <button role="menuitemradio" aria-checked={option.checked} onclick={() => runChoiceOption(option)}>
+              <span class={`color-dot ${option.id}`} aria-hidden="true"></span>
+              <span>{option.label}</span>
+              {#if option.checked}
                 <Check size={14} strokeWidth={2} aria-hidden="true" />
               {/if}
             </button>
@@ -1884,7 +1885,7 @@
         <li>
           <button role="menuitem" onclick={() => { dispatchCommand("app.pane.kill"); closePaneHamburgerMenu(); }}>
             <X size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="menu-row-label">Close pane</span>
+            <span class="menu-row-label">{commandTitle("app.pane.kill")}</span>
             <span class="menu-row-chord">{chordLabel("app.pane.kill")}</span>
           </button>
         </li>
@@ -1900,7 +1901,7 @@
         <li>
           <button role="menuitem" onclick={doOpenCommands}>
             <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="menu-row-label">Commands</span>
+            <span class="menu-row-label">{launcherLabel}</span>
             <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
           </button>
         </li>
@@ -1914,7 +1915,7 @@
                fallback. -->
           <button role="menuitem" onclick={doReloadPane}>
             <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span class="menu-row-label">Reload</span>
+            <span class="menu-row-label">{commandTitle("app.window.reload")}</span>
             <span class="menu-row-chord">{chordLabel("app.window.reload")}</span>
           </button>
         </li>
@@ -1922,7 +1923,7 @@
           <li>
             <button role="menuitem" onclick={doOpenInspector}>
               <Bug size={16} strokeWidth={1.75} aria-hidden="true" />
-              <span class="menu-row-label">Open Inspector</span>
+              <span class="menu-row-label">{commandTitle("app.window.devtools")}</span>
               <span class="menu-row-chord">{inspectorChord ?? ""}</span>
             </button>
           </li>
@@ -2024,9 +2025,9 @@
                  Indexing graph) lives inside the Dashboard tab.
                  Multi-pane empty panes and panes with tabs on their hidden
                  Hybrid side keep the minimal chrome (just the chan mark).
-                 Right-clicking here opens the pane's menu (Commands,
-                 Reload, Open Inspector on the desktop) through the body's
-                 handler; spawn actions live in the pane hamburger's Apps
+                 Right-clicking here opens the pane's menu (the launcher
+                 row, Reload window, Open Inspector on the desktop) through
+                 the body's handler; spawn actions live in the pane hamburger's Apps
                  rows and the command launcher.
 
                  Terminal-only windows skip the welcome entirely: they always
@@ -2123,6 +2124,7 @@
       <svelte:boundary>
         <DashboardTab
           tab={t}
+          paneId={pane.id}
           active={isLiveActive(t)}
         />
         {#snippet failed(error, reset)}

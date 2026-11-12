@@ -53,6 +53,8 @@ app.editor.terminalFromHere terminal
 app.editor.toggleCollapse files
 app.editor.toggleMode files
 app.editor.toggleTrailingWs files
+app.extension.present workspace
+app.extension.reload workspace
 app.file.delete files
 app.file.duplicate files
 app.file.new files
@@ -74,6 +76,11 @@ app.metadata.export workspace
 app.metadata.import workspace
 app.open.path files
 app.pane.closeTabs any
+app.pane.dividerDown any
+app.pane.dividerLeft any
+app.pane.dividerRight any
+app.pane.dividerUp any
+app.pane.equalize any
 app.pane.flip any
 app.pane.focusColor any
 app.pane.kill any
@@ -86,6 +93,7 @@ app.pane.tree any
 app.screensaver.lock workspace
 app.screensaver.setPin workspace
 app.screensaver.test workspace
+app.search.details workspace
 app.search.toggle workspace
 app.settings.open any
 app.slides.new drafts
@@ -136,6 +144,11 @@ app.find.next any
 app.find.open any
 app.find.prev any
 app.pane.closeTabs any
+app.pane.dividerDown any
+app.pane.dividerLeft any
+app.pane.dividerRight any
+app.pane.dividerUp any
+app.pane.equalize any
 app.pane.flip any
 app.pane.focusColor any
 app.pane.kill any
@@ -227,6 +240,11 @@ app.find.open any
 app.find.prev any
 app.open.path files
 app.pane.closeTabs any
+app.pane.dividerDown any
+app.pane.dividerLeft any
+app.pane.dividerRight any
+app.pane.dividerUp any
+app.pane.equalize any
 app.pane.flip any
 app.pane.focusColor any
 app.pane.kill any
@@ -325,6 +343,11 @@ app.find.open any
 app.find.prev any
 app.open.path files
 app.pane.closeTabs any
+app.pane.dividerDown any
+app.pane.dividerLeft any
+app.pane.dividerRight any
+app.pane.dividerUp any
+app.pane.equalize any
 app.pane.flip any
 app.pane.focusColor any
 app.pane.kill any
@@ -381,6 +404,11 @@ app.find.next any
 app.find.open any
 app.find.prev any
 app.pane.closeTabs any
+app.pane.dividerDown any
+app.pane.dividerLeft any
+app.pane.dividerRight any
+app.pane.dividerUp any
+app.pane.equalize any
 app.pane.flip any
 app.pane.focusColor any
 app.pane.kill any

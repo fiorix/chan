@@ -5,7 +5,9 @@
 // call their exported action directly and gate visibility themselves.
 //
 // The Pane scope is assembled here: the spawners of its New tab group, then
-// the Tab and Pane groups, each in the order the launcher lists them.
+// the Tab and Pane groups, each in the order the launcher lists them. The
+// Pane group leaves room between Flip pane and the two closes for the
+// divider commands of panes.ts.
 
 import {
   registerCommands,
@@ -22,6 +24,9 @@ import {
   canReopenClosedTab,
 } from "../tabs.svelte";
 import { shellProfiles } from "../shellProfiles.svelte";
+// The extension tab's own commands, loaded with the catalog's core so the
+// App scope of an extension tab is never short of them.
+import "./extension";
 
 type ReuseSpec = Omit<Command, "available" | "run"> & Partial<Pick<Command, "available">>;
 
@@ -283,7 +288,7 @@ registerCommands([
     category: "Panes",
     scope: "pane",
     group: "Pane",
-    order: 5,
+    order: 10,
     requirement: "any",
     keywords: ["close"],
     confirm: {
@@ -299,7 +304,7 @@ registerCommands([
     category: "Panes",
     scope: "pane",
     group: "Pane",
-    order: 6,
+    order: 11,
     requirement: "any",
     keywords: ["close", "kill"],
     shortcutEditable: false,

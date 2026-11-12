@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 //
-// A pane's hamburger menu opens with Commands, Hybrid Nav and Search workspace,
+// A pane's hamburger menu opens with Command launcher, Hybrid Nav and Search workspace,
 // then the Apps rows that spawn a tab, each running its command (New draft creates a draft
 // and opens it). The pane's theme and side flip are not rows here, and there
 // is no Settings row: those are commands of their own. When the server offers
 // more than one shell, each is a row right under New terminal, in a workspace
 // window and a terminal-only one alike, and picking one opens a terminal in
-// that shell.
+// that shell. Every row takes its words from the catalog: a spawner, Hybrid
+// Nav, Search workspace and Close pane from their commands, a focus colour
+// and a shell from the options of the choices that list them in the
+// launcher, and the launcher's own row from the shortcut table.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -17,6 +20,7 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { expectWords, type WordSource } from "../__tests__/menuWords";
 import { resetLayout } from "../__tests__/tabs";
 import { api } from "../api/client";
 import type { TerminalShellsResponse } from "../api/types";
@@ -55,6 +59,37 @@ function row(menu: HTMLElement, label: string): HTMLButtonElement {
   )!;
 }
 
+/// The words of every line the menu draws, separators aside: a row's label,
+/// the colour section's heading, and a colour row's name.
+function everyLabel(menu: HTMLElement): string[] {
+  return [...menu.querySelectorAll("li:not(.sep)")].map((line) => {
+    const words =
+      line.querySelector(".menu-row-label") ??
+      line.querySelector("span:not(.color-dot):not(.menu-row-chord)");
+    return words?.textContent?.trim() ?? "";
+  });
+}
+
+const SPAWNERS: WordSource[] = [
+  { command: "app.dashboard.open" },
+  { command: "app.diagram.new" },
+  { command: "app.draft.new" },
+  { command: "app.files.toggle" },
+  { command: "app.graph.toggle" },
+  { command: "app.slides.new" },
+  { command: "app.terminal.teamWork" },
+  { command: "app.terminal.toggle" },
+];
+
+const COLOURS: WordSource[] = [
+  { command: "app.pane.focusColor" },
+  { choice: "app.pane.focusColor", option: "blue" },
+  { choice: "app.pane.focusColor", option: "orange" },
+  { choice: "app.pane.focusColor", option: "green" },
+  { choice: "app.pane.focusColor", option: "pink" },
+  { choice: "app.pane.focusColor", option: "grey" },
+];
+
 describe("the pane's hamburger menu", () => {
   test.each([false, true])("New dashboard opens a tab with terminal-only mode %s", async (terminalOnly) => {
     ui.terminalOnly = terminalOnly;
@@ -86,12 +121,32 @@ describe("the pane's hamburger menu", () => {
     expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([{ kind: "dashboard", carouselSlide: 3 }]);
   });
 
-  test("opens with Commands, Hybrid Nav and Search workspace, then the Apps rows", async () => {
+  test("opens with Command launcher, Hybrid Nav and Search workspace, then the Apps rows", async () => {
     const labels = rows(await openMenu());
 
-    expect(labels.slice(0, 3)).toEqual(["Commands", "Hybrid Nav", "Search workspace"]);
+    expect(labels.slice(0, 3)).toEqual(["Command launcher", "Hybrid Nav", "Search workspace"]);
     expect(labels).toContain("New draft");
     expect(labels).toContain("New terminal");
+  });
+
+  test("words every row by the catalog", async () => {
+    expectWords(everyLabel(await openMenu()), [
+      { shortcut: "app.launcher.toggle" },
+      { command: "app.pane.mode" },
+      { command: "app.search.toggle" },
+      ...SPAWNERS,
+      ...COLOURS,
+      { command: "app.pane.kill" },
+    ]);
+  });
+
+  test("checks the window's focus colour, as the launcher's choice does", async () => {
+    const menu = await openMenu();
+    const checked = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .filter((button) => button.getAttribute("aria-checked") === "true")
+      .map((button) => button.textContent?.trim());
+
+    expect(checked).toEqual([layout.focusColor]);
   });
 
   test("Search workspace opens search and closes the menu", async () => {
@@ -167,6 +222,16 @@ describe("New terminal's shell rows", () => {
     await settle();
 
     expect(underNewTerminal(rows(await openMenu()))).toEqual(["Bash", "Zsh"]);
+  });
+
+  test("word each shell by an option of New terminal with profile", async () => {
+    const labels = everyLabel(await openMenu());
+    const at = labels.indexOf("New terminal");
+
+    expectWords(labels.slice(at + 1, at + 3), [
+      { choice: "app.terminal.profile", option: "bash" },
+      { choice: "app.terminal.profile", option: "zsh" },
+    ]);
   });
 
   test("open a terminal in the shell picked", async () => {

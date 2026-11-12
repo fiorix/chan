@@ -1,22 +1,23 @@
 <script lang="ts">
   // The dashboard stays mounted while hidden, preserving its selected slide.
-  import { Check, RefreshCw, Settings2 } from "@lucide/svelte";
+  import { Check, Command as CommandIcon, RefreshCw, Settings2, X } from "@lucide/svelte";
   import { reloadWindow } from "../api/desktop";
-  import { chordFor } from "../state/shortcuts";
+  import { commandTitle } from "../state/commands";
+  import { shownSlideOptions } from "../state/commands/dashboard";
+  // The menu names its rows through the catalog, which this fills.
+  import "../state/commands/install";
+  import { chordFor, SHORTCUTS } from "../state/shortcuts";
   import {
+    openCommandLauncherFromMenu,
     scheduleSessionSave,
     surfaceThemeOverride,
   } from "../state/store.svelte";
   import {
-    DASHBOARD_SLOT_LABELS,
-    DASHBOARD_SLOT_ORDER,
-    dashboardSlotAvailable,
+    closeTab,
     type DashboardTab,
-    dashboardSlotEnabled,
-    firstEnabledSlot,
     flipHybrid,
     layout,
-    toggleDashboardSlot,
+    panesHaveSides,
   } from "../state/tabs.svelte";
   import EmptyPaneCarousel from "./EmptyPaneCarousel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
@@ -32,8 +33,8 @@
   // the visibility contract when it is not the active tab on the visible side.
   // The carousel force-pauses when inactive so it does not auto-rotate or poll
   // the indexer in the background.
-  type Props = { tab: DashboardTab; active?: boolean };
-  let { tab, active = true }: Props = $props();
+  type Props = { tab: DashboardTab; paneId: string; active?: boolean };
+  let { tab, paneId, active = true }: Props = $props();
 
   function onCarouselSlideChange(i: number): void {
     if (tab.carouselSlide === i) return;
@@ -44,12 +45,23 @@
   let menu: HamburgerMenu | undefined = $state();
   let menuOpen = $state(false);
 
-  // Chord lookup so the Reload row in the right-click menu renders its
-  // Cmd+R hint alongside the row label, matching the pane top-bar pattern
-  // in Pane.svelte. Override-aware (user assignment first, then built-in).
+  // Chord lookup so a row in the right-click menu renders its chord beside
+  // its label, matching the pane top-bar pattern in Pane.svelte.
+  // Override-aware (user assignment first, then built-in).
   function chordLabel(id: string): string {
     return chordFor(id) ?? "";
   }
+
+  // The launcher's own toggle has no catalog row; the shortcut table names it.
+  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+
+  // The slide rows are the options of Shown slides, read for this tab.
+  const slideOptions = $derived(shownSlideOptions(tab));
+
+  // First-placement estimate for the menu, which measures itself once open.
+  const menuHeight = $derived(
+    40 + 30 * (slideOptions.length + 3 + (panesHaveSides() ? 1 : 0)),
+  );
 
   function onContextMenu(e: MouseEvent): void {
     e.preventDefault();
@@ -61,28 +73,26 @@
     await reloadWindow();
   }
 
-  function onSlotToggle(i: number): void {
-    toggleDashboardSlot(tab, i);
-    // If the active slide just got switched off, move the cursor to the
-    // first still-enabled slot so the persisted slide stays valid;
-    // otherwise persist the toggled set on its own.
-    if (!dashboardSlotEnabled(tab, tab.carouselSlide ?? 0)) {
-      onCarouselSlideChange(firstEnabledSlot(tab));
-    } else {
-      scheduleSessionSave();
-    }
-  }
-
-  function doSettings(): void {
+  function doFlip(): void {
     menu?.close();
     flipHybrid(layout.activePaneId);
+  }
+
+  function doCloseTab(): void {
+    menu?.close();
+    void closeTab(paneId, tab.id);
+  }
+
+  function openCommands(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    menu?.close();
+    openCommandLauncherFromMenu(row);
   }
 
   // Tab-title right-click parity: Pane.svelte routes every tab kind
   // through the shared `tabMenu` state. Translate a request targeting
   // this dashboard tab into opening its HamburgerMenu at the click point,
-  // so the slot toggles + Flip + Reload are reachable from the tab
-  // title (not only the body). Reuses the same menu rows.
+  // so its rows are reachable from the tab title (not only the body).
   $effect(() => {
     if (tabMenu.openForTabId !== tab.id || !tabMenu.anchor) return;
     // Wait until the menu instance is bound (it renders unconditionally,
@@ -111,42 +121,61 @@
     bind:open={menuOpen}
     showTrigger={false}
     width={220}
-    height={200}
+    height={menuHeight}
   >
     <!-- Right-click menu for the Dashboard tab: a per-slot on/off
          checkbox row for each carousel slide (at least one stays on,
          enforced in toggleDashboardSlot); unchecked slots drop out of
-         auto-rotation and the dots. A separator, then Flip and Reload. -->
-    {#each DASHBOARD_SLOT_ORDER.filter(dashboardSlotAvailable) as i}
+         auto-rotation and the dots. A separator, then Reload window and
+         the tail every tab menu ends with (Flip pane where the window's
+         panes have sides, Close tab), then the launcher row. -->
+    {#each slideOptions as option (option.id)}
       <li>
         <button
           role="menuitemcheckbox"
-          aria-checked={dashboardSlotEnabled(tab, i)}
-          onclick={() => onSlotToggle(i)}
+          aria-checked={option.checked}
+          onclick={() => void option.run()}
         >
-          {#if dashboardSlotEnabled(tab, i)}
+          {#if option.checked}
             <Check size={16} strokeWidth={2} aria-hidden="true" />
           {:else}
             <span class="slot-check-spacer" aria-hidden="true"></span>
           {/if}
-          <span class="menu-row-label">{DASHBOARD_SLOT_LABELS[i]}</span>
+          <span class="menu-row-label">{option.label}</span>
           <span class="menu-row-chord"></span>
         </button>
       </li>
     {/each}
     <li class="sep" role="separator"></li>
     <li>
-      <button role="menuitem" onclick={doSettings}>
-        <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span class="menu-row-label">Flip</span>
-        <span class="menu-row-chord">{chordLabel("app.pane.flip")}</span>
-      </button>
-    </li>
-    <li>
       <button role="menuitem" onclick={doReload}>
         <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span class="menu-row-label">Reload</span>
+        <span class="menu-row-label">{commandTitle("app.window.reload")}</span>
         <span class="menu-row-chord">{chordLabel("app.window.reload")}</span>
+      </button>
+    </li>
+    {#if panesHaveSides()}
+      <li>
+        <button role="menuitem" onclick={doFlip}>
+          <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span class="menu-row-label">{commandTitle("app.pane.flip")}</span>
+          <span class="menu-row-chord">{chordLabel("app.pane.flip")}</span>
+        </button>
+      </li>
+    {/if}
+    <li>
+      <button role="menuitem" onclick={doCloseTab}>
+        <X size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span class="menu-row-label">{commandTitle("app.tab.close")}</span>
+        <span class="menu-row-chord">{chordLabel("app.tab.close")}</span>
+      </button>
+    </li>
+    <li class="sep" role="separator"></li>
+    <li>
+      <button role="menuitem" onclick={openCommands}>
+        <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span class="menu-row-label">{launcherLabel}</span>
+        <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
       </button>
     </li>
   </HamburgerMenu>

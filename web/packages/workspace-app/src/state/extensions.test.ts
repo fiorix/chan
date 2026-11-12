@@ -106,6 +106,9 @@ describe("local extensions", () => {
     await loadExtensions();
     const command = allCommands().find((entry) => entry.id === "extension.echo");
     expect(command?.category).toBe("Apps");
+    // The extension's own row declares where it is listed: with the spawners.
+    expect(command).toMatchObject({ scope: "pane", group: "New tab" });
+    expect(command?.surface).toBeUndefined();
     command?.run();
 
     const tab = activePane().tabs[0];
@@ -118,6 +121,8 @@ describe("local extensions", () => {
       (entry) => entry.id === "extension.echo.say-hello",
     );
     expect(declared?.keywords).toContain("greet");
+    // A command the extension declares is its app's own.
+    expect(declared).toMatchObject({ scope: "app", surface: "extension" });
     declared?.run();
     expect(activePane().tabs).toHaveLength(1);
 
