@@ -2800,11 +2800,12 @@
     focusTerminal();
   }
 
-  // Keyboard copy (Cmd+C / Ctrl+Shift+C) copies the CURRENT SELECTION only.
-  // A bare copy chord must never dump the whole scrollback - that is the
-  // explicit "Copy Scrollback" menu action - so an empty selection is a
-  // no-op, matching every native terminal. The menu's "Copy" stays
-  // selection-or-scrollback because an explicit click wants a result.
+  // Keyboard copy (Cmd+C / Ctrl+Shift+C, and a chord the user assigned to
+  // the Copy command) copies the CURRENT SELECTION only. A bare copy chord
+  // must never dump the whole scrollback - that is the explicit "Copy
+  // Scrollback" menu action - so an empty selection is a no-op, matching
+  // every native terminal. The menu's "Copy" stays selection-or-scrollback
+  // because an explicit click wants a result.
   async function copySelectionToClipboard(): Promise<void> {
     const text = term?.getSelection() ?? "";
     if (!text) return;
@@ -2899,7 +2900,8 @@
   // focused terminal handles. Only the active tab of the focused pane
   // responds, so the launcher's active-surface gate and the acting terminal
   // agree. Find, Copy, Paste and Copy scrollback each call the function
-  // their menu row calls.
+  // their menu row calls, but for a Copy the command marks as run by the
+  // chord the user assigned to it, which calls the copy chord's.
   //
   // The find family rides the same bus: on desktop the key bridge claims
   // the find chords before the webview sees the keydown and fires
@@ -2915,10 +2917,12 @@
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
       if (!active || !focused) return;
-      const name = (e as CustomEvent).detail?.name;
+      const detail = (e as CustomEvent).detail;
+      const name = detail?.name;
       if (name === "app.terminal.restart") void restart();
       else if (name === "app.terminal.copyCwd") void copyTerminalCwd();
       else if (name === "app.terminal.newFsEntry") openNewFsEntry();
+      else if (name === "terminal.copy" && detail.chord === true) void copySelectionToClipboard();
       else if (name === "terminal.copy") void copySelectionOrScrollback();
       else if (name === "terminal.paste") void pasteClipboard();
       else if (name === "app.terminal.copyScrollback") void copyScrollback();
