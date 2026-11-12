@@ -211,6 +211,33 @@ describe("graph tabs in a pane", () => {
     expect(two!.nodes, "the window's one copy again").toBe(one!.nodes);
   });
 
+  test("a tab hidden before its change's burst ends takes the change when shown", async () => {
+    const { pane } = await renderPane();
+    const [one] = canvas.all;
+    const ids = () => one!.nodes.map((n) => n.id);
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.file("new.md")], edges: [fsg.contains("", "new.md")] };
+    graphServer.view = { nodes: [g.dir("")], edges: [] };
+    noteGraphChanged(() => true);
+    graphReloadSignal.paths = ["new.md"];
+    graphReloadSignal.nonce += 1;
+    await settle(2);
+
+    // Switched away inside the tab's 250 ms wait for the burst to end.
+    pane.activeTabId = "two";
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    const spines = graphServer.fsGraphCalls.length;
+    expect(ids(), "a hidden tab reads nothing").not.toContain("new.md");
+
+    pane.activeTabId = "one";
+    await settle();
+    expect(graphServer.fsGraphCalls.slice(spines), "the level the change touched").toEqual([
+      { path: "", depth: 1, cursor: undefined },
+    ]);
+    expect(ids()).toContain("new.md");
+  });
+
   test("a hidden tab lets go of the graph once the window's has moved on, and keeps what it draws", async () => {
     // Tab two has the root's level drawn and `notes` selected; `notes` is
     // closed, so what it draws leaves out the files below it.

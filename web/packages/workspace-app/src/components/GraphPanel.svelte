@@ -1793,11 +1793,13 @@
       graphDirty = true;
       return;
     }
-    // Visible: once the burst is over.
+    // Visible: once the burst is over. A tab hidden by then takes the
+    // changes when it is next shown, as one hidden all along does.
     if (watchReloadTimer) clearTimeout(watchReloadTimer);
     watchReloadTimer = setTimeout(() => {
       watchReloadTimer = null;
       if (visible) takeSpineChanges();
+      else graphDirty = true;
     }, 250);
   });
 
