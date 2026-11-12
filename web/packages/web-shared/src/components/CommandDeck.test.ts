@@ -1723,6 +1723,42 @@ describe("CommandDeck focus", () => {
     expect([reopened.selectionStart, reopened.selectionEnd]).toEqual([0, 5]);
   });
 
+  it("scrolls a restored selection into view as it opens", async () => {
+    const scrolled = vi.mocked(Element.prototype.scrollIntoView);
+    scrolled.mockClear();
+    await mountWith({ items: plainRows(30), initialDraft: { selectedId: "row-22" } });
+    expect(activeTitle()).toBe("Row 22");
+    expect(scrolled.mock.contexts, "one row is scrolled to").toHaveLength(1);
+    expect(scrolled.mock.contexts[0], "the selected one").toBe(rowTitled("Row 22"));
+    expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
+  });
+
+  it("opens and moves where elements have no scrollIntoView", async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => { unhandled.push(reason); };
+    const runner = globalThis as unknown as {
+      process: {
+        on: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
+      };
+    };
+    const stub = Element.prototype.scrollIntoView;
+    runner.process.on("unhandledRejection", record);
+    // jsdom's own shape: the method does not exist.
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    try {
+      await mountWith({ items: plainRows(30), initialDraft: { selectedId: "row-22" } });
+      await press("ArrowDown");
+      expect(activeTitle()).toBe("Row 23");
+      // An unhandled rejection is reported only after the promise queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      Element.prototype.scrollIntoView = stub;
+      runner.process.off("unhandledRejection", record);
+    }
+  });
+
   it("keeps rows and orbs out of the tab order", async () => {
     await mountWith({ items: plainRows(2), scopes: railScopes(), initialDraft: { scope: "app" } });
     const controls = target.querySelectorAll(
@@ -1847,22 +1883,33 @@ describe("CommandDeck sections and rows", () => {
       named("plain", "Reload window"),
     ];
     await mountWith({ items });
+    const slots = (title: string): Element[] =>
+      [...rowTitled(title).children].filter((cell) => cell.matches(".deck-slot"));
+    /// What a row's right column holds, slot by slot, in the order drawn.
     const column = (title: string): string[] =>
-      [...rowTitled(title).children]
-        .filter((cell) => !cell.matches(".deck-result-icon, .deck-result-copy"))
-        .map((cell) =>
-          cell.matches(".deck-result-value")
-            ? `value:${cell.textContent}`
-            : cell.matches(".deck-check")
-              ? "check"
-              : cell.matches("kbd")
-                ? `shortcut:${cell.textContent}`
-                : cell.querySelector(".deck-chevron")
-                  ? "chevron"
-                  : "",
-        )
+      slots(title)
+        .map((slot) => {
+          const value = slot.querySelector(".deck-result-value");
+          const shortcut = slot.querySelector("kbd");
+          if (value) return `value:${value.textContent}`;
+          if (slot.querySelector(".deck-check")) return "check";
+          if (shortcut) return `shortcut:${shortcut.textContent}`;
+          return slot.querySelector(".deck-chevron") ? "chevron" : "";
+        })
         .filter(Boolean);
+    const slotKinds = (title: string): string[] =>
+      slots(title).map((slot) =>
+        [...slot.classList].find((name) => name.startsWith("deck-slot-")) ?? "",
+      );
 
+    for (const item of items) {
+      expect(slotKinds(item.title), `${item.title} reserves every slot the list uses, in order`).toEqual([
+        "deck-slot-value",
+        "deck-slot-check",
+        "deck-slot-shortcut",
+        "deck-slot-chevron",
+      ]);
+    }
     expect(column("Editor body theme")).toEqual(["value:Dark", "check", "shortcut:Ctrl+K", "chevron"]);
     expect(column("Details")).toEqual(["value:on"]);
     expect(column("Rich Prompt"), "a row that is not selected shows its shortcut").toEqual([
@@ -1879,6 +1926,38 @@ describe("CommandDeck sections and rows", () => {
     expect(value("Editor body theme").classList.contains("on")).toBe(false);
     expect(rowTitled("Editor body theme").getAttribute("aria-checked")).toBe("true");
     expect(rowTitled("Details").hasAttribute("aria-checked")).toBe(false);
+  });
+
+  it("sizes each slot of the right column once for the list, from its longest entry", async () => {
+    const listbox = (): HTMLElement => target.querySelector<HTMLElement>(".deck-results")!;
+    const cells = (name: string): string => listbox().style.getPropertyValue(name);
+    await mountWith({
+      items: [
+        named("name", "Rename terminal", { value: "build-watch" }),
+        named("details", "Details", { value: "off", shortcut: "Ctrl+I" }),
+        named("prompt", "Rich Prompt", { shortcut: "Ctrl+Alt+R" }),
+        named("plain", "Restart terminal"),
+      ],
+    });
+    expect(cells("--deck-value-cells"), "build-watch is eleven characters").toBe("11");
+    expect(cells("--deck-shortcut-cells"), "Ctrl+Alt+R is ten").toBe("10");
+    expect(
+      resultRows().map((row) => row.querySelectorAll(".deck-slot").length),
+      "no row uses a check or a chevron, so no row reserves one",
+    ).toEqual([2, 2, 2, 2]);
+    expect(rowTitled("Restart terminal").querySelector(".deck-slot-value")?.textContent?.trim()).toBe("");
+
+    (app.setItems as (items: DeckItem[]) => void)([
+      named("long", "Rename terminal", { value: "a-terminal-name-far-too-long-for-a-column" }),
+      named("wide", "Details", { shortcut: "\u4e2d" }),
+    ]);
+    await flush();
+    expect(cells("--deck-value-cells"), "a long value is capped and cut short").toBe("24");
+    expect(cells("--deck-shortcut-cells"), "a wide character takes two cells").toBe("2");
+
+    (app.setItems as (items: DeckItem[]) => void)(plainRows(2));
+    await flush();
+    expect(target.querySelector(".deck-slot"), "a list with an empty right column reserves nothing").toBeNull();
   });
 
   it("marks a destructive row and a disabled one", async () => {
@@ -1970,9 +2049,30 @@ describe("CommandDeck rail, crumbs and footer", () => {
       onClearScope,
     });
     expect(crumbTexts()).toEqual(["Computers", "geekom", "Windows"]);
+    expect(
+      target.querySelector(".deck-crumbs")?.getAttribute("title"),
+      "the whole trail stays readable where the chip cuts it short",
+    ).toBe("Computers \u203a geekom \u203a Windows");
     target.querySelector<HTMLButtonElement>(".deck-crumbs-clear")!.click();
     await flush();
     expect(onClearScope).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a plain Search beside the chip and keeps the host's placeholder as the input's name", async () => {
+    const shown = (): string | null => target.querySelector(".deck-placeholder")?.textContent ?? null;
+    await mountWith({ items: plainRows(2), scopes: railScopes(), placeholder: "Pane" });
+    expect(shown(), "with no chip the host's words show").toBe("Pane");
+    expect(deckInput().getAttribute("aria-label")).toBe("Pane");
+
+    orb("Window").click();
+    await flush();
+    expect(crumbTexts()).toEqual(["Window"]);
+    expect(shown(), "the chip already names the place").toBe("Search");
+    expect(deckInput().getAttribute("aria-label")).toBe("Pane");
+
+    orb("Window").click();
+    await flush();
+    expect(shown()).toBe("Pane");
   });
 
   it("reads Escape as back in a branch and as close at the root, and counts the rows", async () => {
