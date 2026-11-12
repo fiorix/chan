@@ -241,13 +241,18 @@ export function fuzzyDeckScore(query: string, text: string): number | null {
   return score;
 }
 
-// One band per kind of hit. The position and length penalties inside a band
-// stay under BAND_REACH, so a hit never sinks into the band below it, and the
-// loosest hit, an abbreviation, sits under every band.
-const TITLE_WORD_START = 40_000;
-const TITLE_INSIDE_WORD = 30_000;
-const OTHER_WORD_START = 20_000;
-const OTHER_INSIDE_WORD = 10_000;
+/** How one query word sits in a row, best first: at the start of a word of
+ * the title, inside one, at the start of a word of another field, inside one,
+ * or as an abbreviation of the title. */
+const TITLE_WORD_START = 4;
+const TITLE_INSIDE_WORD = 3;
+const OTHER_WORD_START = 2;
+const OTHER_INSIDE_WORD = 1;
+const ABBREVIATION = 0;
+// A score keeps one band per kind of hit. The position and length penalties
+// inside a band stay under BAND_REACH, so a hit never sinks into the band
+// below it, and the loosest hit, an abbreviation, sits under every band.
+const BAND = 10_000;
 const BAND_REACH = 5_000;
 // How far apart an abbreviation's letters may stand: within a stretch of the
 // title this many times as long as the word.
@@ -291,67 +296,104 @@ function abbreviationHit(word: string, title: string): { at: number; span: numbe
   return best;
 }
 
-/** One query word against one row. The title is read first, so a word the
- * title holds never scores as a hit elsewhere. A word found whole nowhere
- * may still be an abbreviation of the title. The other fields are not read
- * that way: a path or a list of keywords is long enough to hold the letters
- * of most short words in order. */
-function wordScore(word: string, title: string, others: readonly string[]): number | null {
+/** One query word against one row: the kind of hit and its score. The title
+ * is read first, so a word the title holds never scores as a hit elsewhere.
+ * A word found whole nowhere may still be an abbreviation of the title. The
+ * other fields are not read that way: a path or a list of keywords is long
+ * enough to hold the letters of most short words in order. */
+function wordMatch(
+  word: string,
+  title: string,
+  others: readonly string[],
+): { kind: number; score: number } | null {
   const inTitle = wordHit(word, title);
   if (inTitle) {
-    const band = inTitle.start ? TITLE_WORD_START : TITLE_INSIDE_WORD;
-    return band - Math.min(inTitle.at, 400) * 8 - Math.min(title.length, 400);
+    const kind = inTitle.start ? TITLE_WORD_START : TITLE_INSIDE_WORD;
+    return {
+      kind,
+      score: kind * BAND - Math.min(inTitle.at, 400) * 8 - Math.min(title.length, 400),
+    };
   }
-  let best: number | null = null;
+  let best: { kind: number; score: number } | null = null;
   for (const text of others) {
     const hit = wordHit(word, text);
     if (!hit) continue;
-    const score = (hit.start ? OTHER_WORD_START : OTHER_INSIDE_WORD) - Math.min(hit.at, 400) * 8;
-    if (best === null || score > best) best = score;
+    const kind = hit.start ? OTHER_WORD_START : OTHER_INSIDE_WORD;
+    const score = kind * BAND - Math.min(hit.at, 400) * 8;
+    if (best === null || score > best.score) best = { kind, score };
   }
   if (best !== null) return best;
   const loose = abbreviationHit(word, title);
   if (!loose) return null;
-  return Math.max(1, BAND_REACH - 1 - loose.span * 8 - Math.min(loose.at, 400) * 2);
+  return {
+    kind: ABBREVIATION,
+    score: Math.max(1, BAND_REACH - 1 - loose.span * 8 - Math.min(loose.at, 400) * 2),
+  };
+}
+
+/** A row a query matched, with how the match reads. */
+export interface DeckMatch<Item extends DeckItem = DeckItem> {
+  item: Item;
+  /** The kinds of hit the query's words made, summed over the words: 4 for a
+   * word that starts a word of the title, 3 for one inside a title word, 2
+   * and 1 for the same two in the breadcrumb, the subtitle or the search
+   * text, 0 for an abbreviation of the title. Matches of one kind differ only
+   * in where the words sit and how long the title is, which a host may rank
+   * below an order of its own. */
+  kind: number;
+  /** Higher is a better match. It orders the matches of one query and means
+   * nothing across queries. */
+  score: number;
 }
 
 /**
- * Rows matching `query`, best first. The query is split on whitespace and
- * every word must match the row's title, breadcrumb, subtitle or search text,
- * in any order. A word in the title outranks one found elsewhere, and a word
- * that starts a word outranks one inside a word. A word found whole in none of
- * them still matches a title that holds its letters in order within twice the
- * word's length, below every whole hit. Rows that can run come before disabled
- * ones; ties fall to the title, then the id. An empty query returns the rows
- * as given.
+ * The rows `query` matches, best first, each with the kind of hit and the
+ * score that ordered it. The query is split on whitespace and every word must
+ * match the row's title, breadcrumb, subtitle or search text, in any order. A
+ * word in the title outranks one found elsewhere, and a word that starts a
+ * word outranks one inside a word. A word found whole in none of them still
+ * matches a title that holds its letters in order within twice the word's
+ * length, below every whole hit. Rows that can run come before disabled ones;
+ * ties fall to the title, then the id. An empty query matches every row, as
+ * given, with no kind and no score to tell them apart.
  */
-export function rankDeckItems(items: readonly DeckItem[], query: string): DeckItem[] {
+export function matchDeckItems<Item extends DeckItem>(
+  items: readonly Item[],
+  query: string,
+): DeckMatch<Item>[] {
   const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  if (!words.length) return [...items];
-  const ranked: { item: DeckItem; score: number }[] = [];
+  if (!words.length) return items.map((item) => ({ item, kind: 0, score: 0 }));
+  const matches: DeckMatch<Item>[] = [];
   for (const item of items) {
     const title = item.title.toLocaleLowerCase();
     const others = [item.breadcrumb, item.subtitle ?? "", item.searchText].map((text) =>
       text.toLocaleLowerCase(),
     );
+    let kind = 0;
     let score = 0;
+    let matched = true;
     for (const word of words) {
-      const hit = wordScore(word, title, others);
+      const hit = wordMatch(word, title, others);
       if (hit === null) {
-        score = -1;
+        matched = false;
         break;
       }
-      score += hit;
+      kind += hit.kind;
+      score += hit.score;
     }
-    if (score >= 0) ranked.push({ item, score });
+    if (matched) matches.push({ item, kind, score });
   }
-  return ranked
-    .sort(
-      (a, b) =>
-        Number(a.item.disabled === true) - Number(b.item.disabled === true) ||
-        b.score - a.score ||
-        a.item.title.localeCompare(b.item.title, undefined, { sensitivity: "base" }) ||
-        a.item.id.localeCompare(b.item.id),
-    )
-    .map((row) => row.item);
+  return matches.sort(
+    (a, b) =>
+      Number(a.item.disabled === true) - Number(b.item.disabled === true) ||
+      b.score - a.score ||
+      a.item.title.localeCompare(b.item.title, undefined, { sensitivity: "base" }) ||
+      a.item.id.localeCompare(b.item.id),
+  );
+}
+
+/** Rows matching `query`, best first, as `matchDeckItems` orders them. An
+ * empty query returns the rows as given. */
+export function rankDeckItems<Item extends DeckItem>(items: readonly Item[], query: string): Item[] {
+  return matchDeckItems(items, query).map((match) => match.item);
 }

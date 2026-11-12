@@ -591,7 +591,7 @@ describe("the order of a typed query's hits", () => {
     expect(titles(rows)).toEqual(["Deploy shell", "Redeploy", "Split right"]);
   });
 
-  test("reads the kinds of hit as the ranking does, every word counted", () => {
+  test("takes the kinds of hit from the ranking, every word counted", () => {
     // One scope, so the ranking's own order must come through untouched.
     const commands = [
       command({ id: "k.5", title: "D-e-p-l-o-y" }),
@@ -603,7 +603,7 @@ describe("the order of a typed query's hits", () => {
     const src = source({ commands });
     const rows = searchRows(src, null, "deploy", openSettings);
     expect(titles(rows)).toEqual(["Deploy now", "Redeploy", "Alpha", "Beta", "D-e-p-l-o-y"]);
-    expect(titles(rows)).toEqual(titles(rankDeckItems(rows, "deploy") as DeckRow[]));
+    expect(titles(rows)).toEqual(titles(rankDeckItems(rows, "deploy")));
 
     // Two words: both in the title beat one in the title and one in a
     // keyword, whatever the scopes.

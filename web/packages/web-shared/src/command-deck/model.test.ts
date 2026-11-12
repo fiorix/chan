@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fuzzyDeckScore, rankDeckItems, SESSION_DECK_DRAFT_KEY, type DeckItem } from "./model";
+import {
+  fuzzyDeckScore,
+  matchDeckItems,
+  rankDeckItems,
+  SESSION_DECK_DRAFT_KEY,
+  type DeckItem,
+} from "./model";
 
 describe("SESSION_DECK_DRAFT_KEY", () => {
   it("names the launcher draft under the cloned-session prefix", () => {
@@ -154,6 +160,53 @@ describe("rankDeckItems", () => {
 
   it("matches without regard to case", () => {
     expect(ids(rankDeckItems([row("a", "Close Tab")], "CLOSE tab"))).toEqual(["a"]);
+  });
+});
+
+describe("matchDeckItems", () => {
+  const items = [
+    row("abbreviation", "D-e-p-l-o-y"),
+    row("other-inside", "Beta", { breadcrumb: "Redeployment" }),
+    row("other-start", "Alpha", { searchText: "deploy" }),
+    row("inside", "Redeploy"),
+    row("start", "Deploy now"),
+    row("none", "Split right"),
+  ];
+
+  it("reports the kind of hit with each match, best first", () => {
+    expect(matchDeckItems(items, "deploy").map((match) => [match.item.id, match.kind])).toEqual([
+      ["start", 4],
+      ["inside", 3],
+      ["other-start", 2],
+      ["other-inside", 1],
+      ["abbreviation", 0],
+    ]);
+  });
+
+  it("sums the kinds over the words of the query", () => {
+    const two = [
+      row("both", "Close window"),
+      row("split", "Close tab", { searchText: "window" }),
+      row("loose", "Reclose", { subtitle: "the windows" }),
+    ];
+    expect(matchDeckItems(two, "close window").map((match) => [match.item.id, match.kind])).toEqual([
+      ["both", 8],
+      ["split", 6],
+      ["loose", 5],
+    ]);
+  });
+
+  it("orders by a score that falls with the kind, and hands back the rows it was given", () => {
+    const matches = matchDeckItems(items, "deploy");
+    const scores = matches.map((match) => match.score);
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
+    expect(new Set(scores).size).toBe(scores.length);
+    expect(matches.map((match) => match.item)).toEqual(rankDeckItems(items, "deploy"));
+    expect(matches[0]!.item, "the row itself, not a copy").toBe(items[4]);
+  });
+
+  it("matches every row of an empty query, as given", () => {
+    expect(matchDeckItems(items, " ")).toEqual(items.map((item) => ({ item, kind: 0, score: 0 })));
   });
 });
 

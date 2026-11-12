@@ -5,7 +5,13 @@
 // launcher component adds what needs the window's services: icons, the
 // Computers rows, which the shared Computers tree builds, and running a row.
 
-import { fuzzyDeckScore, rankDeckItems, type DeckItem } from "@chan/web-shared/command-deck";
+import {
+  fuzzyDeckScore,
+  matchDeckItems,
+  rankDeckItems,
+  type DeckItem,
+  type DeckMatch,
+} from "@chan/web-shared/command-deck";
 import type { SettingSpec } from "../../components/settings/settingsIndex";
 import {
   CHOICE_LEVEL,
@@ -440,37 +446,9 @@ function settingsScopeRows(
 // inside a word elsewhere, a title abbreviation. Among hits of one kind the
 // position and the title's length decide, which says little about which of
 // two scopes was meant: another window's `Close` is no better a hit for
-// `close` than `Close tab`. So hits of one kind are listed in scope order,
-// nearest the focus first, and the ranking decides inside a scope.
-
-const WORD_CHARACTER = /[\p{L}\p{N}]/u;
-
-/// How `word` sits in `text`, both lowercased: 2 at the start of a word, 1
-/// inside one, 0 when absent.
-function wordFit(word: string, text: string): number {
-  let fit = 0;
-  for (let at = text.indexOf(word); at >= 0; at = text.indexOf(word, at + 1)) {
-    if (at === 0 || !WORD_CHARACTER.test(text[at - 1] ?? "")) return 2;
-    fit = 1;
-  }
-  return fit;
-}
-
-/// The kind of hit `words` make on a row the ranking matched, higher for a
-/// better kind, summed over the words. A word found whole nowhere matched as
-/// an abbreviation of the title, the loosest kind.
-function hitKind(row: DeckItem, words: readonly string[]): number {
-  const title = row.title.toLocaleLowerCase();
-  const elsewhere = [row.breadcrumb, row.subtitle ?? "", row.searchText]
-    .join("\n")
-    .toLocaleLowerCase();
-  let kind = 0;
-  for (const word of words) {
-    const inTitle = wordFit(word, title);
-    kind += inTitle > 0 ? 2 + inTitle : wordFit(word, elsewhere);
-  }
-  return kind;
-}
+// `close` than `Close tab`. So hits of one kind, which the ranking reports
+// with each match, are listed in scope order, nearest the focus first, and
+// the ranking decides inside a scope.
 
 /// Where a row's scope stands among hits of one kind: the focused app's rows,
 /// the pane's, the window's, the workspace's, a command of an app that is not
@@ -492,21 +470,16 @@ function scopeOrder(source: DeckSource, row: DeckRow): number {
   }
 }
 
-/// Ranked rows with the hits of one kind put in scope order. Rows that cannot
-/// run stay last, and the sort is stable, so inside one scope the ranking's
-/// own order stands.
-function inScopeOrder<Row extends DeckRow>(
-  source: DeckSource,
-  ranked: readonly Row[],
-  query: string,
-): Row[] {
-  const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+/// Ranked matches with the hits of one kind put in scope order. Rows that
+/// cannot run stay last, and the sort is stable, so inside one scope the
+/// ranking's own order stands.
+function inScopeOrder(source: DeckSource, ranked: readonly DeckMatch<DeckRow>[]): DeckRow[] {
   return ranked
-    .map((row) => ({
-      row,
-      disabled: Number(row.disabled === true),
-      kind: hitKind(row, words),
-      scope: scopeOrder(source, row),
+    .map(({ item, kind }) => ({
+      row: item,
+      disabled: Number(item.disabled === true),
+      kind,
+      scope: scopeOrder(source, item),
     }))
     .sort((a, b) => a.disabled - b.disabled || b.kind - a.kind || a.scope - b.scope)
     .map((placed) => placed.row);
@@ -605,8 +578,8 @@ export function searchRows(
   }
 
   return [
-    ...inScopeOrder(source, rankDeckItems(enabled, raw) as DeckRow[], raw),
-    ...(rankDeckItems(unavailable, raw) as DeckRow[]).slice(0, UNAVAILABLE_LIMIT),
+    ...inScopeOrder(source, matchDeckItems(enabled, raw)),
+    ...rankDeckItems(unavailable, raw).slice(0, UNAVAILABLE_LIMIT),
   ];
 }
 
