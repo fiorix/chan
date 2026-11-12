@@ -243,12 +243,15 @@ export function fuzzyDeckScore(query: string, text: string): number | null {
 
 // One band per kind of hit. The position and length penalties inside a band
 // stay under BAND_REACH, so a hit never sinks into the band below it, and the
-// loosest hit, a subsequence, sits under every band.
+// loosest hit, an abbreviation, sits under every band.
 const TITLE_WORD_START = 40_000;
 const TITLE_INSIDE_WORD = 30_000;
 const OTHER_WORD_START = 20_000;
 const OTHER_INSIDE_WORD = 10_000;
 const BAND_REACH = 5_000;
+// How far apart an abbreviation's letters may stand: within a stretch of the
+// title this many times as long as the word.
+const ABBREVIATION_REACH = 2;
 
 const WORD_CHARACTER = /[\p{L}\p{N}]/u;
 
@@ -263,8 +266,36 @@ function wordHit(word: string, text: string): { start: boolean; at: number } | n
   return first < 0 ? null : { start: false, at: first };
 }
 
+/** The tightest stretch of `title` that holds the letters of `word` in order,
+ * by where it starts and how many characters it covers from the first letter
+ * to the last, when one covers at most ABBREVIATION_REACH times the word's
+ * length. `trmnl` is found in "terminal" this way and `clsw` in "close
+ * window"; `nt` is not found in "new terminal", where n to t covers five
+ * characters. A word of one character has no such form: a title that holds
+ * its letter holds the word. */
+function abbreviationHit(word: string, title: string): { at: number; span: number } | null {
+  const reach = word.length * ABBREVIATION_REACH;
+  const first = word.charAt(0);
+  let best: { at: number; span: number } | null = null;
+  for (let at = title.indexOf(first); at >= 0; at = title.indexOf(first, at + 1)) {
+    // Taking each next letter at its first chance ends the stretch soonest.
+    let end = at;
+    for (let index = 1; index < word.length && end >= 0; index += 1) {
+      end = title.indexOf(word.charAt(index), end + 1);
+    }
+    // A letter missing after this start is missing after every later one.
+    if (end < 0) break;
+    const span = end - at + 1;
+    if (span <= reach && (best === null || span < best.span)) best = { at, span };
+  }
+  return best;
+}
+
 /** One query word against one row. The title is read first, so a word the
- * title holds never scores as a hit elsewhere. */
+ * title holds never scores as a hit elsewhere. A word found whole nowhere
+ * may still be an abbreviation of the title. The other fields are not read
+ * that way: a path or a list of keywords is long enough to hold the letters
+ * of most short words in order. */
 function wordScore(word: string, title: string, others: readonly string[]): number | null {
   const inTitle = wordHit(word, title);
   if (inTitle) {
@@ -279,17 +310,20 @@ function wordScore(word: string, title: string, others: readonly string[]): numb
     if (best === null || score > best) best = score;
   }
   if (best !== null) return best;
-  const loose = fuzzyDeckScore(word, [title, ...others].join(" "));
-  return loose === null ? null : Math.max(1, Math.min(BAND_REACH - 1, loose));
+  const loose = abbreviationHit(word, title);
+  if (!loose) return null;
+  return Math.max(1, BAND_REACH - 1 - loose.span * 8 - Math.min(loose.at, 400) * 2);
 }
 
 /**
  * Rows matching `query`, best first. The query is split on whitespace and
  * every word must match the row's title, breadcrumb, subtitle or search text,
  * in any order. A word in the title outranks one found elsewhere, and a word
- * that starts a word outranks one inside a word. Rows that can run come before
- * disabled ones; ties fall to the title, then the id. An empty query returns
- * the rows as given.
+ * that starts a word outranks one inside a word. A word found whole in none of
+ * them still matches a title that holds its letters in order within twice the
+ * word's length, below every whole hit. Rows that can run come before disabled
+ * ones; ties fall to the title, then the id. An empty query returns the rows
+ * as given.
  */
 export function rankDeckItems(items: readonly DeckItem[], query: string): DeckItem[] {
   const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);

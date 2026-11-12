@@ -28,12 +28,14 @@
     DeckScopeId,
   } from "../command-deck/model";
 
+  const SEARCH_PLACEHOLDER = "Search";
+
   let {
     open,
     draft = $bindable(),
     items,
     scopes,
-    placeholder = "Search",
+    placeholder = SEARCH_PLACEHOLDER,
     bodyKey = "root",
     direction = "forward",
     onClose,
@@ -84,6 +86,9 @@
   const sectionId = (index: number): string => `chan-command-deck-section-${index}`;
   /// The rows a page moves by where the list has no layout to measure.
   const FALLBACK_PAGE_ROWS = 10;
+  /// The widest value the right column makes room for, in character cells.
+  /// A longer one is cut short with an ellipsis.
+  const VALUE_SLOT_CELLS = 24;
   /// Keys that only arm another key. Holding one is not a key press of its
   /// own: Shift goes down before the `?` it types.
   const LONE_MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"]);
@@ -149,6 +154,9 @@
     draft.scope ? scopes.find((scope) => scope.id === draft.scope) : undefined,
   );
   const trail = $derived(crumbs?.length ? crumbs : activeScope ? [activeScope.label] : []);
+  // A host names the scope or the branch in its placeholder, which the chip
+  // already says; beside the chip the field reads as a plain search.
+  const shownPlaceholder = $derived(trail.length ? SEARCH_PLACEHOLDER : placeholder);
   const sections = $derived.by<DeckSection[]>(() => {
     const runs: DeckSection[] = [];
     items.forEach((item, index) => {
@@ -160,6 +168,23 @@
     return runs;
   });
   const sectioned = $derived(sections.some((section) => section.title !== null));
+  // What the rows hold in their right column. Every row reserves the same
+  // slots, each as wide as the list's longest entry, so values, shortcuts
+  // and chevrons line up down the list whichever rows carry them. A slot no
+  // row fills is left out.
+  const columns = $derived.by(() => {
+    let value = 0;
+    let shortcut = 0;
+    let check = false;
+    let chevron = false;
+    for (const item of items) {
+      if (item.value) value = Math.max(value, textCells(item.value));
+      if (item.shortcut) shortcut = Math.max(shortcut, textCells(item.shortcut));
+      if (item.checked) check = true;
+      if (opens(item)) chevron = true;
+    }
+    return { value: Math.min(value, VALUE_SLOT_CELLS), shortcut, check, chevron };
+  });
   const listShown = $derived(!draft.operation && !keysShown);
   const hints = $derived.by<{ keys: string[]; does: string }[]>(() => {
     const operation = draft.operation;
@@ -199,6 +224,14 @@
     return scopes.find((candidate) => candidate.id === scope)?.icon;
   }
 
+  /// The width of a text in character cells: the unit the right column's
+  /// slots are sized in. An East Asian wide character takes two.
+  function textCells(text: string): number {
+    let cells = 0;
+    for (const character of text) cells += (character.codePointAt(0) ?? 0) > 0x2e7f ? 2 : 1;
+    return cells;
+  }
+
   /// Whether the row leads to a list of its own.
   function opens(item: DeckItem): boolean {
     return item.kind === "branch" || item.kind === "choice" || item.expandable === true;
@@ -206,6 +239,15 @@
 
   function focusInput(): void {
     if (document.activeElement !== input) input?.focus({ preventScroll: true });
+  }
+
+  /// Bring the selected row into the list's view. Layout is the engine's:
+  /// where elements have no scrollIntoView there is nothing to scroll.
+  function revealSelection(): void {
+    void tick().then(() => {
+      const row = document.getElementById(optionId(keyboardIndex));
+      if (typeof row?.scrollIntoView === "function") row.scrollIntoView({ block: "nearest" });
+    });
   }
 
   function reconcileSelection(): void {
@@ -235,6 +277,8 @@
         input?.focus();
         input?.select();
       });
+      // A restored selection may sit below the rows the list shows.
+      revealSelection();
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
       // Preserve the viewport while restoring the caller's focus.
@@ -272,9 +316,7 @@
     keyboardIndex = Math.max(0, Math.min(items.length - 1, index));
     draft.selectedId = items[keyboardIndex]?.id ?? null;
     pointerIndex = null;
-    void tick().then(() =>
-      document.getElementById(optionId(keyboardIndex))?.scrollIntoView({ block: "nearest" }),
-    );
+    revealSelection();
   }
 
   /// The selected row's index, held inside the list.
@@ -859,20 +901,32 @@
         <span class="deck-result-path">{item.breadcrumb}</span>
       {/if}
     </span>
-    {#if item.value}
-      <span class="deck-result-value" class:on={item.value.toLowerCase() === "on"}>{item.value}</span>
+    {#if columns.value}
+      <span class="deck-slot deck-slot-value">
+        {#if item.value}
+          <span class="deck-result-value" class:on={item.value.toLowerCase() === "on"}>{item.value}</span>
+        {/if}
+      </span>
     {/if}
-    {#if item.checked}
-      <svg class="deck-check" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"></path></svg>
+    {#if columns.check}
+      <span class="deck-slot deck-slot-check">
+        {#if item.checked}
+          <svg class="deck-check" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"></path></svg>
+        {/if}
+      </span>
     {/if}
-    {#if item.shortcut}
-      <kbd>{item.shortcut}</kbd>
+    {#if columns.shortcut}
+      <span class="deck-slot deck-slot-shortcut">
+        {#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}
+      </span>
     {/if}
-    <span class="deck-result-opens">
-      {#if opens(item)}
-        <svg class="deck-chevron" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
-      {/if}
-    </span>
+    {#if columns.chevron}
+      <span class="deck-slot deck-slot-chevron">
+        {#if opens(item)}
+          <svg class="deck-chevron" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+        {/if}
+      </span>
+    {/if}
   </button>
 {/snippet}
 
@@ -895,7 +949,7 @@
             <path d="m20 20-4-4"></path>
           </svg>
           {#if trail.length}
-            <span class="deck-crumbs">
+            <span class="deck-crumbs" title={trail.join(" \u203a ")}>
               <span class="deck-crumbs-trail">
                 {#each trail as crumb, index}
                   {#if index > 0}
@@ -921,8 +975,8 @@
           {/if}
           <div class="deck-input-wrap">
             {#if !draft.query}
-              {#key placeholder}
-                <span class="deck-placeholder">{placeholder}</span>
+              {#key shownPlaceholder}
+                <span class="deck-placeholder">{shownPlaceholder}</span>
               {/key}
             {/if}
             <input
@@ -1038,6 +1092,8 @@
               bind:this={list}
               class="deck-results"
               class:sectioned
+              style:--deck-value-cells={columns.value}
+              style:--deck-shortcut-cells={columns.shortcut}
               id={LIST_ID}
               role="listbox"
               tabindex="-1"
@@ -1131,7 +1187,7 @@
   }
   .deck-shell {
     position: relative;
-    width: min(720px, 100%);
+    width: min(780px, 100%);
     min-width: 0;
     outline: none;
     filter: drop-shadow(0 22px 36px rgba(0, 0, 0, 0.2));
@@ -1139,11 +1195,15 @@
   }
   /* One hosting page resets box-sizing and the other does not. */
   .deck-shell :global(*) { box-sizing: border-box; }
+  /* The capsule asks for 300 px and takes what the rail leaves. A rail too
+     wide to sit beside that much capsule wraps under it, centred. */
   .deck-topline {
     position: relative;
     z-index: 2;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 10px;
   }
   .deck-capsule,
@@ -1156,14 +1216,15 @@
   }
   .deck-capsule,
   .deck-scopes {
-    height: 58px;
+    min-height: 58px;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255, 255, 255, 0.08);
   }
   .deck-capsule {
     display: flex;
     align-items: center;
-    flex: 1 1 auto;
+    flex: 1 1 300px;
     min-width: 0;
+    height: 58px;
     padding: 0 16px;
     gap: 10px;
     border-radius: 999px;
@@ -1188,7 +1249,7 @@
     align-items: center;
     flex: 0 1 auto;
     min-width: 0;
-    max-width: 55%;
+    max-width: 45%;
     height: 28px;
     padding: 0 3px 0 11px;
     gap: 4px;
@@ -1206,7 +1267,11 @@
     overflow: hidden;
     white-space: nowrap;
   }
-  .deck-crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* A trail too long for the chip gives up its leading crumbs first, down
+     to a stub each, and only then cuts the last one, which says where the
+     deck stands. */
+  .deck-crumb { flex: 0 100 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; }
+  .deck-crumb:last-child { flex-shrink: 1; }
   .deck-crumbs-clear {
     display: inline-flex;
     align-items: center;
@@ -1252,25 +1317,32 @@
     background: transparent;
     color: var(--text);
   }
+  /* Never narrower than its cells: beside the capsule it keeps its width
+     and wraps under it instead, and on a screen narrower than the rail the
+     cells take a second row. */
   .deck-scopes {
     display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
     align-items: center;
-    flex: 0 1 auto;
-    min-width: 0;
-    padding: 0 7px;
-    gap: 2px;
+    justify-content: center;
+    max-width: 100%;
+    padding: 5px 7px;
+    gap: 6px 2px;
     border-radius: 29px;
   }
+  /* As wide as its caption. The cap is for a long label with no caption;
+     it is well past ten characters. */
   .deck-scope {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    flex: 0 1 54px;
-    width: 54px;
-    min-width: 0;
+    flex: 0 0 auto;
+    min-width: 46px;
+    max-width: 104px;
     gap: 3px;
-    padding: 0;
+    padding: 0 6px;
     border: 0;
     background: transparent;
     color: var(--text-secondary);
@@ -1303,7 +1375,6 @@
     border-color: var(--deck-ring);
     background: color-mix(in srgb, var(--text) 16%, transparent);
   }
-  .deck-scope.active .deck-scope-caption { font-weight: 650; }
   .deck-scope:disabled { opacity: 0.4; cursor: default; }
   .deck-panel {
     position: relative;
@@ -1398,17 +1469,20 @@
   .deck-result-subtitle { color: var(--text-secondary); font-size: 11.5px; line-height: 15px; }
   .deck-result.danger .deck-result-title,
   .deck-result.danger .deck-result-icon { color: var(--deck-danger); }
-  .deck-result-value {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 38%;
-    color: var(--text-secondary);
-    font-size: 12.5px;
-  }
+  /* The right column. Each slot has one width for the whole list, counted
+     in the character cells of the slot's own font from the longest entry, so
+     the cells of every row start at the same place. Only the title gives
+     way when a row runs out of room. A value is set in a proportional face,
+     where a cell is an estimate, so its slot takes one more to spare than
+     the shortcut's; that one adds the chip's own padding and border. */
+  .deck-slot { display: inline-flex; align-items: center; flex: 0 0 auto; min-width: 0; }
+  .deck-slot-value { width: calc((var(--deck-value-cells) + 2) * 1ch); font-size: 12.5px; }
+  .deck-slot-shortcut { width: calc((var(--deck-shortcut-cells) + 1) * 1ch + 14px); }
+  .deck-slot-check,
+  .deck-slot-chevron { justify-content: center; width: 15px; }
+  .deck-result-value { min-width: 0; color: var(--text-secondary); }
   .deck-result-value.on { color: var(--accent); }
   .deck-check { color: var(--text); }
-  /* Reserved on every row, so the shortcuts of a list share one right edge. */
-  .deck-result-opens { display: inline-flex; flex: 0 0 auto; width: 15px; }
   kbd {
     flex: 0 0 auto;
     padding: 2px 6px;
@@ -1416,8 +1490,11 @@
     border-radius: 6px;
     color: var(--text-secondary);
     background: color-mix(in srgb, var(--bg) 56%, transparent);
-    font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap;
   }
+  /* One font for the chip and its slot, whose width is counted in it. */
+  kbd,
+  .deck-slot-shortcut { font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
   .deck-empty { margin: 0; padding: 26px 18px; color: var(--text-secondary); text-align: center; font-size: 13px; }
   .deck-keys {
     display: grid;
@@ -1505,11 +1582,11 @@
   @keyframes note-away { 0%, 72% { opacity: .72; } 100% { opacity: 0; } }
   @media (max-width: 640px) {
     .deck-overlay { padding-top: 54px; }
-    .deck-topline { flex-wrap: wrap; justify-content: center; }
     .deck-capsule { flex-basis: 100%; }
-    .deck-scopes { order: 2; max-width: 100%; }
     .deck-panel { margin-top: 9px; }
     .deck-keys { grid-template-columns: minmax(0, 1fr); }
+    /* A narrow list keeps its width for titles and values. */
+    .deck-slot-shortcut { display: none; }
   }
   @media (prefers-reduced-motion: reduce) {
     .deck-backdrop, .deck-shell, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
