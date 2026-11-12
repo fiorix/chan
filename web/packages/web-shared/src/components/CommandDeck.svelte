@@ -858,6 +858,9 @@
     } else if (event.key === "Enter") {
       if (!items.length) return;
       event.preventDefault();
+      // One press runs one row: a key still held when a branch opens would
+      // go on to run the first row of it.
+      if (event.repeat) return;
       choose(selectedItem, true);
     } else if (event.key === "ArrowRight") {
       // Right goes deeper and never runs: on a row with nothing under it the

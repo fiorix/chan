@@ -1558,6 +1558,24 @@ describe("CommandDeck run and navigation keys", () => {
     expect(onChoose).toHaveBeenCalledExactlyOnceWith(items[1]);
   });
 
+  it("runs nothing on an Enter that repeats while the key is held", async () => {
+    // The host opens the branch, whose first row is then the selected one.
+    const inside = [named("first", "First row"), named("second", "Second row")];
+    const onChoose = vi.fn((chosen: DeckItem) => {
+      if (chosen.kind === "branch") (app.setItems as (entries: DeckItem[]) => void)(inside);
+    });
+    await mountWith({ items: [named("branch", "Windows", { kind: "branch" })], onChoose });
+    await press("Enter");
+    expect(activeTitle()).toBe("First row");
+    const held = await press("Enter", { repeat: true });
+    expect(held.defaultPrevented, "the held key is taken").toBe(true);
+    expect(onChoose, "and runs nothing").toHaveBeenCalledOnce();
+
+    await press("Enter");
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(onChoose).toHaveBeenLastCalledWith(inside[0]);
+  });
+
   it("enters a branch or a choice on Right, opens an expandable row's page, and never runs an action", async () => {
     const onChoose = vi.fn();
     const onExpand = vi.fn();
