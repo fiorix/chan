@@ -5,7 +5,7 @@
 // handlers, every other pane's is hidden, a focus change (Hybrid Nav's
 // staged one included) moves it, and leaving the mode or destroying the pane
 // puts it back where it was. A tmux pane's strip stays hidden in the bar,
-// which names the pane instead. The strip in the bar takes the window's
+// which shows the window's title and a tmux badge. The strip in the bar takes the window's
 // title, left of its actions, while the window has tabs, and its tabs fade
 // toward it while more of them lie past the strip's end.
 
@@ -256,7 +256,9 @@ describe("the window tab bar mode", () => {
     expect(inPlace("left")?.classList.contains("auto-hidden"), "in place it hides again").toBe(true);
   });
 
-  test("a tmux pane's strip stays hidden in the bar, which names the pane instead", async () => {
+  test("a tmux pane's strip stays hidden in the bar, which shows the window's title and the badge", async () => {
+    const TITLE = "↓︎ local Terminal Window 3 [editor]";
+    windowTabBar.title = TITLE;
     splitLayout(
       [terminalTab({ id: "tmux", title: "editor", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })],
       [terminalTab({ id: "plain", title: "plain one" })],
@@ -265,14 +267,23 @@ describe("the window tab bar mode", () => {
     await renderPanes("left", "right");
     expect(barStrips()).toHaveLength(1);
     expect(barStrips()[0]?.classList.contains("control-hidden"), "the strip in the bar stays hidden").toBe(true);
-    expect(bar.querySelector(".tmux-name")?.textContent?.trim()).toBe("editor");
-    expect(bar.querySelector(".tmux-badge")).not.toBeNull();
+    // The bar's text, in order, outside what it hides.
+    const visible = (): string[] => {
+      const texts: string[] = [];
+      const walker = document.createTreeWalker(bar, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent?.trim();
+        if (text && !node.parentElement?.closest("[hidden], .control-hidden")) texts.push(text);
+      }
+      return texts;
+    };
+    expect(visible(), "the window's title and the badge, no pane's name").toEqual([TITLE, "tmux"]);
 
     setActivePane("right");
     await tick();
     expect(labels(barStrips()[0]), "a plain pane's strip shows in the bar").toEqual(["plain one"]);
     expect(barStrips()[0]?.classList.contains("control-hidden")).toBe(false);
-    expect(bar.querySelector(".tmux-name, .tmux-badge"), "and the bar names nothing").toBeNull();
+    expect(bar.querySelector(".tmux-badge"), "and the bar marks no tmux").toBeNull();
   });
 
   describe("the window's title", () => {
