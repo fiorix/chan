@@ -7,6 +7,11 @@
 // too, whose own listener answers the same ids. See state/commands.ts for
 // the Command shape and the onSurface / dispatchChanCommand / workspaceOnly
 // helpers.
+//
+// The list follows the editor's menus: the tab menu's rows, the body menu's,
+// the Details inspector's actions, then the rest by title. An action a menu
+// row also offers is an exported function of the tab it acts on, so the row
+// runs it on its own tab and the command on the active one.
 
 import {
   registerCommands,
@@ -22,7 +27,11 @@ import {
   openFsGraphForFile,
   revealPathInBrowser,
   searchPanel,
+  setTransientStatus,
+  ui,
 } from "../store.svelte";
+import { exportPathToPdf } from "../fileActionExecutors";
+import { isMarkdown } from "../fileTypes";
 import { editorCommandsFor } from "../mountedEditors";
 import {
   activeFileTab,
@@ -63,6 +72,14 @@ function onPlacedFile(ctx: CommandContext): boolean {
   return onSurface(ctx, "file") && !(tab !== null && isDraftClientPath(tab.path));
 }
 
+/// Whether the active file tab is on a file the Details inspector offers to
+/// download or export: any file but a draft, which is scratch space until
+/// it is saved.
+function onKeptFile(ctx: CommandContext): boolean {
+  const tab = activeFileTab();
+  return onSurface(ctx, "file") && tab !== null && !isDraftPath(tab.path);
+}
+
 /// The active file tab's value for a toggle's state, null when no file tab
 /// is active.
 function fileState(read: (tab: FileTab) => boolean): () => boolean | null {
@@ -72,12 +89,58 @@ function fileState(read: (tab: FileTab) => boolean): () => boolean | null {
   };
 }
 
+/// Copy the tab's path, a draft's as a person reads it. A refused clipboard
+/// leaves its reason on the status line until it is dismissed.
+export function copyFilePath(tab: FileTab): Promise<void> {
+  return copyTextToClipboard(displayPath(tab.path), {
+    onSuccess: () => setTransientStatus("Copied file path"),
+    onError: (msg) => {
+      ui.status = `copy failed: ${msg}`;
+      // Persistent so the error pill is dismissable; a null statusKind
+      // would leave it stuck with no x and no auto-clear.
+      ui.statusKind = "persistent";
+    },
+  });
+}
+
+/// Delete the tab's file. fileOps.remove asks before it deletes. A
+/// workspace's draft is discarded from its own flow, not deleted.
+export async function deleteFile(tab: FileTab): Promise<void> {
+  if (isDraftClientPath(tab.path)) return;
+  await fileOps.remove(tab.path, false);
+}
+
+/// Duplicate the tab's file beside it and open the copy. A workspace's
+/// draft is no file of the workspace and is not duplicated as one.
+export async function duplicateFile(tab: FileTab): Promise<void> {
+  if (isDraftClientPath(tab.path)) return;
+  await fileOps.duplicateFile(tab.path);
+}
+
+/// Open workspace search on the text selected in the tab's editor, capped
+/// at 100 words; plain search with no selection. The selection lives in the
+/// editor view's state, so it is still there after a menu or the launcher
+/// took focus.
+export function searchSelection(tab: FileTab): void {
+  const selection = editorCommandsFor(tab.id)?.selectionText() ?? "";
+  const words = selection.trim().split(/\s+/).filter(Boolean);
+  if (words.length > 0) searchPanel.query = words.slice(0, 100).join(" ");
+  searchPanel.open = true;
+}
+
+/// Show the tab's file in a file browser tab, selected, with its details
+/// open. A workspace's draft has no row there.
+export function showInFileBrowser(tab: FileTab): void {
+  if (isDraftClientPath(tab.path)) return;
+  revealPathInBrowser(tab.path, { inspectorOpen: true });
+}
+
 /// A find-family command. App.svelte serves the ids for a file tab and the
 /// focused terminal serves them for itself, so each is offered on both.
 function findCommand(
   id: string,
   title: string,
-  order: number | undefined,
+  order: number,
   keywords: string[],
   available: (ctx: CommandContext) => boolean,
   unavailableReason?: () => string,
@@ -89,6 +152,7 @@ function findCommand(
     scope: "app",
     surface: ["file", "terminal"],
     order,
+    icon: "search",
     // The window-mode table lists the find family for a window that holds
     // terminals alone, so no capability gates it.
     requirement: "any",
@@ -210,13 +274,7 @@ registerCommands([
     requirement: "files",
     keywords: ["Copy path to file", "clipboard", "path"],
     available: (ctx) => onSurface(ctx, "file"),
-    run: onFile((tab) => {
-      // A draft's path is copied as a person reads it.
-      void copyTextToClipboard(displayPath(tab.path), {
-        onSuccess: () => notify("Copied file path"),
-        onError: () => notify("Clipboard unavailable"),
-      });
-    }),
+    run: onFile((tab) => void copyFilePath(tab)),
   },
   {
     id: "app.file.delete",
@@ -227,15 +285,11 @@ registerCommands([
     order: 5,
     requirement: "files",
     keywords: ["Delete", "remove", "trash"],
-    // A workspace's draft is discarded from its own flow, not deleted.
     available: onPlacedFile,
     unavailableReason: () => "Needs a file with a place in the workspace",
-    // fileOps.remove asks before it deletes, so this needs no
-    // launcher-side confirm gate.
-    run: onFile((tab) => {
-      if (isDraftClientPath(tab.path)) return;
-      void fileOps.remove(tab.path, false);
-    }),
+    // deleteFile asks before it deletes, so this needs no launcher-side
+    // confirm gate.
+    run: onFile((tab) => void deleteFile(tab)),
   },
   {
     id: "app.file.duplicate",
@@ -246,10 +300,9 @@ registerCommands([
     order: 6,
     requirement: "files",
     keywords: ["copy", "clone"],
-    available: (ctx) => onSurface(ctx, "file"),
-    run: onFile((tab) => {
-      void fileOps.duplicateFile(tab.path);
-    }),
+    available: onPlacedFile,
+    unavailableReason: () => "Needs a file with a place in the workspace",
+    run: onFile((tab) => void duplicateFile(tab)),
   },
   {
     id: "app.editor.reloadFromDisk",
@@ -267,7 +320,39 @@ registerCommands([
       void forceReloadFromDisk(tab.id);
     }),
   },
+  // The find family lists together, in the order a search runs. The three
+  // that follow Find take orders just past its own and short of the next
+  // whole number, where every other row of the editor and of the terminal
+  // sits, so the family stays adjacent on either tab.
   findCommand("app.find.open", "Find", 8, ["Find on page", "search", "find bar"], onFileOrTerminal),
+  findCommand(
+    "app.find.next",
+    "Find next",
+    8.1,
+    ["search", "next match"],
+    findBarOpen,
+    () => "Needs the find bar open",
+  ),
+  findCommand(
+    "app.find.prev",
+    "Find previous",
+    8.2,
+    ["search", "previous match"],
+    findBarOpen,
+    () => "Needs the find bar open",
+  ),
+  {
+    // The terminal's bar closes on its own Escape and has no command for it.
+    ...findCommand(
+      "app.find.close",
+      "Close find",
+      8.3,
+      ["search", "find bar", "dismiss"],
+      (ctx) => onSurface(ctx, "file") && activeFileTab()?.find?.open === true,
+      () => "Needs the find bar open",
+    ),
+    surface: "file",
+  },
   {
     id: "app.editor.searchSelection",
     title: "Search selection",
@@ -280,43 +365,93 @@ registerCommands([
     requirement: "workspace",
     keywords: ["search", "find", "selection"],
     available: (ctx) => onSurface(ctx, "file"),
-    // The selection lives in the editor view's state, so it survives the
-    // launcher taking focus; seed the search overlay with it, capped at
-    // 100 words. With no selection this opens plain search.
+    run: onFile(searchSelection),
+  },
+  {
+    // The Details inspector's actions on the open file, in its order.
+    id: "app.editor.showInBrowser",
+    title: "Show in file browser",
+    category: "Editor",
+    scope: "app",
+    surface: "file",
+    order: 10,
+    requirement: "files",
+    keywords: ["Show file", "reveal", "files", "tree", "explorer"],
+    available: onPlacedFile,
+    unavailableReason: () => "Needs a file with a place in the workspace",
+    run: onFile(showInFileBrowser),
+  },
+  {
+    id: "app.editor.download",
+    title: "Download",
+    category: "Editor",
+    scope: "app",
+    surface: "file",
+    order: 11,
+    requirement: "files",
+    keywords: ["Download file", "save", "export"],
+    available: onKeptFile,
+    unavailableReason: () => "Needs a file that is not a draft",
+    // The file as it is on disk: the desktop's Downloads folder with the
+    // transfer bubble's progress, the browser's own download elsewhere.
     run: onFile((tab) => {
-      const selection = editorCommandsFor(tab.id)?.selectionText() ?? "";
-      const words = selection.trim().split(/\s+/).filter(Boolean);
-      if (words.length > 0) searchPanel.query = words.slice(0, 100).join(" ");
-      searchPanel.open = true;
+      if (isDraftPath(tab.path)) return;
+      fileOps.downloadPathWithProgress(tab.path, false);
     }),
   },
-  findCommand(
-    "app.find.next",
-    "Find next",
-    undefined,
-    ["search", "next match"],
-    findBarOpen,
-    () => "Needs the find bar open",
-  ),
-  findCommand(
-    "app.find.prev",
-    "Find previous",
-    undefined,
-    ["search", "previous match"],
-    findBarOpen,
-    () => "Needs the find bar open",
-  ),
   {
-    // The terminal's bar closes on its own Escape and has no command for it.
-    ...findCommand(
-      "app.find.close",
-      "Close find",
-      undefined,
-      ["search", "find bar", "dismiss"],
-      (ctx) => onSurface(ctx, "file") && activeFileTab()?.find?.open === true,
-      () => "Needs the find bar open",
-    ),
+    id: "app.editor.terminalFromHere",
+    title: "New terminal here",
+    category: "Editor",
+    scope: "app",
     surface: "file",
+    order: 12,
+    // Spawns a terminal; the file path rides along as plain spawn data.
+    requirement: "terminal",
+    keywords: ["Terminal from here", "shell", "console", "cwd"],
+    available: onPlacedFile,
+    unavailableReason: () => "Needs a file with a place in the workspace",
+    run: onFile((tab) => {
+      if (isDraftClientPath(tab.path)) return;
+      openTerminalInActivePane(terminalFromHereTarget(tab.path, false));
+    }),
+  },
+  {
+    id: "app.editor.exportPdf",
+    title: "Export to PDF",
+    category: "Editor",
+    scope: "app",
+    surface: "file",
+    order: 13,
+    requirement: "files",
+    keywords: ["print", "save as"],
+    available: (ctx) => onKeptFile(ctx) && isMarkdown(activeFileTab()?.path ?? ""),
+    unavailableReason: () => {
+      const tab = activeFileTab();
+      return tab !== null && isMarkdown(tab.path)
+        ? "Needs a file that is not a draft"
+        : "Needs a Markdown file";
+    },
+    // Renders the file as it is on disk; exportPathToPdf reports progress
+    // and failure on the status line.
+    run: onFile((tab) => {
+      if (isDraftPath(tab.path) || !isMarkdown(tab.path)) return;
+      void exportPathToPdf(tab.path);
+    }),
+  },
+  {
+    id: "app.editor.graphFromHere",
+    title: "New graph here",
+    category: "Editor",
+    scope: "app",
+    surface: "file",
+    order: 14,
+    // The graph surface reads the workspace index.
+    requirement: "workspace",
+    keywords: ["Graph from here", "graph", "links", "scope"],
+    available: onPlacedFile,
+    unavailableReason: () => "Needs a file with a place in the workspace",
+    run: onFile((tab) => openFsGraphForFile(tab.path)),
   },
   {
     id: "app.editor.toggleMode",
@@ -377,50 +512,6 @@ registerCommands([
         onSuccess: () => notify("Copied directory path"),
         onError: () => notify("Clipboard unavailable"),
       });
-    }),
-  },
-  {
-    id: "app.editor.terminalFromHere",
-    title: "New terminal here",
-    category: "Editor",
-    scope: "app",
-    surface: "file",
-    // Spawns a terminal; the file path rides along as plain spawn data.
-    requirement: "terminal",
-    keywords: ["Terminal from here", "shell", "console", "cwd"],
-    available: onPlacedFile,
-    unavailableReason: () => "Needs a file with a place in the workspace",
-    run: onFile((tab) => {
-      if (isDraftClientPath(tab.path)) return;
-      openTerminalInActivePane(terminalFromHereTarget(tab.path, false));
-    }),
-  },
-  {
-    id: "app.editor.graphFromHere",
-    title: "New graph here",
-    category: "Editor",
-    scope: "app",
-    surface: "file",
-    // The graph surface reads the workspace index.
-    requirement: "workspace",
-    keywords: ["Graph from here", "graph", "links", "scope"],
-    available: onPlacedFile,
-    unavailableReason: () => "Needs a file with a place in the workspace",
-    run: onFile((tab) => openFsGraphForFile(tab.path)),
-  },
-  {
-    id: "app.editor.showInBrowser",
-    title: "Show in file browser",
-    category: "Editor",
-    scope: "app",
-    surface: "file",
-    requirement: "files",
-    keywords: ["reveal", "files", "tree", "explorer"],
-    available: onPlacedFile,
-    unavailableReason: () => "Needs a file with a place in the workspace",
-    run: onFile((tab) => {
-      if (isDraftClientPath(tab.path)) return;
-      revealPathInBrowser(tab.path, { inspectorOpen: true });
     }),
   },
   {
