@@ -506,7 +506,7 @@ fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
 fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<Scrub> {
     if APPIMAGE_PREPENDED_KEYS.contains(&key) {
         let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
-        let host = host_value(appdir, key, &entries)?;
+        let host = host_value(appdir, key, &entries, None)?;
         // Nothing left, or the lone empty entry AppRun's separator leaves
         // when the user had no value, means the runtime created the variable
         // outright (it does this for LD_LIBRARY_PATH and XDG_DATA_DIRS on
@@ -538,24 +538,36 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
 /// release that started this one handed down its own environment, whose block
 /// follows this one's: whole AppRun blocks that chain on from this mount's
 /// ([`apprun_block_at`]), with only the re-exec's directory between them in
-/// the sibling shape, are that process's and go too, and for `XDG_DATA_DIRS`
+/// the sibling shape, are that process's and go too. That directory is the
+/// entry ahead of this mount's block once this process has re-exec'd, or
+/// `reexec_dir`, the one the re-exec is about to prepend, before it has; for
+/// `XDG_DATA_DIRS`
 /// the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] after each block is the hook's.
 /// What follows is the user's value as they wrote it, an empty entry of
 /// theirs included, minus any whole AppRun block another AppImage leaked into
 /// it, which goes by its own entries so the user's entries around it stay.
-fn host_value(appdir: &Path, key: &str, entries: &[PathBuf]) -> Option<Vec<PathBuf>> {
+fn host_value(
+    appdir: &Path,
+    key: &str,
+    entries: &[PathBuf],
+    reexec_dir: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
     let start = match entries.iter().rposition(|entry| entry.starts_with(appdir)) {
         Some(last) => {
             let first = entries
                 .iter()
                 .position(|entry| entry.starts_with(appdir))
                 .unwrap_or(last);
-            // The entry the re-exec prepends ahead of this mount's block.
-            let reexec = (key == "LD_LIBRARY_PATH" && first > 0).then(|| &entries[first - 1]);
+            // The directory the re-exec prepends ahead of this mount's block.
+            let reexec = (key == "LD_LIBRARY_PATH")
+                .then(|| {
+                    reexec_dir.or_else(|| first.checked_sub(1).map(|at| entries[at].as_path()))
+                })
+                .flatten();
             let mut at = after_gtk_hook(key, entries, last + 1);
             loop {
                 let next = match reexec {
-                    Some(dir) if entries.get(at) == Some(dir) => at + 1,
+                    Some(dir) if entries.get(at).map(PathBuf::as_path) == Some(dir) => at + 1,
                     _ => at,
                 };
                 match apprun_block_at(key, entries, next) {
@@ -615,6 +627,47 @@ pub fn without_apprun_blocks(key: &str, value: &OsStr) -> OsString {
         return value.to_os_string();
     }
     std::env::join_paths(kept).unwrap_or_default()
+}
+
+/// `key` of `vars`, this process's environment, without the AppRun blocks of
+/// any mount but this process's own: everything up to and including this
+/// mount's last entry kept, and the rest as the user had it, as a terminal
+/// gets it. `None` when there is nothing to drop, and off an AppImage. A
+/// desktop an older release started still holds that release's block after
+/// its own in `PATH` and `LD_LIBRARY_PATH`, naming a mount that goes when that
+/// process exits; this is the value to put in their place. For those two
+/// keys, whose blocks are this mount's entries alone. `reexec_dir` is the
+/// directory the GUI-stack re-exec is about to put ahead of this mount's
+/// block in `LD_LIBRARY_PATH`, which the older release's re-exec put ahead of
+/// its block too.
+pub fn without_foreign_apprun_blocks(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<OsString> {
+    let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+    let value_of = |name: &str| {
+        vars.iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty())
+    };
+    let appdir = PathBuf::from(value_of("APPDIR")?);
+    let entries: Vec<PathBuf> = std::env::split_paths(value_of(key)?).collect();
+    let own_last = entries
+        .iter()
+        .rposition(|entry| entry.starts_with(&appdir))?;
+    let mut kept = entries[..=own_last].to_vec();
+    kept.extend(host_value(
+        &appdir,
+        key,
+        &entries,
+        reexec_dir.map(Path::new),
+    )?);
+    if kept.len() == entries.len() {
+        return None;
+    }
+    std::env::join_paths(kept).ok()
 }
 
 /// AppRun's block for `key`: the entries it writes ahead of the user's value,
@@ -1095,6 +1148,7 @@ mod appimage_env_tests {
     mod apprun_shapes {
         use super::super::{
             appimage_host_env, appimage_host_var, hand_appimage_host_env, without_apprun_blocks,
+            without_foreign_apprun_blocks,
         };
         use super::{scrub, HostEnvFor, Scrub, APPDIR};
         use std::ffi::{OsStr, OsString};
@@ -1425,6 +1479,72 @@ mod appimage_env_tests {
             );
             let plain = OsStr::new("/home/u/.local/bin:/opt/x/usr/bin/:/usr/bin");
             assert_eq!(without_apprun_blocks("PATH", plain), plain);
+        }
+
+        /// The process's own value loses an older parent's chained block and a
+        /// leaked one, and keeps this mount's block and what is ahead of it;
+        /// a value with nothing foreign, or a process that is no AppImage,
+        /// gives `None`.
+        #[test]
+        fn a_process_keeps_its_own_block_and_loses_the_others() {
+            let vars = |key: &str, value: String| -> Vec<(OsString, OsString)> {
+                vec![("APPDIR".into(), APPDIR.into()), (key.into(), value.into())]
+            };
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let old = block_under("/tmp/.mount_chanZZ", &LD_BLOCK);
+            let relaunched = format!("{HOST_LIB}:{own}:{HOST_LIB}:{old}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", relaunched),
+                    None
+                ),
+                Some(OsString::from(format!("{HOST_LIB}:{own}:/opt/a/lib")))
+            );
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let path = format!(
+                "{}:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under("/tmp/.mount_chanZZ", &path_block)
+            );
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", vars("PATH", path), None),
+                Some(OsString::from(format!(
+                    "{}:/usr/local/bin:/usr/bin",
+                    block_under(APPDIR, &path_block)
+                )))
+            );
+            let clean = format!("{}:/usr/bin", block_under(APPDIR, &path_block));
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", vars("PATH", clean), None),
+                None
+            );
+            let no_appimage = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+            assert_eq!(
+                without_foreign_apprun_blocks("PATH", no_appimage, None),
+                None
+            );
+            // Before this process's own re-exec the older parent's directory
+            // ahead of its block is the one the re-exec is about to prepend.
+            let before_reexec = format!("{own}:{HOST_LIB}:{old}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", before_reexec.clone()),
+                    Some(OsStr::new(HOST_LIB))
+                ),
+                Some(OsString::from(format!("{own}:/opt/a/lib")))
+            );
+            // A user whose own first entry is that directory keeps it.
+            let users_own = format!("{own}:{HOST_LIB}:/opt/a/lib");
+            assert_eq!(
+                without_foreign_apprun_blocks(
+                    "LD_LIBRARY_PATH",
+                    vars("LD_LIBRARY_PATH", users_own),
+                    Some(OsStr::new(HOST_LIB))
+                ),
+                None
+            );
         }
 
         /// Only a whole block counts: a user's entry that looks like one of
