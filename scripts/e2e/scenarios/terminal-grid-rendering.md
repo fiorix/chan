@@ -67,10 +67,7 @@ content.
 
 ### TG-05 A second tab paints only its own content
 
-With one terminal already holding a full screen, a second terminal built
-from the same process-wide backend comes up showing its prompt and nothing
-else. Every ghostty terminal instantiates one compiled Ghostty WASM module,
-so this is where a leak between terminals would surface.
+With one terminal already holding a full screen, a second terminal built from the same process-wide backend comes up showing its prompt and nothing else. Every ghostty terminal instantiates the one compiled libghostty-vt module into a memory of its own and shares the page with the others, so this is where a leak between terminals would surface.
 
 ### TG-06 The font preference resolves to what the chain says
 

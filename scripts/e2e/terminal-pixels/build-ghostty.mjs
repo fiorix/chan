@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * Bundle the ghostty widget into one ES module for the pixel harness page.
+ * Bundle the ghostty widget and chan's binding of its core into ES modules
+ * for the pixel harness page.
  *
  * WHY: the page loads the widget straight into a real webview, and the
  * workspace package @chan/ghostty-web-ng holds TypeScript sources only. Vite
  * compiles them as the app's build does, each file under its nearest
- * tsconfig.json, so the page paints with the code the app ships. Both drivers
- * (terminal-pixels.py and terminal-pixels.mjs) call this before they serve.
+ * tsconfig.json, so the page paints with the code the app ships: the widget
+ * (`lib/`) over chan's binding (`vt/`) on the vendored libghostty-vt core
+ * (`vendor/ghostty-vt/`). Both drivers (terminal-pixels.py and
+ * terminal-pixels.mjs) call this before they serve.
  *
  * Usage: node scripts/e2e/terminal-pixels/build-ghostty.mjs OUT_DIR
  *
- * Writes OUT_DIR/ghostty-web.js, whatever chunks it imports, and a copy of
- * the widget's ghostty-vt.wasm, which the page loads by path.
+ * Writes OUT_DIR/ghostty-web.js (the package's `.` entry), OUT_DIR/vt.js (its
+ * `./vt` entry), whatever chunks they import, and a copy of the package's
+ * vendor/ghostty-vt/, whose wasm the page loads by path.
  */
 
 import fs from "node:fs";
@@ -43,16 +47,23 @@ export async function buildGhostty(outDir) {
       emptyOutDir: false,
       minify: false,
       lib: {
-        entry: path.join(WIDGET, "lib/index.ts"),
+        entry: {
+          "ghostty-web": path.join(WIDGET, "lib/index.ts"),
+          vt: path.join(WIDGET, "vt/index.ts"),
+        },
         formats: ["es"],
-        fileName: () => "ghostty-web.js",
+        fileName: (_format, name) => `${name}.js`,
       },
     },
   });
-  if (!fs.existsSync(path.join(outDir, "ghostty-web.js"))) {
-    throw new Error(`vite wrote no ghostty-web.js to ${outDir}`);
+  for (const name of ["ghostty-web.js", "vt.js"]) {
+    if (!fs.existsSync(path.join(outDir, name))) {
+      throw new Error(`vite wrote no ${name} to ${outDir}`);
+    }
   }
-  fs.copyFileSync(path.join(WIDGET, "ghostty-vt.wasm"), path.join(outDir, "ghostty-vt.wasm"));
+  fs.cpSync(path.join(WIDGET, "vendor/ghostty-vt"), path.join(outDir, "vendor/ghostty-vt"), {
+    recursive: true,
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -11,15 +11,14 @@
 ///
 /// The ghostty adapters are the product's own modules, compiled straight out
 /// of src/terminal/ into /product/. Only the wiring is written here, and it
-/// tracks TerminalTab.start(): same options, same post-open() alignment, same
-/// custom-glyph and overlay-scrollbar installs.
+/// tracks TerminalTab.start() and backend.ts: the same core under the same
+/// binding, same options, same post-open() alignment, same custom-glyph and
+/// overlay-scrollbar installs.
 
 import { Terminal as XtermTerminal } from "/vendor/xterm/lib/xterm.mjs";
 import { WebglAddon } from "/vendor/addon-webgl/lib/addon-webgl.mjs";
-import {
-  Ghostty,
-  Terminal as GhosttyTerminal,
-} from "/vendor/ghostty-web-ng/ghostty-web.js";
+import { Terminal as GhosttyTerminal } from "/vendor/ghostty-web-ng/ghostty-web.js";
+import { GhosttyVt } from "/vendor/ghostty-web-ng/vt.js";
 import {
   alignGhosttyRendererToXterm,
   installGhosttyCustomGlyphs,
@@ -222,21 +221,39 @@ async function startXterm(host, scenario, warnings, bytes) {
   };
 }
 
-/// One Ghostty per page, like loadGhosttyKit's cached promise: every chan
-/// terminal shares a single WASM instance, so a harness that loaded one per
-/// terminal would not be running the configuration the app ships.
-let ghosttyKit = null;
+/// The vendored libghostty-vt core, compiled once per page like the module
+/// behind loadGhosttyKit's cached promise. Every chan terminal instantiates
+/// it into a memory of its own, through chan's binding (backend.ts's
+/// ghosttyKitFrom), so the second-tab arm's two terminals do not share an
+/// instance either.
+const GHOSTTY_CORE = "/vendor/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
+let ghosttyModule = null;
 
-function loadGhostty() {
-  if (!ghosttyKit) {
-    ghosttyKit = Ghostty.load("/vendor/ghostty-web-ng/ghostty-vt.wasm");
+function compileGhostty() {
+  if (!ghosttyModule) {
+    ghosttyModule = (async () => {
+      const response = await fetch(GHOSTTY_CORE);
+      if (!response.ok) {
+        throw new Error(`fetching ${GHOSTTY_CORE}: ${response.status}`);
+      }
+      return WebAssembly.compile(await response.arrayBuffer());
+    })();
   }
-  return ghosttyKit;
+  return ghosttyModule;
 }
 
 async function startGhostty(host, scenario, warnings, bytes) {
-  const ghostty = await loadGhostty();
-  const term = new GhosttyTerminal({
+  // TerminalTab's instance host: replies the core generates outside a write
+  // (a resize report) go to the PTY, which this page does not have.
+  let term = null;
+  const ghostty = new GhosttyVt(
+    await WebAssembly.instantiate(await compileGhostty(), {}),
+    {
+      cellSize: () => term?.renderer?.getMetrics(),
+      onResizeReply: () => {},
+    },
+  ).asGhostty();
+  term = new GhosttyTerminal({
     allowTransparency: false,
     cols: COLS,
     cursorBlink: false,
