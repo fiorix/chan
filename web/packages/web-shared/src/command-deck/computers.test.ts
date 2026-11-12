@@ -1281,7 +1281,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
 
   function points(
     machine: Partial<ComputersMachine>,
-    may: ComputersMay = { terminal: true, window: true, allComputers: true },
+    may: ComputersMay = { terminal: true, window: true },
   ): { rows: ComputersEntry[]; commands: ComputersCommand[]; model: ComputersModel; ctx: ComputersContext } {
     const { ctx: bare, commands } = harness();
     const ctx = { ...bare, scopes, terminalTitle: "New terminal window" };
@@ -1303,6 +1303,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
     ]);
     expect(rows.every((entry) => entry.scope === "computers" && entry.breadcrumb === "Computers")).toBe(true);
     expect(new Set(rows.map((entry) => entry.id)).size).toBe(3);
+    expect(rows.filter((entry) => entry.pinned || entry.expandable), "none of the tree's objects").toEqual([]);
   });
 
   it("run the terminal in one step and open each type's page as a branch", async () => {
@@ -1340,9 +1341,24 @@ describe("the ways into the tree, for a list that holds other things", () => {
     expect(points(full, { window: true }).rows.map((entry) => entry.title)).toEqual(["Workspaces", "Windows"]);
   });
 
-  it("hold neither the tree's objects nor the way to every computer", () => {
-    const { rows } = points(full);
-    expect(rows.filter((entry) => entry.pinned || entry.expandable)).toEqual([]);
+  it("end with the way to every computer where the host has that screen, and only there", async () => {
+    const { rows, commands, model, ctx } = points(full, { terminal: true, window: true, allComputers: true });
+    expect(rows.map((entry) => `${entry.section}: ${entry.title}`)).toEqual([
+      "Computers: New terminal window",
+      "Computers: Workspaces",
+      "Computers: Windows",
+      "Computers: All computers...",
+    ]);
+    const all = rows[3];
+    // The same row that ends the tree's root: it leaves as it starts.
+    const inTree = row(build(model, {}, ctx), "All computers...");
+    expect([all.id, all.pinned, all.awaitResult, all.next]).toEqual([inTree.id, true, false, undefined]);
+    expect([all.breadcrumb, all.scope]).toEqual(["Computers", "computers"]);
+    await all.run?.();
+    expect(commands).toEqual([{ target: "app", action: "all-computers" }]);
+    // It stands where there is nothing else to list, too.
+    expect(points({}, { allComputers: true }).rows.map((entry) => entry.title)).toEqual(["All computers..."]);
+    expect(points(full).rows.map((entry) => entry.title)).not.toContain("All computers...");
   });
 });
 

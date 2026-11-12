@@ -1210,14 +1210,18 @@ function typeEntry(b: Builder, filter: ComputersFilter, section?: string): Compu
 }
 
 /** The way from a tree that holds one machine to the screen that holds every
- * one. */
-function allComputersEntries(b: Builder, section?: string): ComputersEntry[] {
+ * one. `breadcrumb` says where the row is listed from. */
+function allComputersEntries(
+  b: Builder,
+  section?: string,
+  breadcrumb: string = COMPUTERS_SECTIONS.desktop,
+): ComputersEntry[] {
   if (!b.model.may.allComputers) return [];
   const act: Act = {
     ...appAct(b, "all-computers", "All computers...", "every machine devserver gateway screen"),
     icon: "computers",
   };
-  const layout = { section, breadcrumb: COMPUTERS_SECTIONS.desktop, scope: b.scopes.machines };
+  const layout = { section, breadcrumb, scope: b.scopes.machines };
   return [{ ...actEntry(b, act, undefined, act.label, layout), pinned: true }];
 }
 
@@ -1500,7 +1504,8 @@ export function computersDeck(model: ComputersModel, view: ComputersView, ctx: C
 /** The ways into the tree, for a list that holds other things beside it and
  * has no room for the tree itself: a new terminal on this machine, which is
  * one step, then one row per type of object the model holds, which opens
- * that type's page. Each row carries the one heading they share. */
+ * that type's page, then the way to every computer where the host has one.
+ * Each row carries the one heading they share. */
 export function computersEntryPoints(model: ComputersModel, ctx: ComputersContext): ComputersEntry[] {
   const section = COMPUTERS_SECTIONS.machines;
   const b: Builder = { model, ctx, scopes: ctx.scopes ?? COMPUTERS_TYPE_SCOPES, base: [] };
@@ -1517,6 +1522,7 @@ export function computersEntryPoints(model: ComputersModel, ctx: ComputersContex
   }
   if (everyWorkspace(model).length > 0) rows.push(typeEntry(b, "workspaces", section));
   if (everyWindow(model).length > 0) rows.push(typeEntry(b, "windows", section));
+  rows.push(...allComputersEntries(b, section, section));
   return rows;
 }
 
