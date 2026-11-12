@@ -5,6 +5,12 @@
 // tree registry is, because a docked browser has no tab to hold it. The
 // surface drops its record when it unmounts, so a browser shown again starts
 // from the defaults.
+//
+// A file browser tab's Details panel is a switch of the same kind, which the
+// toolbar and the catalog both flip. It is kept on the tab, not in a record
+// here, because a reload restores it with the tab.
+
+import type { BrowserTab } from "./tabs.svelte";
 
 export type BrowserView = {
   /// List the entries whose name starts with a dot.
@@ -43,4 +49,10 @@ export function toggleBrowserView(instanceId: string, key: keyof BrowserView): v
 /// Forget a surface's view state.
 export function dropBrowserView(instanceId: string): void {
   delete views.byId[instanceId];
+}
+
+/// Show or hide a file browser tab's Details panel. The toolbar button, the
+/// key that previews the selection and the catalog command all flip it here.
+export function toggleBrowserDetails(tab: Pick<BrowserTab, "inspectorOpen">): void {
+  tab.inspectorOpen = !tab.inspectorOpen;
 }

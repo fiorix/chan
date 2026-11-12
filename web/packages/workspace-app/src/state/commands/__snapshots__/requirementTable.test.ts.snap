@@ -9,6 +9,7 @@ app.browser.copyPath files
 app.browser.copySelection files
 app.browser.cutSelection files
 app.browser.deleteSelection files
+app.browser.details files
 app.browser.downloadSelection files
 app.browser.expandAll files
 app.browser.exportPdf files
@@ -193,6 +194,7 @@ app.browser.copyPath files
 app.browser.copySelection files
 app.browser.cutSelection files
 app.browser.deleteSelection files
+app.browser.details files
 app.browser.downloadSelection files
 app.browser.expandAll files
 app.browser.exportPdf files
@@ -293,6 +295,7 @@ app.browser.copyPath files
 app.browser.copySelection files
 app.browser.cutSelection files
 app.browser.deleteSelection files
+app.browser.details files
 app.browser.downloadSelection files
 app.browser.expandAll files
 app.browser.exportPdf files

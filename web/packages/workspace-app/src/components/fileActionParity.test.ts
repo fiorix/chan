@@ -6,15 +6,17 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import FileInfoBody from "./FileInfoBody.svelte";
 import FileTree from "./FileTree.svelte";
 import { openTerminalInActivePane } from "../state/tabs.svelte";
-import { fileOps } from "../state/store.svelte";
+import { raiseReplacePicker, raiseUploadPicker } from "../state/store.svelte";
 
 // Parity proof: the inspector (FileInfoBody) and the file browser
 // context menu (FileTree) render the SAME applicable non-destructive
 // actions for the same entry, because both consume
 // state/fileActions' classifyFileActions, and word them by the same
-// catalog commands. Handlers are surface-local; the destructive +
-// path-mutation rows (Copy path, Rename or move, Delete) and
-// ordinary-file replacement exist only in the tree's separate policy.
+// catalog commands. The destructive + path-mutation rows (Copy path,
+// Rename or move, Delete) and ordinary-file replacement exist only in
+// the tree's separate policy; the tree's Upload rows raise the store's
+// pickers, the one that uploads into a directory or the one that
+// replaces a file.
 // An inspector that allows no upload, as the Search slide's does,
 // leaves out only its Upload row.
 // The api modules are mocked, and the store and tab state have the
@@ -81,6 +83,8 @@ vi.mock("../state/store.svelte", async (importOriginal) => ({
     downloadPathWithProgress: vi.fn(),
   },
   loadTreeDir: vi.fn(async () => {}),
+  raiseReplacePicker: vi.fn(),
+  raiseUploadPicker: vi.fn(),
   openGraphAtNode: vi.fn(),
   openGraphForContact: vi.fn(),
   openGraphForFile: vi.fn(),
@@ -90,7 +94,6 @@ vi.mock("../state/store.svelte", async (importOriginal) => ({
   revealPathInBrowser: vi.fn(),
   tree: { entries: fixtureEntries, loadingDirs: {}, loadedDirs: {}, dirErrors: {} },
   browserSelection: { path: null, paths: [] },
-  clearTreeLoadingForPath: vi.fn(),
   fbClearSelection: vi.fn(),
   fbActivateInstance: vi.fn(),
   fbActiveInstanceId: () => "fb-test",
@@ -204,27 +207,17 @@ function treeMenuLabels(target: HTMLElement): string[] {
     .filter((s) => s.length > 0);
 }
 
-/// Click a menu row by label, then drive the hidden file picker's
-/// change event with one File. Clears the transfer mocks first so the
-/// caller asserts only this invocation's effect.
-const pickedFile = new File(["replacement body"], "notes.txt", {
-  type: "text/plain",
-});
-
-async function pickUpload(target: HTMLElement, label: string): Promise<void> {
+/// Click a menu row by label. Clears the picker mocks first so the caller
+/// asserts only this invocation's effect.
+async function clickRow(target: HTMLElement, label: string): Promise<void> {
   const button = [...target.querySelectorAll<HTMLButtonElement>(".ctx button")].find(
     (b) => b.textContent?.trim() === label,
   );
   expect(button, `menu row "${label}"`).toBeDefined();
-  vi.mocked(fileOps.uploadFilesTo).mockClear();
-  vi.mocked(fileOps.replaceFileAt).mockClear();
+  vi.mocked(raiseUploadPicker).mockClear();
+  vi.mocked(raiseReplacePicker).mockClear();
   button!.click();
   await tick();
-  const input = target.querySelector<HTMLInputElement>("input.file-picker");
-  expect(input, "hidden file picker").toBeDefined();
-  Object.defineProperty(input, "files", { value: [pickedFile], configurable: true });
-  // Bubbles so Svelte's delegated change listener sees it.
-  input!.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 describe("inspector vs tree menu action parity", () => {
@@ -388,14 +381,12 @@ describe("plain-directory parity", () => {
     ]);
   });
 
-  test("the tree upload row pipes the picked files to uploadFilesTo for the directory", async () => {
+  test("the tree upload row raises the picker that uploads into the directory", async () => {
     const tree = await mountTreeMenu("docs");
-    await pickUpload(tree, "Upload");
+    await clickRow(tree, "Upload");
 
-    await vi.waitFor(() => {
-      expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("docs", [pickedFile]);
-    });
-    expect(fileOps.replaceFileAt).not.toHaveBeenCalled();
+    expect(raiseUploadPicker).toHaveBeenCalledExactlyOnceWith("docs");
+    expect(raiseReplacePicker).not.toHaveBeenCalled();
   });
 });
 
@@ -410,14 +401,12 @@ describe("ordinary-file replacement (tree-only)", () => {
     expect(inspectorActionLabels(inspector)).not.toContain("Upload");
   });
 
-  test("invoking it drives the picker and calls fileOps.replaceFileAt with path and file", async () => {
+  test("invoking it raises the picker that replaces the file", async () => {
     const tree = await mountTreeMenu("a.md");
-    await pickUpload(tree, "Upload");
+    await clickRow(tree, "Upload");
 
-    await vi.waitFor(() => {
-      expect(fileOps.replaceFileAt).toHaveBeenCalledWith("a.md", pickedFile);
-    });
-    expect(fileOps.uploadFilesTo).not.toHaveBeenCalled();
+    expect(raiseReplacePicker).toHaveBeenCalledExactlyOnceWith("a.md");
+    expect(raiseUploadPicker).not.toHaveBeenCalled();
   });
 
   test("drafts never get the replacement row", async () => {

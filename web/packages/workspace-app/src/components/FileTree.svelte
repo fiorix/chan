@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import { registerRowActions } from "../state/commands/browser";
+  import { copyEntryPath, registerRowActions, uploadToEntry } from "../state/commands/browser";
   import { classifyFileActions, type FileActionId, type FileActionSet } from "../state/fileActions";
   import { draftsDir, isDraftPath, tree } from "../state/store.svelte";
   import { windowCaps } from "../state/windowCaps";
@@ -62,7 +62,6 @@
   import { directoryEntries, type BrowserSort } from "../state/browserEntries";
   import { browserKeys } from "../state/browserKeys.svelte";
   import { browserKeyCommand, browserCommandChord, type BrowserCommand } from "../state/browserKeymap";
-  import { api } from "../api/client";
   import DraftsGroup from "./DraftsGroup.svelte";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
@@ -78,7 +77,6 @@
   import {
     dirtyPaths,
     layout,
-    openBrowserInActivePane,
     openInActivePane,
     openTerminalInPane,
   } from "../state/tabs.svelte";
@@ -89,8 +87,6 @@
     fbActivateInstance,
     fbActiveInstanceId,
     clearTreeDirError,
-    clearTreeLoadingForPath,
-    copyTextToClipboard,
     openCommandLauncherFromMenu,
     workspace,
     fbClearSelection as fbClearSelectionFor,
@@ -109,8 +105,8 @@
     ensureFbTreeInstance,
     fbTreeInstance,
     persistFbTreeInstanceExpansion,
+    revealPathInBrowser,
   } from "../state/store.svelte";
-  import { notify } from "../state/notify.svelte";
 
   // Full filesystem path for a tree entry, for the row hover
   // tooltip. Falls back to the workspace-relative path when the
@@ -206,13 +202,6 @@
   // Empty string means the root <ul> (drop at workspace root). null means
   // no row is being hovered.
   let dropTarget = $state<string | null>(null);
-
-  function downloadFilename(path: string, isDir: boolean): string {
-    const name = path.split("/").filter(Boolean).pop() || "download";
-    const safe = name.replace(/[:\r\n]/g, "_");
-    if (isDir && !safe.toLowerCase().endsWith(".tar")) return `${safe}.tar`;
-    return safe;
-  }
 
   // File Browser native drag IN and OUT is not supported: the
   // user exports via the Download button and imports via the Upload
@@ -421,8 +410,6 @@
   });
   const expanded = $derived(fbTreeInstance(instanceId)?.expanded ?? { "": true });
   let menu = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
-  let uploadInput = $state<HTMLInputElement | null>(null);
-  let uploadTarget = $state<{ path: string; isDir: boolean } | null>(null);
 
   /// `<ul>` element handles keyboard navigation. Focused at mount
   /// so arrows / Enter are live as soon as the browser opens; the
@@ -686,10 +673,10 @@
   /// pill/dropdown consumes, so a video right-clicked in the tree
   /// offers the same View and Download actions its inspector would.
   /// Every row is worded by the title of the catalog command that does
-  /// the same for the selection, and every handler is tree-local and
-  /// variant-independent. Copy path, Rename or move and Delete are NOT
-  /// part of this model (the tree's separate destructive and
-  /// path-mutation policy below).
+  /// the same for the selection, and runs for its entry what that command
+  /// runs for the selection, whatever the variant. Copy path, Rename or
+  /// move and Delete are NOT part of this model (the tree's separate
+  /// destructive and path-mutation policy below).
   type IconComponent = typeof Upload;
   type MenuActionRow = {
     id: FileActionId;
@@ -734,7 +721,7 @@
           // A file opens as Enter opens it, which is what the launcher's
           // Open runs on the selection.
           onClick: () => {
-            if (isDir) openSelectionInFileBrowser(path);
+            if (isDir) openInNewFileBrowser(path, true);
             else runCommand("open");
           },
         };
@@ -743,7 +730,7 @@
           id,
           label,
           icon: FolderOpen,
-          onClick: () => openSelectionInFileBrowser(path),
+          onClick: () => openInNewFileBrowser(path, isDir),
         };
       case "viewMedia":
         return {
@@ -760,14 +747,14 @@
           id,
           label,
           icon: Download,
-          onClick: () => downloadSelection(path, isDir),
+          onClick: () => downloadEntry(path, isDir),
         };
       case "upload":
         return {
           id,
           label,
           icon: Upload,
-          onClick: () => uploadSelection(path, isDir),
+          onClick: () => uploadEntry(path, isDir),
         };
       case "newTerminal":
         return {
@@ -833,27 +820,11 @@
     menu = null;
     await fileOps.createFileOrDir(parentPath);
   }
-  function expandedAncestors(path: string): string[] {
-    const parts = path.split("/");
-    const ancestors: string[] = [];
-    let acc = "";
-    for (let i = 0; i < parts.length - 1; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      if (acc) ancestors.push(acc);
-    }
-    return ancestors;
-  }
-  function openSelectionInFileBrowser(path: string): void {
-    const ancestors = expandedAncestors(path);
-    const tab = openBrowserInActivePane({ select: path });
-    tab.directory = tree.entries.find((entry) => entry.path === path)?.is_dir ? path : parentDir(path);
-    tab.inspectorOpen = true;
-    tab.showWorkspace = false;
-    // The new tab's surface seeds its own per-instance expansion from
-    // `tab.expanded` on mount, so there is no global singleton to prime
-    // here.
-    tab.expanded = ancestors.length > 0 ? ancestors : undefined;
+  /// Open the row's entry in a new file browser tab with its Details shown:
+  /// inside a directory, or in a file's folder with the file selected.
+  function openInNewFileBrowser(path: string, isDir: boolean): void {
     menu = null;
+    revealPathInBrowser(path, { enter: isDir });
   }
   /// Flip pane routes through the surface-supplied `onFlip`
   /// callback (FBSurface → Pane.svelte → `flipHybrid(pane.id)`).
@@ -868,47 +839,15 @@
     await fileOps.rename(path, isDir);
     menu = null;
   }
-  async function copyPath(path: string): Promise<void> {
-    try {
-      await copyTextToClipboard(path, {
-        onSuccess: () => notify("Copied path"),
-        onError: (message) => notify(`copy failed: ${message}`),
-      });
-    } finally {
-      clearTreeLoadingForPath(path);
-    }
+  /// Download and Upload for the row's entry: what the launcher's commands
+  /// of those titles run for the selection.
+  function downloadEntry(path: string, isDir: boolean): void {
     menu = null;
+    fileOps.downloadPathWithProgress(path, isDir);
   }
-  function downloadSelection(path: string, isDir: boolean): void {
-    const link = document.createElement("a");
-    link.href = api.downloadUrl(path);
-    link.download = downloadFilename(path, isDir);
-    link.rel = "noopener";
-    link.style.display = "none";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+  function uploadEntry(path: string, isDir: boolean): void {
     menu = null;
-  }
-  function uploadSelection(path: string, isDir: boolean): void {
-    uploadTarget = { path, isDir };
-    uploadInput?.click();
-    menu = null;
-  }
-  async function onUploadPicked(e: Event): Promise<void> {
-    const input = e.currentTarget as HTMLInputElement;
-    const target = uploadTarget;
-    uploadTarget = null;
-    try {
-      if (!target || !input.files || input.files.length === 0) return;
-      if (target.isDir) {
-        await fileOps.uploadFilesTo(target.path, input.files);
-      } else {
-        await fileOps.replaceFileAt(target.path, input.files[0]!);
-      }
-    } finally {
-      input.value = "";
-    }
+    uploadToEntry(path, isDir);
   }
   /// Delete from the key or the row menu. A row inside a multi-selection
   /// deletes the whole selection, the way a drag of it moves the whole
@@ -1035,9 +974,9 @@
         else { const cursor = selection.path; fbClearSelection(); selection.path = cursor; }
         break;
       case "new": void newFileOrDir(view === "list" ? directory : pasteTargetDir()); break;
-      case "upload": uploadSelection(view === "list" ? directory : pasteTargetDir(), true); break;
-      case "download": if (selected) downloadSelection(selected.path, selected.isDir); break;
-      case "copyPath": if (selected) void copyPath(selected.path); break;
+      case "upload": uploadEntry(view === "list" ? directory : pasteTargetDir(), true); break;
+      case "download": if (selected) downloadEntry(selected.path, selected.isDir); break;
+      case "copyPath": if (selected) void copyEntryPath(selected.path); break;
       case "terminal": terminalFromHere(selected?.path ?? directory, selected?.isDir ?? true); break;
       case "graph": if (selected) graphThis(selected.path, selected.isDir); break;
       case "preview": onPreview?.(); break;
@@ -1642,19 +1581,19 @@
          selection"), the dir-only creation entry (file-vs-dir detected
          from the path's trailing slash), then the per-type action rows
          from the shared classifier (state/fileActions: the same
-         applicability policy the inspector consumes; handlers are
-         tree-local). For an ordinary non-draft file, a tree-only Upload
-         row follows: single-file replacement through the picker
-         (fileOps.replaceFileAt), the transfer counterpart of the
-         classifier's directory upload. Drafts never get it; the fileOps
-         contract refuses writes there. The clipboard rows and the
-         marking toggle come next, then Copy path, Rename or move and
-         Delete as the tree's separate destructive + path-mutation
-         policy (this is the only surface for those). The foot holds
-         Flip pane when `onFlip` is wired (tab variant only; dock +
-         overlay variants pass no onFlip so the entry hides) and the
-         launcher's row. Every action row takes its words from the
-         command catalog. -->
+         applicability policy the inspector consumes). For an ordinary
+         non-draft file, a tree-only Upload row follows: single-file
+         replacement through the replace picker, the transfer
+         counterpart of the classifier's directory upload. Drafts never
+         get it; the fileOps contract refuses writes there. The
+         clipboard rows and the marking toggle come next, then Copy
+         path, Rename or move and Delete as the tree's separate
+         destructive + path-mutation policy (this is the only surface
+         for those). The foot holds Flip pane when `onFlip` is wired
+         (tab variant only; dock + overlay variants pass no onFlip so
+         the entry hides) and the launcher's row. Every action row takes
+         its words from the command catalog, and runs for its entry the
+         function the command of that title runs for the selection. -->
     <div class="from-selection-label">From selection</div>
     {#if menu.isDir}
       <button role="menuitem" onclick={() => newFileOrDir(menu!.path)}>
@@ -1673,7 +1612,7 @@
       </button>
     {/each}
     {#if !menu.isDir && menu.path !== draftsDir() && !isDraftPath(menu.path)}
-      <button role="menuitem" onclick={() => uploadSelection(menu!.path, false)}>
+      <button role="menuitem" onclick={() => uploadEntry(menu!.path, false)}>
         <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
         <span class="menu-row-label">{commandTitle("app.browser.uploadSelection")}</span>
       </button>
@@ -1718,16 +1657,6 @@
     </button>
   </div>
 {/if}
-
-<input
-  bind:this={uploadInput}
-  class="file-picker"
-  type="file"
-  multiple
-  onchange={onUploadPicked}
-  aria-hidden="true"
-  tabindex="-1"
-/>
 
 <style>
   .tree.directory-list { padding: 4px 8px; }
@@ -2048,13 +1977,6 @@
     }
   }
   .ctx button.danger { color: var(--warn-text); }
-  .file-picker {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
-  }
   /* "From selection" section label. Subdued style for a non-actionable
      menu grouping heading. */
   .from-selection-label {

@@ -12,7 +12,7 @@
   import { chordFor, SHORTCUTS } from "../state/shortcuts";
   import { commandState, commandTitle } from "../state/commands";
   import "../state/commands/install";
-  import { browserView, dropBrowserView, setBrowserView, toggleBrowserView } from "../state/browserView.svelte";
+  import { browserView, dropBrowserView, setBrowserView, toggleBrowserDetails, toggleBrowserView } from "../state/browserView.svelte";
   import { basename, parentDir } from "../state/format";
   import { browserDirectoryInput, type BrowserSort } from "../state/browserEntries";
   import { browserKeys } from "../state/browserKeys.svelte";
@@ -23,10 +23,10 @@
     browserSelection, ensureFbTreeInstance, fbActivateInstance,
     fbTreeInstance, fbSelectSet, fbSelectSingle, clearTreeDirError, loadTreeDir,
     openCommandLauncherFromMenu, openFsGraphForDirectory, openFsGraphForFile, openGraphForContact, openGraphForLanguage,
-    paneWidths, persistPaneWidths, schedulePersistStateToHash, scheduleSessionSave,
+    paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
     seedFbTreeInstanceFromReloadSnapshot, surfaceThemeOverride, toggleBrowserSidePane, tree, workspace,
   } from "../state/store.svelte";
-  import { activeBrowserTab, openBrowserInActivePane, openInActivePane, openTerminalInActivePane } from "../state/tabs.svelte";
+  import { activeBrowserTab, defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane } from "../state/tabs.svelte";
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
@@ -70,10 +70,13 @@
   const rootFolders = $derived(tree.entries.filter((entry) => entry.is_dir && parentDir(entry.path) === "" && (viewState.showHidden || !basename(entry.path).startsWith("."))).sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true })));
   const previewPath = $derived(selection.path ?? directory);
 
+  const DETAILS = "app.browser.details";
   /// The catalog command a file browser key runs, where the catalog has one.
   /// The key list words those keys by the command's title; the other keys
-  /// move the cursor or the selection and keep their own words.
-  const KEY_COMMANDS: Partial<Record<BrowserCommand, string>> = {
+  /// move the cursor or the selection and keep their own words. The key that
+  /// previews the selection shows a tab's Details; a dock has none, and opens
+  /// the selection in a tab instead.
+  const keyCommands = $derived<Partial<Record<BrowserCommand, string>>>({
     open: "app.browser.open",
     rename: "app.browser.renameSelection",
     copy: "app.browser.copySelection",
@@ -81,7 +84,8 @@
     paste: "app.browser.pasteSelection",
     delete: "app.browser.deleteSelection",
     selectMode: "app.browser.selectMultiple",
-  };
+    preview: isTab ? DETAILS : "app.browser.openInBrowser",
+  });
   /// The row that opens the tree's row menu on the selection. Every row of
   /// that menu is a catalog command, so this one is none: its words are
   /// written here, once, for the menu and the key list.
@@ -98,7 +102,7 @@
   const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
 
   function keyLabel(command: BrowserCommand): string {
-    const id = KEY_COMMANDS[command];
+    const id = keyCommands[command];
     if (id) return commandTitle(id);
     if (command === "menu") return SELECTION_ACTIONS;
     const words = command.replace(/([A-Z])/g, " $1").toLowerCase();
@@ -264,7 +268,7 @@
   function closeFind(): void { findOpen = false; filter = ""; treeRef?.clearFind(); treeRef?.focusTree(); }
   function editPath(): void { pathInput = directory ? `${workspace.info?.root?.replace(/\/$/, "") ?? ""}/${directory}` : workspace.info?.root ?? "/"; pathEditing = true; void tick().then(() => { pathInputEl?.focus(); pathInputEl?.select(); }); }
   function changeSort(column: BrowserSort): void { if (sort === column) descending = !descending; else { sort = column; descending = false; } }
-  function toggleDetails(): void { browserState.inspectorOpen = !browserState.inspectorOpen; persist(); }
+  function toggleDetails(): void { toggleBrowserDetails(browserState); }
   function closeDetails(): void { browserState.inspectorOpen = false; persist(); treeRef?.focusTree(); }
   function run(command: BrowserCommand): void { treeRef?.runCommand(command); menu?.close(); }
   function onScroll(): void { if (tab && treeWrapEl) tab.scroll = Math.round(treeWrapEl.scrollTop); }
@@ -303,11 +307,18 @@
     }
     persist();
   }
+  /// The dock's Open in new file browser: the selection in a tab of its own,
+  /// inside a directory or in a file's folder with the file selected. The
+  /// tab's Details follows the screen's width, as any new file browser's
+  /// does, and with nothing selected the row opens one on the workspace root.
   function openCurrentInFileBrowser(): void {
     menu?.close();
     const path = selection.path;
-    const target = openBrowserInActivePane(path ? { select: path } : {});
-    target.directory = path && tree.entries.find((entry) => entry.path === path)?.is_dir ? path : parentDir(path ?? "");
+    if (!path) { openBrowserInActivePane(); return; }
+    revealPathInBrowser(path, {
+      enter: tree.entries.find((entry) => entry.path === path)?.is_dir === true,
+      inspectorOpen: defaultBrowserInspectorOpen(),
+    });
   }
 </script>
 
@@ -334,7 +345,7 @@
     {:else}<button title="Find visible files" aria-label="Find visible files" onclick={openFind}><ListFilter size={16} /></button>{/if}
     {#if isTab}
       <button class="new-button" title={commandTitle("app.browser.newFsEntry")} aria-label={commandTitle("app.browser.newFsEntry")} onclick={() => run("new")}><Plus size={15} /><span>New</span></button>
-      <button aria-label="Toggle details" title="Details (Mod+Y)" aria-pressed={browserState.inspectorOpen} onclick={toggleDetails}><PanelRightOpen size={16} /></button>
+      <button aria-label={commandTitle(DETAILS)} title={`${commandTitle(DETAILS)} (${browserCommandChord("preview", browserKeys.vim)})`} aria-pressed={browserState.inspectorOpen} onclick={toggleDetails}><PanelRightOpen size={16} /></button>
     {/if}
     <HamburgerMenu keyboardNavigation bind:this={menu} bind:open={menuOpen} width={260} height={600}>
       <li><button role="menuitem" onclick={() => run("new")}><span class="menu-row-label">{commandTitle("app.browser.newFsEntry")}</span></button></li>

@@ -8,6 +8,11 @@
 // these titles. Open, View and Export to PDF are offered for a selection
 // when the row menu offers them for that row: the tree hands this module the
 // rule its menu reads (registerRowActions).
+//
+// A row of the tree's menu acts on its entry and the command of its title on
+// the selection, through one function: Download through the store's
+// download, Open in new file browser through the store's reveal, and Upload
+// and Copy path through uploadToEntry and copyEntryPath here.
 
 import {
   dispatchChanCommand,
@@ -16,7 +21,12 @@ import {
   workspaceOnly,
   type CommandContext,
 } from "../commands";
-import { browserView, toggleBrowserView, type BrowserView } from "../browserView.svelte";
+import {
+  browserView,
+  toggleBrowserDetails,
+  toggleBrowserView,
+  type BrowserView,
+} from "../browserView.svelte";
 import type { FileActionId, FileActionSet } from "../fileActions";
 import { exportPathToPdf } from "../fileActionExecutors";
 import { openMediaViewer } from "../mediaOpen";
@@ -32,7 +42,6 @@ import {
   fbClipboardPaste,
   fbClipboardSet,
   fbSelectSet,
-  fbSelectSingle,
   fileOps,
   openFsGraphForDirectory,
   openFsGraphForFile,
@@ -40,6 +49,7 @@ import {
   persistFbTreeInstanceExpansion,
   raiseReplacePicker,
   raiseUploadPicker,
+  revealPathInBrowser,
   toggleBrowserSidePane,
   tree,
 } from "../store.svelte";
@@ -106,40 +116,35 @@ function activeBrowserInstanceId(tab = activeBrowserTab()): string | null {
   return tab ? `fb-tab-${tab.id}` : null;
 }
 
-function expandedAncestors(path: string): string[] {
-  const parts = path.split("/");
-  const ancestors: string[] = [];
-  let acc = "";
-  for (let i = 0; i < parts.length - 1; i++) {
-    acc = acc ? `${acc}/${parts[i]}` : parts[i];
-    if (acc) ancestors.push(acc);
-  }
-  return ancestors;
+/// Copy an entry's path as the workspace names it, and say on the status
+/// line that it was copied or why it was not. The tree's Copy path row and
+/// the command both copy through here.
+export function copyEntryPath(path: string): Promise<void> {
+  return copyTextToClipboard(path, {
+    onSuccess: () => notify("Copied path"),
+    onError: (reason) => notify(`copy failed: ${reason}`),
+  });
+}
+
+/// Raise the picker that uploads into a directory, or the one that replaces
+/// a file with the file picked. An Upload row and the command both raise it
+/// here, so each is the desktop's own picker where there is one.
+export function uploadToEntry(path: string, isDir: boolean): void {
+  if (isDir) raiseUploadPicker(path);
+  else raiseReplacePicker(path);
 }
 
 function copySelectionPath(): void {
   const sel = activeSelection();
-  if (!sel) return;
-  void copyTextToClipboard(sel.path, {
-    onSuccess: () => notify("Copied path"),
-    onError: () => notify("Clipboard unavailable"),
-  });
+  if (sel) void copyEntryPath(sel.path);
 }
 
+/// The launcher reveals the selection in a new file browser: the tab lists
+/// the folder that holds it, a selected directory's included, where the
+/// tree's row opens a directory. With nothing selected the tab opens on the
+/// workspace.
 function openSelectionInFileBrowser(): void {
-  const path = selectedPath();
-  const tab = openBrowserInActivePane(path ? { select: path } : {});
-  tab.inspectorOpen = true;
-  if (!path) {
-    tab.showWorkspace = true;
-    fbClearSelection();
-    browserSelection.showWorkspace = true;
-    return;
-  }
-  tab.showWorkspace = false;
-  tab.expanded = expandedAncestors(path);
-  fbSelectSingle(path);
-  browserSelection.showWorkspace = false;
+  revealPathInBrowser(selectedPath() ?? "");
 }
 
 /// Show the workspace's details in a file browser's inspector: the active
@@ -185,12 +190,8 @@ function newGraphFromSelection(): void {
 
 function uploadToSelection(): void {
   const sel = activeSelection();
-  if (!sel) {
-    raiseUploadPicker(defaultCreateDirectory());
-    return;
-  }
-  if (sel.isDir) raiseUploadPicker(sel.path);
-  else raiseReplacePicker(sel.path);
+  if (sel) uploadToEntry(sel.path, sel.isDir);
+  else uploadToEntry(defaultCreateDirectory(), true);
 }
 
 function downloadSelection(): void {
@@ -526,6 +527,25 @@ registerCommands([
     available: onBrowser,
     state: () => activeView("helpOpen"),
     run: () => toggleActiveView("helpOpen"),
+  },
+  {
+    id: "app.browser.details",
+    title: "Details",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 18,
+    kind: "toggle",
+    // The panel shows filesystem facts in every window with files; its index
+    // sections need a workspace.
+    requirement: "files",
+    keywords: ["Toggle details", "inspector", "info", "metadata", "preview"],
+    available: onBrowser,
+    state: () => activeBrowserTab()?.inspectorOpen ?? null,
+    run: () => {
+      const tab = activeBrowserTab();
+      if (tab) toggleBrowserDetails(tab);
+    },
   },
   {
     id: "app.browser.clearClipboard",
