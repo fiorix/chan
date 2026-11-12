@@ -27,10 +27,19 @@ export type ViewEdge = { source: string; target: string; kind?: string };
 export type Opened = Record<string, boolean>;
 
 /// Edge kinds a selection's walk follows: what a note says about another
-/// note, a tag or a person. `contains` is the tree, which the opened set
-/// draws, and a `language` edge joins every file of a language, so a walk
-/// through either would reach unrelated files in one hop.
-const REFERENCE_KINDS: ReadonlySet<string> = new Set(["link", "tag", "mention"]);
+/// note, a tag or a person, and what the filesystem says of a file, that it
+/// is a symlink to another or another name of the same one. `contains` is
+/// the tree, which the opened set draws, and a `language` edge joins every
+/// file of a language, so a walk through either would reach unrelated files
+/// in one hop. The workspace search walks the first three; it has no
+/// symlink or hardlink relationship.
+const REFERENCE_KINDS: ReadonlySet<string> = new Set([
+  "link",
+  "tag",
+  "mention",
+  "symlink",
+  "hardlink",
+]);
 
 /// The most hops a selection's depth offers.
 export const SELECTION_HOPS_MAX = 6;

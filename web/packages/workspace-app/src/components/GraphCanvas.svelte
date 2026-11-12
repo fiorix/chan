@@ -31,7 +31,7 @@
   } from "d3-force";
   import { draftsDir } from "../state/workspace.svelte";
   import { fileBucket } from "../state/kinds";
-  import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
+  import { GRAPH_FS_EDGE_DEFAULTS, GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
   import {
     directoryNodeId,
     type CanvasEdge as RenderedEdge,
@@ -467,6 +467,10 @@
     /// graph + the FB row + the inspector header all render the same
     /// yellow tint.
     drafts: string;
+    /// The edge from a symlink to its target, and the edge between two
+    /// names of one hardlinked file.
+    symlink: string;
+    hardlink: string;
   };
 
   function readTheme(host: HTMLElement): ThemeColors {
@@ -496,6 +500,8 @@
       // Drafts tint pulled from the same CSS variable as the FB row +
       // the inspector chip.
       drafts: v("--fb-drafts-fg", "#e3b341"),
+      symlink: v("--g-symlink", GRAPH_FS_EDGE_DEFAULTS.dark.symlink),
+      hardlink: v("--g-hardlink", GRAPH_FS_EDGE_DEFAULTS.dark.hardlink),
     };
   }
 
@@ -506,6 +512,8 @@
     mention: "#e3b341", language: paletteSeed.language, accent: "#3fb950",
     folder: paletteSeed.folder, source: paletteSeed.source,
     binary: paletteSeed.binary, drafts: "#e3b341",
+    symlink: GRAPH_FS_EDGE_DEFAULTS.dark.symlink,
+    hardlink: GRAPH_FS_EDGE_DEFAULTS.dark.hardlink,
   });
 
   /// Track `prefers-reduced-motion` so the indexing-state pulse can
@@ -1037,6 +1045,7 @@
   function bucketEdges(edgeList: DEdge[]): EdgeBuckets {
     const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
       link: [], tag: [], mention: [], contains: [], language: [],
+      symlink: [], hardlink: [],
     };
     for (const e of edgeList) edgesByKind[e.kind].push(e);
     // Falls back to the doc colour when the source kind isn't a recognised
@@ -1164,7 +1173,8 @@
     // edges stay GREY (the `contains`
     // kind, stroked in `theme.folder`); every other edge matches its
     // DOCUMENT TYPE rather than a single connector colour. `tag`,
-    // `mention`, and `language` already carry their own palette hue;
+    // `mention`, and `language` already carry their own palette hue,
+    // and so do the spine's `symlink` and `hardlink` edges;
     // the `link` (wiki/markdown reference) edge is the one that needs
     // its colour derived from the SOURCE document's kind so a markdown
     // link reads orange (--g-doc), a source-file link royalblue
@@ -1179,6 +1189,8 @@
       kind === "tag" ? theme.tag
       : kind === "mention" ? theme.mention
       : kind === "contains" ? theme.folder
+      : kind === "symlink" ? theme.symlink
+      : kind === "hardlink" ? theme.hardlink
       : theme.language;
 
     /// Both endpoints strictly off the same side of the viewport means the
@@ -1236,7 +1248,7 @@
     // is memoised in `selectionPaint()`, so a frame only walks the
     // buckets it draws.
     const drawEdgeBuckets = (buckets: EdgeBuckets, alpha: number): void => {
-      for (const kind of ["tag", "mention", "contains", "language"] as const) {
+      for (const kind of ["tag", "mention", "contains", "language", "symlink", "hardlink"] as const) {
         strokePass(buckets.byKind[kind], strokeForKind(kind), alpha);
       }
       for (const [kind, list] of buckets.linkByKind) {

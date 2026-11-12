@@ -306,20 +306,58 @@ describe("the semantic graph's filesystem spine", () => {
     graphServer.fsPageSize = 2;
   }
 
-  function mentionPairs(): string[] {
+  function hardlinkPairs(): string[] {
     return (canvas.props?.visibleEdges ?? [])
-      .filter((edge) => edge.kind === "mention")
+      .filter((edge) => edge.kind === "hardlink")
       .map((edge) => [edge.source, edge.target].sort().join(">"));
   }
 
-  test("draws a pair split across spine pages under the contact chip", async () => {
+  test("draws a pair split across spine pages, whatever the chips", async () => {
     servePair(true);
     const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab());
     expect(graphServer.fsGraphCalls.some((call) => call.cursor)).toBe(true);
-    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+    expect(hardlinkPairs()).toEqual(["a.md>b.md"]);
+    tab.filters.mention = false;
+    tab.filters.tag = false;
+    await settle(2);
+    expect(hardlinkPairs(), "no chip names a hardlink").toEqual(["a.md>b.md"]);
+  });
+
+  test("a symlink's edge keeps its kind and is one edge with the stream's, whatever the chips", async () => {
+    graphServer.view = {
+      nodes: [g.dir(""), g.file("a.md"), g.file("alias.md"), g.file("dangling.md")],
+      edges: [
+        g.edge("", "a.md", "contains"),
+        g.edge("", "alias.md", "contains"),
+        g.edge("", "dangling.md", "contains"),
+        g.edge("alias.md", "a.md", "symlink"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        fsg.file("a.md"),
+        { ...fsg.file("alias.md"), kind: "symlink", target: "a.md" },
+        { ...fsg.file("dangling.md"), kind: "symlink", target: "../gone.md", target_escapes_workspace: true },
+        { ...fsg.file("outside:dangling.md"), kind: "ghost", path: "", outside: true },
+      ],
+      edges: [
+        fsg.contains("", "a.md"),
+        fsg.contains("", "alias.md"),
+        fsg.contains("", "dangling.md"),
+        { source: "alias.md", target: "a.md", kind: "symlink" },
+        { source: "dangling.md", target: "outside:dangling.md", kind: "symlink" },
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    const symlinks = (canvas.props?.visibleEdges ?? [])
+      .filter((edge) => edge.kind === "symlink")
+      .map((edge) => `${edge.source}>${edge.target}`);
+    expect(symlinks.sort()).toEqual(["alias.md>a.md", "dangling.md>outside:dangling.md"]);
+    tab.filters.tag = false;
     tab.filters.mention = false;
     await settle(2);
-    expect(mentionPairs()).toEqual([]);
+    expect((canvas.props?.visibleEdges ?? []).filter((edge) => edge.kind === "symlink")).toHaveLength(2);
   });
 
   test.each([
@@ -328,18 +366,18 @@ describe("the semantic graph's filesystem spine", () => {
   ])("draws one pair when the server delivers %s to %s and a group", async (source, target) => {
     servePair(true, { source, target });
     await mountGraphPanel(GraphPanel, layout, workspaceTab());
-    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+    expect(hardlinkPairs()).toEqual(["a.md>b.md"]);
   });
 
   test("keeps the delivered edge when the nodes have no group", async () => {
     servePair(false, { source: "b.md", target: "a.md" });
     await mountGraphPanel(GraphPanel, layout, workspaceTab());
-    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+    expect(hardlinkPairs()).toEqual(["a.md>b.md"]);
   });
 
   test("does not invent an edge for nodes without a group", async () => {
     servePair(false);
     await mountGraphPanel(GraphPanel, layout, workspaceTab());
-    expect(mentionPairs()).toEqual([]);
+    expect(hardlinkPairs()).toEqual([]);
   });
 });

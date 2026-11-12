@@ -260,7 +260,8 @@ export function selectionEdgesFor(path: string): {
           ? out.mentions
           : e.kind === "date"
             ? out.dates
-            : e.kind === "link"
+            : // A symlink's target is listed with what the file links to.
+              e.kind === "link" || e.kind === "symlink"
               ? out.links
               : null;
     if (!bucket) continue;

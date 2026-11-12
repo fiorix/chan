@@ -72,6 +72,20 @@ export const GRAPH_PALETTE_DEFAULTS: Record<
   },
 };
 
+/// The hues of the two edges the filesystem spine adds to the graph: a
+/// symlink to its target, and the names of one file to each other. They
+/// colour edges only, no node kind, so Settings has no row for them; the
+/// theme blocks carry them as `--g-symlink` and `--g-hardlink`. Cyan and
+/// lime are the two hues the node palette leaves free, away from the tag's
+/// green and the contact's amber on either side.
+export const GRAPH_FS_EDGE_DEFAULTS: Record<
+  GraphColorTheme,
+  { symlink: string; hardlink: string }
+> = {
+  dark: { symlink: "#3cc8d8", hardlink: "#b4cc3a" },
+  light: { symlink: "#0b7f8f", hardlink: "#6b8a14" },
+};
+
 /// Row metadata for the Settings control: label, description, grouping
 /// and the CSS custom property each kind writes. Contact and Mention
 /// share the `--g-contact` token, so the control exposes one row for both.

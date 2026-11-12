@@ -788,6 +788,8 @@ describe("colours and sizes", () => {
     "--g-folder": "#808080",
     "--g-tag": "#10a020",
     "--g-language": "#e030a0",
+    "--g-symlink": "#10b0c0",
+    "--g-hardlink": "#a0c010",
     "--fb-drafts-fg": "#e3b300",
     "--accent": "#00ff00",
   };
@@ -825,6 +827,8 @@ describe("colours and sizes", () => {
       n.edge("notes/c.rs", "notes/z.zip", "link"),
       n.edge("notes/a.md", "#t", "tag"),
       n.edge("notes/c.rs", "language:rust", "language"),
+      n.edge("notes/alice.md", "notes/a.md", "symlink"),
+      n.edge("notes/p.png", "notes/z.zip", "hardlink"),
     ];
     return { nodes, edges };
   }
@@ -896,6 +900,10 @@ describe("colours and sizes", () => {
     expect(strokeOf("notes/c.rs", "notes/z.zip"), "a source file's link").toBe(PALETTE["--g-source"]);
     expect(strokeOf("notes/a.md", "#t")).toBe(PALETTE["--g-tag"]);
     expect(strokeOf("notes/c.rs", "language:rust")).toBe(PALETTE["--g-language"]);
+    expect(strokeOf("notes/alice.md", "notes/a.md"), "a symlink is no link of its source").toBe(
+      PALETTE["--g-symlink"],
+    );
+    expect(strokeOf("notes/p.png", "notes/z.zip"), "two names of one file").toBe(PALETTE["--g-hardlink"]);
   });
 
   test("a directory's disc sits between a leaf's and a document's, the root's is the largest", () => {

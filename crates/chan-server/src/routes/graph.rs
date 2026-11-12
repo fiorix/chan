@@ -391,12 +391,12 @@ enum GraphNodeView {
 struct GraphEdgeView {
     source: String,
     target: String,
-    /// "link" | "tag" | "mention" | "contains" | "language".
-    /// Lowercase to match the
+    /// "link" | "tag" | "mention" | "contains" | "language" |
+    /// "symlink" | "hardlink". Lowercase to match the
     /// frontend's GraphViewEdgeKind type.
     kind: &'static str,
-    /// Only meaningful for link edges: true when the link resolves
-    /// to a missing file. Other kinds skip the field.
+    /// True for a link that resolves to a missing file, and for a
+    /// symlink whose target is missing. Other kinds skip the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     broken: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1180,6 +1180,12 @@ fn merge_filesystem_layer_with_buckets(
     };
     let fs_graph = build_fs_graph(workspace, scope, path, p.depth)?;
     let mut id_map = std::collections::BTreeMap::new();
+    let broken_targets: std::collections::BTreeSet<String> = fs_graph
+        .nodes
+        .iter()
+        .filter(|node| node.broken)
+        .map(|node| node.id.clone())
+        .collect();
 
     for node in fs_graph.nodes {
         let id = fs_node_graph_id(&node);
@@ -1220,16 +1226,16 @@ fn merge_filesystem_layer_with_buckets(
             .get(&edge.target)
             .cloned()
             .unwrap_or(edge.target.clone());
+        // A symlink and a hardlink keep their own kinds: they are facts of
+        // the tree, not references a document makes, and the graph draws
+        // them apart from its links.
+        let broken =
+            (edge.kind == "symlink" && broken_targets.contains(&edge.target)).then_some(true);
         edges.push(GraphEdgeView {
             source,
             target,
-            kind: match edge.kind {
-                "contains" => "contains",
-                "symlink" => "link",
-                "hardlink" => "link",
-                _ => edge.kind,
-            },
-            broken: None,
+            kind: edge.kind,
+            broken,
             rank: None,
             files: None,
             code: None,
@@ -2880,6 +2886,44 @@ mod tests {
             !root_path.exists(),
             "graph request recreated the workspace root"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_a_hardlink_keep_their_own_edge_kinds() {
+        let (_cfg, _root, workspace) = open_workspace();
+        workspace.write_text("top.md", "# Top\n").unwrap();
+        workspace.index_file("top.md").unwrap();
+        let root = workspace.root().to_path_buf();
+        std::os::unix::fs::symlink("top.md", root.join("alias.md")).unwrap();
+        std::os::unix::fs::symlink("gone.md", root.join("dangling.md")).unwrap();
+        std::fs::hard_link(root.join("top.md"), root.join("twin.md")).unwrap();
+
+        let mut emit = None;
+        let view = build_graph_view(
+            workspace,
+            GraphParams {
+                scope: GraphScope::Workspace,
+                path: String::new(),
+                depth: 1,
+            },
+            &mut emit,
+        )
+        .unwrap();
+        let between = |a: &str, b: &str| -> Vec<(&str, Option<bool>)> {
+            view.edges
+                .iter()
+                .filter(|e| (e.source == a && e.target == b) || (e.source == b && e.target == a))
+                .map(|e| (e.kind, e.broken))
+                .collect()
+        };
+        assert_eq!(between("alias.md", "top.md"), vec![("symlink", None)]);
+        assert_eq!(
+            between("dangling.md", "gone.md"),
+            vec![("symlink", Some(true))],
+            "a symlink to a missing target is marked broken"
+        );
+        assert_eq!(between("top.md", "twin.md"), vec![("hardlink", None)]);
     }
 
     #[test]

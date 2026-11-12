@@ -779,6 +779,10 @@
     // `encodeGraphTabFilters` still round-trips it through the
     // layout hash, the saved session and `chan://graph` links.
     if (kind === "link") return true;
+    // A symlink's and a hardlink's edges are facts of the tree, as
+    // `contains` is: no chip names them, and they join files, not a tag or
+    // a contact a chip could hide.
+    if (kind === "symlink" || kind === "hardlink") return true;
     return show[kind];
   }
 
@@ -1227,19 +1231,10 @@
   const FOCAL_IDS = [""];
 
   /// The edge when its kind is one the graph draws (link / tag /
-  /// mention / contains / language), else null; a `date` edge is
-  /// dropped here.
+  /// mention / contains / language / symlink / hardlink), else null; a
+  /// `date` edge is dropped here.
   function renderableGraphEdge(e: GraphViewEdge): RenderedEdge | null {
-    if (
-      e.kind === "link" ||
-      e.kind === "tag" ||
-      e.kind === "mention" ||
-      e.kind === "contains" ||
-      e.kind === "language"
-    ) {
-      return e as RenderedEdge;
-    }
-    return null;
+    return e.kind === "date" ? null : (e as RenderedEdge);
   }
 
   function graphEdgeKey(e: GraphViewEdge): string {
@@ -1420,10 +1415,8 @@
       // canvas classifies it by name (binary for an extension-less link,
       // doc for a `.md` link, etc.). Without this branch a "symlink" kind
       // fell through to the `mention` catch-all below and drew as a yellow
-      // contact silhouette. The symlink relationship
-      // still reads via its distinct edge (mapFsEdges maps "symlink" ->
-      // a tag-kind edge); the inspector keeps the BINARY + target body
-      // off the raw `selectedFsNode`, which is unaffected by this mapping.
+      // contact silhouette. What makes it a symlink reads from its edge
+      // to its target, which keeps the `symlink` kind.
       if (n.kind === "file" || n.kind === "symlink") {
         return {
           kind: "file",
@@ -1460,20 +1453,16 @@
     });
   }
 
+  /// The spine's edges under the kinds the graph's own stream gives them, so
+  /// an edge both deliver is one edge.
   function mapFsEdges(fs: FsGraphResponse): RenderedEdge[] {
-    return fs.edges.map((e): RenderedEdge => ({
-      source: e.source,
-      target: e.target,
-      kind:
-        e.kind === "contains"
-          ? "contains"
-          : e.kind === "symlink"
-            ? "tag"
-            : "mention",
-      broken:
-        e.kind === "symlink" &&
-        Boolean(fs.nodes.find((n) => n.id === e.target)?.broken),
-    }));
+    return fs.edges.map((e): RenderedEdge => {
+      const edge: RenderedEdge = { source: e.source, target: e.target, kind: e.kind };
+      if (e.kind === "symlink" && fs.nodes.find((n) => n.id === e.target)?.broken) {
+        edge.broken = true;
+      }
+      return edge;
+    });
   }
 
   function mapGraphNode(n: GraphViewNode): RenderedNode | null {

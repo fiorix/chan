@@ -109,6 +109,19 @@ describe("a selection laid over the tree", () => {
     );
   });
 
+  test("a symlink reveals its target and a file its other names, as references do", () => {
+    const linked: ViewEdge[] = [
+      ...edges,
+      { source: "README.md", target: "notes/daily/d.md", kind: "symlink" },
+      { source: "src/main.rs", target: "notes/c.md", kind: "hardlink" },
+    ];
+    expect([...selectionReveal(nodes, linked, "README.md", 1)].sort()).toEqual(
+      ["", "README.md", "directory:notes", "directory:notes/daily", "notes/daily/d.md"].sort(),
+    );
+    expect(selectionReveal(nodes, linked, "notes/daily/d.md", 1).has("README.md"), "and back").toBe(true);
+    expect(selectionReveal(nodes, linked, "notes/c.md", 1).has("src/main.rs")).toBe(true);
+  });
+
   test("an id no node has reveals nothing", () => {
     expect(selectionReveal(nodes, edges, "gone.md", 2).size).toBe(0);
     expect(shown({ "": true }, "gone.md")).toEqual([...ROOT_LEVEL].sort());

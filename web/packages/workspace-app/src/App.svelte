@@ -2054,6 +2054,10 @@
     --g-source: #4169e1;
     --g-binary: #5e5e62;
     --g-folder: #8e8e93;
+    /* Edges of the filesystem spine: a symlink to its target, and the
+       names of one hardlinked file to each other. */
+    --g-symlink: #3cc8d8;
+    --g-hardlink: #b4cc3a;
     /* Contact + mention graph nodes read --g-contact, which defaults to
        the warning hue and is settable per colour scheme as part of the
        graph palette (editor.graph_colors.*). Surfaces outside the graph
@@ -2150,6 +2154,8 @@
     --g-source: #2851c4;
     --g-binary: #4e4e54;
     --g-folder: #6c6c70;
+    --g-symlink: #0b7f8f;
+    --g-hardlink: #6b8a14;
     /* Light-mode --g-contact: same zero-pixel default as dark mode. */
     --g-contact: var(--warn-text);
     /* Light-mode Drafts folder: deeper yellow for contrast against the bright bg. */

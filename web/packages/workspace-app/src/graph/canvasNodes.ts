@@ -9,7 +9,18 @@ export type CanvasNode = Extract<
   GraphViewNode,
   { kind: "file" | "tag" | "mention" | "language" | "folder" }
 >;
-export type CanvasEdgeKind = "link" | "tag" | "mention" | "contains" | "language";
+/// The edge kinds the canvas draws: every kind the wire names but `date`.
+/// `symlink` and `hardlink` are facts of the tree, not references a
+/// document makes: a symlink to its target, and the names of one file to
+/// each other.
+export type CanvasEdgeKind =
+  | "link"
+  | "tag"
+  | "mention"
+  | "contains"
+  | "language"
+  | "symlink"
+  | "hardlink";
 /// The edges the canvas takes, between those nodes.
 export type CanvasEdge = GraphViewEdge & { kind: CanvasEdgeKind };
 

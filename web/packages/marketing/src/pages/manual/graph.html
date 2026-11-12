@@ -20,7 +20,8 @@
 <section class="manual-block" id="directory-navigation">
   <h2><a class="heading-anchor" href="#directory-navigation">Navigate directories like a browser</a></h2>
 <p>Use the directory graph as a visual file browser: select a directory to inspect it, and double-click a directory node to open or close it. <strong>Graph from here</strong> opens a new graph tab with that node selected; a directory arrives opened, deep enough to show its files.</p>
-<p>The breadcrumb in Details shows the path of the selected file or directory. Click an ancestor to select that directory in the same graph tab, or <strong>workspace</strong> to select the root. The directories you opened stay open as the selection moves.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-dirs.png" alt="The graph showing the first level of a repository as directory nodes" loading="lazy" /><figcaption>Start with a compact view of the repository directories.</figcaption></figure>
+<p>The breadcrumb in Details shows the path of the selected file or directory. Click an ancestor to select that directory in the same graph tab, or <strong>workspace</strong> to select the root. The directories you opened stay open as the selection moves.</p>
+<p>The tree's own edges are grey. A symlink is joined to its target by a cyan edge, dashed when the target is missing, and the names of a hardlinked file are joined to each other in lime. Select a symlink to read where it points in Details, including a target outside the workspace.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-dirs.png" alt="The graph showing the first level of a repository as directory nodes" loading="lazy" /><figcaption>Start with a compact view of the repository directories.</figcaption></figure>
 </section>
 
 <section class="manual-block" id="depth">
