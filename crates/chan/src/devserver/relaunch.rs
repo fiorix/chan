@@ -90,19 +90,13 @@ fn is_desktop_binary(exe: &Path) -> bool {
         .is_some_and(|stem| stem == std::ffi::OsStr::new("chan-desktop"))
 }
 
-/// Whether this process runs from a chan AppImage. A foreign `$APPIMAGE`
-/// inherited from another AppImage app (an editor launching chan) does not
-/// count.
+/// Whether this process runs from a chan AppImage: one whose runtime set
+/// `$APPDIR` to the mount this executable lies in
+/// ([`chan_server::own_appimage`]), whatever the file is called. A foreign
+/// `$APPIMAGE` inherited from another AppImage app (an editor launching
+/// chan) does not count, even one whose name says chan.
 fn running_in_chan_appimage() -> bool {
-    std::env::var_os("APPIMAGE").is_some_and(|appimage| {
-        Path::new(&appimage)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                name.contains("chan") && name.ends_with(".appimage")
-            })
-    })
+    chan_server::own_appimage().is_some()
 }
 
 /// The live filesystem half of the resolver: probe the two `chan` entry points a
@@ -135,6 +129,22 @@ pub(crate) fn resolve_relaunchable_exe() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether this is chan's AppImage is [`chan_server::own_appimage`]'s
+    /// answer, tested in chan-library, not a guess from `$APPIMAGE`'s file
+    /// name. A source pin.
+    #[test]
+    fn chans_appimage_is_the_one_this_process_runs_from() {
+        const SELF: &str = include_str!("relaunch.rs");
+        let body = SELF
+            .split_once("fn running_in_chan_appimage() -> bool {\n")
+            .expect("the decision")
+            .1
+            .split_once("\n}\n")
+            .expect("its end")
+            .0;
+        assert_eq!(body.trim(), "chan_server::own_appimage().is_some()");
+    }
 
     /// The supervisor `ExecStart` must name a `chan` entry point on every
     /// install layout, and must NEVER name the desktop binary: chan-desktop
