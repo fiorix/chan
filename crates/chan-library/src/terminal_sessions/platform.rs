@@ -451,8 +451,9 @@ pub(super) enum HostEnvFor {
 
 /// Search paths the runtime prepends its own entries to rather than inventing
 /// outright. Its AppRun writes each as its block of mount entries, then a
-/// separator, then the value the user had, empty when there was none, so the
-/// user's value is exactly what follows the last mount entry ([`host_value`]).
+/// separator, then the value it was handed, empty when there was none, so the
+/// user's value is what follows this mount's block and the blocks that chain
+/// from it ([`host_value`]).
 /// They are rewritten to that value, never dropped while it holds anything:
 /// removing `PATH` would leave the shell unable to resolve a command at all.
 /// Two keys AppRun writes look alike and are not here, so the value scan drops
@@ -523,35 +524,97 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
     None
 }
 
-/// The entries of a prepended key the user had: those after its last entry
-/// inside the mount, or after the last whole AppRun block of another mount
-/// ([`last_apprun_block`]) when that comes later, or `None` when there is
-/// neither (the value is the user's as it stands). Whatever comes before is
-/// not the user's: the runtime's own block, and what chan prepended to it
-/// afterwards, the host library directory the AppImage's GUI-stack re-exec
-/// puts first in `LD_LIBRARY_PATH` among them. Everything after it is the
-/// user's value as they wrote it, an empty entry of theirs included. For
-/// `XDG_DATA_DIRS` the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] directly after the
-/// mount entries is the hook's too.
-fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'a [PathBuf]> {
-    let own = entries.iter().rposition(|entry| entry.starts_with(appdir));
-    let last = own.max(last_apprun_block(key, entries))?;
-    let host = &entries[last + 1..];
-    Some(match host.split_first() {
-        Some((first, rest))
-            if key == "XDG_DATA_DIRS" && first.as_path() == Path::new(GTK_HOOK_XDG_DATA_DIR) =>
-        {
-            rest
+/// The entries of a prepended key the user had, or `None` when the value is
+/// the user's as it stands. AppRun writes the key as this mount's block, then
+/// the value it was handed; chan's GUI-stack re-exec then puts its host
+/// library directory first in `LD_LIBRARY_PATH`. So everything up to this
+/// mount's last entry is the runtime's or chan's. A chan process of an older
+/// release that started this one handed down its own environment, whose block
+/// follows this one's: whole AppRun blocks that chain on from this mount's
+/// ([`apprun_block_at`]), with only the re-exec's directory between them in
+/// the sibling shape, are that process's and go too, and for `XDG_DATA_DIRS`
+/// the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] after each block is the hook's.
+/// What follows is the user's value as they wrote it, an empty entry of
+/// theirs included, minus any whole AppRun block another AppImage leaked into
+/// it, which goes by its own entries so the user's entries around it stay.
+fn host_value(appdir: &Path, key: &str, entries: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let start = match entries.iter().rposition(|entry| entry.starts_with(appdir)) {
+        Some(last) => {
+            let first = entries
+                .iter()
+                .position(|entry| entry.starts_with(appdir))
+                .unwrap_or(last);
+            // The entry the re-exec prepends ahead of this mount's block.
+            let reexec = (key == "LD_LIBRARY_PATH" && first > 0).then(|| &entries[first - 1]);
+            let mut at = after_gtk_hook(key, entries, last + 1);
+            loop {
+                let next = match reexec {
+                    Some(dir) if entries.get(at) == Some(dir) => at + 1,
+                    _ => at,
+                };
+                match apprun_block_at(key, entries, next) {
+                    Some(end) => at = after_gtk_hook(key, entries, end + 1),
+                    None => break,
+                }
+            }
+            at
         }
-        _ => host,
-    })
+        None => 0,
+    };
+    let rest = &entries[start..];
+    let user = without_whole_blocks(key, rest);
+    (start > 0 || user.len() < rest.len()).then_some(user)
+}
+
+/// `at`, or past the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] when that is the
+/// entry at `at` of `XDG_DATA_DIRS`.
+fn after_gtk_hook(key: &str, entries: &[PathBuf], at: usize) -> usize {
+    match entries.get(at) {
+        Some(entry)
+            if key == "XDG_DATA_DIRS" && entry.as_path() == Path::new(GTK_HOOK_XDG_DATA_DIR) =>
+        {
+            at + 1
+        }
+        _ => at,
+    }
+}
+
+/// `entries` without the whole AppRun blocks of `key` in it, each removed by
+/// its own entries, whatever directory it names.
+fn without_whole_blocks(key: &str, entries: &[PathBuf]) -> Vec<PathBuf> {
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut at = 0;
+    while at < entries.len() {
+        match apprun_block_at(key, entries, at) {
+            Some(end) => at = end + 1,
+            None => {
+                kept.push(entries[at].clone());
+                at += 1;
+            }
+        }
+    }
+    kept
+}
+
+/// `value`, a search path for `key`, without the whole AppRun blocks of any
+/// AppImage's mount in it, the entries around them kept in order. For a
+/// value chan recorded from an AppImage process before it knew to hand on the
+/// user's, such as the `PATH` an older release wrote into the devserver's
+/// systemd unit: the mount it names is gone, and its directories under `/tmp`
+/// are anyone's to create.
+pub fn without_apprun_blocks(key: &str, value: &OsStr) -> OsString {
+    let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
+    let kept = without_whole_blocks(key, &entries);
+    if kept.len() == entries.len() {
+        return value.to_os_string();
+    }
+    std::env::join_paths(kept).unwrap_or_default()
 }
 
 /// AppRun's block for `key`: the entries it writes ahead of the user's value,
 /// each one directory of its mount followed by these suffixes in this order
 /// (its format strings, and for `XDG_DATA_DIRS` the GTK hook's entry after
-/// its own). Empty for a key whose block is a lone entry, which a user's own
-/// entry could match.
+/// its own).
 fn apprun_block(key: &str) -> &'static [&'static str] {
     match key {
         "LD_LIBRARY_PATH" => &[
@@ -568,6 +631,7 @@ fn apprun_block(key: &str) -> &'static [&'static str] {
         ],
         "PATH" => &["/usr/bin/", "/usr/sbin/", "/usr/games/", "/bin/", "/sbin/"],
         "XDG_DATA_DIRS" => &["/usr/share/", "/usr/share"],
+        "PYTHONPATH" => &["/usr/share/pyshared/"],
         "PERLLIB" => &["/usr/share/perl5/", "/usr/lib/perl5/"],
         "QT_PLUGIN_PATH" => &[
             "/usr/lib/qt4/plugins/",
@@ -585,35 +649,26 @@ fn apprun_block(key: &str) -> &'static [&'static str] {
     }
 }
 
-/// The index of the last entry of the last whole AppRun block of `key` in
-/// `entries`, under any one directory other than the root. A chan process of
-/// an older release that starts the AppImage again hands the child its own
-/// environment, so the child's search paths hold that process's block after
-/// the child's own, and in FUSE mode that block names another mount, gone
-/// once its process exits. A user does not write a whole block: every one of
-/// its entries, in AppRun's order, with its trailing separators.
-fn last_apprun_block(key: &str, entries: &[PathBuf]) -> Option<usize> {
+/// The index of the last entry of the whole AppRun block of `key` that
+/// starts at `at`, under any one directory other than the root, or `None`.
+/// A user does not write a whole block: every one of its entries, in
+/// AppRun's order, with its trailing separators; for `PYTHONPATH`, whose block
+/// is a lone entry, that entry with its trailing separator under a directory
+/// other than the root, which is a Python import path inside some mount.
+fn apprun_block_at(key: &str, entries: &[PathBuf], at: usize) -> Option<usize> {
     let block = apprun_block(key);
-    let len = block.len();
-    if len < 2 || entries.len() < len {
-        return None;
-    }
-    (len - 1..entries.len()).rev().find(|&end| {
-        let run = &entries[end + 1 - len..=end];
-        let Some(dir) = run[0]
-            .to_str()
-            .and_then(|first| first.strip_suffix(block[0]))
-        else {
-            return false;
-        };
-        dir.len() > 1
-            && dir.starts_with('/')
-            && run.iter().zip(block).all(|(entry, suffix)| {
-                entry
-                    .to_str()
-                    .is_some_and(|entry| entry == format!("{dir}{suffix}"))
-            })
-    })
+    let run = entries
+        .get(at..at + block.len())
+        .filter(|_| !block.is_empty())?;
+    let dir = run[0].to_str()?.strip_suffix(block[0])?;
+    let whole = dir.len() > 1
+        && dir.starts_with('/')
+        && run.iter().zip(block).all(|(entry, suffix)| {
+            entry
+                .to_str()
+                .is_some_and(|entry| entry == format!("{dir}{suffix}"))
+        });
+    whole.then(|| at + block.len() - 1)
 }
 
 /// Strip the AppImage bundle environment from a terminal spawn.
@@ -951,7 +1006,9 @@ mod appimage_env_tests {
 
     #[cfg(unix)]
     mod apprun_shapes {
-        use super::super::{appimage_host_env, appimage_host_var, hand_appimage_host_env};
+        use super::super::{
+            appimage_host_env, appimage_host_var, hand_appimage_host_env, without_apprun_blocks,
+        };
         use super::{scrub, HostEnvFor, Scrub, APPDIR};
         use std::ffi::{OsStr, OsString};
 
@@ -1190,6 +1247,97 @@ mod appimage_env_tests {
                  {other}/usr/share/:{other}/usr/share:/usr/share:"
             );
             assert_eq!(scrub("XDG_DATA_DIRS", &xdg.into()), Some(Scrub::Remove));
+        }
+
+        /// An older release's `PYTHONPATH` entry follows this mount's, a lone
+        /// entry of AppRun's shape: it goes, with or without a user value,
+        /// and so does one another AppImage leaked among the user's entries.
+        /// `PERLLIB`'s two-entry block chains the same way.
+        #[test]
+        fn an_older_parents_python_and_perl_entries_are_not_the_users() {
+            let other = "/tmp/.mount_chanZZ";
+            let py = |user: &str| {
+                OsString::from(format!(
+                    "{APPDIR}/usr/share/pyshared/:{other}/usr/share/pyshared/:{user}"
+                ))
+            };
+            assert_eq!(scrub("PYTHONPATH", &py("")), Some(Scrub::Remove));
+            assert_eq!(
+                scrub("PYTHONPATH", &py("/opt/py")),
+                Some(Scrub::Rewrite("/opt/py".into()))
+            );
+            let leaked = OsString::from(format!(
+                "{APPDIR}/usr/share/pyshared/:/opt/py:/tmp/.mount_TermAB/usr/share/pyshared/:/opt/py2"
+            ));
+            assert_eq!(
+                scrub("PYTHONPATH", &leaked),
+                Some(Scrub::Rewrite("/opt/py:/opt/py2".into()))
+            );
+            let perl = format!(
+                "{APPDIR}/usr/share/perl5/:{APPDIR}/usr/lib/perl5/:\
+                 {other}/usr/share/perl5/:{other}/usr/lib/perl5/:/opt/perl"
+            );
+            assert_eq!(
+                scrub("PERLLIB", &perl.into()),
+                Some(Scrub::Rewrite("/opt/perl".into()))
+            );
+        }
+
+        /// Another application's AppImage can leak its block into the
+        /// environment chan is started from, after entries the user's shell
+        /// put ahead of it. That block goes by its own entries; the user's
+        /// entries on either side of it stay, in order.
+        #[test]
+        fn a_leaked_block_goes_and_the_users_entries_around_it_stay() {
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let term = "/tmp/.mount_TermAB";
+            let path = format!(
+                "{}:/home/u/.local/bin:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under(term, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &path.into()),
+                Some(Scrub::Rewrite(
+                    "/home/u/.local/bin:/usr/local/bin:/usr/bin".into()
+                ))
+            );
+            let ld = format!(
+                "{HOST_LIB}:{}:/opt/a/lib:{}:/opt/b/lib",
+                block_under(APPDIR, &LD_BLOCK),
+                block_under(term, &LD_BLOCK)
+            );
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &ld.into()),
+                Some(Scrub::Rewrite("/opt/a/lib:/opt/b/lib".into()))
+            );
+            // With no entry of this mount at all, the leaked block still goes.
+            let no_own = format!(
+                "/home/u/.local/bin:{}:/usr/bin",
+                block_under(term, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &no_own.into()),
+                Some(Scrub::Rewrite("/home/u/.local/bin:/usr/bin".into()))
+            );
+        }
+
+        /// A `PATH` an older release recorded from its AppImage loses that
+        /// mount's block and keeps the rest in order; one with no block is
+        /// returned as it is.
+        #[test]
+        fn a_recorded_path_loses_whole_blocks_only() {
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let recorded = format!(
+                "{}:/home/u/.local/bin:/usr/local/bin:/usr/bin",
+                block_under("/tmp/.mount_ChanOLD", &path_block)
+            );
+            assert_eq!(
+                without_apprun_blocks("PATH", OsStr::new(&recorded)),
+                "/home/u/.local/bin:/usr/local/bin:/usr/bin"
+            );
+            let plain = OsStr::new("/home/u/.local/bin:/opt/x/usr/bin/:/usr/bin");
+            assert_eq!(without_apprun_blocks("PATH", plain), plain);
         }
 
         /// Only a whole block counts: a user's entry that looks like one of
