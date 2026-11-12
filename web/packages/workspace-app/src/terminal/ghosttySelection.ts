@@ -75,9 +75,7 @@ export function selectionManagerOf(term: Terminal): SelectionManagerLike | null 
 /// another core.
 export function installGhosttySelection(term: Terminal, write: (text: string) => void): boolean {
   const manager = selectionManagerOf(term);
-  // Typed as unknown: ghostty-web's terminal type and the binding's class
-  // both have private fields, so narrowing one to the other is empty.
-  const core: unknown = term.wasmTerm;
+  const core = term.wasmTerm;
   if (!manager || !(core instanceof VtTerminal)) return false;
   const ownRead = manager.getSelection.bind(manager);
 
@@ -201,7 +199,7 @@ export function lineAcrossWraps(core: VtTerminal, row: number): Extent | null {
 /// reaches or runs another core.
 export function installGhosttyClickExtents(term: Terminal): (() => void) | null {
   const manager = selectionManagerOf(term) as ClickSelectionManager | null;
-  const core: unknown = term.wasmTerm;
+  const core = term.wasmTerm;
   const host = term.element;
   const canvas = (term as unknown as { renderer?: { getCanvas?(): HTMLCanvasElement } }).renderer?.getCanvas?.();
   if (

@@ -197,9 +197,7 @@ export class GhosttyFind {
   /// Find over `term` when it runs on chan's binding of libghostty-vt; null
   /// on any other core, which has no search.
   static attach(term: Terminal, viewport: FindViewport, onCount: (count: FindCount) => void): GhosttyFind | null {
-    // Typed as unknown: ghostty-web's terminal type and the binding's class
-    // both have private fields, so narrowing one to the other is empty.
-    const core: unknown = term.wasmTerm;
+    const core = term.wasmTerm;
     if (!(core instanceof VtTerminal)) return null;
     return new GhosttyFind(core, { viewport, selection: selectionManagerOf(term), onCount });
   }

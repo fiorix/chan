@@ -23,8 +23,7 @@ type ConfigBuilder = { buildWasmConfig?: () => VtTerminalConfig | undefined };
 /// what `open()` and `reset()` will use.
 export function applyGhosttyTheme(term: Terminal, theme: ITheme): boolean {
   holdTheme(term.options, theme);
-  // ghostty-web types its core as its own class; chan's binding is not one.
-  const core: unknown = term.wasmTerm;
+  const core = term.wasmTerm;
   const renderer = term.renderer;
   const build = (term as unknown as ConfigBuilder).buildWasmConfig;
   if (!(core instanceof VtTerminal) || !renderer || typeof build !== "function") return false;
