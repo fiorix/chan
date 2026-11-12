@@ -4,7 +4,8 @@
 // opened from after a dismissal, left where a command put it after a run,
 // back to that element after a run that put it nowhere, and back to that
 // element again when Open's path dialog, which outlives the launcher, is
-// cancelled.
+// cancelled. And where it stays while the launcher is open: on the query,
+// whatever a row that changes in place shows under it.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -22,6 +23,7 @@ vi.mock("../api/libraryCommand", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
+import StandInSurface, { type SurfaceGrab } from "./CommandLauncher.testSurface.svelte";
 import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import { allCommands, registerCommands } from "../state/commands";
@@ -71,7 +73,25 @@ const runHeld = vi.fn(() => {
   held = { promise, resolve };
   return promise;
 });
+/// A surface a row that changes in place shows under the launcher, and how
+/// it takes the keyboard when shown.
+let surface: { show: (how: SurfaceGrab) => void; hide: () => void; isShown: () => boolean } | null = null;
+let surfaceGrab: SurfaceGrab = "sync";
+/// A toggle that shows a surface which focuses itself, as Rich Prompt and
+/// Source mode do. It reports its state, so the launcher stays open on it.
+const runSurface = vi.fn(() => surface?.show(surfaceGrab));
 registerCommands([
+  {
+    id: "test.focus.surface",
+    title: "Stand-in prompt",
+    category: "Global",
+    scope: "window",
+    requirement: "any",
+    kind: "toggle",
+    state: () => surface?.isShown() === true,
+    available: () => true,
+    run: runSurface,
+  },
   {
     id: "test.focus.probe",
     title: "Probe focus",
@@ -211,6 +231,7 @@ beforeEach(() => {
   library.snapshot = null;
   probeTarget = null;
   held = null;
+  surface = null;
   document.documentElement.removeAttribute("data-launcher-shown");
   sessionStorage.clear();
   clearLauncherDraft();
@@ -415,5 +436,85 @@ describe("focus when the launcher closes", () => {
 
     await runOpenAndCancel();
     expect(document.activeElement, "focus returns to the chord's control, not the launcher's last opener").toBe(field);
+  });
+});
+
+describe("the keyboard while the launcher is open", () => {
+  const WHEN: Record<SurfaceGrab, string> = {
+    sync: "as the row runs",
+    microtask: "in a microtask",
+    tick: "after a tick",
+    timer: "on a zero-delay timer",
+    mount: "as it mounts",
+  };
+
+  const field = (): Element | null => document.querySelector(".stand-in-surface");
+
+  function mountSurface(how: SurfaceGrab): void {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const component = mount(StandInSurface, { target: host });
+    mounted.push(component as Record<string, unknown>);
+    surface = component as unknown as NonNullable<typeof surface>;
+    surfaceGrab = how;
+  }
+
+  /// Send one keydown to the element that holds the keyboard, as a key press
+  /// does.
+  async function pressFocused(key: string): Promise<void> {
+    (document.activeElement ?? document.body).dispatchEvent(
+      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+    );
+    await flush();
+  }
+
+  for (const how of ["sync", "microtask", "tick", "timer", "mount"] as const) {
+    test(`a row that shows a surface which takes focus ${WHEN[how]} leaves the keyboard on the query`, async () => {
+      mountSurface(how);
+      const target = await openFromOrigin();
+      const query = target.querySelector(".deck-input");
+      await runFromLauncher(target, "Stand-in prompt");
+      expect(runSurface).toHaveBeenCalledOnce();
+      expect(launcherPanel.open, "the row changes in place").toBe(true);
+      expect(field(), "the surface shows under the launcher").not.toBeNull();
+      expect(document.activeElement, "the query keeps the keyboard").toBe(query);
+
+      await pressFocused("Enter");
+      expect(runSurface, "the next Enter is the launcher's").toHaveBeenCalledTimes(2);
+      await pressFocused("Escape");
+      expect(launcherPanel.open, "and so is Escape").toBe(false);
+      expect(document.activeElement, "the close hands the keyboard to what the row showed").toBe(field());
+    });
+  }
+
+  test("the close hands the keyboard back to the element the launcher opened from when the surface is gone", async () => {
+    mountSurface("sync");
+    const target = await openFromOrigin();
+    await runFromLauncher(target, "Stand-in prompt");
+    surface!.hide();
+    await flush();
+    await pressFocused("Escape");
+    expect(launcherPanel.open).toBe(false);
+    expect(document.activeElement).toBe(origin);
+  });
+
+  test("a later command that closes the launcher and takes no focus hands the keyboard to the surface", async () => {
+    mountSurface("microtask");
+    const target = await openFromOrigin();
+    await runFromLauncher(target, "Stand-in prompt");
+    await runFromLauncher(target, "Toggle nothing");
+    expect(runNothing).toHaveBeenCalledOnce();
+    expect(launcherPanel.open).toBe(false);
+    expect(document.activeElement).toBe(field());
+  });
+
+  test("a surface that shows under the Computers launcher over the window keeps the focus it took", async () => {
+    mountSurface("sync");
+    const target = await openFromOrigin();
+    // chan-desktop sets this while its launcher window covers the page: a
+    // focus change the page makes then would take the keyboard from it.
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    await runFromLauncher(target, "Stand-in prompt");
+    expect(document.activeElement).toBe(field());
   });
 });

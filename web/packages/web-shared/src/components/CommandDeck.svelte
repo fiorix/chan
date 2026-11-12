@@ -117,7 +117,7 @@
   // are never tab stops; the selected row is a virtual one the input names
   // through aria-activedescendant.
   let input: HTMLInputElement | undefined = $state();
-  let shell: HTMLElement | undefined = $state();
+  let overlay: HTMLElement | undefined = $state();
   let list: HTMLElement | undefined = $state();
   let keyList: HTMLElement | undefined = $state();
   let keyboardIndex = $state(0);
@@ -129,8 +129,16 @@
   let listedIds = "";
   let wasOpen = false;
   let closeVersion = 0;
-  // Where focus goes back to when the deck closes, captured as it opens.
+  // The element that held focus as the deck opened, where focus goes back to
+  // when the deck closes and nothing under it asked for the keyboard since.
   let returnFocus: HTMLElement | null = null;
+  // The element under the deck that last took the keyboard while the deck was
+  // open, and lost it to the query at once. A row that changes something in
+  // place can show a surface that focuses itself: a composer, an editor
+  // remounted by a mode switch, a terminal handed the keyboard back. The
+  // request is kept, not refused: when the deck closes the keyboard goes
+  // there, where it would be had the deck not been open.
+  let deferredFocus: HTMLElement | null = null;
   // The run in flight: a plain item while the host handles it, an awaited
   // one while the host takes its success. A close while a run is in flight
   // leaves focus where it is, whatever closed the deck, since the command may
@@ -264,6 +272,7 @@
     const isOpen = open;
     if (isOpen && !wasOpen) {
       returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      deferredFocus = null;
       closingRun = null;
       reconcileSelection();
       pointerIndex = null;
@@ -279,7 +288,8 @@
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
       // Preserve the viewport while restoring the caller's focus.
-      if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+      const heir = canTakeFocus(deferredFocus) ? deferredFocus : returnFocus;
+      if (!closingRun && heir?.isConnected) heir.focus({ preventScroll: true });
       returnFocus = null;
       // The pending opener is for a dialog that mounts in the flush that
       // unmounts this deck's input. Once that close has rendered, a dialog
@@ -482,17 +492,19 @@
   /// close hands focus to nothing. A command that moves focus nowhere would
   /// leave it on the body, where the terminal or editor under the deck gets
   /// no keys until it is clicked. Once the run has settled and the close has
-  /// rendered, focus still at large goes back to the element the deck opened
-  /// from, when it can take it, and otherwise to the host, unless the host
-  /// says the page may not take focus now. A surface the command opened
-  /// keeps the focus it took, and one that takes focus later takes it from
-  /// the restored element as it would from any other.
-  async function settleRunFocus(opener: HTMLElement | null): Promise<void> {
+  /// rendered, focus still at large goes to the surface that asked for it
+  /// under the open deck, when it can take it, else back to the element the
+  /// deck opened from, and otherwise to the host, unless the host says the
+  /// page may not take focus now. A surface the command opened after the
+  /// close keeps the focus it took, and one that takes focus later takes it
+  /// from the restored element as it would from any other.
+  async function settleRunFocus(opener: HTMLElement | null, published: HTMLElement | null): Promise<void> {
     await tick();
-    if (pendingReturnFocus === opener) pendingReturnFocus = null;
+    if (pendingReturnFocus === published) pendingReturnFocus = null;
     if (open || holdsFocus(document.activeElement)) return;
     if (mayTakeFocus && !mayTakeFocus()) return;
-    if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
+    if (canTakeFocus(deferredFocus)) deferredFocus.focus({ preventScroll: true });
+    else if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
     else onFocusLost?.();
   }
 
@@ -501,14 +513,15 @@
     // Captured before the run: the close effect forgets the opener as the
     // deck closes, which the run may do at once.
     const opener = returnFocus;
-    pendingReturnFocus = opener;
+    const published = canTakeFocus(deferredFocus) ? deferredFocus : opener;
+    pendingReturnFocus = published;
     try {
       await runItem(item);
     } finally {
       if (open) {
-        if (pendingReturnFocus === opener) pendingReturnFocus = null;
+        if (pendingReturnFocus === published) pendingReturnFocus = null;
       } else {
-        void settleRunFocus(opener);
+        void settleRunFocus(opener, published);
       }
     }
   }
@@ -688,16 +701,9 @@
     return input.selectionStart === end && input.selectionEnd === end;
   }
 
-  function onPageKeydown(event: KeyboardEvent): void {
-    if (!open || !shell || event.defaultPrevented) return;
-    const target = event.target;
-    const inside = target instanceof Node && shell.contains(target);
-    const page = target === document.body || target === document.documentElement ||
-      target === document || target === window;
-    if (!inside && !page) return;
-
-    // This non-modal deck yields to a visible modal, including while the
-    // modal repairs focus after removing its active control.
+  /// Whether a modal dialog is showing. This deck is not modal and yields
+  /// the keyboard to one.
+  function modalShowing(): boolean {
     const modals = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"], dialog[open]');
     for (const modal of modals) {
       let visible = true;
@@ -708,8 +714,44 @@
           break;
         }
       }
-      if (visible) return;
+      if (visible) return true;
     }
+    return false;
+  }
+
+  /// Take the keyboard back from `element`, which is under the open deck, and
+  /// remember that it asked. False when the page may not move focus now.
+  function reclaimFocus(element: EventTarget | null): boolean {
+    if (mayTakeFocus && !mayTakeFocus()) return false;
+    if (element instanceof HTMLElement) deferredFocus = element;
+    focusInput();
+    return true;
+  }
+
+  /// The deck holds the keyboard while it is open and no modal dialog is
+  /// showing. Enforced here, on every focus change in the page, so it holds
+  /// for whatever a row or the page does under the deck, at once or later.
+  function onPageFocusIn(event: FocusEvent): void {
+    if (!open || !overlay) return;
+    const target = event.target;
+    if (!(target instanceof Node) || overlay.contains(target)) return;
+    if (modalShowing()) return;
+    reclaimFocus(target);
+  }
+
+  function onPageKeydown(event: KeyboardEvent): void {
+    if (!open || !overlay || event.defaultPrevented) return;
+    // The yield covers the page's own keys too, while a modal repairs focus
+    // after removing its active control.
+    if (modalShowing()) return;
+    const target = event.target;
+    const inside = target instanceof Node && overlay.contains(target);
+    const page = target === document.body || target === document.documentElement ||
+      target === document || target === window;
+    // A key from an element under the deck: focus reached it unseen, while a
+    // dialog was showing or the page could not take focus. The key is the
+    // deck's, and the keyboard comes back with it.
+    if (!inside && !page && !reclaimFocus(target)) return;
     onKeydown(event);
   }
 
@@ -832,6 +874,7 @@
 
 <svelte:window
   onkeydowncapture={onPageKeydown}
+  onfocusincapture={onPageFocusIn}
   onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }}
 />
 
@@ -898,11 +941,10 @@
 {/snippet}
 
 {#if open}
-  <div class="deck-overlay" data-direction={direction}>
+  <div bind:this={overlay} class="deck-overlay" data-direction={direction}>
     <button class="deck-backdrop" type="button" aria-label="Hide command launcher" onclick={onClose}></button>
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role, a11y_no_noninteractive_element_interactions -->
     <section
-      bind:this={shell}
       class="deck-shell"
       role="dialog"
       aria-modal="false"

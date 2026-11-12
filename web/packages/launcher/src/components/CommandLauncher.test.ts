@@ -1433,6 +1433,63 @@ describe("focus around the deck", () => {
     expect(document.activeElement).toBe(control);
     control.remove();
   });
+
+  /// Send one keydown to the element that holds the keyboard, as a key press
+  /// does.
+  async function pressFocused(value: string): Promise<void> {
+    (document.activeElement ?? document.body).dispatchEvent(
+      new KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true }),
+    );
+    await flushPromises();
+  }
+
+  it("keeps the keyboard on the query when a row that changes in place moves focus", async () => {
+    remount({ desktop: true });
+    // A surface the row's action focuses in a microtask, under the open deck.
+    const surface = document.createElement("textarea");
+    document.body.append(surface);
+    actions.theme.mockImplementation((choice: ThemeChoice) => {
+      themeState.choice = choice;
+      queueMicrotask(() => surface.focus());
+    });
+    try {
+      open();
+      await flushPromises();
+      await query("theme light");
+      await pressFocused("Enter");
+      expect(actions.theme).toHaveBeenCalledExactlyOnceWith("light");
+      expect(activeCommandLauncherDraft().visible, "the row changes in place").toBe(true);
+      expect(document.activeElement, "the query keeps the keyboard").toBe(input());
+
+      await pressFocused("Escape");
+      expect(activeCommandLauncherDraft().visible, "the next Escape is the deck's").toBe(false);
+      expect(document.activeElement, "the close hands the keyboard to what the row focused").toBe(surface);
+    } finally {
+      surface.remove();
+    }
+  });
+
+  it("hands the keyboard to what a row focused before the deck closed behind it", async () => {
+    remount({ desktop: true });
+    library.devservers = [{ ...alpha }];
+    // The card a machine's row turns the Computers screen to takes focus as
+    // the row runs; this host closes the deck once the run has answered.
+    const cardSlot = document.createElement("div");
+    cardSlot.tabIndex = -1;
+    document.body.append(cardSlot);
+    actions.showCard.mockImplementation(() => cardSlot.focus());
+    try {
+      open();
+      await flushPromises();
+      await query("show alpha");
+      await pressFocused("Enter");
+      expect(actions.showCard).toHaveBeenCalledExactlyOnceWith("ds-a");
+      expect(activeCommandLauncherDraft().visible).toBe(false);
+      expect(document.activeElement).toBe(cardSlot);
+    } finally {
+      cardSlot.remove();
+    }
+  });
 });
 
 

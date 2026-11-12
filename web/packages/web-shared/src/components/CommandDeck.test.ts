@@ -115,10 +115,11 @@ describe("CommandDeck lazy confirmation", () => {
     expect(onChoose).not.toHaveBeenCalled();
   });
 
-  it("leaves other controls and modal dialogs in charge of their keys", async () => {
+  it("takes the keyboard back from a control under it and leaves a modal dialog its keys", async () => {
     const onChoose = vi.fn();
     mountDeck({ ...item(undefined), awaitResult: false }, onChoose);
     await flush();
+    const query = target.querySelector(".deck-input");
     const outside = document.createElement("div");
     outside.innerHTML = '<input><textarea class="xterm-helper-textarea"></textarea><div contenteditable="true"></div><div role="dialog" aria-modal="true" tabindex="-1"></div>';
     document.body.append(outside);
@@ -127,19 +128,18 @@ describe("CommandDeck lazy confirmation", () => {
       modal.hidden = true;
       for (const control of outside.querySelectorAll<HTMLElement>("input, textarea, [contenteditable]")) {
         control.focus();
-        const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-        control.dispatchEvent(event);
-        expect(event.defaultPrevented, "an outside control keeps Enter").toBe(false);
-        expect(onChoose).not.toHaveBeenCalled();
+        expect(document.activeElement, "the query takes the keyboard back").toBe(query);
       }
       modal.hidden = false;
       modal.focus();
+      expect(document.activeElement, "a modal dialog keeps the focus it takes").toBe(modal);
       modal.blur();
       const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
       document.body.dispatchEvent(event);
       await flush();
       expect(event.defaultPrevented, "the modal keeps page keys").toBe(false);
       expect(target.querySelector(".deck-shell")).not.toBeNull();
+      expect(onChoose).not.toHaveBeenCalled();
     } finally {
       outside.remove();
     }
@@ -1796,6 +1796,154 @@ describe("CommandDeck focus", () => {
     expect(enter.defaultPrevented).toBe(false);
     expect(onChoose).not.toHaveBeenCalled();
     expect(activeTitle()).toBe("Row 1");
+  });
+});
+
+describe("CommandDeck keyboard hold", () => {
+  let origin: HTMLButtonElement;
+
+  beforeEach(() => {
+    origin = document.createElement("button");
+    document.body.appendChild(origin);
+    origin.focus();
+  });
+
+  afterEach(() => {
+    origin.remove();
+    for (const dialog of dialogs.splice(0)) dialog.remove();
+  });
+
+  type Grab = "sync" | "microtask" | "tick" | "timer" | "mount";
+  const WHEN: Record<Grab, string> = {
+    sync: "as the row runs",
+    microtask: "in a microtask",
+    tick: "after a tick",
+    timer: "on a zero-delay timer",
+    mount: "as it mounts",
+  };
+
+  const surface = (): HTMLTextAreaElement | null => target.querySelector(".stand-in-surface");
+  const showSurface = (grab: Grab): void => (app.showSurface as (grab: Grab) => void)(grab);
+  const toggle = (): DeckItem => named("prompt", "Rich Prompt", { kind: "toggle" });
+
+  /// Let a zero-delay timer run, then what it scheduled.
+  async function settle(): Promise<void> {
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
+  }
+
+  /// Send one keydown to the element that holds the keyboard, as a key press
+  /// does.
+  async function pressFocused(key: string): Promise<KeyboardEvent> {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    (document.activeElement ?? document.body).dispatchEvent(event);
+    await settle();
+    return event;
+  }
+
+  // The dialogs a test raised, taken down after it whatever it asserted, so
+  // a failure cannot leave one showing over the tests that follow.
+  const dialogs: HTMLElement[] = [];
+
+  function modalDialog(): HTMLElement {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(document.createElement("input"));
+    document.body.append(dialog);
+    dialogs.push(dialog);
+    return dialog;
+  }
+
+  for (const grab of ["sync", "microtask", "tick", "timer", "mount"] as const) {
+    it(`keeps the keyboard from a surface a row shows, which takes focus ${WHEN[grab]}`, async () => {
+      const onChoose = vi.fn(() => showSurface(grab));
+      await mountWith({ items: [toggle()], onChoose });
+      await pressFocused("Enter");
+      expect(onChoose).toHaveBeenCalledOnce();
+      expect(surface(), "the surface shows under the deck").not.toBeNull();
+      expect(document.activeElement, "the query keeps the keyboard").toBe(deckInput());
+
+      await pressFocused("Enter");
+      expect(onChoose, "the next Enter is the deck's").toHaveBeenCalledTimes(2);
+      await pressFocused("Escape");
+      expect(target.querySelector(".deck-shell"), "and so is Escape").toBeNull();
+      expect(document.activeElement, "the close hands the keyboard to what the row showed").toBe(surface());
+    });
+  }
+
+  it("hands the keyboard to the element it opened from when the surface that asked for it is gone", async () => {
+    await mountWith({ items: [toggle()], onChoose: () => showSurface("sync") });
+    await pressFocused("Enter");
+    (app.hideSurface as () => void)();
+    await settle();
+    await pressFocused("Escape");
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("hands the keyboard to the surface when a later row closes the deck and takes no focus", async () => {
+    const onChoose = vi.fn((chosen: DeckItem) => {
+      if (chosen.id === "prompt") showSurface("sync");
+      else (app.close as () => void)();
+    });
+    await mountWith({ items: [toggle(), named("run", "Run")], onChoose });
+    await pressFocused("Enter");
+    await pressFocused("ArrowDown");
+    await pressFocused("Enter");
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).toBe(surface());
+  });
+
+  it("leaves a modal dialog a row opens the keyboard, and takes it back from what the dialog returns it to", async () => {
+    let dialog: HTMLElement | null = null;
+    const onChoose = vi.fn(() => {
+      dialog = modalDialog();
+      dialog.querySelector("input")!.focus();
+    });
+    await mountWith({ items: [toggle()], onChoose });
+    await pressFocused("Enter");
+    expect(document.activeElement, "the dialog's field").toBe(dialog!.querySelector("input"));
+    const enter = await pressFocused("Enter");
+    expect(enter.defaultPrevented, "the dialog keeps its keys").toBe(false);
+    expect(onChoose).toHaveBeenCalledOnce();
+    dialog!.remove();
+    // The dialog hands focus back to the element under the deck it took as
+    // its opener.
+    origin.focus();
+    expect(document.activeElement).toBe(deckInput());
+  });
+
+  it("moves no focus while the host says the page may not take it", async () => {
+    await mountWith({ items: [toggle()], onChoose: () => showSurface("sync"), mayTakeFocus: () => false });
+    await pressFocused("Enter");
+    expect(document.activeElement).toBe(surface());
+  });
+
+  it("takes a key pressed in an element under it, and the keyboard with it", async () => {
+    const onChoose = vi.fn();
+    await mountWith({ items: plainRows(2), onChoose });
+    // Focus that reached an element while a dialog was up is still there
+    // when the dialog goes.
+    const dialog = modalDialog();
+    origin.focus();
+    expect(document.activeElement, "the deck yields while the dialog is up").toBe(origin);
+    dialog.remove();
+
+    const letter = await pressFocused("x");
+    expect(letter.defaultPrevented, "a character is left to the query").toBe(false);
+    expect(document.activeElement, "which now holds the keyboard").toBe(deckInput());
+
+    const again = modalDialog();
+    origin.focus();
+    again.remove();
+    expect(document.activeElement).toBe(origin);
+    const enter = await pressFocused("Enter");
+    expect(enter.defaultPrevented).toBe(true);
+    expect(onChoose).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(deckInput());
   });
 });
 
