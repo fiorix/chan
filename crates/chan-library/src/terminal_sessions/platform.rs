@@ -422,12 +422,15 @@ pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, S
     ])
 }
 
-/// Keys the AppImage runtime sets for every process it starts, whose value
-/// holds no mount path, so the value scan in [`scrub_var`] cannot see them.
-/// `ARGV0` is read ahead of `argv[0]` by `chan_shell::invoked_arg0`, so an
-/// inherited copy misnames a re-exec'd chan. A child that is itself an
+/// Keys the AppImage runtime and its AppRun set for every process they start,
+/// whose value holds no mount path, so the value scan in [`scrub_var`] cannot
+/// see them. `ARGV0` is read ahead of `argv[0]` by `chan_shell::invoked_arg0`,
+/// so an inherited copy misnames a re-exec'd chan. AppRun sets
+/// `PYTHONDONTWRITEBYTECODE=1` over whatever the user had, so a terminal's
+/// Python would stop writing bytecode caches; the user's own value is lost
+/// before chan runs, and a terminal gets none. A child that is itself an
 /// AppImage process gets each of them again from its own runtime.
-const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD"];
+const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD", "PYTHONDONTWRITEBYTECODE"];
 
 /// Keys linuxdeploy's GTK hook reads whose value holds no mount path. A
 /// terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK children
@@ -1132,7 +1135,13 @@ mod appimage_env_tests {
                 "{key}"
             );
         }
-        for key in ["APPIMAGE", "ARGV0", "OWD", "GTK_THEME"] {
+        for key in [
+            "APPIMAGE",
+            "ARGV0",
+            "OWD",
+            "GTK_THEME",
+            "PYTHONDONTWRITEBYTECODE",
+        ] {
             let value = OsString::from("value");
             for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
                 assert_eq!(
