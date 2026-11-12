@@ -161,6 +161,24 @@ describe("rankDeckItems", () => {
   it("matches without regard to case", () => {
     expect(ids(rankDeckItems([row("a", "Close Tab")], "CLOSE tab"))).toEqual(["a"]);
   });
+
+  it("ranks a title that is the whole query above every title that only holds its words", () => {
+    const rows = [
+      row("forward", "New graph"),
+      row("longer", "Graph new here"),
+      row("exact", "Graph new"),
+    ];
+    // The words match in either order, and by where they sit and how long
+    // the title is `New graph` would lead a query of `graph new`.
+    expect(ids(rankDeckItems(rows, "graph new"))).toEqual(["exact", "forward", "longer"]);
+    expect(ids(rankDeckItems(rows, "  GRAPH   new "))[0], "case and outer space aside").toBe("exact");
+    expect(ids(rankDeckItems(rows, "graph ne"))[0], "a query that is not the whole title").toBe("forward");
+  });
+
+  it("still lists a row titled as the query after the rows that can run when it cannot", () => {
+    const rows = [row("exact", "Close", { disabled: true }), row("longer", "Close tab")];
+    expect(ids(rankDeckItems(rows, "close"))).toEqual(["longer", "exact"]);
+  });
 });
 
 describe("matchDeckItems", () => {
@@ -189,10 +207,23 @@ describe("matchDeckItems", () => {
       row("split", "Close tab", { searchText: "window" }),
       row("loose", "Reclose", { subtitle: "the windows" }),
     ];
-    expect(matchDeckItems(two, "close window").map((match) => [match.item.id, match.kind])).toEqual([
+    expect(matchDeckItems(two, "window close").map((match) => [match.item.id, match.kind])).toEqual([
       ["both", 8],
       ["split", 6],
       ["loose", 5],
+    ]);
+  });
+
+  it("puts a title that is the whole query in a kind of its own, above every other", () => {
+    const rows = [row("exact", "Close window"), row("longer", "Close window 2"), row("one", "Close")];
+    expect(matchDeckItems(rows, " close WINDOW ").map((match) => [match.item.id, match.kind])).toEqual([
+      ["exact", 10],
+      ["longer", 8],
+    ]);
+    expect(matchDeckItems(rows, "close").map((match) => [match.item.id, match.kind])).toEqual([
+      ["one", 5],
+      ["exact", 4],
+      ["longer", 4],
     ]);
   });
 

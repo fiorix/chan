@@ -555,6 +555,64 @@ describe("the order of a typed query's hits", () => {
     ]);
   });
 
+  test("leads with the row titled as the whole query, ahead of a nearer scope's longer title", () => {
+    const commands = [
+      command({ id: "b.graph", title: "New graph here", scope: "app", surface: "browser" }),
+      command({ id: "n.graph", title: "New graph", scope: "pane", group: "New tab" }),
+      command({ id: "w.graph", title: "New graph window" }),
+    ];
+    const onFiles = source({
+      commands,
+      ctx: context({ activeSurface: "browser" }),
+      app: { label: "File browser" },
+    });
+    expect(titles(searchRows(onFiles, null, "New graph", openSettings))).toEqual([
+      "New graph",
+      "New graph here",
+      "New graph window",
+    ]);
+    expect(titles(searchRows(onFiles, null, "  new GRAPH ", openSettings))[0], "case and outer space aside").toBe("New graph");
+    // A query that is no row's whole title: the scopes decide as before.
+    expect(titles(searchRows(onFiles, null, "new gra", openSettings))).toEqual([
+      "New graph here",
+      "New graph",
+      "New graph window",
+    ]);
+  });
+
+  test("lists rows that are all titled as the query in scope order", () => {
+    const commands = [
+      command({ id: "e.details", title: "Details", scope: "app", surface: "file" }),
+      command({ id: "w.details", title: "Details" }),
+      command({ id: "a.details", title: "Details", scope: "app", surface: "terminal" }),
+      command({ id: "p.details", title: "Details of the pane", scope: "pane", group: "Pane" }),
+    ];
+    const rows = searchRows(source({ commands }), null, "details", openSettings);
+    expect(rows.map((row) => row.command?.id)).toEqual(["a.details", "w.details", "e.details", "p.details"]);
+  });
+
+  test("leads with a typed leaf of a choice and with a typed argument, as before", () => {
+    let colour = "blue";
+    const choice = command({
+      id: "w.colour", title: "Focus border colour", kind: "choice",
+      options: () => ["blue", "green"].map((id) => ({ id, label: id, checked: colour === id, run: () => { colour = id; } })),
+    });
+    const run = vi.fn();
+    const open = command({ id: "n.open", title: "Open...", scope: "pane", group: "New tab", acceptsArg: true, keywords: ["Open"], run });
+    const notes = command({ id: "w.notes", title: "Open notes folder", keywords: ["x.md"] });
+    const src = source({ commands: [choice, open, notes] });
+
+    const leaf = searchRows(src, null, "focus border colour: green", openSettings);
+    expect(titles(leaf)[0]).toBe("Focus border colour: green");
+    leaf[0]!.run?.();
+    expect(colour).toBe("green");
+
+    const typed = searchRows(src, null, "open notes/x.md", openSettings);
+    expect(titles(typed)[0]).toBe("Open notes/x.md");
+    typed[0]!.run?.();
+    expect(run).toHaveBeenCalledExactlyOnceWith("notes/x.md");
+  });
+
   test("lists hits of one kind by scope: the focused app, pane, window, workspace, another app, settings, this machine", () => {
     const commands = [
       command({ id: "w.close", title: "Close window" }),

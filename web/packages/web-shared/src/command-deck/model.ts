@@ -241,9 +241,11 @@ export function fuzzyDeckScore(query: string, text: string): number | null {
   return score;
 }
 
-/** How one query word sits in a row, best first: at the start of a word of
- * the title, inside one, at the start of a word of another field, inside one,
- * or as an abbreviation of the title. */
+/** How one query word sits in a row, best first: as a word of a title that is
+ * the whole query, at the start of a word of the title, inside one, at the
+ * start of a word of another field, inside one, or as an abbreviation of the
+ * title. */
+const WHOLE_TITLE = 5;
 const TITLE_WORD_START = 4;
 const TITLE_INSIDE_WORD = 3;
 const OTHER_WORD_START = 2;
@@ -334,12 +336,12 @@ function wordMatch(
 /** A row a query matched, with how the match reads. */
 export interface DeckMatch<Item extends DeckItem = DeckItem> {
   item: Item;
-  /** The kinds of hit the query's words made, summed over the words: 4 for a
-   * word that starts a word of the title, 3 for one inside a title word, 2
-   * and 1 for the same two in the breadcrumb, the subtitle or the search
-   * text, 0 for an abbreviation of the title. Matches of one kind differ only
-   * in where the words sit and how long the title is, which a host may rank
-   * below an order of its own. */
+  /** The kinds of hit the query's words made, summed over the words: 5 for a
+   * word of a title that is the whole query, 4 for a word that starts a word
+   * of the title, 3 for one inside a title word, 2 and 1 for the same two in
+   * the breadcrumb, the subtitle or the search text, 0 for an abbreviation of
+   * the title. Matches of one kind differ only in where the words sit and how
+   * long the title is, which a host may rank below an order of its own. */
   kind: number;
   /** Higher is a better match. It orders the matches of one query and means
    * nothing across queries. */
@@ -351,9 +353,12 @@ export interface DeckMatch<Item extends DeckItem = DeckItem> {
  * score that ordered it. The query is split on whitespace and every word must
  * match the row's title, breadcrumb, subtitle or search text, in any order. A
  * word in the title outranks one found elsewhere, and a word that starts a
- * word outranks one inside a word. A word found whole in none of them still
- * matches a title that holds its letters in order within twice the word's
- * length, below every whole hit. Rows that can run come before disabled ones;
+ * word outranks one inside a word. A title that is the whole query, case and
+ * the space around and between its words aside, outranks every title that
+ * only holds the query's words: it is what was typed. A word found whole in
+ * none of them still matches a title that holds its letters in order within
+ * twice the word's length, below every whole hit. Rows that can run come
+ * before disabled ones;
  * ties fall to the title, then the id. An empty query matches every row, as
  * given, with no kind and no score to tell them apart.
  */
@@ -363,6 +368,7 @@ export function matchDeckItems<Item extends DeckItem>(
 ): DeckMatch<Item>[] {
   const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return items.map((item) => ({ item, kind: 0, score: 0 }));
+  const whole = words.join(" ");
   const matches: DeckMatch<Item>[] = [];
   for (const item of items) {
     const title = item.title.toLocaleLowerCase();
@@ -381,7 +387,14 @@ export function matchDeckItems<Item extends DeckItem>(
       kind += hit.kind;
       score += hit.score;
     }
-    if (matched) matches.push({ item, kind, score });
+    if (!matched) continue;
+    // Each word of a title that is the whole query started a title word, so
+    // each moves up the one band from there to the top.
+    if (title.split(/\s+/).filter(Boolean).join(" ") === whole) {
+      kind += (WHOLE_TITLE - TITLE_WORD_START) * words.length;
+      score += (WHOLE_TITLE - TITLE_WORD_START) * BAND * words.length;
+    }
+    matches.push({ item, kind, score });
   }
   return matches.sort(
     (a, b) =>

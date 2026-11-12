@@ -448,14 +448,16 @@ function settingsScopeRows(
 
 // ---- typed order -------------------------------------------------------
 //
-// A typed query ranks rows by the kind of hit first: a word that starts a
-// title word, one inside a title word, one that starts a word elsewhere, one
-// inside a word elsewhere, a title abbreviation. Among hits of one kind the
-// position and the title's length decide, which says little about which of
-// two scopes was meant: another window's `Close` is no better a hit for
-// `close` than `Close tab`. So hits of one kind, which the ranking reports
-// with each match, are listed in scope order, nearest the focus first, and
-// the ranking decides inside a scope.
+// A typed query ranks rows by the kind of hit first: a title that is the
+// whole query, a word that starts a title word, one inside a title word, one
+// that starts a word elsewhere, one inside a word elsewhere, a title
+// abbreviation. Among hits of one kind the position and the title's length
+// decide, which says little about which of two scopes was meant: another
+// window's `Close Window 2` is no better a hit for `close` than `Close tab`.
+// So hits of one kind, which the ranking reports with each match, are listed
+// in scope order, nearest the focus first, and the ranking decides inside a
+// scope. The whole-title kind is the ranking's own, so a row titled exactly
+// as typed leads whatever its scope, here and on the Computers page.
 
 /// Where a row's scope stands among hits of one kind: the focused app's rows,
 /// the pane's, the window's, the workspace's, a command of an app that is not
