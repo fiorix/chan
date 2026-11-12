@@ -99,6 +99,9 @@ export class Buffer implements IBuffer {
   private terminal: Terminal;
   private bufferType: 'normal' | 'alternate';
   private nullCell: BufferCell;
+  // A view for each screen row its lines are read into, which reads nothing
+  // while its row is unchanged.
+  private screenRows: VtCells[] = [];
 
   constructor(terminal: Terminal, type: 'normal' | 'alternate') {
     this.terminal = terminal;
@@ -159,10 +162,12 @@ export class Buffer implements IBuffer {
       return undefined;
     }
 
-    // Determine if accessing scrollback or visible screen. A line keeps its
-    // cells, so each line reads into a view of its own.
+    // Determine if accessing scrollback or visible screen. As xterm.js's, a
+    // line is current until the terminal next changes: a screen row's line
+    // reads into the view the buffer keeps for that row, and a history row's
+    // into a view of its own.
     const scrollbackLength = wasmTerm.getScrollbackLength();
-    const cells = new VtCells();
+    let cells: VtCells;
     let read: boolean;
     let isWrapped: boolean;
 
@@ -171,6 +176,7 @@ export class Buffer implements IBuffer {
       // History rows: offset 0 = oldest, offset (length-1) = newest
       // Buffer coords: y=0 = oldest, y=(length-1) = newest
       // So the history offset is y directly!
+      cells = new VtCells();
       read = wasmTerm.readHistoryRow(y, cells);
       // TODO: We'd need WASM API to check if scrollback line is wrapped
       // For now, assume not wrapped
@@ -178,6 +184,7 @@ export class Buffer implements IBuffer {
     } else {
       // Accessing visible screen
       const lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
+      cells = this.screenRows[lineNumber] ??= new VtCells();
       read = wasmTerm.readRow(lineNumber, cells);
       isWrapped = wasmTerm.isRowWrapped(lineNumber);
     }

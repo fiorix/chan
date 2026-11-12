@@ -447,6 +447,31 @@ describe("the frame reader's dirty rows", () => {
     expect(calls.counts.ghostty_render_state_row_iterator_next).toBe(3);
   });
 
+  test("a row an update left as it was reads nothing again, and a row it changed reads again", async () => {
+    const { vt } = await core();
+    const t = vt.createTerminal(20, 8);
+    t.write(Array.from({ length: 6 }, (_, i) => `row ${i}`).join("\r\n"));
+    const top = new VtCells();
+    const changed = new VtCells();
+    expect(t.readRow(0, top)).toBe(true);
+    expect(t.readRow(3, changed)).toBe(true);
+    t.beginFrame();
+    t.endFrame();
+    t.write("\x1b[4;1Hrow three");
+    const calls = counting(t);
+    expect(t.readRow(0, top)).toBe(true);
+    expect(calls.counts.ghostty_render_state_row_get_multi, "the unchanged row").toBeUndefined();
+    expect(t.readRow(3, changed)).toBe(true);
+    expect(calls.counts.ghostty_render_state_row_get_multi, "the changed row").toBe(1);
+    expect([text(top), text(changed)]).toEqual(["row 0", "row three"]);
+    // New colours change every row.
+    t.setColors({ fgColor: 0x123456 });
+    calls.reset();
+    expect(t.readRow(0, top)).toBe(true);
+    expect(calls.counts.ghostty_render_state_row_get_multi).toBe(1);
+    expect(top.at(0)!.fg).toBe(0x123456);
+  });
+
   test("a row is read again after a write, and reads what the write left", async () => {
     const { vt } = await core();
     const t = vt.createTerminal(20, 4);

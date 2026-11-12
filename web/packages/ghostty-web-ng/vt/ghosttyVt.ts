@@ -190,10 +190,10 @@ export class VtCells {
   /// row `row`. `row` is -1 before the first read.
   history = false;
   row = -1;
-  /// The terminal and the state of its screen the row was read at, so a
-  /// read of the same row in the same state reads nothing.
+  /// The terminal and the version of the row it was read at, so a read of
+  /// the row before it changes reads nothing.
   private source: object | null = null;
-  private generation = -1;
+  private version = -1;
 
   /// The cell at column `x`, or undefined outside the row.
   at(x: number): VtCell | undefined {
@@ -201,21 +201,21 @@ export class VtCells {
   }
 
   /// Whether the view holds the row a reader is asked for, read from `source`
-  /// at `generation`. For `VtTerminal`'s readers.
-  holds(source: object, history: boolean, row: number, generation: number): boolean {
-    return this.source === source && this.generation === generation && this.history === history && this.row === row;
+  /// at `version`. For `VtTerminal`'s readers.
+  holds(source: object, history: boolean, row: number, version: number): boolean {
+    return this.source === source && this.version === version && this.history === history && this.row === row;
   }
 
   /// Takes the view for a row of `length` cells and returns its cells, whose
   /// first `length` a reader fills, every one. For `VtTerminal`'s readers.
-  fill(source: object, history: boolean, row: number, generation: number, length: number): VtCell[] {
+  fill(source: object, history: boolean, row: number, version: number, length: number): VtCell[] {
     while (this.cells.length < length) {
       this.cells.push({ codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0, bg: 0, hyperlink: 0 });
     }
     this.source = source;
     this.history = history;
     this.row = row;
-    this.generation = generation;
+    this.version = version;
     this.length = length;
     return this.cells;
   }
@@ -723,9 +723,15 @@ export class VtTerminal {
   private rowDirty = new Uint8Array(0);
   /// Writes or a resize since the render state was last updated.
   private stale = true;
-  /// Updates of the render state so far. A view holds a row read at one
-  /// count, and the row iterator was filled at one.
+  /// Updates of the render state so far. A view holds a history row read
+  /// at one count, and the row iterator was filled at one.
   private generation = 0;
+  /// Each screen row's version: a new one at every update that lists the
+  /// row changed, every row's at an update that changes the whole screen.
+  /// A row keeps its version, and a view holding it stays current, through
+  /// the updates that leave it as it was.
+  private rowVersions = new Uint32Array(0);
+  private versions = 0;
   private iteratorGeneration = -1;
   /// The row the iterator stands on, -1 before its first row.
   private iteratorRow = -1;
@@ -783,6 +789,7 @@ export class VtTerminal {
     this.applyConfig(config);
     this.writeMultiArgs();
     this.rowDirty = new Uint8Array(rows);
+    this.rowVersions = new Uint32Array(rows);
   }
 
   get cols(): number {
@@ -826,8 +833,9 @@ export class VtTerminal {
       Math.round(cell?.width ?? 0), Math.round(cell?.height ?? 0),
     );
     // The render state's next update redraws every row; until then, nothing
-    // is dirty at the new size.
+    // is dirty at the new size, and no view holds a row of it.
     this.rowDirty = new Uint8Array(rows);
+    this.rowVersions = new Uint32Array(rows);
     this.stale = true;
     // ghostty-web drains after writes only; a resize can produce its own
     // mode 2048 report while the program is otherwise silent.
@@ -897,11 +905,11 @@ export class VtTerminal {
   /// date first: the row's raw cells in one call, read where the core keeps
   /// them, and a style or a cluster for the cells that carry one. False
   /// outside the screen or once the terminal is freed. A view that holds the
-  /// row already, read since the last update, is left as it is.
+  /// row already, as no update since has changed it, is left as it is.
   readRow(y: number, into: VtCells): boolean {
     if (y < 0 || y >= this._rows || !this.handle) return false;
     this.sync();
-    if (into.holds(this, false, y, this.generation)) return true;
+    if (into.holds(this, false, y, this.rowVersions[y])) return true;
     const fn = this.wasm.fn;
     const s = this.scratch;
     const ok = ABI.GhosttyResult.SUCCESS;
@@ -913,7 +921,7 @@ export class VtTerminal {
     let view = this.wasm.view();
     const raw = view.getUint32(s + SCRATCH.cellsView + V.ptr, true);
     const len = view.getUint32(s + SCRATCH.cellsView + V.len, true);
-    const cells = into.fill(this, false, y, this.generation, this._cols);
+    const cells = into.fill(this, false, y, this.rowVersions[y], this._cols);
     const T = ABI.GhosttyCellContentTag;
     this.styleCount = 0;
     for (let x = 0; x < this._cols; x++) {
@@ -1436,6 +1444,7 @@ export class VtTerminal {
     // here, so a change to them repaints every row whatever the core says.
     if (this.readColors()) dirty = D.FULL;
     if (dirty === D.PARTIAL) this.readDirtyRows();
+    else if (dirty === D.FULL) this.rowVersions.fill(++this.versions);
     if (dirty > this.dirty) this.dirty = dirty;
     // The update moved the rows the iterator was filled with.
     this.iteratorGeneration = -1;
@@ -1449,7 +1458,9 @@ export class VtTerminal {
     fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.ROW_ITERATOR, s + SCRATCH.slot);
     while (fn.ghostty_render_state_row_iterator_next_dirty(this.rowIterator, s + SCRATCH.dirtyY)) {
       const y = this.wasm.view().getUint16(s + SCRATCH.dirtyY, true);
-      if (y < this.rowDirty.length) this.rowDirty[y] = 1;
+      if (y >= this.rowDirty.length) continue;
+      this.rowDirty[y] = 1;
+      this.rowVersions[y] = ++this.versions;
     }
   }
 
