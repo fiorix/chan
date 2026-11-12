@@ -123,6 +123,8 @@ type Props = {
   onReveal?: () => void;
   onSetAsScope?: () => void;
   onNewTerminal?: () => void;
+  onDownload?: () => void;
+  onExportPdf?: () => void;
   onContactNavigate?: (path: string) => void;
   showRefs?: boolean;
   allowUpload?: boolean;
@@ -516,6 +518,28 @@ describe("the actions section", () => {
     openMenu(target);
     menuItem(target, title(EDITOR.exportPdf)).click();
     expect(exportPathToPdf).toHaveBeenCalledExactlyOnceWith(".Drafts/idea/a.md");
+  });
+
+  // The editor hands its own two for the file it has open, a draft too: they
+  // save the tab before they read the server's copy.
+  test("a host's own Download and Export to PDF run in place of the path's", async () => {
+    h.entries = [file("notes/plan.md"), file(".Drafts/idea/a.md")];
+    for (const path of ["notes/plan.md", ".Drafts/idea/a.md"]) {
+      const onDownload = vi.fn();
+      const onExportPdf = vi.fn();
+      const target = await render({ path, surface: "file", onReveal() {}, onDownload, onExportPdf });
+
+      openMenu(target);
+      menuItem(target, title(EDITOR.download)).click();
+      flushSync();
+      openMenu(target);
+      menuItem(target, title(EDITOR.exportPdf)).click();
+
+      expect([onDownload.mock.calls.length, onExportPdf.mock.calls.length], path).toEqual([1, 1]);
+      unmount(mounted.pop()!);
+    }
+    expect(fileOps.downloadPathWithProgress).not.toHaveBeenCalled();
+    expect(exportPathToPdf).not.toHaveBeenCalled();
   });
 
   test("a draft that is not Markdown downloads there and has nothing to export", async () => {

@@ -26,6 +26,11 @@ vi.mock("../state/windowCaps", async (importOriginal) => ({
   },
 }));
 
+vi.mock("../state/fileActionExecutors", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/fileActionExecutors")>()),
+  exportPathToPdf: vi.fn(async () => {}),
+}));
+
 import { browserKeys, setBrowserVim } from "../state/browserKeys.svelte";
 import { api } from "../api/client";
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
@@ -42,6 +47,7 @@ import {
   commandUnavailableReason,
 } from "../state/commands";
 import { chordFor, SHORTCUTS } from "../state/shortcuts";
+import { exportPathToPdf } from "../state/fileActionExecutors";
 import {
   browserSelection,
   fbTreeInstance,
@@ -66,7 +72,7 @@ import {
   type BrowserTab,
   type LeafNode,
 } from "../state/tabs.svelte";
-import { terminalTab } from "../__tests__/tabs";
+import { fileTab, terminalTab } from "../__tests__/tabs";
 
 class TestResizeObserver {
   observe() {}
@@ -542,6 +548,42 @@ describe("Details", () => {
     expect(command.available(commandContext())).toBe(false);
     expect(commandUnavailableReason(command, commandContext())).toBe("Needs a file browser tab");
     expect(commandState(DETAILS)).toBeNull();
+  });
+
+  // The panel acts on the selection by its path, the server's copy. Saving
+  // an open file first is its editor's panel's alone.
+  test("Download and Export to PDF ask for the selection's path at once, with no save of an editor tab on it", async () => {
+    const tab = seat(browserTab({ inspectorOpen: true }));
+    (layout.nodes[PANE] as LeafNode).tabs.push(
+      fileTab({ id: "open-readme", path: "README.md", content: "typed", saved: "hi" }),
+    );
+    const target = await render({ variant: "tab", tab });
+    const write = vi.spyOn(api, "write");
+    const download = vi.spyOn(fileOps, "downloadPathWithProgress").mockImplementation(() => {});
+    vi.mocked(exportPathToPdf).mockClear();
+    /// Opens the caret menu and presses the action of the command `id`.
+    const press = async (id: string): Promise<void> => {
+      target.querySelector<HTMLButtonElement>(".inspector .pill-caret")!.click();
+      await settle(2);
+      const found = [...target.querySelectorAll<HTMLButtonElement>(".inspector .action-menu-item")].find(
+        (el) => el.textContent?.trim() === title(id),
+      );
+      if (!found) throw new Error(`no Details action ${title(id)}`);
+      found.click();
+      await settle(2);
+    };
+
+    [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")]
+      .find((el) => el.querySelector(".name")?.textContent?.trim() === "README.md")!
+      .querySelector<HTMLElement>(".name")!
+      .click();
+    await settle();
+    await press("app.browser.downloadSelection");
+    await press("app.browser.exportPdf");
+
+    expect(download.mock.calls).toEqual([["README.md", false]]);
+    expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([["README.md"]]);
+    expect(write, "no save was asked").not.toHaveBeenCalled();
   });
 });
 
