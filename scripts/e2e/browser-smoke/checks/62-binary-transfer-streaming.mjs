@@ -1245,6 +1245,16 @@ export default {
       let lastProbePercent = null;
       const lastProbeName = probeFiles.at(-1).split("/").at(-1);
       const probeStarted = Date.now();
+      // The upload is bounded by its progress, not its length: it fails when
+      // no probe file has landed for 30 s, or after 5 min in all, so a loaded
+      // host that halves the upload's rate does not fail a queue that is
+      // still moving.
+      const probePrefix = "probe-";
+      const probeSuffix = `-${probeStamp}.bin`;
+      const landedProbes = () => readdirSync(ctx.workspaceDir).filter((name) => name.startsWith(probePrefix) && name.endsWith(probeSuffix)).length;
+      let probeLanded = 0;
+      let probeProgressAt = probeStarted;
+      let probeCountedAt = 0;
       while (!existsSync(join(ctx.workspaceDir, lastProbeName))) {
         const line = await page.evaluate(
           () =>
@@ -1257,8 +1267,19 @@ export default {
           lastProbePercent = match[1];
           probePercents.push(Number(match[1]));
         }
-        if (Date.now() - probeStarted > 30_000) {
-          throw new Error("coalescing probe upload did not finish");
+        if (Date.now() - probeCountedAt >= 500) {
+          probeCountedAt = Date.now();
+          const landed = landedProbes();
+          if (landed > probeLanded) {
+            probeLanded = landed;
+            probeProgressAt = probeCountedAt;
+          }
+        }
+        if (Date.now() - probeProgressAt > 30_000) {
+          throw new Error(`coalescing probe upload stopped: ${probeLanded} of ${probeFiles.length} files landed, none in the last 30 s`);
+        }
+        if (Date.now() - probeStarted > 300_000) {
+          throw new Error(`coalescing probe upload did not finish in 5 min: ${probeLanded} of ${probeFiles.length} files landed`);
         }
         await sleep(20);
       }
