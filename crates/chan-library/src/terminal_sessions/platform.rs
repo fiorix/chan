@@ -455,7 +455,19 @@ pub(super) enum HostEnvFor {
 /// user's value is exactly what follows the last mount entry ([`host_value`]).
 /// They are rewritten to that value, never dropped while it holds anything:
 /// removing `PATH` would leave the shell unable to resolve a command at all.
-const APPIMAGE_PREPENDED_KEYS: &[&str] = &["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS"];
+/// Two keys AppRun writes look alike and are not here, so the value scan drops
+/// them whole: the GTK hook sets `GSETTINGS_SCHEMA_DIR` outright, losing the
+/// user's value before AppRun prepends to it, and AppRun follows its
+/// `GST_PLUGIN_SYSTEM_PATH` and `GST_PLUGIN_SYSTEM_PATH_1_0` entries with the
+/// user's `QT_PLUGIN_PATH`, not their own value.
+const APPIMAGE_PREPENDED_KEYS: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "XDG_DATA_DIRS",
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
+];
 
 /// The host entry linuxdeploy's GTK hook writes right after its own mount
 /// entry, ahead of the user's value: `$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS`.
@@ -986,6 +998,57 @@ mod appimage_env_tests {
                 scrub("PATH", &value),
                 Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into())),
             );
+        }
+
+        /// AppRun writes `PYTHONPATH`, `PERLLIB` and `QT_PLUGIN_PATH` in the
+        /// same shape as `LD_LIBRARY_PATH`, so a terminal gets the user's value
+        /// of each, or none; `GSETTINGS_SCHEMA_DIR` and the GStreamer paths do
+        /// not carry the user's own value after the mount entries and are
+        /// dropped whole.
+        #[test]
+        fn the_other_apprun_paths_give_back_the_users_value() {
+            let qt: Vec<String> = ["qt4", "qt5"]
+                .iter()
+                .flat_map(|qt| {
+                    [
+                        "usr/lib",
+                        "usr/lib/i386-linux-gnu",
+                        "usr/lib/x86_64-linux-gnu",
+                        "usr/lib32",
+                        "usr/lib64",
+                    ]
+                    .map(|lib| format!("{lib}/{qt}/plugins/"))
+                })
+                .collect();
+            let qt: Vec<&str> = qt.iter().map(String::as_str).collect();
+            for (key, block) in [
+                ("PYTHONPATH", &["usr/share/pyshared/"][..]),
+                ("PERLLIB", &["usr/share/perl5/", "usr/lib/perl5/"]),
+                ("QT_PLUGIN_PATH", &qt),
+            ] {
+                assert_eq!(
+                    scrub(key, &apprun(block, "/opt/mine").into()),
+                    Some(Scrub::Rewrite("/opt/mine".into())),
+                    "{key}"
+                );
+                assert_eq!(
+                    scrub(key, &apprun(block, "").into()),
+                    Some(Scrub::Remove),
+                    "{key}"
+                );
+            }
+            let schemas = format!(
+                "{APPDIR}/usr/share/glib-2.0/schemas/:{APPDIR}//usr/share/glib-2.0/schemas"
+            );
+            assert_eq!(
+                scrub("GSETTINGS_SCHEMA_DIR", &schemas.into()),
+                Some(Scrub::Remove)
+            );
+            for key in ["GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0"] {
+                // The user's QT_PLUGIN_PATH, which AppRun writes there.
+                let gst = format!("{APPDIR}/usr/lib/gstreamer:/opt/qt");
+                assert_eq!(scrub(key, &gst.into()), Some(Scrub::Remove), "{key}");
+            }
         }
 
         fn apprun_path(user: &str) -> String {
