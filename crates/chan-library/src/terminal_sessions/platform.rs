@@ -524,18 +524,18 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
 }
 
 /// The entries of a prepended key the user had: those after its last entry
-/// inside the mount, or `None` when no entry is inside it (the value is the
-/// user's as it stands). Whatever comes before that entry is not the user's:
-/// the runtime's own block, and what chan prepended to it afterwards, the
-/// host library directory the AppImage's GUI-stack re-exec puts first in
-/// `LD_LIBRARY_PATH` among them. Everything after it is the user's value as
-/// they wrote it, an empty entry of theirs included. For `XDG_DATA_DIRS` the
-/// GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] directly after the mount entries is
-/// the hook's too.
+/// inside the mount, or after the last whole AppRun block of another mount
+/// ([`last_apprun_block`]) when that comes later, or `None` when there is
+/// neither (the value is the user's as it stands). Whatever comes before is
+/// not the user's: the runtime's own block, and what chan prepended to it
+/// afterwards, the host library directory the AppImage's GUI-stack re-exec
+/// puts first in `LD_LIBRARY_PATH` among them. Everything after it is the
+/// user's value as they wrote it, an empty entry of theirs included. For
+/// `XDG_DATA_DIRS` the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] directly after the
+/// mount entries is the hook's too.
 fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'a [PathBuf]> {
-    let last = entries
-        .iter()
-        .rposition(|entry| entry.starts_with(appdir))?;
+    let own = entries.iter().rposition(|entry| entry.starts_with(appdir));
+    let last = own.max(last_apprun_block(key, entries))?;
     let host = &entries[last + 1..];
     Some(match host.split_first() {
         Some((first, rest))
@@ -544,6 +544,75 @@ fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'
             rest
         }
         _ => host,
+    })
+}
+
+/// AppRun's block for `key`: the entries it writes ahead of the user's value,
+/// each one directory of its mount followed by these suffixes in this order
+/// (its format strings, and for `XDG_DATA_DIRS` the GTK hook's entry after
+/// its own). Empty for a key whose block is a lone entry, which a user's own
+/// entry could match.
+fn apprun_block(key: &str) -> &'static [&'static str] {
+    match key {
+        "LD_LIBRARY_PATH" => &[
+            "/usr/lib/",
+            "/usr/lib/i386-linux-gnu/",
+            "/usr/lib/x86_64-linux-gnu/",
+            "/usr/lib32/",
+            "/usr/lib64/",
+            "/lib/",
+            "/lib/i386-linux-gnu/",
+            "/lib/x86_64-linux-gnu/",
+            "/lib32/",
+            "/lib64/",
+        ],
+        "PATH" => &["/usr/bin/", "/usr/sbin/", "/usr/games/", "/bin/", "/sbin/"],
+        "XDG_DATA_DIRS" => &["/usr/share/", "/usr/share"],
+        "PERLLIB" => &["/usr/share/perl5/", "/usr/lib/perl5/"],
+        "QT_PLUGIN_PATH" => &[
+            "/usr/lib/qt4/plugins/",
+            "/usr/lib/i386-linux-gnu/qt4/plugins/",
+            "/usr/lib/x86_64-linux-gnu/qt4/plugins/",
+            "/usr/lib32/qt4/plugins/",
+            "/usr/lib64/qt4/plugins/",
+            "/usr/lib/qt5/plugins/",
+            "/usr/lib/i386-linux-gnu/qt5/plugins/",
+            "/usr/lib/x86_64-linux-gnu/qt5/plugins/",
+            "/usr/lib32/qt5/plugins/",
+            "/usr/lib64/qt5/plugins/",
+        ],
+        _ => &[],
+    }
+}
+
+/// The index of the last entry of the last whole AppRun block of `key` in
+/// `entries`, under any one directory other than the root. A chan process of
+/// an older release that starts the AppImage again hands the child its own
+/// environment, so the child's search paths hold that process's block after
+/// the child's own, and in FUSE mode that block names another mount, gone
+/// once its process exits. A user does not write a whole block: every one of
+/// its entries, in AppRun's order, with its trailing separators.
+fn last_apprun_block(key: &str, entries: &[PathBuf]) -> Option<usize> {
+    let block = apprun_block(key);
+    let len = block.len();
+    if len < 2 || entries.len() < len {
+        return None;
+    }
+    (len - 1..entries.len()).rev().find(|&end| {
+        let run = &entries[end + 1 - len..=end];
+        let Some(dir) = run[0]
+            .to_str()
+            .and_then(|first| first.strip_suffix(block[0]))
+        else {
+            return false;
+        };
+        dir.len() > 1
+            && dir.starts_with('/')
+            && run.iter().zip(block).all(|(entry, suffix)| {
+                entry
+                    .to_str()
+                    .is_some_and(|entry| entry == format!("{dir}{suffix}"))
+            })
     })
 }
 
@@ -1049,6 +1118,94 @@ mod appimage_env_tests {
                 let gst = format!("{APPDIR}/usr/lib/gstreamer:/opt/qt");
                 assert_eq!(scrub(key, &gst.into()), Some(Scrub::Remove), "{key}");
             }
+        }
+
+        /// A block of the given entries under `dir`, as AppRun writes it.
+        fn block_under(dir: &str, block: &[&str]) -> String {
+            block
+                .iter()
+                .map(|entry| format!("{dir}/{entry}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+
+        const LD_BLOCK: [&str; 10] = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ];
+
+        /// What a parent of an older release hands down, which still reaches
+        /// this release's terminal scrub: a desktop a CLI started holds the
+        /// CLI's block after its own, and an own-process sibling holds its
+        /// parent's re-exec directory and block after its own. In FUSE mode
+        /// those blocks name another mount, so the own-mount rule alone kept
+        /// them; a whole AppRun block under any directory is not the user's.
+        #[test]
+        fn an_older_parents_block_is_not_the_users() {
+            let other = "/tmp/.mount_chanZZ";
+            for user in ["", "/opt/a/lib"] {
+                let want = if user.is_empty() {
+                    Scrub::Remove
+                } else {
+                    Scrub::Rewrite(user.into())
+                };
+                let cold_start = format!(
+                    "{HOST_LIB}:{}:{}:{user}",
+                    block_under(APPDIR, &LD_BLOCK),
+                    block_under(other, &LD_BLOCK)
+                );
+                let sibling = format!(
+                    "{HOST_LIB}:{}:{HOST_LIB}:{}:{user}",
+                    block_under(APPDIR, &LD_BLOCK),
+                    block_under(other, &LD_BLOCK)
+                );
+                for value in [cold_start, sibling] {
+                    assert_eq!(
+                        scrub("LD_LIBRARY_PATH", &value.clone().into()),
+                        Some(want.clone()),
+                        "{value}"
+                    );
+                }
+            }
+            let path_block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];
+            let path = format!(
+                "{}:{}:/usr/local/bin:/usr/bin",
+                block_under(APPDIR, &path_block),
+                block_under(other, &path_block)
+            );
+            assert_eq!(
+                scrub("PATH", &path.into()),
+                Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into()))
+            );
+            let xdg = format!(
+                "{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:\
+                 {other}/usr/share/:{other}/usr/share:/usr/share:"
+            );
+            assert_eq!(scrub("XDG_DATA_DIRS", &xdg.into()), Some(Scrub::Remove));
+        }
+
+        /// Only a whole block counts: a user's entry that looks like one of
+        /// its entries, or a block cut short, stays the user's.
+        #[test]
+        fn part_of_a_block_is_the_users() {
+            let partial = format!(
+                "{}:/opt/x/usr/lib/:/opt/x/usr/lib/i386-linux-gnu/:/opt/a",
+                block_under(APPDIR, &LD_BLOCK)
+            );
+            assert_eq!(
+                scrub("LD_LIBRARY_PATH", &partial.into()),
+                Some(Scrub::Rewrite(
+                    "/opt/x/usr/lib/:/opt/x/usr/lib/i386-linux-gnu/:/opt/a".into()
+                ))
+            );
         }
 
         fn apprun_path(user: &str) -> String {
