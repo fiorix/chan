@@ -216,7 +216,9 @@ export type PaneTreePane = {
   rect: PaneRect;
   /// The window's active pane.
   active: boolean;
-  /// The title of the tab the pane shows, or "Empty pane".
+  /// The title of the tab the pane shows, or "Empty pane", for the pane's
+  /// accessible name; the pane's head does not show it, since that tab's row
+  /// does.
   label: string;
   sides: PaneTreeSide[];
 };
