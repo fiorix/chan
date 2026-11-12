@@ -18,13 +18,14 @@ class ContractError(RuntimeError):
     """One missing edge in the build graph."""
 
 
-# The names of the chan binary a package links: the CLI, the `cs` alias and
-# the two openers the Linux desktop entries run by name.
-ENTRY_POINTS = ("chan", "cs", "chan-files", "chan-edit")
-# The desktop entries a desktop package installs: the app's own, and the two
-# that make it a file browser and a Markdown editor to `xdg-open`.
-DESKTOP_ENTRIES = ("chan-desktop.desktop", "chan-files.desktop", "chan-edit.desktop")
-OPENER_ENTRIES = ("chan-files.desktop", "chan-edit.desktop")
+# The names of the chan binary a package links: the CLI, the `cs` alias, the
+# two openers and the terminal the Linux desktop entries run by name.
+ENTRY_POINTS = ("chan", "cs", "chan-files", "chan-edit", "chan-term")
+# The desktop entries a desktop package installs: the app's own, the two that
+# make it a file browser and a Markdown editor to `xdg-open`, and the one that
+# makes it the terminal xdg-terminal-exec runs.
+NAME_ENTRIES = ("chan-files.desktop", "chan-edit.desktop", "chan-term.desktop")
+DESKTOP_ENTRIES = ("chan-desktop.desktop", *NAME_ENTRIES)
 
 
 def read(relative: str) -> str:
@@ -323,15 +324,16 @@ def check_desktop_contract() -> None:
     )
 
 
-def check_opener_contract() -> None:
-    """Every package links the openers, and every desktop package carries their entries.
+def check_name_contract() -> None:
+    """Every package links the binary's names, and every desktop package carries their entries.
 
-    `chan-files` and `chan-edit` are dispatched on the program name, so a
-    package that does not link them has no openers, and a desktop entry whose
-    file a package does not install never reaches `xdg-open`. NAME stands for
-    each linked name and ENTRY for each opener entry. The AppImage takes the
-    entries through Tauri's bundle files; its links come from the desktop's
-    shim installer instead, as an AppImage has no `/usr/bin`.
+    `chan-files`, `chan-edit` and `chan-term` are dispatched on the program
+    name, so a package that does not link them lacks them, and a desktop entry
+    whose file a package does not install never reaches `xdg-open` or
+    xdg-terminal-exec. NAME stands for each linked name and ENTRY for each
+    entry that runs one. The AppImage takes the entries through Tauri's bundle
+    files; its links come from the desktop's shim installer instead, as an
+    AppImage has no `/usr/bin`.
     """
     cli_names = ENTRY_POINTS[1:]
     packages = (
@@ -365,7 +367,7 @@ def check_opener_contract() -> None:
         for name in names:
             for needle in link_needles:
                 require(text, needle.replace("NAME", name), path)
-        for entry in OPENER_ENTRIES:
+        for entry in NAME_ENTRIES:
             for needle in entry_needles:
                 require(text, needle.replace("ENTRY", entry), path)
     # The AppImage carries the entries outside usr/share/applications: linuxdeploy
@@ -378,7 +380,7 @@ def check_opener_contract() -> None:
         ("appimage", "/usr/share/chan/applications"),
     ):
         files = linux.get(bundle, {}).get("files", {})
-        for entry in OPENER_ENTRIES:
+        for entry in NAME_ENTRIES:
             if files.get(f"{directory}/{entry}") != f"../../packaging/distros/shared/{entry}":
                 raise ContractError(
                     f"desktop/src-tauri/tauri.conf.json: bundle.linux.{bundle}.files must install "
@@ -1081,6 +1083,7 @@ def check_nix_contract() -> None:
         'ln -s chan "$out/bin/cs"',
         'ln -s chan "$out/bin/chan-files"',
         'ln -s chan "$out/bin/chan-edit"',
+        'ln -s chan "$out/bin/chan-term"',
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
         require(headless, needle, "packaging/nix/chan.nix")
@@ -1113,6 +1116,7 @@ def check_nix_contract() -> None:
         'ln -s chan-desktop "$out/bin/cs"',
         'ln -s chan-desktop "$out/bin/chan-files"',
         'ln -s chan-desktop "$out/bin/chan-edit"',
+        'ln -s chan-desktop "$out/bin/chan-term"',
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
         require(desktop, needle, "packaging/nix/chan-desktop.nix")
@@ -1932,7 +1936,7 @@ def main(argv: list[str]) -> int:
     for check in (
         check_make_contract,
         check_desktop_contract,
-        check_opener_contract,
+        check_name_contract,
         check_workflow_contract,
         check_gateway_trigger_contract,
         check_docker_contract,
