@@ -1165,11 +1165,12 @@ export class Terminal implements ITerminalCore {
     if (this.animationFrameId) return; // already running
     const loop = () => {
       if (!this.isDisposed && this.isOpen) {
-        // Render using WASM's native dirty tracking
+        // Render using the core's own dirty tracking
         // The render() method:
-        // 1. Calls update() once to sync state and check dirty flags
+        // 1. Begins a frame on the terminal (beginFrame), which brings its
+        //    render state up to date and lists the rows that changed
         // 2. Only redraws dirty rows when forceAll=false
-        // 3. Always calls clearDirty() at the end
+        // 3. Always ends the frame (endFrame) at the end
         this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.scrollbarOpacity);
 
         // Check for cursor movement (Phase 2: onCursorMove event)
@@ -1332,7 +1333,7 @@ export class Terminal implements ITerminalCore {
     const x = Math.floor((e.clientX - rect.left) / this.renderer.charWidth);
     const y = Math.floor((e.clientY - rect.top) / this.renderer.charHeight);
 
-    // Get hyperlink_id directly from the cell at this position
+    // Get the link the cell at this position carries
     // Must account for viewportY (scrollback position)
     const viewportRow = y; // Row in the viewport (0 to rows-1)
     let hyperlinkId = 0;
