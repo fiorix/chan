@@ -376,7 +376,16 @@
   // flips too.
   let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
   const effectiveSecretMasking = $derived(terminalSecretMaskingOn(tab));
-  $effect(() => { secretMasker?.setEnabled(effectiveSecretMasking); });
+  // The one place a change of that state reaches the masker, whatever made
+  // it: the menu's row, the launcher's, a chord, Privacy mode. The state is
+  // read before the masker is asked for, since the masker is not reactive
+  // and does not exist on the first run: an effect that reads no state then
+  // would never run again. A masker built later is handed the state as it
+  // is built (start()).
+  $effect(() => {
+    const masking = effectiveSecretMasking;
+    untrack(() => secretMasker?.setEnabled(masking));
+  });
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
   let resizeScanCols = 0;
@@ -2775,11 +2784,11 @@
   }
 
   // The masking row. The launcher's command flips the same choice through
-  // the same function and leaves the keyboard where the launcher has it.
+  // the same function and leaves the keyboard where the launcher has it;
+  // the masker follows the choice from either.
   function toggleSecretMaskingFromMenu(): void {
     closeTabMenu();
     if (!toggleTerminalSecretMasking(tab)) return;
-    secretMasker?.setEnabled(effectiveSecretMasking);
     focusTerminal();
   }
 
