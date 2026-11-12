@@ -1,6 +1,6 @@
 <section class="manual-block" id="extension-tabs">
   <h2><a class="heading-anchor" href="#extension-tabs">Your tools as tabs</a></h2>
-  <p>Extensions add applications to Chan as sandboxed tabs. An extension is a separate program serving a local web app, written in any language. Chan starts it, proxies its traffic through the existing connection, and adds an entry under <strong>Apps</strong> in the command launcher.</p>
+  <p>Extensions add applications to Chan as sandboxed tabs. An extension is a separate program serving a local web app, written in any language. Chan starts it, proxies its traffic through the existing connection, and adds an entry under <strong>New tab</strong> in the command launcher.</p>
   <p>The application runs on the machine serving Chan, including a devserver. Its tab works over the same ssh or gateway connection as the rest of the workspace.</p>
 </section>
 
@@ -16,7 +16,7 @@
 
 <section class="manual-block" id="configure">
   <h2><a class="heading-anchor" href="#configure">Configure an extension</a></h2>
-  <p>Follow the extension's installation instructions. Its declaration lives at <code>&lt;chan-home&gt;/extensions/&lt;id&gt;.toml</code>, normally under <code>~/.chan/extensions/</code>, and specifies the name, command, arguments, and host capabilities. Restart the serving Chan process after installing or changing a declaration, then open the extension from <strong>Apps</strong>.</p>
+  <p>Follow the extension's installation instructions. Its declaration lives at <code>&lt;chan-home&gt;/extensions/&lt;id&gt;.toml</code>, normally under <code>~/.chan/extensions/</code>, and specifies the name, command, arguments, and host capabilities. Restart the serving Chan process after installing or changing a declaration, then open the extension from <strong>New tab</strong> in the command launcher.</p>
   <p>Chan stops all extensions together when it shuts down. Extension supervisors share a three-second grace period, so installing more extensions does not add a separate shutdown wait for each one.</p>
   <p>Declarations run local programs as your user. The tab is sandboxed from Chan's browser state; the extension process has the same machine access as other programs you run.</p>
 </section>
