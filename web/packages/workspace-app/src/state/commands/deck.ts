@@ -3,7 +3,7 @@
 // query gets, and the option lists of choices. Pure builders over a snapshot
 // of the window, so each rule is checked without mounting the launcher. The
 // launcher component adds what needs the window's services: icons, the
-// Computers rows, and running a row.
+// Computers rows, which the shared Computers tree builds, and running a row.
 
 import { fuzzyDeckScore, rankDeckItems, type DeckItem } from "@chan/web-shared/command-deck";
 import type { SettingSpec } from "../../components/settings/settingsIndex";
@@ -57,6 +57,9 @@ export type DeckSource = {
 export interface DeckRow extends DeckItem {
   /// The branch choosing the row opens, as a whole launcher path.
   next?: string[];
+  /// The page of a row that runs when chosen, as a whole launcher path: its
+  /// other actions sit there.
+  page?: string[];
   /// What choosing the row runs.
   run?: () => unknown;
   /// How the launcher treats the run: `stay` leaves it open on the row, whose
@@ -430,6 +433,85 @@ function settingsScopeRows(
   return rows;
 }
 
+// ---- typed order -------------------------------------------------------
+//
+// A typed query ranks rows by the kind of hit first: a word that starts a
+// title word, one inside a title word, one that starts a word elsewhere, one
+// inside a word elsewhere, a title abbreviation. Among hits of one kind the
+// position and the title's length decide, which says little about which of
+// two scopes was meant: another window's `Close` is no better a hit for
+// `close` than `Close tab`. So hits of one kind are listed in scope order,
+// nearest the focus first, and the ranking decides inside a scope.
+
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+
+/// How `word` sits in `text`, both lowercased: 2 at the start of a word, 1
+/// inside one, 0 when absent.
+function wordFit(word: string, text: string): number {
+  let fit = 0;
+  for (let at = text.indexOf(word); at >= 0; at = text.indexOf(word, at + 1)) {
+    if (at === 0 || !WORD_CHARACTER.test(text[at - 1] ?? "")) return 2;
+    fit = 1;
+  }
+  return fit;
+}
+
+/// The kind of hit `words` make on a row the ranking matched, higher for a
+/// better kind, summed over the words. A word found whole nowhere matched as
+/// an abbreviation of the title, the loosest kind.
+function hitKind(row: DeckItem, words: readonly string[]): number {
+  const title = row.title.toLocaleLowerCase();
+  const elsewhere = [row.breadcrumb, row.subtitle ?? "", row.searchText]
+    .join("\n")
+    .toLocaleLowerCase();
+  let kind = 0;
+  for (const word of words) {
+    const inTitle = wordFit(word, title);
+    kind += inTitle > 0 ? 2 + inTitle : wordFit(word, elsewhere);
+  }
+  return kind;
+}
+
+/// Where a row's scope stands among hits of one kind: the focused app's rows,
+/// the pane's, the window's, the workspace's, a command of an app that is not
+/// focused, the settings, then this machine's objects.
+function scopeOrder(source: DeckSource, row: DeckRow): number {
+  switch (row.scope) {
+    case "app":
+      return row.command && commandOnActiveSurface(row.command, source.ctx) ? 0 : 4;
+    case "pane":
+      return 1;
+    case "window":
+      return 2;
+    case "workspace":
+      return 3;
+    case "settings":
+      return 5;
+    default:
+      return 6;
+  }
+}
+
+/// Ranked rows with the hits of one kind put in scope order. Rows that cannot
+/// run stay last, and the sort is stable, so inside one scope the ranking's
+/// own order stands.
+function inScopeOrder<Row extends DeckRow>(
+  source: DeckSource,
+  ranked: readonly Row[],
+  query: string,
+): Row[] {
+  const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  return ranked
+    .map((row) => ({
+      row,
+      disabled: Number(row.disabled === true),
+      kind: hitKind(row, words),
+      scope: scopeOrder(source, row),
+    }))
+    .sort((a, b) => a.disabled - b.disabled || b.kind - a.kind || a.scope - b.scope)
+    .map((placed) => placed.row);
+}
+
 // ---- lists -------------------------------------------------------------
 
 /// Opens the Settings overlay on a section and, inside it, a field.
@@ -467,10 +549,11 @@ export function browseRows(
 }
 
 /// The list a typed query shows: flat and ranked, over every scope or the
-/// active one. A choice lists its options as leaves beside itself, so one
-/// step applies a value. A setting that a command also changes is left to
-/// the command. Commands that cannot run here follow the ones that can, a
-/// few at most, each with its reason. `extra` rows are ranked with the rest.
+/// active one, with hits of one kind in scope order. A choice lists its
+/// options as leaves beside itself, so one step applies a value. A setting
+/// that a command also changes is left to the command. Commands that cannot
+/// run here follow the ones that can, a few at most, each with its reason.
+/// `extra` rows are ranked with the rest.
 export function searchRows(
   source: DeckSource,
   scope: string | null,
@@ -522,7 +605,7 @@ export function searchRows(
   }
 
   return [
-    ...(rankDeckItems(enabled, raw) as DeckRow[]),
+    ...inScopeOrder(source, rankDeckItems(enabled, raw) as DeckRow[], raw),
     ...(rankDeckItems(unavailable, raw) as DeckRow[]).slice(0, UNAVAILABLE_LIMIT),
   ];
 }

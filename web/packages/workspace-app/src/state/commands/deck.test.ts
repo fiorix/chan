@@ -3,6 +3,7 @@
 // how a toggle, a choice and a setting are listed, and what a typed query
 // adds. No component is mounted; the builders are plain functions.
 
+import { rankDeckItems } from "@chan/web-shared/command-deck";
 import { describe, expect, test, vi } from "vitest";
 import type { SettingSpec } from "../../components/settings/settingsIndex";
 import type { Command, CommandContext } from "../commands";
@@ -530,6 +531,109 @@ describe("a typed query", () => {
     expect(titles(searchRows(source(), null, "reload", openSettings, [extra]))).toEqual(
       expect.arrayContaining(["Reload window", "Reload station"]),
     );
+  });
+});
+
+describe("the order of a typed query's hits", () => {
+  const titles = (rows: readonly DeckRow[]): string[] => rows.map((row) => row.title);
+
+  /// A row of this machine's, as the launcher adds them to a typed query.
+  function machineRow(title: string, partial: Partial<DeckRow> = {}): DeckRow {
+    return { id: `computers:${title}`, title, breadcrumb: "Windows", searchText: title, scope: "computers", ...partial };
+  }
+
+  test("`close` leads with Close tab, ahead of another window's Close", () => {
+    // The ranking alone would lead with the shortest title, the other
+    // window's.
+    const others = [machineRow("Close W"), machineRow("Close Window 2")];
+    expect(titles(rankDeckItems([...searchRows(source(), null, "close", openSettings), ...others], "close"))[0]).toBe("Close W");
+    expect(titles(searchRows(source(), null, "close", openSettings, others))).toEqual([
+      "Close tab",
+      "Close pane",
+      "Close W",
+      "Close Window 2",
+    ]);
+  });
+
+  test("lists hits of one kind by scope: the focused app, pane, window, workspace, another app, settings, this machine", () => {
+    const commands = [
+      command({ id: "w.close", title: "Close window" }),
+      command({ id: "ws.close", title: "Close index", scope: "workspace", requirement: "workspace" }),
+      command({ id: "p.kill", title: "Close pane", scope: "pane", group: "Pane" }),
+      command({ id: "t.close", title: "Close tab", scope: "pane", group: "Tab" }),
+      command({ id: "e.close", title: "Close outline", scope: "app", surface: "file" }),
+      command({ id: "a.close", title: "Close find", scope: "app", surface: "terminal" }),
+    ];
+    const specs: SettingSpec[] = [{
+      id: "terminal.close", section: "terminal", label: "Close on exit", kind: "open",
+      read: () => "", available: () => true,
+    }];
+    const rows = searchRows(source({ commands, settings: specs }), null, "close", openSettings, [machineRow("Close W")]);
+    expect(titles(rows)).toEqual([
+      "Close find",
+      "Close tab",
+      "Close pane",
+      "Close window",
+      "Close index",
+      "Close outline",
+      "Close on exit",
+      "Close W",
+    ]);
+  });
+
+  test("keeps a better kind of hit ahead of a nearer scope", () => {
+    const commands = [
+      command({ id: "p.split", title: "Split right", scope: "pane", group: "Pane", keywords: ["deploy"] }),
+      command({ id: "w.redeploy", title: "Redeploy" }),
+    ];
+    const rows = searchRows(source({ commands }), null, "deploy", openSettings, [machineRow("Deploy shell")]);
+    // A title word's start, the inside of a title word, then a keyword.
+    expect(titles(rows)).toEqual(["Deploy shell", "Redeploy", "Split right"]);
+  });
+
+  test("reads the kinds of hit as the ranking does, every word counted", () => {
+    // One scope, so the ranking's own order must come through untouched.
+    const commands = [
+      command({ id: "k.5", title: "D-e-p-l-o-y" }),
+      command({ id: "k.4", title: "Beta", keywords: ["redeployment"] }),
+      command({ id: "k.3", title: "Alpha", keywords: ["deploy"] }),
+      command({ id: "k.2", title: "Redeploy" }),
+      command({ id: "k.1", title: "Deploy now" }),
+    ];
+    const src = source({ commands });
+    const rows = searchRows(src, null, "deploy", openSettings);
+    expect(titles(rows)).toEqual(["Deploy now", "Redeploy", "Alpha", "Beta", "D-e-p-l-o-y"]);
+    expect(titles(rows)).toEqual(titles(rankDeckItems(rows, "deploy") as DeckRow[]));
+
+    // Two words: both in the title beat one in the title and one in a
+    // keyword, whatever the scopes.
+    const two = [
+      command({ id: "t.close", title: "Close tab", scope: "pane", group: "Tab", keywords: ["window"] }),
+      command({ id: "w.close", title: "Close window" }),
+    ];
+    expect(titles(searchRows(source({ commands: two }), null, "close window", openSettings, [machineRow("Close Window 2")]))).toEqual([
+      "Close window",
+      "Close Window 2",
+      "Close tab",
+    ]);
+  });
+
+  test("leaves a row that cannot run after every row that can, and before the commands that cannot", () => {
+    const commands = [
+      command({ id: "t.close", title: "Close tab", scope: "pane", group: "Tab" }),
+      command({ id: "p.split", title: "Split right", scope: "pane", group: "Pane", keywords: ["close"] }),
+      command({ id: "x.close", title: "Close probe", available: () => false, unavailableReason: () => "Needs a selection" }),
+    ];
+    // A title hit that cannot run still follows a keyword hit that can.
+    const held = machineRow("Close A", { disabled: true, subtitle: "Working" });
+    const rows = searchRows(source({ commands }), null, "close", openSettings, [held, machineRow("Close Window 2")]);
+    expect(rows.map((row) => [row.title, row.disabled === true])).toEqual([
+      ["Close tab", false],
+      ["Close Window 2", false],
+      ["Split right", false],
+      ["Close A", true],
+      ["Close probe", true],
+    ]);
   });
 });
 
