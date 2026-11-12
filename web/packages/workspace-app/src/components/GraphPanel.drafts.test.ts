@@ -34,6 +34,7 @@ import {
   visibleIds,
   type CanvasProps,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { draftPath } from "../__tests__/drafts";
 import { api } from "../api/client";
 import type { DraftListEntry } from "../api/types";
@@ -113,6 +114,7 @@ function listed(rows: DraftListEntry[]): void {
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   resetDraftsForTests();
   serveGraph();
 });
@@ -130,7 +132,7 @@ afterEach(() => {
 
 /// The whole workspace's content graph, every directory expanded.
 function workspaceTab(over: Partial<GraphTab> = {}): GraphTab {
-  return graphTab({ scopeId: "workspace", expanded: { "": true, notes: true, src: true }, ...over });
+  return graphTab({ expanded: { "": true, notes: true, src: true }, ...over });
 }
 
 type Drawn = { id: string; kind: string; label?: string; group?: boolean };
@@ -392,28 +394,18 @@ describe("what the drafts leave as it was", () => {
     expect(withDrafts.focal).toEqual(without.focal);
   });
 
-  const elsewhere: Array<[string, Partial<GraphTab>]> = [
-    ["a directory's graph", { scopeId: "dir:notes", expanded: { "": true, notes: true } }],
-    ["a file's graph", { scopeId: `file:${A}` }],
-    ["a tag's lens", { scopeId: "tag:#t" }],
-    ["the filesystem graph of the workspace", { scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true, src: true } }],
-    ["the language graph", { scopeId: "workspace", mode: "language" }],
+  // The graph is the whole workspace whatever is selected, so the drafts
+  // hang from its root under every selection.
+  const selections: Array<[string, Partial<GraphTab>]> = [
+    ["a directory", { pendingSelectId: "notes", expanded: { "": true, notes: true } }],
+    ["a file", { pendingSelectId: A }],
+    ["a tag", { pendingSelectId: "#t" }],
   ];
-  test.each(elsewhere)("%s draws no draft and reads the same with drafts listed", async (_name, over) => {
-    await mountGraphPanel(GraphPanel, layout, graphTab(over));
-    const without = { ids: visibleIds(), nodes: canvas.props?.nodes.length, edges: canvas.props?.edges.length };
-    unmountGraphPanels();
-    canvas.props = null;
-
-    // The list is known to the window before the graph is shown.
+  test.each(selections)("with %s selected, the drafts are drawn as they are with the root selected", async (_name, over) => {
     listed([row("untitled"), row("sketch")]);
     await refreshDrafts();
     await mountGraphPanel(GraphPanel, layout, graphTab(over));
-
-    expect(draftNodes()).toEqual([]);
-    expect(visibleIds()).toEqual(without.ids);
-    expect(handed()?.nodes.length).toBe(without.nodes);
-    expect(handed()?.edges.length).toBe(without.edges);
+    expect(draftNodes().length, "the group and two drafts").toBe(3);
   });
 
   test("where the workspace's own node is not drawn, no draft is", async () => {

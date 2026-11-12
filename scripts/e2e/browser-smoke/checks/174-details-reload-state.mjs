@@ -70,8 +70,9 @@ export default {
 
       for (const [name, tab, host] of [
         ['browser', { k: 'b', bs: fixture, bi: 1 }, '.browser'],
-        ['semantic graph', { k: 'g', gm: 's', gs: 'workspace', gn: fixture, gi: 1 }, '.graph-tab'],
-        ['filesystem graph', { k: 'g', gm: 'f', gs: 'workspace', gn: fixture, gi: 1 }, '.graph-tab'],
+        ['graph', { k: 'g', gn: fixture, gi: 1 }, '.graph-tab'],
+        // A tab as a session saved it when a graph tab had a mode and a scope.
+        ['graph saved with a mode', { k: 'g', gm: 'f', gs: 'workspace', gn: fixture, gi: 1 }, '.graph-tab'],
         ['dashboard', { k: 'd', cs: 1, ar: false, dsi: '' }, '.dashboard'],
       ]) {
         await page.goto(layoutUrl(tab), { waitUntil: 'networkidle0' });

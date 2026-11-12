@@ -142,8 +142,6 @@ function loadedGraphTab(): GraphTab {
     kind: "graph",
     id: "graph-loaded",
     title: "workspace",
-    mode: "filesystem",
-    scopeId: "scope-1",
     depth: 2,
     expanded: { "": true, src: true },
     filters: {

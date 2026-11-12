@@ -33,11 +33,11 @@ pub struct WorkspaceSearchRequest {
     pub from: Vec<WorkspaceSelector>,
     /// Collections to query. Empty with a query means all domains; without a query, supply a `from` seed or choose a non-content domain to browse.
     pub domains: Vec<WorkspaceSearchDomain>,
-    /// Traversal depth, defaulting to 1 with exact seeds and 0 otherwise; values above 10 are clamped with a warning. Language seeds are further capped at 1.
+    /// Traversal depth, defaulting to 1 with exact seeds and 0 otherwise; values above 10 are clamped with a warning. From a file, tag, mention or contact seed it is hops of references (links, tags and mentions); from a directory seed, levels of the tree below it; a language seed reaches its files and is capped at 1. Depth 0 returns each seed alone, with its directories.
     pub depth: Option<u8>,
     /// Relationship direction, defaulting to `Auto`; each seed profile records the resolved direction.
     pub direction: WorkspaceTraversalDirection,
-    /// Relationship filter; empty means all kinds. Required root containment spines may be included even when `Contains` is omitted.
+    /// Relationship filter; empty means all kinds. It selects the relationships returned and the reference kinds a walk follows. A walk never follows `Contains` or, except from a language seed, `Language`: the tree is every node's path to the root, and a language joins files that say nothing about each other. Both are still returned between the nodes a walk reached, and required root containment spines may be included even when `Contains` is omitted.
     pub relationship_kinds: Vec<WorkspaceRelationshipKind>,
     /// Independent cap for content hits and entity matches. Missing or zero means 20; values above 100 are clamped with a warning.
     pub limit: Option<u32>,
@@ -98,7 +98,7 @@ pub enum WorkspaceSearchDomain {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceTraversalDirection {
-    /// Use outgoing relationships for file and directory seeds, and both directions for other seed kinds.
+    /// Descend from a directory seed, and follow references in both directions from every other seed kind: what a file, tag, mention or contact refers to and what refers to it.
     #[default]
     Auto,
     /// Follow relationships from source to target.
@@ -2082,19 +2082,13 @@ fn traverse_seed(
         return Ok(());
     }
     if depth == 0 {
-        if seed.profile_kind == WorkspaceSelectorKind::Contact {
-            builder.closure_for_files(
-                std::slice::from_ref(&seed.node_id),
-                &request.relationship_kinds,
-                0,
-            )?;
-        }
         return Ok(());
     }
     if seed.profile_kind == WorkspaceSelectorKind::Directory {
         return traverse_directory(builder, request, &seed, direction, depth, cancel);
     }
 
+    let walked = walked_kinds(&request.relationship_kinds, seed.profile_kind);
     let mut visited = BTreeSet::from([seed.node_id.clone()]);
     let mut frontier = vec![seed.node_id];
     for hop in 0..depth {
@@ -2105,8 +2099,7 @@ fn traverse_seed(
         #[cfg(test)]
         hop_probe(builder.workspace, hop);
         let frontier_set: BTreeSet<&str> = frontier.iter().map(String::as_str).collect();
-        let relationships =
-            builder.incident_relationships(&frontier, direction, &request.relationship_kinds)?;
+        let relationships = builder.incident_relationships(&frontier, direction, &walked)?;
         let mut next = BTreeSet::new();
         for relationship in relationships {
             let mut candidates = Vec::new();
@@ -2126,24 +2119,46 @@ fn traverse_seed(
         }
         frontier = next.into_iter().collect();
     }
-    if matches!(
-        seed.profile_kind,
-        WorkspaceSelectorKind::Tag
-            | WorkspaceSelectorKind::Mention
-            | WorkspaceSelectorKind::Contact
-    ) {
-        let files: Vec<String> = visited
-            .iter()
-            .filter(|id| {
-                builder.catalog.files.contains(*id)
-                    || builder.catalog.contact_by_path.contains_key(*id)
-            })
-            .cloned()
-            .collect();
-        check_cancel(cancel)?;
-        builder.closure_for_files(&files, &request.relationship_kinds, depth)?;
-    }
+    // Every file a walk reached comes with its tags, mentions and language,
+    // whatever kind of seed the walk started from.
+    let files: Vec<String> = visited
+        .iter()
+        .filter(|id| {
+            builder.catalog.files.contains(*id) || builder.catalog.contact_by_path.contains_key(*id)
+        })
+        .cloned()
+        .collect();
+    check_cancel(cancel)?;
+    builder.closure_for_files(&files, &request.relationship_kinds, depth)?;
     Ok(())
+}
+
+/// The relationship kinds a walk from a seed of `kind` follows, out of the
+/// requested ones. A walk follows references: links, tags and mentions.
+/// It does not follow `Contains`, which is every node's path to the root
+/// and is returned as its spine, nor `Language`, which joins every file of
+/// a language and would reach files that say nothing about each other. A
+/// language seed is the exception: its one hop is to its files.
+fn walked_kinds(
+    requested: &[WorkspaceRelationshipKind],
+    kind: WorkspaceSelectorKind,
+) -> Vec<WorkspaceRelationshipKind> {
+    requested
+        .iter()
+        .copied()
+        .filter(|relationship| {
+            if kind == WorkspaceSelectorKind::Language {
+                *relationship == WorkspaceRelationshipKind::Language
+            } else {
+                matches!(
+                    relationship,
+                    WorkspaceRelationshipKind::Link
+                        | WorkspaceRelationshipKind::Tag
+                        | WorkspaceRelationshipKind::Mention
+                )
+            }
+        })
+        .collect()
 }
 
 fn traverse_directory(
@@ -2193,9 +2208,9 @@ fn effective_direction(
         return requested;
     }
     match kind {
-        WorkspaceSelectorKind::File => WorkspaceTraversalDirection::Out,
         WorkspaceSelectorKind::Directory => WorkspaceTraversalDirection::Out,
-        WorkspaceSelectorKind::Tag
+        WorkspaceSelectorKind::File
+        | WorkspaceSelectorKind::Tag
         | WorkspaceSelectorKind::Mention
         | WorkspaceSelectorKind::Contact
         | WorkspaceSelectorKind::Language => WorkspaceTraversalDirection::Both,

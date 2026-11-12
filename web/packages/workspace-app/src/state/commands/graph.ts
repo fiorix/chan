@@ -1,8 +1,9 @@
 // Graph surface commands: available when a graph tab is the active
 // surface. Net-new actions mutate the active GraphTab directly (its
 // fields are $state, so the graph re-renders reactively, matching the
-// pane's own menu). Reload is the exception: the fetch lives inside
-// GraphPanel, so it arrives there as a chan:command. See
+// pane's own menu). Reload and the depth are the exceptions: the fetch
+// and the selection the depth belongs to live inside GraphPanel, so they
+// arrive there as a chan:command. See
 // state/commands.ts for the Command shape and the onSurface helper.
 
 import { registerCommands, dispatchChanCommand, onSurface } from "../commands";
@@ -70,10 +71,9 @@ registerCommands([
     requirement: "workspace",
     keywords: ["depth", "expand", "more", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
-    // The panel's own clamp effect caps depth to the scope's ceiling.
-    run: onGraph((tab) => {
-      tab.depth = tab.depth + 1;
-    }),
+    // The depth is the selected node's (levels below a directory, hops
+    // from any other node), so the panel that knows the selection moves it.
+    run: () => dispatchChanCommand("app.graph.depth.increase"),
   },
   {
     id: "app.graph.depth.decrease",
@@ -82,9 +82,7 @@ registerCommands([
     requirement: "workspace",
     keywords: ["depth", "collapse", "less", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
-    run: onGraph((tab) => {
-      tab.depth = Math.max(0, tab.depth - 1);
-    }),
+    run: () => dispatchChanCommand("app.graph.depth.decrease"),
   },
   {
     id: "app.graph.filter.tag",

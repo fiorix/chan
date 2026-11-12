@@ -31,8 +31,11 @@ import {
   unmountGraphPanels,
   visibleIds,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
+import { openedForPath } from "../graph/selectionView";
 import { layout, type GraphTab } from "../state/tabs.svelte";
 
 installGraphDom();
@@ -57,8 +60,10 @@ function serveGraph(): void {
       g.file("notes/deep/d.md"),
       g.file("src/main.rs"),
       g.tag("t"),
+      g.language("rust"),
     ],
     edges: [
+      g.edge(MAIN, "language:rust", "language"),
       g.edge("", NOTES, "contains"),
       g.edge("", SRC, "contains"),
       g.edge(NOTES, DEEP, "contains"),
@@ -102,6 +107,7 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   serveGraph();
 });
 
@@ -110,6 +116,13 @@ afterEach(() => {
   unmountGraphPanels();
   timers.release();
 });
+
+/// Move the depth slider to `value`, as a drag ends on it.
+async function slideTo(slider: HTMLInputElement, value: number): Promise<void> {
+  slider.value = String(value);
+  slider.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+}
 
 async function depthRow(tab: GraphTab): Promise<HTMLElement> {
   openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
@@ -121,7 +134,7 @@ async function depthRow(tab: GraphTab): Promise<HTMLElement> {
 
 describe("the depth slider", () => {
   test("reaches the workspace's deepest level and is live", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     const row = await depthRow(tab);
     const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
 
@@ -131,20 +144,47 @@ describe("the depth slider", () => {
     expect(row.querySelector(".depth-cue")).toBeNull();
   });
 
-  test("on a scope depth 1 already exhausts, is disabled and says so", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "language:rust" }));
+  test("on a language, which always shows one hop, is disabled and says so", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ pendingSelectId: "language:rust" }),
+    );
+    expect(canvas.props?.selectedId).toBe("language:rust");
     const row = await depthRow(tab);
 
     expect(row.classList.contains("shallow")).toBe(true);
-    expect(row.getAttribute("title")).toContain("Scope is shallow");
+    expect(row.getAttribute("title")).toContain("Nothing further");
     expect(row.querySelector<HTMLInputElement>("input[type='range']")!.disabled).toBe(true);
     expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("1 [max]");
+  });
+
+  test("is the selected node's: levels below a directory, hops from a file", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { "": true, notes: true } }),
+    );
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    expect([slider.min, slider.value, slider.max], "nothing selected reads as the root").toEqual(["1", "1", "3"]);
+
+    canvas.props!.onSelect(NOTES);
+    await settle(2);
+    expect([slider.min, slider.value, slider.max], "notes is opened one level of its two").toEqual(["0", "1", "2"]);
+
+    canvas.props!.onSelect(SRC);
+    await settle(2);
+    expect([slider.min, slider.value, slider.max], "src is closed").toEqual(["0", "0", "1"]);
+
+    canvas.props!.onSelect(A);
+    await settle(2);
+    expect([slider.min, slider.value], "a file's depth is hops, from one").toEqual(["1", "1"]);
   });
 });
 
 describe("the workspace tree", () => {
   test("shows a directory's files only while it and its ancestors are expanded", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace", expanded: { "": true } }));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
     let ids = visibleIds();
     expect(ids).toEqual(expect.arrayContaining(["", NOTES, SRC]));
     expect(ids).not.toContain(A);
@@ -153,7 +193,7 @@ describe("the workspace tree", () => {
     await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true, notes: true } }),
+      graphTab({ expanded: { "": true, notes: true } }),
     );
     ids = visibleIds();
     expect(ids).toEqual(expect.arrayContaining([A, DEEP]));
@@ -165,7 +205,7 @@ describe("the workspace tree", () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+      graphTab({ expanded: { "": true } }),
     );
     canvas.props!.onSelect(NOTES);
     await settle(2);
@@ -186,114 +226,99 @@ describe("the workspace tree", () => {
     expect(visibleIds()).not.toContain(A);
   });
 
-  test("a depth change seeds the expansion from the selected directory", async () => {
+  test("the depth on a selected directory opens that many levels below it, and only there", async () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+      graphTab({ expanded: { "": true, src: true } }),
     );
     canvas.props!.onSelect(NOTES);
     await settle(2);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    const streams = graphServer.graphStreamCalls;
 
-    tab.depth = 2;
-    await settle();
+    await slideTo(slider, 2);
     expect(tab.expanded.notes).toBe(true);
     expect(tab.expanded["notes/deep"], "one level below the selection").toBe(true);
-    expect(tab.expanded.src, "not a directory under the selection").toBeUndefined();
-    expect(visibleIds()).toContain(D);
+    expect(tab.expanded.src, "another branch stays as it was").toBe(true);
+    expect(visibleIds()).toEqual(expect.arrayContaining([D, MAIN]));
+    expect(slider.value).toBe("2");
+
+    await slideTo(slider, 0);
+    expect(tab.expanded.notes, "zero closes the directory").toBeUndefined();
+    expect(tab.expanded["notes/deep"]).toBeUndefined();
+    expect(visibleIds()).not.toContain(A);
+    expect(visibleIds(), "the directory itself stays").toContain(NOTES);
+    expect(graphServer.graphStreamCalls, "the tree was already loaded").toBe(streams);
+  });
+
+  test("the depth reads a double-click on the selected directory", async () => {
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { "": true } }),
+    );
+    canvas.props!.onSelect(NOTES);
+    await settle(2);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.value).toBe("0");
+
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(slider.value).toBe("1");
   });
 });
 
-describe("a directory scope", () => {
-  test("opens deep enough to show its shallowest file", async () => {
+describe("a graph opened on a directory", () => {
+  /// The tab "Graph from here" on notes/ builds: that directory selected, by
+  /// its path, and opened.
+  const onNotes = (over: Partial<GraphTab> = {}): GraphTab =>
+    graphTab({ pendingSelectId: "notes", expanded: openedForPath("notes"), ...over });
+
+  test("opens down to its shallowest file", async () => {
     // Without notes/a.md the shallowest file under notes is two levels down.
     dropNotesA();
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, onNotes());
 
-    expect(tab.depth).toBe(2);
+    expect(canvas.props?.selectedId).toBe(NOTES);
+    expect(tab.expanded["notes/deep"]).toBe(true);
+    expect(visibleIds()).toContain(D);
   });
 
-  test("stays at depth 1 when a file sits right under it", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
-    expect(tab.depth).toBe(1);
+  test("stays one level deep when a file sits right under it", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, onNotes());
+    expect(tab.expanded["notes/deep"]).toBeUndefined();
+    expect(visibleIds()).toContain(A);
+    expect(visibleIds()).not.toContain(D);
   });
 
-  test("keeps the depth a user expansion below it implies", async () => {
+  test("leaves the tree of a tab that already showed a selection as it is", async () => {
+    // A restored or moved tab carries the selection it had.
     dropNotesA();
-    const { tab } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "dir:notes", expanded: { "": true, notes: true, "notes/deep": true } }),
-    );
-    expect(tab.depth).toBe(1);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, onNotes({ selectedNodeId: NOTES }));
+    expect(tab.expanded["notes/deep"]).toBeUndefined();
+    expect(visibleIds()).not.toContain(D);
   });
 
-  test("raises the depth on arrival only, not on a later depth change", async () => {
+  test("opens it down once: a depth lowered afterwards stays", async () => {
     dropNotesA();
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
-    expect(tab.depth).toBe(2);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, onNotes());
+    expect(tab.expanded["notes/deep"]).toBe(true);
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
 
-    tab.depth = 1;
+    await slideTo(slider, 1);
+    expect(tab.expanded["notes/deep"]).toBeUndefined();
+    graphReloadSignal.paths = ["notes/deep/d.md"];
+    graphReloadSignal.nonce += 1;
+    await new Promise((r) => setTimeout(r, 300));
     await settle();
-    expect(tab.depth).toBe(1);
-  });
-});
-
-describe("the filesystem graph", () => {
-  test("shows what the expanded directories hold, and hides a collapsed one's", async () => {
-    const { tab } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true } }),
-    );
-    expect(visibleIds()).toEqual(expect.arrayContaining(["", "notes", "src", "notes/a.md", "notes/deep"]));
-    expect(visibleIds()).not.toContain("src/main.rs");
-
-    // Collapse notes with a double-click: its children stay loaded, and hidden.
-    canvas.props!.onSelect("notes");
-    await settle(2);
-    canvas.props!.onSetAsScope();
-    await settle();
-    expect(tab.expanded.notes).toBeUndefined();
-    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "still loaded").toBe(true);
-    expect(visibleIds()).not.toContain("notes/a.md");
-    expect(visibleIds()).toContain("notes");
-  });
-
-  test("expanding a directory fetches its children and asks the canvas to fit them", async () => {
-    const { tab } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true } }),
-    );
-    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "not loaded yet").toBe(false);
-
-    canvas.props!.onSelect("notes");
-    await settle(2);
-    canvas.props!.onSetAsScope();
-    await settle();
-
-    expect(tab.expanded.notes).toBe(true);
-    expect(graphServer.fsGraphCalls.some((c) => c.path === "notes" && c.depth === 1)).toBe(true);
-    expect(visibleIds()).toEqual(expect.arrayContaining(["notes/a.md", "notes/deep"]));
-    expect(canvas.props!.expansionFitRequest?.ids).toEqual(
-      expect.arrayContaining(["notes", "", "notes/a.md", "notes/deep"]),
-    );
-  });
-
-  test("a file scope shows everything it loaded", async () => {
-    await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "file:notes/a.md", mode: "filesystem" }),
-    );
-    expect(visibleIds().length).toBe(canvas.props!.nodes.length);
+    expect(tab.expanded["notes/deep"], "a reload does not open it again").toBeUndefined();
   });
 });
 
 describe("the tab menu", () => {
   test("is the scope row, the depth slider, the filters and Close, each group behind a separator", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
     await settle(2);
     const bubble = document.body.querySelector(".tab-menu-bubble")!;

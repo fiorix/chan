@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// Graph tabs stay mounted while hidden. A Pane is mounted with two graph tabs
-// over a fixed graph and GraphCanvas replaced by a stand-in; the assertions
-// read the panels' DOM, the requests they make and the props each hands its
-// canvas.
+// Graph tabs stay mounted while hidden, and draw one graph between them: the
+// window's shared one. A Pane is mounted with two graph tabs over a fixed
+// graph and GraphCanvas replaced by a stand-in; the assertions read the
+// panels' DOM, the requests made and the props each panel hands its canvas.
 
 import { mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -22,6 +22,7 @@ import Pane from "./Pane.svelte";
 import graphPanelSource from "./GraphPanel.svelte?raw";
 import {
   canvas,
+  fsg,
   g,
   GRAPH_PANE,
   graphServer,
@@ -30,6 +31,7 @@ import {
   resetGraphServer,
   settle,
 } from "../__tests__/graphPanel";
+import { invalidateGraph, noteGraphChanged } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -43,6 +45,7 @@ const mounted: Array<Record<string, unknown>> = [];
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   graphServer.view = {
     nodes: [g.dir(""), g.dir("notes"), g.file("notes/a.md")],
     edges: [g.edge("", "directory:notes", "contains"), g.edge("directory:notes", "notes/a.md", "contains")],
@@ -64,8 +67,8 @@ async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement
       kind: "leaf",
       id: GRAPH_PANE,
       tabs: [
-        graphTab({ id: "one", scopeId: "workspace" }),
-        graphTab({ id: "two", scopeId: "dir:notes" }),
+        graphTab({ id: "one" }),
+        graphTab({ id: "two", pendingSelectId: "notes" }),
       ],
       activeTabId: "one",
     },
@@ -114,37 +117,132 @@ describe("graph tabs in a pane", () => {
     expect(panels()[1], "the first tab keeps its panel after moving").toBe(one);
   });
 
-  test("a hidden tab loads when first shown, not before", async () => {
+  test("a hidden tab asks for its spine when first shown, not before, and for no second graph", async () => {
     const { pane } = await renderPane();
-    expect(graphServer.graphStreamCalls, "only the shown tab loaded").toBe(1);
+    const spines = () => graphServer.fsGraphCalls.length;
+    expect(graphServer.graphStreamCalls, "the window's graph, asked for once").toBe(1);
+    expect(spines(), "only the shown tab's spine").toBe(1);
+    expect(canvas.all[1]!.nodes, "the hidden tab draws nothing yet").toHaveLength(0);
 
     pane.activeTabId = "two";
     await settle();
-    expect(graphServer.graphStreamCalls).toBe(2);
+    expect(graphServer.graphStreamCalls, "the second tab draws the graph the window has").toBe(1);
+    expect(spines()).toBe(2);
 
     pane.activeTabId = "one";
     await settle();
-    expect(graphServer.graphStreamCalls, "coming back needs no reload").toBe(2);
+    expect(graphServer.graphStreamCalls).toBe(1);
+    expect(spines(), "coming back needs no reload").toBe(2);
   });
 
-  test("an edit while hidden reloads the tab when it is shown again", async () => {
+  test("two tabs draw one copy of the graph", async () => {
+    // A spine that holds nothing the graph lacks adds nothing of its own.
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes")],
+      edges: [fsg.contains("", "notes")],
+    };
+    const { pane } = await renderPane();
+    pane.activeTabId = "two";
+    await settle();
+    const [one, two] = canvas.all;
+
+    expect(one!.nodes.map((n) => n.id)).toEqual(["", "directory:notes", "notes/a.md"]);
+    expect(two!.nodes, "the same array of the same nodes").toBe(one!.nodes);
+    expect(two!.edges).toBe(one!.edges);
+  });
+
+  test("a tab whose spine holds more draws it over the same shared nodes", async () => {
+    // docs/ is on disk and not in the graph the index answered.
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("docs")],
+      edges: [fsg.contains("", "notes"), fsg.contains("", "docs")],
+    };
+    const { pane } = await renderPane();
+    pane.activeTabId = "two";
+    await settle();
+    const [one, two] = canvas.all;
+
+    expect(two!.nodes.map((n) => n.id)).toEqual(["", "directory:notes", "notes/a.md", "directory:docs"]);
+    for (const id of ["", "directory:notes", "notes/a.md"]) {
+      const find = (c: typeof one) => c!.nodes.find((n) => n.id === id);
+      expect(find(two), `${id || "the root"} is one object in both tabs`).toBe(find(one));
+    }
+  });
+
+  test("an edit reloads the graph once for the window; a hidden tab takes it when shown", async () => {
     const { pane } = await renderPane();
     pane.activeTabId = "two";
     await settle();
     pane.activeTabId = "one";
     await settle();
-    const before = graphServer.graphStreamCalls;
+    const [one, two] = canvas.all;
+    const streams = graphServer.graphStreamCalls;
+    const spines = graphServer.fsGraphCalls.length;
+    const ids = (c: typeof one) => c!.nodes.map((n) => n.id);
 
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/new.md")],
+      edges: [...graphServer.view.edges, g.edge("directory:notes", "notes/new.md", "contains")],
+    };
+    // The store's two cues for a change: the shared graph's quiet window,
+    // and the signal the graph tabs take.
+    noteGraphChanged(() => true);
     graphReloadSignal.paths = ["notes/new.md"];
     graphReloadSignal.nonce += 1;
     await settle();
     await new Promise((r) => setTimeout(r, 300));
-    const whileHidden = graphServer.graphStreamCalls;
+    await settle();
+    expect(graphServer.graphStreamCalls - streams, "one stream, whatever the tabs").toBe(1);
+    expect(graphServer.fsGraphCalls.length - spines, "the shown tab's spine; the hidden one waits").toBe(1);
+    expect(ids(one)).toContain("notes/new.md");
+    expect(ids(two), "the hidden tab keeps what it drew").not.toContain("notes/new.md");
 
     pane.activeTabId = "two";
     await settle();
-    expect(whileHidden - before, "the shown tab reloads; the hidden one waits").toBe(1);
-    expect(graphServer.graphStreamCalls - whileHidden, "the hidden one reloads on show").toBe(1);
+    expect(graphServer.graphStreamCalls - streams, "showing it asks for no graph").toBe(1);
+    expect(graphServer.fsGraphCalls.length - spines, "and for its own spine").toBe(2);
+    expect(ids(two)).toContain("notes/new.md");
+    expect(two!.nodes, "the window's one copy again").toBe(one!.nodes);
+  });
+
+  test("a hidden tab lets go of the graph once the window's has moved on, and keeps what it draws", async () => {
+    // Tab two has the root's level drawn and `notes` selected; `notes` is
+    // closed, so what it draws leaves out the files below it.
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/b.md"), g.tag("t")],
+      edges: [
+        ...graphServer.view.edges,
+        g.edge("directory:notes", "notes/b.md", "contains"),
+        g.edge("notes/a.md", "#t", "tag"),
+      ],
+    };
+    const { pane } = await renderPane();
+    pane.activeTabId = "two";
+    await settle();
+    pane.activeTabId = "one";
+    await settle();
+    const [one, two] = canvas.all;
+    const first = two!.nodes;
+    const drawn = [...two!.visibleNodeIds].sort();
+    expect(first, "hidden under the graph it took: the window's own arrays").toBe(one!.nodes);
+    expect(drawn).toEqual(["", "directory:notes"]);
+
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/new.md")],
+      edges: [...graphServer.view.edges, g.edge("directory:notes", "notes/new.md", "contains")],
+    };
+    noteGraphChanged(() => true);
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(one!.nodes.map((n) => n.id)).toContain("notes/new.md");
+    expect(two!.nodes, "the view it took is let go").not.toBe(first);
+    expect(two!.nodes.map((n) => n.id), "the part it draws from, and no more").toEqual(["", "directory:notes"]);
+    expect([...two!.visibleNodeIds].sort(), "and it draws what it drew").toEqual(drawn);
+
+    pane.activeTabId = "two";
+    await settle();
+    expect(two!.nodes, "shown again, it draws the window's graph").toBe(one!.nodes);
+    expect([...two!.visibleNodeIds].sort()).toEqual(drawn);
   });
 
   test("a canvas opens the first time its tab is shown and pauses while hidden", async () => {

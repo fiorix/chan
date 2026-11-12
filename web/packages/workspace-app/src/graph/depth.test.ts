@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { FS_GRAPH_DEPTH_MAX, graphDepthCap, shallowestFileDepth } from "./depth";
-import type { FsGraphNode, GraphViewNode } from "../api/types";
+import { shallowestFileDepth } from "./depth";
+import type { GraphViewNode } from "../api/types";
 
 function file(path: string): Extract<GraphViewNode, { kind: "file" }> {
   return { kind: "file", id: path, label: path, path };
@@ -13,107 +13,6 @@ function folder(path: string): Extract<GraphViewNode, { kind: "folder" }> {
 function media(path: string): Extract<GraphViewNode, { kind: "media" }> {
   return { kind: "media", id: path, label: path, path };
 }
-
-function fsNode(path: string): Pick<FsGraphNode, "path"> {
-  return { path };
-}
-
-describe("graphDepthCap", () => {
-  it("pins file scopes to depth 1", () => {
-    expect(graphDepthCap({ scope: { kind: "file" }, nodes: [] })).toBe(1);
-  });
-
-  it("derives directory depth from loaded content graph file paths", () => {
-    expect(
-      graphDepthCap({
-        scope: { kind: "dir", path: "notes" },
-        nodes: [
-          file("notes/today.md"),
-          file("notes/projects/chan/todo.md"),
-          file("outside/deep/file.md"),
-        ],
-      }),
-    ).toBe(3);
-  });
-
-  it("derives directory depth from the loaded fs graph and honors truncation", () => {
-    expect(
-      graphDepthCap({
-        scope: { kind: "dir", path: "notes" },
-        nodes: [],
-        fsGraph: {
-          truncated: false,
-          nodes: [
-            fsNode("notes"),
-            fsNode("notes/projects"),
-            fsNode("notes/projects/chan/todo.md"),
-          ],
-        },
-      }),
-    ).toBe(3);
-    expect(
-      graphDepthCap({
-        scope: { kind: "dir", path: "notes" },
-        nodes: [],
-        fsGraph: { truncated: true, nodes: [fsNode("notes/projects")] },
-      }),
-    ).toBe(FS_GRAPH_DEPTH_MAX);
-  });
-
-  it("uses the workspace fs graph probe for workspace scopes", () => {
-    expect(
-      graphDepthCap({
-        scope: { kind: "workspace" },
-        nodes: [],
-        fsGraph: {
-          truncated: false,
-          nodes: [fsNode("a.md"), fsNode("notes/projects/chan/todo.md")],
-        },
-      }),
-    ).toBe(4);
-    expect(
-      graphDepthCap({
-        scope: { kind: "workspace" },
-        nodes: [],
-        fsGraph: { truncated: true, nodes: [fsNode("notes/projects")] },
-      }),
-    ).toBe(FS_GRAPH_DEPTH_MAX);
-  });
-
-  it("keeps tag scopes on the hard max", () => {
-    expect(graphDepthCap({ scope: { kind: "tag" }, nodes: [] })).toBe(10);
-  });
-
-  // The depth slider can snap back to 1 when the cap is derived
-  // from the fs-graph LOADED AT THE CURRENT DEPTH. At depth 1 only
-  // the depth-1 layer is loaded, so the cap collapses to 1 even
-  // when deeper structure exists. These cases prove the cap depends
-  // on WHICH fs-graph is fed in: a shallow loaded slice caps at 1,
-  // but a full-depth probe of the same directory exposes the real
-  // reachable depth. GraphPanel feeds `graphDepthCap` the
-  // full-depth `dirDepthProbe` for a dir scope.
-  it("caps a dir at 1 from a depth-1 loaded slice but at the true depth from a full-depth probe", () => {
-    const dir = { kind: "dir", path: "journals" } as const;
-    // Slice loaded at depth 1: only the directory's depth-1 child dir.
-    const shallowSlice = {
-      truncated: false,
-      nodes: [fsNode("journals"), fsNode("journals/year-1")],
-    };
-    expect(graphDepthCap({ scope: dir, nodes: [], fsGraph: shallowSlice })).toBe(1);
-    // Full-depth probe of the same dir reaches 3 levels deep
-    // (relative depth 3 from `journals`).
-    const fullProbe = {
-      truncated: false,
-      nodes: [
-        fsNode("journals"),
-        fsNode("journals/year-1"),
-        fsNode("journals/year-1/month-1"),
-        fsNode("journals/year-1/month-1/entry.md"),
-      ],
-    };
-    expect(graphDepthCap({ scope: dir, nodes: [], fsGraph: fullProbe })).toBe(3);
-  });
-});
 
 describe("shallowestFileDepth", () => {
   it("is 1 when the directory holds files among its immediate children", () => {

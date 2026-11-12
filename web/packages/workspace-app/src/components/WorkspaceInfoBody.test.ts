@@ -246,12 +246,12 @@ describe("the languages report", () => {
     expect(api.reportPrefix).not.toHaveBeenCalled();
   });
 
-  test("each language opens the graph scoped to it, through the host when it asks", async () => {
+  test("each language opens the graph on it, through the host when it asks", async () => {
     h.report = prefix;
     const first = await render();
     const rows = [...first.querySelectorAll<HTMLButtonElement>("button.lang-name")];
     expect(rows.map((b) => b.textContent?.trim())).toEqual(["Rust", "TOML"]);
-    expect(rows[0]!.title).toBe("open in graph (scoped to this language)");
+    expect(rows[0]!.title).toBe("open in graph");
     rows[1]!.click();
     expect(openGraphForLanguage).toHaveBeenCalledWith("TOML");
 

@@ -715,13 +715,18 @@ export type GraphViewEdgeKind =
   | "mention"
   | "contains"
   | "language"
-  | "date";
+  | "date"
+  /// A symlink to its target, and two names of one hardlinked file: facts
+  /// of the tree, where the server's filesystem walk reaches.
+  | "symlink"
+  | "hardlink";
 
 export type GraphViewEdge = {
   source: string;
   target: string;
   kind: GraphViewEdgeKind;
-  /// Only meaningful for `link` edges; missing/false for the others.
+  /// A `link` to a missing file, or a `symlink` whose target is missing;
+  /// missing/false for the others.
   broken?: boolean;
   rank?: number;
   files?: number;

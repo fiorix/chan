@@ -299,7 +299,7 @@ describe("graphs from the browser", () => {
       .click();
     await settle();
     const graph = (layout.nodes[PANE] as LeafNode).tabs.find((t) => t.kind === "graph");
-    expect(graph).toMatchObject({ mode: "semantic", scopeId: "workspace" });
+    expect(graph, "the graph, on the workspace's own node").toMatchObject({ kind: "graph", pendingSelectId: "" });
   });
 
   test("a window without a workspace offers no graph from the inspector or the tree", async () => {

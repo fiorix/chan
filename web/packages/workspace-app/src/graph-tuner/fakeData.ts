@@ -2,12 +2,16 @@
 //
 // Mirrors what GraphCanvas.svelte actually consumes in production (the
 // RenderedNode / RenderedEdge shapes), NOT the raw server GraphView.
-// GraphPanel maps `media`->file, `directory`->folder and drops `date`
-// before handing the graph to GraphCanvas, so this generator emits the
-// post-map kinds directly: file (doc / source / binary / media by
-// extension, plus `contact`), tag, mention, language, folder (incl. the
-// id:"" workspace root); edges are link / tag / mention / contains /
-// language.
+// The graph tab maps `media`->file, `directory`->folder and drops `date`
+// (`graph/sharedGraph`) before the graph reaches GraphCanvas, so this
+// generator emits the post-map kinds directly: file (doc / source /
+// binary / media by extension, plus `contact`), tag, mention, language,
+// folder (incl. the id:"" workspace root); edges are link / tag /
+// mention / contains /
+// language / symlink / hardlink. Ids follow the server's schemes (a file's
+// is its path, a directory's `directory:<path>`, a tag's `#name`, a
+// mention's `@@name`), so the rules the Graph tab runs
+// (../graph/selectionView.ts) run on this graph unchanged.
 //
 // The filesystem hierarchy is fixed and legible (so the spine reads the
 // same every reload); the seed only varies the link / tag / mention
@@ -35,6 +39,9 @@ export type GraphSpec = {
   tagsPerDoc: number;
   /// Average mentions attached per document.
   mentionsPerDoc: number;
+  /// 1 puts every file at the workspace root with no directories, the
+  /// shape of a flat notes folder; 0 keeps the directory tree.
+  flat: number;
 };
 
 export const defaultSpec: GraphSpec = {
@@ -42,6 +49,7 @@ export const defaultSpec: GraphSpec = {
   linkDensity: 0.05,
   tagsPerDoc: 1.4,
   mentionsPerDoc: 0.5,
+  flat: 0,
 };
 
 function mulberry32(seed: number): () => number {
@@ -65,8 +73,17 @@ const DIRS = ["notes", "notes/daily", "projects", "projects/chan", "assets", ".D
 
 /// Files by path. `contact: true` sets node_kind so classifyFile routes
 /// them to the contact bucket; `missing: true` marks a ghost (broken
-/// wiki-link target) so the dashed-ghost styling is exercised.
-type FileSpec = { path: string; contact?: boolean; missing?: boolean };
+/// wiki-link target) so the dashed-ghost styling is exercised. `symlink`
+/// names the file this one points at, and `hardlink` the file this one is
+/// another name of; neither is a document of its own, so the seeded wiring
+/// leaves them out.
+type FileSpec = {
+  path: string;
+  contact?: boolean;
+  missing?: boolean;
+  symlink?: string;
+  hardlink?: string;
+};
 const FILES: FileSpec[] = [
   // root-level docs
   { path: "README.md" },
@@ -98,10 +115,18 @@ const FILES: FileSpec[] = [
   { path: ".Drafts/draft-2.md" },
   // ghost target of a broken wiki link (indexed-then-vanished)
   { path: "notes/archived.md", missing: true },
+  // symlinks (one to a missing target) and a second name of one file
+  { path: "notes/latest.md", symlink: "notes/daily/2026-06-03.md" },
+  { path: "projects/chan/overview.md", symlink: "README.md" },
+  { path: "projects/dangling.md", symlink: "notes/archived.md" },
+  { path: "assets/logo-copy.png", hardlink: "assets/logo.png" },
 ];
 
 const TAG_NAMES = ["idea", "todo", "research", "wip", "personal", "ship"];
-const MENTION_NAMES = ["alice", "bob", "carol", "dave"];
+/// Handles with no contact file: each is a mention node of its own. A
+/// handle that resolves to a contact has no such node; its mention edges
+/// point at the contact's file, as the server rewrites them.
+const MENTION_NAMES = ["carol", "dave", "erin", "frank"];
 
 /// Language nodes + the file extensions they own. Language nodes are
 /// non-hierarchical (depth -1), so they float on the center force and
@@ -113,15 +138,54 @@ const LANGUAGES: { name: string; label: string; exts: string[] }[] = [
 ];
 
 const dirId = (path: string) => `directory:${path}`;
-const fileId = (path: string) => `file:${path}`;
+const fileId = (path: string) => path;
 const parentDirOf = (path: string): string => {
   const dir = parentDir(path);
   return dir === "" ? "" : dirId(dir);
 };
 const isDoc = (path: string) => /\.(md|txt)$/i.test(path);
 
+/// The directories and files a spec lays out, and where a file of the fixed
+/// tree sits in that layout: at its own path, or at the root when flat.
+function layoutFor(spec: GraphSpec): {
+  dirs: string[];
+  files: FileSpec[];
+  at: (path: string) => string;
+} {
+  if (!spec.flat) return { dirs: DIRS, files: FILES, at: (path) => path };
+  return {
+    dirs: [],
+    files: FILES.map((f) => ({ ...f, path: basename(f.path) })),
+    at: basename,
+  };
+}
+
+/// What each scope kind of the tuner can be pointed at: directory and file
+/// paths, tag and mention node ids, contact file paths, language names.
+export function tunerSubjects(spec: GraphSpec = defaultSpec): {
+  dir: string[];
+  file: string[];
+  tag: string[];
+  mention: string[];
+  contact: string[];
+  language: string[];
+} {
+  const { dirs, files } = layoutFor(spec);
+  return {
+    dir: dirs,
+    file: files
+      .filter((f) => !f.missing && !f.contact && !f.symlink && isDoc(f.path))
+      .map((f) => f.path),
+    tag: TAG_NAMES.map((name) => `#${name}`),
+    mention: MENTION_NAMES.map((name) => `@@${name}`),
+    contact: files.filter((f) => f.contact).map((f) => f.path),
+    language: LANGUAGES.map((l) => l.name),
+  };
+}
+
 export function makeTunerGraph(spec: GraphSpec = defaultSpec): TunerGraph {
   const rng = mulberry32(spec.seed);
+  const { dirs: DIRS, files: FILES, at } = layoutFor(spec);
   const nodes: TunerNode[] = [];
   const edges: TunerEdge[] = [];
 
@@ -162,27 +226,48 @@ export function makeTunerGraph(spec: GraphSpec = defaultSpec): TunerGraph {
     );
     if (f.missing) continue;
     edges.push({ source: parentDirOf(f.path), target: fileId(f.path), kind: "contains" });
+    if (f.symlink || f.hardlink) continue;
     if (isDoc(f.path)) docIds.push(fileId(f.path));
+  }
+
+  // A symlink's edge to its target, dashed when the target is missing, and
+  // the edge between two names of one file.
+  const missing = new Set(FILES.filter((f) => f.missing).map((f) => f.path));
+  for (const f of FILES) {
+    if (f.symlink) {
+      const target = at(f.symlink);
+      edges.push(
+        missing.has(target)
+          ? { source: fileId(f.path), target: fileId(target), kind: "symlink", broken: true }
+          : { source: fileId(f.path), target: fileId(target), kind: "symlink" },
+      );
+    }
+    if (f.hardlink) {
+      edges.push({ source: fileId(at(f.hardlink)), target: fileId(f.path), kind: "hardlink" });
+    }
   }
 
   // Tag nodes.
   const tagIds = TAG_NAMES.map((name) => {
-    const id = `tag:${name}`;
-    nodes.push({ kind: "tag", id, label: `#${name}` });
+    const id = `#${name}`;
+    nodes.push({ kind: "tag", id, label: id });
     return id;
   });
 
-  // Mention nodes.
+  // Mention targets: a node per unresolved handle, and the contact files.
   const mentionIds = MENTION_NAMES.map((name) => {
-    const id = `mention:${name}`;
-    nodes.push({ kind: "mention", id, label: `@${name}` });
+    const id = `@@${name}`;
+    nodes.push({ kind: "mention", id, label: id });
     return id;
   });
+  for (const f of FILES) {
+    if (f.contact) mentionIds.push(fileId(f.path));
+  }
 
   // Language nodes + language edges to every file of a matching ext.
   for (const lang of LANGUAGES) {
     const owned = FILES.filter(
-      (f) => !f.missing && lang.exts.some((e) => f.path.toLowerCase().endsWith(e)),
+      (f) => !f.missing && !f.symlink && lang.exts.some((e) => f.path.toLowerCase().endsWith(e)),
     );
     if (owned.length === 0) continue;
     const id = `language:${lang.name}`;
@@ -216,15 +301,15 @@ export function makeTunerGraph(spec: GraphSpec = defaultSpec): TunerGraph {
     }
   }
   // Anchor links so the doc cluster is always connected.
-  pushLink(fileId("README.md"), fileId("notes/ideas.md"));
-  pushLink(fileId("README.md"), fileId("projects/roadmap.md"));
-  pushLink(fileId("notes/ideas.md"), fileId("notes/reading.md"));
-  pushLink(fileId("projects/roadmap.md"), fileId("projects/chan/design.md"));
+  pushLink(fileId(at("README.md")), fileId(at("notes/ideas.md")));
+  pushLink(fileId(at("README.md")), fileId(at("projects/roadmap.md")));
+  pushLink(fileId(at("notes/ideas.md")), fileId(at("notes/reading.md")));
+  pushLink(fileId(at("projects/roadmap.md")), fileId(at("projects/chan/design.md")));
   // Doc -> image embeds.
-  pushLink(fileId("projects/chan/design.md"), fileId("assets/diagram.png"));
-  pushLink(fileId("README.md"), fileId("assets/logo.png"));
+  pushLink(fileId(at("projects/chan/design.md")), fileId(at("assets/diagram.png")));
+  pushLink(fileId(at("README.md")), fileId(at("assets/logo.png")));
   // Broken wiki link to the ghost file.
-  pushLink(fileId("notes/ideas.md"), fileId("notes/archived.md"), true);
+  pushLink(fileId(at("notes/ideas.md")), fileId(at("notes/archived.md")), true);
 
   // Doc -> tag / mention attachments (seeded, Poisson-ish per doc).
   const attach = (source: string, pool: string[], avg: number, kind: "tag" | "mention"): void => {

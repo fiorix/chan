@@ -391,12 +391,12 @@ enum GraphNodeView {
 struct GraphEdgeView {
     source: String,
     target: String,
-    /// "link" | "tag" | "mention" | "contains" | "language".
-    /// Lowercase to match the
+    /// "link" | "tag" | "mention" | "contains" | "language" |
+    /// "symlink" | "hardlink". Lowercase to match the
     /// frontend's GraphViewEdgeKind type.
     kind: &'static str,
-    /// Only meaningful for link edges: true when the link resolves
-    /// to a missing file. Other kinds skip the field.
+    /// True for a link that resolves to a missing file, and for a
+    /// symlink whose target is missing. Other kinds skip the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     broken: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1180,6 +1180,12 @@ fn merge_filesystem_layer_with_buckets(
     };
     let fs_graph = build_fs_graph(workspace, scope, path, p.depth)?;
     let mut id_map = std::collections::BTreeMap::new();
+    let broken_targets: std::collections::BTreeSet<String> = fs_graph
+        .nodes
+        .iter()
+        .filter(|node| node.broken)
+        .map(|node| node.id.clone())
+        .collect();
 
     for node in fs_graph.nodes {
         let id = fs_node_graph_id(&node);
@@ -1220,16 +1226,16 @@ fn merge_filesystem_layer_with_buckets(
             .get(&edge.target)
             .cloned()
             .unwrap_or(edge.target.clone());
+        // A symlink and a hardlink keep their own kinds: they are facts of
+        // the tree, not references a document makes, and the graph draws
+        // them apart from its links.
+        let broken =
+            (edge.kind == "symlink" && broken_targets.contains(&edge.target)).then_some(true);
         edges.push(GraphEdgeView {
             source,
             target,
-            kind: match edge.kind {
-                "contains" => "contains",
-                "symlink" => "link",
-                "hardlink" => "link",
-                _ => edge.kind,
-            },
-            broken: None,
+            kind: edge.kind,
+            broken,
             rank: None,
             files: None,
             code: None,
@@ -2349,6 +2355,90 @@ mod tests {
         assert_the_graph_is_answered_ungated(&app, "with the rebuild finished").await;
     }
 
+    /// The answer to a `GET` of `uri` from a client that sends
+    /// `accept_encoding`, when it sends one: the `Content-Encoding` the
+    /// answer carries and its body as sent.
+    async fn graph_route_answer(
+        app: &GraphRouteApp,
+        uri: &str,
+        accept_encoding: Option<&str>,
+    ) -> (Option<String>, Vec<u8>) {
+        use tower::ServiceExt;
+
+        let mut request = axum::http::Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer secret");
+        if let Some(accepted) = accept_encoding {
+            request = request.header(header::ACCEPT_ENCODING, accepted);
+        }
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        let encoding = response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|value| value.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (encoding, body.to_vec())
+    }
+
+    // The graph is megabytes on a real workspace, so a client that accepts
+    // gzip is sent it compressed, stream or not, and reads back the bytes
+    // the plain answer carries. A client that does not ask, or asks for
+    // encodings the route does not speak, is sent the plain answer.
+    #[tokio::test]
+    async fn a_graph_answer_is_gzipped_for_a_client_that_accepts_it() {
+        use std::io::Read;
+
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+
+        for uri in ["/api/graph?stream=1", "/api/graph"] {
+            let (encoding, plain) = graph_route_answer(&app, uri, None).await;
+            assert_eq!(
+                encoding, None,
+                "{uri}: an answer nobody asked to compress carries an encoding"
+            );
+            assert!(
+                plain.starts_with(b"{"),
+                "{uri}: the plain answer is not JSON"
+            );
+
+            // What a browser sends.
+            let (encoding, sent) =
+                graph_route_answer(&app, uri, Some("gzip, deflate, br, zstd")).await;
+            assert_eq!(
+                encoding.as_deref(),
+                Some("gzip"),
+                "{uri}: a client that accepts gzip is not sent gzip"
+            );
+            let mut read = Vec::new();
+            flate2::read::GzDecoder::new(sent.as_slice())
+                .read_to_end(&mut read)
+                .expect("the body sent as gzip is gzip");
+            assert_eq!(
+                String::from_utf8_lossy(&read),
+                String::from_utf8_lossy(&plain),
+                "{uri}: the gzipped answer does not read back as the plain one"
+            );
+
+            let (encoding, sent) = graph_route_answer(&app, uri, Some("br, zstd")).await;
+            assert_eq!(
+                encoding, None,
+                "{uri}: a client that does not accept gzip is sent an encoding"
+            );
+            assert_eq!(
+                sent, plain,
+                "{uri}: a client that does not accept gzip is not sent the plain answer"
+            );
+        }
+    }
+
     fn report_file(path: &str, language: &str, code: u64) -> ReportFileStats {
         ReportFileStats {
             path: path.to_string(),
@@ -2880,6 +2970,44 @@ mod tests {
             !root_path.exists(),
             "graph request recreated the workspace root"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_and_a_hardlink_keep_their_own_edge_kinds() {
+        let (_cfg, _root, workspace) = open_workspace();
+        workspace.write_text("top.md", "# Top\n").unwrap();
+        workspace.index_file("top.md").unwrap();
+        let root = workspace.root().to_path_buf();
+        std::os::unix::fs::symlink("top.md", root.join("alias.md")).unwrap();
+        std::os::unix::fs::symlink("gone.md", root.join("dangling.md")).unwrap();
+        std::fs::hard_link(root.join("top.md"), root.join("twin.md")).unwrap();
+
+        let mut emit = None;
+        let view = build_graph_view(
+            workspace,
+            GraphParams {
+                scope: GraphScope::Workspace,
+                path: String::new(),
+                depth: 1,
+            },
+            &mut emit,
+        )
+        .unwrap();
+        let between = |a: &str, b: &str| -> Vec<(&str, Option<bool>)> {
+            view.edges
+                .iter()
+                .filter(|e| (e.source == a && e.target == b) || (e.source == b && e.target == a))
+                .map(|e| (e.kind, e.broken))
+                .collect()
+        };
+        assert_eq!(between("alias.md", "top.md"), vec![("symlink", None)]);
+        assert_eq!(
+            between("dangling.md", "gone.md"),
+            vec![("symlink", Some(true))],
+            "a symlink to a missing target is marked broken"
+        );
+        assert_eq!(between("top.md", "twin.md"), vec![("hardlink", None)]);
     }
 
     #[test]

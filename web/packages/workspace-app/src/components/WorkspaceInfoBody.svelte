@@ -62,13 +62,14 @@
   /// The workspace inspector matches FileInfoBody's clickable
   /// Languages + Contacts:
   ///   - `onLanguageClick`: fired when a language row is clicked;
-  ///     opens that language's graph lens. Mirrors FileInfoBody's
-  ///     `openGraphForLanguage(lang.name)` wiring.
+  ///     opens the graph with that language selected. Mirrors
+  ///     FileInfoBody's `openGraphForLanguage(lang.name)` wiring.
   ///   - `onContactNavigate`: fired when a contact pill is clicked
   ///     for a RESOLVED contact (a `chan.kind: contact` file). The
   ///     graph host can select the node on the canvas; other hosts
-  ///     spawn a contact-scoped lens. Unresolved `@@name` mentions
-  ///     always route through `openGraphAtNode` (no file to scope to).
+  ///     open the graph with the contact's file selected. Unresolved
+  ///     `@@name` mentions always route through `openGraphAtNode`,
+  ///     which selects the mention's own node.
   /// Both default to the store helpers so a standalone mount stays
   /// functional even when a host doesn't wire them.
   let {
@@ -418,7 +419,7 @@
               class="ref contact"
               onclick={c.onClick}
               title={c.path
-                ? `open in graph (scoped to ${c.path})`
+                ? `open in graph (${c.path})`
                 : "open in graph"}
             >{c.label}</button>
           </li>

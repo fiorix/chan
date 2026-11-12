@@ -309,9 +309,10 @@ derived at query time from the workspace catalog and the maintained
 report, so folder and language nodes appear without ever being written
 to the graph.
 
-Bare `cs graph` opens the graph at workspace scope. With PATH it focuses
-that file or directory; PATH is resolved against the terminal's cwd and
-must be inside the workspace.
+There is one graph, rooted at the workspace. Bare `cs graph` opens it
+with the workspace's own node selected. With PATH it selects that file
+or directory, a directory opened deep enough to show its files; PATH is
+resolved against the terminal's cwd and must be inside the workspace.
 
 The target defaults to $CHAN_WINDOW_ID. `--window`, `--pane`, and
 `--side a|b` address another exact live destination. Workspace windows
@@ -320,12 +321,15 @@ a workspace window; this is a standalone terminal."
 
 Navigating the tab: drag the background to pan, wheel to zoom toward the
 cursor, drag a node to move it. A click selects a node and opens the
-inspector; a double-click on a directory node expands or collapses its
-children in place. Re-rooting is the inspector's "Graph from here",
-which spawns a NEW graph tab; the ancestor breadcrumb re-scopes the
-current tab in place. Right-click opens the tab menu, which carries the
-Depth slider and the node-type filter chips (tag, contact, language,
-media, folder, markdown, source), each with its count.
+inspector; a selected file, tag or mention also shows what refers to it
+and what it refers to, each on its directories. A double-click on a
+directory node opens or closes it in place. The inspector's "Graph from
+here" opens a NEW graph tab with that node selected; the breadcrumb
+selects a directory of the selected node's path in the current tab.
+Right-click opens the tab menu, which carries the Depth slider and the
+node-type filter chips (tag, contact, language, media, folder, markdown,
+source), each with its count. The depth is the selected node's: levels
+opened below a directory, hops of references from any other node.
 "#;
 
 /// `cs graph` examples, side effects, and caveats.
@@ -605,10 +609,14 @@ contact, language:
 --domain takes those same six names plus `content`.
 
 Relationship kinds: link, tag and mention come from the stored graph;
-language and contains are derived at query time. --direction auto (the
-default) resolves per seed -- out for file and directory seeds, both for
-tag, mention, contact and language seeds; out, in and both override it
-for every seed.
+language and contains are derived at query time. A walk follows the
+references: links, tags and mentions. --depth counts hops of them from a
+file, tag, mention or contact seed, and levels of the tree below a
+directory seed; a language seed reaches its files in one hop. Each node
+reached comes with its directories up to the root, and each file with
+its tags, mentions and language. --direction auto (the default) resolves
+per seed -- out for a directory seed, both for every other kind; out, in
+and both override it for every seed.
 
 Markdown by default (## Content, ## Entities, ## Graph, ## Warnings, ##
 Errors sections); --json emits the core result unchanged, --json --pretty
@@ -622,10 +630,10 @@ pub(crate) const CS_SEARCH_AFTER: &str = r#"EXAMPLES:
     content hits as "path:line - heading" plus a snippet, matched
     terms wrapped in **
   cs search --from file:notes/design.md --depth 2
-    everything within two hops of that file, following its outgoing
-    link / tag / mention edges
+    everything within two hops of that file along link / tag /
+    mention edges, in both directions
   cs search --from tag:design --edge-kind tag
-    the files carrying #design (tag seeds traverse both directions)
+    the files carrying #design
   cs search --domain tag
     browse every tag in the workspace, no query needed
   cs search --from language:Rust --edge-kind language --json --pretty

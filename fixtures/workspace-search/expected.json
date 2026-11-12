@@ -1,12 +1,9 @@
 {
   "cases": [
     {
-      "lens": "file",
+      "kind": "file",
       "depth": 0,
       "seed": "README.md",
-      "direction": "out",
-      "meta_closure": false,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "README.md"
@@ -16,23 +13,27 @@
       ]
     },
     {
-      "lens": "file",
+      "kind": "file",
       "depth": 1,
       "seed": "README.md",
-      "direction": "out",
-      "meta_closure": false,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
+        "#deep",
+        "#shared",
         "#sharing",
         "README.md",
         "assets/logo.png",
         "directory:assets",
         "directory:docs",
+        "directory:docs/nested",
+        "directory:docs/nested/deeper",
         "directory:resources",
         "directory:src",
+        "docs/nested/deeper/final.md",
         "docs/space note.md",
         "docs/start.md",
+        "language:Markdown",
+        "language:Rust",
         "resources/data.csv",
         "src/lib.rs"
       ],
@@ -49,25 +50,35 @@
         "[\"README.md\",\"resources/data.csv\",\"link\"]",
         "[\"README.md\",\"src/lib.rs\",\"link\"]",
         "[\"directory:assets\",\"assets/logo.png\",\"contains\"]",
+        "[\"directory:docs\",\"directory:docs/nested\",\"contains\"]",
         "[\"directory:docs\",\"docs/space note.md\",\"contains\"]",
         "[\"directory:docs\",\"docs/start.md\",\"contains\"]",
+        "[\"directory:docs/nested\",\"directory:docs/nested/deeper\",\"contains\"]",
+        "[\"directory:docs/nested/deeper\",\"docs/nested/deeper/final.md\",\"contains\"]",
         "[\"directory:resources\",\"resources/data.csv\",\"contains\"]",
         "[\"directory:src\",\"src/lib.rs\",\"contains\"]",
+        "[\"docs/nested/deeper/final.md\",\"#deep\",\"tag\"]",
+        "[\"docs/nested/deeper/final.md\",\"README.md\",\"link\"]",
+        "[\"docs/start.md\",\"#shared\",\"tag\"]",
         "[\"docs/start.md\",\"#sharing\",\"tag\"]",
-        "[\"docs/start.md\",\"README.md\",\"link\"]"
+        "[\"docs/start.md\",\"README.md\",\"link\"]",
+        "[\"language:Markdown\",\"README.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/nested/deeper/final.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/space note.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/start.md\",\"language\"]",
+        "[\"language:Rust\",\"src/lib.rs\",\"language\"]"
       ]
     },
     {
-      "lens": "file",
+      "kind": "file",
       "depth": 2,
       "seed": "README.md",
-      "direction": "out",
-      "meta_closure": false,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
+        "#deep",
         "#shared",
         "#sharing",
+        "@@unresolved",
         "README.md",
         "assets/logo.png",
         "contacts/alice.md",
@@ -75,11 +86,15 @@
         "directory:contacts",
         "directory:docs",
         "directory:docs/nested",
+        "directory:docs/nested/deeper",
         "directory:resources",
         "directory:src",
+        "docs/nested/deeper/final.md",
         "docs/nested/next.md",
         "docs/space note.md",
         "docs/start.md",
+        "language:Markdown",
+        "language:Rust",
         "resources/data.csv",
         "src/lib.rs"
       ],
@@ -101,25 +116,36 @@
         "[\"directory:docs\",\"directory:docs/nested\",\"contains\"]",
         "[\"directory:docs\",\"docs/space note.md\",\"contains\"]",
         "[\"directory:docs\",\"docs/start.md\",\"contains\"]",
+        "[\"directory:docs/nested\",\"directory:docs/nested/deeper\",\"contains\"]",
         "[\"directory:docs/nested\",\"docs/nested/next.md\",\"contains\"]",
+        "[\"directory:docs/nested/deeper\",\"docs/nested/deeper/final.md\",\"contains\"]",
         "[\"directory:resources\",\"resources/data.csv\",\"contains\"]",
         "[\"directory:src\",\"src/lib.rs\",\"contains\"]",
+        "[\"docs/nested/deeper/final.md\",\"#deep\",\"tag\"]",
+        "[\"docs/nested/deeper/final.md\",\"README.md\",\"link\"]",
+        "[\"docs/nested/deeper/final.md\",\"contacts/alice.md\",\"mention\"]",
         "[\"docs/nested/next.md\",\"#shared\",\"tag\"]",
+        "[\"docs/nested/next.md\",\"@@unresolved\",\"mention\"]",
+        "[\"docs/nested/next.md\",\"docs/nested/deeper/final.md\",\"link\"]",
         "[\"docs/nested/next.md\",\"docs/start.md\",\"link\"]",
         "[\"docs/start.md\",\"#shared\",\"tag\"]",
         "[\"docs/start.md\",\"#sharing\",\"tag\"]",
         "[\"docs/start.md\",\"README.md\",\"link\"]",
         "[\"docs/start.md\",\"contacts/alice.md\",\"mention\"]",
-        "[\"docs/start.md\",\"docs/nested/next.md\",\"link\"]"
+        "[\"docs/start.md\",\"docs/nested/next.md\",\"link\"]",
+        "[\"language:Markdown\",\"README.md\",\"language\"]",
+        "[\"language:Markdown\",\"contacts/alice.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/nested/deeper/final.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/nested/next.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/space note.md\",\"language\"]",
+        "[\"language:Markdown\",\"docs/start.md\",\"language\"]",
+        "[\"language:Rust\",\"src/lib.rs\",\"language\"]"
       ]
     },
     {
-      "lens": "directory",
+      "kind": "directory",
       "depth": 0,
       "seed": "directory:docs",
-      "direction": "out",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "directory:docs"
@@ -129,12 +155,9 @@
       ]
     },
     {
-      "lens": "directory",
+      "kind": "directory",
       "depth": 1,
       "seed": "directory:docs",
-      "direction": "out",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#shared",
@@ -157,12 +180,9 @@
       ]
     },
     {
-      "lens": "directory",
+      "kind": "directory",
       "depth": 2,
       "seed": "directory:docs",
-      "direction": "out",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#shared",
@@ -195,24 +215,18 @@
       ]
     },
     {
-      "lens": "tag",
+      "kind": "tag",
       "depth": 0,
       "seed": "#shared",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "#shared"
       ],
       "relationship_keys": []
     },
     {
-      "lens": "tag",
+      "kind": "tag",
       "depth": 1,
       "seed": "#shared",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#shared",
@@ -240,12 +254,9 @@
       ]
     },
     {
-      "lens": "tag",
+      "kind": "tag",
       "depth": 2,
       "seed": "#shared",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#deep",
@@ -295,24 +306,18 @@
       ]
     },
     {
-      "lens": "mention",
+      "kind": "mention",
       "depth": 0,
       "seed": "@@unresolved",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "@@unresolved"
       ],
       "relationship_keys": []
     },
     {
-      "lens": "mention",
+      "kind": "mention",
       "depth": 1,
       "seed": "@@unresolved",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#shared",
@@ -332,12 +337,9 @@
       ]
     },
     {
-      "lens": "mention",
+      "kind": "mention",
       "depth": 2,
       "seed": "@@unresolved",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#deep",
@@ -373,31 +375,23 @@
       ]
     },
     {
-      "lens": "contact",
+      "kind": "contact",
       "depth": 0,
       "seed": "contacts/alice.md",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "contacts/alice.md",
-        "directory:contacts",
-        "language:Markdown"
+        "directory:contacts"
       ],
       "relationship_keys": [
         "[\"\",\"directory:contacts\",\"contains\"]",
-        "[\"directory:contacts\",\"contacts/alice.md\",\"contains\"]",
-        "[\"language:Markdown\",\"contacts/alice.md\",\"language\"]"
+        "[\"directory:contacts\",\"contacts/alice.md\",\"contains\"]"
       ]
     },
     {
-      "lens": "contact",
+      "kind": "contact",
       "depth": 1,
       "seed": "contacts/alice.md",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#deep",
@@ -431,12 +425,9 @@
       ]
     },
     {
-      "lens": "contact",
+      "kind": "contact",
       "depth": 2,
       "seed": "contacts/alice.md",
-      "direction": "both",
-      "meta_closure": true,
-      "language_one_hop": false,
       "visible_node_ids": [
         "",
         "#deep",
@@ -445,14 +436,12 @@
         "@@unresolved",
         "README.md",
         "contacts/alice.md",
-        "contacts/alicia.md",
         "directory:contacts",
         "directory:docs",
         "directory:docs/nested",
         "directory:docs/nested/deeper",
         "docs/nested/deeper/final.md",
         "docs/nested/next.md",
-        "docs/space note.md",
         "docs/start.md",
         "language:Markdown"
       ],
@@ -461,12 +450,9 @@
         "[\"\",\"directory:contacts\",\"contains\"]",
         "[\"\",\"directory:docs\",\"contains\"]",
         "[\"README.md\",\"#sharing\",\"tag\"]",
-        "[\"README.md\",\"docs/space note.md\",\"link\"]",
         "[\"README.md\",\"docs/start.md\",\"link\"]",
         "[\"directory:contacts\",\"contacts/alice.md\",\"contains\"]",
-        "[\"directory:contacts\",\"contacts/alicia.md\",\"contains\"]",
         "[\"directory:docs\",\"directory:docs/nested\",\"contains\"]",
-        "[\"directory:docs\",\"docs/space note.md\",\"contains\"]",
         "[\"directory:docs\",\"docs/start.md\",\"contains\"]",
         "[\"directory:docs/nested\",\"directory:docs/nested/deeper\",\"contains\"]",
         "[\"directory:docs/nested\",\"docs/nested/next.md\",\"contains\"]",
@@ -485,32 +471,24 @@
         "[\"docs/start.md\",\"docs/nested/next.md\",\"link\"]",
         "[\"language:Markdown\",\"README.md\",\"language\"]",
         "[\"language:Markdown\",\"contacts/alice.md\",\"language\"]",
-        "[\"language:Markdown\",\"contacts/alicia.md\",\"language\"]",
         "[\"language:Markdown\",\"docs/nested/deeper/final.md\",\"language\"]",
         "[\"language:Markdown\",\"docs/nested/next.md\",\"language\"]",
-        "[\"language:Markdown\",\"docs/space note.md\",\"language\"]",
         "[\"language:Markdown\",\"docs/start.md\",\"language\"]"
       ]
     },
     {
-      "lens": "language",
+      "kind": "language",
       "depth": 0,
       "seed": "language:Rust",
-      "direction": "both",
-      "meta_closure": false,
-      "language_one_hop": true,
       "visible_node_ids": [
         "language:Rust"
       ],
       "relationship_keys": []
     },
     {
-      "lens": "language",
+      "kind": "language",
       "depth": 1,
       "seed": "language:Rust",
-      "direction": "both",
-      "meta_closure": false,
-      "language_one_hop": true,
       "visible_node_ids": [
         "",
         "directory:src",
@@ -524,12 +502,9 @@
       ]
     },
     {
-      "lens": "language",
+      "kind": "language",
       "depth": 2,
       "seed": "language:Rust",
-      "direction": "both",
-      "meta_closure": false,
-      "language_one_hop": true,
       "visible_node_ids": [
         "",
         "directory:src",

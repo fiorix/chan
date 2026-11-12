@@ -47,6 +47,7 @@ import {
   isWorkspaceRootMissingError,
 } from "../api/errors";
 import { clientPathOf, isDraftClientPath, type FileIdentity } from "../api/fileIdentity";
+import { openedForPath } from "../graph/selectionView";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -114,6 +115,7 @@ import {
   type BrowserTab,
   type FocusColor,
   type LeafNode,
+  type GraphTab,
   type OpenGraphOptions,
   type PaneSide,
   type ResolvedTabDestination,
@@ -1378,9 +1380,8 @@ export function onWatchEvent(e: unknown): void {
       forgetLinkKindsAtFrame();
     }
     if (hasGraphTab()) {
-      // Carry the touched path(s) so each open graph reloads only when the
-      // change is in ITS scope (GraphPanel path-filters the signal). An
-      // empty set means the event carried no path -> reload to stay safe.
+      // The cue for the open graph tabs, with the touched path(s); an
+      // empty set means the event carried no path.
       graphReloadSignal.paths = watchedPaths;
       graphReloadSignal.nonce += 1;
     }
@@ -3648,8 +3649,8 @@ export async function handleDraftPromoted(path: string): Promise<void> {
     // The promotion's own watch frame joins the same burst.
     noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
-      // A promoted draft becomes a real file at `path`; reload any graph
-      // whose scope covers it (GraphPanel path-filters the signal).
+      // A promoted draft becomes a real file at `path`: the cue for the
+      // open graph tabs.
       graphReloadSignal.paths = [path];
       graphReloadSignal.nonce += 1;
     }
@@ -3704,8 +3705,7 @@ export async function noteDraftCreated(path: string): Promise<void> {
   if (windowCaps.workspace) {
     noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
-      // New draft at `path`; reload any graph whose scope covers it
-      // (GraphPanel path-filters the signal).
+      // New draft at `path`: the cue for the open graph tabs.
       graphReloadSignal.paths = [path];
       graphReloadSignal.nonce += 1;
     }
@@ -4917,14 +4917,14 @@ export function closeSettings(): void {
 // Open + scope picker state, plus a `depth` knob for how far the
 // file/group scopes expand into their neighbors in the link graph.
 
-/// Incremented by watcher events while the graph overlay is open.
-/// GraphPanel consumes this as a lightweight reload signal and
-/// debounces the actual `/api/graph` request locally. `paths` carries
-/// the workspace-relative path(s) the event touched so each GraphPanel
-/// can gate its reload on whether the change is in ITS scope: editing a
-/// file that is not in the open graph must NOT reload it (without the
-/// gate, any change to any file in the workspace triggered a graph
-/// reload). Empty `paths` means "unknown" -> reload to stay safe.
+/// Incremented by watcher events while a graph tab is open. A shown
+/// GraphPanel takes it as the cue to fetch its filesystem spine again,
+/// debounced locally, and a hidden one to do so when next shown. The
+/// `/api/graph` fetch is not the panel's: the shared graph has its own
+/// quiet window (`noteGraphChanged`, called beside every bump). `paths`
+/// carries the workspace-relative path(s) the event touched; a graph tab
+/// spans the workspace, so it reloads whatever they are. Empty `paths`
+/// means the event named none.
 export const graphReloadSignal = $state<{ nonce: number; paths: string[] }>({
   nonce: 0,
   paths: [],
@@ -4941,201 +4941,113 @@ function openGraphAtDestination(
   }
 }
 
-/** Spawn a graph tab rooted at the focused surface's context.
- *  Mirrors `paneModeOpenGraph` (which targets the Hybrid Nav draft);
- *  this variant spawns in the live layout for top-level chords
- *  (`Cmd+Shift+M`, `chan:command app.graph.toggle`). Passing a
- *  `file:` or `dir:` scope lands the new graph already scoped and
- *  the breadcrumb above the inspector body renders the ancestor
- *  chain. Falls back to workspace scope when no context is
- *  available. */
+// Every opener below opens the graph: the whole workspace, rooted at its
+// own node, with the node the caller is about selected. A directory
+// comes with the path down to it opened, so its children show; a file, a
+// tag, a mention, a contact or a language is revealed by its selection.
+
+/** The graph with the directory at `path` selected and opened; the
+ *  workspace's own node for the root. */
+function directorySelection(path: string): OpenGraphOptions {
+  return { depth: 1, pendingSelectId: path, expanded: openedForPath(path) };
+}
+
+/** The graph with the node `select` names selected: a file's path, or a
+ *  tag's, mention's or language's node id. */
+function nodeSelection(select: string): OpenGraphOptions {
+  return { depth: 1, pendingSelectId: select };
+}
+
+/** Spawn a graph tab on the focused surface's context: the focused file
+ *  or directory selected, the workspace's own node when there is none.
+ *  Mirrors `paneModeOpenGraph` (which targets the Hybrid Nav draft); this
+ *  variant spawns in the live layout for top-level chords
+ *  (`Cmd+Shift+M`, `chan:command app.graph.toggle`). */
 export function openGraphWithContext(ctx: SpawnContext): void {
-  const scopeId = ctx.file
-    ? `file:${ctx.file}`
-    : ctx.dir
-      ? `dir:${ctx.dir}`
-      : "workspace";
-  const pendingSelectId = ctx.file ?? (ctx.dir || null);
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId,
-    depth: 1,
-    pendingSelectId,
-  });
+  openGraphInActivePane(
+    ctx.file ? nodeSelection(ctx.file) : directorySelection(ctx.dir ?? ""),
+  );
   scheduleSessionSave();
 }
 
-/** Open the semantic graph for the whole workspace. Workspace scope renders
- *  the full graph, so the depth knob is reset to its neutral value. */
+/** Open the graph on the workspace's own node. */
 export function openGraphForWorkspace(
   destination?: ResolvedTabDestination,
 ): void {
-  openGraphAtDestination({
-    mode: "semantic",
-    scopeId: "workspace",
-    depth: 1,
-    pendingSelectId: null,
-  }, destination);
+  openGraphAtDestination(directorySelection(""), destination);
   scheduleSessionSave();
 }
 
-/** Open the graph overlay at workspace scope and pre-select the given
- *  node so its connections render in the inspector immediately.
- *  Used by tag/mention/date chips outside the graph (file browser
- *  inspector today; conceivably the editor margin later). Workspace
- *  scope guarantees the node is in the rendered set regardless of
- *  prior scope. */
+/** Open the graph with the given node selected, so its connections show
+ *  on the canvas and in the inspector at once. Used by the tag, mention
+ *  and date chips outside the graph. */
 export function openGraphAtNode(nodeId: string): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: "workspace",
-    depth: 1,
-    pendingSelectId: nodeId,
-  });
-  // Stack on top of whatever overlay invoked us (typically the
-  // file browser via a tag chip). OverlayShell's z-index follows
-  // `overlayStack.ids`, so the graph paints above and Escape
-  // pops just the graph - returning to the browser instead of
-  // dismissing both at once.
+  openGraphInActivePane(nodeSelection(nodeId));
   scheduleSessionSave();
 }
 
-/** Open the graph overlay scoped to a specific file and pre-select
- *  that file's node. The file tab menu's "Show in Graph" routes
- *  here so the resulting subgraph is the file's neighbourhood, not
- *  the entire workspace - matching the user's mental model that
- *  invoking the graph FROM a file means "show me what's around
- *  THIS file". */
+/** Open the graph with a file selected: its node, what it refers to and
+ *  what refers to it, on the workspace's tree. */
 export function openGraphForFile(
   path: string,
   destination?: ResolvedTabDestination,
 ): void {
-  openGraphAtDestination({
-    mode: "semantic",
-    scopeId: `file:${path}`,
-    depth: 1,
-    pendingSelectId: path,
-  }, destination);
+  openGraphAtDestination(nodeSelection(path), destination);
   scheduleSessionSave();
 }
 
+/** "Graph from here" on a file. */
 export function openFsGraphForFile(path: string): void {
-  // A workspace's draft is outside the graph and has no directory to scope
-  // one to.
+  // A workspace's draft is outside the graph and has no node to select.
   if (isDraftClientPath(path)) return;
-  // "Graph from here" on a file opens the parent directory's tree so
-  // the focal file lives in a meaningful neighbourhood (its cohort)
-  // rather than getting lost in the whole-workspace view. Files at the
-  // workspace root fall back to workspace scope.
-  const parent = parentDir(path);
-  openGraphInActivePane({
-    mode: "filesystem",
-    scopeId: parent ? `dir:${parent}` : "workspace",
-    depth: 1,
-    pendingSelectId: path,
-  });
+  openGraphInActivePane(nodeSelection(path));
   scheduleSessionSave();
 }
 
-/** Open the graph overlay scoped to a directory. Depth starts at 1:
- *  all files under the directory plus their immediate graph neighbours.
- *  GraphPanel resolves the rooted directory straight from the tab's
- *  `dir:<path>` scopeId (synthesizeScope); re-rooting is "graph from
- *  here" / file-browser navigation, not a pane-derived option list. */
+/** Open the graph with a directory selected and opened. */
 export function openGraphForDirectory(
   path: string,
   destination?: ResolvedTabDestination,
 ): void {
-  openGraphAtDestination({
-    mode: "semantic",
-    scopeId: `dir:${path}`,
-    depth: 1,
-    pendingSelectId: null,
-  }, destination);
+  openGraphAtDestination(directorySelection(path), destination);
   scheduleSessionSave();
 }
 
+/** "Graph from here" on a directory; the workspace's own node for "". */
 export function openFsGraphForDirectory(path: string): void {
-  // "Graph from here" on a directory scopes to that subtree directly.
-  // Empty path is the workspace root, so use the "workspace" alias instead of
-  // a sentinel `dir:` scope.
-  //
-  // Open the directory graph in SEMANTIC mode, not the
-  // directories-only filesystem mode. The semantic dir-scope graph
-  // carries every layer (files with their link / backlink / hashtag /
-  // contact / language edges plus the directory `contains` spine), and
-  // GraphPanel supports directory expand/collapse + the
-  // depth-slider in semantic mode, so "Graph from here" on a directory
-  // (from the file browser, mirroring the in-graph re-scope) keeps the
-  // rich graph instead of collapsing to a bare directory tree.
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: path ? `dir:${path}` : "workspace",
-    depth: 1,
-    pendingSelectId: path || null,
-  });
+  openGraphInActivePane(directorySelection(path));
   scheduleSessionSave();
 }
 
-/** Open the graph overlay scoped to a tag, with the tag node itself
- *  pre-selected. The resulting subgraph is the tag's neighbourhood
- *  (every file referencing the tag, plus their depth-limited
- *  neighbours). Called from every "click a tag chip" surface:
- *  editor tag pills, FileInfoBody's tag list, search overlay tag
- *  hits, TagInfoBody's Open-in-Graph button. */
+/** Open the graph with a tag selected: the notes that carry it show with
+ *  their directories. Called from every "click a tag chip" surface:
+ *  editor tag pills, FileInfoBody's tag list, search overlay tag hits,
+ *  TagInfoBody's Open-in-Graph button. */
 export function openGraphForTag(nodeId: string, _label: string): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: `tag:${nodeId}`,
-    depth: 1,
-    pendingSelectId: nodeId,
-  });
+  openGraphInActivePane(nodeSelection(nodeId));
   scheduleSessionSave();
 }
 
-/** Open the graph overlay scoped to a `@@mention`, with the mention
- *  node itself pre-selected. Mirrors `openGraphForTag`: the resulting
- *  subgraph is the mention's neighbourhood (every file referencing the
- *  handle, plus their directory spine). Called from the surfaces that
- *  click a standalone `@@name`: the inspector's unresolved-mention
+/** Open the graph with a `@@mention` selected. Called from the surfaces
+ *  that click a standalone `@@name`: the inspector's unresolved-mention
  *  pill, the editor mention click on a name with no contact file, and
  *  search mention hits. The `nodeId` is the `@@Name` graph node id. */
 export function openGraphForMention(nodeId: string, _label: string): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: `mention:${nodeId}`,
-    depth: 1,
-    pendingSelectId: nodeId,
-  });
+  openGraphInActivePane(nodeSelection(nodeId));
   scheduleSessionSave();
 }
 
-/** Open the graph scoped to a contact (a Contact-kind note or a
- *  workspace file referenced by a mention). The lens centers on
- *  the contact file with edges to every doc referencing it.
- *  Title formatting flows through `graphTitle()` via the
- *  `contact:` scopeId prefix. */
+/** Open the graph with a contact's file selected (a Contact-kind note or
+ *  a workspace file referenced by a mention). */
 export function openGraphForContact(relPath: string): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: `contact:${relPath}`,
-    depth: 1,
-    pendingSelectId: relPath,
-  });
+  openGraphInActivePane(nodeSelection(relPath));
   scheduleSessionSave();
 }
 
-/** Open the graph scoped to a language. The language node is a
- *  bubble connected to every file of that language; depth does not
- *  apply to language lenses, so `depth: 0` matches the
- *  language-overview convention. */
+/** Open the graph with a language selected: its files show with their
+ *  directories. */
 export function openGraphForLanguage(language: string): void {
-  openGraphInActivePane({
-    mode: "semantic",
-    scopeId: `language:${language}`,
-    depth: 0,
-    pendingSelectId: `language:${language}`,
-  });
+  openGraphInActivePane(nodeSelection(`language:${language}`));
   scheduleSessionSave();
 }
 
@@ -5152,11 +5064,10 @@ export function openGraphFromLink(
   const parsed = parseGraphLink(link);
   if (!parsed) return false;
   openGraphAtDestination({
-    mode: parsed.mode,
-    scopeId: parsed.scopeId,
     depth: parsed.depth,
     filters: parsed.filters,
     pendingSelectId: parsed.selectedNodeId,
+    expanded: parsed.expanded,
   }, destination);
   scheduleSessionSave();
   return true;
@@ -5253,7 +5164,7 @@ export function resolveSpawnContext(): SpawnContext {
     case "browser":
       return resolveBrowserSpawnContext();
     case "graph":
-      return resolveGraphSpawnContext(tab.scopeId);
+      return resolveGraphSpawnContext(tab);
     case "dashboard":
       // Dashboard carries no path context; spawn from here lands at
       // workspace root.
@@ -5277,17 +5188,17 @@ function resolveBrowserSpawnContext(): SpawnContext {
   return { dir: parentDir(sel), file: sel };
 }
 
-function resolveGraphSpawnContext(scopeId: string): SpawnContext {
-  if (scopeId.startsWith("file:")) {
-    const file = scopeId.slice("file:".length);
-    return { dir: parentDir(file), file };
+function resolveGraphSpawnContext(tab: GraphTab): SpawnContext {
+  // The graph is the whole workspace; what anchors a spawn from it is the
+  // selected node: a directory, or a file with its directory. A tag, a
+  // mention, a language and the workspace's own node have no path, so
+  // they anchor at the workspace root.
+  const id = tab.selectedNodeId ?? tab.pendingSelectId ?? "";
+  if (id.startsWith("directory:")) return { dir: id.slice("directory:".length) };
+  if (id === "" || id.startsWith("#") || id.startsWith("@@") || id.startsWith("language:")) {
+    return { dir: "" };
   }
-  if (scopeId.startsWith("dir:")) {
-    return { dir: scopeId.slice("dir:".length) };
-  }
-  // "workspace", "tag:...", and any future scope shapes have no useful
-  // path anchor - fall back to workspace root.
-  return { dir: "" };
+  return { dir: parentDir(id), file: id };
 }
 
 // ---- overlay z-order stack ----------------------------------------------

@@ -77,8 +77,6 @@ function graphTab(partial: Partial<GraphTab> = {}): GraphTab {
     kind: "graph",
     id: "graph-1",
     title: "Graph",
-    mode: "semantic",
-    scopeId: "workspace",
     depth: 1,
     expanded: { "": true },
     filters: {
@@ -1034,7 +1032,7 @@ describe("Pane tab drag and drop between windows", () => {
   /// wire, the way another window's drag arrives here.
   async function draggedGraph(): Promise<Record<string, string>> {
     const target = await renderPane(
-      { kind: "leaf", id: "pane-source", tabs: [graphTab({ id: "g-src", scopeId: "src" })], activeTabId: "g-src" },
+      { kind: "leaf", id: "pane-source", tabs: [graphTab({ id: "g-src", selectedNodeId: "directory:src" })], activeTabId: "g-src" },
       { paneMode: false },
     );
     const data = new DragData();
@@ -1316,8 +1314,7 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
   test("a graph tab crosses as a graph, not a terminal", async () => {
     const payload = await dragPayload(
       graphTab({
-        mode: "filesystem",
-        scopeId: "src",
+        selectedNodeId: "directory:src",
         depth: 3,
         inspectorOpen: true,
       }),
@@ -1449,8 +1446,8 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
     // The round trip that matters: snapshot on the source, adopt in the
     // target. Rebuilt through the same restore path a reload uses.
     const source = graphTab({
-      mode: "filesystem",
-      scopeId: "src",
+      selectedNodeId: "directory:src",
+      expanded: { "": true, src: true },
       depth: 3,
       inspectorOpen: true,
     });
@@ -1474,8 +1471,9 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
 
     expect(adopted?.kind).toBe("graph");
     const graph = adopted as GraphTab;
-    expect(graph.mode).toBe("filesystem");
-    expect(graph.scopeId).toBe("src");
+    expect(graph.selectedNodeId).toBe("directory:src");
+    expect(graph.pendingSelectId, "the new panel selects it again").toBe("directory:src");
+    expect(graph.expanded).toEqual({ "": true, src: true });
     expect(graph.depth).toBe(3);
     expect(graph.inspectorOpen).toBe(true);
     // A fresh id, so a move can never collide with a tab already live here.

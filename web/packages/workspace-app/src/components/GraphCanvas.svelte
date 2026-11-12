@@ -31,7 +31,7 @@
   } from "d3-force";
   import { draftsDir } from "../state/workspace.svelte";
   import { fileBucket } from "../state/kinds";
-  import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
+  import { GRAPH_FS_EDGE_DEFAULTS, GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
   import {
     directoryNodeId,
     type CanvasEdge as RenderedEdge,
@@ -79,18 +79,16 @@
     onSetAsScope?: () => void;
     /// Where the automatic fit places the view. "bottom" (default) anchors
     /// the single focal node near the bottom edge so the cluster grows upward
-    /// from it, so the workspace-root spine reads bottom-to-top; the graph
-    /// tab's workspace, directory and file scopes use it. "center" centers
+    /// from it, so the workspace-root spine reads bottom-to-top. "center" centers
     /// the focal instead. "bounds" anchors no node: it frames the drawn
     /// cluster's bounding box in the middle of the canvas, with equal room on
     /// either side of it on both axes at the fit's zoom; the layout still
-    /// pins the focal, so the root stays at the bottom of the spine. Since no
-    /// node holds it in place, the "bounds" fit follows the layout for as
-    /// long as the layout moves, not only through a refit window, and fits
-    /// again when the canvas changes size. The Dashboard's Search slide and
-    /// the graph tab's tag, mention, contact and language lenses use
-    /// "bounds". A user's pan, zoom or drag stops the automatic fit under
-    /// every value.
+    /// pins the focal, so the root stays at the bottom of the spine. The
+    /// Dashboard's Search slide uses "bounds"; the graph tab pins the
+    /// workspace's node and takes the default. Under every value the fit
+    /// follows the layout for as long as the layout moves, the view fits
+    /// again when the canvas changes size, and a user's pan, zoom or drag
+    /// stops the automatic fit.
     focalAnchor?: "center" | "bottom" | "bounds";
     /// d3-force tuning. Defaults to DEFAULT_FORCE (../graph/force.ts),
     /// the values the live graph ships with. Only the standalone
@@ -156,6 +154,11 @@
     /// for non-hierarchical nodes.
     depth: number;
     parentId: string | null;
+    /// The deepest `depth` among the hierarchical nodes this node is linked
+    /// to in the working set, or -1 when it has none. Read for the
+    /// non-hierarchical kinds only: `force.metaLift` seats them that many
+    /// bands above it.
+    linkedDepth: number;
     /// Per-directory indexing status surfaced by the Dashboard
     /// indexing slide. When set on a `folder` node the
     /// paint pass overrides the standard folder fill with the
@@ -245,11 +248,12 @@
   /// handlers; consumed once per paint pass.
   let transform = { x: 0, y: 0, k: 1 };
 
-  /// Auto-fit state. While `refitUntil` is in the future the rAF
-  /// loop recomputes `fitTarget` each frame from the current bbox
-  /// so the view tracks the cluster as it relaxes after a scope /
-  /// filter / depth change. `fitTarget` is the ease-in destination
-  /// for transform; null = no easing in flight.
+  /// Auto-fit state. While `refitUntil` is in the future, or the
+  /// layout still moves under an untouched view, the rAF loop
+  /// recomputes `fitTarget` each frame from the current bbox so the
+  /// view tracks the cluster as it relaxes after a scope / filter /
+  /// depth change. `fitTarget` is the ease-in destination for
+  /// transform; null = no easing in flight.
   let refitUntil = 0;
   let fitTarget: { x: number; y: number; k: number } | null = null;
   let expansionRefit: { until: number; ids: Set<string> } | null = null;
@@ -450,7 +454,7 @@
     mention: string;
     language: string;
     accent: string;
-    /// Directory node fill (filesystem graph mode).
+    /// Directory node fill.
     folder: string;
     /// Source-code file fill. Royalblue; source is its own bucket
     /// (distinct from binary's grey) so the markdown / source /
@@ -463,6 +467,10 @@
     /// graph + the FB row + the inspector header all render the same
     /// yellow tint.
     drafts: string;
+    /// The edge from a symlink to its target, and the edge between two
+    /// names of one hardlinked file.
+    symlink: string;
+    hardlink: string;
   };
 
   function readTheme(host: HTMLElement): ThemeColors {
@@ -492,6 +500,8 @@
       // Drafts tint pulled from the same CSS variable as the FB row +
       // the inspector chip.
       drafts: v("--fb-drafts-fg", "#e3b341"),
+      symlink: v("--g-symlink", GRAPH_FS_EDGE_DEFAULTS.dark.symlink),
+      hardlink: v("--g-hardlink", GRAPH_FS_EDGE_DEFAULTS.dark.hardlink),
     };
   }
 
@@ -502,6 +512,8 @@
     mention: "#e3b341", language: paletteSeed.language, accent: "#3fb950",
     folder: paletteSeed.folder, source: paletteSeed.source,
     binary: paletteSeed.binary, drafts: "#e3b341",
+    symlink: GRAPH_FS_EDGE_DEFAULTS.dark.symlink,
+    hardlink: GRAPH_FS_EDGE_DEFAULTS.dark.hardlink,
   });
 
   /// Track `prefers-reduced-motion` so the indexing-state pulse can
@@ -695,7 +707,7 @@
       } else {
         const fresh: DNode = {
           id: n.id, label: n.label, kind, missing, draft,
-          isFocal, radius, depth, parentId, indexState,
+          isFocal, radius, depth, parentId, linkedDepth: -1, indexState,
         };
         newById.set(n.id, fresh);
         added.push(fresh);
@@ -704,11 +716,28 @@
     for (const [id, n] of nodeById) {
       if (!newById.has(id)) removed.push(n);
     }
+    // A tag, mention or language node has no depth of its own; it takes its
+    // band from the files it is linked to.
+    for (const n of newById.values()) {
+      n.linkedDepth = -1;
+      if (n.depth >= 0) continue;
+      const linked = adjacency.get(n.id);
+      if (!linked) continue;
+      for (const id of linked) {
+        const other = newById.get(id);
+        if (other && other.depth > n.linkedDepth) n.linkedDepth = other.depth;
+      }
+    }
     // Seed fresh node positions near a visible neighbour so they
     // grow out of the cluster on a depth-bump rather than popping
     // in from the origin and being yanked across the canvas by
-    // the spring forces.
+    // the spring forces. A node with a band starts at its band's height:
+    // one seeded below its parent would have to pass through it to reach
+    // its band, and the link spring that keeps the two apart holds it on
+    // the far side instead, most firmly below a pinned root.
     for (const a of added) {
+      const band = yBand(a);
+      const bandY = band < 0 ? null : -band * force.hierarchyYSpacing;
       const adj = adjacency.get(a.id);
       let anchor: DNode | null = null;
       if (adj) {
@@ -722,13 +751,14 @@
       }
       if (anchor) {
         a.x = anchor.x! + (Math.random() - 0.5) * 40;
-        a.y = anchor.y! + (Math.random() - 0.5) * 40;
+        a.y = (bandY ?? anchor.y!) + (Math.random() - 0.5) * 40;
       } else {
         // No anchor available (first run or fully disconnected
-        // component): drop into a 600x600 box around origin and
-        // let the sim settle it.
+        // component): spread across a 600-wide box around the origin, at
+        // the band's height or anywhere in the box's for a node with no
+        // band, and let the sim settle it.
         a.x = (Math.random() - 0.5) * 600;
-        a.y = (Math.random() - 0.5) * 600;
+        a.y = bandY === null ? (Math.random() - 0.5) * 600 : bandY + (Math.random() - 0.5) * 40;
       }
     }
     // Pin focal nodes. Single-focus scopes stay centered at origin;
@@ -833,12 +863,13 @@
       .force(
         "y",
         forceY<DNode>((d) => {
-          if (d.depth < 0) return 0;
+          const band = yBand(d);
+          if (band < 0) return 0;
           // Negative pull so deeper nodes rise ABOVE their
           // ancestors; the workspace root (depth 0) anchors the bottom.
-          return -d.depth * force.hierarchyYSpacing;
+          return -band * force.hierarchyYSpacing;
         }).strength((d) =>
-          d.depth < 0 ? force.centerStrength : force.hierarchyYStrength,
+          yBand(d) < 0 ? force.centerStrength : force.hierarchyYStrength,
         ),
       )
       .force("parentX", parentXForce(force.parentXStrength))
@@ -849,6 +880,18 @@
       // just needs to mutate positions. No-op on tick keeps us from
       // doing per-tick work twice (rAF + tick callback).
       .on("tick", () => {});
+  }
+
+  /// The depth band a node is pulled to, or -1 for a node on the weak pull
+  /// toward the center. A hierarchical node's band is its depth. With
+  /// `force.metaLift` set, a tag, mention or language node sits that many
+  /// bands above the deepest file it is linked to, so it reads as growing
+  /// out of the tree; one linked to no file, or any of them with the lift
+  /// at 0, floats.
+  function yBand(d: DNode): number {
+    if (d.depth >= 0) return d.depth;
+    if (force.metaLift <= 0 || d.linkedDepth < 0) return -1;
+    return d.linkedDepth + force.metaLift;
   }
 
   /// Parent-anchored X force. Each hierarchical node (depth >= 0)
@@ -919,10 +962,11 @@
       transform = { x: r.width / 2, y: r.height / 2, k: 1 };
       fitToContent(24);
       scheduleRefit(900);
-    } else if (focalAnchor === "bounds" && r.width > 0 && r.height > 0) {
-      // The bounds framing is relative to the canvas's size, so a new size
-      // needs a new fit; the other framings keep the view where it is.
-      // scheduleRefit leaves a view the user has taken alone.
+    } else if (r.width > 0 && r.height > 0) {
+      // Every framing places the view relative to the canvas's size (the
+      // box in its middle, the focal at its bottom edge or its center), so
+      // a new size needs a new fit. scheduleRefit leaves a view the user
+      // has taken alone.
       scheduleRefit(300);
     }
   }
@@ -1001,6 +1045,7 @@
   function bucketEdges(edgeList: DEdge[]): EdgeBuckets {
     const edgesByKind: Record<RenderedEdgeKind, DEdge[]> = {
       link: [], tag: [], mention: [], contains: [], language: [],
+      symlink: [], hardlink: [],
     };
     for (const e of edgeList) edgesByKind[e.kind].push(e);
     // Falls back to the doc colour when the source kind isn't a recognised
@@ -1128,7 +1173,8 @@
     // edges stay GREY (the `contains`
     // kind, stroked in `theme.folder`); every other edge matches its
     // DOCUMENT TYPE rather than a single connector colour. `tag`,
-    // `mention`, and `language` already carry their own palette hue;
+    // `mention`, and `language` already carry their own palette hue,
+    // and so do the spine's `symlink` and `hardlink` edges;
     // the `link` (wiki/markdown reference) edge is the one that needs
     // its colour derived from the SOURCE document's kind so a markdown
     // link reads orange (--g-doc), a source-file link royalblue
@@ -1143,6 +1189,8 @@
       kind === "tag" ? theme.tag
       : kind === "mention" ? theme.mention
       : kind === "contains" ? theme.folder
+      : kind === "symlink" ? theme.symlink
+      : kind === "hardlink" ? theme.hardlink
       : theme.language;
 
     /// Both endpoints strictly off the same side of the viewport means the
@@ -1200,7 +1248,7 @@
     // is memoised in `selectionPaint()`, so a frame only walks the
     // buckets it draws.
     const drawEdgeBuckets = (buckets: EdgeBuckets, alpha: number): void => {
-      for (const kind of ["tag", "mention", "contains", "language"] as const) {
+      for (const kind of ["tag", "mention", "contains", "language", "symlink", "hardlink"] as const) {
         strokePass(buckets.byKind[kind], strokeForKind(kind), alpha);
       }
       for (const [kind, list] of buckets.linkByKind) {
@@ -1382,12 +1430,11 @@
     // signal: d3-force stops its own timer once alpha decays past
     // alphaMin, and node positions are fixed from then on.
     const simRunning = sim !== null && sim.alpha() > SIM_ALPHA_MIN;
-    // The bounds framing frames every node rather than one pinned in place,
-    // so it follows the layout for as long as the layout moves, including
-    // the small warm-up a content refresh gives it; the other framings hold
-    // their pinned focal and track only during a refit window. Either stops
-    // once the user takes the view.
-    const tracksLayout = focalAnchor === "bounds" && simRunning && !userInteracted;
+    // An untouched view follows the layout for as long as the layout moves,
+    // including the small warm-up a content refresh gives it: a refit
+    // window can close while nodes still spread, and one would end past an
+    // edge of the canvas. It stops once the user takes the view.
+    const tracksLayout = simRunning && !userInteracted;
     // While the refit window is open, retarget every frame so the
     // view tracks the cluster as the sim spreads / contracts. Once
     // the window expires we keep easing toward the last target until
@@ -1768,6 +1815,13 @@
 
   function scheduleExpansionFit(ids: string[], ms: number): void {
     if (ids.length === 0) return;
+    // An untouched view frames every node and follows the layout, so what
+    // the expansion brought is in view under its own fit; framing the
+    // named nodes alone would move it off that fit and back.
+    if (!userInteracted) {
+      scheduleRefit(ms);
+      return;
+    }
     const set = new Set(ids);
     expansionRefit = { until: performance.now() + ms, ids: set };
     const t = computeFitForNodes(32, set, false, transform.k);
@@ -2013,9 +2067,10 @@
 
   /// Directory expansion fit. Runs after the visibility effect above so
   /// `dNodes` contains the newly visible directory children. Unlike the
-  /// normal content refit, this bypasses `userInteracted` because it is a
-  /// direct result of the user's expand gesture. The target caps zoom at the
-  /// current scale, so it can zoom out or pan but never zoom in.
+  /// normal content refit, it moves a view the user has taken, because it is
+  /// a direct result of the user's expand gesture: the target caps zoom at
+  /// the current scale, so it can zoom out or pan but never zoom in. An
+  /// untouched view keeps its own fit, which holds the new nodes too.
   $effect(() => {
     const request = expansionFitRequest;
     if (!request || request.nonce === seenExpansionFitNonce) return;

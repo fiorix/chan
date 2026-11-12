@@ -90,7 +90,9 @@ impl<T: Send + 'static> StreamBridge<T> {
     }
 
     /// Every frame the producer queues, then the stall error when the bound
-    /// stopped it.
+    /// stopped it. Fused: a poll past the end answers the end again, where
+    /// the unfold alone panics. A layer over the body may ask once more
+    /// after the end, as the graph route's compression does.
     fn frames(self) -> impl Stream<Item = Result<T, std::io::Error>> + Send {
         let Self { rx, signal } = self;
         stream::unfold((rx, signal, false), |(mut rx, signal, ended)| async move {
@@ -109,6 +111,7 @@ impl<T: Send + 'static> StreamBridge<T> {
                 None => None,
             }
         })
+        .fuse()
     }
 }
 
