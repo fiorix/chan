@@ -5198,6 +5198,9 @@ function resolveGraphSpawnContext(tab: GraphTab): SpawnContext {
   if (id === "" || id.startsWith("#") || id.startsWith("@@") || id.startsWith("language:")) {
     return { dir: "" };
   }
+  // A selection still waiting on the graph names a directory by its bare
+  // path, and its opener opened that directory; no opener opens a file.
+  if (tab.expanded[id]) return { dir: id };
   return { dir: parentDir(id), file: id };
 }
 
