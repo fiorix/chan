@@ -162,10 +162,12 @@ export class Buffer implements IBuffer {
       return undefined;
     }
 
-    // Determine if accessing scrollback or visible screen. As xterm.js's, a
-    // line is current until the terminal next changes: a screen row's line
-    // reads into the view the buffer keeps for that row, and a history row's
-    // into a view of its own.
+    // Determine if accessing scrollback or visible screen. A screen row's
+    // line reads into the view the buffer keeps for that row, which reads
+    // nothing while the row is unchanged, so a line or cell held after the
+    // row changed shows it as the row's next read found it; as with
+    // xterm.js's lines, read a line when it is used. A history row's line
+    // reads into a view of its own.
     const scrollbackLength = wasmTerm.getScrollbackLength();
     let cells: VtCells;
     let read: boolean;
