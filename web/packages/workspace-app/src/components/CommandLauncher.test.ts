@@ -492,10 +492,9 @@ describe("contextual command deck", () => {
     await flush();
     expect(document.activeElement).toBe(input(target));
     // No tab is focused, so no app's commands are listed: the editor's and
-    // the file browser's wait for their tab.
-    expect(titles(target)).toEqual([
-      "Search", "Project A", "Control terminal", CAPTIONED, "New terminal window",
-    ]);
+    // the file browser's wait for their tab. This machine closes the list
+    // with the ways into its tree.
+    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
     expect([...target.querySelectorAll(".deck-scope")].map((orb) => orb.getAttribute("aria-label"))).toEqual([
       "App scope", "Pane scope", "Window scope", "Workspace scope", "Settings scope", "Computers scope",
     ]);
@@ -1636,6 +1635,7 @@ describe("contextual command deck", () => {
   test("Escape leaves a page before it closes the launcher", async () => {
     const target = openLauncher();
     await flush();
+    await openComputers(target);
     await openPage(target, "Project A");
     expect(launcherDraft.path).toEqual(["workspace:project-a"]);
     await key(target, "Escape");
@@ -1643,6 +1643,50 @@ describe("contextual command deck", () => {
     expect(launcherPanel.open).toBe(true);
     await key(target, "Escape");
     expect(launcherPanel.open).toBe(false);
+  });
+
+  test("Workspaces and Windows open from the list of every scope, and Escape or Backspace comes back", async () => {
+    const target = openLauncher();
+    await flush();
+    await selectRow(target, "Workspaces");
+    await key(target, "Enter");
+    expect(launcherDraft.path).toEqual(["type:workspaces"]);
+    expect(crumbs(target)).toEqual(["Computers", "Workspaces"]);
+    expect(sectionTitles(target)).toEqual(["This machine"]);
+    expect(titles(target)).toEqual(["Project A"]);
+
+    // One level further, then back out a level at a time.
+    await openPage(target, "Project A");
+    expect(crumbs(target)).toEqual(["Computers", "Workspaces", "Project A"]);
+    await key(target, "Escape");
+    expect(launcherDraft.path).toEqual(["type:workspaces"]);
+    await key(target, "Escape");
+    expect(launcherDraft.path).toEqual([]);
+    expect(launcherPanel.open, "Escape left the branch, not the launcher").toBe(true);
+    expect(launcherDraft.scope).toBeNull();
+    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
+
+    // Right enters a branch as Enter does, and Backspace leaves it.
+    await selectRow(target, "Windows");
+    await key(target, "ArrowRight");
+    expect(launcherDraft.path).toEqual(["type:windows"]);
+    expect(crumbs(target)).toEqual(["Computers", "Windows"]);
+    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New terminal window"]);
+    await key(target, "Backspace");
+    expect(launcherDraft.path).toEqual([]);
+    expect(launcherPanel.open).toBe(true);
+    await key(target, "Escape");
+    expect(launcherPanel.open).toBe(false);
+  });
+
+  test("a type's page restores after a reload, once the library answers", async () => {
+    launcherDraft.path = ["type:windows"];
+    const target = openLauncher();
+    await flush();
+    expect(launcherDraft.path).toEqual(["type:windows"]);
+    expect(crumbs(target)).toEqual(["Computers", "Windows"]);
+    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New terminal window"]);
+    expect(launcherDraft.contextChanged, "nothing moved under the reader").toBe(false);
   });
 });
 
@@ -1660,7 +1704,9 @@ describe("the way to every computer", () => {
   test("the Computers scope ends with All computers... where the window's app has that screen", async () => {
     const target = openBeside(vi.fn());
     await flush();
-    expect(titles(target).at(-1), "the list of every scope ends with it too").toBe("All computers...");
+    expect(titles(target), "the list of every scope holds the ways in alone").toEqual([
+      "Search", "New terminal window", "Workspaces", "Windows",
+    ]);
     await openComputers(target);
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New", "Chan Desktop"]);
     expect(titles(target)).toEqual([

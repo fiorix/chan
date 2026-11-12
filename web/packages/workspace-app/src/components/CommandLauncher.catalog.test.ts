@@ -169,6 +169,13 @@ const librarySnapshot = {
   ],
 };
 
+/// A window of Project A, for the tests that need this machine to hold one.
+const projectWindow = {
+  window_id: "w-a", kind: "workspace" as const, title: "Project A Window 1", ordinal: 1, label: "",
+  workspace_path: "/work/project-a", connected: true, hidden: false, control: false, tmux: false,
+  origin: "browser" as const, launch_path: "/api/library/command-capabilities/cap/windows/w-a/launch",
+};
+
 const mounted: Array<Record<string, unknown>> = [];
 let target: HTMLElement;
 
@@ -310,15 +317,96 @@ describe("the scope rail", () => {
 });
 
 describe("browsing", () => {
+  /// The rows as `section: title` lines.
+  const outline = (): string[] =>
+    rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`);
+  const computerRows = (): HTMLButtonElement[] =>
+    rows().filter((candidate) => candidate.dataset.section === "Computers");
+
   test("sections run from the app to Computers", async () => {
+    fake.load.mockResolvedValue({ ...librarySnapshot, windows: [projectWindow] });
     await open();
     expect(sections()).toEqual([
       "Terminal", "New tab", "Tab", "Pane", "Window", "Workspace", "Settings", "Computers",
     ]);
-    // This machine's rows close the list under one heading, objects first.
-    expect(rows().filter((candidate) => candidate.dataset.section === "Computers").map((r) => r.textContent)).toEqual([
-      "Project A", "New terminal window",
+    // The list ends with the ways into this machine's tree, not the tree.
+    expect(rows().slice(-3).map((r) => [r.textContent, r.dataset.kind, r.dataset.breadcrumb])).toEqual([
+      ["New terminal window", "action", "Computers"],
+      ["Workspaces", "branch", "Computers"],
+      ["Windows", "branch", "Computers"],
     ]);
+    expect(computerRows()).toHaveLength(3);
+  });
+
+  test("a type this machine holds none of has no row among the ways in", async () => {
+    // The snapshot lists a workspace and no window.
+    await open();
+    expect(computerRows().map((r) => r.textContent)).toEqual(["New terminal window", "Workspaces"]);
+  });
+
+  test("no way in is listed before the library answers, and none inside a scope", async () => {
+    let answer!: (snapshot: unknown) => void;
+    fake.load.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    await open();
+    expect(sections()).not.toContain("Computers");
+    answer({ ...librarySnapshot, windows: [projectWindow] });
+    await flush();
+    expect(computerRows()).toHaveLength(3);
+    await scope("window");
+    expect(sections()).toEqual(["Window"]);
+  });
+
+  test("Workspaces opens the workspaces as the Computers scope lists them, and Back returns to the list", async () => {
+    fake.load.mockResolvedValue({ ...librarySnapshot, windows: [projectWindow] });
+    await open();
+    await scope("computers");
+    const inScope = rows()
+      .filter((candidate) => candidate.dataset.section === "Workspaces")
+      .map((candidate) => [candidate.dataset.id, candidate.textContent, candidate.dataset.value]);
+    (target.querySelector(".probe-clear") as HTMLButtonElement).click();
+    await flush();
+
+    await click("Workspaces");
+    expect(launcherDraft.path).toEqual(["type:workspaces"]);
+    expect(launcherDraft.scope, "the branch is entered from every scope and stays there").toBeNull();
+    expect(crumbs()).toBe("Computers > Workspaces");
+    expect(outline()).toEqual(["This machine: Project A"]);
+    expect(rows().map((r) => [r.dataset.id, r.textContent, r.dataset.value])).toEqual(inScope);
+
+    // A workspace's page is one level further, and Back climbs one at a time.
+    (target.querySelector('.probe-expand[data-id="computers:workspace:project-a"]') as HTMLButtonElement).click();
+    await flush();
+    expect(launcherDraft.path).toEqual(["type:workspaces", "workspace:project-a"]);
+    expect(crumbs()).toBe("Computers > Workspaces > Project A");
+    const back = target.querySelector(".probe-back") as HTMLButtonElement;
+    back.click();
+    await flush();
+    expect(crumbs()).toBe("Computers > Workspaces");
+    back.click();
+    await flush();
+    expect(launcherDraft.path).toEqual([]);
+    expect(crumbs()).toBe("");
+    expect(computerRows()).toHaveLength(3);
+  });
+
+  test("Windows opens the windows as the Computers scope lists them, with a new terminal window after", async () => {
+    fake.load.mockResolvedValue({ ...librarySnapshot, windows: [projectWindow] });
+    await open();
+    await click("Windows");
+    expect(launcherDraft.path).toEqual(["type:windows"]);
+    expect(crumbs()).toBe("Computers > Windows");
+    expect(outline()).toEqual(["This machine: Window 1", "New: New terminal window"]);
+    expect(row("Window 1").dataset).toMatchObject({ subtitle: "Project A", expandable: "true" });
+  });
+
+  test("a query typed on a type's page searches that type alone", async () => {
+    fake.load.mockResolvedValue({ ...librarySnapshot, windows: [projectWindow] });
+    await open();
+    await click("Windows");
+    await type("project");
+    expect(titles()).toEqual(expect.arrayContaining(["Window 1", "Focus Window 1", "Close Window 1"]));
+    expect(titles()).not.toContain("Project A");
+    expect(titles()).not.toContain("Workspaces");
   });
 
   test("the Computers scope lists the same rows under the tree's own sections", async () => {
@@ -342,7 +430,7 @@ describe("browsing", () => {
     );
     await open();
     expect(row("New terminal window").dataset.kind).toBe("action");
-    expect(row("New terminal window").dataset.breadcrumb).toBe("Computers › New");
+    expect(row("New terminal window").dataset.breadcrumb).toBe("Computers");
     await click("New terminal window");
     expect(fake.run).toHaveBeenCalledExactlyOnceWith({ action: "new_terminal" });
   });
@@ -352,7 +440,8 @@ describe("browsing", () => {
       () => ({ close: vi.fn(), focus: vi.fn(), closed: false, document: document.implementation.createHTMLDocument(), location: { href: "about:blank" } }) as unknown as Window,
     );
     await open();
-    expect(row("Project A").dataset).toMatchObject({ value: "on", expandable: "true", breadcrumb: "Computers › Workspaces" });
+    await scope("computers");
+    expect(row("Project A").dataset).toMatchObject({ value: "on", expandable: "true", breadcrumb: "Workspaces" });
     (target.querySelector('.probe-expand[data-id="computers:workspace:project-a"]') as HTMLButtonElement).click();
     await flush();
     expect(crumbs()).toBe("Computers > Project A");

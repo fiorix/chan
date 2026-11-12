@@ -18,6 +18,7 @@
   import {
     computersConfirmBridge,
     computersDeck,
+    computersEntryPoints,
     createComputersConfirmations,
     type ComputersBridge,
     type ComputersContext,
@@ -199,8 +200,9 @@
 
   const ctx = $derived(commandContext());
   // A path the catalog builders own is a choice's options or a Settings
-  // section. Any other non-empty path names pages of the Computers tree: a
-  // workspace's or a window's, outermost first.
+  // section. Any other non-empty path names pages of the Computers tree,
+  // outermost first: every workspace or every window, a workspace's, a
+  // window's.
   const catalogMode = $derived(isCatalogPath(launcherDraft.path));
   const computerMode = $derived(!catalogMode && launcherDraft.path.length > 0);
 
@@ -519,6 +521,7 @@
     confirmations: createComputersConfirmations(computersConfirmBridge(computersBridge)),
     // Every icon a row of this window's model draws.
     icons: {
+      windows: Layers,
       window: AppWindow,
       terminal: Terminal,
       workspace: Folder,
@@ -556,7 +559,7 @@
   /// was typed. An empty query keeps the tree's own order and sections.
   function computerRows(entries: readonly ComputersEntry[], query: string): Entry[] {
     if (!query) return [...entries];
-    const ranked = rankDeckItems(entries.filter((entry) => !entry.pinned), query) as ComputersEntry[];
+    const ranked = rankDeckItems(entries.filter((entry) => !entry.pinned), query);
     return [...ranked, ...entries.filter((entry) => entry.pinned)];
   }
 
@@ -573,6 +576,13 @@
           : `${COMPUTERS_SECTION} › ${entry.breadcrumb}`,
     }));
   }
+
+  /// What a list of every scope shows of this machine while it browses: the
+  /// ways into the Computers tree, one row each, under the scope's name. The
+  /// tree itself is the Computers scope's. Nothing until a snapshot arrives.
+  const computerEntryPoints = $derived<Entry[]>(
+    library ? computersEntryPoints(library.model, computersContext) : [],
+  );
 
   /// What the Computers scope shows in place of its root while no snapshot
   /// has arrived. Connecting only while the first request is unanswered, as
@@ -608,25 +618,24 @@
     const query = launcherDraft.query.trim();
     const scope = launcherDraft.scope;
     if (catalogMode) {
-      return (rankDeckItems(catalogBranch ?? [], query) as DeckRow[]).map(withIcon);
+      return rankDeckItems(catalogBranch ?? [], query).map(withIcon);
     }
     if (computerMode || scope === "computers") {
       if (computers) return computerRows(computers.entries, query);
       return computerMode ? [] : [computerStatusEntry];
     }
     const source = deckSource();
-    const machine = scope === null && computers ? amongScopes(computers.entries) : [];
     if (!query) {
-      // Browsing ends with this machine's rows under one heading; the
-      // Computers scope lists them under the tree's own sections.
+      // Browsing every scope ends with the ways into this machine's tree.
       return [
         ...browseRows(source, scope, openSettingsAt).map(withIcon),
-        ...machine.map((entry) => ({ ...entry, section: COMPUTERS_SECTION })),
+        ...(scope === null ? computerEntryPoints : []),
       ];
     }
     // Typed search crosses every level: this machine's objects and each of
     // their actions rank with the commands, so `focus deploy shell` acts in
     // one Enter.
+    const machine = scope === null && computers ? amongScopes(computers.entries) : [];
     return searchRows(source, scope, query, openSettingsAt, machine).map(withIcon);
   });
 
