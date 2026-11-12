@@ -373,6 +373,14 @@ fn command_name(path: &Path) -> Option<String> {
 
 /// The `/usr/bin/open` command that starts the `.app` at `bundle` to open
 /// `paths`, or the `terminal` a `chan-term` asked for.
+///
+/// The terminal goes through `--env`, which reaches the new instance however
+/// much of `open`'s own environment LaunchServices passes on, and `open`
+/// itself carries neither `$ARGV0` nor a terminal this process inherited.
+/// The started desktop's dispatch reads `$ARGV0` ahead of `argv[0]`, and an
+/// inherited `chan-term` (a New Window sibling's) would run it as a terminal
+/// launch, which finds no desktop and opens the app again; an inherited
+/// carrier would open a terminal nobody asked for.
 #[cfg(unix)]
 fn macos_open_command(
     bundle: &Path,
@@ -386,8 +394,6 @@ fn macos_open_command(
     // `-n` with paths or a terminal: `open --args` aimed at an app that is
     // already launching drops the arguments, where a new instance runs the
     // single-instance guard and hands them to the one on its way up.
-    // LaunchServices starts the app with its own environment, so the terminal
-    // goes through `--env`.
     if !paths.is_empty() || terminal.is_some() {
         open.arg("-n");
     }
@@ -398,7 +404,9 @@ fn macos_open_command(
     if !paths.is_empty() {
         open.arg("--args").args(paths);
     }
-    open.stdin(Stdio::null())
+    open.env_remove("ARGV0")
+        .env_remove(OPEN_TERMINAL_ENV)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     open
@@ -941,6 +949,68 @@ mod tests {
             start(&install.dev_exe, Some(&appimage), false).unwrap(),
             DesktopStart::Binary(appimage)
         );
+    }
+
+    /// The `open` command asks for a new instance with paths, after
+    /// `--args`, or with a terminal, in `--env`, and nothing more for a bare
+    /// start; it carries no `$ARGV0` and no inherited carrier of its own, so
+    /// neither can reach the desktop it starts, whose dispatch reads `$ARGV0`
+    /// ahead of `argv[0]`.
+    #[cfg(unix)]
+    #[test]
+    fn the_open_command_carries_the_asked_terminal_and_no_argv0() {
+        use chan_server::handoff::OPEN_TERMINAL_ENV;
+        use std::ffi::{OsStr, OsString};
+        let env = |command: &std::process::Command, key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        let argv = |command: &std::process::Command| {
+            command
+                .get_args()
+                .map(OsStr::to_os_string)
+                .collect::<Vec<_>>()
+        };
+        let strings = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+        let bundle = Path::new("/Applications/Chan.app");
+        let terminal = macos_open_command(bundle, &[], Some("/srv/notes"));
+        assert_eq!(
+            terminal.get_program(),
+            Path::new("/usr/bin/open").as_os_str()
+        );
+        assert_eq!(
+            argv(&terminal),
+            strings(&[
+                "-n",
+                "--env",
+                &format!("{OPEN_TERMINAL_ENV}=/srv/notes"),
+                "/Applications/Chan.app"
+            ])
+        );
+        let paths = ["/srv/a.md".to_string(), "/srv/docs".to_string()];
+        let opener = macos_open_command(bundle, &paths, None);
+        assert_eq!(
+            argv(&opener),
+            strings(&[
+                "-n",
+                "/Applications/Chan.app",
+                "--args",
+                "/srv/a.md",
+                "/srv/docs"
+            ])
+        );
+        let bare = macos_open_command(bundle, &[], None);
+        assert_eq!(argv(&bare), strings(&["/Applications/Chan.app"]));
+        for command in [&terminal, &opener, &bare] {
+            assert_eq!(env(command, "ARGV0"), Some(None), "ARGV0 is removed");
+            assert_eq!(
+                env(command, OPEN_TERMINAL_ENV),
+                Some(None),
+                "an inherited carrier is removed"
+            );
+        }
     }
 
     #[cfg(unix)]
