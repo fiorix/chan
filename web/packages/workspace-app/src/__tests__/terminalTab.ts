@@ -8,6 +8,7 @@
 import { mount, tick, unmount, type Component } from "svelte";
 import { expect, vi } from "vitest";
 
+import { __testResetSessionWrites } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { xterm, type FakeTerminal } from "./xterm";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
@@ -250,4 +251,9 @@ export function resetTerminals(): void {
   globalThis.requestAnimationFrame = immediateFrame;
   document.body.innerHTML = "";
   seatTerminals([]);
+  // Every attach schedules a session save. With no server standing in, the
+  // save fails and backs off into retries, the second failure setting a
+  // status. The store outlives the test, so end what it left armed before
+  // the next test runs.
+  __testResetSessionWrites();
 }

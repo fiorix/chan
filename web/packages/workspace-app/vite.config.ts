@@ -189,7 +189,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     // Guarantees a working localStorage / sessionStorage under every Node the
-    // gate runs on; see vitest.setup.ts for what jsdom does not deliver.
+    // gate runs on, and ends each file's timers with its page; see
+    // vitest.setup.ts for what jsdom does not deliver.
     setupFiles: ["./vitest.setup.ts"],
     alias: [
       { find: /^svelte$/, replacement: svelteClient },
