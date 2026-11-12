@@ -1,7 +1,8 @@
 <script lang="ts">
   // File browser settings: which docks show, the optional Vim map, and the
   // surface's Hybrid body-theme override. Each field takes its words, and a
-  // dock its change, from the settings index.
+  // dock its change and its gate, from the settings index: a dock is offered
+  // only in a window that loads the stored value into its own docks.
 
   import { browserKeys, setBrowserVim } from "../../state/browserKeys.svelte";
   import type { Preferences } from "../../api/types";
@@ -21,17 +22,19 @@
 </script>
 
 {#each DOCKS as dock (dock.entry.id)}
-  <SettingField
-    setting={dock.entry}
-    pref={dock.pref}
-    hint={`Show a file browser docked at the window's ${dock.edge} edge. The file browser's own menu toggles the same field.`}
-  >
-    <PillToggle
-      label={dock.entry.caption}
-      checked={toggledIn(dock.entry, prefs)}
-      ontoggle={(on) => commitSetting(commit, dock.entry, on)}
-    />
-  </SettingField>
+  {#if dock.entry.available()}
+    <SettingField
+      setting={dock.entry}
+      pref={dock.pref}
+      hint={`Show a file browser docked at the window's ${dock.edge} edge. The file browser's own menu toggles the same field.`}
+    >
+      <PillToggle
+        label={dock.entry.caption}
+        checked={toggledIn(dock.entry, prefs)}
+        ontoggle={(on) => commitSetting(commit, dock.entry, on)}
+      />
+    </SettingField>
+  {/if}
 {/each}
 
 <SettingField setting={VIM} hint="Standard desktop keys are always available. The optional Vim map applies to file lists and trees in this browser; text inputs keep their normal keys.">

@@ -744,6 +744,10 @@ const ENTRIES: readonly SettingEntry[] = [
   bodyTheme("terminal"),
 
   // ---- File browser ---------------------------------------------------------
+  // A window's docks are its own state. A window over a workspace loads the
+  // stored pair into them as it boots and on every configuration change; a
+  // window with no workspace never does, so there the field would change a
+  // value the window does not show.
   ...(["left", "right"] as const).map((side) =>
     toggle(
       {
@@ -753,6 +757,7 @@ const ENTRIES: readonly SettingEntry[] = [
         caption: "Show",
         keywords: ["side pane", "Side panes", `${side === "left" ? "Left" : "Right"} pane`, "stick"],
         command: side === "left" ? "app.browser.toggleLeftDock" : "app.browser.toggleRightDock",
+        available: inWorkspace,
       },
       {
         get: (p) => p.browser_side_panes[side],

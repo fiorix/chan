@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import SettingsOverlay from "./SettingsOverlay.svelte";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import { settingsPreferences } from "../__tests__/settings";
-import { closeSettings, openSettings, settingsPanel } from "../state/store.svelte";
+import { demoWorkspaceInfo } from "../demo/data";
+import { closeSettings, openSettings, settingsPanel, workspace } from "../state/store.svelte";
 
 let target: HTMLElement;
 let view: Record<string, unknown> | null = null;
@@ -64,6 +65,7 @@ afterEach(() => {
   view = null;
   settingsPanel.open = false;
   settingsPanel.target = null;
+  workspace.info = null;
   stopRecordingRequests();
   if (hadScrollIntoView) Object.defineProperty(Element.prototype, "scrollIntoView", hadScrollIntoView);
   else delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
@@ -204,6 +206,14 @@ describe("a link into Settings, opened from closed", () => {
 
 describe("a link into Settings that is already open", () => {
   test("moves to a field in another section", async () => {
+    // A dock is a field of a window over a workspace.
+    workspace.info = demoWorkspaceInfo(
+      {
+        metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+        files: [],
+      },
+      settingsPreferences(),
+    );
     openSettings();
     await settle();
     expect(activeTab()).toBe("Global");

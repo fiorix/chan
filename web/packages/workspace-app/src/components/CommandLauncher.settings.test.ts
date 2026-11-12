@@ -170,6 +170,30 @@ describe("the Settings scope over the settings index", () => {
     expect(rows().filter((r) => r.textContent === "Keyboard Shortcuts")).toHaveLength(1);
   });
 
+  test("lists the two docks among the File browser fields over a workspace, and not without one", async () => {
+    const docks = ["browser.leftDock", "browser.rightDock"].map((id) => `setting:${id}`);
+    const listed = (): (string | undefined)[] =>
+      rows()
+        .filter((r) => r.dataset.section === "File browser")
+        .map((r) => r.dataset.id);
+
+    // This window has no workspace, so nothing mirrors a stored dock into
+    // its own.
+    serve(settingsPreferences());
+    await openSettingsScope();
+    expect(listed()).toEqual(["setting:browser.vim", "setting:browser.bodyTheme"]);
+
+    workspace.info = demoWorkspaceInfo(
+      {
+        metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+        files: [],
+      },
+      settingsPreferences(),
+    );
+    await flush();
+    expect(listed()).toEqual([...docks, "setting:browser.vim", "setting:browser.bodyTheme"]);
+  });
+
   test("a toggle flips in place, sends its slice and shows the new value", async () => {
     const config = serve(settingsPreferences());
     const mcp = settingEntry("terminal.mcpEnv");

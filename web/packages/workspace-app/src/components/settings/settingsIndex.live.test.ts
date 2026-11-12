@@ -232,6 +232,24 @@ describe("a machine preference, with the overlay closed", () => {
     expect(settingEntry("browser.rightDock").read()).toBe(true);
   });
 
+  test("the docks are offered where the window mirrors them into its own: over a workspace", () => {
+    const preferences = settingsPreferences();
+    serve(preferences);
+    const docks = ["browser.leftDock", "browser.rightDock"].map((id) => settingEntry(id));
+    expect(docks.map((dock) => dock.available())).toEqual([false, false]);
+    // The file browser's other fields are this browser's, in any window.
+    expect(settingEntry("browser.vim").available()).toBe(true);
+
+    workspace.info = demoWorkspaceInfo(
+      {
+        metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+        files: [],
+      },
+      preferences,
+    );
+    expect(docks.map((dock) => dock.available())).toEqual([true, true]);
+  });
+
   test("custom terminal colours start from the page's standard colours and open their rows", async () => {
     const config = serve(settingsPreferences());
     const custom = settingEntry("terminal.customColors");
