@@ -3259,12 +3259,6 @@ export function clearTreeDirError(path: string): void {
   tree.dirErrors = rest;
 }
 
-export function clearTreeLoadingForPath(path: string): void {
-  const { [path]: _done, ...rest } = tree.loadingDirs;
-  tree.loadingDirs = rest;
-  if (Object.keys(rest).length === 0) tree.loading = false;
-}
-
 /// Take a save's or a live session's disk state into the saved file's tree
 /// entry, so the Details card follows the session's saves without a listing:
 /// a save through a session sends no watch frame, and only a listing writes
