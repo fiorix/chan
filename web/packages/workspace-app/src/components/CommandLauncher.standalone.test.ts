@@ -32,7 +32,12 @@ afterEach(() => {
   vi.resetModules();
 });
 
-test("a window with no workspace lists no Workspace scope and dims a workspace command", async () => {
+// The test transforms the launcher's whole module graph a second time, which
+// takes most of the suite's default bound on a host that is also running
+// other suites, so it carries a bound of its own.
+const FRESH_GRAPH_TIMEOUT_MS = 120_000;
+
+test("a window with no workspace lists no Workspace scope and dims a workspace command", { timeout: FRESH_GRAPH_TIMEOUT_MS }, async () => {
   vi.resetModules();
   window.history.replaceState({}, "", "/?kind=terminal&w=w-mini");
   serveMeta("chan-files", true);
