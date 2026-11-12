@@ -15,10 +15,10 @@ import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { FIND_COST_PRIORS, FIND_FRAME_BUDGET_MS, FIND_SCAN_BUDGET_MS, FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
-import { GhosttyVt, type MatchRange, type VtSearch, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, type MatchRange, type VtSearch, VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { SCROLLBACK_MB_DEFAULT, scrollbackLinesFromMb } from "./scrollback";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 
 let vendored: WebAssembly.Module;
 

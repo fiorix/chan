@@ -11,7 +11,7 @@
 /// and focus stay as they were.
 
 import type { ITheme, Terminal } from "@chan/ghostty-web-ng";
-import { VtTerminal, type VtTerminalConfig } from "./ghosttyVt";
+import { VtTerminal, type VtTerminalConfig } from "@chan/ghostty-web-ng/vt";
 
 /// The widget's private builder of the core's config from
 /// `options.theme`, the one `open()` and `reset()` call, so a switch

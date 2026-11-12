@@ -17,9 +17,9 @@ import {
   pasteLineEnds,
   type GhosttyPasteTerminal,
 } from "./ghosttyPaste";
-import { GhosttyVt, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const OPEN = "\x1b[200~";
 const CLOSE = "\x1b[201~";
 

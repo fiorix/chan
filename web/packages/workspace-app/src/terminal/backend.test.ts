@@ -42,7 +42,7 @@ describe("ghostty kit instances", () => {
   /// The vendored release wasm (relative to the package directory vitest
   /// runs in).
   async function vendoredModule(): Promise<WebAssembly.Module> {
-    return WebAssembly.compile(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+    return WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
   }
 
   /// Cells on screen holding the disposed terminal's marker byte.

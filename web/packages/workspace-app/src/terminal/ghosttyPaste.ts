@@ -1,4 +1,4 @@
-import { VtTerminal } from "./ghosttyVt";
+import { VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 // ghostty-web's paste path, cleaned and brought level with xterm.js.
 //
