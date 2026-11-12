@@ -1770,6 +1770,41 @@ describe("CommandDeck keys under a card", () => {
     expect(chosen(), "a chord is not the card's").toBe("Close");
   });
 
+  it("takes an answered confirmation down when its row runs and the host keeps the deck open", async () => {
+    // A row that changes in place after asking: the host handles the run
+    // and does not close the deck.
+    const onChoose = vi.fn();
+    await mountWith({
+      items: [named("semantic", "Semantic search", { kind: "toggle", confirm: confirmation("Download?") })],
+      onChoose,
+    });
+    await press("Enter");
+    deckInput().dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Download?");
+    await press("ArrowRight");
+    await press("Enter");
+    expect(onChoose).toHaveBeenCalledOnce();
+    expect(target.querySelector(".deck-operation"), "the card gives way to the list").toBeNull();
+    expect(activeTitle()).toBe("Semantic search");
+    expect(deckInput().readOnly).toBe(false);
+  });
+
+  it("takes a retried error down when its row runs again and the host keeps the deck open", async () => {
+    const onChoose = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("refused"))
+      .mockResolvedValueOnce();
+    await mountWith({ items: [named("masking", "Secret masking", { kind: "toggle" })], onChoose });
+    await press("Enter");
+    deckInput().dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("refused");
+    await press("ArrowRight");
+    await press("Enter");
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(target.querySelector(".deck-operation"), "the retry that went through leaves no card").toBeNull();
+    expect(activeTitle()).toBe("Secret masking");
+  });
+
   it("gives the query back when the card leaves", async () => {
     await showCard("confirm");
     expect(deckInput().readOnly).toBe(true);

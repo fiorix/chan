@@ -572,6 +572,14 @@
     }
 
     if (!item.awaitResult) {
+      // A card this row raised has its answer once the row runs: the action
+      // of its confirmation, or Retry on its error. The host handles the run
+      // from here, and a host that keeps the deck open for a row that changes
+      // in place shows the list meanwhile, never a question already answered.
+      const card = executionDraft.operation;
+      if (card?.itemId === item.id && (card.kind === "confirm" || card.kind === "error")) {
+        executionDraft.operation = null;
+      }
       const run = {};
       closingRun = run;
       try {
