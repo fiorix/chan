@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -349,8 +348,6 @@ fn default_profile(id: &str, name: &str, program: PathBuf, kind: ShellKind) -> S
 ///   4. `%ComSpec%` / `cmd.exe`.
 #[cfg(windows)]
 fn resolve_windows_shell() -> ShellProfile {
-    use std::process::Command;
-
     // 1. Explicit override.
     if let Some(raw) = std::env::var_os("CHAN_SHELL").filter(|v| !v.is_empty()) {
         let program = PathBuf::from(raw);
@@ -425,19 +422,32 @@ pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, S
     ])
 }
 
-/// Keys the AppImage runtime and linuxdeploy's GTK hook invent whose value
+/// Keys the AppImage runtime sets for every process it starts, whose value
 /// holds no mount path, so the value scan in [`scrub_var`] cannot see them.
-/// `GDK_BACKEND` pins GTK children to X11, which drops every GTK app launched
-/// from a terminal onto XWayland; `ARGV0` is read ahead of `argv[0]` by
-/// `chan_shell::invoked_arg0`, so an inherited copy misnames a re-exec'd chan.
-const APPIMAGE_OPAQUE_KEYS: &[&str] = &[
-    "APPIMAGE",
-    "APPIMAGE_GTK_THEME",
-    "ARGV0",
-    "GDK_BACKEND",
-    "GTK_THEME",
-    "OWD",
-];
+/// `ARGV0` is read ahead of `argv[0]` by `chan_shell::invoked_arg0`, so an
+/// inherited copy misnames a re-exec'd chan. A child that is itself an
+/// AppImage process gets each of them again from its own runtime.
+const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD"];
+
+/// Keys linuxdeploy's GTK hook reads or sets whose value holds no mount path.
+/// A terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK
+/// children to X11, which drops every GTK app launched from a terminal onto
+/// XWayland, and `GTK_THEME` is the bundle's theme. A child AppImage process
+/// keeps them, since its own hook reads `APPIMAGE_GTK_THEME` as the user's
+/// override and sets `GTK_THEME` again, and a `GDK_BACKEND` the hook no
+/// longer sets is the user's.
+const APPIMAGE_GTK_KEYS: &[&str] = &["APPIMAGE_GTK_THEME", "GDK_BACKEND", "GTK_THEME"];
+
+/// Who is handed the environment the user had before a chan AppImage process
+/// started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HostEnvFor {
+    /// A terminal's shell or command.
+    Terminal,
+    /// Another AppImage process of chan's, whose own runtime and GTK hook
+    /// build the AppImage's environment again on top of the user's.
+    AppImage,
+}
 
 /// Search paths the runtime prepends its own entries to rather than inventing
 /// outright. Its AppRun writes each as its block of mount entries, then a
@@ -452,7 +462,7 @@ const APPIMAGE_PREPENDED_KEYS: &[&str] = &["PATH", "LD_LIBRARY_PATH", "XDG_DATA_
 const GTK_HOOK_XDG_DATA_DIR: &str = "/usr/share";
 
 /// What scrubbing one variable does to it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Scrub {
     /// Drop the key: it exists only to point at the bundle.
     Remove,
@@ -475,7 +485,7 @@ fn entry_in_bundle(appdir: &Path, value: &OsStr) -> bool {
 /// honest across a Tauri or linuxdeploy bump: a plugin that starts exporting
 /// some new bundle-scoped key is caught the day it appears, with no list here
 /// to forget to update. Only the keys whose value hides the mount need naming.
-fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
+fn scrub_var(appdir: &Path, key: &str, value: &OsStr, to: HostEnvFor) -> Option<Scrub> {
     if APPIMAGE_PREPENDED_KEYS.contains(&key) {
         let entries: Vec<PathBuf> = std::env::split_paths(value).collect();
         let host = host_value(appdir, key, &entries)?;
@@ -489,7 +499,13 @@ fn scrub_var(appdir: &Path, key: &str, value: &OsStr) -> Option<Scrub> {
             _ => Scrub::Remove,
         });
     }
-    if APPIMAGE_OPAQUE_KEYS.contains(&key) || entry_in_bundle(appdir, value) {
+    if to == HostEnvFor::AppImage && APPIMAGE_GTK_KEYS.contains(&key) {
+        return None;
+    }
+    if APPIMAGE_RUNTIME_KEYS.contains(&key)
+        || APPIMAGE_GTK_KEYS.contains(&key)
+        || entry_in_bundle(appdir, value)
+    {
         return Some(Scrub::Remove);
     }
     None
@@ -534,22 +550,79 @@ fn host_value<'a>(appdir: &Path, key: &str, entries: &'a [PathBuf]) -> Option<&'
 /// runtime, so the dev binary, the macOS bundle, and the deb/rpm install never
 /// enter the branch.
 pub(super) fn clear_appimage_env(cmd: &mut CommandBuilder) {
-    let Some(appdir) = std::env::var_os("APPDIR").filter(|dir| !dir.is_empty()) else {
-        return;
-    };
-    if std::env::var_os("APPIMAGE").is_none_or(|path| path.is_empty()) {
-        return;
-    }
-    let appdir = PathBuf::from(appdir);
-    for (key, value) in std::env::vars_os() {
-        let Some(key) = key.to_str() else {
-            continue;
-        };
-        match scrub_var(&appdir, key, &value) {
-            Some(Scrub::Remove) => cmd.env_remove(key),
-            Some(Scrub::Rewrite(filtered)) => cmd.env(key, filtered),
-            None => {}
+    for (key, scrub) in appimage_host_env(std::env::vars_os(), HostEnvFor::Terminal) {
+        match scrub {
+            Scrub::Remove => cmd.env_remove(key),
+            Scrub::Rewrite(value) => cmd.env(key, value),
         }
+    }
+}
+
+/// What turns `vars`, a process's environment, back into the one the user
+/// had before the chan AppImage process it belongs to started, for `to`:
+/// each variable the AppImage runtime, its GTK hook or chan put there, with
+/// what to do to it. Empty when `vars` is no AppImage process's: `$APPDIR`
+/// and `$APPIMAGE` are set only by that runtime, so the dev binary, the macOS
+/// bundle and the deb/rpm install hand their environment on unchanged.
+fn appimage_host_env(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    to: HostEnvFor,
+) -> Vec<(String, Scrub)> {
+    let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+    let value_of = |name: &str| {
+        vars.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(appdir), Some(_)) = (value_of("APPDIR"), value_of("APPIMAGE")) else {
+        return Vec::new();
+    };
+    let appdir = PathBuf::from(appdir);
+    vars.iter()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            Some((key.to_string(), scrub_var(&appdir, key, value, to)?))
+        })
+        .collect()
+}
+
+/// Give `cmd`, which starts chan's AppImage again (a New Window sibling, a
+/// desktop a command starts, the devserver daemon, a relaunch), the
+/// environment the user had before `parent`, this process's environment, was
+/// built: its search paths as the user had them and none of this mount's
+/// entries, so the child's own runtime adds exactly one block of its own on
+/// top. A parent that is no AppImage process changes nothing.
+pub fn hand_appimage_host_env(
+    cmd: &mut Command,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    for (key, scrub) in appimage_host_env(parent, HostEnvFor::AppImage) {
+        match scrub {
+            Scrub::Remove => cmd.env_remove(key),
+            Scrub::Rewrite(value) => cmd.env(key, value),
+        };
+    }
+}
+
+/// The value of `name` a process chan starts should get from `parent`, this
+/// process's environment: as the user had it before chan's AppImage built
+/// `parent` (`None` when they had none), or as `parent` has it off an
+/// AppImage. For a value chan records for later processes, such as the
+/// `PATH` of the devserver's systemd unit.
+pub fn appimage_host_var(
+    name: &str,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Option<OsString> {
+    let parent: Vec<(OsString, OsString)> = parent.into_iter().collect();
+    let host = appimage_host_env(parent.iter().cloned(), HostEnvFor::AppImage);
+    match host.into_iter().find(|(key, _)| key == name) {
+        Some((_, Scrub::Remove)) => None,
+        Some((_, Scrub::Rewrite(value))) => Some(value),
+        None => parent
+            .into_iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value),
     }
 }
 
@@ -645,7 +718,7 @@ mod tests {
 
 #[cfg(test)]
 mod appimage_env_tests {
-    use super::{scrub_var, Scrub};
+    use super::{scrub_var, HostEnvFor, Scrub};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -658,7 +731,7 @@ mod appimage_env_tests {
     }
 
     fn scrub(key: &str, value: &OsString) -> Option<Scrub> {
-        scrub_var(Path::new(APPDIR), key, value)
+        scrub_var(Path::new(APPDIR), key, value, HostEnvFor::Terminal)
     }
 
     #[test]
@@ -764,10 +837,42 @@ mod appimage_env_tests {
     /// The values exactly as the AppImage's AppRun writes them, with the
     /// `:` separator of its format strings, so only on unix, where AppImages
     /// run.
+    /// A child AppImage process keeps the GTK hook's keys, which its own hook
+    /// reads or sets again, and a terminal loses them; the runtime's keys go
+    /// for both, since every AppImage process's runtime sets them again.
+    #[test]
+    fn a_child_appimage_keeps_the_gtk_keys_a_terminal_loses() {
+        let appdir = Path::new(APPDIR);
+        for key in ["GDK_BACKEND", "GTK_THEME", "APPIMAGE_GTK_THEME"] {
+            let value = OsString::from("x11");
+            assert_eq!(
+                scrub_var(appdir, key, &value, HostEnvFor::Terminal),
+                Some(Scrub::Remove),
+                "{key}"
+            );
+            assert_eq!(
+                scrub_var(appdir, key, &value, HostEnvFor::AppImage),
+                None,
+                "{key}"
+            );
+        }
+        for key in ["APPIMAGE", "ARGV0", "OWD"] {
+            let value = OsString::from("value");
+            for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
+                assert_eq!(
+                    scrub_var(appdir, key, &value, to),
+                    Some(Scrub::Remove),
+                    "{key} {to:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(unix)]
     mod apprun_shapes {
-        use super::{scrub, Scrub, APPDIR};
-        use std::ffi::OsString;
+        use super::super::{appimage_host_env, appimage_host_var, hand_appimage_host_env};
+        use super::{scrub, HostEnvFor, Scrub, APPDIR};
+        use std::ffi::{OsStr, OsString};
 
         /// The host library directory the AppImage's GUI-stack re-exec puts
         /// first in the desktop's `LD_LIBRARY_PATH`.
@@ -880,6 +985,126 @@ mod appimage_env_tests {
             assert_eq!(
                 scrub("PATH", &value),
                 Some(Scrub::Rewrite("/usr/local/bin:/usr/bin".into())),
+            );
+        }
+
+        fn apprun_path(user: &str) -> String {
+            apprun(
+                &["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"],
+                user,
+            )
+        }
+
+        /// A chan AppImage desktop's environment as its runtime, the GTK hook
+        /// and the re-exec leave it, over a user's `PATH` and, when given,
+        /// `LD_LIBRARY_PATH`.
+        fn appimage_desktop(user_ld: Option<&str>) -> Vec<(OsString, OsString)> {
+            let pair = |key: &str, value: String| (OsString::from(key), OsString::from(value));
+            vec![
+                pair("APPDIR", APPDIR.to_string()),
+                pair("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+                pair("ARGV0", "chan-desktop".into()),
+                pair("OWD", "/home/u".into()),
+                pair("HOME", "/home/u".into()),
+                pair("PATH", apprun_path("/usr/local/bin:/usr/bin")),
+                pair(
+                    "LD_LIBRARY_PATH",
+                    reexeced_ld(user_ld.unwrap_or("")).into_string().unwrap(),
+                ),
+                pair(
+                    "XDG_DATA_DIRS",
+                    format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:"),
+                ),
+                pair("GTK_PATH", format!("{APPDIR}//usr/lib/gtk-3.0")),
+                pair("GDK_BACKEND", "x11".into()),
+            ]
+        }
+
+        /// What a child AppImage process is handed: the user's search paths,
+        /// none of the runtime's keys, nothing inside the parent's mount, and
+        /// the GTK keys its own hook reads; a variable the AppImage did not
+        /// touch is left to be inherited.
+        #[test]
+        fn a_child_appimage_gets_the_users_environment() {
+            for (user_ld, ld) in [
+                (None, None),
+                (Some("/opt/a/lib"), Some(OsString::from("/opt/a/lib"))),
+            ] {
+                let host = appimage_host_env(appimage_desktop(user_ld), HostEnvFor::AppImage);
+                let get = |name: &str| {
+                    host.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, scrub)| scrub.clone())
+                };
+                let rewrite = |value: &str| Some(Scrub::Rewrite(value.into()));
+                assert_eq!(get("PATH"), rewrite("/usr/local/bin:/usr/bin"));
+                assert_eq!(
+                    get("LD_LIBRARY_PATH"),
+                    Some(ld.map_or(Scrub::Remove, Scrub::Rewrite)),
+                    "{user_ld:?}"
+                );
+                assert_eq!(get("XDG_DATA_DIRS"), Some(Scrub::Remove));
+                for gone in ["APPDIR", "APPIMAGE", "ARGV0", "OWD", "GTK_PATH"] {
+                    assert_eq!(get(gone), Some(Scrub::Remove), "{gone}");
+                }
+                assert_eq!(get("GDK_BACKEND"), None, "the user's backend is kept");
+                assert_eq!(get("HOME"), None, "an untouched variable is inherited");
+            }
+        }
+
+        /// A parent that is no AppImage process, by `$APPDIR` and `$APPIMAGE`
+        /// both, hands its environment on as it is.
+        #[test]
+        fn a_parent_that_is_no_appimage_hands_its_environment_on() {
+            let mut env = appimage_desktop(Some("/opt/a/lib"));
+            for drop in ["APPDIR", "APPIMAGE"] {
+                let without: Vec<_> = env.iter().filter(|(key, _)| key != drop).cloned().collect();
+                assert_eq!(
+                    appimage_host_env(without, HostEnvFor::AppImage),
+                    Vec::new(),
+                    "{drop}"
+                );
+            }
+            env.retain(|(key, _)| key != "APPDIR" && key != "APPIMAGE");
+            let mut command = std::process::Command::new("/bin/true");
+            hand_appimage_host_env(&mut command, env.clone());
+            assert_eq!(command.get_envs().count(), 0, "nothing set or removed");
+            assert_eq!(
+                appimage_host_var("PATH", env),
+                Some(OsString::from(apprun_path("/usr/local/bin:/usr/bin")))
+            );
+        }
+
+        /// A command handed the host environment sets the user's values and
+        /// removes the rest, and the single-variable read agrees with it.
+        #[test]
+        fn a_command_is_handed_the_users_values() {
+            let mut command = std::process::Command::new("/bin/true");
+            hand_appimage_host_env(&mut command, appimage_desktop(None));
+            let env = |key: &str| {
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.map(OsStr::to_os_string))
+            };
+            assert_eq!(
+                env("PATH"),
+                Some(Some(OsString::from("/usr/local/bin:/usr/bin")))
+            );
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(None));
+            assert_eq!(env("APPIMAGE"), Some(None));
+            assert_eq!(env("GDK_BACKEND"), None);
+            assert_eq!(
+                appimage_host_var("PATH", appimage_desktop(None)),
+                Some(OsString::from("/usr/local/bin:/usr/bin"))
+            );
+            assert_eq!(
+                appimage_host_var("LD_LIBRARY_PATH", appimage_desktop(None)),
+                None
+            );
+            assert_eq!(
+                appimage_host_var("HOME", appimage_desktop(None)),
+                Some(OsString::from("/home/u"))
             );
         }
     }

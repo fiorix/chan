@@ -94,6 +94,9 @@ pub use chan_library::desktop_window_ops::{
     WireguardKeyOutcome, NO_DESKTOP,
 };
 pub use chan_library::terminal_sessions::TerminalExit;
+/// Re-exported so the CLI and the desktop, which start chan's AppImage again,
+/// hand the child the environment the user had, as a terminal gets it.
+pub use chan_library::terminal_sessions::{appimage_host_var, hand_appimage_host_env};
 pub use chan_library::terminal_sessions::{
     TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,
 };
