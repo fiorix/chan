@@ -736,6 +736,9 @@ export class VtTerminal {
   private readonly styleFg = new Int32Array(ROW_STYLES);
   private readonly styleBg = new Int32Array(ROW_STYLES);
   private styleCount = 0;
+  /// The content tag and content of the raw cell `rawCell` read last.
+  private rawTag = 0;
+  private rawContent = 0;
   /// The history's length at an update, for the reads after it.
   private historyGeneration = -1;
   private historyRows = 0;
@@ -919,12 +922,9 @@ export class VtTerminal {
         this.blank(cell);
         continue;
       }
-      const lo = view.getUint32(raw + x * 8, true);
-      const hi = view.getUint32(raw + x * 8 + 4, true);
-      this.rawCell(cell, lo, hi);
-      const styleId = cellBits(lo, hi, CELL_BITS.style_id);
+      const styleId = this.rawCell(cell, view.getUint32(raw + x * 8, true), view.getUint32(raw + x * 8 + 4, true));
       let style = styleId === 0 ? -1 : this.knownStyle(styleId);
-      const grapheme = cellBits(lo, hi, CELL_BITS.content_tag) === T.CODEPOINT_GRAPHEME;
+      const grapheme = this.rawTag === T.CODEPOINT_GRAPHEME;
       if ((styleId !== 0 && style < 0) || grapheme) {
         // One call for what the cell needs read: its style, its cluster or
         // both (the keys are STYLE then GRAPHEMES_BUF).
@@ -948,7 +948,7 @@ export class VtTerminal {
         }
       }
       if (style >= 0) this.applyStyle(cell, style);
-      this.contentBackground(cell, lo, hi);
+      this.contentBackground(cell);
     }
     return true;
   }
@@ -980,18 +980,15 @@ export class VtTerminal {
         continue;
       }
       let view = this.wasm.view();
-      const lo = view.getUint32(s + SCRATCH.raw, true);
-      const hi = view.getUint32(s + SCRATCH.raw + 4, true);
-      this.rawCell(cell, lo, hi);
-      const styleId = cellBits(lo, hi, CELL_BITS.style_id);
+      const styleId = this.rawCell(cell, view.getUint32(s + SCRATCH.raw, true), view.getUint32(s + SCRATCH.raw + 4, true));
       let style = styleId === 0 ? -1 : this.knownStyle(styleId);
       if (styleId !== 0 && style < 0 && fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, s + SCRATCH.style) === ok) {
         view = this.wasm.view();
         style = this.rememberStyle(styleId, view, s + SCRATCH.style);
       }
       if (style >= 0) this.applyStyle(cell, style);
-      this.contentBackground(cell, lo, hi);
-      if (cellBits(lo, hi, CELL_BITS.content_tag) === T.CODEPOINT_GRAPHEME) {
+      this.contentBackground(cell);
+      if (this.rawTag === T.CODEPOINT_GRAPHEME) {
         const text = this.gridGraphemes();
         if (text && [...text].length > 1) cell.cluster = text;
       }
@@ -1490,28 +1487,33 @@ export class VtTerminal {
   }
 
   /// A cell from its raw value, `lo` and `hi`, with no style yet: its text,
-  /// its width, its link and the default colours.
-  private rawCell(cell: VtCell, lo: number, hi: number): void {
+  /// its width, its link and the default colours. Keeps the value's content
+  /// tag and content for the reader's next steps, decoding each field once,
+  /// and returns its style id.
+  private rawCell(cell: VtCell, lo: number, hi: number): number {
     const T = ABI.GhosttyCellContentTag;
     const tag = cellBits(lo, hi, CELL_BITS.content_tag);
-    cell.codepoint = tag === T.CODEPOINT || tag === T.CODEPOINT_GRAPHEME ? cellBits(lo, hi, CELL_BITS.content) & 0x1fffff : 0;
+    const content = cellBits(lo, hi, CELL_BITS.content);
+    this.rawTag = tag;
+    this.rawContent = content;
+    cell.codepoint = tag === T.CODEPOINT || tag === T.CODEPOINT_GRAPHEME ? content & 0x1fffff : 0;
     cell.cluster = null;
     cell.width = cellWidth(cellBits(lo, hi, CELL_BITS.wide));
     cell.flags = 0;
     cell.fg = this.fg;
     cell.bg = this.bg;
     cell.hyperlink = cellBits(lo, hi, CELL_BITS.hyperlink);
+    return cellBits(lo, hi, CELL_BITS.style_id);
   }
 
-  /// The background a cell with no text carries in its raw value, over its
-  /// style's.
-  private contentBackground(cell: VtCell, lo: number, hi: number): void {
+  /// The background a cell with no text carries in its raw value (the one
+  /// `rawCell` read last), over its style's.
+  private contentBackground(cell: VtCell): void {
     const T = ABI.GhosttyCellContentTag;
-    const tag = cellBits(lo, hi, CELL_BITS.content_tag);
-    if (tag === T.BG_COLOR_PALETTE) {
-      cell.bg = this.paletteColor(cellBits(lo, hi, CELL_BITS.content) & 0xff);
-    } else if (tag === T.BG_COLOR_RGB) {
-      const c = cellBits(lo, hi, CELL_BITS.content);
+    if (this.rawTag === T.BG_COLOR_PALETTE) {
+      cell.bg = this.paletteColor(this.rawContent & 0xff);
+    } else if (this.rawTag === T.BG_COLOR_RGB) {
+      const c = this.rawContent;
       cell.bg = ((c & 0xff) << 16) | (c & 0xff00) | ((c >>> 16) & 0xff);
     }
   }
