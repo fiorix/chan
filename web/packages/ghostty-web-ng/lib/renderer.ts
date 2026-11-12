@@ -30,12 +30,21 @@ export interface IRenderable {
    * For simple cells, returns the single character.
    */
   getGraphemeString?(row: number, col: number): string;
+  /**
+   * Get the full grapheme string for a cell of history row `offset`, numbered
+   * as IScrollbackProvider.getScrollbackLine numbers them (0 is the oldest).
+   */
+  getScrollbackGraphemeString?(offset: number, col: number): string;
 }
 
 export interface IScrollbackProvider {
   getScrollbackLine(offset: number): GhosttyCell[] | null;
   getScrollbackLength(): number;
 }
+
+// Where a painted line was read from: a history row by its scrollback offset,
+// or a screen row by its index.
+type LineSource = { history: boolean; row: number };
 
 // ============================================================================
 // Type Definitions
@@ -112,6 +121,11 @@ export class CanvasRenderer {
 
   // Current buffer being rendered (for grapheme lookups)
   private currentBuffer: IRenderable | null = null;
+
+  // Where the line whose text is being painted was read from. Scrolled back,
+  // a viewport row's index is neither its history offset nor its row on the
+  // screen, so a cell's cluster is looked up by this.
+  private paintedLine: LineSource | null = null;
 
   // Selection manager (for rendering selection)
   private selectionManager?: SelectionManager;
@@ -425,6 +439,7 @@ export class CanvasRenderer {
 
       // Fetch line from scrollback or visible screen
       let line: GhosttyCell[] | null = null;
+      let source: LineSource = { history: false, row: y };
       if (viewportY > 0) {
         // Scrolled up - need to fetch from scrollback + visible screen
         // When scrolled up N lines, we want to show:
@@ -437,10 +452,12 @@ export class CanvasRenderer {
           // Floor viewportY for array access (handles fractional values during smooth scroll)
           const scrollbackOffset = scrollbackLength - Math.floor(viewportY) + y;
           line = scrollbackProvider.getScrollbackLine(scrollbackOffset);
+          source = { history: true, row: scrollbackOffset };
         } else {
           // This row is from visible screen (lower part of viewport)
           const screenRow = viewportY > 0 ? y - Math.floor(viewportY) : y;
           line = buffer.getLine(screenRow);
+          source = { history: false, row: screenRow };
         }
       } else {
         // At bottom - fetch from visible screen
@@ -448,7 +465,7 @@ export class CanvasRenderer {
       }
 
       if (line) {
-        this.renderLine(line, y, dims.cols);
+        this.renderLine(line, y, dims.cols, source);
       }
     }
 
@@ -486,8 +503,16 @@ export class CanvasRenderer {
    * base character into the previous cell's visual area. If we draw backgrounds
    * and text in a single pass (cell by cell), the background of cell N would
    * cover any left-extending portions of graphemes from cell N-1.
+   *
+   * `source` is where the line was read from, so its cells' clusters come
+   * from that row; by default the screen row painted at `y`.
    */
-  private renderLine(line: GhosttyCell[], y: number, cols: number): void {
+  private renderLine(
+    line: GhosttyCell[],
+    y: number,
+    cols: number,
+    source: LineSource = { history: false, row: y }
+  ): void {
     const lineY = y * this.metrics.height;
     const lineWidth = cols * this.metrics.width;
 
@@ -511,11 +536,15 @@ export class CanvasRenderer {
 
     // PASS 2: Draw all cell text and decorations
     // Now text can safely extend beyond cell boundaries (for complex scripts)
+    // The row reaches renderCellText through a field rather than a parameter
+    // because chan's adapters wrap that hook with its four arguments.
+    this.paintedLine = source;
     for (let x = 0; x < line.length; x++) {
       const cell = line[x];
       if (cell.width === 0) continue; // Skip spacer cells for wide characters
       this.renderCellText(cell, x, y);
     }
+    this.paintedLine = null;
   }
 
   /**
@@ -614,9 +643,17 @@ export class CanvasRenderer {
 
     // Get the character to render - use grapheme lookup for complex scripts
     let char: string;
-    if (cell.grapheme_len > 0 && this.currentBuffer?.getGraphemeString) {
-      // Cell has additional codepoints - get full grapheme cluster
-      char = this.currentBuffer.getGraphemeString(y, x);
+    const source = this.paintedLine;
+    if (cell.grapheme_len > 0 && source?.history) {
+      // A history cell's cluster from its own row. Without that lookup, the
+      // base codepoint: the screen row at this index holds other text.
+      char =
+        this.currentBuffer?.getScrollbackGraphemeString?.(source.row, x) ??
+        String.fromCodePoint(cell.codepoint || 32);
+    } else if (cell.grapheme_len > 0 && this.currentBuffer?.getGraphemeString) {
+      // Cell has additional codepoints - get full grapheme cluster, from the
+      // screen row its line was read from (the cursor's, outside a line).
+      char = this.currentBuffer.getGraphemeString(source?.row ?? y, x);
     } else {
       // Simple cell - single codepoint
       char = String.fromCodePoint(cell.codepoint || 32); // Default to space if null
