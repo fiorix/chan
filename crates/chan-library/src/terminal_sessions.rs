@@ -57,7 +57,9 @@ pub use child_identity::{current_boot_id, process_start_time, RecordedChildIdent
 pub use platform::prime_windows_shell;
 #[cfg(unix)]
 pub use platform::user_shell;
-pub use platform::{appimage_host_var, hand_appimage_host_env, without_apprun_blocks};
+pub use platform::{
+    appimage_host_var, hand_appimage_host_env, own_appimage, without_apprun_blocks,
+};
 use platform::{
     clear_appimage_env, command_builder, locale_selects_utf8, mcp_env,
     openpty_absorbing_transient_refusal, path_inside_root, process_cwd,

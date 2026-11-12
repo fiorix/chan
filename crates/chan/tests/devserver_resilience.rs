@@ -2613,8 +2613,8 @@ impl Attempt {
 
 /// A serve command in the environment of a plain shell in a GUI session: both
 /// handoffs allowed, a display present, no SSH session, and no update probe.
-/// `APPIMAGE` names what a desktop launch would run, so it is cleared unless
-/// `env` sets it.
+/// `APPIMAGE` names what a desktop launch would run, so it and `APPDIR` are
+/// cleared unless `env` sets them.
 fn serve_command(
     sandbox: &Sandbox,
     spelling: &[&str],
@@ -2629,6 +2629,7 @@ fn serve_command(
         .env_remove("SSH_TTY")
         .env_remove("SSH_CLIENT")
         .env_remove("APPIMAGE")
+        .env_remove("APPDIR")
         .env("DISPLAY", ":0")
         .env("CHAN_UPDATE_CHECK", "0")
         .envs(env.iter().copied())
@@ -2713,6 +2714,20 @@ fn desktop_requests(requests: &Mutex<Vec<serde_json::Value>>) -> Vec<String> {
 /// A stand-in for the desktop GUI binary. A serve that launches the desktop
 /// runs what `$APPIMAGE` names, and this script records that it ran by
 /// creating the returned marker.
+///
+/// The serve runs `$APPIMAGE` only as its own AppImage, one whose runtime set
+/// `$APPDIR` to the directory its executable lies in, so a launch sets both:
+/// [`appdir_of_chan`] beside this script.
+/// The directory of the chan binary under test, as the `$APPDIR` an AppImage
+/// runtime would set for it.
+fn appdir_of_chan() -> String {
+    Path::new(env!("CARGO_BIN_EXE_chan"))
+        .parent()
+        .and_then(Path::to_str)
+        .expect("the chan binary's utf-8 directory")
+        .to_string()
+}
+
 fn desktop_launcher(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let script = sandbox.scratch.path().join("desktop-gui");
@@ -2811,9 +2826,11 @@ async fn no_settings_refuses_before_launching_the_desktop() {
     let sandbox = Sandbox::new();
     let (launcher, launched) = desktop_launcher(&sandbox);
     let root = canonical_scratch(&sandbox).join("launch");
+    let appdir = appdir_of_chan();
     let env = [
         ("CHAN_DESKTOP_HANDOFF", "1"),
         ("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")),
+        ("APPDIR", appdir.as_str()),
     ];
     let spelling = ["serve"];
     let (status, output) =
@@ -2891,9 +2908,11 @@ async fn serve_without_no_settings_still_launches_the_desktop() {
     let sandbox = Sandbox::new();
     let (launcher, launched) = desktop_launcher(&sandbox);
     let root = canonical_scratch(&sandbox).join("launch");
+    let appdir = appdir_of_chan();
     let env = [
         ("CHAN_DESKTOP_HANDOFF", "1"),
         ("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")),
+        ("APPDIR", appdir.as_str()),
     ];
     let spelling = ["serve"];
     let mut child = serve_command(&sandbox, &spelling, &root, &[], &env)
@@ -3088,12 +3107,14 @@ async fn no_settings_serves_standalone_where_nothing_is_handed_off() {
         ),
     ];
     let (mut served, mut expected, mut transcripts) = (Vec::new(), Vec::new(), String::new());
+    let appdir = appdir_of_chan();
     for (case, flags, env, desktop_live) in cases {
         let sandbox = Sandbox::new();
         let (launcher, launched) = desktop_launcher(&sandbox);
         let desktop = desktop_live.then(|| fake_desktop(&sandbox));
         let mut env = env.to_vec();
         env.push(("APPIMAGE", launcher.to_str().expect("utf-8 launcher path")));
+        env.push(("APPDIR", appdir.as_str()));
         let root = sandbox.workspace("fallback");
         let (mut observed, output) =
             restricted_serve(&sandbox, case, &["serve"], &root, flags, &env).await;

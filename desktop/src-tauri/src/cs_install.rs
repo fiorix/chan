@@ -74,15 +74,16 @@ const WRAPPER_OWNS: &str = "# chan-desktop";
 #[cfg(unix)]
 pub const CALLER_PWD_ENV: &str = "CHAN_CALLER_PWD";
 
-/// The AppImage path from `$APPIMAGE`, or `None` when not running from an
-/// AppImage (macOS, `cargo run`, a deb/rpm install). Also consumed by
-/// `linux_gui_stack` to gate the bundle-first loader fixups. Unix-only: the
-/// AppImage / bundle-first loader concept does not exist on Windows.
+/// The AppImage this process runs from, or `None` when not running from an
+/// AppImage (macOS, `cargo run`, a deb/rpm install), including a deb's chan
+/// started under another application's AppImage environment, whose
+/// `$APPIMAGE` is not this process's ([`chan_server::own_appimage`]). Also
+/// consumed by `linux_gui_stack` to gate the bundle-first loader fixups, and
+/// by the New Window sibling and the shim install. Unix-only: the AppImage /
+/// bundle-first loader concept does not exist on Windows.
 #[cfg(unix)]
 pub fn appimage_path() -> Option<PathBuf> {
-    std::env::var_os("APPIMAGE")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+    chan_server::own_appimage()
 }
 
 /// Undo the AppImage `AppRun` chdir: move back to the working directory the

@@ -281,7 +281,9 @@ pub(super) fn spawn_desktop_gui_opening(
 ) -> std::io::Result<Option<std::process::Child>> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().ok();
-    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    // This process's own AppImage only: a deb's chan started under another
+    // application's AppImage environment must not start that AppImage.
+    let appimage = chan_server::own_appimage();
     let start = desktop_start(
         &exe,
         resolved.as_deref(),

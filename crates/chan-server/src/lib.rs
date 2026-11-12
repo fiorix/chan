@@ -97,7 +97,7 @@ pub use chan_library::terminal_sessions::TerminalExit;
 /// Re-exported so the CLI and the desktop, which start chan's AppImage again,
 /// hand the child the environment the user had, as a terminal gets it.
 pub use chan_library::terminal_sessions::{
-    appimage_host_var, hand_appimage_host_env, without_apprun_blocks,
+    appimage_host_var, hand_appimage_host_env, own_appimage, without_apprun_blocks,
 };
 pub use chan_library::terminal_sessions::{
     TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,

@@ -677,6 +677,38 @@ fn apprun_block_at(key: &str, entries: &[PathBuf], at: usize) -> Option<usize> {
     whole.then(|| at + block.len() - 1)
 }
 
+/// This process's own AppImage: `$APPIMAGE`, when this process runs from the
+/// mount (or the extract-and-run directory) that AppImage's runtime names in
+/// `$APPDIR`, else `None`. A chan of another install started from a shell
+/// inside some other application's AppImage inherits that AppImage's
+/// `$APPIMAGE` and `$APPDIR`, and must neither start that AppImage as chan's
+/// desktop nor point chan's shims at it. The `~/.local/bin` wrappers exec the
+/// AppImage, whose runtime sets both for the process it starts, so chan run
+/// through one finds its own.
+pub fn own_appimage() -> Option<PathBuf> {
+    own_appimage_of(
+        std::env::var_os("APPIMAGE"),
+        std::env::var_os("APPDIR"),
+        std::env::current_exe().ok(),
+    )
+}
+
+/// [`own_appimage`] over the values it reads. The executable path is resolved
+/// already on Linux; `$APPDIR` is resolved here, since an extraction
+/// directory under a `TMPDIR` that is a link is named unresolved.
+fn own_appimage_of(
+    appimage: Option<OsString>,
+    appdir: Option<OsString>,
+    exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let appimage = appimage.filter(|value| !value.is_empty())?;
+    let appdir = PathBuf::from(appdir.filter(|value| !value.is_empty())?);
+    let appdir = appdir.canonicalize().unwrap_or(appdir);
+    let exe = exe?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    exe.starts_with(&appdir).then(|| PathBuf::from(appimage))
+}
+
 /// Strip the AppImage bundle environment from a terminal spawn.
 ///
 /// The type-2 runtime and linuxdeploy's GTK hook redirect a wide set of
@@ -979,6 +1011,54 @@ mod appimage_env_tests {
     /// The values exactly as the AppImage's AppRun writes them, with the
     /// `:` separator of its format strings, so only on unix, where AppImages
     /// run.
+    /// `$APPIMAGE` is this process's own only when this process's executable
+    /// lies inside the `$APPDIR` the runtime set, also when that directory is
+    /// named through a link; a deb's chan under another application's
+    /// AppImage environment, or a value half set, is no AppImage of its own.
+    #[cfg(unix)]
+    #[test]
+    fn only_this_processs_own_appimage_counts() {
+        use super::own_appimage_of;
+        let os = |value: &str| Some(OsString::from(value));
+        let image = os("/home/u/Applications/Chan.AppImage");
+        let mount = "/tmp/.mount_ChanAB";
+        let exe = || Some(PathBuf::from(format!("{mount}/usr/bin/chan-desktop")));
+        assert_eq!(
+            own_appimage_of(image.clone(), os(mount), exe()),
+            Some(PathBuf::from("/home/u/Applications/Chan.AppImage"))
+        );
+        let foreign = os("/tmp/.mount_TermXY");
+        assert_eq!(
+            own_appimage_of(image.clone(), foreign, Some("/usr/bin/chan-desktop".into())),
+            None,
+            "a deb's chan inside another AppImage's environment"
+        );
+        assert_eq!(own_appimage_of(image.clone(), None, exe()), None);
+        assert_eq!(own_appimage_of(None, os(mount), exe()), None);
+        assert_eq!(own_appimage_of(os(""), os(mount), exe()), None);
+        assert_eq!(own_appimage_of(image.clone(), os(mount), None), None);
+        // Extract-and-run under a TMPDIR that is a link: $APPDIR names the
+        // directory through the link, the executable path is resolved.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        let extracted = real.join("appimage_extracted_0123");
+        std::fs::create_dir_all(extracted.join("usr/bin")).expect("extraction dir");
+        std::os::unix::fs::symlink(&real, tmp.path().join("link")).expect("link");
+        let through_link = tmp.path().join("link/appimage_extracted_0123");
+        let resolved_exe = extracted
+            .canonicalize()
+            .expect("resolve")
+            .join("usr/bin/chan-desktop");
+        assert_eq!(
+            own_appimage_of(
+                image.clone(),
+                Some(through_link.into_os_string()),
+                Some(resolved_exe)
+            ),
+            Some(PathBuf::from("/home/u/Applications/Chan.AppImage"))
+        );
+    }
+
     /// A child AppImage process keeps the GTK hook's keys its own hook reads,
     /// and a terminal loses them; the runtime's keys and the hook's theme go
     /// for both, since every AppImage process's runtime and hook set them
