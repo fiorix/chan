@@ -18,6 +18,7 @@
     {{copyButton}}
   </div><p><code>chan open .</code> registers and serves the current directory as a workspace; use <code>--here</code> when intentionally opening a subdirectory of a repository. <code>cs open README.md</code> opens a file in the current window, and <code>cs open .</code> opens its file browser. Paths refer to the machine hosting the terminal, including on a devserver.</p>
 <p><code>chan open</code> serves a workspace; <code>chan-files</code> and <code>chan-edit</code> open a path in a window, as <code>cs open</code> does inside chan. In a chan terminal they are <code>cs open</code> by another name. From any other shell, or your desktop's file manager, they open each path in a standalone window of the running Chan Desktop, which Chan Desktop's own <code>chan-files</code> and <code>chan-edit</code> start when it is not running. Both follow <code>cs open</code>'s rule for every path; the two names differ in their help and in the desktop entry that makes Chan Desktop your <a href="/manual/install/#default-file-browser">file browser or Markdown editor on Linux</a>.</p>
+<p><code>chan-term</code> opens a terminal window: your shell, here or in <code>--dir</code>, or the command after <code>-e</code> in a window of its own. It is the command <code>chan-term.desktop</code> runs, which makes Chan Desktop your <a href="/manual/install/#default-terminal">default terminal on Linux</a>; <code>chan-term --help</code> lists its options.</p>
 </section>
 
 <section class="manual-block" id="terminal-walkthrough">
