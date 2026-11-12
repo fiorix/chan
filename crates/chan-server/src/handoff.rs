@@ -215,7 +215,7 @@ pub enum Request {
         target: String,
         workspace_path: String,
     },
-    /// A default-terminal launch that runs the user's shell (xdg-terminal-exec
+    /// A `chan-term` launch that runs the user's shell (xdg-terminal-exec
     /// with no command): open a throwaway standalone terminal window whose
     /// first terminal starts in `cwd`. The window is never saved, so a relaunch
     /// does not restore it. The desktop answers `TerminalOpened` once the
@@ -1853,7 +1853,7 @@ pub async fn try_devserver_control(_req: Request) -> DevserverControlOutcome {
     DevserverControlOutcome::NoDesktop
 }
 
-/// Hand a default-terminal launch that runs the user's shell to a running
+/// Hand a `chan-term` launch that runs the user's shell to a running
 /// same-user desktop, as an `OpenTerminal` for `cwd`. `true` only when the
 /// desktop answers `TerminalOpened`. Every other outcome is `false` and the
 /// launcher opens its own window: no desktop, an opt-out
@@ -1865,15 +1865,22 @@ pub async fn try_open_terminal(cwd: &str) -> bool {
     if handoff_opt_out() || !gui_session_present() {
         return false;
     }
-    let req = Request::OpenTerminal {
+    matches!(
+        open_terminal(cwd).await,
+        DevserverControlOutcome::Reply(Response::TerminalOpened { .. })
+    )
+}
+
+/// One `OpenTerminal` for `cwd` and what came back, for a caller that says
+/// why no window opened. It reads neither the opt-out nor the GUI-session
+/// check: such a caller reads them first, to name the one that stopped it.
+pub async fn open_terminal(cwd: &str) -> DevserverControlOutcome {
+    try_devserver_control(Request::OpenTerminal {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         cwd: cwd.to_string(),
-    };
-    matches!(
-        try_devserver_control(req).await,
-        DevserverControlOutcome::Reply(Response::TerminalOpened { .. })
-    )
+    })
+    .await
 }
 
 /// What the desktop serving an endpoint answered to an `Activate`.
