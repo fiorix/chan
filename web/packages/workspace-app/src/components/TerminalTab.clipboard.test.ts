@@ -222,7 +222,8 @@ describe("in a mounted terminal off the Mac", () => {
 
 // The catalog's Copy, Paste and Copy scrollback reach the focused terminal as
 // commands, from the launcher or a chord the user assigned, and run what its
-// menu rows run.
+// menu rows run. A Copy its command marks as run by the assigned chord is
+// the one exception: it copies as the built-in copy chord does.
 describe("the terminal's clipboard commands", () => {
   function run(id: string): void {
     const command = allCommands().find((candidate) => candidate.id === id);
@@ -253,6 +254,23 @@ describe("the terminal's clipboard commands", () => {
     await vi.waitFor(() =>
       expect(clipboard.writeText.mock.calls).toEqual([["selected text"], ["line one\nline two"]]),
     );
+  });
+
+  test("a Copy marked as its assigned chord's copies the selection only, and nothing when there is none", async () => {
+    const { term } = await attached();
+    xterm.serialized = "line one\nline two";
+    const byChord = (): void => {
+      window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.copy", chord: true } }));
+    };
+
+    term.selection = "";
+    byChord();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(clipboard.writeText, "no selection, so no copy").not.toHaveBeenCalled();
+
+    term.selection = "selected text";
+    byChord();
+    await vi.waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([["selected text"]]));
   });
 
   test("Copy scrollback copies the scrollback whatever is selected", async () => {

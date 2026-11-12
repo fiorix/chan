@@ -82,6 +82,9 @@
   </header>
   <h3 class="title" title={language}>{label}</h3>
 
+  <!-- The words are this body's own: the catalog's two New graph here
+       commands act on a file or a directory, and none opens a graph from a
+       language. -->
   {#if onSetAsScope}
     <button class="open" type="button" onclick={onSetAsScope}>Graph from here</button>
   {/if}

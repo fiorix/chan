@@ -1,3 +1,6 @@
+import type { Command } from "../state/commands";
+import { commandIdForChord } from "../state/keymapOverrides.svelte";
+import { resolveEventChord } from "../state/shortcuts";
 import type { TerminalBackend } from "./backend";
 
 export type TerminalClipboardChordOptions = {
@@ -22,6 +25,20 @@ export function isTerminalPasteChord(e: KeyboardEvent, os: string): boolean {
     return e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
   }
   return e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
+}
+
+/// Whether `e` is the keydown of a chord the user assigned to the terminal's
+/// Copy on this client: the key the window's handler runs that command for,
+/// by the same lookup over the same `commands`. The built-in copy chord is
+/// never one, even assigned again as itself: the terminal answers it and no
+/// command runs.
+export function isAssignedTerminalCopyChord(
+  e: Event | undefined,
+  commands: readonly Command[],
+): boolean {
+  if (!(e instanceof KeyboardEvent) || e.type !== "keydown") return false;
+  const chord = resolveEventChord(e);
+  return chord !== null && commandIdForChord(chord, commands) === "terminal.copy";
 }
 
 /// Resolve a terminal clipboard chord on keydown. Copy owns the action and

@@ -48,7 +48,9 @@
   import {
     copyFilePath,
     deleteFile,
+    downloadFile,
     duplicateFile,
+    exportFileToPdf,
     searchSelection,
     showInFileBrowser,
   } from "../state/commands/editor";
@@ -61,6 +63,7 @@
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
+  import InspectorActionPill, { type InspectorAction } from "./InspectorActionPill.svelte";
   import { displayPath, isDraftClientPath } from "../api/fileIdentity";
   import StyleToolbar from "./StyleToolbar.svelte";
   import { clampMenu } from "./menuClamp";
@@ -134,7 +137,7 @@
     saveDraftTabToWorkspace,
     tabFocusPulse,
   } from "../state/tabs.svelte";
-  import { csvDelimiter, isCsv, isExcalidraw, isJson } from "../state/fileTypes";
+  import { csvDelimiter, isCsv, isExcalidraw, isJson, isMarkdown } from "../state/fileTypes";
   import {
     acquireDocSession,
     isDocSyncEligible,
@@ -802,6 +805,17 @@
   /// A workspace's draft is no file of the workspace: it is not deleted or
   /// duplicated as one, and leaves by its discard or its save.
   const isWorkspaceDraftTab = $derived(isDraftClientPath(tab.path));
+  /// What the Details panel offers on a workspace's draft. A draft has no
+  /// entry in the tree for the file inspector to act on, so the panel names
+  /// the draft and offers the two actions the editor's commands have for
+  /// it, each through the command's own function: Download, and Export to
+  /// PDF on Markdown.
+  const draftActions = $derived<{ main: InspectorAction; secondary: InspectorAction[] }>({
+    main: { command: "app.editor.download", onClick: () => downloadFile(tab) },
+    secondary: isMarkdown(tab.path)
+      ? [{ command: "app.editor.exportPdf", onClick: () => void exportFileToPdf(tab) }]
+      : [],
+  });
   $effect(() => {
     // Sync the draft to the tab path when the underlying file
     // changes (e.g. external rename, or another menu surface).
@@ -1281,6 +1295,7 @@
         <div class="action-list">
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCutSelection}
             disabled={!bodyHasSelection}
           >
@@ -1292,6 +1307,7 @@
           </button>
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCopySelection}
             disabled={!bodyCanCopy}
           >
@@ -1301,7 +1317,7 @@
             <span class="mbtn-label">Copy</span>
             <span class="mbtn-chord"></span>
           </button>
-          <button class="mbtn" onclick={doPasteClipboard}>
+          <button class="mbtn" role="menuitem" onclick={doPasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1311,14 +1327,14 @@
           {#if bodyLinkUrl || bodyPreviewHit}
             <div class="msep" role="separator"></div>
             {#if bodyLinkUrl}
-              <button class="mbtn" onclick={doOpenLink}>
+              <button class="mbtn" role="menuitem" onclick={doOpenLink}>
                 <span class="mbtn-icon">
                   <ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
                 <span class="mbtn-label">Open link</span>
                 <span class="mbtn-chord"></span>
               </button>
-              <button class="mbtn" onclick={doCopyLink}>
+              <button class="mbtn" role="menuitem" onclick={doCopyLink}>
                 <span class="mbtn-icon">
                   <LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1327,7 +1343,7 @@
               </button>
             {/if}
             {#if bodyPreviewHit}
-              <button class="mbtn" onclick={doPreviewLink}>
+              <button class="mbtn" role="menuitem" onclick={doPreviewLink}>
                 <span class="mbtn-icon">
                   <Eye size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1337,7 +1353,7 @@
             {/if}
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={doFind}>
+          <button class="mbtn" role="menuitem" onclick={doFind}>
             <span class="mbtn-icon">
               <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1345,7 +1361,7 @@
             <span class="mbtn-chord">{chordLabel("app.find.open")}</span>
           </button>
           {#if bodyHasSelection}
-            <button class="mbtn" onclick={doOpenSearch}>
+            <button class="mbtn" role="menuitem" onclick={doOpenSearch}>
               <span class="mbtn-icon">
                 <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
@@ -1354,7 +1370,7 @@
             </button>
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={() => void doForceReload()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
             <span class="mbtn-icon">
               <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1362,7 +1378,7 @@
             <span class="mbtn-chord"></span>
           </button>
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={doOpenCommands}>
+          <button class="mbtn" role="menuitem" onclick={doOpenCommands}>
             <span class="mbtn-icon">
               <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1373,7 +1389,7 @@
       {:else}
       <div class="action-list">
         {#if isDraftEditorTab}
-          <button class="mbtn" type="button" onclick={doSaveDraftToWorkspace}>
+          <button class="mbtn" role="menuitem" type="button" onclick={doSaveDraftToWorkspace}>
             <span class="mbtn-icon">
               <Save size={18} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1478,7 +1494,7 @@
           </button>
         {/if}
         <div class="msep" role="separator"></div>
-        <button class="mbtn" onclick={() => void doCopyPathToFile()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doCopyPathToFile()}>
           <span class="mbtn-icon">
             <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
@@ -1488,13 +1504,13 @@
         {#if !isWorkspaceDraftTab}
           <!-- No chord hint: `app.files.delete` (Backspace) only binds in
                FileTree's rows; nothing in the editor tab dispatches it. -->
-          <button class="mbtn" onclick={() => void doDeleteFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDeleteFile()}>
             <span class="mbtn-icon">
               <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">{commandTitle("app.file.delete")}</span>
           </button>
-          <button class="mbtn" onclick={() => void doDuplicateFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDuplicateFile()}>
             <span class="mbtn-icon">
               <Files size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1502,7 +1518,7 @@
             <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
           </button>
         {/if}
-        <button class="mbtn" onclick={() => void doForceReload()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
           <span class="mbtn-icon">
             <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
@@ -1513,7 +1529,7 @@
              window's panes have two sides, then the tab's close. -->
         <div class="msep" role="separator"></div>
         {#if panesHaveSides()}
-          <button class="mbtn" onclick={doFlipPane}>
+          <button class="mbtn" role="menuitem" onclick={doFlipPane}>
             <span class="mbtn-icon">
               <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1521,7 +1537,7 @@
             <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
           </button>
         {/if}
-        <button class="mbtn" onclick={doCloseTab}>
+        <button class="mbtn" role="menuitem" onclick={doCloseTab}>
           <span class="mbtn-icon">
             <X size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
@@ -1833,6 +1849,9 @@
       >
         {#if isWorkspaceDraftTab}
           <DraftInfoBody path={tab.path} />
+          <div class="draft-actions">
+            <InspectorActionPill main={draftActions.main} secondary={draftActions.secondary} />
+          </div>
         {:else}
           <FileInfoBody
             path={tab.path}
@@ -2143,6 +2162,12 @@
     color: var(--danger-text, #d33);
     padding: 1rem;
     text-align: center;
+  }
+  /* A draft's actions sit under the draft body, in its gutter and at its
+     text size. */
+  .draft-actions {
+    padding: 0 0.7rem 0.8rem;
+    font-size: 12.5px;
   }
   .missing-file-state {
     flex: 1;

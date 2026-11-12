@@ -501,6 +501,58 @@ describe("the actions section", () => {
     );
   });
 
+  test("on the editor's Details panel a draft file also downloads, and exports to PDF as Markdown", async () => {
+    h.entries = [dir(".Drafts/idea"), file(".Drafts/idea/a.md")];
+    const target = await render({ path: ".Drafts/idea/a.md", surface: "file" });
+
+    expect(pill(target).textContent?.trim()).toBe(title(EDITOR.newTerminal));
+    expect(openMenu(target)).toEqual([title(EDITOR.download), title(EDITOR.exportPdf)]);
+    menuItem(target, title(EDITOR.download)).click();
+    flushSync();
+    expect(fileOps.downloadPathWithProgress).toHaveBeenCalledExactlyOnceWith(".Drafts/idea/a.md", false);
+
+    openMenu(target);
+    menuItem(target, title(EDITOR.exportPdf)).click();
+    expect(exportPathToPdf).toHaveBeenCalledExactlyOnceWith(".Drafts/idea/a.md");
+  });
+
+  test("a draft that is not Markdown downloads there and has nothing to export", async () => {
+    h.entries = [file(".Drafts/board/board.excalidraw", "text")];
+    const target = await render({ path: ".Drafts/board/board.excalidraw", surface: "file" });
+
+    expect(openMenu(target)).toEqual([title(EDITOR.download)]);
+  });
+
+  test("a draft's words on the editor's panel are the editor's commands'", async () => {
+    retitleCatalog();
+    h.entries = [file(".Drafts/idea/a.md")];
+    const target = await render({ path: ".Drafts/idea/a.md", surface: "file" });
+
+    expect([pill(target).textContent?.trim(), ...openMenu(target)]).toEqual([
+      "<app.editor.terminalFromHere>",
+      "<app.editor.download>",
+      "<app.editor.exportPdf>",
+    ]);
+  });
+
+  test("a selection's inspector offers a draft file the terminal alone, as the file browser's menu does", async () => {
+    h.entries = [file(".Drafts/idea/a.md")];
+    const target = await render({ path: ".Drafts/idea/a.md", onOpen() {}, onReveal() {}, onSetAsScope() {} });
+
+    expect(pill(target).textContent?.trim()).toBe(title(BROWSER.newTerminal));
+    expect(caret(target)).toBeNull();
+  });
+
+  test("the drafts directory itself keeps the terminal alone on the editor's panel", async () => {
+    h.entries = [dir(".Drafts"), dir(".Drafts/idea")];
+    for (const path of [".Drafts", ".Drafts/idea"]) {
+      const target = await render({ path, surface: "file" });
+      expect(pill(target).textContent?.trim(), path).toBe(title(EDITOR.newTerminal));
+      expect(caret(target), path).toBeNull();
+      unmount(mounted.pop()!);
+    }
+  });
+
   test("a draft directory roots the terminal in itself", async () => {
     h.entries = [dir(".Drafts/idea")];
     const target = await render({ path: ".Drafts/idea" });

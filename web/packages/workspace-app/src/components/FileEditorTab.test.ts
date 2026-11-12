@@ -1098,6 +1098,132 @@ describe("a menu row and its command", () => {
     await settle(2);
     expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([["notes/plan.md"], ["notes/plan.md"]]);
   });
+
+  // A workspace's draft has no entry for the file inspector to act on. Its
+  // Details panel names the draft and offers the editor's two commands for
+  // it, each through the command's own function.
+  test("a workspace draft's Details panel offers Download and Export to PDF, and runs what their commands run", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const download = vi.spyOn(fileOps, "downloadPath").mockImplementation(() => {});
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const titled = (id: string): string => commandById(id)!.title;
+    const main = details.querySelector<HTMLButtonElement>(".pill-main")!;
+    const items = (): HTMLButtonElement[] => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      return [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")];
+    };
+
+    expect(details.querySelector(".drafts-chip"), "the draft's own body").not.toBeNull();
+    expect(main.textContent?.trim()).toBe(titled("app.editor.download"));
+    main.click();
+    run("app.editor.download");
+    expect(download.mock.calls).toEqual([
+      [path, false],
+      [path, false],
+    ]);
+
+    const [exportItem, ...rest] = items();
+    expect([exportItem?.textContent?.trim(), rest.length]).toEqual([titled("app.editor.exportPdf"), 0]);
+    exportItem!.click();
+    run("app.editor.exportPdf");
+    await settle(2);
+    expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[path], [path]]);
+  });
+
+  test("a workspace draft that is not Markdown offers Download alone", async () => {
+    const tab = seat(
+      fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
+    );
+    const { target } = await render(tab);
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+
+    expect(details.querySelector(".pill-main")?.textContent?.trim()).toBe(commandById("app.editor.download")!.title);
+    expect(details.querySelector(".pill-caret")).toBeNull();
+  });
+});
+
+// A menu role is true inside a menu. Both of the editor's menus are menus,
+// so every action row of either is a menu item, and a row with a check a
+// menu item checkbox.
+describe("the menus' roles", () => {
+  /// Every button of the open menu, as its label and its role.
+  function buttonRoles(): Array<[string, string | null]> {
+    return [...bubble()!.querySelectorAll<HTMLButtonElement>("button")].map((button) => [
+      button.querySelector(".mbtn-label")?.textContent?.trim() ?? "",
+      button.getAttribute("role"),
+    ]);
+  }
+
+  /// Opens the body menu with every row it can show: a selection, and a
+  /// pointer over both an external and an internal link.
+  async function openFullBodyMenu(): Promise<void> {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first");
+    view.dispatch({ selection: { anchor: at, head: at + "first".length } });
+    h.urlUnderCursor = "https://example.com/doc";
+    h.wikiUnderCursor = { target: "notes/other.md", anchorEl: document.createElement("span") };
+    await rightClickBody(target);
+  }
+
+  test("every row of the body menu is a menu item", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.getAttribute("role")).toBe("menu");
+    expect(buttonRoles()).toEqual(
+      [
+        "Cut",
+        "Copy",
+        "Paste",
+        "Open link",
+        "Copy link",
+        "Preview",
+        "Find",
+        "Search selection",
+        "Reload from disk",
+        "Command launcher",
+      ].map((label) => [label, "menuitem"]),
+    );
+  });
+
+  test("every action row of the tab menu is a menu item, a view row a checkbox", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+
+    expect(bubble()!.getAttribute("role")).toBe("menu");
+    expect(buttonRoles()).toEqual([
+      ["Outline", "menuitemcheckbox"],
+      ["Details", "menuitemcheckbox"],
+      ["Style toolbar", "menuitemcheckbox"],
+      ["Copy file path", "menuitem"],
+      ["Delete file", "menuitem"],
+      ["Duplicate file", "menuitem"],
+      ["Reload from disk", "menuitem"],
+      ["Flip pane", "menuitem"],
+      ["Close tab", "menuitem"],
+    ]);
+  });
+
+  test("a draft's Save draft row is a menu item too", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(buttonRoles()[0]).toEqual(["Save draft", "menuitem"]);
+  });
+
+  test("a disabled row stays a disabled menu item", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    await rightClickBody(target);
+
+    expect([row("Cut").getAttribute("role"), row("Cut").disabled]).toEqual(["menuitem", true]);
+  });
 });
 
 // The editor keeps focus while its menu is open, so an Escape goes first to

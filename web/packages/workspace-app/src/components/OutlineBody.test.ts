@@ -4,15 +4,30 @@ import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import OutlineBody from "./OutlineBody.svelte";
+import {
+  allCommands,
+  commandById,
+  registerCommands,
+  unregisterCommands,
+  type Command,
+} from "../state/commands";
 
 // OutlineBody, the file editor's outline inspector: the buffer's ATX headings
 // in document order, with heading-looking lines inside fenced code left out.
+// On a slide deck it shows the deck's thumbnails under the deck's two
+// actions, each worded by its command.
 
 const mounted: Array<Record<string, any>> = [];
+let catalog: Command[] | null = null;
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
+  if (catalog) {
+    unregisterCommands(() => true);
+    registerCommands(catalog);
+    catalog = null;
+  }
 });
 
 function outlineRows(content: string): string[] {
@@ -93,5 +108,52 @@ describe("slide thumbnails", () => {
     buttons[1]!.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
     expect(selected).toEqual([7, 4]);
     expect(document.activeElement).toBe(buttons[0]);
+  });
+});
+
+describe("a deck's actions", () => {
+  const DECK = '---\nchan:\n  kind: slides\n---\n# First\n';
+  const PREVIEW = "app.slides.preview";
+  const PRESENT = "app.slides.present";
+
+  function title(id: string): string {
+    const command = commandById(id);
+    if (!command) throw new Error(`no command ${id}`);
+    return command.title;
+  }
+
+  function actions(props: Record<string, unknown> = {}): HTMLButtonElement[] {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(OutlineBody, { target, props: { content: DECK, onSelect: () => {}, ...props } }));
+    flushSync();
+    return [...target.querySelectorAll<HTMLButtonElement>(".slide-action")];
+  }
+
+  test("carry the titles of the preview and present commands, and run the host's handlers", () => {
+    const onPreview = vi.fn();
+    const onPlay = vi.fn();
+    const [preview, present] = actions({ onPreview, onPlay });
+
+    expect([preview!.textContent?.trim(), present!.textContent?.trim()]).toEqual([title(PREVIEW), title(PRESENT)]);
+    preview!.click();
+    present!.click();
+    expect([onPreview.mock.calls.length, onPlay.mock.calls.length]).toEqual([1, 1]);
+  });
+
+  test("follow the catalog when a title there changes, in the label and in the tooltip", () => {
+    catalog = allCommands();
+    unregisterCommands(() => true);
+    registerCommands(catalog.map((command) => ({ ...command, title: `<${command.id}>` })));
+    const [preview, present] = actions({ previewChord: "Ctrl+Enter" });
+
+    expect([preview!.textContent?.trim(), present!.textContent?.trim()]).toEqual([`<${PREVIEW}>`, `<${PRESENT}>`]);
+    // The tooltip adds the deck's aspect ratio, and the chord where the
+    // action has one.
+    expect([preview!.title, present!.title]).toEqual([`<${PREVIEW}> (16:9, Ctrl+Enter)`, `<${PRESENT}> (16:9)`]);
+  });
+
+  test("are not shown over a document that is not a deck", () => {
+    expect(actions({ content: "# One\n" })).toEqual([]);
   });
 });
