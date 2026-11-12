@@ -66,10 +66,10 @@ pub enum Message {
     PaneModeChanged(PaneId),
     /// What a pane is called, from the subscription
     /// [`Command::SubscribePaneNames`](crate::Command::SubscribePaneNames)
-    /// adds: the pane's title, or the name of its foreground command while
-    /// the title is the one tmux gives a new pane (its host's name) or is
-    /// blank. A program in the pane chose either text; control characters
-    /// are removed and the ends trimmed. Empty when tmux has neither.
+    /// adds: the name of its foreground command, as tmux's automatic rename
+    /// names a window after its active pane, whatever title the pane has.
+    /// The program chose the text; control characters are removed and the
+    /// ends trimmed. Empty when tmux has no command for the pane.
     PaneName {
         pane: PaneId,
         name: String,
@@ -257,11 +257,9 @@ fn pane_name(mut rest: &[u8]) -> Result<Message, Error> {
     if field(&mut rest, WHAT)? != b":" {
         return Err(bad(WHAT));
     }
-    let default_title = match field(&mut rest, WHAT)? {
-        b"0" => false,
-        b"1" => true,
-        _ => return Err(bad(WHAT)),
-    };
+    if !matches!(field(&mut rest, WHAT)?, b"0" | b"1") {
+        return Err(bad(WHAT));
+    }
     let command_len = decimal(field(&mut rest, WHAT)?).ok_or(bad(WHAT))?;
     let title_len = decimal(field(&mut rest, WHAT)?).ok_or(bad(WHAT))?;
     let whole = command_len
@@ -270,14 +268,14 @@ fn pane_name(mut rest: &[u8]) -> Result<Message, Error> {
     if whole != Some(rest.len()) || rest[command_len] != b' ' {
         return Err(bad(WHAT));
     }
-    let command = name_text(&rest[..command_len]);
-    let title = name_text(&rest[command_len + 1..]);
-    let name = if default_title || title.is_empty() {
-        command
-    } else {
-        title
-    };
-    Ok(Message::PaneName { pane, name })
+    // The title is checked with the rest of the line and names nothing: a
+    // shell may title its pane at every prompt (`user@host:~/dir`), and the
+    // program it starts leaves that title standing, so only the command
+    // says what runs in the pane.
+    Ok(Message::PaneName {
+        pane,
+        name: name_text(&rest[..command_len]),
+    })
 }
 
 /// Take the bytes before the next space off the front of `rest`. The space

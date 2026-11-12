@@ -979,7 +979,7 @@ export function terminalTabName(t: TerminalTab): string {
 }
 
 /// What tmux calls the pane a terminal tab shows, which is how a tmux pane is
-/// labelled: its title, or its command under a title that names nothing. The
+/// labelled: its foreground command, never a title its shell set. The
 /// tab's own name is the session's tab name, which the server keeps unique,
 /// so two panes tmux calls the same differ there by a suffix that says
 /// nothing about either pane. Null for any other tab, and for a pane the

@@ -1,0 +1,45 @@
+P1000p%begin 1794504589 272 0
+%end 1794504589 272 0
+%window-add @0
+%sessions-changed
+%session-changed $0 m1
+%window-renamed @0 tmux
+%output %0 \033]0;user@tmuxvm:~\007
+%output %0 \033[?2004h
+%output %0 $ 
+%window-renamed @0 bash
+%begin 1794504590 281 1
+%end 1794504590 281 1
+%subscription-changed chan-pane-name $0 @0 0 %0 : 0 4 13 bash user@tmuxvm:~
+%begin 1794504591 282 1
+%end 1794504591 282 1
+%window-pane-changed @0 %1
+%layout-change @0 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} *
+%output %0 \015\033[K\015$ 
+%window-renamed @0 tmux
+%output %1 \033]0;user@tmuxvm:~\007
+%output %1 \033[?2004h$ 
+%subscription-changed chan-pane-name $0 @0 0 %1 : 0 4 13 bash user@tmuxvm:~
+%window-renamed @0 bash
+%begin 1794504593 288 1
+%end 1794504593 288 1
+%output %1 top -d 10 -p 1\015\012\033[?2004l\015
+%output %1 \033[?1h\033=\033[?25l
+%output %1 \033[H\033[J\033[m\017top - 17:29:53 up 45 days,  9:57,  0 us\033[m\017\033[39;49m\033[m\017\033[39;49m\033[K\015\012Tasks:\033[m\017\033[39;49m\033[1m   1 \033[m\017\033[39;49mtotal,\033[m\017\033[39;49m\033[1m   0 \033[m\017\033[39;49mrunning,\033[m\017\033[39;49m\033[1m   1 \033[m\017\033[39;49mslee\033[m\017\033[39;49m\033[m\017\033[39;49m\033[K\015\012%Cpu(s):\033[m\017\033[39;49m\033[1m  6.8 \033[m\017\033[39;49mus,\033[m\017\033[39;49m\033[1m  9.9 \033[m\017\033[39;49msy,\033[m\017\033[39;49m\033[1m 39.1 \033[m\017\033[39;49mni,\033[m\017\033[39;49m\033[1m 42.\033[m\017\033[39;49m\033[m\017\033[39;49m\033[K\015\012MiB Mem :\033[m\017\033[39;49m\033[1m  31360.4 \033[m\017\033[39;49mtotal,\033[m\017\033[39;49m\033[1m  18604.2 \033[m\017\033[39;49mfree\033[m\017\033[39;49m\033[m\017\033[39;49m\033[K\015\012MiB Swap:\033[m\017\033[39;49m\033[1m  35456.0 \033[m\017\033[39;49mtotal,\033[m\017\033[39;49m\033[1m  17761.5 \033[m\017\033[39;49mfree\033[m\017\033[39;49m\033[m\017\033[39;49m\033[K\015\012\033[K\015\012\033[7m    PID USER      PR  NI    VIRT \033[m\017\033[39;49m\033[K\015\012\033[m\017      1 root      20   0   22864 \033[m\017\033[39;49m\033[K\015\012\033[J
+%subscription-changed chan-pane-name $0 @0 0 %1 : 0 3 13 top user@tmuxvm:~
+%window-renamed @0 top
+%begin 1794504595 290 1
+%end 1794504595 290 1
+%output %0 cd /tmp\015\012
+%output %0 \033[?2004l\015
+%output %0 \033]0;user@tmuxvm:/tmp\007
+%output %0 \033[?2004h$ 
+%subscription-changed chan-pane-name $0 @0 0 %0 : 0 4 16 bash user@tmuxvm:/tmp
+%begin 1794504596 292 1
+%end 1794504596 292 1
+%output %1 \033[?1l\033>\033[25;1H\015\012\033[34h\033[?25h\033[K
+%output %1 \033]0;user@tmuxvm:~\007\033[?2004h$ 
+%subscription-changed chan-pane-name $0 @0 0 %1 : 0 4 13 bash user@tmuxvm:~
+%window-renamed @0 bash
+%exit
+\

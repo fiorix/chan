@@ -1035,11 +1035,12 @@ impl TmuxConnection {
         self.push_label(window, steps);
     }
 
-    /// tmux reported what `pane` is called: its title, or its command under
-    /// a title that names nothing. The pane's session takes the name as its
-    /// tab name; a session the registry is still making takes it when the
-    /// registry answers, and a pane with no session keeps it for when it has
-    /// one. An empty name is tmux having none, and reads as the pane's id.
+    /// tmux reported what `pane` is called: its foreground command, whatever
+    /// title a shell or a program gave it. The pane's session takes the name
+    /// as its tab name; a session the registry is still making takes it when
+    /// the registry answers, and a pane with no session keeps it for when it
+    /// has one. An empty name is tmux having none, and reads as the pane's
+    /// id.
     fn pane_named(&mut self, pane_id: PaneId, name: &str, steps: &mut Vec<Step>) {
         let name: String = name.chars().take(PANE_NAME_CHARS_MAX).collect();
         let name = name.trim_end();
