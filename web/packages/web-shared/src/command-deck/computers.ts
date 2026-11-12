@@ -13,6 +13,8 @@
 // offers, Enter on a workspace opens a new window of it, and Enter on a
 // machine or a gateway opens its page. Every object has a page of its actions
 // and of the objects under it, which Right opens on a row Enter would run.
+// A type of object has a page too, the list its filter gives, so a list that
+// holds other things beside the tree can lead into it in one row per type.
 
 import type { ComputersConfirmBridge, ComputersConfirmations } from "./computersConfirm";
 import type { DeckConfirm, DeckIcon, DeckItem, DeckScope } from "./model";
@@ -158,11 +160,13 @@ export interface ComputersMay {
   allComputers?: boolean;
 }
 
-/** The app that hosts the Computers screen, where one has commands of its
- * own. */
+/** The themes a Computers screen switches between. */
+export type ComputersTheme = "light" | "dark";
+
+/** Chan Desktop, where it is the app that hosts the Computers screen: it has
+ * commands of its own. */
 export interface ComputersDesktop {
-  theme: "dark" | "light";
-  selecting: boolean;
+  theme: ComputersTheme;
 }
 
 export interface ComputersModel {
@@ -173,6 +177,8 @@ export interface ComputersModel {
   /** Window keys, most recently used first. */
   recent?: string[];
   may: ComputersMay;
+  /** Whether the screen's Select mode is on, where the screen has one. */
+  selecting?: boolean;
   desktop?: ComputersDesktop;
 }
 
@@ -201,7 +207,6 @@ export type AppActionId =
   | "new-workspace"
   | "add-devserver"
   | "add-gateway"
-  | "theme"
   | "select"
   | "quit"
   | "all-computers";
@@ -211,7 +216,8 @@ export type ComputersCommand =
   | { target: "workspace"; key: string; action: WorkspaceActionId }
   | { target: "machine"; key: string; action: MachineActionId }
   | { target: "gateway"; key: string; action: GatewayActionId }
-  | { target: "app"; action: AppActionId };
+  | { target: "app"; action: AppActionId }
+  | { target: "app"; action: "theme"; theme: ComputersTheme };
 
 /** How the tree reaches the host. A host is handed back only the keys of its
  * own model and only the actions its `ComputersMay` and its windows' action
@@ -307,6 +313,9 @@ export interface ComputersEntry extends DeckItem {
   /** The row ends a ranked list whatever was typed: it leads out of the
    * model, to where what a query names may be. */
   pinned?: boolean;
+  /** The row changes a state its own list shows, so the deck stays open on
+   * it. */
+  stays?: boolean;
   run?: () => void | DeckConfirm | Promise<void | DeckConfirm>;
 }
 
@@ -343,6 +352,7 @@ export const COMPUTERS_SECTIONS = {
   windows: "Windows",
   create: "New",
   desktop: "Chan Desktop",
+  screen: "Computers screen",
   actions: "Actions",
   unplaced: "Connecting",
 } as const;
@@ -363,6 +373,25 @@ const WINDOW_WORDS: Record<WindowActionId, { label: string; verb: string; keywor
   open: { label: "Open window", verb: "Open", keywords: "in this browser" },
   close: { label: "Close window", verb: "Close", keywords: "remove" },
 };
+
+const FILTERS: readonly ComputersFilter[] = ["windows", "workspaces", "machines", "gateways"];
+
+const FILTER_ICON: Record<ComputersFilter, ComputersIconName> = {
+  windows: "windows",
+  workspaces: "workspace",
+  machines: "computers",
+  gateways: "gateway",
+};
+
+// The words the window's Settings uses for the same themes, in its order.
+const THEME_WORDS: Record<ComputersTheme, string> = { light: "Light", dark: "Dark" };
+const THEMES: readonly ComputersTheme[] = ["light", "dark"];
+const THEME_TITLE = "Theme";
+
+// Path parts that name a page with no object behind it: every object of one
+// type, and the themes.
+const TYPE_PAGE = "type";
+const THEME_PAGE = "app:theme";
 
 const RECENT_WINDOWS = 5;
 
@@ -396,7 +425,7 @@ export function connectionWord(
 
 type RefKind = "machine" | "workspace" | "window" | "gateway";
 
-function ref(kind: RefKind, key: string): string {
+function ref(kind: RefKind | typeof TYPE_PAGE, key: string): string {
   return `${kind}:${key}`;
 }
 
@@ -1052,6 +1081,16 @@ function appAct(b: Builder, action: AppActionId, label: string, keywords: string
   };
 }
 
+/** The new terminal a list of every machine offers: this machine's. A
+ * devserver's is on its own page. */
+function localTerminalAct(b: Builder): Act | undefined {
+  const local = b.model.machines.find((machine) => machine.kind === "local");
+  const terminal = local && machineActs(b, local).find((act) => act.id === "new-terminal");
+  return local && terminal
+    ? { ...terminal, keywords: `shell ${local.name} ${local.search ?? ""}` }
+    : undefined;
+}
+
 interface Created {
   entry: ComputersEntry;
   /** The type filter the row also closes. */
@@ -1065,31 +1104,71 @@ function createEntries(b: Builder, section?: string): Created[] {
     const layout = { section, breadcrumb: COMPUTERS_SECTIONS.create, scope: b.scopes[filter] };
     rows.push({ filter, entry: actEntry(b, act, undefined, act.label, layout) });
   };
-  // A terminal opens on this machine: a devserver's is on its own page.
-  const local = b.model.machines.find((machine) => machine.kind === "local");
-  const terminal = local && machineActs(b, local).find((act) => act.id === "new-terminal");
-  if (local && terminal) {
-    add("windows", { ...terminal, keywords: `shell ${local.name} ${local.search ?? ""}` });
-  }
+  const terminal = localTerminalAct(b);
+  if (terminal) add("windows", terminal);
   if (may.newWorkspace) add("workspaces", appAct(b, "new-workspace", "New workspace", "add folder"));
   if (may.addDevserver) add("machines", appAct(b, "add-devserver", "Add devserver", "new computer server"));
   if (may.addGateway) add("gateways", appAct(b, "add-gateway", "Add gateway", "new"));
   return rows;
 }
 
-function desktopEntries(b: Builder, section?: string): ComputersEntry[] {
-  const desktop = b.model.desktop;
-  if (!desktop) return [];
-  const next = desktop.theme === "dark" ? "light" : "dark";
-  const acts: Act[] = [
-    { ...appAct(b, "theme", `Switch to ${next} theme`, "appearance toggle"), icon: next },
-    {
+/** The themes as rows, the current one checked. Choosing one keeps the deck
+ * open on the list. A `leaf` is titled to read alone in a ranked list. */
+function themeOptionEntries(b: Builder, desktop: ComputersDesktop, leaf: boolean): ComputersEntry[] {
+  return THEMES.map((theme) => {
+    const word = THEME_WORDS[theme];
+    return {
+      id: `computers:theme:${theme}`,
+      title: leaf ? `${THEME_TITLE}: ${word}` : word,
+      breadcrumb: leaf
+        ? COMPUTERS_SECTIONS.desktop
+        : `${COMPUTERS_SECTIONS.desktop} › ${THEME_TITLE}`,
+      searchText: `${THEME_TITLE} ${word} appearance switch to ${theme} theme`,
+      scope: b.scopes.machines,
+      icon: b.ctx.icons[theme],
+      checked: theme === desktop.theme,
+      stays: true,
+      run: () => b.ctx.bridge.run({ target: "app", action: "theme", theme }),
+    };
+  });
+}
+
+/** What the screen itself offers beside its objects: its Select mode, and on
+ * Chan Desktop the app's theme and Quit. */
+function screenEntries(b: Builder, sectioned: boolean): ComputersEntry[] {
+  const { desktop, selecting } = b.model;
+  const name = desktop ? COMPUTERS_SECTIONS.desktop : COMPUTERS_SECTIONS.screen;
+  const layout: Layout = {
+    section: sectioned ? name : undefined,
+    breadcrumb: name,
+    scope: b.scopes.machines,
+  };
+  const rows: ComputersEntry[] = [];
+  if (desktop) {
+    rows.push({
+      id: "computers:theme",
+      title: THEME_TITLE,
+      breadcrumb: layout.breadcrumb,
+      searchText: searchText(THEME_TITLE, layout, "appearance light dark switch"),
+      scope: layout.scope,
+      icon: b.ctx.icons[desktop.theme],
+      section: layout.section,
+      kind: "choice",
+      value: THEME_WORDS[desktop.theme],
+      next: [...b.base, THEME_PAGE],
+    });
+  }
+  if (selecting !== undefined) {
+    const select: Act = {
       ...appAct(b, "select", "Select", "select mode bulk turn on turn off remove"),
       icon: "select",
       toggle: true,
-      value: desktop.selecting ? "on" : "off",
-    },
-    {
+      value: selecting ? "on" : "off",
+    };
+    rows.push(actEntry(b, select, undefined, select.label, layout));
+  }
+  if (desktop) {
+    const quit: Act = {
       ...appAct(b, "quit", "Quit", "exit app desktop"),
       icon: "quit",
       danger: true,
@@ -1099,10 +1178,26 @@ function desktopEntries(b: Builder, section?: string): ComputersEntry[] {
         actionLabel: "Quit",
         danger: true,
       },
-    },
-  ];
-  const layout = { section, breadcrumb: COMPUTERS_SECTIONS.desktop, scope: b.scopes.machines };
-  return acts.map((act) => actEntry(b, act, undefined, act.label, layout));
+    };
+    rows.push(actEntry(b, quit, undefined, quit.label, layout));
+  }
+  return rows;
+}
+
+/** A type of object as one row, which opens the type's page. */
+function typeEntry(b: Builder, filter: ComputersFilter, section?: string): ComputersEntry {
+  const title = FILTER_LABEL[filter];
+  return {
+    id: `computers:${TYPE_PAGE}:${filter}`,
+    title,
+    breadcrumb: COMPUTERS_SECTIONS.machines,
+    searchText: title,
+    scope: b.scopes[filter],
+    icon: b.ctx.icons[FILTER_ICON[filter]],
+    section,
+    kind: "branch",
+    next: [...b.base, ref(TYPE_PAGE, filter)],
+  };
 }
 
 /** The way from a tree that holds one machine to the screen that holds every
@@ -1180,7 +1275,7 @@ function rootEntries(b: Builder): ComputersEntry[] {
     appendOnce(rows, (model.gateways ?? []).map((gateway) => gatewayEntry(b, gateway, COMPUTERS_SECTIONS.gateways)));
   }
   appendOnce(rows, createEntries(b, COMPUTERS_SECTIONS.create).map((created) => created.entry));
-  appendOnce(rows, desktopEntries(b, COMPUTERS_SECTIONS.desktop));
+  appendOnce(rows, screenEntries(b, true));
   appendOnce(rows, allComputersEntries(b, COMPUTERS_SECTIONS.desktop));
   return rows;
 }
@@ -1248,7 +1343,12 @@ function searchEntries(b: Builder, filter: ComputersFilter | null): ComputersEnt
       .filter((created) => all || created.filter === filter)
       .map((created) => created.entry),
   );
-  if (all) rows.push(...desktopEntries(b), ...allComputersEntries(b));
+  if (all) {
+    rows.push(...screenEntries(b, false));
+    // A theme is one step away by its own name.
+    if (model.desktop) rows.push(...themeOptionEntries(b, model.desktop, true));
+    rows.push(...allComputersEntries(b));
+  }
   return rows;
 }
 
@@ -1258,9 +1358,12 @@ type Page =
   | { kind: "machine"; machine: ComputersMachine }
   | { kind: "workspace"; placed: PlacedWorkspace }
   | { kind: "window"; placed: PlacedWindow }
-  | { kind: "gateway"; gateway: ComputersGateway };
+  | { kind: "gateway"; gateway: ComputersGateway }
+  | { kind: "type"; filter: ComputersFilter }
+  | { kind: "theme"; desktop: ComputersDesktop };
 
 function findPage(model: ComputersModel, part: string): Page | null {
+  if (part === THEME_PAGE) return model.desktop ? { kind: "theme", desktop: model.desktop } : null;
   const at = part.indexOf(":");
   const kind = part.slice(0, at);
   const key = part.slice(at + 1);
@@ -1280,6 +1383,10 @@ function findPage(model: ComputersModel, part: string): Page | null {
     const gateway = (model.gateways ?? []).find((candidate) => candidate.key === key);
     return gateway ? { kind, gateway } : null;
   }
+  if (kind === TYPE_PAGE) {
+    const filter = FILTERS.find((candidate) => candidate === key);
+    return filter && (filter !== "gateways" || model.may.gateways) ? { kind, filter } : null;
+  }
   return null;
 }
 
@@ -1293,6 +1400,10 @@ function pageName(page: Page): string {
       return page.placed.window.name;
     case "gateway":
       return page.gateway.name;
+    case "type":
+      return FILTER_LABEL[page.filter];
+    case "theme":
+      return THEME_TITLE;
   }
 }
 
@@ -1333,6 +1444,10 @@ function pageEntries(b: Builder, page: Page, searching: boolean): ComputersEntry
       return windowActEntries(b, page.placed, true, section(COMPUTERS_SECTIONS.actions));
     case "gateway":
       return gatewayActEntries(b, page.gateway, true, section(COMPUTERS_SECTIONS.actions));
+    case "type":
+      return searching ? searchEntries(b, page.filter) : filterEntries(b, page.filter);
+    case "theme":
+      return themeOptionEntries(b, page.desktop, false);
   }
 }
 
@@ -1373,6 +1488,29 @@ export function computersDeck(model: ComputersModel, view: ComputersView, ctx: C
   return { entries, path, crumbs, title: filter ? FILTER_LABEL[filter] : COMPUTERS_SECTIONS.machines };
 }
 
+/** The ways into the tree, for a list that holds other things beside it and
+ * has no room for the tree itself: a new terminal on this machine, which is
+ * one step, then one row per type of object the model holds, which opens
+ * that type's page. Each row carries the one heading they share. */
+export function computersEntryPoints(model: ComputersModel, ctx: ComputersContext): ComputersEntry[] {
+  const section = COMPUTERS_SECTIONS.machines;
+  const b: Builder = { model, ctx, scopes: ctx.scopes ?? COMPUTERS_TYPE_SCOPES, base: [] };
+  const rows: ComputersEntry[] = [];
+  const terminal = localTerminalAct(b);
+  if (terminal) {
+    rows.push(
+      actEntry(b, terminal, undefined, terminal.label, {
+        section,
+        breadcrumb: section,
+        scope: b.scopes.windows,
+      }),
+    );
+  }
+  if (everyWorkspace(model).length > 0) rows.push(typeEntry(b, "workspaces", section));
+  if (everyWindow(model).length > 0) rows.push(typeEntry(b, "windows", section));
+  return rows;
+}
+
 /** The rail of a deck that lists Computers alone: one orb per type of object
  * the host holds. */
 export function computersScopes(
@@ -1380,18 +1518,10 @@ export function computersScopes(
   icons: ComputersContext["icons"],
   scopes: ComputersScopeIds = COMPUTERS_TYPE_SCOPES,
 ): DeckScope[] {
-  const filters: ComputersFilter[] = ["windows", "workspaces", "machines"];
-  if (model.may.gateways) filters.push("gateways");
-  const icon: Record<ComputersFilter, ComputersIconName> = {
-    windows: "windows",
-    workspaces: "workspace",
-    machines: "computers",
-    gateways: "gateway",
-  };
-  return filters.map((filter) => ({
+  return FILTERS.filter((filter) => filter !== "gateways" || model.may.gateways).map((filter) => ({
     id: scopes[filter],
     label: FILTER_LABEL[filter],
-    icon: icons[icon[filter]],
+    icon: icons[FILTER_ICON[filter]],
   }));
 }
 
@@ -1400,6 +1530,5 @@ export function computersFilter(
   scope: string | null,
   scopes: ComputersScopeIds = COMPUTERS_TYPE_SCOPES,
 ): ComputersFilter | null {
-  const filters: ComputersFilter[] = ["windows", "workspaces", "machines", "gateways"];
-  return filters.find((filter) => scopes[filter] === scope) ?? null;
+  return FILTERS.find((filter) => scopes[filter] === scope) ?? null;
 }

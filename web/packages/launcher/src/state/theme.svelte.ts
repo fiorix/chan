@@ -35,7 +35,7 @@ function cacheTheme(theme: Theme): void {
   try {
     localStorage.setItem(STORAGE_KEY, theme);
   } catch {
-    // Best-effort persistence; the in-memory toggle still works without it.
+    // Best-effort persistence; the in-memory choice still works without it.
   }
 }
 
@@ -50,7 +50,7 @@ function adoptLocalTheme(theme: string | null): void {
 /// standalone terminal window follows it (`PUT /api/library/local-theme`).
 /// Best-effort and DESKTOP-only: a surface with no local-theme store (a plain
 /// browser, a headless devserver) answers 404/401, which is swallowed, so the
-/// toggle never breaks. Kept off `LibraryApi`: this is a desktop-config
+/// switch never breaks. Kept off `LibraryApi`: this is a desktop-config
 /// side-channel, not library-registry data.
 async function putLocalTheme(theme: Theme): Promise<void> {
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -63,15 +63,18 @@ async function putLocalTheme(theme: Theme): Promise<void> {
       body: JSON.stringify({ theme }),
     });
   } catch {
-    // Network or store-less surface: the in-memory + cached toggle still stands.
+    // Network or store-less surface: the in-memory + cached choice still stands.
   }
 }
 
-export function toggleTheme(): void {
-  themeState.theme = themeState.theme === "dark" ? "light" : "dark";
-  cacheTheme(themeState.theme);
+/// Switch to `theme` and keep it as the user's choice. Choosing the theme
+/// already showing still stores it, so a theme the system preference picked
+/// stops following that preference.
+export function setTheme(theme: Theme): void {
+  themeState.theme = theme;
+  cacheTheme(theme);
   applyTheme();
-  void putLocalTheme(themeState.theme);
+  void putLocalTheme(theme);
 }
 
 /**
@@ -130,7 +133,7 @@ export function watchLocalTheme(): () => void {
 /// otherwise leave the launcher on one theme and the terminals on another. When
 /// the config holds a value, adopt it (and refresh the cache); when it is null
 /// (unset / no store / unreachable), keep the current choice, which the next
-/// toggle seeds into the config.
+/// switch seeds into the config.
 export async function reconcileLocalTheme(): Promise<void> {
   const headers: Record<string, string> = {};
   const token = authToken();

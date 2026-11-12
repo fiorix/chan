@@ -220,7 +220,7 @@ describe("launcher root", () => {
     expect(topbar.querySelector('[aria-label="New local terminal"]')).toBeNull();
   });
 
-  it("switches theme from the Desktop Computers launcher and dismisses it", async () => {
+  it("switches theme from the Desktop Computers launcher, which stays open on the list", async () => {
     themeState.theme = "dark";
     applyTheme();
     target = document.createElement("div");
@@ -240,7 +240,7 @@ describe("launcher root", () => {
     flushSync();
 
     const themeCommand = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
-      (button) => button.querySelector(".deck-result-title")?.textContent === "Switch to light theme",
+      (button) => button.querySelector(".deck-result-title")?.textContent === "Theme: Light",
     );
     expect(themeCommand).toBeTruthy();
     themeCommand?.click();
@@ -249,7 +249,7 @@ describe("launcher root", () => {
 
     expect(themeState.theme).toBe("light");
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
-    expect(activeCommandLauncherDraft().visible).toBe(false);
+    expect(activeCommandLauncherDraft().visible).toBe(true);
   });
 
   it("renders the Local new-terminal + new-workspace actions and the add-devserver button once loaded", async () => {

@@ -27,6 +27,7 @@ const actions = vi.hoisted(() => ({
   turnOnAndOpen: vi.fn(),
   workspaceCount: vi.fn(),
   desktop: false,
+  readOnly: false,
   hostOs: "linux",
 }));
 
@@ -49,7 +50,7 @@ vi.mock("@chan/web-shared/CommandDeck.svelte", async (importOriginal) => {
 
 vi.mock("../state/theme.svelte", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/theme.svelte")>()),
-  toggleTheme: actions.theme,
+  setTheme: actions.theme,
 }));
 
 vi.mock("../api/backend", async () => {
@@ -63,7 +64,7 @@ vi.mock("../state/capabilities", async (importOriginal) => ({
   canMutateRegistry: true,
   get hasDesktopBridge() { return actions.desktop; },
   selfManagedWindows: true,
-  readOnly: false,
+  get readOnly() { return actions.readOnly; },
   get hostOs() { return actions.hostOs; },
 }));
 
@@ -116,6 +117,7 @@ import { screen } from "../state/screen.svelte";
 import { confirm } from "../state/confirm.svelte";
 import { dialog, closeDialog } from "../state/dialog.svelte";
 import { selection, setSelectMode } from "../state/selection.svelte";
+import { themeState, type Theme } from "../state/theme.svelte";
 import { backend } from "../api/backend";
 import { mintWindow, resetWindowManager } from "../state/windowManager.svelte";
 import { notices, clearNotices } from "../state/notices.svelte";
@@ -314,9 +316,10 @@ function open(): void {
 
 /** Mount again on another surface: the adapter reads the surface as it builds
  * its model. */
-function remount(surface: { desktop: boolean }): void {
+function remount(surface: { desktop: boolean; readOnly?: boolean }): void {
   unmount(app);
   actions.desktop = surface.desktop;
+  actions.readOnly = surface.readOnly === true;
   app = mount(CommandLauncher, { target }) as Record<string, unknown>;
 }
 
@@ -328,7 +331,9 @@ async function openWindowPage(): Promise<void> {
 
 beforeEach(() => {
   actions.desktop = false;
+  actions.readOnly = false;
   actions.hostOs = "linux";
+  themeState.theme = "dark";
   actions.canManage.mockReturnValue(true);
   actions.canOpen.mockReturnValue(true);
   sessionStorage.clear();
@@ -402,13 +407,15 @@ describe("Computers command deck", () => {
     windowKey({ ctrlKey: true, altKey: true });
     expect(activeCommandLauncherDraft().visible).toBe(true);
     // One machine and no registry of others: its workspaces and windows
-    // stand at the root, with no gateways and no desktop commands.
+    // stand at the root, with no gateways and no desktop commands. The
+    // screen's own Select mode closes the list.
     expect(outline()).toEqual([
       "Workspaces: Project",
       "Windows: Control terminal",
       `Windows: ${WINDOW_1}`,
       "New: New terminal",
       "New: New workspace",
+      "Computers screen: Select",
     ]);
     expect(titles()).toEqual(items().map((row) => row.title));
     expect((deck.props!.scopes as DeckScope[]).map((scope) => scope.label)).toEqual([
@@ -432,7 +439,7 @@ describe("Computers command deck", () => {
       "New: New workspace",
       "New: Add devserver",
       "New: Add gateway",
-      "Chan Desktop: Switch to light theme",
+      "Chan Desktop: Theme",
       "Chan Desktop: Select",
       "Chan Desktop: Quit",
     ]);
@@ -448,13 +455,32 @@ describe("Computers command deck", () => {
     library.gateways = [{ ...home }];
     open();
     await query("theme");
-    expect(titles()).not.toContain("Switch to light theme");
-    expect(titles()).not.toContain("Switch to dark theme");
+    expect(titles()).toEqual([]);
     await query("");
     const listed = items().map((row) => row.title);
-    for (const title of ["Select", "Quit", "Add devserver", "Add gateway", "home"]) {
+    for (const title of ["Theme", "Quit", "Add devserver", "Add gateway", "home"]) {
       expect(listed).not.toContain(title);
     }
+  });
+
+  it("enters select mode from Select on a devserver's page, as its top bar does", async () => {
+    open();
+    expect([item("Select").section, item("Select").value]).toEqual(["Computers screen", "off"]);
+    result("Select").click();
+    await flushPromises();
+    expect(selection.selectMode).toBe(true);
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    open();
+    expect(item("Select").value).toBe("on");
+    await query("select");
+    expect(titles()).toContain("Select");
+  });
+
+  it("offers no Select on a surface whose top bar has no such button", () => {
+    remount({ desktop: false, readOnly: true });
+    open();
+    expect(items().map((row) => row.title)).not.toContain("Select");
+    expect(outline().at(-1)).toBe("New: New workspace");
   });
 
   it("focuses a window from its own row", async () => {
@@ -1246,6 +1272,49 @@ describe("the desktop's library", () => {
     expect(activeCommandLauncherDraft().visible).toBe(false);
   });
 
+  it("lists the themes under Theme, checks the current one, and switches in place", async () => {
+    actions.theme.mockImplementation((theme: Theme) => {
+      themeState.theme = theme;
+    });
+    open();
+    expect([item("Theme").kind, item("Theme").value]).toEqual(["choice", "Dark"]);
+    result("Theme").click();
+    await tick();
+    expect(activeCommandLauncherDraft().path).toEqual(["app:theme"]);
+    expect(deck.props!.crumbs).toEqual(["Theme"]);
+    const themes = (): unknown[] => items().map((row) => [row.title, row.checked]);
+    expect(themes()).toEqual([["Light", false], ["Dark", true]]);
+
+    result("Light").click();
+    await flushPromises();
+    expect(actions.theme).toHaveBeenCalledExactlyOnceWith("light");
+    expect(activeCommandLauncherDraft().visible, "the deck stays on the themes").toBe(true);
+    expect(activeCommandLauncherDraft().path).toEqual(["app:theme"]);
+    expect(target.querySelector(".deck-operation"), "no card for a change in place").toBeNull();
+    expect(themes()).toEqual([["Light", true], ["Dark", false]]);
+
+    await key("Escape");
+    expect(activeCommandLauncherDraft().path).toEqual([]);
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    expect(item("Theme").value).toBe("Light");
+  });
+
+  it("switches the theme in one step from a typed query and keeps the deck open", async () => {
+    actions.theme.mockImplementation((theme: Theme) => {
+      themeState.theme = theme;
+    });
+    open();
+    await query("theme");
+    expect(titles()).toEqual(["Theme", "Theme: Dark", "Theme: Light"]);
+    expect([item("Theme: Dark").checked, item("Theme: Light").checked]).toEqual([true, false]);
+    result("Theme: Light").click();
+    await flushPromises();
+    expect(actions.theme).toHaveBeenCalledExactlyOnceWith("light");
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    expect(activeCommandLauncherDraft().query).toBe("theme");
+    expect([item("Theme: Dark").checked, item("Theme: Light").checked]).toEqual([false, true]);
+  });
+
   it("enters select mode from Select and shows its state", async () => {
     open();
     expect(item("Select").value).toBe("off");
@@ -1425,14 +1494,11 @@ describe("Waiting command refusals", () => {
     actions.theme.mockImplementation(() => pending);
     remount({ desktop: true });
     open();
-    await query("switch theme");
-    const row = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find((button) =>
-      button.querySelector(".deck-result-title")?.textContent?.startsWith("Switch to "),
-    )!;
-    const title = row.querySelector(".deck-result-title")!.textContent!;
-    row.click();
+    await query("theme light");
+    const title = "Theme: Light";
+    result(title).click();
     await flushPromises();
-    expect(actions.theme).toHaveBeenCalledOnce();
+    expect(actions.theme).toHaveBeenCalledExactlyOnceWith("light");
     closeCommandLauncher();
     await flushPromises();
     reject(new Error("Theme write refused"));

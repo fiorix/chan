@@ -4,6 +4,7 @@ import {
   COMPUTERS_REASONS,
   computersConfirmBridge,
   computersDeck,
+  computersEntryPoints,
   computersFilter,
   computersScopes,
   connectionWord,
@@ -176,7 +177,8 @@ function desktopModel(over: Partial<ComputersModel> = {}): ComputersModel {
     gateways: [gateway("gw-1", { name: "home", publicKey: true })],
     recent: [],
     may: DESKTOP,
-    desktop: { theme: "dark", selecting: false },
+    selecting: false,
+    desktop: { theme: "dark" },
     ...over,
   };
 }
@@ -217,7 +219,7 @@ describe("the root", () => {
       "New: New workspace",
       "New: Add devserver",
       "New: Add gateway",
-      "Chan Desktop: Switch to light theme",
+      "Chan Desktop: Theme",
       "Chan Desktop: Select",
       "Chan Desktop: Quit",
     ]);
@@ -288,14 +290,9 @@ describe("the root", () => {
     ]);
   });
 
-  it("names the theme it switches to and shows Select's state", async () => {
+  it("asks before Quit and carries it to the bridge", async () => {
     const { ctx, commands } = harness();
-    const deck = build(desktopModel({ desktop: { theme: "light", selecting: true } }), {}, ctx);
-    expect(row(deck, "Switch to dark theme").section).toBe("Chan Desktop");
-    const select = row(deck, "Select");
-    expect([select.kind, select.value]).toEqual(["toggle", "on"]);
-    await select.run?.();
-    const quit = row(deck, "Quit");
+    const quit = row(build(desktopModel(), {}, ctx), "Quit");
     expect(quit.confirm).toEqual({
       title: "Quit Chan Desktop?",
       message: "Local workspaces and terminal sessions will stop.",
@@ -303,10 +300,110 @@ describe("the root", () => {
       danger: true,
     });
     await quit.run?.();
-    expect(commands).toEqual([
-      { target: "app", action: "select" },
-      { target: "app", action: "quit" },
+    expect(commands).toEqual([{ target: "app", action: "quit" }]);
+  });
+});
+
+// ---- The screen's own commands ------------------------------------------------
+
+describe("Select", () => {
+  it("is a toggle that shows the mode's state and leaves as it starts", async () => {
+    const { ctx, commands } = harness();
+    const select = row(build(desktopModel({ selecting: true }), {}, ctx), "Select");
+    expect([select.section, select.kind, select.value, select.awaitResult]).toEqual([
+      "Chan Desktop",
+      "toggle",
+      "on",
+      false,
     ]);
+    expect(row(build(desktopModel()), "Select").value).toBe("off");
+    await select.run?.();
+    expect(commands).toEqual([{ target: "app", action: "select" }]);
+  });
+
+  it("is offered off the desktop too, under the screen's own name, with no theme and no Quit", () => {
+    const deck = build(devserverModel({ selecting: false }));
+    expect(outline(deck)).toEqual([
+      "Workspaces: chan",
+      "Windows: Terminal Window 1",
+      "Windows: Window 1",
+      "New: New terminal",
+      "New: New workspace",
+      "Computers screen: Select",
+    ]);
+    const typed = build(devserverModel({ selecting: false }), { query: "x" });
+    expect(row(typed, "Select").breadcrumb).toBe("Computers screen");
+    expect(titles(typed).filter((title) => title.startsWith("Theme") || title === "Quit")).toEqual([]);
+  });
+
+  it("is left out where the screen has no such mode", () => {
+    const listed = [
+      ...titles(build(devserverModel())),
+      ...titles(build(devserverModel(), { query: "x" })),
+      ...titles(build(desktopModel({ selecting: undefined }))),
+    ];
+    expect(listed).not.toContain("Select");
+  });
+});
+
+describe("Theme", () => {
+  it("is a choice that names the current theme and opens the themes", () => {
+    const theme = row(build(desktopModel()), "Theme");
+    expect([theme.section, theme.kind, theme.value, theme.next]).toEqual([
+      "Chan Desktop",
+      "choice",
+      "Dark",
+      ["app:theme"],
+    ]);
+    expect(theme.run).toBeUndefined();
+    expect(row(build(desktopModel({ desktop: { theme: "light" } })), "Theme").value).toBe("Light");
+  });
+
+  it("lists the themes with a check on the current one, in the Settings words and order", () => {
+    const deck = build(desktopModel(), { path: ["app:theme"] });
+    expect(deck.entries.map((entry) => [entry.title, entry.checked])).toEqual([
+      ["Light", false],
+      ["Dark", true],
+    ]);
+    expect([deck.path, deck.crumbs, deck.title]).toEqual([["app:theme"], ["Theme"], "Theme"]);
+    expect(deck.entries.every((entry) => entry.breadcrumb === "Chan Desktop › Theme")).toBe(true);
+    const light = build(desktopModel({ desktop: { theme: "light" } }), { path: ["app:theme"] });
+    expect(light.entries.map((entry) => entry.checked)).toEqual([true, false]);
+  });
+
+  it("switches in place: the row carries its theme to the bridge and keeps the deck open", async () => {
+    const { ctx, commands } = harness();
+    const deck = build(desktopModel(), { path: ["app:theme"] }, ctx);
+    const light = row(deck, "Light");
+    expect([light.stays, light.awaitResult, light.confirm]).toEqual([true, undefined, undefined]);
+    await light.run?.();
+    await row(deck, "Dark").run?.();
+    expect(commands).toEqual([
+      { target: "app", action: "theme", theme: "light" },
+      { target: "app", action: "theme", theme: "dark" },
+    ]);
+  });
+
+  it("is one step away in a typed list, each theme a row that reads alone", async () => {
+    const { ctx, commands } = harness();
+    const typed = build(desktopModel(), { query: "x" }, ctx);
+    expect(titles(typed).filter((title) => title.startsWith("Theme"))).toEqual([
+      "Theme",
+      "Theme: Light",
+      "Theme: Dark",
+    ]);
+    const light = row(typed, "Theme: Light");
+    expect([light.breadcrumb, light.checked, light.stays]).toEqual(["Chan Desktop", false, true]);
+    expect(row(typed, "Theme: Dark").checked).toBe(true);
+    // The words the row had before it was a choice still find it.
+    expect(light.searchText).toContain("switch to light theme");
+    await light.run?.();
+    expect(commands).toEqual([{ target: "app", action: "theme", theme: "light" }]);
+  });
+
+  it("has no row and no page where the host is not the desktop", () => {
+    expect(titles(build(devserverModel({ selecting: false }))).some((title) => title.startsWith("Theme"))).toBe(false);
+    expect(build(devserverModel(), { path: ["app:theme"] }).path).toEqual([]);
   });
 });
 
@@ -1064,6 +1161,55 @@ describe("the type filter", () => {
   });
 });
 
+// ---- A type's page ---------------------------------------------------------------------------
+
+describe("a type's page", () => {
+  it("lists what the type's filter lists, and names the type", () => {
+    for (const filter of ["windows", "workspaces", "machines", "gateways"] as const) {
+      const page = build(desktopModel(), { path: [`type:${filter}`] });
+      const filtered = build(desktopModel(), { filter });
+      expect(outline(page), filter).toEqual(outline(filtered));
+      expect([page.path, page.crumbs, page.title], filter).toEqual([
+        [`type:${filter}`],
+        [filtered.title],
+        filtered.title,
+      ]);
+    }
+    expect(outline(build(devserverModel(), { path: ["type:workspaces"] }))).toEqual([
+      "This machine: chan",
+      "New: New workspace",
+    ]);
+  });
+
+  it("leads on to an object's page, which names both", () => {
+    const { ctx } = harness();
+    const page = build(desktopModel(), { path: ["type:workspaces"] }, ctx);
+    const chan = row(page, "chan");
+    expect(chan.page).toEqual(["type:workspaces", "workspace:local:chan"]);
+    expect(row(build(desktopModel(), { path: ["type:machines"] }, ctx), "geekom").next).toEqual([
+      "type:machines",
+      "machine:geekom",
+    ]);
+    const deeper = build(desktopModel(), { path: chan.page! }, ctx);
+    expect([deeper.path, deeper.crumbs]).toEqual([chan.page, ["Workspaces", "chan"]]);
+    expect(sections(deeper)).toEqual(["Actions", "Windows"]);
+  });
+
+  it("searches the type alone when a query is typed on it", () => {
+    const page = build(desktopModel(), { path: ["type:windows"], query: "x" });
+    expect(titles(page)).toEqual(titles(build(desktopModel(), { filter: "windows", query: "x" })));
+    expect(titles(page)).toContain("Close Window 1");
+    expect(titles(page)).not.toContain("chan");
+    expect(page.entries.every((entry) => entry.section === undefined)).toBe(true);
+  });
+
+  it("is no page for a type the host does not hold, or for a name that is no type", () => {
+    expect(build(devserverModel(), { path: ["type:gateways"] }).path).toEqual([]);
+    expect(build(desktopModel(), { path: ["type:tabs"] }).path).toEqual([]);
+    expect(build(desktopModel(), { path: ["type:"] }).path).toEqual([]);
+  });
+});
+
 // ---- A window's scoped snapshot ----------------------------------------------------------------
 
 describe("a host that holds one machine's snapshot", () => {
@@ -1113,6 +1259,78 @@ describe("a host that holds one machine's snapshot", () => {
     expect(terminal.next).toBeUndefined();
     await terminal.run?.();
     expect(commands).toEqual([{ target: "machine", key: "local", action: "new-terminal" }]);
+  });
+});
+
+// ---- The ways into the tree ---------------------------------------------------------------------
+
+describe("the ways into the tree, for a list that holds other things", () => {
+  const scopes = { windows: "computers", workspaces: "computers", machines: "computers", gateways: "computers" };
+
+  function points(
+    machine: Partial<ComputersMachine>,
+    may: ComputersMay = { terminal: true, window: true, allComputers: true },
+  ): { rows: ComputersEntry[]; commands: ComputersCommand[]; model: ComputersModel; ctx: ComputersContext } {
+    const { ctx: bare, commands } = harness();
+    const ctx = { ...bare, scopes, terminalTitle: "New terminal window" };
+    const model: ComputersModel = { machines: [local(machine)], may };
+    return { rows: computersEntryPoints(model, ctx), commands, model, ctx };
+  }
+
+  const full = {
+    workspaces: [space("ws-1", { name: "chan", windows: [win("w-1", { name: "Window 1" })] })],
+    windows: [win("w-2", { name: "Terminal Window 2" })],
+  };
+
+  it("are a new terminal window, Workspaces and Windows, under one heading", () => {
+    const { rows } = points(full);
+    expect(rows.map((entry) => `${entry.section}: ${entry.title}`)).toEqual([
+      "Computers: New terminal window",
+      "Computers: Workspaces",
+      "Computers: Windows",
+    ]);
+    expect(rows.every((entry) => entry.scope === "computers" && entry.breadcrumb === "Computers")).toBe(true);
+    expect(new Set(rows.map((entry) => entry.id)).size).toBe(3);
+  });
+
+  it("run the terminal in one step and open each type's page as a branch", async () => {
+    const { rows, commands, model, ctx } = points(full);
+    const [terminal, workspaces, windows] = rows;
+    expect([terminal.kind, terminal.next, terminal.awaitResult]).toEqual([undefined, undefined, true]);
+    await terminal.run?.();
+    expect(commands).toEqual([{ target: "machine", key: "local", action: "new-terminal" }]);
+
+    expect([workspaces.kind, workspaces.next, workspaces.run]).toEqual(["branch", ["type:workspaces"], undefined]);
+    expect([windows.kind, windows.next, windows.run]).toEqual(["branch", ["type:windows"], undefined]);
+    // Each lands on the rows the tree's own root lists for that type.
+    const shown = (entry: ComputersEntry): unknown[] => [entry.id, entry.title, entry.subtitle, entry.value];
+    const root = build(model, {}, ctx);
+    const under = (section: string): unknown[][] =>
+      root.entries.filter((entry) => entry.section === section).map(shown);
+    const page = (entry: ComputersEntry): unknown[][] =>
+      build(model, { path: entry.next! }, ctx)
+        .entries.filter((listed) => listed.section !== "New")
+        .map(shown);
+    expect(page(workspaces)).toEqual(under("Workspaces"));
+    expect(page(windows)).toEqual(under("Windows"));
+    expect(page(windows)).toHaveLength(2);
+  });
+
+  it("leave out a type the model holds none of, and the terminal the host may not open", () => {
+    expect(points({ windows: full.windows }).rows.map((entry) => entry.title)).toEqual([
+      "New terminal window",
+      "Windows",
+    ]);
+    expect(points({ workspaces: [space("ws-1")] }).rows.map((entry) => entry.title)).toEqual([
+      "New terminal window",
+      "Workspaces",
+    ]);
+    expect(points(full, { window: true }).rows.map((entry) => entry.title)).toEqual(["Workspaces", "Windows"]);
+  });
+
+  it("hold neither the tree's objects nor the way to every computer", () => {
+    const { rows } = points(full);
+    expect(rows.filter((entry) => entry.pinned || entry.expandable)).toEqual([]);
   });
 });
 

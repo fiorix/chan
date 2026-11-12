@@ -61,24 +61,50 @@ describe("launcher initial theme headless fallback", () => {
 });
 
 describe("launcher local-theme desktop sync", () => {
-  test("toggleTheme mirrors the new choice to the desktop config", async () => {
+  test("setTheme switches, stores the choice and mirrors it to the desktop config", async () => {
     vi.stubGlobal("matchMedia", matchMediaStub({ light: false })); // start dark
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
-    const { themeState, toggleTheme } = await import("./theme.svelte");
+    const { themeState, setTheme } = await import("./theme.svelte");
     expect(themeState.theme).toBe("dark");
 
-    toggleTheme();
+    setTheme("light");
 
     expect(themeState.theme).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(localStorage.getItem("chan-launcher-theme")).toBe("light");
     // The PUT fires synchronously (fire-and-forget) with the new theme.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/library/local-theme",
+      expect.objectContaining({ method: "PUT", body: JSON.stringify({ theme: "light" }) }),
+    );
+
+    setTheme("dark");
+    expect(themeState.theme).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(localStorage.getItem("chan-launcher-theme")).toBe("dark");
+  });
+
+  test("setTheme keeps the theme already showing as the stored choice", async () => {
+    // Light because the system prefers it, with nothing stored.
+    vi.stubGlobal("matchMedia", matchMediaStub({ light: true }));
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { themeState, setTheme } = await import("./theme.svelte");
+    expect(themeState.theme).toBe("light");
+    expect(localStorage.getItem("chan-launcher-theme")).toBeNull();
+
+    setTheme("light");
+
+    expect(themeState.theme).toBe("light");
+    expect(localStorage.getItem("chan-launcher-theme")).toBe("light");
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/library/local-theme",
       expect.objectContaining({ method: "PUT", body: JSON.stringify({ theme: "light" }) }),
     );
   });
 
-  test("toggleTheme still flips when the PUT fails (best-effort)", async () => {
+  test("setTheme still switches when the PUT fails (best-effort)", async () => {
     vi.stubGlobal("matchMedia", matchMediaStub({ light: false }));
     vi.stubGlobal(
       "fetch",
@@ -86,8 +112,8 @@ describe("launcher local-theme desktop sync", () => {
         throw new Error("no store");
       }),
     );
-    const { themeState, toggleTheme } = await import("./theme.svelte");
-    toggleTheme();
+    const { themeState, setTheme } = await import("./theme.svelte");
+    setTheme("light");
     expect(themeState.theme).toBe("light");
   });
 

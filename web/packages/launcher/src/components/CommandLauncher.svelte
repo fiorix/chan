@@ -23,7 +23,6 @@
     type ComputersBridge,
     type ComputersCommand,
     type ComputersContext,
-    type ComputersEntry,
     type ComputersGateway,
     type ComputersMachine,
     type ComputersModel,
@@ -123,7 +122,7 @@
   import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
-  import { themeState, toggleTheme } from "../state/theme.svelte";
+  import { setTheme, themeState } from "../state/theme.svelte";
   import { hasWindowAttention } from "../state/windowAttention.svelte";
 
   let direction: "forward" | "back" | "still" = $state("still");
@@ -400,9 +399,10 @@
         renameGateway: hasDesktopBridge,
         showCard: hasDesktopBridge,
       },
-      desktop: hasDesktopBridge
-        ? { theme: themeState.theme, selecting: selection.selectMode }
-        : undefined,
+      // Select mode is the screen's own, offered wherever its top bar
+      // offers the button.
+      selecting: readOnly ? undefined : selection.selectMode,
+      desktop: hasDesktopBridge ? { theme: themeState.theme } : undefined,
     };
     return { model, records };
   });
@@ -505,7 +505,7 @@
           case "add-gateway":
             return openNewDialog("gateway");
           case "theme":
-            return toggleTheme();
+            return setTheme(command.theme);
           case "select":
             return toggleSelectMode();
           case "quit":
@@ -573,7 +573,7 @@
     computersDeck(current.model, { path: draft.path, filter, query: draft.query }, context),
   );
   const visibleEntries = $derived(
-    draft.query.trim() ? (rankDeckItems(deck.entries, draft.query) as ComputersEntry[]) : deck.entries,
+    draft.query.trim() ? rankDeckItems(deck.entries, draft.query) : deck.entries,
   );
   const crumbs = $derived.by(() => {
     if (!deck.crumbs.length) return undefined;
@@ -661,7 +661,8 @@
     }
     clearError();
     const result = await entry.run?.();
-    if (!entry.awaitResult) finish();
+    // A row that changes what its own list shows leaves the deck open on it.
+    if (!entry.awaitResult && !entry.stays) finish();
     return result;
   }
 
