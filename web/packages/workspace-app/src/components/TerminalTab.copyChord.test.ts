@@ -59,11 +59,21 @@ async function seed(...tabs: Tab[]): Promise<FakeTerminal> {
   return xterm.terminals[0]!;
 }
 
-/// Let a copy's clipboard write, or its absence, be seen.
-async function copied(): Promise<string[]> {
-  await settle();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+/// Every text written to the clipboard so far.
+function written(): string[] {
   return clipboard.writeText.mock.calls.map(([text]) => text);
+}
+
+/// Wait until the clipboard has been written exactly these texts.
+async function copied(texts: string[]): Promise<void> {
+  await vi.waitFor(() => expect(written()).toEqual(texts));
+}
+
+/// Give a copy that was asked for the turns it takes to reach the
+/// clipboard, for a case that expects none.
+async function idle(): Promise<void> {
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
 function runCopy(): void {
@@ -81,7 +91,7 @@ describe("a chord assigned to the terminal's Copy", () => {
     const { event } = pressInPage(ASSIGNED);
 
     expect(event.defaultPrevented, "the app took the key").toBe(true);
-    expect(await copied()).toEqual(["selected text"]);
+    await copied(["selected text"]);
   });
 
   test("does nothing with nothing selected, where the launcher's row copies the scrollback", async () => {
@@ -91,10 +101,11 @@ describe("a chord assigned to the terminal's Copy", () => {
 
     const { event } = pressInPage(ASSIGNED);
     expect(event.defaultPrevented, "the app took the key").toBe(true);
-    expect(await copied(), "the chord").toEqual([]);
+    await idle();
+    expect(written(), "the chord").toEqual([]);
 
     runCopy();
-    expect(await copied(), "the row").toEqual([SCROLLBACK]);
+    await copied([SCROLLBACK]);
   });
 
   test("leaves the next run of the command a row's", async () => {
@@ -102,11 +113,11 @@ describe("a chord assigned to the terminal's Copy", () => {
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
     term.selection = "selected text";
     pressInPage(ASSIGNED);
-    expect(await copied()).toEqual(["selected text"]);
+    await copied(["selected text"]);
 
     term.selection = "";
     runCopy();
-    expect(await copied()).toEqual(["selected text", SCROLLBACK]);
+    await copied(["selected text", SCROLLBACK]);
   });
 
   test("is not the terminal's while another tab holds the pane", async () => {
@@ -117,6 +128,7 @@ describe("a chord assigned to the terminal's Copy", () => {
     const { event } = pressInPage(ASSIGNED);
 
     expect(event.defaultPrevented, "Copy is not offered on a file tab").toBe(false);
-    expect(await copied()).toEqual([]);
+    await idle();
+    expect(written()).toEqual([]);
   });
 });
