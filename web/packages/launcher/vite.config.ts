@@ -47,7 +47,7 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // builder, config-backed per-machine collapse, the Gateways screen, the
 // Computers command launcher, and the desktop's carousel deck with its Add
 // devserver card, All windows, the tmux connection cards and plasma
-// background and viewer privacy fields, about 74.2 KiB) leaves
+// background and viewer privacy fields, about 74.8 KiB) leaves
 // a few KiB below the ceiling; raise it
 // deliberately when adding real surface, and treat an unexpected jump as an
 // accidental heavy import. Keep a few KiB of headroom rather than trimming to
