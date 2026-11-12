@@ -122,7 +122,7 @@
   import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
-  import { setTheme, themeState } from "../state/theme.svelte";
+  import { setThemeChoice, themeState } from "../state/theme.svelte";
   import { hasWindowAttention } from "../state/windowAttention.svelte";
 
   let direction: "forward" | "back" | "still" = $state("still");
@@ -402,7 +402,7 @@
       // Select mode is the screen's own, offered wherever its top bar
       // offers the button.
       selecting: readOnly ? undefined : selection.selectMode,
-      desktop: hasDesktopBridge ? { theme: themeState.theme } : undefined,
+      desktop: hasDesktopBridge ? { theme: themeState.choice } : undefined,
     };
     return { model, records };
   });
@@ -505,7 +505,7 @@
           case "add-gateway":
             return openNewDialog("gateway");
           case "theme":
-            return setTheme(command.theme);
+            return setThemeChoice(command.theme);
           case "select":
             return toggleSelectMode();
           case "quit":
@@ -559,6 +559,8 @@
       card: PanelsTopLeft,
       copy: Copy,
       add: Plus,
+      // The glyph a theme picker gives the system's own preference.
+      system: Monitor,
       light: Sun,
       dark: Moon,
       select: SquareCheckBig,

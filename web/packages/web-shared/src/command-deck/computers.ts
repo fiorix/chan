@@ -160,12 +160,14 @@ export interface ComputersMay {
   allComputers?: boolean;
 }
 
-/** The themes a Computers screen switches between. */
-export type ComputersTheme = "light" | "dark";
+/** What a Computers screen's theme may be set to: the system's preference,
+ * or one theme whatever the system prefers. */
+export type ComputersTheme = "system" | "light" | "dark";
 
 /** Chan Desktop, where it is the app that hosts the Computers screen: it has
  * commands of its own. */
 export interface ComputersDesktop {
+  /** The choice made, which is not the theme showing while it is `system`. */
   theme: ComputersTheme;
 }
 
@@ -266,6 +268,7 @@ export type ComputersIconName =
   | "card"
   | "copy"
   | "add"
+  | "system"
   | "light"
   | "dark"
   | "select"
@@ -383,9 +386,14 @@ const FILTER_ICON: Record<ComputersFilter, ComputersIconName> = {
   gateways: "gateway",
 };
 
-// The words the window's Settings uses for the same themes, in its order.
-const THEME_WORDS: Record<ComputersTheme, string> = { light: "Light", dark: "Dark" };
-const THEMES: readonly ComputersTheme[] = ["light", "dark"];
+// The words the window's Settings uses for the same choices, in its order.
+// `keywords` are other words a query may use for one; no row shows them.
+const THEMES: readonly ComputersTheme[] = ["system", "light", "dark"];
+const THEME_WORDS: Record<ComputersTheme, { label: string; keywords: string }> = {
+  system: { label: "System", keywords: "follow os automatic default" },
+  light: { label: "Light", keywords: "switch to light theme" },
+  dark: { label: "Dark", keywords: "switch to dark theme" },
+};
 const THEME_TITLE = "Theme";
 
 // Path parts that name a page with no object behind it: every object of one
@@ -1112,18 +1120,19 @@ function createEntries(b: Builder, section?: string): Created[] {
   return rows;
 }
 
-/** The themes as rows, the current one checked. Choosing one keeps the deck
- * open on the list. A `leaf` is titled to read alone in a ranked list. */
+/** The theme choices as rows, the current one checked. Choosing one keeps
+ * the deck open on the list. A `leaf` is titled to read alone in a ranked
+ * list. */
 function themeOptionEntries(b: Builder, desktop: ComputersDesktop, leaf: boolean): ComputersEntry[] {
   return THEMES.map((theme) => {
-    const word = THEME_WORDS[theme];
+    const { label, keywords } = THEME_WORDS[theme];
     return {
       id: `computers:theme:${theme}`,
-      title: leaf ? `${THEME_TITLE}: ${word}` : word,
+      title: leaf ? `${THEME_TITLE}: ${label}` : label,
       breadcrumb: leaf
         ? COMPUTERS_SECTIONS.desktop
         : `${COMPUTERS_SECTIONS.desktop} › ${THEME_TITLE}`,
-      searchText: `${THEME_TITLE} ${word} appearance switch to ${theme} theme`,
+      searchText: `${THEME_TITLE} ${label} appearance ${keywords}`,
       scope: b.scopes.machines,
       icon: b.ctx.icons[theme],
       checked: theme === desktop.theme,
@@ -1149,12 +1158,12 @@ function screenEntries(b: Builder, sectioned: boolean): ComputersEntry[] {
       id: "computers:theme",
       title: THEME_TITLE,
       breadcrumb: layout.breadcrumb,
-      searchText: searchText(THEME_TITLE, layout, "appearance light dark switch"),
+      searchText: searchText(THEME_TITLE, layout, "appearance system light dark switch"),
       scope: layout.scope,
       icon: b.ctx.icons[desktop.theme],
       section: layout.section,
       kind: "choice",
-      value: THEME_WORDS[desktop.theme],
+      value: THEME_WORDS[desktop.theme].label,
       next: [...b.base, THEME_PAGE],
     });
   }

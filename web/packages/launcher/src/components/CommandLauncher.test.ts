@@ -50,7 +50,7 @@ vi.mock("@chan/web-shared/CommandDeck.svelte", async (importOriginal) => {
 
 vi.mock("../state/theme.svelte", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/theme.svelte")>()),
-  setTheme: actions.theme,
+  setThemeChoice: actions.theme,
 }));
 
 vi.mock("../api/backend", async () => {
@@ -117,7 +117,7 @@ import { screen } from "../state/screen.svelte";
 import { confirm } from "../state/confirm.svelte";
 import { dialog, closeDialog } from "../state/dialog.svelte";
 import { selection, setSelectMode } from "../state/selection.svelte";
-import { themeState, type Theme } from "../state/theme.svelte";
+import { themeState, type ThemeChoice } from "../state/theme.svelte";
 import { backend } from "../api/backend";
 import { mintWindow, resetWindowManager } from "../state/windowManager.svelte";
 import { notices, clearNotices } from "../state/notices.svelte";
@@ -1273,8 +1273,8 @@ describe("the desktop's library", () => {
   });
 
   it("lists the themes under Theme, checks the current one, and switches in place", async () => {
-    actions.theme.mockImplementation((theme: Theme) => {
-      themeState.theme = theme;
+    actions.theme.mockImplementation((choice: ThemeChoice) => {
+      themeState.choice = choice;
     });
     open();
     expect([item("Theme").kind, item("Theme").value]).toEqual(["choice", "Dark"]);
@@ -1283,7 +1283,7 @@ describe("the desktop's library", () => {
     expect(activeCommandLauncherDraft().path).toEqual(["app:theme"]);
     expect(deck.props!.crumbs).toEqual(["Theme"]);
     const themes = (): unknown[] => items().map((row) => [row.title, row.checked]);
-    expect(themes()).toEqual([["Light", false], ["Dark", true]]);
+    expect(themes()).toEqual([["System", false], ["Light", false], ["Dark", true]]);
 
     result("Light").click();
     await flushPromises();
@@ -1291,7 +1291,7 @@ describe("the desktop's library", () => {
     expect(activeCommandLauncherDraft().visible, "the deck stays on the themes").toBe(true);
     expect(activeCommandLauncherDraft().path).toEqual(["app:theme"]);
     expect(target.querySelector(".deck-operation"), "no card for a change in place").toBeNull();
-    expect(themes()).toEqual([["Light", true], ["Dark", false]]);
+    expect(themes()).toEqual([["System", false], ["Light", true], ["Dark", false]]);
 
     await key("Escape");
     expect(activeCommandLauncherDraft().path).toEqual([]);
@@ -1299,20 +1299,48 @@ describe("the desktop's library", () => {
     expect(item("Theme").value).toBe("Light");
   });
 
+  it("offers System first, and names the choice rather than the theme it resolves to", async () => {
+    actions.theme.mockImplementation((choice: ThemeChoice) => {
+      themeState.choice = choice;
+    });
+    open();
+    result("Theme").click();
+    await tick();
+    result("System").click();
+    await flushPromises();
+    expect(actions.theme).toHaveBeenCalledExactlyOnceWith("system");
+    expect(items().map((row) => [row.title, row.checked])).toEqual([
+      ["System", true],
+      ["Light", false],
+      ["Dark", false],
+    ]);
+    // Whichever theme the system prefers, the row says System.
+    expect(["light", "dark"]).toContain(themeState.theme);
+    await key("Escape");
+    expect(item("Theme").value).toBe("System");
+  });
+
   it("switches the theme in one step from a typed query and keeps the deck open", async () => {
-    actions.theme.mockImplementation((theme: Theme) => {
-      themeState.theme = theme;
+    actions.theme.mockImplementation((choice: ThemeChoice) => {
+      themeState.choice = choice;
     });
     open();
     await query("theme");
-    expect(titles()).toEqual(["Theme", "Theme: Dark", "Theme: Light"]);
-    expect([item("Theme: Dark").checked, item("Theme: Light").checked]).toEqual([true, false]);
+    expect(titles()).toEqual(["Theme", "Theme: Dark", "Theme: Light", "Theme: System"]);
+    const checks = (): unknown[] =>
+      ["Theme: System", "Theme: Light", "Theme: Dark"].map((title) => item(title).checked);
+    expect(checks()).toEqual([false, false, true]);
     result("Theme: Light").click();
     await flushPromises();
     expect(actions.theme).toHaveBeenCalledExactlyOnceWith("light");
     expect(activeCommandLauncherDraft().visible).toBe(true);
     expect(activeCommandLauncherDraft().query).toBe("theme");
-    expect([item("Theme: Dark").checked, item("Theme: Light").checked]).toEqual([false, true]);
+    expect(checks()).toEqual([false, true, false]);
+    await query("system");
+    result("Theme: System").click();
+    await flushPromises();
+    expect(actions.theme).toHaveBeenLastCalledWith("system");
+    expect(item("Theme: System").checked).toBe(true);
   });
 
   it("enters select mode from Select and shows its state", async () => {

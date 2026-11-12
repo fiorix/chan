@@ -1,58 +1,111 @@
-// Dark/light theme, applied as `data-theme` on the document element (the CSS
-// tokens key off it) and persisted so a reload keeps the user's choice.
+// The launcher's theme: the system's preference, or dark or light whatever
+// the system prefers. The theme showing is applied as `data-theme` on the
+// document element (the CSS tokens key off it), and a pinned choice is stored
+// so a reload keeps it. Nothing stored means the system's preference.
 
 import { authToken } from "./authToken";
 
 export type Theme = "dark" | "light";
+/// What the user chose: one theme, or to follow the system's preference.
+export type ThemeChoice = "system" | Theme;
 
 const STORAGE_KEY = "chan-launcher-theme";
+const LIGHT_SCHEME = "(prefers-color-scheme: light)";
 
-function prefersLight(): boolean {
+function isTheme(value: unknown): value is Theme {
+  return value === "dark" || value === "light";
+}
+
+/// The theme the system prefers: dark unless it says light, so a system that
+/// states no preference reads dark.
+function systemTheme(): Theme {
   try {
-    return typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches;
+    return typeof matchMedia === "function" && matchMedia(LIGHT_SCHEME).matches ? "light" : "dark";
   } catch {
-    return false;
+    return "dark";
   }
 }
 
-function initialTheme(): Theme {
+function storedChoice(): ThemeChoice {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "dark" || stored === "light") return stored;
+    if (isTheme(stored)) return stored;
   } catch {
-    // Storage unavailable (private mode): fall through to the system default.
+    // Storage unavailable (private mode): fall through to the system's.
   }
-  return prefersLight() ? "light" : "dark";
+  return "system";
 }
 
-export const themeState = $state<{ theme: Theme }>({ theme: initialTheme() });
+let choice = $state<ThemeChoice>(storedChoice());
+let system = $state<Theme>(systemTheme());
+
+export const themeState = {
+  /// What the user chose. Assigning sets it for this page without storing it.
+  get choice(): ThemeChoice {
+    return choice;
+  },
+  set choice(next: ThemeChoice) {
+    choice = next;
+  },
+  /// The theme showing: the choice, or the system's while the choice is to
+  /// follow it. Assigning a theme pins it for this page without storing it,
+  /// which is how a preview holds one theme whatever the system prefers.
+  get theme(): Theme {
+    return choice === "system" ? system : choice;
+  },
+  set theme(next: Theme) {
+    choice = next;
+  },
+};
 
 export function applyTheme(): void {
   document.documentElement.setAttribute("data-theme", themeState.theme);
 }
 
-function cacheTheme(theme: Theme): void {
+// The document carries the theme for as long as the page lives, so the
+// system's preference is followed for as long: a change repaints while the
+// choice is to follow it, and is remembered for when it becomes so.
+function followSystem(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, theme);
+    if (typeof matchMedia !== "function") return;
+    matchMedia(LIGHT_SCHEME).addEventListener("change", () => {
+      system = systemTheme();
+      if (choice === "system") applyTheme();
+    });
+  } catch {
+    // An engine that reports no changes keeps the preference read at load.
+  }
+}
+followSystem();
+
+/// Store a pinned theme; following the system is the absence of one.
+function cacheChoice(next: ThemeChoice): void {
+  try {
+    if (next === "system") localStorage.removeItem(STORAGE_KEY);
+    else localStorage.setItem(STORAGE_KEY, next);
   } catch {
     // Best-effort persistence; the in-memory choice still works without it.
   }
 }
 
-function adoptLocalTheme(theme: string | null): void {
-  if ((theme !== "dark" && theme !== "light") || theme === themeState.theme) return;
-  themeState.theme = theme;
-  cacheTheme(theme);
+/// Take a choice another writer made as this page's own, without writing it
+/// back.
+function adoptChoice(next: ThemeChoice): void {
+  if (next === choice) return;
+  choice = next;
+  cacheChoice(next);
   applyTheme();
 }
 
-/// Mirror the launcher's light/dark choice to the desktop config so a local
-/// standalone terminal window follows it (`PUT /api/library/local-theme`).
-/// Best-effort and DESKTOP-only: a surface with no local-theme store (a plain
-/// browser, a headless devserver) answers 404/401, which is swallowed, so the
-/// switch never breaks. Kept off `LibraryApi`: this is a desktop-config
+/// Mirror the launcher's choice to the desktop config so a local standalone
+/// terminal window follows it (`PUT /api/library/local-theme`). The config
+/// holds `"dark"`, `"light"`, or null for the system's preference, which is
+/// how the desktop's own windows already read an unset value. Best-effort and
+/// DESKTOP-only: a surface with no local-theme store (a plain browser, a
+/// headless devserver) answers 404/401, which is swallowed, so the switch
+/// never breaks. Kept off `LibraryApi`: this is a desktop-config
 /// side-channel, not library-registry data.
-async function putLocalTheme(theme: Theme): Promise<void> {
+async function putLocalTheme(theme: Theme | null): Promise<void> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   const token = authToken();
   if (token) headers.authorization = `Bearer ${token}`;
@@ -67,21 +120,24 @@ async function putLocalTheme(theme: Theme): Promise<void> {
   }
 }
 
-/// Switch to `theme` and keep it as the user's choice. Choosing the theme
-/// already showing still stores it, so a theme the system preference picked
-/// stops following that preference.
-export function setTheme(theme: Theme): void {
-  themeState.theme = theme;
-  cacheTheme(theme);
+/// Make `next` the user's choice: show it, store it and mirror it to the
+/// desktop. A theme pins: choosing the one already showing stops it following
+/// the system. `system` un-pins, and follows the system from then on.
+export function setThemeChoice(next: ThemeChoice): void {
+  choice = next;
+  cacheChoice(next);
   applyTheme();
-  void putLocalTheme(theme);
+  void putLocalTheme(next === "system" ? null : next);
 }
 
 /**
  * Follow changes written by another launcher webview. The native command deck
  * is a separate transparent webview, so its optimistic DOM update cannot
  * recolor the underlying Computers window by itself. The desktop-owned theme
- * feed pushes the authoritative value on connect and after every write.
+ * feed pushes the authoritative value on connect and after every write, and
+ * its null is the choice to follow the system: a caller subscribes only where
+ * the desktop holds the theme, since a surface with no store reports null
+ * whatever was chosen there.
  */
 export function watchLocalTheme(): () => void {
   if (typeof WebSocket === "undefined" || typeof location === "undefined") return () => {};
@@ -109,8 +165,9 @@ export function watchLocalTheme(): () => void {
     socket.onmessage = (event) => {
       attempt = 0;
       try {
-        const frame = JSON.parse(event.data) as { theme?: string | null };
-        adoptLocalTheme(frame?.theme ?? null);
+        const frame = JSON.parse(event.data) as { theme?: unknown };
+        if (frame.theme === null) adoptChoice("system");
+        else if (isTheme(frame.theme)) adoptChoice(frame.theme);
       } catch {
         // Drop malformed frames; the next full value self-heals.
       }
@@ -131,21 +188,20 @@ export function watchLocalTheme(): () => void {
 /// desktop-config value (`GET /api/library/local-theme`). localStorage is only
 /// a first-paint cache; a cleared WebView store or a future second writer would
 /// otherwise leave the launcher on one theme and the terminals on another. When
-/// the config holds a value, adopt it (and refresh the cache); when it is null
-/// (unset / no store / unreachable), keep the current choice, which the next
-/// switch seeds into the config.
+/// the config holds a theme, adopt it (and refresh the cache). A null settles
+/// nothing here, since a surface with no store answers null too: the current
+/// choice stands, and where the desktop holds the theme its feed decides.
 export async function reconcileLocalTheme(): Promise<void> {
   const headers: Record<string, string> = {};
   const token = authToken();
   if (token) headers.authorization = `Bearer ${token}`;
-  let theme: string | null = null;
+  let theme: unknown;
   try {
     const res = await fetch("/api/library/local-theme", { headers });
     if (!res.ok) return;
-    const body = (await res.json()) as { theme?: string | null };
-    theme = body?.theme ?? null;
+    theme = ((await res.json()) as { theme?: unknown } | null)?.theme;
   } catch {
     return;
   }
-  adoptLocalTheme(theme);
+  if (isTheme(theme)) adoptChoice(theme);
 }
