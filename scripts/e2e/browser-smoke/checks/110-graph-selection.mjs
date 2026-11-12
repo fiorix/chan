@@ -106,7 +106,7 @@ async function openAndRead(ctx, page) {
   const framed = await steadyGraphDiscs(page, GRAPH);
   await ctx.shot("graph-tag-selected");
   const drafts = await draftDiscs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
-  const failures = rootedFailures(framed, details.visibleNodes, drafts);
+  const failures = rootedFailures(framed, framed.counted, drafts);
   if (failures.length) {
     throw new Error(`the graph opened on the tag is not framed from its root: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
   }
@@ -123,7 +123,7 @@ async function openAndRead(ctx, page) {
   } finally {
     await page.setViewport(before);
   }
-  const resizedFailures = rootedFailures(resized, details.visibleNodes, drafts);
+  const resizedFailures = rootedFailures(resized, resized.counted, drafts);
   if (resized.canvas[0] === framed.canvas[0]) resizedFailures.push(`the canvas kept its width ${framed.canvas[0]} through the resize`);
   if (resizedFailures.length) {
     throw new Error(`the graph opened on the tag is not framed from its root after a resize to ${size.width}x${size.height}: ${resizedFailures.join("; ")}; ${JSON.stringify(resized)}`);

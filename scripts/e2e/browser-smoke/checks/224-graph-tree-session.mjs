@@ -15,7 +15,7 @@
 // opened, the same count of nodes drawn.
 
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const RUN = Date.now().toString(36);
@@ -158,6 +158,13 @@ export default {
       return evidence;
     } finally {
       for (const page of pages) await page.close().catch(() => {});
+      // The runner keeps one server and one workspace for every check: the
+      // fixture and the saved window go with this one.
+      rmSync(join(ctx.workspaceDir, DIR), { recursive: true, force: true });
+      const url = new URL("/api/session", ctx.serverUrl);
+      url.search = "";
+      url.searchParams.set("w", windowId);
+      await fetch(url, { method: "DELETE", headers: token ? { authorization: `Bearer ${token}` } : {} }).catch(() => {});
     }
   },
 };

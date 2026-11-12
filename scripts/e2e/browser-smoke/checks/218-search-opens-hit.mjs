@@ -95,7 +95,7 @@ async function openGraphRow(ctx, page, query, title, label) {
   const framed = await steadyGraphDiscs(page, ".graph-tab");
   await ctx.shot(`218-${label}-graph`, page);
   const drafts = await draftDiscs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
-  const failures = rootedFailures(framed, graph.visibleNodes, drafts);
+  const failures = rootedFailures(framed, framed.counted, drafts);
   if (failures.length) throw new Error(`the ${label} graph is not framed from its root: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
   return { rows: rows.slice(0, 3), graph, drafts, framed };
 }

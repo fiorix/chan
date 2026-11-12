@@ -59,14 +59,19 @@ export async function untraceGraphDiscs(page) {
 
 /// The last frame's discs on the canvas under `hostSelector`, in device
 /// pixels: how many, their box, the room it leaves to each edge, and how far
-/// the disc nearest the root's seat is from it, `[across, down]`.
+/// the disc nearest the root's seat is from it, `[across, down]`; with the
+/// nodes the host's status line counts as drawn at the same moment
+/// (`counted`, null when it shows none).
 export function readGraphDiscs(page, hostSelector) {
   return page.evaluate(({ host, margin }) => {
     const canvas = document.querySelector(`${host} canvas`);
     const frame = canvas && window.__smokeGraphDiscs?.frames.get(canvas);
     if (!canvas || !frame) return { missing: `no traced frame on ${host} canvas` };
+    const stat = canvas.closest(host)?.querySelector(".statusbar .stat")?.textContent ?? "";
+    const visible = stat.match(/(\d+)\/\d+ nodes/);
+    const counted = visible ? Number(visible[1]) : null;
     const { discs } = frame;
-    if (discs.length === 0) return { canvas: [canvas.width, canvas.height], count: 0 };
+    if (discs.length === 0) return { canvas: [canvas.width, canvas.height], count: 0, counted };
     const round = (n) => Math.round(n * 10) / 10;
     const left = Math.min(...discs.map((d) => d.x - d.r));
     const right = Math.max(...discs.map((d) => d.x + d.r));
@@ -82,13 +87,16 @@ export function readGraphDiscs(page, hostSelector) {
       box: [round(left), round(top), round(right), round(bottom)],
       room: { left: round(left), right: round(canvas.width - right), above: round(top), below: round(canvas.height - bottom) },
       rootOff: [round(nearest.x - seat.x), round(nearest.y - seat.y)],
+      counted,
     };
   }, { host: hostSelector, margin: ROOT_BOTTOM_MARGIN });
 }
 
 /// The discs once their box holds: two reads `gap` ms apart within a pixel on
-/// every side and with the same count. The graph eases into its fit as the
-/// layout settles, over a second or so.
+/// every side, with the same count of discs and the same count on the status
+/// line. The graph eases into its fit as the layout settles, over a second
+/// or so, and the status line counts what the graph holds, which can still
+/// be growing when the first nodes are drawn.
 export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutMs = 20_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = await readGraphDiscs(page, hostSelector);
@@ -96,7 +104,7 @@ export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutM
     await delay(gap);
     const next = await readGraphDiscs(page, hostSelector);
     const held =
-      next.box && last.box && next.count === last.count &&
+      next.box && last.box && next.count === last.count && next.counted === last.counted &&
       next.box.every((v, i) => Math.abs(v - last.box[i]) <= 1);
     if (held) return next;
     if (Date.now() > deadline) throw new Error(`the graph's discs did not hold still in ${timeoutMs} ms: ${JSON.stringify(next)}`);
