@@ -50,3 +50,16 @@ Not read: an AppImage's `chan-term` and its sibling through `exec -a`, macOS (th
 - A bare `chan-desktop` beside a running desktop asks it to come forward instead of opening a new terminal window; `chan-term` opens one.
 - A `chan-term` that only runs the shell, bare or with `--dir` (Omarchy's Super+Return sends `--dir=<cwd>`), with no desktop running starts Chan Desktop, whose first window is that terminal in the launch's directory, beside the windows it restores; before, a bare `chan-desktop` started it with the restored windows alone and a `--dir` launch opened a window of its own.
 - `CHAN_NO_DESKTOP_HANDOFF`, and a session read as headless (an SSH login, which `SSH_CONNECTION`, `SSH_TTY` or `SSH_CLIENT` marks, `ssh -X` with a working `DISPLAY` included), make Chan Desktop's `chan-term` refuse a launch that only runs the shell, as the standalone CLI's does: it exits 1 with the reason and opens nothing. Before, a bare `chan-desktop` there brought the running desktop forward or started one, and a `--dir` launch opened a window of its own.
+- On Linux, a Chan Desktop AppImage's New Window windows, a desktop such a window starts, and a `chan-term -e` typed in its terminals use the system GTK and WebKit, as the first launch does. Before, they ran the bundled ones, and the typed `chan-term -e` exited 127.
+- The AppImage finds `ldconfig` in `/sbin` or `/usr/sbin` when `PATH` lacks them. Before, it ran on the bundled GTK and WebKit without saying so.
+
+## Readings after the merge, 2026-11-12
+
+An independent review of the merged branch found no high-severity defect (`dev/v0129/reviews/review-chan-term-intake.md`); its confirmed findings were fixed in two rounds, each reviewed or read (`dev/v0129/reviews/review-termfix-1.md`). Four guest readings it asked for (`dev/v0129/reviews/chan-term-runs-1.md`):
+
+- Unit lifetime: a launcher that runs `chan-term` as a plain transient service (`ExitType=main`) kills the desktop it started about 7.4 s later; a scope keeps it, and so does a service with `ExitType=cgroup`. uwsm defaults to a scope and Omarchy launches terminals through it, so neither is affected. Open for the owner: start the desktop in place for the cold terminal case, or document what a launcher needs.
+- AppImage: every child of an AppImage desktop inherited the re-exec's marker, so a New Window sibling and a desktop it cold-started ran on the bundled GTK and WebKit, and `chan-term -e` typed in one of its terminals exited 127. The re-exec'd process now consumes the marker where it reads it. Proven by unit tests; the AppImage-level run of the fix is owed.
+- xdg-terminal-exec (the reference implementation, 0.14.4) across the upgrade: its cache is rebuilt on the first run after the entries change, so a stale cache never launched `chan-desktop`. With a list that still names `chan-desktop.desktop`, which terminal wins depends on the filesystem's directory order: on btrfs the entry created last, on tmpfs the one created first.
+- Wayland: under headless sway a `chan-term` window's `app_id` is `TUI.float` with `--app-id=TUI.float` and `chan-desktop` without.
+
+Still not read: macOS (the shim and the window), a FUSE-mounted AppImage, other xdg-terminal-exec implementations and the KDE and GLib terminal pickers.
