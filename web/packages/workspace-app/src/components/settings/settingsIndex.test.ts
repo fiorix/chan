@@ -160,4 +160,16 @@ describe("settled words", () => {
       "Screen lock",
     ]);
   });
+
+  test("secret masking is a choice of On, Off and Default", () => {
+    const masking = settingEntry("terminal.secretMasking");
+    expect([masking.label, masking.kind]).toEqual(["Secret masking", "choice"]);
+    expect(masking.options).toEqual([
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+      { value: "default", label: "Default" },
+    ]);
+    // The former pill's caption.
+    expect(masking.keywords).toContain("Mask secrets in new terminals");
+  });
 });

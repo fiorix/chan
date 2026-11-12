@@ -40,7 +40,6 @@ import {
   withHybridSurfaceTheme,
   workspace,
 } from "../../state/store.svelte";
-import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
 import { setWindowTabBarPreference, windowTabBar } from "../../state/windowTabBar.svelte";
 import {
   TERMINAL_BACKGROUND_OPACITY_MAX,
@@ -281,6 +280,11 @@ const SPACING: readonly SettingOption[] = [
 const TERMINAL_ENGINES: readonly SettingOption[] = [
   { value: "ghostty", label: "ghostty" },
   { value: "xterm", label: "xterm" },
+];
+const SECRET_MASKING: readonly SettingOption[] = [
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+  { value: "default", label: "Default" },
 ];
 const TERMINAL_FONTS: readonly SettingOption[] = [
   { value: "os-default", label: "OS default (mono)" },
@@ -639,21 +643,29 @@ const ENTRIES: readonly SettingEntry[] = [
       }),
     },
   ),
-  toggle(
+  choice(
     {
       id: "terminal.secretMasking",
       section: "terminal",
       heading: "Secret masking",
-      caption: "Mask secrets in new terminals",
+      keywords: ["Mask secrets in new terminals"],
     },
+    SECRET_MASKING,
     {
-      // What a new terminal of this window starts with: the stored choice,
-      // or with none stored the window's default.
-      get: (p) =>
-        windowModeSecretMaskingEnabled(p.terminal.secret_masking ?? null, {
-          terminalControl: ui.terminalControl,
-        }),
-      change: (on) => (p) => ({ ...p, terminal: { ...p.terminal, secret_masking: on } }),
+      // The stored choice. With none stored a new terminal takes its
+      // window's default, which is what Default names.
+      get: (p) => {
+        const stored = p.terminal.secret_masking ?? null;
+        return stored === null ? "default" : stored ? "on" : "off";
+      },
+      // Default removes the stored choice with a write of `null`, which the
+      // config route takes as "clear"; a key left out of the terminal object
+      // keeps the stored choice. With none stored there is nothing to clear.
+      change: (value) => (p) => {
+        const stored = p.terminal.secret_masking ?? null;
+        const next = value === "default" ? null : value === "on";
+        return next === stored ? p : { ...p, terminal: { ...p.terminal, secret_masking: next } };
+      },
     },
   ),
   choice(
