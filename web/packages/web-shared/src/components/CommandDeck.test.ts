@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
-import type { DeckConfirm, DeckItem } from "../command-deck/model";
+import type { DeckConfirm, DeckDraft, DeckIcon, DeckItem, DeckScope } from "../command-deck/model";
 import { deckPendingReturnFocus } from "./CommandDeck.svelte";
 import CommandDeckHarness from "./CommandDeck.test-harness.svelte";
 
@@ -90,7 +90,6 @@ describe("CommandDeck lazy confirmation", () => {
     (document.activeElement as HTMLElement).blur();
     expect(document.activeElement).toBe(document.body);
 
-    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await flush();
@@ -644,6 +643,10 @@ describe("CommandDeck focus on close", () => {
     expect(target.querySelector(".deck-operation")?.textContent, "the error card").toContain("save failed");
     escape();
     await flush();
+    expect(target.querySelector(".deck-operation"), "Escape leaves the card first").toBeNull();
+    expect(target.querySelector(".deck-shell")).not.toBeNull();
+    escape();
+    await flush();
     expect(document.activeElement).toBe(origin);
   });
 
@@ -728,9 +731,14 @@ describe("CommandDeck non-awaited rejection", () => {
     expect(unhandled).toEqual([]);
   });
 
-  it("closes the error card on Escape and restores the opening focus", async () => {
+  it("leaves the error card on Escape, then closes and restores the opening focus", async () => {
     await rejectCommand();
     expect(target.querySelector(".deck-operation")?.textContent).toContain("The command was refused");
+    escape();
+    await flush();
+    expect(target.querySelector(".deck-operation"), "the first Escape returns to the list").toBeNull();
+    expect(closeResult()).not.toBeNull();
+    expect(document.activeElement).toBe(target.querySelector(".deck-input"));
     escape();
     await flush();
     expect(target.querySelector('[role="dialog"]')).toBeNull();
@@ -1200,5 +1208,799 @@ describe("command success ownership", () => {
     await settle();
     expect(onSuccess).not.toHaveBeenCalled();
     expect(original.operation).toBeNull();
+  });
+});
+
+/// Rows `Row 1` to `Row <count>`, each an action with a breadcrumb.
+function plainRows(count: number, over: (index: number) => Partial<DeckItem> = () => ({})): DeckItem[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `row-${index + 1}`,
+    title: `Row ${index + 1}`,
+    breadcrumb: "Commands",
+    searchText: "",
+    scope: "window",
+    ...over(index),
+  }));
+}
+
+function named(id: string, title: string, over: Partial<DeckItem> = {}): DeckItem {
+  return { id, title, breadcrumb: "Commands", searchText: "", scope: "window", ...over };
+}
+
+/// A stand-in icon component that leaves a mark where it was drawn.
+function markerIcon(name: string): DeckIcon {
+  return (anchor: Node): void => {
+    const mark = document.createElement("i");
+    mark.dataset.icon = name;
+    anchor.parentNode?.insertBefore(mark, anchor);
+  };
+}
+
+/// Three scopes; the middle one is not available.
+function railScopes(): DeckScope[] {
+  return [
+    { id: "app", label: "Terminal", icon: markerIcon("app") },
+    { id: "pane", label: "Pane", icon: markerIcon("pane"), available: false },
+    { id: "window", label: "Window", caption: "Win", icon: markerIcon("window") },
+  ];
+}
+
+async function mountWith(props: Record<string, unknown>): Promise<void> {
+  app = mount(CommandDeckHarness, { target, props: props as never }) as Record<string, unknown>;
+  await flush();
+}
+
+function deckInput(): HTMLInputElement {
+  return target.querySelector(".deck-input") as HTMLInputElement;
+}
+
+function hostDraft(): DeckDraft {
+  return (app.currentDraft as () => DeckDraft)();
+}
+
+/// Send one keydown to the input, where focus rests while the deck is open.
+async function press(key: string, init: KeyboardEventInit = {}): Promise<KeyboardEvent> {
+  const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
+  deckInput().dispatchEvent(event);
+  await flush();
+  return event;
+}
+
+async function typeQuery(query: string): Promise<void> {
+  const field = deckInput();
+  field.value = query;
+  field.dispatchEvent(new InputEvent("input", { bubbles: true, data: query }));
+  await flush();
+}
+
+function activeTitle(): string | null {
+  return target.querySelector(".deck-result.active .deck-result-title")?.textContent ?? null;
+}
+
+function resultRows(): HTMLButtonElement[] {
+  return [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")];
+}
+
+function rowTitled(title: string): HTMLButtonElement {
+  const found = resultRows().find(
+    (button) => button.querySelector(".deck-result-title")?.textContent === title,
+  );
+  if (!found) throw new Error(`missing row ${title}`);
+  return found;
+}
+
+function orb(label: string): HTMLButtonElement {
+  const found = target.querySelector<HTMLButtonElement>(`.deck-scope[aria-label="${label} scope"]`);
+  if (!found) throw new Error(`missing orb ${label}`);
+  return found;
+}
+
+describe("CommandDeck row keys", () => {
+  it("selects row 1 on open, and the first Down selects row 2", async () => {
+    await mountWith({ items: plainRows(3) });
+    expect(activeTitle()).toBe("Row 1");
+    const down = await press("ArrowDown");
+    expect(activeTitle()).toBe("Row 2");
+    expect(down.defaultPrevented).toBe(true);
+    expect(deckInput().getAttribute("aria-activedescendant")).toBe(rowTitled("Row 2").id);
+    expect(hostDraft().selectedId).toBe("row-2");
+  });
+
+  it("wraps Up from the first row and Down from the last", async () => {
+    await mountWith({ items: plainRows(3) });
+    await press("ArrowUp");
+    expect(activeTitle()).toBe("Row 3");
+    await press("ArrowDown");
+    expect(activeTitle()).toBe("Row 1");
+  });
+
+  it("moves on Ctrl+N and Ctrl+P as on Down and Up", async () => {
+    await mountWith({ items: plainRows(3) });
+    const next = await press("n", { ctrlKey: true, code: "KeyN" });
+    expect(activeTitle()).toBe("Row 2");
+    expect(next.defaultPrevented).toBe(true);
+    await press("p", { ctrlKey: true, code: "KeyP" });
+    expect(activeTitle()).toBe("Row 1");
+    await press("p", { ctrlKey: true, code: "KeyP" });
+    expect(activeTitle(), "Ctrl+P wraps as Up does").toBe("Row 3");
+    // Other Ctrl chords stay the browser's.
+    const copy = await press("c", { ctrlKey: true, code: "KeyC" });
+    expect(copy.defaultPrevented).toBe(false);
+    expect(activeTitle()).toBe("Row 3");
+  });
+
+  it("pages by the number of rows the list shows, without wrapping", async () => {
+    await mountWith({ items: plainRows(30) });
+    Object.defineProperty(target.querySelector(".deck-results"), "clientHeight", {
+      configurable: true,
+      value: 180,
+    });
+    for (const row of resultRows()) {
+      Object.defineProperty(row, "offsetHeight", { configurable: true, value: 36 });
+    }
+    const down = await press("PageDown");
+    expect(down.defaultPrevented).toBe(true);
+    expect(activeTitle(), "180 px of 36 px rows is five").toBe("Row 6");
+    await press("PageDown");
+    expect(activeTitle()).toBe("Row 11");
+    await press("PageUp");
+    expect(activeTitle()).toBe("Row 6");
+    await press("PageUp");
+    await press("PageUp");
+    expect(activeTitle(), "PageUp stops at the first row").toBe("Row 1");
+    await press("End");
+    await press("PageDown");
+    expect(activeTitle(), "PageDown stops at the last row").toBe("Row 30");
+  });
+
+  it("pages by ten rows where the list has no layout to measure", async () => {
+    await mountWith({ items: plainRows(30) });
+    await press("PageDown");
+    expect(activeTitle()).toBe("Row 11");
+  });
+
+  it("takes Home and End for the rows on an empty query and leaves them to the caret otherwise", async () => {
+    await mountWith({ items: plainRows(5) });
+    const end = await press("End");
+    expect(activeTitle()).toBe("Row 5");
+    expect(end.defaultPrevented).toBe(true);
+    const home = await press("Home");
+    expect(activeTitle()).toBe("Row 1");
+    expect(home.defaultPrevented).toBe(true);
+
+    await typeQuery("row");
+    const caretEnd = await press("End");
+    const caretHome = await press("Home");
+    expect(caretEnd.defaultPrevented).toBe(false);
+    expect(caretHome.defaultPrevented).toBe(false);
+    expect(activeTitle()).toBe("Row 1");
+  });
+
+  it("moves to the first row of the next and the previous section on Alt+Down and Alt+Up", async () => {
+    // Recent holds rows 1 and 2, Terminal 3 to 5, Pane 6 and 7.
+    const items = plainRows(7, (index) => ({
+      section: index < 2 ? "Recent" : index < 5 ? "Terminal" : "Pane",
+    }));
+    await mountWith({ items });
+    const next = await press("ArrowDown", { altKey: true });
+    expect(next.defaultPrevented).toBe(true);
+    expect(activeTitle()).toBe("Row 3");
+    await press("ArrowDown");
+    expect(activeTitle()).toBe("Row 4");
+    await press("ArrowDown", { altKey: true });
+    expect(activeTitle()).toBe("Row 6");
+    await press("ArrowDown", { altKey: true });
+    expect(activeTitle(), "the last section wraps to the first").toBe("Row 1");
+    await press("ArrowUp", { altKey: true });
+    expect(activeTitle(), "the first section wraps to the last").toBe("Row 6");
+    await press("ArrowDown");
+    expect(activeTitle()).toBe("Row 7");
+    await press("ArrowUp", { altKey: true });
+    expect(activeTitle(), "from inside a section, the previous one's first row").toBe("Row 3");
+  });
+
+  it("moves from the row the pointer selected, and a pointer at rest does not take the selection back", async () => {
+    await mountWith({ items: plainRows(4) });
+    const move = async (title: string, x: number): Promise<void> => {
+      rowTitled(title).dispatchEvent(
+        new MouseEvent("pointermove", { bubbles: true, screenX: x, screenY: 40 }),
+      );
+      await flush();
+    };
+    await move("Row 3", 10);
+    expect(activeTitle(), "the first report only places the pointer").toBe("Row 1");
+    await move("Row 3", 11);
+    expect(activeTitle()).toBe("Row 3");
+    await press("ArrowDown");
+    expect(activeTitle()).toBe("Row 4");
+    // The list scrolled under the pointer: a report from where it already was.
+    await move("Row 2", 11);
+    expect(activeTitle()).toBe("Row 4");
+    await move("Row 2", 12);
+    expect(activeTitle()).toBe("Row 2");
+  });
+});
+
+describe("CommandDeck scope keys", () => {
+  it("cycles the available scopes on Tab and Shift+Tab, wrapping through no scope", async () => {
+    const onScope = vi.fn();
+    const onClearScope = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onScope, onClearScope });
+
+    const tab = await press("Tab");
+    expect(tab.defaultPrevented).toBe(true);
+    expect(onScope).toHaveBeenLastCalledWith("app");
+    expect(hostDraft().scope).toBe("app");
+    expect(orb("Terminal").classList.contains("active")).toBe(true);
+
+    await press("Tab");
+    expect(onScope, "the unavailable scope is passed over").toHaveBeenLastCalledWith("window");
+    expect(hostDraft().scope).toBe("window");
+
+    await press("Tab");
+    expect(onClearScope, "after the last scope comes no scope").toHaveBeenCalledTimes(1);
+    expect(hostDraft().scope).toBeNull();
+
+    await press("Tab");
+    expect(onScope).toHaveBeenLastCalledWith("app");
+    expect(onScope).toHaveBeenCalledTimes(3);
+
+    const back = await press("Tab", { shiftKey: true });
+    expect(back.defaultPrevented).toBe(true);
+    expect(onClearScope).toHaveBeenCalledTimes(2);
+    expect(hostDraft().scope).toBeNull();
+
+    await press("Tab", { shiftKey: true });
+    expect(onScope, "before no scope comes the last scope").toHaveBeenLastCalledWith("window");
+    expect(document.activeElement, "focus stays on the input").toBe(deckInput());
+  });
+
+  it("keeps Tab on the input when the host offers no scope", async () => {
+    const onScope = vi.fn();
+    const onClearScope = vi.fn();
+    await mountWith({ items: plainRows(2), onScope, onClearScope });
+    const tab = await press("Tab");
+    expect(tab.defaultPrevented).toBe(true);
+    expect(onScope).not.toHaveBeenCalled();
+    expect(onClearScope).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-scopes"), "no rail without scopes").toBeNull();
+  });
+
+  it("applies the scope at a rail position on Alt+digit and clears on Alt+0", async () => {
+    const onScope = vi.fn();
+    const onClearScope = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onScope, onClearScope });
+
+    const third = await press("3", { altKey: true, code: "Digit3" });
+    expect(third.defaultPrevented).toBe(true);
+    expect(onScope).toHaveBeenLastCalledWith("window");
+    expect(hostDraft().scope).toBe("window");
+
+    await press("2", { altKey: true, code: "Digit2" });
+    expect(onScope, "an unavailable scope is inert").toHaveBeenCalledTimes(1);
+    expect(hostDraft().scope).toBe("window");
+
+    // Option changes what a digit key types; the position still names the scope.
+    await press("¡", { altKey: true, code: "Digit1" });
+    expect(onScope).toHaveBeenLastCalledWith("app");
+
+    await press("9", { altKey: true, code: "Digit9" });
+    expect(onScope, "no scope sits at position nine").toHaveBeenCalledTimes(2);
+
+    const clear = await press("0", { altKey: true, code: "Digit0" });
+    expect(clear.defaultPrevented).toBe(true);
+    expect(onClearScope).toHaveBeenCalledTimes(1);
+    expect(hostDraft().scope).toBeNull();
+  });
+});
+
+describe("CommandDeck run and navigation keys", () => {
+  it("runs the selected row on Enter", async () => {
+    const onChoose = vi.fn();
+    const items = plainRows(3);
+    await mountWith({ items, onChoose });
+    await press("ArrowDown");
+    const enter = await press("Enter");
+    expect(enter.defaultPrevented).toBe(true);
+    expect(onChoose).toHaveBeenCalledExactlyOnceWith(items[1]);
+  });
+
+  it("enters a branch or a choice on Right, opens an expandable row's page, and never runs an action", async () => {
+    const onChoose = vi.fn();
+    const onExpand = vi.fn();
+    const items = [
+      named("run", "Run"),
+      named("branch", "Windows", { kind: "branch" }),
+      named("choice", "Theme", { kind: "choice" }),
+      named("toggle", "Details", { kind: "toggle" }),
+      named("window", "Window 1", { expandable: true }),
+      named("locked", "Locked", { kind: "branch", disabled: true }),
+    ];
+    await mountWith({ items, onChoose, onExpand });
+
+    const onAction = await press("ArrowRight");
+    expect(onChoose, "Right on an action row does nothing").not.toHaveBeenCalled();
+    expect(onExpand).not.toHaveBeenCalled();
+    expect(onAction.defaultPrevented).toBe(false);
+
+    await press("ArrowDown");
+    const onBranch = await press("ArrowRight");
+    expect(onBranch.defaultPrevented).toBe(true);
+    expect(onChoose).toHaveBeenLastCalledWith(items[1]);
+
+    await press("ArrowDown");
+    await press("ArrowRight");
+    expect(onChoose).toHaveBeenLastCalledWith(items[2]);
+    expect(onChoose).toHaveBeenCalledTimes(2);
+
+    await press("ArrowDown");
+    await press("ArrowRight");
+    expect(onChoose, "a toggle flips on Enter only").toHaveBeenCalledTimes(2);
+
+    await press("ArrowDown");
+    const onExpandable = await press("ArrowRight");
+    expect(onExpandable.defaultPrevented).toBe(true);
+    expect(onExpand).toHaveBeenCalledExactlyOnceWith(items[4]);
+    expect(onChoose, "Right opens the page and does not run the row").toHaveBeenCalledTimes(2);
+
+    await press("ArrowDown");
+    await press("ArrowRight");
+    expect(onChoose, "a disabled branch stays shut").toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Right to the text caret until the caret is at the end of the query", async () => {
+    const onChoose = vi.fn();
+    const items = [named("branch", "Windows", { kind: "branch" })];
+    await mountWith({ items, onChoose });
+    await typeQuery("win");
+    const field = deckInput();
+
+    field.setSelectionRange(1, 1);
+    const inside = await press("ArrowRight");
+    expect(inside.defaultPrevented).toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+
+    field.setSelectionRange(0, 3);
+    const selected = await press("ArrowRight");
+    expect(selected.defaultPrevented, "a selection collapses first").toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+
+    field.setSelectionRange(3, 3);
+    const atEnd = await press("ArrowRight");
+    expect(atEnd.defaultPrevented).toBe(true);
+    expect(onChoose).toHaveBeenCalledExactlyOnceWith(items[0]);
+  });
+
+  it("goes back on Left and Backspace with an empty query and edits the text otherwise", async () => {
+    const onBack = vi.fn();
+    await mountWith({ items: plainRows(2), onBack });
+    const left = await press("ArrowLeft");
+    const backspace = await press("Backspace");
+    expect(onBack).toHaveBeenCalledTimes(2);
+    expect(left.defaultPrevented).toBe(true);
+    expect(backspace.defaultPrevented).toBe(true);
+
+    await typeQuery("ab");
+    const caretLeft = await press("ArrowLeft");
+    const erase = await press("Backspace");
+    expect(onBack).toHaveBeenCalledTimes(2);
+    expect(caretLeft.defaultPrevented).toBe(false);
+    expect(erase.defaultPrevented).toBe(false);
+  });
+
+  it("leaves a branch one level per Escape before it closes", async () => {
+    // The host owns the path; this one pops a level, as both hosts do.
+    const onBack = vi.fn(() => {
+      const draft = hostDraft();
+      draft.path = draft.path.slice(0, -1);
+    });
+    const onClose = vi.fn();
+    await mountWith({
+      items: plainRows(2),
+      initialDraft: { path: ["windows", "w-1"] },
+      onBack,
+      onClose,
+    });
+
+    await press("Escape");
+    expect(onBack).toHaveBeenCalledTimes(1);
+    await press("Escape");
+    expect(onBack).toHaveBeenCalledTimes(2);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(target.querySelector(".deck-shell")).not.toBeNull();
+
+    const last = await press("Escape");
+    expect(last.defaultPrevented).toBe(true);
+    expect(onBack).toHaveBeenCalledTimes(2);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(target.querySelector(".deck-shell")).toBeNull();
+  });
+
+  it("returns from a confirmation card to the list on Escape", async () => {
+    const onChoose = vi.fn();
+    const onClose = vi.fn();
+    await mountWith({
+      items: [named("close", "Close", { confirm: confirmation("Sure?") })],
+      onChoose,
+      onClose,
+    });
+    await press("Enter");
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("Sure?");
+
+    await press("Escape");
+    expect(target.querySelector(".deck-operation")).toBeNull();
+    expect(activeTitle()).toBe("Close");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onChoose).not.toHaveBeenCalled();
+
+    await press("Escape");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CommandDeck key list", () => {
+  const keyList = (): Element | null => target.querySelector(".deck-keys");
+
+  it("shows the keys in place of the rows on ? with an empty query", async () => {
+    await mountWith({ items: plainRows(3) });
+    const question = await press("?", { shiftKey: true });
+    expect(question.defaultPrevented).toBe(true);
+    expect(keyList()?.textContent).toContain("Shift+Tab");
+    expect(resultRows(), "the rows give way").toHaveLength(0);
+    expect(deckInput().hasAttribute("aria-activedescendant")).toBe(false);
+    expect(deckInput().value).toBe("");
+  });
+
+  it("leaves the key list on any key, which does nothing else", async () => {
+    const onChoose = vi.fn();
+    const onClose = vi.fn();
+    await mountWith({ items: plainRows(3), onChoose, onClose });
+
+    await press("?", { shiftKey: true });
+    await press("Shift", { shiftKey: true });
+    expect(keyList(), "a modifier going down is not a key press").not.toBeNull();
+    const enter = await press("Enter");
+    expect(keyList()).toBeNull();
+    expect(enter.defaultPrevented).toBe(true);
+    expect(onChoose).not.toHaveBeenCalled();
+
+    await press("?");
+    await press("ArrowDown");
+    expect(keyList()).toBeNull();
+    expect(activeTitle(), "the selection did not move").toBe("Row 1");
+
+    await press("?");
+    await press("Escape");
+    expect(keyList()).toBeNull();
+    expect(onClose, "Escape leaves the list, not the deck").not.toHaveBeenCalled();
+
+    await press("?");
+    await press("?");
+    expect(keyList(), "? closes what it opened").toBeNull();
+
+    await press("?");
+    const letter = await press("a");
+    expect(keyList()).toBeNull();
+    expect(letter.defaultPrevented, "a character is left to the query").toBe(false);
+  });
+
+  it("leaves ? to the text once the query holds something", async () => {
+    await mountWith({ items: plainRows(3) });
+    await typeQuery("what");
+    const question = await press("?", { shiftKey: true });
+    expect(question.defaultPrevented).toBe(false);
+    expect(keyList()).toBeNull();
+  });
+
+  it("opens from the footer too", async () => {
+    await mountWith({ items: plainRows(3) });
+    const toggle = target.querySelector<HTMLButtonElement>(".deck-keys-toggle")!;
+    toggle.click();
+    await flush();
+    expect(keyList()).not.toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    toggle.click();
+    await flush();
+    expect(keyList()).toBeNull();
+  });
+});
+
+describe("CommandDeck focus", () => {
+  it("focuses the input and selects the query each time it opens", async () => {
+    await mountWith({ items: plainRows(2), initialDraft: { query: "split" } });
+    const field = deckInput();
+    expect(document.activeElement).toBe(field);
+    expect(field.value).toBe("split");
+    expect([field.selectionStart, field.selectionEnd]).toEqual([0, 5]);
+
+    field.setSelectionRange(5, 5);
+    (app.close as () => void)();
+    await flush();
+    (app.open as () => void)();
+    await flush();
+    const reopened = deckInput();
+    expect(document.activeElement).toBe(reopened);
+    expect([reopened.selectionStart, reopened.selectionEnd]).toEqual([0, 5]);
+  });
+
+  it("keeps rows and orbs out of the tab order", async () => {
+    await mountWith({ items: plainRows(2), scopes: railScopes(), initialDraft: { scope: "app" } });
+    const controls = target.querySelectorAll(
+      ".deck-result, .deck-scope, .deck-crumbs-clear, .deck-keys-toggle",
+    );
+    expect(controls).toHaveLength(7);
+    for (const control of controls) expect(control.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("holds focus on the input through a press on a row or an orb", async () => {
+    const onChoose = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onChoose });
+    const pressDown = (element: Element): MouseEvent => {
+      const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+      element.dispatchEvent(event);
+      return event;
+    };
+    expect(pressDown(rowTitled("Row 2")).defaultPrevented, "a row does not take focus").toBe(true);
+    expect(pressDown(orb("Terminal")).defaultPrevented, "an orb does not take focus").toBe(true);
+    expect(pressDown(deckInput()).defaultPrevented, "the input keeps its own presses").toBe(false);
+    const listbox = target.querySelector<HTMLElement>(".deck-results")!;
+    expect(pressDown(listbox).defaultPrevented, "the list's own box keeps its scrollbar").toBe(false);
+    listbox.focus();
+    expect(document.activeElement, "the list hands back the focus a press gave it").toBe(deckInput());
+
+    deckInput().blur();
+    expect(document.activeElement).toBe(document.body);
+    rowTitled("Row 2").click();
+    await flush();
+    expect(onChoose).toHaveBeenCalledOnce();
+    expect(document.activeElement, "a press on a row hands focus back").toBe(deckInput());
+
+    deckInput().blur();
+    orb("Terminal").click();
+    await flush();
+    expect(document.activeElement, "a press on an orb hands focus back").toBe(deckInput());
+  });
+
+  it("leaves a key an input method is composing with to the composition", async () => {
+    const onChoose = vi.fn();
+    await mountWith({ items: plainRows(2), onChoose });
+    const enter = await press("Enter", { isComposing: true });
+    await press("ArrowDown", { isComposing: true });
+    expect(enter.defaultPrevented).toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(activeTitle()).toBe("Row 1");
+  });
+});
+
+describe("CommandDeck sections and rows", () => {
+  it("groups consecutive rows under a header that names their section and carries their scope's icon", async () => {
+    const items = [
+      named("recent-a", "New terminal", { section: "Recent", scope: "app" }),
+      named("recent-b", "Reload window", { section: "Recent", scope: "window" }),
+      named("restart", "Restart terminal", { section: "Terminal", scope: "app" }),
+      named("details", "Details", { section: "Terminal", scope: "app" }),
+      named("flat", "Split right", { scope: "pane" }),
+      named("rename", "Rename terminal", { section: "Terminal", scope: "app" }),
+    ];
+    await mountWith({ items, scopes: railScopes() });
+
+    const listbox = target.querySelector('[role="listbox"]')!;
+    const groups = [...listbox.querySelectorAll('.deck-section[role="group"]')];
+    const header = (group: Element): Element => group.querySelector(".deck-section-header")!;
+    const titles = (group: Element): (string | null)[] =>
+      [...group.querySelectorAll(".deck-result-title")].map((node) => node.textContent);
+
+    expect(groups.map((group) => header(group).querySelector(".deck-section-title")?.textContent)).toEqual([
+      "Recent",
+      "Terminal",
+      "Terminal",
+    ]);
+    expect(groups.map(titles), "a section holds its consecutive rows only").toEqual([
+      ["New terminal", "Reload window"],
+      ["Restart terminal", "Details"],
+      ["Rename terminal"],
+    ]);
+    for (const group of groups) {
+      expect(header(group).id).not.toBe("");
+      expect(group.getAttribute("aria-labelledby")).toBe(header(group).id);
+    }
+    expect(new Set(groups.map((group) => header(group).id)).size, "each header has its own id").toBe(3);
+
+    expect(header(groups[1]!).querySelector("[data-icon]")?.getAttribute("data-icon")).toBe("app");
+    expect(header(groups[0]!).querySelector("[data-icon]"), "rows of two scopes share no icon").toBeNull();
+
+    expect(rowTitled("Split right").parentElement, "a row without a section sits in no group").toBe(listbox);
+    expect(listbox.querySelectorAll('[role="option"]')).toHaveLength(items.length);
+    expect(
+      [...listbox.querySelectorAll('[role="option"]')].map((option) => option.id),
+      "options are numbered in list order across sections",
+    ).toEqual(items.map((_, index) => `chan-command-deck-option-${index}`));
+  });
+
+  it("gives a row a second line for its subtitle, or its breadcrumb when it sits under no section", async () => {
+    const items = [
+      named("sectioned", "Restart terminal", { section: "Terminal", breadcrumb: "Tab > Terminal" }),
+      named("object", "Window 1", { section: "Windows", subtitle: "geekom" }),
+      named("typed", "Reload window", { breadcrumb: "Window > Global" }),
+      named("refused", "Copy path", { breadcrumb: "Tab > Files", subtitle: "Needs a selection" }),
+      named("bare", "Quit", { breadcrumb: "" }),
+    ];
+    await mountWith({ items });
+    const second = (title: string): [string | null, string | null] => [
+      rowTitled(title).querySelector(".deck-result-path")?.textContent ?? null,
+      rowTitled(title).querySelector(".deck-result-subtitle")?.textContent ?? null,
+    ];
+    expect(second("Restart terminal"), "a sectioned row is one line").toEqual([null, null]);
+    expect(second("Window 1")).toEqual([null, "geekom"]);
+    expect(second("Reload window"), "a flat row keeps its breadcrumb").toEqual(["Window > Global", null]);
+    expect(second("Copy path"), "a subtitle takes the line").toEqual([null, "Needs a selection"]);
+    expect(second("Quit")).toEqual([null, null]);
+  });
+
+  it("lays the right column out as value, check, shortcut, chevron", async () => {
+    const items = [
+      named("all", "Editor body theme", { value: "Dark", checked: true, shortcut: "Ctrl+K", kind: "choice" }),
+      named("on", "Details", { kind: "toggle", value: "on" }),
+      named("off", "Rich Prompt", { kind: "toggle", value: "off", shortcut: "Ctrl+R" }),
+      named("branch", "Windows", { kind: "branch" }),
+      named("page", "Window 1", { expandable: true }),
+      named("plain", "Reload window"),
+    ];
+    await mountWith({ items });
+    const column = (title: string): string[] =>
+      [...rowTitled(title).children]
+        .filter((cell) => !cell.matches(".deck-result-icon, .deck-result-copy"))
+        .map((cell) =>
+          cell.matches(".deck-result-value")
+            ? `value:${cell.textContent}`
+            : cell.matches(".deck-check")
+              ? "check"
+              : cell.matches("kbd")
+                ? `shortcut:${cell.textContent}`
+                : cell.querySelector(".deck-chevron")
+                  ? "chevron"
+                  : "",
+        )
+        .filter(Boolean);
+
+    expect(column("Editor body theme")).toEqual(["value:Dark", "check", "shortcut:Ctrl+K", "chevron"]);
+    expect(column("Details")).toEqual(["value:on"]);
+    expect(column("Rich Prompt"), "a row that is not selected shows its shortcut").toEqual([
+      "value:off",
+      "shortcut:Ctrl+R",
+    ]);
+    expect(column("Windows")).toEqual(["chevron"]);
+    expect(column("Window 1")).toEqual(["chevron"]);
+    expect(column("Reload window")).toEqual([]);
+
+    const value = (title: string): Element => rowTitled(title).querySelector(".deck-result-value")!;
+    expect(value("Details").classList.contains("on")).toBe(true);
+    expect(value("Rich Prompt").classList.contains("on")).toBe(false);
+    expect(value("Editor body theme").classList.contains("on")).toBe(false);
+    expect(rowTitled("Editor body theme").getAttribute("aria-checked")).toBe("true");
+    expect(rowTitled("Details").hasAttribute("aria-checked")).toBe(false);
+  });
+
+  it("marks a destructive row and a disabled one", async () => {
+    const items = [
+      named("close", "Close window", { danger: true }),
+      named("locked", "Turn off", { disabled: true, subtitle: "Session leader only" }),
+      named("plain", "Reload window"),
+    ];
+    await mountWith({ items });
+    expect(rowTitled("Close window").classList.contains("danger")).toBe(true);
+    expect(rowTitled("Reload window").classList.contains("danger")).toBe(false);
+    const locked = rowTitled("Turn off");
+    expect(locked.classList.contains("disabled")).toBe(true);
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    expect(locked.disabled).toBe(true);
+    expect(rowTitled("Reload window").getAttribute("aria-disabled")).toBe("false");
+  });
+});
+
+describe("CommandDeck rail, crumbs and footer", () => {
+  const crumbTexts = (): (string | null)[] =>
+    [...target.querySelectorAll(".deck-crumbs .deck-crumb")].map((node) => node.textContent);
+  const footerHint = (key: string): string | null => {
+    const hint = [...target.querySelectorAll(".deck-footer .deck-hint")].find(
+      (candidate) => candidate.querySelector("kbd")?.textContent === key,
+    );
+    return hint?.querySelector("span")?.textContent ?? null;
+  };
+
+  it("draws an orb per scope with its caption, and an unavailable one inert", async () => {
+    const onScope = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onScope });
+    expect(
+      [...target.querySelectorAll(".deck-scope .deck-scope-caption")].map((node) => node.textContent),
+      "the caption, or the label where there is none",
+    ).toEqual(["Terminal", "Pane", "Win"]);
+    expect(target.querySelectorAll(".deck-scope [data-icon]")).toHaveLength(3);
+    expect(orb("Pane").disabled).toBe(true);
+    orb("Pane").click();
+    await flush();
+    expect(onScope).not.toHaveBeenCalled();
+    expect(hostDraft().scope).toBeNull();
+  });
+
+  it("applies a scope on a press of its orb and clears it on a press of the active one", async () => {
+    const onScope = vi.fn();
+    const onClearScope = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onScope, onClearScope });
+
+    orb("Window").click();
+    await flush();
+    expect(onScope).toHaveBeenCalledExactlyOnceWith("window");
+    expect(hostDraft().scope).toBe("window");
+    expect(orb("Window").classList.contains("active")).toBe(true);
+    expect(orb("Window").getAttribute("aria-pressed")).toBe("true");
+    expect(orb("Terminal").classList.contains("active")).toBe(false);
+
+    orb("Window").click();
+    await flush();
+    expect(onClearScope).toHaveBeenCalledTimes(1);
+    expect(onScope).toHaveBeenCalledTimes(1);
+    expect(hostDraft().scope).toBeNull();
+    expect(orb("Window").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("shows the active scope's label as a chip that clears it", async () => {
+    const onClearScope = vi.fn();
+    await mountWith({ items: plainRows(2), scopes: railScopes(), onClearScope });
+    expect(target.querySelector(".deck-crumbs"), "no chip at the root").toBeNull();
+
+    orb("Window").click();
+    await flush();
+    expect(crumbTexts(), "the label, not the rail's caption").toEqual(["Window"]);
+
+    target.querySelector<HTMLButtonElement>(".deck-crumbs-clear")!.click();
+    await flush();
+    expect(onClearScope).toHaveBeenCalledTimes(1);
+    expect(hostDraft().scope).toBeNull();
+    expect(target.querySelector(".deck-crumbs")).toBeNull();
+  });
+
+  it("shows the host's crumbs in place of the scope's label", async () => {
+    const onClearScope = vi.fn();
+    await mountWith({
+      items: plainRows(2),
+      scopes: railScopes(),
+      crumbs: ["Computers", "geekom", "Windows"],
+      initialDraft: { scope: "window", path: ["geekom", "windows"] },
+      onClearScope,
+    });
+    expect(crumbTexts()).toEqual(["Computers", "geekom", "Windows"]);
+    target.querySelector<HTMLButtonElement>(".deck-crumbs-clear")!.click();
+    await flush();
+    expect(onClearScope).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads Escape as back in a branch and as close at the root, and counts the rows", async () => {
+    const onBack = vi.fn(() => {
+      hostDraft().path = [];
+    });
+    await mountWith({ items: plainRows(3), initialDraft: { path: ["windows"] }, onBack });
+    expect(footerHint("Esc")).toBe("back");
+    expect(target.querySelector(".deck-count")?.textContent).toBe("3 items");
+
+    await press("Escape");
+    expect(footerHint("Esc")).toBe("close");
+
+    (app.setItems as (items: DeckItem[]) => void)(plainRows(1));
+    await flush();
+    expect(target.querySelector(".deck-count")?.textContent).toBe("1 item");
+  });
+
+  it("names the scope key only where there is a scope to move to", async () => {
+    await mountWith({ items: plainRows(2) });
+    expect(footerHint("Tab")).toBeNull();
+    expect(footerHint("Enter")).toBe("run");
+  });
+
+  it("names a card's own keys while one is showing", async () => {
+    await mountWith({ items: [named("close", "Close", { confirm: confirmation("Sure?") })] });
+    await press("Enter");
+    expect(footerHint("Esc")).toBe("cancel");
+    expect(target.querySelector(".deck-count"), "a card has no rows to count").toBeNull();
   });
 });

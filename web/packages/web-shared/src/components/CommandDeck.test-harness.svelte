@@ -1,24 +1,52 @@
 <script lang="ts">
-  import { createDeckDraft, type DeckConfirm, type DeckItem } from "../command-deck/model";
+  import {
+    createDeckDraft,
+    type DeckConfirm,
+    type DeckDraft,
+    type DeckItem,
+    type DeckScope,
+    type DeckScopeId,
+  } from "../command-deck/model";
   import CommandDeck from "./CommandDeck.svelte";
 
   let {
     items,
+    scopes = [],
+    crumbs,
+    initialDraft = {},
     onChoose = () => {},
     onSuccess,
     onError = () => {},
     onFocusLost,
     mayTakeFocus,
+    onClose,
+    onBack = () => {},
+    onScope = () => {},
+    onClearScope = () => {},
+    onExpand,
   }: {
     items: DeckItem[];
+    scopes?: DeckScope[];
+    crumbs?: string[];
+    /// Fields the draft starts with, as a host that restored one would.
+    initialDraft?: Partial<DeckDraft>;
     onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
     onSuccess?: (item: DeckItem) => void;
     onError?: (item: DeckItem, error: unknown) => void;
     onFocusLost?: () => void;
     mayTakeFocus?: () => boolean;
+    onClose?: () => void;
+    onBack?: () => void;
+    onScope?: (scope: DeckScopeId) => void;
+    onClearScope?: () => void;
+    onExpand?: (item: DeckItem) => void;
   } = $props();
 
-  let draft = $state({ ...createDeckDraft(), visible: true });
+  function startingDraft(): DeckDraft {
+    return { ...createDeckDraft(), visible: true, ...initialDraft };
+  }
+
+  let draft = $state(startingDraft());
   let replacementItems: DeckItem[] | null = $state(null);
 
   export function setItems(entries: DeckItem[]): void {
@@ -51,14 +79,19 @@
   open={draft.visible}
   bind:draft
   items={replacementItems ?? items}
-  scopes={[]}
-  onClose={() => { draft.visible = false; }}
+  {scopes}
+  {crumbs}
+  onClose={() => {
+    draft.visible = false;
+    onClose?.();
+  }}
   {onChoose}
   {onSuccess}
   {onFocusLost}
   {mayTakeFocus}
   {...{ onError }}
-  onBack={() => {}}
-  onScope={() => {}}
-  onClearScope={() => {}}
+  {onBack}
+  {onScope}
+  {onClearScope}
+  {onExpand}
 />

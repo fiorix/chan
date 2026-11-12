@@ -17,10 +17,12 @@
 <script lang="ts">
   import PrivateField from "./PrivateField.svelte";
   import { tick } from "svelte";
+  import { shortcutKey } from "../keyboard";
   import { canTakeFocus } from "../modalFocus";
   import type {
     DeckConfirm,
     DeckDraft,
+    DeckIcon,
     DeckItem,
     DeckScope,
     DeckScopeId,
@@ -39,6 +41,8 @@
     onBack,
     onScope,
     onClearScope,
+    onExpand,
+    crumbs,
     onSuccess,
     onError,
     onFocusLost,
@@ -77,13 +81,50 @@
 
   const LIST_ID = "chan-command-deck-list";
   const optionId = (index: number): string => `chan-command-deck-option-${index}`;
+  const sectionId = (index: number): string => `chan-command-deck-section-${index}`;
+  /// The rows a page moves by where the list has no layout to measure.
+  const FALLBACK_PAGE_ROWS = 10;
+  /// Keys that only arm another key. Holding one is not a key press of its
+  /// own: Shift goes down before the `?` it types.
+  const LONE_MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"]);
+  /// The deck's keys, as the key list shows them.
+  const KEY_LIST: readonly { keys: readonly string[]; does: string }[] = [
+    { keys: ["↑", "↓", "Ctrl+P", "Ctrl+N"], does: "Previous, next row" },
+    { keys: ["PageUp", "PageDown"], does: "One page up, down" },
+    { keys: ["Home", "End"], does: "First, last row, on an empty query" },
+    { keys: ["Alt+↑", "Alt+↓"], does: "Previous, next section" },
+    { keys: ["Tab", "Shift+Tab"], does: "Next, previous scope" },
+    { keys: ["Alt+1..9"], does: "The scope at that position" },
+    { keys: ["Alt+0"], does: "Every scope" },
+    { keys: ["Enter"], does: "Run the row, or open it" },
+    { keys: ["→"], does: "Open a row that holds more, from the end of the query" },
+    { keys: ["←", "Backspace"], does: "Back one level, on an empty query" },
+    { keys: ["Esc"], does: "Back one level, then close" },
+    { keys: ["?"], does: "This list, on an empty query" },
+  ];
 
+  /// A run of consecutive rows under one heading. `title` is null for rows
+  /// that carry no section; those render flat, with no header.
+  interface DeckSection {
+    title: string | null;
+    start: number;
+    rows: DeckItem[];
+  }
+
+  // Focus stays on the input for as long as the deck is open. Rows and orbs
+  // are never tab stops; the selected row is a virtual one the input names
+  // through aria-activedescendant.
   let input: HTMLInputElement | undefined = $state();
   let shell: HTMLElement | undefined = $state();
-  let zone: "input" | "results" | "scopes" = $state("input");
+  let list: HTMLElement | undefined = $state();
+  let keyList: HTMLElement | undefined = $state();
   let keyboardIndex = $state(0);
   let pointerIndex: number | null = $state(null);
-  let scopeIndex = $state(0);
+  let keysShown = $state(false);
+  // Where the pointer last reported itself, to tell a pointer that moved
+  // from one the list moved under.
+  let lastPointer: { x: number; y: number } | null = null;
+  let listedIds = "";
   let wasOpen = false;
   let closeVersion = 0;
   // Where focus goes back to when the deck closes, captured as it opens.
@@ -104,6 +145,68 @@
   const activeIndex = $derived(pointerIndex ?? keyboardIndex);
   const availableScopes = $derived(scopes.filter((scope) => scope.available !== false));
   const selectedItem = $derived(items[activeIndex]);
+  const activeScope = $derived(
+    draft.scope ? scopes.find((scope) => scope.id === draft.scope) : undefined,
+  );
+  const trail = $derived(crumbs?.length ? crumbs : activeScope ? [activeScope.label] : []);
+  const sections = $derived.by<DeckSection[]>(() => {
+    const runs: DeckSection[] = [];
+    items.forEach((item, index) => {
+      const title = item.section || null;
+      const last = runs[runs.length - 1];
+      if (last && last.title === title) last.rows.push(item);
+      else runs.push({ title, start: index, rows: [item] });
+    });
+    return runs;
+  });
+  const sectioned = $derived(sections.some((section) => section.title !== null));
+  const listShown = $derived(!draft.operation && !keysShown);
+  const hints = $derived.by<{ keys: string[]; does: string }[]>(() => {
+    const operation = draft.operation;
+    if (operation?.kind === "confirm") {
+      return [
+        { keys: ["←", "→"], does: "choose" },
+        { keys: ["Enter"], does: "select" },
+        { keys: ["Esc"], does: "cancel" },
+      ];
+    }
+    if (operation?.kind === "error") {
+      return [
+        { keys: ["←", "→"], does: "choose" },
+        { keys: ["Enter"], does: "select" },
+        { keys: ["Esc"], does: "back" },
+      ];
+    }
+    if (operation?.kind === "preparing" || operation?.kind === "pending") {
+      return [{ keys: ["Esc"], does: "dismiss" }];
+    }
+    if (operation) return [];
+    if (keysShown) return [{ keys: ["Esc"], does: "back to the list" }];
+    return [
+      { keys: ["↑", "↓"], does: "move" },
+      { keys: ["Enter"], does: "run" },
+      { keys: ["→"], does: "open" },
+      ...(availableScopes.length ? [{ keys: ["Tab"], does: "scope" }] : []),
+      { keys: ["Esc"], does: draft.path.length ? "back" : "close" },
+    ];
+  });
+
+  /// The icon a section's header carries: its scope's, when every row under
+  /// it belongs to one scope the rail shows.
+  function sectionIcon(section: DeckSection): DeckIcon | undefined {
+    const scope = section.rows[0]?.scope;
+    if (section.rows.some((row) => row.scope !== scope)) return undefined;
+    return scopes.find((candidate) => candidate.id === scope)?.icon;
+  }
+
+  /// Whether the row leads to a list of its own.
+  function opens(item: DeckItem): boolean {
+    return item.kind === "branch" || item.kind === "choice" || item.expandable === true;
+  }
+
+  function focusInput(): void {
+    if (document.activeElement !== input) input?.focus({ preventScroll: true });
+  }
 
   function reconcileSelection(): void {
     if (!items.length) {
@@ -124,9 +227,14 @@
       returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       closingRun = null;
       reconcileSelection();
-      zone = "input";
       pointerIndex = null;
-      void tick().then(() => input?.focus());
+      lastPointer = null;
+      keysShown = false;
+      // The query is selected so Enter repeats it and typing replaces it.
+      void tick().then(() => {
+        input?.focus();
+        input?.select();
+      });
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
       // Preserve the viewport while restoring the caller's focus.
@@ -145,19 +253,17 @@
 
   $effect(() => {
     const ids = items.map((item) => item.id).join("\u001f");
-    void ids;
     if (!open) return;
+    // A hovered row index means nothing in a different list. The same list
+    // delivered again, as a host that polls does, keeps it.
+    if (ids !== listedIds) {
+      listedIds = ids;
+      pointerIndex = null;
+    }
     reconcileSelection();
   });
 
-  $effect(() => {
-    const wanted = draft.scope;
-    const found = wanted ? availableScopes.findIndex((scope) => scope.id === wanted) : -1;
-    if (found >= 0) scopeIndex = found;
-    else if (scopeIndex >= availableScopes.length) scopeIndex = Math.max(0, availableScopes.length - 1);
-  });
-
-  function setKeyboardIndex(index: number): void {
+  function selectRow(index: number): void {
     if (!items.length) {
       keyboardIndex = -1;
       draft.selectedId = null;
@@ -166,37 +272,112 @@
     keyboardIndex = Math.max(0, Math.min(items.length - 1, index));
     draft.selectedId = items[keyboardIndex]?.id ?? null;
     pointerIndex = null;
-    zone = "results";
     void tick().then(() =>
       document.getElementById(optionId(keyboardIndex))?.scrollIntoView({ block: "nearest" }),
     );
   }
 
-  function enterScopes(): void {
-    if (!availableScopes.length) return;
-    const active = draft.scope
-      ? availableScopes.findIndex((scope) => scope.id === draft.scope)
-      : -1;
-    scopeIndex = active >= 0 ? active : 0;
-    zone = "scopes";
-    pointerIndex = null;
+  /// The selected row's index, held inside the list.
+  function currentRow(): number {
+    return Math.max(0, Math.min(items.length - 1, activeIndex));
   }
 
-  function moveScope(delta: number): void {
-    if (!availableScopes.length) return;
-    const next = scopeIndex + delta;
-    if (next < 0) {
+  function moveRow(delta: 1 | -1): void {
+    if (!items.length) return;
+    selectRow((currentRow() + delta + items.length) % items.length);
+  }
+
+  /// The number of rows the list shows at once, measured from the selected
+  /// row's height.
+  function pageRows(): number {
+    const visible = list?.clientHeight ?? 0;
+    const row = document.getElementById(optionId(currentRow()))?.offsetHeight ?? 0;
+    return visible > 0 && row > 0 ? Math.max(1, Math.floor(visible / row)) : FALLBACK_PAGE_ROWS;
+  }
+
+  function movePage(delta: 1 | -1): void {
+    if (!items.length) return;
+    selectRow(currentRow() + delta * pageRows());
+  }
+
+  function moveSection(delta: 1 | -1): void {
+    if (!items.length) return;
+    const row = currentRow();
+    let current = 0;
+    sections.forEach((section, index) => {
+      if (section.start <= row) current = index;
+    });
+    const next = sections[(current + delta + sections.length) % sections.length];
+    if (next) selectRow(next.start);
+  }
+
+  function applyScope(scope: DeckScope | null): void {
+    keysShown = false;
+    if (scope) {
+      draft.scope = scope.id;
+      onScope(scope.id);
+    } else {
       draft.scope = null;
       onClearScope();
-      zone = "input";
-      input?.focus();
+    }
+  }
+
+  /// Step through the scopes the host offers now. "No scope" is one stop of
+  /// the cycle, between the last scope and the first.
+  function cycleScope(delta: 1 | -1): void {
+    if (!availableScopes.length) return;
+    const stops = availableScopes.length + 1;
+    const at = availableScopes.findIndex((scope) => scope.id === draft.scope) + 1;
+    const next = (at + delta + stops) % stops;
+    applyScope(next === 0 ? null : availableScopes[next - 1] ?? null);
+  }
+
+  /// The scope at a rail position, counted from 1 over every orb drawn, so
+  /// a number names the same orb whether or not its neighbours are available.
+  /// Position 0 clears the scope.
+  function scopeAt(position: number): void {
+    if (position === 0) {
+      applyScope(null);
       return;
     }
-    scopeIndex = Math.min(availableScopes.length - 1, next);
-    const scope = availableScopes[scopeIndex];
-    if (!scope) return;
-    draft.scope = scope.id;
-    onScope(scope.id);
+    const scope = scopes[position - 1];
+    if (scope && scope.available !== false) applyScope(scope);
+  }
+
+  function pressScope(scope: DeckScope): void {
+    if (scope.available === false) return;
+    focusInput();
+    applyScope(draft.scope === scope.id ? null : scope);
+  }
+
+  function pressRow(item: DeckItem, index: number): void {
+    keyboardIndex = index;
+    pointerIndex = index;
+    draft.selectedId = item.id;
+    // Before the run, so a command that puts focus somewhere keeps it.
+    focusInput();
+    choose(item);
+  }
+
+  /// A press inside the deck leaves focus on the input: the default action
+  /// of a press on a row or an orb would move it there. A press on a
+  /// scrolling box itself is its scrollbar's, and cancelling it would stop
+  /// the drag; the list hands the focus it takes straight back.
+  function holdInputFocus(event: MouseEvent): void {
+    if (event.target === input || event.target === list || event.target === keyList) return;
+    event.preventDefault();
+    focusInput();
+  }
+
+  /// Engines that re-run hit testing after a scroll report a move from a
+  /// pointer at rest, at the position it last had. Only a report from a new
+  /// position selects, so the row the keyboard chose is not taken back by the
+  /// list scrolling under the pointer.
+  function pointerOverRow(event: PointerEvent, index: number): void {
+    const moved =
+      lastPointer !== null && (lastPointer.x !== event.screenX || lastPointer.y !== event.screenY);
+    lastPointer = { x: event.screenX, y: event.screenY };
+    if (moved) pointerIndex = index;
   }
 
   async function openConfirm(item: DeckItem, enterHeld = false): Promise<void> {
@@ -425,7 +606,6 @@
 
   function operationBack(): void {
     releaseOperation();
-    zone = "results";
     void tick().then(() => input?.focus());
   }
 
@@ -467,7 +647,18 @@
     draft.selectedId = null;
     keyboardIndex = items.length ? 0 : -1;
     pointerIndex = null;
-    zone = "input";
+    keysShown = false;
+    void tick().then(() => {
+      if (list) list.scrollTop = 0;
+    });
+  }
+
+  /// Whether the text caret sits after the last character with nothing
+  /// selected, where Right has no text left to move over.
+  function caretAtEnd(): boolean {
+    if (!input) return true;
+    const end = input.value.length;
+    return input.selectionStart === end && input.selectionEnd === end;
   }
 
   function onPageKeydown(event: KeyboardEvent): void {
@@ -500,15 +691,24 @@
     // activate an app-level key mode, so letting the execution key bubble
     // would immediately drive that new mode with the same event.
     event.stopPropagation();
+    // A key an input method is composing with belongs to the composition.
+    if (event.isComposing || LONE_MODIFIERS.has(event.key)) return;
+
     if (event.key === "Escape") {
       event.preventDefault();
-      // Escape returns to the results list. An executing command continues
-      // settling in the background.
-      if (draft.operation?.kind === "preparing" || draft.operation?.kind === "pending") {
+      const kind = draft.operation?.kind;
+      if (kind === "preparing" || kind === "pending") {
+        // An executing command continues settling in the background.
         releaseOperation();
-        return;
+      } else if (kind === "confirm" || kind === "error") {
+        operationBack();
+      } else if (keysShown) {
+        keysShown = false;
+      } else if (draft.path.length) {
+        onBack();
+      } else {
+        onClose();
       }
-      onClose();
       return;
     }
 
@@ -524,7 +724,7 @@
         } else if (event.key === "Enter") {
           event.preventDefault();
           operationEnter(event);
-        } else if (event.key === "Backspace" || event.key === "ArrowLeft") {
+        } else if (event.key === "Backspace") {
           event.preventDefault();
           operationBack();
         }
@@ -532,59 +732,91 @@
       return;
     }
 
-    if (zone === "scopes") {
-      if (event.key === "ArrowLeft") {
+    const chord = event.ctrlKey || event.metaKey || event.altKey;
+    // AltGr reports as Ctrl+Alt on Windows, and some layouts type `?` with it.
+    const typesText = event.key.length === 1 && !event.metaKey && event.ctrlKey === event.altKey;
+
+    if (keysShown) {
+      // Any key leaves the key list and does nothing else, except a
+      // character, which starts the query.
+      keysShown = false;
+      if (typesText && event.key !== "?") focusInput();
+      else if (!event.ctrlKey && !event.metaKey) event.preventDefault();
+      return;
+    }
+
+    if (event.key === "?" && typesText && draft.query === "") {
+      event.preventDefault();
+      keysShown = true;
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (event.ctrlKey || event.metaKey) return;
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      if (event.altKey) moveSection(delta);
+      else moveRow(delta);
+      return;
+    }
+
+    if (event.key === "Tab") {
+      if (chord) return;
+      // Always taken, so focus cannot walk off the input.
+      event.preventDefault();
+      cycleScope(event.shiftKey ? -1 : 1);
+      return;
+    }
+
+    if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      const letter = shortcutKey(event)?.key;
+      if (letter === "N" || letter === "P") {
         event.preventDefault();
-        moveScope(-1);
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        moveScope(1);
-      } else if (event.key === "ArrowDown" || event.key === "Enter") {
-        event.preventDefault();
-        setKeyboardIndex(0);
-      } else if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        zone = "input";
-        input?.focus();
+        moveRow(letter === "N" ? 1 : -1);
       }
       return;
     }
 
-    if (zone === "results") {
-      if (event.key === "ArrowDown") {
+    if (event.altKey && !event.ctrlKey && !event.metaKey) {
+      // By physical position: Option changes what a digit key types.
+      const digit = shortcutKey(event)?.key;
+      if (digit && /^[0-9]$/.test(digit)) {
         event.preventDefault();
-        setKeyboardIndex(keyboardIndex >= items.length - 1 ? 0 : keyboardIndex + 1);
-      } else if (event.key === "ArrowUp") {
-        event.preventDefault();
-        if (keyboardIndex <= 0) enterScopes();
-        else setKeyboardIndex(keyboardIndex - 1);
-      } else if (event.key === "Enter" || event.key === "ArrowRight") {
-        event.preventDefault();
-        choose(selectedItem, event.key === "Enter");
-      } else if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        onBack();
-      } else if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        zone = "input";
-        input?.focus();
+        scopeAt(Number(digit));
       }
       return;
     }
 
-    if (event.key === "ArrowDown") {
+    if (chord) return;
+
+    if (event.key === "PageDown" || event.key === "PageUp") {
       event.preventDefault();
-      setKeyboardIndex(0);
-    } else if (event.key === "ArrowUp") {
+      movePage(event.key === "PageDown" ? 1 : -1);
+    } else if ((event.key === "Home" || event.key === "End") && draft.query === "") {
       event.preventDefault();
-      enterScopes();
-    } else if (event.key === "Enter" && items.length) {
+      selectRow(event.key === "Home" ? 0 : items.length - 1);
+    } else if (event.key === "Enter") {
+      if (!items.length) return;
       event.preventDefault();
       choose(selectedItem, true);
-    } else if ((event.key === "Backspace" && draft.query === "") || event.key === "ArrowLeft" && draft.query === "") {
+    } else if (event.key === "ArrowRight") {
+      // Right goes deeper and never runs: on a row with nothing under it the
+      // key is the caret's.
+      const item = selectedItem;
+      if (!item || item.disabled || event.shiftKey || !caretAtEnd()) return;
+      if (item.kind === "branch" || item.kind === "choice") {
+        event.preventDefault();
+        choose(item);
+      } else if (item.expandable && onExpand) {
+        event.preventDefault();
+        onExpand(item);
+      }
+    } else if ((event.key === "ArrowLeft" || event.key === "Backspace") && draft.query === "") {
       event.preventDefault();
       onBack();
-    } else if (event.key === "Tab") {
-      event.preventDefault();
-      enterScopes();
+    } else if (typesText) {
+      // Typing reaches the query even after focus fell to the page.
+      focusInput();
     }
   }
 </script>
@@ -594,31 +826,99 @@
   onkeyup={(event) => { if (event.key === "Enter") confirmKeyReleased = true; }}
 />
 
+{#snippet keycaps(keys: readonly string[])}
+  {#each keys as key (key)}<kbd>{key}</kbd>{/each}
+{/snippet}
+
+{#snippet resultRow(item: DeckItem, index: number)}
+  {@const Icon = item.icon}
+  <button
+    class="deck-result"
+    class:active={index === activeIndex}
+    class:disabled={item.disabled}
+    class:danger={item.danger}
+    id={optionId(index)}
+    type="button"
+    role="option"
+    tabindex="-1"
+    aria-selected={index === activeIndex}
+    aria-disabled={item.disabled === true}
+    aria-checked={item.checked ? "true" : undefined}
+    disabled={item.disabled}
+    onclick={() => pressRow(item, index)}
+    onpointermove={(event) => pointerOverRow(event, index)}
+  >
+    <span class="deck-result-icon">
+      {#if Icon}<Icon size={16} strokeWidth={1.6} aria-hidden="true" />{/if}
+    </span>
+    <span class="deck-result-copy">
+      <span class="deck-result-title">{item.title}</span>
+      {#if item.subtitle}
+        <span class="deck-result-subtitle">{item.subtitle}</span>
+      {:else if !item.section && item.breadcrumb}
+        <span class="deck-result-path">{item.breadcrumb}</span>
+      {/if}
+    </span>
+    {#if item.value}
+      <span class="deck-result-value" class:on={item.value.toLowerCase() === "on"}>{item.value}</span>
+    {/if}
+    {#if item.checked}
+      <svg class="deck-check" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"></path></svg>
+    {/if}
+    {#if item.shortcut}
+      <kbd>{item.shortcut}</kbd>
+    {/if}
+    <span class="deck-result-opens">
+      {#if opens(item)}
+        <svg class="deck-chevron" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+      {/if}
+    </span>
+  </button>
+{/snippet}
+
 {#if open}
   <div class="deck-overlay" data-direction={direction}>
     <button class="deck-backdrop" type="button" aria-label="Hide command launcher" onclick={onClose}></button>
-    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role, a11y_no_noninteractive_element_interactions -->
     <section
       bind:this={shell}
       class="deck-shell"
       role="dialog"
       aria-modal="false"
       aria-label="Command launcher"
+      onmousedown={holdInputFocus}
     >
-      <svg class="deck-filter" width="0" height="0" aria-hidden="true">
-        <filter id="chan-command-orb-blob">
-          <feGaussianBlur stdDeviation="7" in="SourceGraphic" />
-          <feColorMatrix values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 16 -7" result="blob" />
-          <feBlend in="SourceGraphic" in2="blob" />
-        </filter>
-      </svg>
-
       <div class="deck-topline">
         <div class="deck-capsule">
-          <svg class="deck-search-icon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <svg class="deck-search-icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <circle cx="11" cy="11" r="7"></circle>
             <path d="m20 20-4-4"></path>
           </svg>
+          {#if trail.length}
+            <span class="deck-crumbs">
+              <span class="deck-crumbs-trail">
+                {#each trail as crumb, index}
+                  {#if index > 0}
+                    <svg class="deck-crumb-sep" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+                  {/if}
+                  <span class="deck-crumb">{crumb}</span>
+                {/each}
+              </span>
+              <button
+                class="deck-crumbs-clear"
+                type="button"
+                tabindex="-1"
+                aria-label="Clear scope"
+                title="Clear scope"
+                onclick={() => {
+                  focusInput();
+                  applyScope(null);
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+              </button>
+            </span>
+          {/if}
           <div class="deck-input-wrap">
             {#if !draft.query}
               {#key placeholder}
@@ -633,7 +933,7 @@
               role="combobox"
               aria-expanded="true"
               aria-controls={LIST_ID}
-              aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
+              aria-activedescendant={listShown && activeIndex >= 0 ? optionId(activeIndex) : undefined}
               aria-autocomplete="list"
               aria-label={placeholder}
               autocomplete="off"
@@ -645,31 +945,29 @@
           </div>
         </div>
 
-        <div class="deck-scopes" class:keyboard-active={zone === "scopes"} style="filter: url(#chan-command-orb-blob)">
-          {#each scopes as scope, index (scope.id)}
-            {@const Icon = scope.icon}
-            <button
-              class="deck-scope"
-              class:active={draft.scope === scope.id}
-              class:focused={zone === "scopes" && availableScopes[scopeIndex]?.id === scope.id}
-              disabled={scope.available === false}
-              type="button"
-              aria-label={`${scope.label} scope`}
-              aria-pressed={draft.scope === scope.id}
-              title={scope.label}
-              onclick={() => {
-                if (scope.available === false) return;
-                draft.scope = scope.id;
-                scopeIndex = availableScopes.findIndex((candidate) => candidate.id === scope.id);
-                zone = "scopes";
-                onScope(scope.id);
-              }}
-              style={`--orb-index: ${index}`}
-            >
-              <Icon size={20} strokeWidth={1.55} aria-hidden="true" />
-            </button>
-          {/each}
-        </div>
+        {#if scopes.length}
+          <div class="deck-scopes" role="group" aria-label="Scopes">
+            {#each scopes as scope, index (scope.id)}
+              {@const Icon = scope.icon}
+              <button
+                class="deck-scope"
+                class:active={draft.scope === scope.id}
+                disabled={scope.available === false}
+                type="button"
+                tabindex="-1"
+                aria-label={`${scope.label} scope`}
+                aria-pressed={draft.scope === scope.id}
+                title={index < 9 ? `${scope.label} (Alt+${index + 1})` : scope.label}
+                onclick={() => pressScope(scope)}
+              >
+                <span class="deck-scope-orb">
+                  <Icon size={17} strokeWidth={1.6} aria-hidden="true" />
+                </span>
+                <span class="deck-scope-caption">{scope.caption ?? scope.label}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <div class="deck-panel">
@@ -725,52 +1023,48 @@
               </div>
             {/if}
           </div>
+        {:else if keysShown}
+          <dl bind:this={keyList} class="deck-keys" aria-label="Keys" aria-live="polite">
+            {#each KEY_LIST as entry (entry.does)}
+              <div class="deck-keys-entry">
+                <dt>{@render keycaps(entry.keys)}</dt>
+                <dd>{entry.does}</dd>
+              </div>
+            {/each}
+          </dl>
         {:else}
           {#key bodyKey}
             <div
+              bind:this={list}
               class="deck-results"
+              class:sectioned
               id={LIST_ID}
               role="listbox"
               tabindex="-1"
               aria-label="Commands"
+              onfocus={focusInput}
               onpointerleave={() => (pointerIndex = null)}
             >
               {#if items.length}
-                {#each items as item, index (item.id)}
-                  {@const Icon = item.icon}
-                  <button
-                    class="deck-result"
-                    class:active={index === activeIndex}
-                    class:disabled={item.disabled}
-                    id={optionId(index)}
-                    type="button"
-                    role="option"
-                    aria-selected={index === activeIndex}
-                    aria-disabled={item.disabled === true}
-                    disabled={item.disabled}
-                    onclick={() => {
-                      keyboardIndex = index;
-                      pointerIndex = index;
-                      zone = "results";
-                      draft.selectedId = item.id;
-                      choose(item);
-                    }}
-                    onpointermove={() => (pointerIndex = index)}
-                  >
-                    <span class="deck-result-icon">
-                      {#if Icon}<Icon size={19} strokeWidth={1.55} aria-hidden="true" />{/if}
-                    </span>
-                    <span class="deck-result-copy">
-                      <span class="deck-result-title">{item.title}</span>
-                      <span class="deck-result-path">{item.breadcrumb}</span>
-                    </span>
-                    {#if index === activeIndex && item.shortcut}
-                      <kbd>{item.shortcut}</kbd>
-                    {/if}
-                    {#if index === activeIndex && item.kind === "branch"}
-                      <svg class="deck-chevron" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
-                    {/if}
-                  </button>
+                {#each sections as section, sectionIndex (section.start)}
+                  {#if section.title !== null}
+                    {@const HeaderIcon = sectionIcon(section)}
+                    <div class="deck-section" role="group" aria-labelledby={sectionId(sectionIndex)}>
+                      <div class="deck-section-header" id={sectionId(sectionIndex)} role="presentation">
+                        <span class="deck-section-icon">
+                          {#if HeaderIcon}<HeaderIcon size={13} strokeWidth={1.7} aria-hidden="true" />{/if}
+                        </span>
+                        <span class="deck-section-title">{section.title}</span>
+                      </div>
+                      {#each section.rows as item, offset (item.id)}
+                        {@render resultRow(item, section.start + offset)}
+                      {/each}
+                    </div>
+                  {:else}
+                    {#each section.rows as item, offset (item.id)}
+                      {@render resultRow(item, section.start + offset)}
+                    {/each}
+                  {/if}
                 {/each}
               {:else}
                 <p class="deck-empty">No matching commands</p>
@@ -778,6 +1072,28 @@
             </div>
           {/key}
         {/if}
+        <div class="deck-footer">
+          <span class="deck-hints">
+            {#each hints as hint (hint.does)}
+              <span class="deck-hint">{@render keycaps(hint.keys)}<span>{hint.does}</span></span>
+            {/each}
+          </span>
+          {#if !draft.operation}
+            <button
+              class="deck-hint deck-keys-toggle"
+              type="button"
+              tabindex="-1"
+              aria-pressed={keysShown}
+              onclick={() => {
+                focusInput();
+                keysShown = !keysShown;
+              }}
+            ><kbd>?</kbd><span>keys</span></button>
+          {/if}
+          {#if listShown}
+            <span class="deck-count">{items.length} {items.length === 1 ? "item" : "items"}</span>
+          {/if}
+        </div>
       </div>
     </section>
   </div>
@@ -786,6 +1102,10 @@
 <style>
   .deck-overlay {
     --deck-scrim: rgba(0, 0, 0, 0.56);
+    /* The hosts name their accent and danger colours differently, and one
+       of them names no accent, so each falls back to a token both define. */
+    --deck-ring: var(--deck-accent, var(--brand, var(--text)));
+    --deck-danger: var(--danger, var(--danger-text, #d1242f));
     position: fixed;
     inset: 0;
     z-index: 32000;
@@ -807,54 +1127,105 @@
     border-radius: 0;
     background: var(--deck-scrim);
     cursor: default;
-    animation: scrim-in 180ms ease-out;
+    animation: scrim-in 120ms ease-out;
   }
   .deck-shell {
     position: relative;
-    width: min(650px, 100%);
+    width: min(720px, 100%);
     min-width: 0;
     outline: none;
     filter: drop-shadow(0 22px 36px rgba(0, 0, 0, 0.2));
-    animation: deck-arrive 440ms cubic-bezier(0.2, 0.86, 0.25, 1.12);
+    animation: deck-arrive 150ms ease-out;
   }
-  .deck-filter { position: absolute; pointer-events: none; }
+  /* One hosting page resets box-sizing and the other does not. */
+  .deck-shell :global(*) { box-sizing: border-box; }
   .deck-topline {
     position: relative;
     z-index: 2;
     display: flex;
     align-items: center;
-    gap: 11px;
+    gap: 10px;
   }
   .deck-capsule,
-  .deck-scope,
+  .deck-scopes,
   .deck-panel {
     background: color-mix(in srgb, var(--bg-elev) 96%, transparent);
     border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
     -webkit-backdrop-filter: blur(22px) saturate(1.08);
     backdrop-filter: blur(22px) saturate(1.08);
   }
+  .deck-capsule,
+  .deck-scopes {
+    height: 58px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255, 255, 255, 0.08);
+  }
   .deck-capsule {
     display: flex;
     align-items: center;
     flex: 1 1 auto;
     min-width: 0;
-    height: 58px;
-    padding: 0 19px;
-    gap: 11px;
+    padding: 0 16px;
+    gap: 10px;
     border-radius: 999px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16), inset 0 1px rgba(255, 255, 255, 0.08);
   }
   .deck-search-icon,
-  .deck-chevron {
+  .deck-chevron,
+  .deck-check,
+  .deck-crumb-sep,
+  .deck-crumbs-clear svg {
     flex: 0 0 auto;
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.55;
+    stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
-    color: var(--text-secondary);
   }
-  .deck-input-wrap { position: relative; flex: 1; height: 100%; min-width: 0; }
+  .deck-search-icon,
+  .deck-chevron,
+  .deck-crumb-sep { color: var(--text-secondary); }
+  .deck-crumbs {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 55%;
+    height: 28px;
+    padding: 0 3px 0 11px;
+    gap: 4px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text) 9%, transparent);
+    color: var(--text);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .deck-crumbs-trail {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 3px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .deck-crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .deck-crumbs-clear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .deck-crumbs-clear:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+  }
+  .deck-input-wrap { position: relative; flex: 1 1 80px; height: 100%; min-width: 0; }
   .deck-placeholder,
   .deck-input {
     position: absolute;
@@ -863,15 +1234,16 @@
     height: 100%;
     display: flex;
     align-items: center;
-    box-sizing: border-box;
     font: inherit;
-    font-size: 21px;
-    letter-spacing: -0.015em;
+    font-size: 19px;
+    letter-spacing: -0.012em;
   }
   .deck-placeholder {
+    overflow: hidden;
     color: var(--text-secondary);
+    white-space: nowrap;
     pointer-events: none;
-    animation: placeholder-in 180ms ease-out;
+    animation: placeholder-in 120ms ease-out;
   }
   .deck-input {
     padding: 0;
@@ -882,100 +1254,161 @@
   }
   .deck-scopes {
     display: flex;
-    gap: 8px;
-    flex: 0 0 auto;
+    align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 0 7px;
+    gap: 2px;
+    border-radius: 29px;
   }
   .deck-scope {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 0 1 54px;
+    width: 54px;
+    min-width: 0;
+    gap: 3px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+    transition: color 120ms ease, opacity 120ms ease;
+  }
+  .deck-scope-orb {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 44px;
-    height: 44px;
-    padding: 0;
+    width: 30px;
+    height: 30px;
+    border: 1px solid transparent;
     border-radius: 999px;
-    color: var(--text-secondary);
-    opacity: 0.36;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
-    transition: opacity 160ms ease, color 160ms ease, box-shadow 180ms ease, transform 180ms ease;
-    animation: orb-arrive 420ms cubic-bezier(0.2, 0.9, 0.25, 1.16) both;
-    animation-delay: calc(var(--orb-index) * 36ms + 70ms);
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+    transition: background-color 120ms ease, border-color 120ms ease;
   }
-  .deck-scope:hover,
-  .deck-scope.active,
-  .deck-scope.focused { opacity: 1; color: var(--text); }
-  .deck-scope.focused {
-    transform: translateY(-1px);
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18), 0 0 0 2px color-mix(in srgb, var(--deck-accent, var(--brand)) 58%, transparent);
+  .deck-scope-caption {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 10.5px;
+    line-height: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .deck-scope.active:not(.focused) {
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.14), inset 0 0 0 1px color-mix(in srgb, var(--deck-accent, var(--brand)) 42%, transparent);
+  .deck-scope:hover:not(:disabled),
+  .deck-scope.active { color: var(--text); }
+  .deck-scope.active .deck-scope-orb {
+    border-color: var(--deck-ring);
+    background: color-mix(in srgb, var(--text) 16%, transparent);
   }
-  .deck-scope:disabled { opacity: 0.12; cursor: default; }
+  .deck-scope.active .deck-scope-caption { font-weight: 650; }
+  .deck-scope:disabled { opacity: 0.4; cursor: default; }
   .deck-panel {
     position: relative;
     z-index: 1;
+    display: flex;
+    flex-direction: column;
     width: calc(100% - 4px);
-    max-height: min(430px, 62vh);
+    max-height: min(480px, 66vh);
     margin: 10px 2px 0;
     overflow: hidden;
-    border-radius: 24px;
+    border-radius: 20px;
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.24), inset 0 1px rgba(255, 255, 255, 0.07);
-    transform-origin: center top;
-    animation: panel-unfold 360ms cubic-bezier(0.2, 0.84, 0.25, 1.08);
   }
   .deck-context-note {
+    flex: 0 0 auto;
     padding: 7px 16px 0;
     color: var(--text-secondary);
     font-size: 11px;
     animation: note-away 2.4s ease both;
   }
   .deck-results {
-    max-height: min(430px, 62vh);
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
-    padding: 7px;
+    padding: 6px;
+    scroll-padding-bottom: 6px;
   }
-  [data-direction="forward"] .deck-results { animation: body-forward 220ms ease-out; }
-  [data-direction="back"] .deck-results { animation: body-back 220ms ease-out; }
-  .deck-result {
-    position: relative;
+  /* A row scrolled into view from above stops below the sticky header. */
+  .deck-results.sectioned { scroll-padding-top: 28px; }
+  [data-direction="forward"] .deck-results { animation: body-forward 140ms ease-out; }
+  [data-direction="back"] .deck-results { animation: body-back 140ms ease-out; }
+  .deck-section + .deck-section { margin-top: 4px; }
+  .deck-section-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
-    width: 100%;
-    min-height: 51px;
-    gap: 11px;
-    padding: 6px 10px;
-    border: 0;
-    border-radius: 16px;
-    background: transparent;
-    color: var(--text);
-    text-align: left;
-    cursor: pointer;
-    transition: background-color 140ms ease, box-shadow 160ms ease, transform 160ms ease;
+    height: 28px;
+    /* Reaches the panel's edges, so a row passing under it is covered. */
+    margin: 0 -6px;
+    padding: 0 16px;
+    gap: 10px;
+    background: var(--bg-elev);
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-weight: 650;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
   }
-  .deck-result.active {
-    background: color-mix(in srgb, var(--bg-card) 88%, var(--text) 4%);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.13), inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
-    transform: translateY(-0.5px);
-  }
-  .deck-result.disabled { opacity: 0.34; cursor: default; }
+  /* As wide as a row's icon, so headers and titles share one left edge. */
+  .deck-section-icon,
   .deck-result-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--text) 6%, transparent);
-    transition: color 140ms ease, background-color 140ms ease;
+    width: 22px;
   }
+  .deck-section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .deck-result {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 36px;
+    gap: 10px;
+    padding: 4px 10px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 100ms ease;
+  }
+  .deck-result.active {
+    background: color-mix(in srgb, var(--text) 11%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+  }
+  .deck-result.disabled { opacity: 0.5; cursor: default; }
+  .deck-result-icon { height: 22px; color: var(--text-secondary); }
   .deck-result.active .deck-result-icon { color: var(--deck-accent, var(--text)); }
-  .deck-result-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+  .deck-result-copy { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; gap: 1px; }
   .deck-result-title,
-  .deck-result-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .deck-result-title { font-size: 14px; font-weight: 590; letter-spacing: -0.006em; }
-  .deck-result-path { color: var(--text-secondary); font-size: 11.5px; }
+  .deck-result-path,
+  .deck-result-subtitle,
+  .deck-result-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .deck-result-title { font-size: 13.5px; font-weight: 500; line-height: 18px; }
+  .deck-result-path,
+  .deck-result-subtitle { color: var(--text-secondary); font-size: 11.5px; line-height: 15px; }
+  .deck-result.danger .deck-result-title,
+  .deck-result.danger .deck-result-icon { color: var(--deck-danger); }
+  .deck-result-value {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 38%;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+  }
+  .deck-result-value.on { color: var(--accent); }
+  .deck-check { color: var(--text); }
+  /* Reserved on every row, so the shortcuts of a list share one right edge. */
+  .deck-result-opens { display: inline-flex; flex: 0 0 auto; width: 15px; }
   kbd {
     flex: 0 0 auto;
     padding: 2px 6px;
@@ -986,6 +1419,46 @@
     font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .deck-empty { margin: 0; padding: 26px 18px; color: var(--text-secondary); text-align: center; font-size: 13px; }
+  .deck-keys {
+    display: grid;
+    flex: 1 1 auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-height: 0;
+    margin: 0;
+    padding: 14px 16px;
+    gap: 9px 24px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .deck-keys-entry { display: flex; align-items: baseline; min-width: 0; gap: 9px; }
+  .deck-keys-entry dt { display: flex; flex: 0 0 auto; gap: 4px; }
+  .deck-keys-entry dd { min-width: 0; margin: 0; color: var(--text-secondary); }
+  .deck-footer {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    height: 30px;
+    padding: 0 14px;
+    gap: 14px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .deck-hints { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: 14px; overflow: hidden; }
+  .deck-hint { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 4px; }
+  .deck-keys-toggle {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .deck-keys-toggle:hover,
+  .deck-keys-toggle[aria-pressed="true"] { color: var(--text); }
+  .deck-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
   .deck-operation {
     display: grid;
     grid-template-columns: 38px minmax(0, 1fr) auto;
@@ -993,7 +1466,7 @@
     gap: 12px;
     min-height: 88px;
     padding: 13px 15px;
-    animation: body-forward 200ms ease-out;
+    animation: body-forward 140ms ease-out;
   }
   .deck-operation-icon,
   .deck-spinner {
@@ -1007,8 +1480,8 @@
     background: color-mix(in srgb, var(--text) 7%, transparent);
   }
   .deck-operation-icon.success { color: var(--accent); }
-  .deck-operation-icon.error { color: var(--danger, #d1242f); }
-  .deck-spinner { box-sizing: border-box; border: 2px solid color-mix(in srgb, var(--text) 12%, transparent); border-top-color: var(--deck-accent, var(--brand)); animation: spin 800ms linear infinite; }
+  .deck-operation-icon.error { color: var(--deck-danger); }
+  .deck-spinner { border: 2px solid color-mix(in srgb, var(--text) 12%, transparent); border-top-color: var(--deck-ring); animation: spin 800ms linear infinite; }
   .deck-operation-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
   .deck-operation-copy strong { font-size: 14px; }
   .deck-operation-copy span { color: var(--text-secondary); font-size: 12px; line-height: 1.35; }
@@ -1022,25 +1495,24 @@
     font-size: 12px;
   }
   .deck-decisions button.chosen { color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); border-color: color-mix(in srgb, var(--text) 12%, transparent); }
-  .deck-decisions button.danger.chosen { color: var(--danger, #d1242f); }
+  .deck-decisions button.danger.chosen { color: var(--deck-danger); }
   @keyframes scrim-in { from { opacity: 0; } }
-  @keyframes deck-arrive { from { opacity: 0; transform: translateY(-10px) scaleX(1.08) scaleY(.96); filter: blur(13px); } to { opacity: 1; transform: none; filter: blur(0); } }
-  @keyframes panel-unfold { from { opacity: 0; transform: translateY(-8px) scaleY(.92); filter: blur(7px); } to { opacity: 1; transform: none; filter: blur(0); } }
-  @keyframes orb-arrive { from { opacity: 0; transform: translateX(-28px) scale(.72); } }
-  @keyframes placeholder-in { from { opacity: 0; transform: translateY(7px); filter: blur(4px); } to { opacity: 1; transform: none; filter: blur(0); } }
-  @keyframes body-forward { from { opacity: 0; transform: translateX(13px); filter: blur(4px); } to { opacity: 1; transform: none; filter: blur(0); } }
-  @keyframes body-back { from { opacity: 0; transform: translateX(-13px); filter: blur(4px); } to { opacity: 1; transform: none; filter: blur(0); } }
+  @keyframes deck-arrive { from { opacity: 0; transform: translateY(-6px); } }
+  @keyframes placeholder-in { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes body-forward { from { opacity: 0; transform: translateX(10px); } }
+  @keyframes body-back { from { opacity: 0; transform: translateX(-10px); } }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes note-away { 0%, 72% { opacity: .72; } 100% { opacity: 0; } }
   @media (max-width: 640px) {
     .deck-overlay { padding-top: 54px; }
     .deck-topline { flex-wrap: wrap; justify-content: center; }
     .deck-capsule { flex-basis: 100%; }
-    .deck-scopes { order: 2; }
+    .deck-scopes { order: 2; max-width: 100%; }
     .deck-panel { margin-top: 9px; }
+    .deck-keys { grid-template-columns: minmax(0, 1fr); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .deck-backdrop, .deck-shell, .deck-panel, .deck-scope, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
-    .deck-result, .deck-scope { transition-duration: 1ms; }
+    .deck-backdrop, .deck-shell, .deck-placeholder, .deck-results, .deck-operation, .deck-spinner { animation-duration: 1ms; animation-delay: 0ms; }
+    .deck-result, .deck-scope, .deck-scope-orb { transition-duration: 1ms; }
   }
 </style>
