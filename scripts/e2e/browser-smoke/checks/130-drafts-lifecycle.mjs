@@ -2,7 +2,7 @@
 // life in a workspace window and reads all three places it shows: the page,
 // the server's drafts list, and the disk.
 //
-// Create: the workspace root gains nothing and the sidecar store under the server's CHAN_HOME holds the draft. Edit: what is typed is saved there, and a reload brings the tab and its text back. The Drafts group in File locations lists the draft. The client's own spelling of a draft's path, sent to the files route, is refused and creates nothing. Save to Workspace on a draft with no attachments makes one file at the chosen path, the editor follows it, and the draft leaves the store and the group. A second, edited draft discarded from its close dialog lands in the store's trash. Nothing the page shows holds a draft path's mark or the id of a draft's lifetime, and the search refuses each when planted in the page.
+// Create: the workspace root gains nothing and the sidecar store under the server's CHAN_HOME holds the draft. Edit: what is typed is saved there, and a reload brings the tab and its text back. The Drafts group in File locations lists the draft. The client's own spelling of a draft's path, sent to the files route, is refused and creates nothing. Save draft on a draft with no attachments makes one file at the chosen path, the editor follows it, and the draft leaves the store and the group. A second, edited draft discarded from its close dialog lands in the store's trash. Nothing the page shows holds a draft path's mark or the id of a draft's lifetime, and the search refuses each when planted in the page.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -90,7 +90,7 @@ export default {
       await ctx.shot("drafts-group");
       await activateTab(page, `Drafts/${first.path}`);
 
-      // Save to Workspace: one file at the chosen path, and the editor follows.
+      // Save draft: one file at the chosen path, and the editor follows.
       const promotions = [];
       const onResponse = async (response) => {
         if (!response.url().includes("/api/drafts/promote")) return;
@@ -103,7 +103,7 @@ export default {
       page.on("response", onResponse);
       mkdirSync(join(ctx.workspaceDir, dir));
       await saveDraftToWorkspace(page, target, () =>
-        assertNothingMarkedShown(page, [first.id], "with Save to Workspace open"),
+        assertNothingMarkedShown(page, [first.id], "with Save draft open"),
       );
       const onDisk = join(ctx.workspaceDir, target);
       await waitFor("the promoted file in the workspace", 20_000, () => existsSync(onDisk));

@@ -350,9 +350,10 @@ export async function closeDraft(page, action, target = null, whileOpen = null) 
 }
 
 /// Save the active draft tab to the workspace file `target` through its tab
-/// menu, which leaves the tab open on the file the draft became. The menu
-/// is the one a right-click on the tab in the strip opens; a right-click in
-/// the editor's body opens the editing menu, which has no such row.
+/// menu's Save draft row, which leaves the tab open on the file the draft
+/// became. The menu is the one a right-click on the tab in the strip opens;
+/// a right-click in the editor's body opens the editing menu, which has no
+/// such row.
 export async function saveDraftToWorkspace(page, target, whileOpen = null) {
   await page.bringToFront();
   const tab = await page.$(".tabs .tab.active");
@@ -361,7 +362,7 @@ export async function saveDraftToWorkspace(page, target, whileOpen = null) {
   await page.waitForSelector(".tab-menu-bubble", { timeout: 5_000 });
   const clicked = await page.evaluate(() => {
     const row = [...document.querySelectorAll(".tab-menu-bubble .mbtn")].find(
-      (b) => b.querySelector(".mbtn-label")?.textContent?.trim() === "Save to Workspace",
+      (b) => b.querySelector(".mbtn-label")?.textContent?.trim() === "Save draft",
     );
     row?.click();
     return !!row;
@@ -370,7 +371,7 @@ export async function saveDraftToWorkspace(page, target, whileOpen = null) {
     const rows = await page.evaluate(() =>
       [...document.querySelectorAll(".tab-menu-bubble .mbtn-label")].map((l) => l.textContent?.trim()),
     );
-    throw new Error(`the draft tab's menu has no Save to Workspace row; it offers: ${rows.join(" | ")}`);
+    throw new Error(`the draft tab's menu has no Save draft row; it offers: ${rows.join(" | ")}`);
   }
   const input = await page.waitForSelector("#path-prompt-title ~ input", { timeout: 15_000 });
   await whileOpen?.();

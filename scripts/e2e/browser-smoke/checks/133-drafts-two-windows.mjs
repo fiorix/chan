@@ -69,7 +69,7 @@ async function savedInStore(ctx, draft, text) {
 }
 
 /// Wait until the active tab in `page` shows no unsaved marker and no write
-/// of `draft` is on the wire in any window, so Save to Workspace is pressed
+/// of `draft` is on the wire in any window, so Save draft is pressed
 /// on a tab whose save has ended. The wait's span is logged and marked on
 /// the check's timeline.
 async function settledBeforePress(ctx, page, draft) {

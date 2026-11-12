@@ -16,6 +16,7 @@ const TEAM_GROUP = "cs-pane-layout-team";
 const TEAM_HANDLES = ["@@LayoutLead", "@@LayoutHand"];
 const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
+const ROW_TITLE_SELECTOR = `${LAUNCHER_SELECTOR} [role="option"] .deck-result-title`;
 const SELECTED_TITLE_SELECTOR = `${LAUNCHER_SELECTOR} [role="option"][aria-selected="true"] .deck-result-title`;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -311,7 +312,34 @@ async function selectedLauncherTitle(page) {
   );
 }
 
-async function launcherRun(page, query, expectedTitle = query, confirm = false) {
+/// Wait until the launcher's selected row is the one titled `title`.
+async function waitLauncherSelection(page, title) {
+  try {
+    await page.waitForFunction(
+      (selector, wanted) =>
+        document.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim() === wanted,
+      { timeout: 10_000 },
+      SELECTED_TITLE_SELECTOR,
+      title,
+    );
+  } catch (cause) {
+    const rows = await page
+      .$$eval(ROW_TITLE_SELECTOR, (entries) =>
+        entries.map((entry) => entry.textContent?.replace(/\s+/g, " ").trim() ?? ""))
+      .catch(() => []);
+    throw new Error(
+      `the launcher did not select "${title}"; its rows are ${JSON.stringify(rows)}`,
+      { cause },
+    );
+  }
+}
+
+/// Type `title` into the launcher, run the row it selects and answer that
+/// row's title. The typed title must select its own row: at once, or with
+/// `under`, one Down below the row of that title. Among hits of one kind
+/// the list puts the focused app's rows ahead of the pane's, so a pane row
+/// whose title an app row extends stands under that row.
+async function launcherRun(page, title, { confirm = false, under = null } = {}) {
   await page.evaluate(() => {
     window.dispatchEvent(
       new CustomEvent("chan:command", {
@@ -324,16 +352,12 @@ async function launcherRun(page, query, expectedTitle = query, confirm = false) 
     input.value = "";
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  await page.type(LAUNCHER_INPUT_SELECTOR, query);
-  await page.waitForFunction(
-    (selector, title) => {
-      const text = document.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
-      return text === title || text?.startsWith(`${title} `);
-    },
-    { timeout: 10_000 },
-    SELECTED_TITLE_SELECTOR,
-    expectedTitle,
-  );
+  await page.type(LAUNCHER_INPUT_SELECTOR, title);
+  if (under !== null) {
+    await waitLauncherSelection(page, under);
+    await page.keyboard.press("ArrowDown");
+  }
+  await waitLauncherSelection(page, title);
   const selected = await selectedLauncherTitle(page);
   await page.keyboard.press("Enter");
   if (confirm) {
@@ -1156,17 +1180,17 @@ is_lead = false
       );
 
       check(
-        (await launcherRun(page, "Split bottom")) === "Split bottom",
-        "launcher did not select Split bottom",
+        (await launcherRun(page, "Split down")) === "Split down",
+        "launcher did not select Split down",
       );
       launcherSplit = await pollLayout(
         ctx,
         WINDOW_ID,
         (value) => value.panes.length === beforeLauncherSplit.panes.length + 2,
-        "launcher split bottom",
+        "launcher split down",
       );
       const launcherBottomId = launcherSplit.activePaneId;
-      await launcherRun(page, "Close pane", "Close pane", true);
+      await launcherRun(page, "Close pane", { confirm: true });
       await pollLayout(
         ctx,
         WINDOW_ID,
@@ -1186,7 +1210,7 @@ is_lead = false
         "--window",
         WINDOW_ID,
       ]);
-      await launcherRun(page, "Close pane", "Close pane", true);
+      await launcherRun(page, "Close pane", { confirm: true });
       await pollLayout(
         ctx,
         WINDOW_ID,
@@ -1203,7 +1227,7 @@ is_lead = false
         "--side",
         "a",
       ]);
-      await launcherRun(page, `Open ${layoutFileLauncher}`, "Open");
+      await launcherRun(page, `Open ${layoutFileLauncher}`);
       await pollLayout(
         ctx,
         WINDOW_ID,
@@ -1217,17 +1241,20 @@ is_lead = false
         "launcher Open placement",
       );
 
+      // Each row runs on the tab the row before it opened. On the Files tab
+      // the file browser's own New graph here leads the hits for New graph,
+      // and the pane's row is the one under it.
       const launcherKinds = [
-        ["New file browser", "browser"],
-        ["New graph", "graph"],
-        ["New dashboard", "dashboard"],
-        ["New terminal", "terminal"],
+        ["New file browser", "browser", null],
+        ["New graph", "graph", "New graph here"],
+        ["New dashboard", "dashboard", null],
+        ["New terminal", "terminal", null],
       ];
-      for (const [title, kind] of launcherKinds) {
+      for (const [title, kind, under] of launcherKinds) {
         const countBefore = sideTabs(await paneList(ctx, WINDOW_ID), leftId, "a").filter(
           (tab) => tab.kind === kind,
         ).length;
-        const selected = await launcherRun(page, title);
+        const selected = await launcherRun(page, title, { under });
         check(selected === title, `launcher selected ${selected}, expected ${title}`);
         await pollLayout(
           ctx,
@@ -1272,7 +1299,7 @@ is_lead = false
         "--side",
         "a",
       ]);
-      await launcherRun(page, "Enter hybrid navigation");
+      await launcherRun(page, "Hybrid Nav");
       await page.waitForSelector(".app.pane-mode", { timeout: 10_000 });
       const hybridWidthBefore = (await paneRect(page, leftId)).width;
       await page.keyboard.press("]");
@@ -1641,21 +1668,21 @@ is_lead = false
           "terminal team load",
         ],
         launcherRows: [
-          "Open",
+          "Open...",
           "New file browser",
           "New graph",
           "New dashboard",
           "New terminal",
           "New team",
           "Split right",
-          "Split bottom",
+          "Split down",
           "Previous pane",
           "Next pane",
           "Flip pane",
           "Close pane",
           "Send tab to side A",
           "Send tab to side B",
-          "Enter hybrid navigation",
+          "Hybrid Nav",
         ],
       };
     } catch (error) {
