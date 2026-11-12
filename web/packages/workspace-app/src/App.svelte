@@ -268,6 +268,9 @@
             void t.depth;
             void t.inspectorOpen;
             void t.pendingSelectId;
+            // The opened directories: replaced whole by a depth move, and
+            // a key set or deleted in place by a double-click.
+            void Object.entries(t.expanded ?? {}).length;
             void t.filters.link;
             void t.filters.tag;
             void t.filters.mention;
