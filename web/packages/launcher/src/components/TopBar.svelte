@@ -5,7 +5,8 @@
   // add-devserver entry points live in the library tree (the LOCAL header's
   // [new workspace] and the bottom "Add devserver" dashed button), and
   // open-terminal lives in each machine header, so the top bar stays the
-  // global chrome: title + Computers command launcher + select.
+  // global chrome: title + command launcher + select. The command launcher
+  // lists machines and gateways alike, so its button sits on both screens.
   import { Command, SquareCheckBig } from "@lucide/svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
   import { readOnly, hasDesktopBridge } from "../state/capabilities";
@@ -48,7 +49,7 @@
     {/if}
   </div>
   <div class="actions">
-    {#if !readOnly && screen.current === "computers"}
+    {#if !readOnly}
       <button
         class="icon-btn command"
         class:active={activeCommandLauncherDraft().visible}

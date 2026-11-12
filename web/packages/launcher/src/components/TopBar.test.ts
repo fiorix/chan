@@ -52,7 +52,8 @@ describe("TopBar screen toggle (desktop surface)", () => {
     expect(target!.textContent).toContain("Gateways");
     expect(target!.textContent).toContain("Connection to remote gateways");
     expect(toggle().getAttribute("aria-label")).toBe("Show computers");
-    expect(target!.querySelector('[aria-label="Open command launcher"]')).toBeNull();
+    // The command launcher lists gateways too, so its button stays.
+    expect(target!.querySelector('[aria-label="Open command launcher"]')).not.toBeNull();
 
     toggle().click();
     flushSync();
