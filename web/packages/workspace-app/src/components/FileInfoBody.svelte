@@ -328,8 +328,8 @@
     // Resolved contacts route through the host's `onContactNavigate`
     // when present (graph overlay: select the contact's node on the
     // canvas, matching how documents behave there). When absent, fall
-    // back to opening a contact-scoped graph (bidirectional BFS lens
-    // around the contact) via openGraphForContact.
+    // back to opening the graph with the contact's file selected, via
+    // openGraphForContact.
     const navigateContact = onContactNavigate
       ? (p: string) => onContactNavigate(p)
       : (p: string) => openGraphForContact(p);
@@ -343,10 +343,8 @@
         });
       } else {
         // Unresolved `@@name` - no matching contact on disk yet.
-        // Opens the mention lens (a focused graph centered on the
-        // `@@Name` meta-node with edges to every referencing file),
-        // mirroring how a tag chip opens the tag lens. There's no
-        // contact file to scope to, so the meta-node itself is the seed.
+        // Opens the graph with the `@@Name` node selected, which shows
+        // every file that mentions it, as a tag chip does for its tag.
         push({
           key: m.id,
           label: m.label.replace(/^@@/, ""),

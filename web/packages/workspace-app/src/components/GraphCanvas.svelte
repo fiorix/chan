@@ -454,7 +454,7 @@
     mention: string;
     language: string;
     accent: string;
-    /// Directory node fill (filesystem graph mode).
+    /// Directory node fill.
     folder: string;
     /// Source-code file fill. Royalblue; source is its own bucket
     /// (distinct from binary's grey) so the markdown / source /

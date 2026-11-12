@@ -981,10 +981,8 @@ describe("window commands", () => {
     const tab = activePane().tabs.at(-1);
     expect(tab?.kind).toBe("graph");
     const graph = tab as GraphTab;
-    expect(graph.mode).toBe("semantic");
-    // A link made when a directory was a scope of its own: the one graph,
-    // with the link's node selected and that directory opened.
-    expect(graph.scopeId).toBe("workspace");
+    // A link made when a directory was a scope of its own: the graph, with
+    // the link's node selected and that directory opened.
     expect(graph.pendingSelectId).toBe("crates/chan-tunnel-proto/src/h2_duplex.rs");
     expect(graph.expanded).toEqual({
       "": true,
@@ -1384,8 +1382,6 @@ describe("graph from here", () => {
 
     const graph = activeGraphTab();
     expect(graph).toMatchObject({
-      mode: "semantic",
-      scopeId: "workspace",
       pendingSelectId: "notes/a.md",
       // The selection reveals the file with its directories; no directory
       // is opened for it.
@@ -1398,8 +1394,6 @@ describe("graph from here", () => {
 
     const graph = activeGraphTab();
     expect(graph).toMatchObject({
-      mode: "semantic",
-      scopeId: "workspace",
       pendingSelectId: "notes/sub",
       expanded: { "": true, notes: true, "notes/sub": true },
     });
@@ -1410,8 +1404,6 @@ describe("graph from here", () => {
 
     const graph = activeGraphTab();
     expect(graph).toMatchObject({
-      mode: "semantic",
-      scopeId: "workspace",
       pendingSelectId: "",
       expanded: { "": true },
     });
@@ -1590,8 +1582,6 @@ describe("resolveSpawnContext", () => {
         kind: "graph",
         id: "g-1",
         title: "File Graph",
-        mode: "semantic",
-        scopeId: "workspace",
         selectedNodeId: "notes/a.md",
         depth: 1,
         expanded: { "": true },
@@ -1621,8 +1611,6 @@ describe("resolveSpawnContext", () => {
         kind: "graph",
         id: "g-1",
         title: "Dir Graph",
-        mode: "semantic",
-        scopeId: "workspace",
         selectedNodeId: "directory:notes/sub",
         depth: 1,
         expanded: { "": true },
@@ -1649,8 +1637,6 @@ describe("resolveSpawnContext", () => {
         kind: "graph",
         id: "g-1",
         title: "Graph",
-        mode: "semantic",
-        scopeId: "workspace",
         depth: 1,
         expanded: { "": true },
         filters: {
@@ -1676,8 +1662,6 @@ describe("resolveSpawnContext", () => {
         kind: "graph",
         id: "g-1",
         title: "Tag Graph",
-        mode: "semantic",
-        scopeId: "workspace",
         selectedNodeId: "#foo",
         depth: 1,
         expanded: { "": true },

@@ -30,7 +30,9 @@ test.each([null, "", "directory:notes"])("dashboard Details selection %s and wid
   expect(tab.indexingSelectedId ?? null).toBeNull();
 });
 
-test("a semantic graph tab saved with a scope of its own restores as the workspace with that node selected", async () => {
+test("a graph tab saved with a scope of its own restores as the workspace with that node selected", async () => {
+  // Tabs as a session holds them from when a graph could be scoped to a
+  // node, or be the filesystem's (`gm: "f"`) or a language's (`gm: "l"`).
   await restoreLayout({
     k: "l",
     t: [
@@ -38,30 +40,33 @@ test("a semantic graph tab saved with a scope of its own restores as the workspa
       // The selection the tab was saved with wins over the scope's own node.
       { k: "g", gm: "s", gs: "tag:#t", gn: "notes/a.md", gnl: "a.md", gf: "" },
       { k: "g", gm: "s", gs: "language:Rust", gf: "" },
-      // The filesystem graph is scoped still.
-      { k: "g", gm: "f", gs: "dir:notes", gf: "" },
+      // The filesystem graph named a directory by its bare path.
+      { k: "g", gm: "f", gs: "dir:notes", gn: "notes", gf: "" },
+      { k: "g", gm: "l", gs: "workspace", gd: 0, gf: "" },
     ],
   });
-  const [dir, tag, language, fs] = activePane().tabs;
+  const [dir, tag, language, fs, languages] = activePane().tabs;
   expect(dir).toMatchObject({
     kind: "graph",
-    scopeId: "workspace",
     title: "path=workspace",
     pendingSelectId: "notes/sub",
     expanded: { "": true, notes: true, "notes/sub": true },
   });
-  expect(tag).toMatchObject({ scopeId: "workspace", pendingSelectId: "notes/a.md", selectedNodeId: "notes/a.md" });
-  expect(language).toMatchObject({ scopeId: "workspace", pendingSelectId: "language:Rust" });
-  expect(fs).toMatchObject({ mode: "filesystem", scopeId: "dir:notes", pendingSelectId: null });
+  expect(tag).toMatchObject({ pendingSelectId: "notes/a.md", selectedNodeId: "notes/a.md" });
+  expect(language).toMatchObject({ pendingSelectId: "language:Rust" });
+  expect(fs).toMatchObject({ pendingSelectId: "notes", expanded: { "": true, notes: true } });
+  expect(languages).toMatchObject({ title: "path=workspace", pendingSelectId: null });
 
-  // Saved again, the tabs are the one graph: no scope of their own comes back.
-  const saved = (serializeLayout() as SerLeaf).t;
-  expect(saved.map((t) => t.gs)).toEqual(["workspace", "workspace", "workspace", "dir:notes"]);
+  // Saved again, the tabs are the one graph: neither a mode nor a scope is
+  // written.
+  for (const saved of (serializeLayout() as SerLeaf).t) {
+    expect("gm" in saved || "gs" in saved).toBe(false);
+  }
 });
 
 test("a graph tab's selection of the workspace's own node survives serialization", async () => {
   // The root's node id is the empty string.
-  await restoreLayout({ k: "l", t: [{ k: "g", gm: "s", gs: "workspace", gn: "", gnl: "notes", gf: "" }] });
+  await restoreLayout({ k: "l", t: [{ k: "g", gn: "", gnl: "notes", gf: "" }] });
   let tab = activePane().tabs[0];
   if (tab.kind !== "graph") throw new Error("expected graph");
   expect([tab.selectedNodeId, tab.pendingSelectId]).toEqual(["", ""]);

@@ -309,9 +309,10 @@ derived at query time from the workspace catalog and the maintained
 report, so folder and language nodes appear without ever being written
 to the graph.
 
-Bare `cs graph` opens the graph at workspace scope. With PATH it focuses
-that file or directory; PATH is resolved against the terminal's cwd and
-must be inside the workspace.
+There is one graph, rooted at the workspace. Bare `cs graph` opens it
+with the workspace's own node selected. With PATH it selects that file
+or directory, a directory opened deep enough to show its files; PATH is
+resolved against the terminal's cwd and must be inside the workspace.
 
 The target defaults to $CHAN_WINDOW_ID. `--window`, `--pane`, and
 `--side a|b` address another exact live destination. Workspace windows
@@ -320,12 +321,15 @@ a workspace window; this is a standalone terminal."
 
 Navigating the tab: drag the background to pan, wheel to zoom toward the
 cursor, drag a node to move it. A click selects a node and opens the
-inspector; a double-click on a directory node expands or collapses its
-children in place. Re-rooting is the inspector's "Graph from here",
-which spawns a NEW graph tab; the ancestor breadcrumb re-scopes the
-current tab in place. Right-click opens the tab menu, which carries the
-Depth slider and the node-type filter chips (tag, contact, language,
-media, folder, markdown, source), each with its count.
+inspector; a selected file, tag or mention also shows what refers to it
+and what it refers to, each on its directories. A double-click on a
+directory node opens or closes it in place. The inspector's "Graph from
+here" opens a NEW graph tab with that node selected; the breadcrumb
+selects a directory of the selected node's path in the current tab.
+Right-click opens the tab menu, which carries the Depth slider and the
+node-type filter chips (tag, contact, language, media, folder, markdown,
+source), each with its count. The depth is the selected node's: levels
+opened below a directory, hops of references from any other node.
 "#;
 
 /// `cs graph` examples, side effects, and caveats.

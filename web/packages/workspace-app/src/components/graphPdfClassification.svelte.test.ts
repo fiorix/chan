@@ -92,8 +92,6 @@ function graphTab(): GraphTab {
     kind: "graph",
     id: "graph-pdf",
     title: "graph",
-    mode: "semantic",
-    scopeId: "workspace",
     depth: 1,
     expanded: {},
     filters: {

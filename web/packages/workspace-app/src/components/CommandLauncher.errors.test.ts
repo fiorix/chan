@@ -172,7 +172,7 @@ function surfaceTab(surface: typeof themes[number][1]): Tab | null {
     case "browser": return { kind: "browser", id: "browser", title: "Files", inspectorOpen: false };
     case "dashboard": return { kind: "dashboard", id: "dashboard", title: "Dashboard" };
     case "graph": return {
-      kind: "graph", id: "graph", title: "Graph", mode: "semantic", scopeId: "", depth: 1,
+      kind: "graph", id: "graph", title: "Graph", depth: 1,
       expanded: {}, inspectorOpen: false, pendingSelectId: null,
       filters: { link: true, tag: true, mention: true, language: true, img: true, folder: true, markdown: true, source: true },
     };

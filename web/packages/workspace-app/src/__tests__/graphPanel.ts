@@ -27,7 +27,6 @@ import type {
   GraphView,
   GraphViewEdge,
   GraphViewNode,
-  LanguageGraphResponse,
 } from "../api/types";
 import { directoryNodeId } from "../graph/canvasNodes";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
@@ -78,12 +77,10 @@ export const graphServer = {
   streamGate: null as Promise<void> | null,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
-  /// What languageGraph answers for the whole language graph (language mode).
-  languageView: { nodes: [], edges: [], max_depth: 1 } as LanguageGraphResponse,
-  /// What languageGraph answers for a single language's detail.
+  /// What languageGraph answers for a single language's detail, which a
+  /// language node's inspector asks for.
   languageDetail: null as unknown,
   graphStreamCalls: 0,
-  languageGraphCalls: 0,
   fsGraphCalls: [] as Array<{ path: string; depth: number; cursor?: string }>,
 };
 
@@ -93,10 +90,8 @@ export function resetGraphServer(): void {
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
   graphServer.fsGate = null;
-  graphServer.languageView = { nodes: [], edges: [], max_depth: 1 };
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
-  graphServer.languageGraphCalls = 0;
   graphServer.fsGraphCalls = [];
   canvas.props = null;
   canvas.all = [];
@@ -156,13 +151,12 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         },
       ),
       graph: vi.fn(async () => graphServer.view),
-      languageGraph: vi.fn(async (o: { language?: string } = {}) => {
-        graphServer.languageGraphCalls += 1;
-        if (o.language) {
-          return { nodes: [], edges: [], max_depth: 1, detail: graphServer.languageDetail };
-        }
-        return graphServer.languageView;
-      }),
+      languageGraph: vi.fn(async () => ({
+        nodes: [],
+        edges: [],
+        max_depth: 1,
+        detail: graphServer.languageDetail,
+      })),
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
         if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
@@ -228,8 +222,6 @@ export function graphTab(over: Partial<GraphTab> = {}): GraphTab {
     kind: "graph",
     id: "graph-1",
     title: "graph",
-    mode: "semantic",
-    scopeId: "workspace",
     depth: 1,
     expanded: {},
     filters: {

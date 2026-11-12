@@ -196,7 +196,7 @@ describe("whatever is selected", () => {
       await selecting(select);
       expect(canvas.props?.focalIds).toEqual([""]);
       expect(canvas.props?.focalAnchor).toBeUndefined();
-      expect(canvas.props?.scopeKey, "one graph, one view").toBe("semantic:workspace");
+      expect(canvas.props?.scopeKey, "one graph, one view: no scope to change it").toBeUndefined();
     },
   );
 
@@ -228,56 +228,4 @@ describe("whatever is selected", () => {
     await settle();
     expect(tab.depth).toBe(2);
   });
-});
-
-describe("a tab scoped the way tabs once were", () => {
-  test.each([
-    ["tag:#t", "#t", [A, B]],
-    ["mention:@@alice", "@@alice", [B]],
-    ["contact:notes/a.md", A, [B, C]],
-    ["file:notes/a.md", A, [B, C]],
-    ["language:rust", "language:rust", [MAIN]],
-    ["dir:notes", NOTES, [A, B, C, NOTES_DEEP]],
-  ] as const)("%s reads as the workspace with %s selected", async (scopeId, selected, shown) => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId }));
-    expect(tab.scopeId).toBe("workspace");
-    expect(canvas.props?.selectedId).toBe(selected);
-    expect(visibleIds()).toEqual(expect.arrayContaining([...ROOT_LEVEL, ...shown]));
-  });
-});
-
-describe("the language graph", () => {
-  // Language mode's own graph: each language linked to the directories that
-  // hold its files, as the server spells them, with src shared by both.
-  function serveLanguageGraph(): void {
-    const lang = (name: string, files: number) =>
-      ({ kind: "language", id: `language:${name}`, label: name, language: name, files, code: files }) as const;
-    const dir = (path: string) =>
-      ({ kind: "directory", id: `directory:${path}`, label: path, path, files: 1, code: 1 }) as const;
-    const edge = (name: string, path: string) =>
-      ({ source: `language:${name}`, target: `directory:${path}`, kind: "language", rank: 1, files: 1, code: 1 }) as const;
-    graphServer.languageView = {
-      max_depth: 1,
-      nodes: [lang("Rust", 1), lang("Python", 2), dir("src"), dir("scripts")],
-      edges: [edge("Rust", "src"), edge("Python", "src"), edge("Python", "scripts")],
-    };
-  }
-
-  // A mode of its own, with its own rules. Depth 0 reads as "max" there.
-  // Depth 2 is past this fixture's slider (max_depth 1): it reaches the lens
-  // because the tab is built at 2 and the depth clamp returns early in
-  // language mode.
-  for (const depth of [0, 2]) {
-    test(`a language scope takes exactly one hop at depth ${depth}`, async () => {
-      serveLanguageGraph();
-      await mountGraphPanel(
-        GraphPanel,
-        layout,
-        graphTab({ mode: "language", scopeId: "language:Rust", depth }),
-      );
-      const edges = canvas.props?.visibleEdges ?? [];
-      expect(edges.map((e) => e.source), "only rust's own edge").toEqual(["language:Rust"]);
-      expect(visibleIds(), "python is two hops out, through src").not.toContain("language:Python");
-    });
-  }
 });

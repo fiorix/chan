@@ -265,8 +265,6 @@
         }
         if (t.kind !== "file") {
           if (t.kind === "graph") {
-            void t.mode;
-            void t.scopeId;
             void t.depth;
             void t.inspectorOpen;
             void t.pendingSelectId;

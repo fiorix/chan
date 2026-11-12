@@ -50,7 +50,6 @@ import {
   focusColorForWindow,
   browserTabLabel,
   graphTabLabel,
-  graphTitle,
   isMissingFileError,
   layout,
   openBrowserInActivePane,
@@ -1798,10 +1797,7 @@ describe("pane state", () => {
     const file = fileTab({ id: "file-host", path: "notes/host.md" });
     const pane = resetLayout([file]);
     const browser = openBrowserInActivePane();
-    const graph = openGraphInActivePane({
-      mode: "filesystem",
-      scopeId: "dir:notes",
-    });
+    const graph = openGraphInActivePane({ pendingSelectId: "notes" });
 
     detachTabToPaneEdge(pane.id, browser.id, pane.id, "right");
     const afterBrowser = layout.nodes[layout.rootId];
@@ -1865,68 +1861,32 @@ describe("pane state", () => {
   test("opens graph and file browser as first-class tabs", () => {
     resetLayout([]);
 
-    const graph = openGraphInActivePane({
-      mode: "filesystem",
-      scopeId: "dir:notes",
-      pendingSelectId: "notes/today.md",
-    });
+    const graph = openGraphInActivePane({ pendingSelectId: "notes/today.md" });
     const browser = openBrowserInActivePane();
 
     expect(activePane().tabs.map((tab) => tab.kind)).toEqual(["graph", "browser"]);
-    expect(graph.scopeId).toBe("dir:notes");
     expect(graph.pendingSelectId).toBe("notes/today.md");
     expect(browser.inspectorOpen).toBeTypeOf("boolean");
     expect(activePane().activeTabId).toBe(browser.id);
   });
 
-  test("the semantic graph opens on a node: the one named, or the workspace's own", () => {
+  test("a graph opens on a node: the one named, or the workspace's own", () => {
     resetLayout([]);
     // The workspace's node id is "" (server directory_node_id("")): as the
     // pending selection it makes load() select it and open the inspector.
-    expect(openGraphInActivePane({}).pendingSelectId).toBe("");
-    expect(openGraphInActivePane({ scopeId: "workspace" }).pendingSelectId).toBe("");
-    expect(openGraphInActivePane({ pendingSelectId: "@@Alice" }).pendingSelectId).toBe("@@Alice");
-    // The filesystem and language modes get no root focus.
-    expect(
-      openGraphInActivePane({ mode: "language", scopeId: "workspace" }).pendingSelectId,
-    ).toBeNull();
-    expect(
-      openGraphInActivePane({ mode: "filesystem", scopeId: "workspace" }).pendingSelectId,
-    ).toBeNull();
-  });
-
-  test("a semantic scope of the old shapes opens as the workspace with its node selected", () => {
-    resetLayout([]);
-    expect(openGraphInActivePane({ scopeId: "mention:@@Alice" })).toMatchObject({
-      scopeId: "workspace",
+    expect(openGraphInActivePane()).toMatchObject({
       title: "path=workspace",
-      pendingSelectId: "@@Alice",
+      pendingSelectId: "",
       expanded: { "": true },
     });
-    expect(openGraphInActivePane({ scopeId: "language:Rust" }).pendingSelectId).toBe("language:Rust");
-    expect(openGraphInActivePane({ scopeId: "dir:notes/sub" })).toMatchObject({
-      scopeId: "workspace",
-      pendingSelectId: "notes/sub",
-      expanded: { "": true, notes: true, "notes/sub": true },
-    });
-    // A selection the caller names wins over the one the scope implies.
-    expect(
-      openGraphInActivePane({ scopeId: "tag:#t", pendingSelectId: "notes/a.md" }).pendingSelectId,
-    ).toBe("notes/a.md");
-    // The filesystem graph is scoped still.
-    expect(openGraphInActivePane({ mode: "filesystem", scopeId: "dir:notes" })).toMatchObject({
-      scopeId: "dir:notes",
-      expanded: { "": true },
-    });
+    expect(openGraphInActivePane({ pendingSelectId: "@@Alice" }).pendingSelectId).toBe("@@Alice");
+    // The root stays opened whatever the caller opens.
+    expect(openGraphInActivePane({ expanded: { notes: true } }).expanded).toEqual({ "": true, notes: true });
   });
 
   test("round-trips graph and file browser tab state", async () => {
     resetLayout([]);
-    const graph = openGraphInActivePane({
-      mode: "language",
-      scopeId: "workspace",
-      depth: 0,
-    });
+    const graph = openGraphInActivePane({ depth: 2 });
     graph.inspectorOpen = true;
     graph.filters.img = false;
     const browser = openBrowserInActivePane();
@@ -1940,8 +1900,7 @@ describe("pane state", () => {
     const restoredGraph = tabs[0];
     expect(restoredGraph?.kind).toBe("graph");
     if (restoredGraph?.kind !== "graph") return;
-    expect(restoredGraph.mode).toBe("language");
-    expect(restoredGraph.depth).toBe(0);
+    expect(restoredGraph.depth).toBe(2);
     expect(restoredGraph.inspectorOpen).toBe(true);
     expect(restoredGraph.filters.img).toBe(false);
 
@@ -2157,8 +2116,6 @@ describe("pane state", () => {
     const browser1 = openBrowserInActivePane();
     const browser2 = openBrowserInActivePane();
     const graph1 = openGraphInActivePane({
-      mode: "semantic",
-      scopeId: "workspace",
       depth: 1,
     });
     const file1 = fileTab({ id: "f1", path: "notes/a.md" });
@@ -2447,7 +2404,6 @@ describe("pane state", () => {
     }
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
-      expect(graph.scopeId).toBe("workspace");
       expect(graph.pendingSelectId).toBe("notes/sub/a.md");
       expect(graph.expanded).toEqual({ "": true });
     }
@@ -2464,7 +2420,6 @@ describe("pane state", () => {
     const graph = activePane().tabs.find((t) => t.kind === "graph");
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
-      expect(graph.scopeId).toBe("workspace");
       // The dir is itself the pre-selected node so the inspector pops on mount.
       expect(graph.pendingSelectId).toBe("notes");
       expect(graph.expanded).toEqual({ "": true, notes: true });
@@ -2486,7 +2441,6 @@ describe("pane state", () => {
     expect(terminal.cwd).toBeUndefined();
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
-      expect(graph.scopeId).toBe("workspace");
       expect(graph.pendingSelectId, "the workspace's own node").toBe("");
     }
   });
@@ -2527,7 +2481,6 @@ describe("pane state", () => {
       const graph = live.tabs.find((t) => t.kind === "graph");
       expect(graph?.kind).toBe("graph");
       if (graph?.kind === "graph") {
-        expect(graph.scopeId).toBe("workspace");
         expect(graph.pendingSelectId).toBe("notes/x.md");
       }
     }
@@ -2883,12 +2836,12 @@ describe("pane state", () => {
       activePane().tabs.filter((t) => t.kind === "browser"),
     ).toHaveLength(2);
 
-    const g1 = openGraphInActivePane({ scopeId: "dir:notes" });
-    const g2 = openGraphInActivePane({ scopeId: "dir:notes" });
+    const g1 = openGraphInActivePane({ pendingSelectId: "notes" });
+    const g2 = openGraphInActivePane({ pendingSelectId: "notes" });
     expect(g1.id).not.toBe(g2.id);
-    // Same scope is fine; each instance keeps its own filters
+    // The same selection is fine; each instance keeps its own filters
     // and pending-select state.
-    expect(g1.scopeId).toBe(g2.scopeId);
+    expect(g1.pendingSelectId).toBe(g2.pendingSelectId);
     expect(
       activePane().tabs.filter((t) => t.kind === "graph"),
     ).toHaveLength(2);
@@ -3883,8 +3836,6 @@ describe("tab labels", () => {
     expect(tabLabel(root)).toBe("a\\b.md");
     expect(tabLabel(nested)).toBe("a\\b.md");
     expect(tabLabelInPane(nested, [nested])).toBe("a\\b.md");
-    expect(graphTitle("semantic", "file:dir/a\\b.md")).toBe("path=a\\b.md");
-    expect(graphTitle("semantic", "dir:x\\y")).toBe("path=x\\y/");
   });
 
   test("re-collapses when the conflicting tab leaves the pane", () => {
@@ -5077,68 +5028,6 @@ describe("truncateTabTitle", () => {
   });
 });
 
-describe("graphTitle", () => {
-  // Titles carry a `kind=` prefix (`path=` / `tag=` / `contact=` / `lang=`)
-  // so the tab strip surfaces the lens shape next to the payload.
-  test("workspace scope reads as 'path=workspace'", () => {
-    expect(graphTitle("semantic", "workspace")).toBe("path=workspace");
-    expect(graphTitle("filesystem", "workspace")).toBe("path=workspace");
-    expect(graphTitle("semantic", "global")).toBe("path=workspace");
-  });
-
-  test("file: scope reads as 'path=<basename>'", () => {
-    expect(graphTitle("semantic", "file:notes/sub/foo.md")).toBe("path=foo.md");
-    expect(graphTitle("semantic", "file:README.md")).toBe("path=README.md");
-    // File at the workspace root with no path falls back to 'path=workspace'.
-    expect(graphTitle("semantic", "file:")).toBe("path=workspace");
-  });
-
-  test("dir: scope reads as 'path=<basename>/'", () => {
-    expect(graphTitle("semantic", "dir:notes/sub")).toBe("path=sub/");
-    expect(graphTitle("semantic", "dir:notes")).toBe("path=notes/");
-    // dir: with no path is treated as the workspace root.
-    expect(graphTitle("semantic", "dir:")).toBe("path=workspace");
-  });
-
-  test("tag: scope reads as 'tag=#<name>'", () => {
-    expect(graphTitle("semantic", "tag:#search")).toBe("tag=#search");
-    // Tag without the leading # gets one prepended (then the kind prefix).
-    expect(graphTitle("semantic", "tag:foo")).toBe("tag=#foo");
-  });
-
-  test("mention: scope reads as 'mention=@@<name>'", () => {
-    expect(graphTitle("semantic", "mention:@@Lead")).toBe("mention=@@Lead");
-    // Mention without the leading @@ gets one prepended (then the prefix).
-    expect(graphTitle("semantic", "mention:Lead")).toBe("mention=@@Lead");
-  });
-
-  test("contact: scope reads as 'contact=<basename>'", () => {
-    expect(graphTitle("semantic", "contact:alice")).toBe("contact=alice");
-    // Workspace-relative contact paths peel to the file basename.
-    expect(graphTitle("semantic", "contact:Contacts/alice.md")).toBe("contact=alice.md");
-  });
-
-  test("language: scope reads as 'lang=<name>'", () => {
-    expect(graphTitle("semantic", "language:rust")).toBe("lang=rust");
-    expect(graphTitle("semantic", "language:typescript")).toBe("lang=typescript");
-  });
-
-  test("git_repo: scope renders the repo basename", () => {
-    expect(graphTitle("semantic", "git_repo:project/chan")).toBe("chan");
-  });
-
-  test("language mode keeps its dedicated label regardless of scope", () => {
-    expect(graphTitle("language", "workspace")).toBe("Languages");
-    expect(graphTitle("language", "file:foo.md")).toBe("Languages");
-  });
-
-  test("unknown prefix peels the payload after the first colon", () => {
-    expect(graphTitle("semantic", "weird:abc")).toBe("abc");
-    // Truly unknown shape (no colon) falls through to the raw value.
-    expect(graphTitle("semantic", "raw-thing")).toBe("raw-thing");
-  });
-});
-
 describe("browserTabLabel", () => {
   function browserTab(overrides: Partial<BrowserTab> = {}): BrowserTab {
     return {
@@ -5229,8 +5118,6 @@ describe("graphTabLabel", () => {
       kind: "graph",
       id: "g-1",
       title: "workspace",
-      mode: "semantic",
-      scopeId: "workspace",
       depth: 1,
       expanded: { "": true },
       filters: {
@@ -5279,10 +5166,10 @@ describe("graphTabLabel", () => {
     ).toBe("#search");
   });
 
-  test("kind= prefix from graphTitle survives node selection", () => {
-    // The tab strip keeps showing path= / tag= / contact= / lang=
-    // even after the user taps a node. graphTitle() seeds tab.title
-    // with that prefix; graphTabLabel preserves it.
+  test("the title's prefix survives node selection", () => {
+    // A graph tab's title is `path=workspace`; the label keeps the
+    // prefix and puts the selected node's label after it. A tab saved
+    // with a title of an older shape keeps that one's prefix.
     expect(
       graphTabLabel(
         graphTab({
@@ -5319,16 +5206,9 @@ describe("graphTabLabel", () => {
         }),
       ),
     ).toBe("lang=lib.rs");
-    // `Languages` top-level overview (mode === "language") has no
-    // `=`; selection still renders the bare label.
+    // A title with no `=` renders the bare label.
     expect(
-      graphTabLabel(
-        graphTab({
-          title: "Languages",
-          mode: "language",
-          selectedNodeLabel: "Rust",
-        }),
-      ),
+      graphTabLabel(graphTab({ title: "Languages", selectedNodeLabel: "Rust" })),
     ).toBe("Rust");
   });
 

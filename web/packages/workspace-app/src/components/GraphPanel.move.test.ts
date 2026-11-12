@@ -60,20 +60,6 @@ beforeEach(() => {
       g.edge("notes/c.md", "@@bob", "mention"),
     ],
   };
-  const lang = (name: string) =>
-    ({ kind: "language", id: `language:${name}`, label: name, language: name, files: 1, code: 1 }) as const;
-  graphServer.languageView = {
-    max_depth: 1,
-    nodes: [
-      lang("Rust"),
-      lang("Python"),
-      { kind: "directory", id: "directory:src", label: "src", path: "src", files: 2, code: 2 },
-    ],
-    edges: [
-      { source: "language:Rust", target: "directory:src", kind: "language", rank: 1, files: 1, code: 1 },
-      { source: "language:Python", target: "directory:src", kind: "language", rank: 1, files: 1, code: 1 },
-    ],
-  };
 });
 
 afterEach(async () => {
@@ -93,13 +79,13 @@ async function renderSplit(tab: GraphTab): Promise<{ first: LeafNode; second: Le
     first: {
       kind: "leaf",
       id: "first",
-      tabs: [tab, graphTab({ id: "stays", scopeId: "dir:notes" })],
+      tabs: [tab, graphTab({ id: "stays" })],
       activeTabId: tab.id,
     },
     second: {
       kind: "leaf",
       id: "second",
-      tabs: [graphTab({ id: "host", scopeId: "dir:notes" })],
+      tabs: [graphTab({ id: "host" })],
       activeTabId: "host",
     },
   } as typeof layout.nodes;
@@ -133,14 +119,13 @@ describe("a graph tab moved to another pane", () => {
   // workspace, with the mention selected.
   test("keeps the selection of a workspace graph opened at a node", async () => {
     const { first, second } = await renderSplit(
-      graphTab({ id: "lens", title: "path=workspace", scopeId: "workspace", pendingSelectId: "@@alice" }),
+      graphTab({ id: "lens", title: "path=workspace", pendingSelectId: "@@alice" }),
     );
     const source = first.tabs[0] as GraphTab;
     expect(canvas.all[0]!.selectedId, "selected before the move").toBe("@@alice");
     expect(tabLabel(source)).toBe("path=@@alice");
 
     const { tab, moved } = await moveAcross(second);
-    expect(moved.scopeKey).toBe("semantic:workspace");
     expect(moved.selectedId, "the new panel selects the tab's node").toBe("@@alice");
     expect(tab.selectedNodeId).toBe("@@alice");
     expect(tab.pendingSelectId, "resolved by the load, not left waiting").toBeNull();
@@ -170,7 +155,7 @@ describe("a graph tab moved to another pane", () => {
 
   test("keeps Details closed when it was closed", async () => {
     const { first, second } = await renderSplit(
-      graphTab({ id: "lens", title: "path=workspace", scopeId: "workspace", pendingSelectId: "notes/a.md" }),
+      graphTab({ id: "lens", title: "path=workspace", pendingSelectId: "notes/a.md" }),
     );
     (first.tabs[0] as GraphTab).inspectorOpen = false;
     await settle();
@@ -180,22 +165,9 @@ describe("a graph tab moved to another pane", () => {
     expect(tab.inspectorOpen, "resuming a selection does not open Details").toBe(false);
   });
 
-  test("keeps the selection of the language graph", async () => {
-    const { first, second } = await renderSplit(
-      graphTab({ id: "lens", title: "Languages", mode: "language", scopeId: "workspace", depth: 0 }),
-    );
-    canvas.all[0]!.onSelect("language:Rust");
-    await settle();
-    expect((first.tabs[0] as GraphTab).selectedNodeId).toBe("language:Rust");
-
-    const { moved } = await moveAcross(second);
-    expect(moved.scopeKey).toBe("language:workspace");
-    expect(moved.selectedId).toBe("language:Rust");
-  });
-
   test("drops a selection whose node is gone, without waiting on it", async () => {
     const { first, second } = await renderSplit(
-      graphTab({ id: "lens", title: "path=workspace", scopeId: "workspace", pendingSelectId: "@@bob" }),
+      graphTab({ id: "lens", title: "path=workspace", pendingSelectId: "@@bob" }),
     );
     expect((first.tabs[0] as GraphTab).selectedNodeId).toBe("@@bob");
     graphServer.view = {

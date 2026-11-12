@@ -87,9 +87,7 @@ afterEach(() => {
 
 /// Every graph request the panel has made so far.
 function loads(): number {
-  return (
-    graphServer.graphStreamCalls + graphServer.languageGraphCalls + graphServer.fsGraphCalls.length
-  );
+  return graphServer.graphStreamCalls + graphServer.fsGraphCalls.length;
 }
 
 function reloadCommand(): void {
@@ -152,24 +150,6 @@ describe("what reloads the graph", () => {
     expect(spines()).toBe(before);
   });
 
-  test("a mode change does", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
-    const before = loads();
-    tab.mode = "language";
-    await settle();
-    expect(loads()).toBeGreaterThan(before);
-  });
-
-  test("in the filesystem graph, a scope or depth change does", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ mode: "filesystem" }));
-    for (const change of [() => (tab.scopeId = "dir:notes"), () => (tab.depth = 2)]) {
-      const before = graphServer.fsGraphCalls.length;
-      change();
-      await settle();
-      expect(graphServer.fsGraphCalls.length, change.toString()).toBeGreaterThan(before);
-    }
-  });
-
   test("an inspector, filter or expansion change does not", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     const before = loads();
@@ -182,7 +162,7 @@ describe("what reloads the graph", () => {
   });
 
   test("a reload keeps the drawn graph until the new one arrives", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
     const drawn = canvas.props!.nodes.length;
     expect(drawn).toBeGreaterThan(0);
     let release!: () => void;
@@ -200,7 +180,7 @@ describe("what reloads the graph", () => {
 describe("the filesystem spine under the semantic graph", () => {
   test("is fetched before the semantic stream and paged to the end", async () => {
     graphServer.fsPageSize = 2;
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await mountGraphPanel(GraphPanel, layout, graphTab());
 
     const seeds = graphServer.fsGraphCalls.filter((c) => c.depth === 1 && c.path === "");
     expect(seeds.map((c) => c.cursor), "two pages of two").toEqual([undefined, "2"]);
@@ -212,7 +192,7 @@ describe("the filesystem spine under the semantic graph", () => {
     await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+      graphTab({ expanded: { "": true } }),
     );
     const ids = canvas.props!.nodes.map((n) => n.id);
     expect(ids).toEqual(expect.arrayContaining(["", "directory:src", "directory:docs"]));
@@ -253,21 +233,8 @@ describe("while the workspace index is not ready", () => {
     expect(placeholder()).toBe("graph unavailable while the workspace recovers");
   });
 
-  test("an empty filesystem graph does not blame the index", async () => {
-    graphServer.fs = { nodes: [], edges: [] };
-    setIndex("building");
-    const { target } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "file:nowhere.md", mode: "filesystem" }),
-    );
-    expect(target.querySelector(".canvas .placeholder")?.textContent?.trim()).toBe(
-      "no filesystem graph nodes for this scope",
-    );
-  });
-
   test("dead-end files stay out of the graph until it is ready", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "file:notes/a.md" }));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes/a.md" }));
     expect(visibleIds()).toContain(GONE);
 
     setIndex("building");
@@ -276,9 +243,9 @@ describe("while the workspace index is not ready", () => {
     expect(canvas.props!.visibleEdges.some((e) => e.target === GONE)).toBe(false);
   });
 
-  test("the graph reloads once when indexing finishes, in the semantic graph only", async () => {
+  test("the graph reloads once when indexing finishes", async () => {
     setIndex("building");
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
+    await mountGraphPanel(GraphPanel, layout, graphTab());
     const before = graphServer.graphStreamCalls;
 
     setIndex("idle");
@@ -287,33 +254,17 @@ describe("while the workspace index is not ready", () => {
     setIndex("idle");
     await settle();
     expect(graphServer.graphStreamCalls, "not again without a new build").toBe(before + 1);
-
-    tab.mode = "filesystem";
-    await settle();
-    const fsBefore = loads();
-    setIndex("building");
-    await settle(2);
-    setIndex("idle");
-    await settle();
-    expect(loads(), "the filesystem graph does not use the index").toBe(fsBefore);
   });
 });
 
 describe("watching the directories it shows", () => {
   test("subscribes to them, follows what it shows, and lets them go on unmount", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     const id = `graph-tab-${tab.id}`;
     const watched = () => Object.keys(fbTreeInstance(id)?.subscribedDirs ?? {}).filter(Boolean).sort();
+    // Every directory the loaded graph holds a file of, opened or not: a
+    // save in any of them changes what a selection can reveal.
     expect(watched()).toEqual(["notes"]);
-
-    tab.scopeId = "workspace";
-    tab.mode = "filesystem";
-    await settle();
-    expect(watched(), "the filesystem graph of the workspace shows src and docs too").toEqual([
-      "docs",
-      "notes",
-      "src",
-    ]);
 
     unmountGraphPanels();
     expect(fbTreeInstance(id)).toBeNull();
@@ -330,27 +281,6 @@ describe("watching the directories it shows", () => {
       graphReloadSignal.nonce += 1;
       await vi.runAllTimersAsync();
       expect(graphServer.graphStreamCalls).toBe(before + 1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  test("in the filesystem graph, a change inside the scope reloads it; one outside does not", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes", mode: "filesystem" }));
-    // So "no reload" is judged after any reload would land.
-    vi.useFakeTimers();
-    try {
-      const change = async (paths: string[]) => {
-        graphReloadSignal.paths = paths;
-        graphReloadSignal.nonce += 1;
-        await vi.runAllTimersAsync();
-      };
-
-      const before = graphServer.fsGraphCalls.length;
-      await change(["src/other.rs"]);
-      expect(graphServer.fsGraphCalls.length, "src is not in dir:notes").toBe(before);
-      await change(["notes/new.md"]);
-      expect(graphServer.fsGraphCalls.length).toBeGreaterThan(before);
     } finally {
       vi.useRealTimers();
     }

@@ -17,9 +17,6 @@
   // it in `visibleEdges` / `visibleNodeIds`. GraphCanvas reuses the
   // laid-out node of every id that stays visible and re-warms the
   // simulation around the change.
-  //
-  // The filesystem and language modes keep rules of their own
-  // (`graph/scopeView`): a scope id picks what they load and pin.
 
   import { api } from "../api/client";
   import { isWorkspaceRootMissingError } from "../api/errors";
@@ -30,11 +27,9 @@
     FsGraphResponse,
     GraphViewEdge,
     GraphViewNode,
-    LanguageGraphResponse,
   } from "../api/types";
   import {
     activeGraphTab,
-    graphTitle,
     openBrowserInActivePane,
     openGraphInActivePane,
     openInActivePane,
@@ -68,21 +63,12 @@
     fbWatchReconcile,
     fbWatchDispose,
   } from "../state/fbWatch.svelte";
-  import { type ScopeOption } from "../state/scope";
   import { basename, parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
   import { menuEscape } from "./menuEscape";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
-  import {
-    AtSign,
-    CodeXml,
-    FileText,
-    Folder,
-    HardDrive,
-    Hash,
-    X,
-  } from "@lucide/svelte";
+  import { HardDrive, X } from "@lucide/svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import Inspector from "./Inspector.svelte";
@@ -97,12 +83,7 @@
     type FileKind,
   } from "../state/kinds";
   import { chordFor } from "../state/shortcuts";
-  import {
-    FS_GRAPH_DEPTH_MAX,
-    graphDepthCap,
-    relativeDepth,
-    shallowestFileDepth,
-  } from "../graph/depth";
+  import { FS_GRAPH_DEPTH_MAX, shallowestFileDepth } from "../graph/depth";
   import {
     directoryNodeId,
     type CanvasEdge as RenderedEdge,
@@ -117,7 +98,6 @@
     type DraftLayer,
   } from "../graph/draftNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
-  import { scopeFocalAnchor, scopeFocalIds, scopeNodeIds } from "../graph/scopeView";
   import {
     graphNodeIds,
     openBelow,
@@ -125,7 +105,6 @@
     openedForPath,
     selectedDirectory,
     selectionDepthCap,
-    selectionOfScope,
   } from "../graph/selectionView";
 
   let {
@@ -149,197 +128,48 @@
   const graphState = $derived(tab);
   const visible = $derived(active);
 
-  /// The graph tab carries its own `scopeId`, and `currentScope`
-  /// resolves straight from it via `synthesizeScope`. The rest of the
-  /// panel branches on `currentScope.kind` (filesystemMode, seedIds,
-  /// BFS shape, etc.).
-  const currentScope = $derived<ScopeOption | null>(
-    synthesizeScope(graphState.scopeId),
-  );
-
-  /// The semantic graph is the one graph; the filesystem and language modes
-  /// are graphs of their own.
-  const oneGraph = $derived(graphState.mode === "semantic");
-
-  // A semantic tab that still carries a scope of its own (one built before
-  // the graph was one, by a path that does not go through the tab store's
-  // openers) reads as the workspace with that scope's node selected.
-  untrack(() => {
-    if (tab.mode !== "semantic" || tab.scopeId === "workspace") return;
-    const scoped = selectionOfScope(tab.scopeId);
-    if (scoped) {
-      if (tab.pendingSelectId === null && tab.selectedNodeId == null) {
-        tab.pendingSelectId = scoped.select;
-      }
-      if (scoped.dir !== null) tab.expanded = { ...openedForPath(scoped.dir), ...tab.expanded };
-    }
-    tab.scopeId = "workspace";
-    tab.title = graphTitle("semantic", "workspace");
-  });
-
-  /// A graph tab's scopeId is `workspace` or one of six prefixes:
-  /// `file:` / `dir:` (path lens), `tag:` and `mention:` (lens
-  /// centered on the tag or mention node), `contact:` (contact lens
-  /// -- bidirectional BFS from the contact file picks up backlinks),
-  /// and `language:` (language lens -- 1-hop neighbours). Any other
-  /// id resolves to null.
-  function synthesizeScope(scopeId: string): ScopeOption | null {
-    if (scopeId === "workspace") return { id: "workspace", kind: "workspace", label: "workspace" };
-    if (scopeId.startsWith("file:")) {
-      const path = scopeId.slice("file:".length);
-      if (!path) return null;
-      return { id: scopeId, kind: "file", label: path, path };
-    }
-    if (scopeId.startsWith("dir:")) {
-      const path = scopeId.slice("dir:".length);
-      if (!path) return null;
-      return { id: scopeId, kind: "dir", label: path, path };
-    }
-    if (scopeId.startsWith("tag:")) {
-      const nodeId = scopeId.slice("tag:".length);
-      if (!nodeId) return null;
-      // Strip the leading `#` for the label: the scope header renders it
-      // as `#${label}`, so the raw `#search` nodeId would double-hash.
-      return { id: scopeId, kind: "tag", label: nodeId.replace(/^#/, ""), nodeId };
-    }
-    if (scopeId.startsWith("mention:")) {
-      const nodeId = scopeId.slice("mention:".length);
-      if (!nodeId) return null;
-      // Strip the leading `@@` for the label: the scope header renders it
-      // as `@@${label}`, so the raw `@@Lead` nodeId would double-sigil.
-      return { id: scopeId, kind: "mention", label: nodeId.replace(/^@@/, ""), nodeId };
-    }
-    if (scopeId.startsWith("contact:")) {
-      const relPath = scopeId.slice("contact:".length);
-      if (!relPath) return null;
-      // Label peels to the file basename so the scope header reads
-      // as the contact name; the full path stays on `relPath` for
-      // the BFS seed.
-      const label = basename(relPath);
-      return { id: scopeId, kind: "contact", label, relPath };
-    }
-    if (scopeId.startsWith("language:")) {
-      const language = scopeId.slice("language:".length);
-      if (!language) return null;
-      return { id: scopeId, kind: "language", label: language, language };
-    }
-    return null;
-  }
-
-  /// The breadcrumb over the inspector: the path from the workspace down to
-  /// where the graph is, one step per directory. In the one graph that is
-  /// the selected file's or directory's path, and a step selects its
-  /// directory; with a tag, a mention or a language selected, or nothing,
-  /// it is the workspace alone. In filesystem mode it is the scope's path,
-  /// and a step re-scopes the tab there in place. The last step is where
-  /// the graph is, and is not a button.
+  /// The breadcrumb over the inspector: the selected file's or directory's
+  /// path from the workspace down, one step per directory. A step selects
+  /// its directory; the last is the selection itself, and is not a button.
+  /// With a tag, a mention or a language selected, or nothing, it is the
+  /// workspace alone.
   type Crumb = { label: string; key: string; current: boolean; go: () => void };
   const scopeAncestors = $derived.by<Crumb[]>(() => {
-    if (oneGraph) {
-      const path =
-        selectedNode && (selectedNode.kind === "file" || selectedNode.kind === "folder")
-          ? selectedNode.path
-          : null;
-      const crumbs: Crumb[] = [
-        { label: "workspace", key: "", current: path === "", go: () => selectFromCrumb("") },
-      ];
-      const segments = path ? path.split("/") : [];
-      for (let i = 0; i < segments.length; i++) {
-        const sub = segments.slice(0, i + 1).join("/");
-        crumbs.push({
-          label: segments[i],
-          key: sub,
-          current: i === segments.length - 1,
-          go: () => selectFromCrumb(directoryNodeId(sub)),
-        });
-      }
-      return crumbs;
-    }
-    if (!currentScope) return [];
-    const here = (scopeId: string): (() => void) => () => rescopeFromHere(scopeId);
-    if (currentScope.kind === "workspace") {
-      return [{ label: "workspace", key: "workspace", current: true, go: here("workspace") }];
-    }
-    if (currentScope.kind !== "file" && currentScope.kind !== "dir") {
-      return [];
-    }
-    const path = currentScope.path;
-    if (!path) {
-      return [{ label: "workspace", key: "workspace", current: true, go: here("workspace") }];
-    }
-    const out: Crumb[] = [
-      { label: "workspace", key: "workspace", current: false, go: here("workspace") },
+    const path =
+      selectedNode && (selectedNode.kind === "file" || selectedNode.kind === "folder")
+        ? selectedNode.path
+        : null;
+    const crumbs: Crumb[] = [
+      { label: "workspace", key: "", current: path === "", go: () => selectFromCrumb("") },
     ];
-    const segments = path.split("/");
+    const segments = path ? path.split("/") : [];
     for (let i = 0; i < segments.length; i++) {
       const sub = segments.slice(0, i + 1).join("/");
-      const isLast = i === segments.length - 1;
-      // Intermediate hops are always directory scopes; the leaf
-      // mirrors the current scope's kind so a file-scoped graph
-      // ends on `file:`, a dir-scoped one on `dir:`.
-      const scopeId =
-        isLast && currentScope.kind === "file"
-          ? `file:${sub}`
-          : `dir:${sub}`;
-      out.push({ label: segments[i], key: scopeId, current: isLast, go: here(scopeId) });
+      crumbs.push({
+        label: segments[i],
+        key: sub,
+        current: i === segments.length - 1,
+        go: () => selectFromCrumb(directoryNodeId(sub)),
+      });
     }
-    return out;
+    return crumbs;
   });
 
-  /// A breadcrumb step in the one graph: select that directory's node, when
-  /// the loaded graph has it.
+  /// A breadcrumb step: select that directory's node, when the loaded graph
+  /// has it.
   function selectFromCrumb(id: string): void {
     const n = nodeById.get(id);
     if (n) selectFromList(n);
   }
 
-  /// Re-scope the current graph in place: depth resets to 1 so a
-  /// freshly-scoped graph starts tight; selection clears so the
-  /// inspector lands on the new scope's body. Used by the
-  /// breadcrumb's click handler.
-  function rescopeFromHere(scopeId: string): void {
-    if (scopeId === graphState.scopeId) return;
-    graphState.scopeId = scopeId;
-    graphState.depth = 1;
-    graphState.pendingSelectId = null;
-    selectedId = null;
-  }
-
-  /// Double-click a graph node. For a directory node in filesystem mode
-  /// this expands/collapses it in place (File Browser parity): expanding
-  /// reveals the directory's next degree (find -d 1), collapsing hides its
-  /// subtree, with no graph reload. Rescope ("graph from here") stays on
-  /// the inspector, right-click, and chord, not the double-click. The
-  /// preceding tap already set the selection, so this reads it directly.
+  /// Double-click a graph node: a directory opens or closes in place, as a
+  /// File Browser's does. The loaded graph holds the whole tree, so this
+  /// only flips the directory's flag in the opened set and the drawn set
+  /// follows; closing keeps what was opened below it for the next opening.
+  /// The preceding tap already set the selection, so this reads it.
   function onGraphDoubleClick(): void {
-    if (
-      filesystemMode &&
-      selectedFsNode &&
-      isFsDirectory(selectedFsNode) &&
-      selectedFsNode.path
-    ) {
-      void toggleDirExpand(selectedFsNode.path);
-      return;
-    }
-    // In semantic mode the directory spine ships in the
-    // already-loaded /api/graph payload, so a directory double-click
-    // toggles its children purely client-side - no fs-graph fetch, no
-    // mode flip. The fresh from-here graph is semantic, so this is
-    // what makes double-click-to-expand work there without first
-    // running "Graph from here" on the root. The directory node is a
-    // `folder`-kind RenderedNode whose `path` is the bare workspace-
-    // relative directory path (the expanded set is keyed by path).
-    if (selectedNode && selectedNode.kind === "folder") {
-      toggleSemanticDirExpand(selectedNode.path);
-    }
-  }
-
-  /// Toggle a directory's expansion in semantic mode. Unlike the
-  /// filesystem-mode `toggleDirExpand`, the whole spine is already
-  /// loaded by the graphStream fetch, so expanding just flips the
-  /// `expanded` flag and `scopedNodeIds` re-derives the visible set;
-  /// there is no per-directory degree to fetch.
-  function toggleSemanticDirExpand(path: string): void {
+    if (!selectedNode || selectedNode.kind !== "folder") return;
+    const path = selectedNode.path;
     if (graphState.expanded[path]) {
       delete graphState.expanded[path];
     } else {
@@ -387,24 +217,25 @@
 
   // ---- the depth, which is the selected node's ---------------------------
 
-  /// The directory the depth acts on in the one graph: the selected one,
-  /// the root when nothing is selected, null when the selection is any
-  /// other node (its depth is hops) and in the other modes.
-  const depthDir = $derived.by(() => (oneGraph ? selectedDirectory(nodes, selectedId) : null));
-  /// A directory other than the root can be closed, which is depth 0;
-  /// language mode reads 0 as "max".
-  const depthMin = $derived.by(() =>
-    languageMode || (depthDir !== null && depthDir !== "") ? 0 : 1,
-  );
-  /// What the depth control shows. In the one graph a directory's depth is
-  /// read from the tree, so it follows a double-click as well as the
-  /// slider; any other node's is the hops the tab holds.
+  /// The directory the depth acts on: the selected one, the root when
+  /// nothing is selected, null when the selection is any other node (its
+  /// depth is hops).
+  const depthDir = $derived.by(() => selectedDirectory(nodes, selectedId));
+  /// A directory other than the root can be closed, which is depth 0.
+  const depthMin = $derived.by(() => (depthDir !== null && depthDir !== "" ? 0 : 1));
+  /// The largest depth the selected node can use: the levels below a
+  /// directory, the hops a file's, tag's or mention's references run.
+  const depthCap = $derived.by(() => selectionDepthCap(nodes, edges, selectedId));
+  /// Nothing further to reveal from the selected node: the control is
+  /// disabled and marks its value as the maximum.
+  const depthShallow = $derived.by(() => depthCap <= depthMin);
+  /// What the depth control shows. A directory's depth is read from the
+  /// tree, so it follows a double-click as well as the slider; any other
+  /// node's is the hops the tab holds.
   const depthValue = $derived.by(() =>
-    !oneGraph
-      ? graphState.depth
-      : depthDir !== null
-        ? Math.min(openedDepth(nodes, expandedDirs, depthDir), depthCap)
-        : Math.max(1, Math.min(graphState.depth, depthCap)),
+    depthDir !== null
+      ? Math.min(openedDepth(nodes, expandedDirs, depthDir), depthCap)
+      : Math.max(1, Math.min(graphState.depth, depthCap)),
   );
   function setDepth(value: number): void {
     if (depthDir === null) {
@@ -420,7 +251,7 @@
   /// a directory's is read from the tree as it stands, any other node
   /// begins at one hop.
   function depthFollowsSelection(next: string | null): void {
-    if (oneGraph && next !== selectedId) graphState.depth = 1;
+    if (next !== selectedId) graphState.depth = 1;
   }
 
   /// Whether this panel's tab came from an opener and has not yet shown a
@@ -446,29 +277,19 @@
     graphState.expanded = openBelow(nodes, expandedDirs, dir, Math.min(reveal, FS_GRAPH_DEPTH_MAX));
   }
 
-  /// Id of the rendered node for the directory at `path`: the bare path
-  /// in filesystem mode, `directoryNodeId(path)` otherwise.
-  function renderedDirectoryId(path: string): string {
-    return filesystemMode ? path : directoryNodeId(path);
-  }
-
+  /// Asks the canvas to fit the directory at `path`, its parent and what
+  /// opening it brought into view, once the drawn set has followed.
   async function requestExpansionFitAfterUpdate(
     path: string,
     before: Set<string>,
   ): Promise<void> {
     await tick();
-    const ids = new Set<string>([renderedDirectoryId(path)]);
-    if (path) ids.add(renderedDirectoryId(parentDir(path)));
+    const ids = new Set<string>([directoryNodeId(path)]);
+    if (path) ids.add(directoryNodeId(parentDir(path)));
     for (const id of visibleNodeIds) {
       if (!before.has(id)) ids.add(id);
     }
     expansionFitRequest = { nonce: ++expansionFitNonce, ids: [...ids] };
-  }
-
-  /// True once at least one child of `dir` is in the loaded spine, so a
-  /// re-expand can show it without another fetch.
-  function dirChildrenLoaded(dir: string): boolean {
-    return fsNodes.some((n) => n.path !== dir && parentDir(n.path) === dir);
   }
 
   function fsEdgeKey(edge: FsGraphEdge): string {
@@ -503,26 +324,6 @@
     return [...edgeByKey.values()];
   }
 
-  /// Merge a single-directory fs-graph batch into the accumulated spine
-  /// and re-project the rendered node / edge sets.
-  function mergeFsResponse(fs: FsGraphResponse): void {
-    const nodeById = new Map(fsNodes.map((n) => [n.id, n]));
-    for (const n of fs.nodes) nodeById.set(n.id, n);
-    fsNodes = [...nodeById.values()];
-    fsEdgesRaw = joinFsHardlinks(fsNodes, [...fsEdgesRaw, ...fs.edges]);
-    const merged: FsGraphResponse = {
-      root: fs.root,
-      scope: fs.scope,
-      path: fs.path,
-      depth: fs.depth,
-      nodes: fsNodes,
-      edges: fsEdgesRaw,
-      truncated: fsTruncated,
-    };
-    nodes = mapFsNodes(merged);
-    edges = mapFsEdges(merged);
-  }
-
   /// Per-batch node budget for cursor-paged fs-graph delivery. Within the
   /// server's [16, 256] clamp; small enough that appending a batch plus a
   /// low-alpha layout pass stays within a frame, large enough to keep the
@@ -542,136 +343,11 @@
     });
   }
 
-  /// Fetch one directory's next degree (find -d 1), cursor-paged so a very
-  /// wide directory fills in gradually. Drops the result if a full reload
-  /// superseded it mid-flight.
-  async function fetchDirChildren(dir: string): Promise<void> {
-    const seq = graphLoadSeq;
-    let cursor: string | undefined;
-    let fs: FsGraphResponse;
-    try {
-      do {
-        fs = await api.fsGraph({
-          scope: "directory",
-          path: dir,
-          depth: 1,
-          limit: GRAPH_BATCH_NODES,
-          cursor,
-        });
-        if (seq !== graphLoadSeq) return;
-        fsTruncated = fsTruncated || fs.truncated;
-        mergeFsResponse(fs);
-        cursor = fs.cursor ?? undefined;
-        if (!fs.done && cursor) {
-          await yieldToFrame();
-          if (seq !== graphLoadSeq) return;
-        }
-      } while (!fs.done && cursor);
-    } catch {
-      // Best-effort; leave the directory as-is if a batch fails.
-    }
-  }
-
-  /// Directory paths in the currently-loaded graph. Filesystem mode
-  /// emits `directory`-kind fs-graph nodes; semantic mode emits
-  /// `folder`-kind RenderedNodes (the /api/graph directory spine).
-  /// Both carry the bare workspace-relative path on `path`, which is
-  /// how the `expanded` set is keyed.
-  function loadedDirectoryPaths(): string[] {
-    if (filesystemMode) {
-      return fsNodes.flatMap((n) =>
-        n.kind === "directory" && n.path ? [n.path] : [],
-      );
-    }
-    return nodes.flatMap((n) =>
-      n.kind === "folder" && n.path ? [n.path] : [],
-    );
-  }
-
-  /// Re-establish the expanded set so the depth slider expands
-  /// the directory tree FROM THE CURRENTLY SELECTED directory downward
-  /// by `depth` levels. Selecting the workspace root and cranking the
-  /// slider to its max reveals the whole workspace; selecting a
-  /// directory two levels deep expands only that subtree. The selected
-  /// directory's ancestors stay expanded so the revealed subtree stays
-  /// attached to the spine. When nothing (or a non-directory) is
-  /// selected the seed falls back to the scope root, keeping the
-  /// "find -d N from the scope root" behaviour. Authoritative:
-  /// the slider overrides individual expand / collapse toggles.
-  function seedExpandedFromSelected(depth: number): void {
-    const scopeRoot = currentScope?.kind === "dir" ? currentScope.path : "";
-    // The slider seeds from the selected directory when one is
-    // selected; otherwise from the scope root. A selected file (or
-    // non-directory node) seeds from the scope root, not the file's
-    // parent, so cranking the slider over a file behaves like "expand
-    // the whole scope" rather than a surprise re-root.
-    const selectedDirPath =
-      filesystemMode && selectedFsNode && isFsDirectory(selectedFsNode)
-        ? selectedFsNode.path
-        : !filesystemMode && selectedNode?.kind === "folder"
-          ? selectedNode.path
-          : null;
-    const seedRoot = selectedDirPath ?? scopeRoot;
-    const next: Record<string, boolean> = { "": true };
-    if (scopeRoot) next[scopeRoot] = true;
-    // Keep every ancestor directory between the scope root and the
-    // seed root expanded so the seeded subtree is reachable from the
-    // spine (otherwise the ancestor-expanded gate would hide it).
-    if (seedRoot && seedRoot !== scopeRoot) {
-      const rel =
-        scopeRoot && seedRoot.startsWith(`${scopeRoot}/`)
-          ? seedRoot.slice(scopeRoot.length + 1)
-          : seedRoot;
-      const parts = rel.split("/");
-      let prefix = scopeRoot;
-      for (const part of parts) {
-        prefix = prefix ? `${prefix}/${part}` : part;
-        next[prefix] = true;
-      }
-    }
-    if (seedRoot) next[seedRoot] = true;
-    // Expand every directory within `depth` levels below the seed
-    // root. relativeDepth(seedRoot, dir) === 1 is a direct child;
-    // a directory at relative depth d expands its own children when
-    // d < depth (find -d N semantics).
-    for (const dir of loadedDirectoryPaths()) {
-      const rel = relativeDepth(seedRoot, dir);
-      if (rel >= 1 && rel < depth) next[dir] = true;
-    }
-    graphState.expanded = next;
-  }
-
-  /// Fetch children for any expanded directory whose degree isn't loaded
-  /// (a reload replaced the spine, or a restored snapshot opened a
-  /// directory beyond the fetched depth).
-  async function reconcileExpandedChildren(): Promise<void> {
-    const expanded = graphState.expanded;
-    for (const dir of Object.keys(expanded)) {
-      if (!expanded[dir] || dir === "") continue;
-      if (!dirChildrenLoaded(dir)) await fetchDirChildren(dir);
-    }
-  }
-
-  /// Toggle a directory node's expansion (double-click). Expanding fetches
-  /// its next degree if not already loaded; collapsing hides its subtree.
-  async function toggleDirExpand(path: string): Promise<void> {
-    if (!path) return;
-    if (graphState.expanded[path]) {
-      delete graphState.expanded[path];
-    } else {
-      const before = new Set(visibleNodeIds);
-      graphState.expanded[path] = true;
-      if (!dirChildrenLoaded(path)) await fetchDirChildren(path);
-      await requestExpansionFitAfterUpdate(path, before);
-    }
-  }
-
   /// "Graph from here" opens a NEW graph tab with the clicked node selected:
   /// the same graph, on that node. A directory comes with the path down to
   /// it opened, so its children show; a file is revealed by its selection.
   function graphFromHere(path: string, isDir: boolean): void {
     openGraphInActivePane({
-      mode: "semantic",
       depth: 1,
       pendingSelectId: path,
       ...(isDir ? { expanded: openedForPath(path) } : {}),
@@ -721,46 +397,8 @@
 
   let nodes: RenderedNode[] = $state([]);
   let edges: RenderedEdge[] = $state([]);
-  let fsNodes: FsGraphNode[] = $state([]);
-  /// Raw fs-graph edges accumulated alongside `fsNodes`, so a
-  /// single-directory expand can merge into the spine and re-project the
-  /// rendered edge set without losing already-loaded degrees.
-  let fsEdgesRaw: FsGraphEdge[] = $state([]);
-  let fsTruncated = $state(false);
-  /// Trackers for the expanded-set reseed: the depth + scope the current
-  /// expanded set was established for. A depth-slider move or a rescope
-  /// re-establishes the set (find -d N); mount / watcher reloads keep it.
-  /// `null` until the first load seeds a fresh instance (no snapshot).
-  let appliedDepth: number | null = null;
-  let appliedScopeKey: string | null = null;
   /// Set once `showSelectedDirectoryFiles` has had its one run.
   let shownDirectoryFiles = false;
-  let workspaceDepthProbe: FsGraphResponse | null = $state(null);
-  let workspaceDepthProbeLoading = $state(false);
-  /// A probe that failed leaves no response and is not loading, which is the
-  /// same shape as one that has never run, so the effect below would ask again
-  /// at once and hold /api/graph/fs in a tight loop for as long as the tab is
-  /// visible. The failure is its own state, cleared wherever the probe is
-  /// legitimately reset.
-  let workspaceDepthProbeFailed = $state(false);
-  /// Directory-scope depth probe. The depth slider's cap is the
-  /// max relative depth REACHABLE under the scope, which we can only
-  /// learn by walking deeper than the currently-loaded slice. At depth
-  /// 1 the loaded fs-graph only contains depth-1 nodes, so a cap derived
-  /// from it collapses to 1 and the clamp effect snaps the slider back
-  /// the moment the user drags it. The workspace scope already solves this
-  /// with `workspaceDepthProbe` (a full-depth walk of the root); this is the
-  /// same probe for an arbitrary directory scope, keyed by the scope
-  /// path so it re-probes when the scope changes.
-  let dirDepthProbe: FsGraphResponse | null = $state(null);
-  let dirDepthProbeLoading = $state(false);
-  let dirDepthProbePath: string | null = $state(null);
-  /// The one directory scope whose probe failed, or null. It holds a path
-  /// rather than a flag so a failure on one directory does not suppress the
-  /// probe for every other: moving to another directory probes it, and that
-  /// probe's own result replaces this. A reload clears it too.
-  let dirDepthProbeFailedPath: string | null = $state(null);
-  let languageMaxDepth = $state(0);
   let loading = $state(true);
   let error: string | null = $state(null);
   let watchReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -809,20 +447,14 @@
   // runs through the `graphReloadSignal` reload path.
   const graphInstanceId = $derived(`graph-tab-${tab.id}`);
 
-  /// Directory scopes the currently-loaded graph displays. In
-  /// filesystem mode this is the set of `directory` fs-graph nodes; in
-  /// the semantic/workspace view it is the scope directory plus the parent
-  /// directories of the rendered file nodes. Root (`""`) is excluded
-  /// (always implicitly watched). Recomputes as nodes / depth / scope
-  /// change so the reconcile effect tracks the visible degree.
+  /// Directories the loaded graph holds a file of: the parent directory
+  /// of each file node. Root (`""`) is excluded (always implicitly
+  /// watched). Recomputes as the nodes change.
   const displayedDirs = $derived.by<string[]>(() => {
     const dirs = new Set<string>();
-    for (const n of fsNodes) {
-      if (n.kind === "directory" && n.path) dirs.add(n.path);
-    }
-    if (currentScope?.kind === "dir" && currentScope.path) dirs.add(currentScope.path);
-    // Semantic file nodes don't carry a directory node; add their parent
-    // dirs so a save inside a shown document's folder reaches this graph.
+    // A file node carries no directory node; add each one's parent
+    // directory so a save inside a shown document's folder reaches this
+    // graph.
     for (const n of nodes) {
       if (n.kind !== "file") continue;
       const slash = n.path.lastIndexOf("/");
@@ -849,13 +481,6 @@
   /// they round-trip through the URL hash. Local proxy aliases keep
   /// the existing read sites compact.
   const show = $derived(graphState.filters);
-  const filesystemMode = $derived(
-    graphState.mode === "filesystem" &&
-      (currentScope?.kind === "file" ||
-        currentScope?.kind === "dir" ||
-        currentScope?.kind === "workspace"),
-  );
-  const languageMode = $derived(graphState.mode === "language");
 
   /// `indexStatus` is the workspace-global indexer state. While the index is
   /// still building/reindexing, or the workspace is recovering, the semantic
@@ -875,84 +500,18 @@
   );
 
   /// Copy for the canvas empty-state (not loading, no error, zero nodes).
-  /// Filesystem mode is structural: it reads the on-disk tree, not the
-  /// index, so it keeps its scope message regardless of index state. The
-  /// markdown and language graphs are both index-derived, so a zero-node
-  /// result WHILE the index is still building means "not ready yet", not
-  /// "nothing here"; `indexBuilding` shows the temporarily-unavailable
-  /// copy. An idle zero-node markdown graph most often means the semantic
-  /// index has not populated yet, so it stays optimistic ("data being
-  /// indexed, hang tight..."); language mode keeps its genuine-empty
-  /// scope message.
+  /// The graph draws the tree from disk before the index answers, so it is
+  /// empty only over a workspace with nothing in it or while the workspace
+  /// recovers. A zero-node result WHILE the index is still building means
+  /// "not ready yet", not "nothing here"; an idle one stays optimistic
+  /// ("data being indexed, hang tight...").
   const emptyStateMessage = $derived(
-    filesystemMode
-      ? "no filesystem graph nodes for this scope"
-      : workspaceRecovering
-        ? "graph unavailable while the workspace recovers"
-        : indexBuilding
-          ? "graph temporarily unavailable while indexing the workspace"
-          : languageMode
-            ? "no language graph nodes for this workspace yet"
-            : "data being indexed, hang tight...",
+    workspaceRecovering
+      ? "graph unavailable while the workspace recovers"
+      : indexBuilding
+        ? "graph temporarily unavailable while indexing the workspace"
+        : "data being indexed, hang tight...",
   );
-
-  /// Shallow-scope cue: when the scope's
-  /// `depthCap` is 1 (single-file graph with no further forward
-  /// hops; tag scope with only direct neighbours; etc.) the
-  /// slider can't meaningfully be dragged. Surface that via a
-  /// `[max]` suffix + disable the slider so the user can see at
-  /// a glance there's nothing more to reveal. Gates: only fires
-  /// outside language mode (which has its own depth=0 "max"
-  /// affordance) + only when the slider would otherwise be
-  /// enabled (depthDisabled is the unresolved-scope guard).
-  const depthShallow = $derived.by(() => {
-    if (languageMode) return false;
-    // Workspace scope takes the shallow check too: with the
-    // workspace depth probe feeding a meaningful `depthCap`, a
-    // workspace whose deepest dir sits at depth 1 reads as
-    // legitimately shallow and the `[max]` cue + disabled state
-    // mirrors the dir-scope shape.
-    if (!currentScope) return false;
-    return depthCap <= (oneGraph ? depthMin : 1);
-  });
-
-  const depthCap = $derived.by(() => {
-    if (languageMode) return Math.max(1, languageMaxDepth);
-    // The one graph's range is the selected node's: the levels below a
-    // directory, the hops a file's, tag's or mention's references run.
-    if (oneGraph) return selectionDepthCap(nodes, edges, selectedId);
-    if (loading && currentScope?.kind === "dir" && nodes.length === 0) {
-      return DEPTH_MAX;
-    }
-    // For a directory scope the loaded fs-graph only reaches the
-    // current depth, so deriving the cap from it pins the slider at the
-    // loaded depth (it cannot grow to reveal a deeper layer). Prefer the
-    // full-depth `dirDepthProbe` (mirrors what the workspace scope already
-    // does) so the cap is the directory's REACHABLE depth. Until the
-    // probe lands, keep DEPTH at least at the loaded slice's depth so
-    // the slider never snaps below what's already on screen.
-    if (filesystemMode && currentScope?.kind === "dir") {
-      const probeCap = graphDepthCap({
-        scope: currentScope,
-        nodes,
-        fsGraph: dirDepthProbe ?? { nodes: fsNodes, truncated: fsTruncated },
-        hardMax: DEPTH_MAX,
-        fsMax: FS_GRAPH_DEPTH_MAX,
-      });
-      return Math.max(probeCap, graphState.depth);
-    }
-    return graphDepthCap({
-      scope: currentScope,
-      nodes,
-      fsGraph: filesystemMode
-        ? { nodes: fsNodes, truncated: fsTruncated }
-        : currentScope?.kind === "workspace"
-          ? workspaceDepthProbe
-          : null,
-      hardMax: DEPTH_MAX,
-      fsMax: FS_GRAPH_DEPTH_MAX,
-    });
-  });
 
   // Currently inspected node, surfaced in the side details panel.
   // Tap a node to set this; tap empty space to clear it. Nodes never
@@ -1002,33 +561,22 @@
     if (trigger) return;
     closeTabMenu();
   }
-  const DEPTH_MAX = 10;
 
   /// File nodes reach the chips, the hidden-id sets and the inspector
   /// through `fileBucket` (state/kinds.ts), the bucketer the canvas
   /// paints with, so a node is counted, hidden and coloured as one kind.
 
-  /// Forced reload of the current scope: at workspace scope the depth
-  /// probe is re-run first, then `load()` refetches. Called by the
-  /// launcher's `Reload graph` command and by the index-settle effect.
+  /// Forced reload of the graph. Called by the launcher's `Reload graph`
+  /// command and by the index-settle effect.
   async function reloadGraph(): Promise<void> {
     closeTabMenu();
-    // A reload is one of the things that may make a failed probe succeed, so
-    // it releases the latch for whichever scope is current. The directory
-    // effect reads the latch tracked, so nulling it re-arms exactly one probe.
-    dirDepthProbeFailedPath = null;
-    if (currentScope?.kind === "workspace") {
-      workspaceDepthProbe = null;
-      workspaceDepthProbeFailed = false;
-      await loadWorkspaceDepthProbe();
-    }
     lastLoadedKey = loadKey;
     graphDirty = false;
     await load();
   }
 
   // The launcher's `Reload graph` reaches the fetch through the chan:command
-  // bridge, since the /api/graph call and its depth probe live here. Only the
+  // bridge, since the /api/graph call lives here. Only the
   // graph the launcher itself targeted responds, so the command's
   // active-surface gate and the reloading graph agree.
   $effect(() => {
@@ -1047,53 +595,6 @@
   function closeFromMenu(): void {
     closeTabMenu();
     close();
-  }
-
-  async function loadWorkspaceDepthProbe(): Promise<void> {
-    if (workspaceDepthProbeLoading) return;
-    workspaceDepthProbeLoading = true;
-    try {
-      workspaceDepthProbe = await api.fsGraph({
-        scope: "directory",
-        path: "",
-        depth: FS_GRAPH_DEPTH_MAX,
-      });
-      workspaceDepthProbeFailed = false;
-    } catch {
-      workspaceDepthProbe = null;
-      workspaceDepthProbeFailed = true;
-    } finally {
-      workspaceDepthProbeLoading = false;
-    }
-  }
-
-  /// Probe a directory scope at the full fs-graph depth so the
-  /// slider cap reflects the deepest layer the user could reveal, not
-  /// just the layer currently loaded. Keyed by `path`; a stale probe
-  /// for a different directory is discarded by the caller's guard.
-  async function loadDirDepthProbe(path: string): Promise<void> {
-    if (dirDepthProbeLoading) return;
-    dirDepthProbeLoading = true;
-    dirDepthProbePath = path;
-    try {
-      const probe = await api.fsGraph({
-        scope: "directory",
-        path,
-        depth: FS_GRAPH_DEPTH_MAX,
-      });
-      // Drop the result if the scope moved on while we were fetching.
-      if (dirDepthProbePath === path) {
-        dirDepthProbe = probe;
-        dirDepthProbeFailedPath = null;
-      }
-    } catch {
-      if (dirDepthProbePath === path) {
-        dirDepthProbe = null;
-        dirDepthProbeFailedPath = path;
-      }
-    } finally {
-      dirDepthProbeLoading = false;
-    }
   }
 
   function onGraphContextMenu(e: MouseEvent): void {
@@ -1118,9 +619,8 @@
   //
   // Two filters compose to decide what's drawn:
   //
-  //   (1) what the graph includes (`scopedNodeIds`): in the one graph, the
-  //       opened directory tree with what the selected node reveals laid
-  //       over it; in the filesystem and language modes, the scope's nodes.
+  //   (1) what the graph includes (`scopedNodeIds`): the opened directory
+  //       tree with what the selected node reveals laid over it.
   //   (2) the chips (tag / mention / language / img / folder /
   //       markdown / source). An edge whose kind or endpoint is
   //       filtered out drops, and a tag, mention or language node
@@ -1137,26 +637,15 @@
   const expandedDirs = $derived(graphState.expanded ?? { "": true });
 
   /// Set of node ids the graph includes, before the chips: the opened tree
-  /// with the selection's reveal in the one graph, the scope's nodes by
-  /// `scopeView`'s rules in the other modes. `null` means "no filter": an
-  /// unresolved scope, or a file scope in filesystem mode.
+  /// with the selection's reveal laid over it.
   const scopedNodeIds = $derived(
-    oneGraph
-      ? graphNodeIds({
-          nodes,
-          edges,
-          opened: expandedDirs,
-          selectedId,
-          depth: Math.max(1, graphState.depth),
-        })
-      : scopeNodeIds({
-          scope: currentScope,
-          filesystemMode,
-          nodes,
-          edges,
-          expanded: expandedDirs,
-          depth: graphState.depth,
-        }),
+    graphNodeIds({
+      nodes,
+      edges,
+      opened: expandedDirs,
+      selectedId,
+      depth: Math.max(1, graphState.depth),
+    }),
   );
 
   /// File-node ids the `img` filter currently hides. Pulled out so
@@ -1191,7 +680,7 @@
   /// to the graph, so the folder chip must NOT hide them -- hiding them is what
   /// rendered file nodes "loose". Computed only when the folder chip is off
   /// (when on, nothing is hidden so the spine is moot). Seeds from in-scope
-  /// files and walks `contains` upward with the lenses' `ancestorClosure`, for
+  /// files and walks `contains` upward with `ancestorClosure`, for
   /// the same "no file renders edgeless" invariant. Keyed off in-scope (not chip-visible) files
   /// deliberately: keeping a directory whose only files are chip-filtered is
   /// harmless declutter, whereas dropping a spine directory re-introduces loose
@@ -1400,16 +889,6 @@
       else if (cls === "doc") c.markdown++;
       else if (cls === "source") c.source++;
     }
-    if (filesystemMode) {
-      c.tag = fsNodes.filter((n) => n.kind === "symlink").length;
-      const hardlinkedIds = new Set<string>();
-      for (const edge of fsEdgesRaw) {
-        if (edge.kind !== "hardlink") continue;
-        hardlinkedIds.add(edge.source);
-        hardlinkedIds.add(edge.target);
-      }
-      c.mention = hardlinkedIds.size;
-    }
     return c;
   });
 
@@ -1427,11 +906,9 @@
   // derived from them above never hold one, so the chip counts, the depth
   // range, a selection's reveal and the watched directories read the same
   // whether or not drafts are listed, and a draft is counted nowhere as a
-  // workspace file. The filesystem and language graphs draw none: a draft
-  // is at no path on disk under the workspace.
+  // workspace file.
   const draftNodes = $derived.by<DraftLayer>(() => {
-    if (!windowCaps.workspace || filesystemMode || languageMode) return NO_DRAFT_LAYER;
-    if (currentScope?.kind !== "workspace") return NO_DRAFT_LAYER;
+    if (!windowCaps.workspace) return NO_DRAFT_LAYER;
     // Drawn where the workspace's own node is: the group hangs from it.
     const rootId = directoryNodeId("");
     if (!nodeById.has(rootId) || !visibleNodeIds.has(rootId)) return NO_DRAFT_LAYER;
@@ -1458,7 +935,6 @@
   // `drafts.loaded` as it was, so this does not ask again by itself.
   $effect(() => {
     if (!visible || !windowCaps.workspace || drafts.loaded) return;
-    if (filesystemMode || languageMode || currentScope?.kind !== "workspace") return;
     untrack(() => void refreshDrafts());
   });
 
@@ -1501,16 +977,6 @@
     // node carries id="" in the workspace-scope merged view, and a
     // truthy test would silently null it out.
     selectedId !== null ? (nodeById.get(selectedId) ?? null) : null,
-  );
-  const fsNodeById = $derived(new Map(fsNodes.map((n) => [n.id, n])));
-  const selectedFsNode = $derived<FsGraphNode | null>(
-    // The workspace-root directory has id="" (empty path = workspace root), so
-    // `selectedId` is checked with `!== null` rather than a truthy
-    // test -- otherwise clicking the root node silently no-op's the
-    // inspector.
-    filesystemMode && selectedId !== null
-      ? (fsNodeById.get(selectedId) ?? null)
-      : null,
   );
 
   /// True when the graph claims the node is a real file but the
@@ -1640,62 +1106,11 @@
     graphState.inspectorOpen = true;
   }
 
-  /// Click on the scope-header row in the
-  /// graph tab-menu opens the inspector for the current scope. Maps
-  /// the scope kind to the matching node id in the current graph
-  /// nodes list; workspace root + tag have stable ids, file/dir need a
-  /// path-based lookup. No-op when the scope doesn't have a
-  /// corresponding node in this view (e.g. a file scope whose file
-  /// isn't in the response).
+  /// The tab menu's header row names the workspace the graph is of; a click
+  /// selects the workspace's own node, which opens its inspector.
   function openScopeHeaderInspector(): void {
-    if (!currentScope) return;
-    let nodeId: string | null = null;
-    if (currentScope.kind === "workspace") {
-      // Workspace root node carries id="" in the filesystem-merged layer.
-      nodeId = "";
-    } else if (currentScope.kind === "tag") {
-      nodeId = currentScope.nodeId;
-    } else if (currentScope.kind === "mention") {
-      // Mention lens header opens the mention meta-node inspector;
-      // the node id IS the scope's nodeId (`@@Name`), same as tag.
-      nodeId = currentScope.nodeId;
-    } else if (currentScope.kind === "file") {
-      // File-kind nodes carry their path as the id when emitted
-      // from the markdown layer + a synthesized id from the
-      // filesystem layer. Lookup by path matches both shapes.
-      const found = nodes.find(
-        (n) => n.kind === "file" && n.path === currentScope.path,
-      );
-      if (found) nodeId = found.id;
-    } else if (currentScope.kind === "dir") {
-      // Directory nodes' ids carry a `directory:` prefix in the
-      // merged layer; the SPA normalises `kind` to `folder` at
-      // load. Match by path against folder-kind nodes.
-      const found = nodes.find(
-        (n) => n.kind === "folder" && n.path === currentScope.path,
-      );
-      if (found) nodeId = found.id;
-    } else if (currentScope.kind === "contact") {
-      // Contact lens header opens the
-      // contact's underlying file-node inspector. Same shape as
-      // the file branch above -- the seed for the contact lens IS
-      // a file node located by rel_path.
-      const found = nodes.find(
-        (n) => n.kind === "file" && n.path === currentScope.relPath,
-      );
-      if (found) nodeId = found.id;
-    } else if (currentScope.kind === "language") {
-      // Language lens header opens the
-      // language bubble inspector. Bubble node id is
-      // `language:<lang>` by indexer convention.
-      const found = nodes.find(
-        (n) => n.kind === "language" && n.id === `language:${currentScope.language}`,
-      );
-      if (found) nodeId = found.id;
-    }
-    if (nodeId === null) return;
-    depthFollowsSelection(nodeId);
-    selectedId = nodeId;
+    depthFollowsSelection("");
+    selectedId = "";
     graphState.inspectorOpen = true;
     closeTabMenu();
   }
@@ -1782,12 +1197,6 @@
     return node.kind === "directory";
   }
 
-  function stripDirectoryPrefix(id: string): string {
-    if (id.startsWith("directory:")) return id.slice("directory:".length);
-    if (id.startsWith("folder:")) return id.slice("folder:".length);
-    return id;
-  }
-
   // ---- custom palette application ------------------------------------------
 
   /// Inline custom-property block carrying the user's custom graph
@@ -1812,14 +1221,10 @@
   // `setSelected` on tap, and `selectedId` goes back down as a prop,
   // so the inspector and the canvas's selection emphasis follow it.
 
-  /// Which nodes the canvas pins and how it frames them. The one graph has
-  /// one root: the workspace's node, pinned, with the view anchored on it
-  /// at the bottom (the canvas's default framing) so the tree grows up
-  /// from the same spot whatever is selected. The other modes answer per
-  /// scope, by `scopeView`'s rules.
-  const ONE_GRAPH_FOCAL = [""];
-  const focalAnchor = $derived(oneGraph ? undefined : scopeFocalAnchor(currentScope));
-  const focalIds = $derived(oneGraph ? ONE_GRAPH_FOCAL : scopeFocalIds(currentScope, nodes));
+  /// The graph has one root: the workspace's node, which the canvas pins
+  /// and, under its default framing, seats at the bottom, so the tree grows
+  /// up from the same spot whatever is selected.
+  const FOCAL_IDS = [""];
 
   /// The edge when its kind is one the graph draws (link / tag /
   /// mention / contains / language), else null; a `date` edge is
@@ -1868,111 +1273,12 @@
     loading = true;
     error = null;
     try {
-      if (filesystemMode && currentScope) {
-        languageMaxDepth = 0;
-        const fsScope =
-          currentScope.kind === "file" ? "file" : "directory";
-        const fsPath =
-          currentScope.kind === "dir" || currentScope.kind === "file"
-            ? currentScope.path
-            : "";
-        // Cursor-paged delivery: reset the spine, then pull bounded
-        // batches and append each so a large scope (e.g. /tmp/linux) fills
-        // in gradually instead of arriving as one blocking payload, with a
-        // frame yield between batches to keep every surface interactive.
-        fsNodes = [];
-        fsEdgesRaw = [];
-        nodes = [];
-        edges = [];
-        let cursor: string | undefined;
-        let fs: FsGraphResponse;
-        do {
-          fs = await api.fsGraph({
-            scope: fsScope,
-            path: fsPath,
-            depth: graphState.depth,
-            limit: GRAPH_BATCH_NODES,
-            cursor,
-          });
-          if (seq !== graphLoadSeq) return;
-          fsTruncated = fs.truncated;
-          mergeFsResponse(fs);
-          cursor = fs.cursor ?? undefined;
-          if (!fs.done && cursor) {
-            await yieldToFrame();
-            if (seq !== graphLoadSeq) return;
-          }
-        } while (!fs.done && cursor);
-        if (currentScope.kind !== "file") {
-          // The expanded set is restored with the tab (or defaults to the
-          // root for a fresh depth-1 graph), so the first load trusts it.
-          // A later depth-slider move or rescope re-establishes the set
-          // from the selected directory to depth N (authoritative;
-          // overrides individual expand/collapse).
-          const scopeKey = graphState.scopeId;
-          if (appliedDepth === null) {
-            appliedDepth = graphState.depth;
-            appliedScopeKey = scopeKey;
-          } else if (
-            graphState.depth !== appliedDepth ||
-            scopeKey !== appliedScopeKey
-          ) {
-            seedExpandedFromSelected(graphState.depth);
-            appliedDepth = graphState.depth;
-            appliedScopeKey = scopeKey;
-          }
-        }
-        const pending = graphState.pendingSelectId;
-        // Match the pending select by node id OR path: "Graph from here"
-        // sets a workspace path, which equals the fs node id for files /
-        // dirs today, but matching path too keeps the select robust and
-        // mirrors the semantic branch's resolveSelectId.
-        const pendingNode = pending
-          ? fsNodes.find((n) => n.id === pending || n.path === pending)
-          : undefined;
-        if (pendingNode) {
-          selectedId = pendingNode.id;
-          if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
-        } else if (!selectedId || !fsNodes.some((n) => n.id === selectedId)) {
-          selectedId = fs.path;
-        }
-        graphState.pendingSelectId = null;
-        void reconcileExpandedChildren();
-        return;
-      }
-      fsNodes = [];
-      fsTruncated = false;
-      if (languageMode) {
-        const g: LanguageGraphResponse = await api.languageGraph({
-          depth: graphState.depth,
-        });
-        if (seq !== graphLoadSeq) return;
-        languageMaxDepth = g.max_depth;
-        nodes = mapLanguageNodes(g.nodes);
-        edges = mapLanguageEdges(g.edges);
-        // A pending selection (a restored or moved tab) wins over the
-        // panel's own, which is empty on a first load.
-        const wanted = graphState.pendingSelectId ?? selectedId;
-        selectedId = wanted !== null && g.nodes.some((n) => n.id === wanted)
-          ? wanted
-          : null;
-        graphState.pendingSelectId = null;
-        return;
-      }
-      languageMaxDepth = 0;
-      // The one graph is the whole workspace whatever is selected, with
-      // the filesystem spine fetched as deep as the opened directories go.
+      // The graph is the whole workspace whatever is selected, with the
+      // filesystem spine fetched as deep as the opened directories go.
       const graphScope = { scope: "workspace" as const, path: "" };
       const levels = spineDepth();
       const renderedNodesById = new Map<string, RenderedNode>();
       const renderedEdgesByKey = new Map<string, RenderedEdge>();
-      // The seeded fs spine lives in `renderedNodesById` / `nodes`, NOT
-      // `fsNodes`: the semantic-mode inspector reads `selectedNode` /
-      // `nodeById`, and `selectedFsNode` is gated on `filesystemMode`, so
-      // leaving `fsNodes` empty in semantic mode keeps the inspector
-      // correct (no fs-row fallback) while the spine still renders.
-      fsNodes = [];
-      fsTruncated = false;
       // Do NOT blank `nodes` / `edges` to `[]` here: the fs spine is
       // seeded into the maps and published below, so an index-settle
       // RE-load keeps the existing graph on screen instead of flashing
@@ -2094,8 +1400,6 @@
           // Do not leave the persisted/indexed graph dimly visible behind the
           // error after the source root is gone. The dirty editor owns its
           // buffer; a graph owns no unsaved state and converges to unavailable.
-          fsNodes = [];
-          fsEdgesRaw = [];
           nodes = [];
           edges = [];
           selectedId = null;
@@ -2108,23 +1412,6 @@
         graphLoadAbort = null;
       }
     }
-  }
-
-  function mapLanguageNodes(input: LanguageGraphResponse["nodes"]): RenderedNode[] {
-    return input.map((n): RenderedNode => {
-      if (n.kind === "directory") {
-        return { ...n, kind: "folder" };
-      }
-      return n;
-    });
-  }
-
-  function mapLanguageEdges(input: LanguageGraphResponse["edges"]): RenderedEdge[] {
-    return input.map((e) => ({
-      source: e.source,
-      target: stripDirectoryPrefix(e.target),
-      kind: "language",
-    }));
   }
 
   function mapFsNodes(fs: FsGraphResponse): RenderedNode[] {
@@ -2215,19 +1502,14 @@
     return null;
   }
 
-  /// The stable identity of "what graph to load". The one graph loads the
-  /// whole workspace once: its selection and its depth only choose what of
-  /// it is drawn, so neither reloads it, and the one thing that does is a
-  /// directory opened past what was loaded (`spineReload`). The other
-  /// modes load by scope id and depth. The reload effect tracks THIS key
-  /// and runs `load()` untracked, so nothing `load()` reads on the way
-  /// (the `currentScope` object, the expanded set, the pending selection)
+  /// The stable identity of "what graph to load". The graph loads the whole
+  /// workspace once: its selection and its depth only choose what of it is
+  /// drawn, so neither reloads it, and the one thing that does is a
+  /// directory opened past what was loaded (`spineReload`). The reload
+  /// effect tracks THIS key and runs `load()` untracked, so nothing
+  /// `load()` reads on the way (the expanded set, the pending selection)
   /// is a reload trigger.
-  const loadKey = $derived(
-    oneGraph
-      ? `one|${spineReload}`
-      : `${graphState.scopeId}|${graphState.depth}|${graphState.mode}`,
-  );
+  const loadKey = $derived(`graph|${spineReload}`);
 
   /// Keep-alive load gating. A graph tab stays mounted while hidden,
   /// so "visible" does not mean "just mounted": this effect decides
@@ -2261,114 +1543,24 @@
   });
 
   $effect(() => {
-    if (!visible) {
-      workspaceDepthProbe = null;
-      workspaceDepthProbeFailed = false;
-    }
-  });
-
-  $effect(() => {
-    if (!visible) return;
-    // The one graph reads its depth range from the loaded tree.
-    if (oneGraph || currentScope?.kind !== "workspace") return;
-    if (workspaceDepthProbe || workspaceDepthProbeLoading || workspaceDepthProbeFailed) return;
-    void loadWorkspaceDepthProbe();
-  });
-
-  /// Keep the directory depth probe in sync with the dir scope.
-  /// Reset when the panel hides or the scope is not a directory; (re)run
-  /// it whenever the scope path changes so the slider cap tracks the new
-  /// directory's reachable depth.
-  $effect(() => {
-    if (!visible || currentScope?.kind !== "dir") {
-      dirDepthProbe = null;
-      dirDepthProbePath = null;
-      dirDepthProbeFailedPath = null;
-      return;
-    }
-    const path = currentScope.path;
-    if (dirDepthProbeLoading) return;
-    if (dirDepthProbePath === path && dirDepthProbe) return;
-    if (dirDepthProbeFailedPath === path) return;
-    untrack(() => void loadDirDepthProbe(path));
-  });
-
-  $effect(() => {
-    // The one graph shows its depth clamped and stores it as it is: a
-    // directory's lives in the opened set, and hops return to 1 with each
-    // selection.
-    if (languageMode || oneGraph) return;
-    const max = depthCap;
-    if (graphState.depth < 1) {
-      graphState.depth = 1;
-    } else if (graphState.depth > max) {
-      graphState.depth = max;
-    }
-  });
-
-  /// Does a watcher event touching `paths` warrant reloading THIS graph?
-  /// Only when the change is in scope:
-  ///   - the one graph, and the filesystem graph of the whole workspace,
-  ///     span the tree -> always.
-  ///   - a filesystem graph of a directory or file -> a path inside the
-  ///     subtree (covers a NEW file not yet a node) or a path currently
-  ///     rendered as a node.
-  /// Unknown paths (empty) reload to stay safe.
-  function changeAffectsScope(paths: string[]): boolean {
-    if (paths.length === 0) return true;
-    const scope = currentScope;
-    if (!scope) return true;
-    if (scope.kind === "workspace") return true;
-    const visibleIds = scopedNodeIds;
-    for (const p of paths) {
-      if (
-        scope.kind === "dir" &&
-        (p === scope.path || p.startsWith(`${scope.path}/`))
-      ) {
-        return true;
-      }
-      if (scope.kind === "file" && p === scope.path) return true;
-      for (const n of nodes) {
-        if (
-          (n.kind === "file" || n.kind === "folder") &&
-          n.path === p &&
-          (visibleIds === null || visibleIds.has(n.id))
-        ) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  $effect(() => {
     const nonce = graphReloadSignal.nonce;
     if (nonce === seenGraphReloadNonce) return;
     seenGraphReloadNonce = nonce;
-    // Path-filter FIRST: an out-of-scope edit is ignored on every graph,
-    // visible or hidden (it changes nothing this scope renders). `untrack`
-    // so reading the scope / node sets here doesn't make the effect
-    // re-fire on load.
-    if (!untrack(() => changeAffectsScope(graphReloadSignal.paths))) return;
+    // The graph spans the workspace, so a change anywhere is a change to
+    // it.
     if (!visible) {
-      // Hidden + in-scope edit: don't reload in the background.
-      // Remember it so the next activation refetches once.
+      // Hidden: don't reload in the background. Remember it so the next
+      // activation refetches once.
       graphDirty = true;
       return;
     }
-    // Visible + in-scope: debounce-reload. Sync lastLoadedKey
-    // so the load effect doesn't treat this fresh data as stale on the
-    // next re-fire, and clear dirty since we're refetching now.
+    // Visible: debounce-reload. Sync lastLoadedKey so the load effect
+    // doesn't treat this fresh data as stale on the next re-fire, and
+    // clear dirty since we're refetching now.
     if (watchReloadTimer) clearTimeout(watchReloadTimer);
     watchReloadTimer = setTimeout(() => {
       watchReloadTimer = null;
       if (visible) {
-        dirDepthProbeFailedPath = null;
-        if (currentScope?.kind === "workspace") {
-          workspaceDepthProbe = null;
-          workspaceDepthProbeFailed = false;
-          void loadWorkspaceDepthProbe();
-        }
         lastLoadedKey = loadKey;
         graphDirty = false;
         void load();
@@ -2379,19 +1571,18 @@
   /// Layer the index-derived graph in once indexing finishes. The load
   /// effect above tracks only `visible` + `loadKey`, and the watcher path
   /// only fires on real file edits -- neither covers the initial index of
-  /// PRE-EXISTING files. A semantic-mode graph opened mid-index shows the
+  /// PRE-EXISTING files. A graph opened mid-index shows the
   /// always-available fs spine immediately (seeded in `load()`), so `nodes`
   /// is non-empty, but the link / tag / mention / language edges only
   /// arrive once the index settles. Fire `reloadGraph()` on the
   /// `indexBuilding` true→false edge so those layer on. Guards: edge-only
   /// via `prevIndexBuilding` (no reload loop); `visible`-only (don't wake a
-  /// backgrounded tab); semantic-mode only (filesystem mode is structural,
-  /// language mode is its own surface). NOT gated on `nodes.length === 0`:
+  /// backgrounded tab). NOT gated on `nodes.length === 0`:
   /// the fs spine keeps `nodes` populated, so an empty-only guard
   /// would never fire the re-layer. Distinct trigger from the
   /// graphReloadSignal watcher (a save's reindex), so no double-load.
-  /// `visible` / mode are read untracked so only `indexBuilding` re-fires
-  /// this effect.
+  /// `visible` is read untracked so only `indexBuilding` re-fires this
+  /// effect.
   let prevIndexBuilding = false;
   $effect(() => {
     const building = indexBuilding;
@@ -2399,7 +1590,7 @@
     prevIndexBuilding = building;
     if (!wasBuilding || building) return; // not a true -> false edge
     untrack(() => {
-      if (visible && !filesystemMode && !languageMode) void reloadGraph();
+      if (visible) void reloadGraph();
     });
   });
 
@@ -2453,11 +1644,6 @@
   }
 
   function graphSelectionLabel(id: string): string | null {
-    // FsGraphNode carries `name` directly -- workspace root has
-    // name="" (empty path), so fall through to the semantic node
-    // lookup before declaring no label.
-    const fs = fsNodeById.get(id);
-    if (fs && fs.name) return fs.name;
     const node = nodeById.get(id);
     if (node) return node.label ?? null;
     return null;
@@ -2494,15 +1680,6 @@
          rows with optional icon + label + chord on the right; filters
          render vertically, one row per kind, with the kind colour as
          a dot + on/off cue via the `.on` class. -->
-    <!-- The workspace path-scope does not pin the depth slider
-         in the disabled state: workspace scope has a valid
-         `depthCap` derived from `workspaceDepthProbe`, so the
-         slider behaves like the dir scope's depth control.
-         Language mode keeps its own pinned-to-1 behaviour via
-         the early-return in the clamp `$effect` + depthCap. The
-         `!currentScope` check guards the brief boot window where
-         the scope hasn't resolved yet. -->
-    {@const depthDisabled = !languageMode && !currentScope}
     <div
       class="tab-menu-bubble"
       role="menu"
@@ -2520,67 +1697,28 @@
            menus. Click on the row routes through the existing
            inspector-open path so the user can hop from the menu
            to the scope's inspector view. -->
-      {#if currentScope}
-        {@const scopePath =
-          currentScope.kind === "workspace" ? ""
-          : currentScope.kind === "file" ? currentScope.path
-          : currentScope.kind === "dir" ? currentScope.path
-          : currentScope.kind === "tag" ? `#${currentScope.label}`
-          : currentScope.kind === "mention" ? `@@${currentScope.label}`
-          : currentScope.kind === "contact" ? `@@${currentScope.label}`
-          : currentScope.kind === "language" ? currentScope.label
-          : ""}
-        {@const scopeKindLabel =
-          currentScope.kind === "workspace" ? "Workspace"
-          : currentScope.kind === "tag" ? "Hashtag"
-          : currentScope.kind === "mention" ? "Mention"
-          : currentScope.kind === "file" ? "File"
-          : currentScope.kind === "dir" ? "Directory"
-          : currentScope.kind === "contact" ? "Contact"
-          : currentScope.kind === "language" ? "Language"
-          : "Scope"}
-        <button
-          type="button"
-          class="mbtn graph-scope-row"
-          role="menuitem"
-          tabindex="-1"
-          title={scopePath || scopeKindLabel}
-          onclick={openScopeHeaderInspector}
-        >
-          <span class="mbtn-icon" aria-hidden="true">
-            {#if currentScope.kind === "workspace"}
-              <HardDrive size={16} strokeWidth={1.75} />
-            {:else if currentScope.kind === "dir"}
-              <Folder size={16} strokeWidth={1.75} />
-            {:else if currentScope.kind === "tag"}
-              <Hash size={16} strokeWidth={1.75} />
-            {:else if currentScope.kind === "mention"}
-              <AtSign size={16} strokeWidth={1.75} />
-            {:else if currentScope.kind === "contact"}
-              <AtSign size={16} strokeWidth={1.75} />
-            {:else if currentScope.kind === "language"}
-              <CodeXml size={16} strokeWidth={1.75} />
-            {:else}
-              <FileText size={16} strokeWidth={1.75} />
-            {/if}
-          </span>
-          <span class="mbtn-label graph-scope-path">
-            {scopePath || scopeKindLabel}
-          </span>
-        </button>
-        <div class="msep" role="separator"></div>
-      {/if}
+      <button
+        type="button"
+        class="mbtn graph-scope-row"
+        role="menuitem"
+        tabindex="-1"
+        title="Workspace"
+        onclick={openScopeHeaderInspector}
+      >
+        <span class="mbtn-icon" aria-hidden="true">
+          <HardDrive size={16} strokeWidth={1.75} />
+        </span>
+        <span class="mbtn-label graph-scope-path">Workspace</span>
+      </button>
+      <div class="msep" role="separator"></div>
       <div
         class="mbtn depth-row"
-        class:disabled={depthDisabled}
         class:shallow={depthShallow}
         title={depthShallow
           ? "Nothing further to reveal from here"
-          : oneGraph
-            ? depthDir !== null
-              ? "Directory levels opened below the selected directory"
-              : "Hops of references shown from the selected node"
-            : null}
+          : depthDir !== null
+            ? "Directory levels opened below the selected directory"
+            : "Hops of references shown from the selected node"}
       >
         <span class="mbtn-icon" aria-hidden="true"></span>
         <span class="mbtn-label">Depth</span>
@@ -2591,14 +1729,12 @@
           step="1"
           value={depthValue}
           oninput={(e) => setDepth(+e.currentTarget.value)}
-          disabled={depthDisabled || depthShallow}
+          disabled={depthShallow}
           onmousedown={(e) => e.stopPropagation()}
           aria-label="depth"
         />
         <span class="depth-value">
-          {#if languageMode && graphState.depth === 0}
-            max
-          {:else if depthShallow}
+          {#if depthShallow}
             {depthValue} <span class="depth-cue">[max]</span>
           {:else}
             {depthValue}
@@ -2607,44 +1743,25 @@
       </div>
       <div class="msep graph-filter-sep" role="separator"></div>
       {#each ["tag", "mention", "language", "img", "folder", "markdown", "source"] as const as kind (kind)}
-        {@const workspaceLike =
-          currentScope?.kind === "workspace"}
-        <!-- The backend emits per-file language edges through
-             `scoped_report_files`, so dir-scoped graphs have
-             language data too. Show the language chip whenever
-             the layout is the semantic graph (not the filesystem
-             / language modes), regardless of path scope. -->
-        {#if (!filesystemMode || (kind !== "img" && kind !== "language")) && (languageMode ? kind === "language" : true) && (kind !== "folder" || filesystemMode || workspaceLike)}
-          <button
-            type="button"
-            class="mbtn filter-row"
-            class:on={show[kind]}
-            onclick={() => (show[kind] = !show[kind])}
-            role="menuitemcheckbox"
-            aria-checked={show[kind]}
-          >
-            <span
-              class="filter-dot"
-              class:filter-dot-off={!show[kind]}
-              style="background:{show[kind] ? FILTER_COLORS[kind] : 'transparent'};border-color:{FILTER_COLORS[kind]}"
-              aria-hidden="true"
-            ></span>
-            <span class="mbtn-label">
-              {#if filesystemMode}
-                {kind === "tag"
-                  ? "symlink"
-                  : kind === "mention"
-                    ? "hardlink"
-                    : kind === "folder"
-                      ? "directory"
-                      : kind}
-              {:else}
-                {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
-              {/if}
-            </span>
-            <span class="filter-count">{counts[kind]}</span>
-          </button>
-        {/if}
+        <button
+          type="button"
+          class="mbtn filter-row"
+          class:on={show[kind]}
+          onclick={() => (show[kind] = !show[kind])}
+          role="menuitemcheckbox"
+          aria-checked={show[kind]}
+        >
+          <span
+            class="filter-dot"
+            class:filter-dot-off={!show[kind]}
+            style="background:{show[kind] ? FILTER_COLORS[kind] : 'transparent'};border-color:{FILTER_COLORS[kind]}"
+            aria-hidden="true"
+          ></span>
+          <span class="mbtn-label">
+            {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
+          </span>
+          <span class="filter-count">{counts[kind]}</span>
+        </button>
       {/each}
       <div class="msep" role="separator"></div>
       <button class="mbtn" onclick={closeFromMenu}>
@@ -2675,13 +1792,11 @@
       <GraphCanvas
         open={canvasEverShown}
         paused={!active}
-        scopeKey={`${graphState.mode}:${graphState.scopeId}`}
         nodes={canvasNodes}
         edges={canvasEdges}
         visibleNodeIds={canvasVisibleNodeIds}
         visibleEdges={canvasVisibleEdges}
-        {focalIds}
-        {focalAnchor}
+        focalIds={FOCAL_IDS}
         {selectedId}
         {expansionFitRequest}
         onSelect={setSelected}
@@ -2742,7 +1857,7 @@
             onOpen={draftFile === null ? undefined : () => void openInActivePane(draftFile)}
           />
         {/if}
-      {:else if (selectedFsNode && isFsDirectory(selectedFsNode) && selectedFsNode.id === "") || (selectedNode?.kind === "folder" && selectedNode.id === "")}
+      {:else if selectedNode?.kind === "folder" && selectedNode.id === ""}
         <!-- Workspace root: same body the file browser hamburger
              menu's Directory row pops (WorkspaceInfoBody) so the
              whole-workspace config lives in one place across surfaces.
@@ -2760,64 +1875,6 @@
           onLanguageClick={openGraphForLanguage}
           onContactNavigate={openGraphForContact}
         />
-      {:else if selectedFsNode && (isFsDirectory(selectedFsNode) || selectedFsNode.kind === "file") && selectedFsNode.path !== undefined && !selectedFsNode.broken}
-        <!-- Real fs-mode file or directory: render the same body as the
-             file browser / editor inspector (counts, size, code
-             report; tags / refs / backlinks for files) by routing
-             through InspectorBody. FileInfoBody dispatches on
-             entry.is_dir so the "file" selection variant covers both
-             shapes. Per the nav contract a file "Open" (onOpen ->
-             openFileOrReveal) opens the editor pane, matching the File
-             Browser; a directory "Open" routes through FileInfoBody's
-             openDirInBrowser → onReveal into a new File Browser tab;
-             "Graph from here" (`onSetAsScope` → `graphFromHere`) spawns
-             a new graph tab. The breadcrumb above handles upward
-             navigation. -->
-        {@const fsPath = selectedFsNode.path}
-        {@const fsKind = selectedFsNode.kind}
-        {@const fsIsDir = isFsDirectory(selectedFsNode)}
-        <InspectorBody
-          selection={{ kind: "file", path: fsPath }}
-          showRefs
-          onOpen={fsKind === "file" ? () => openFileOrReveal(fsPath) : undefined}
-          onReveal={fsIsDir ? () => revealPathInBrowserTab(fsPath, true) : undefined}
-          onNavigate={(p) => {
-            const peer = fsNodes.find((n) => n.path === p);
-            if (peer) {
-              selectedId = peer.id;
-              graphState.inspectorOpen = true;
-            }
-          }}
-          onSetAsScope={() => graphFromHere(fsPath, fsIsDir)}
-        />
-      {:else if selectedFsNode}
-        <div class="ghost-body">
-          <header class="head">
-            <KindChip
-              kind={isFsDirectory(selectedFsNode) ? "folder" : selectedFsNode.kind === "file" ? "document" : "binary"}
-              path={selectedFsNode.path}
-              block
-              ghost={selectedFsNode.kind === "ghost" || selectedFsNode.broken === true}
-            />
-          </header>
-          <h3 class="title" title={selectedFsNode.path || selectedFsNode.target || selectedFsNode.id}>
-            {selectedFsNode.name || selectedFsNode.path || selectedFsNode.id || "(workspace)"}
-          </h3>
-          <div class="path mono">{selectedFsNode.path || selectedFsNode.target || selectedFsNode.id}</div>
-          {#if selectedFsNode.target}
-            <div class="missing">target: {selectedFsNode.target}</div>
-          {/if}
-          {#if selectedFsNode.outside}
-            <div class="missing">target is outside this workspace</div>
-          {:else if selectedFsNode.broken}
-            <div class="missing">missing or unreadable target</div>
-          {/if}
-          {#if selectedFsNode.kind === "file" && selectedFsNode.path}
-            <button class="open-fs" onclick={() => { void openInActivePane(selectedFsNode!.path); }}>
-              Open
-            </button>
-          {/if}
-        </div>
       {:else if selectedNode && selectedNode.kind === "file" && isFileGhost}
         <!-- Ghost: a file node marked missing, a broken-link target.
              FileInfoBody can't render it; surface inline inside the
@@ -2921,13 +1978,12 @@
   <div class="statusbar">
     <span class="stat">
       {visibleNodeIds.size}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} edges
-      {#if filesystemMode && fsTruncated} · truncated{/if}
       {#if indexBuilding}
         · <span class="indexing" title="The workspace index is not ready; dead-end nodes may resolve once it completes.">{workspaceRecovering ? "workspace recovering…" : "indexing…"}</span>
       {/if}
     </span>
     <span class="hint">
-      {filesystemMode ? "filesystem graph" : languageMode ? "language graph" : "semantic graph"} · drag to pan · scroll to zoom · click to inspect
+semantic graph · drag to pan · scroll to zoom · click to inspect
     </span>
   </div>
   </div>
@@ -3246,11 +2302,6 @@
     .tab-menu-bubble .mbtn:hover {
       transform: none;
     }
-  }
-  .tab-menu-bubble .mbtn.disabled {
-    color: var(--text-secondary);
-    cursor: not-allowed;
-    opacity: 0.58;
   }
   .tab-menu-bubble .mbtn-icon {
     width: 18px;

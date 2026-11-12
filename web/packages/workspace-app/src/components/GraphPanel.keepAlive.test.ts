@@ -64,8 +64,8 @@ async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement
       kind: "leaf",
       id: GRAPH_PANE,
       tabs: [
-        graphTab({ id: "one", scopeId: "workspace" }),
-        graphTab({ id: "two", scopeId: "dir:notes" }),
+        graphTab({ id: "one" }),
+        graphTab({ id: "two", pendingSelectId: "notes" }),
       ],
       activeTabId: "one",
     },

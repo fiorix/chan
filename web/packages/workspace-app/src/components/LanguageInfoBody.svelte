@@ -14,10 +14,9 @@
   // "Load more"; clicking a row graphs from that directory.
   //
   // The action's semantic is host-decided (the callback-agnostic
-  // pattern WorkspaceInfoBody / FileInfoBody already use): the graph
-  // host re-scopes the current tab to the language lens, the file
-  // browser host would spawn a fresh language graph. The body just
-  // calls `onSetAsScope` / `onOpenDirectory`.
+  // pattern WorkspaceInfoBody / FileInfoBody already use): a host
+  // opens the graph with the language, or the directory of a row,
+  // selected. The body just calls `onSetAsScope` / `onOpenDirectory`.
 
   import { api } from "../api/client";
   import type { LanguageGraphDetail } from "../api/types";

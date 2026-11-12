@@ -132,7 +132,7 @@ async function depthRow(tab: GraphTab): Promise<HTMLElement> {
 
 describe("the depth slider", () => {
   test("reaches the workspace's deepest level and is live", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     const row = await depthRow(tab);
     const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
 
@@ -161,7 +161,7 @@ describe("the depth slider", () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true, notes: true } }),
+      graphTab({ expanded: { "": true, notes: true } }),
     );
     const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
     expect([slider.min, slider.value, slider.max], "nothing selected reads as the root").toEqual(["1", "1", "3"]);
@@ -182,7 +182,7 @@ describe("the depth slider", () => {
 
 describe("the workspace tree", () => {
   test("shows a directory's files only while it and its ancestors are expanded", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace", expanded: { "": true } }));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
     let ids = visibleIds();
     expect(ids).toEqual(expect.arrayContaining(["", NOTES, SRC]));
     expect(ids).not.toContain(A);
@@ -191,7 +191,7 @@ describe("the workspace tree", () => {
     await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true, notes: true } }),
+      graphTab({ expanded: { "": true, notes: true } }),
     );
     ids = visibleIds();
     expect(ids).toEqual(expect.arrayContaining([A, DEEP]));
@@ -203,7 +203,7 @@ describe("the workspace tree", () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+      graphTab({ expanded: { "": true } }),
     );
     canvas.props!.onSelect(NOTES);
     await settle(2);
@@ -228,7 +228,7 @@ describe("the workspace tree", () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true, src: true } }),
+      graphTab({ expanded: { "": true, src: true } }),
     );
     canvas.props!.onSelect(NOTES);
     await settle(2);
@@ -254,7 +254,7 @@ describe("the workspace tree", () => {
     const { tab } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "workspace", expanded: { "": true } }),
+      graphTab({ expanded: { "": true } }),
     );
     canvas.props!.onSelect(NOTES);
     await settle(2);
@@ -314,61 +314,9 @@ describe("a graph opened on a directory", () => {
   });
 });
 
-describe("the filesystem graph", () => {
-  test("shows what the expanded directories hold, and hides a collapsed one's", async () => {
-    const { tab } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true } }),
-    );
-    expect(visibleIds()).toEqual(expect.arrayContaining(["", "notes", "src", "notes/a.md", "notes/deep"]));
-    expect(visibleIds()).not.toContain("src/main.rs");
-
-    // Collapse notes with a double-click: its children stay loaded, and hidden.
-    canvas.props!.onSelect("notes");
-    await settle(2);
-    canvas.props!.onSetAsScope();
-    await settle();
-    expect(tab.expanded.notes).toBeUndefined();
-    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "still loaded").toBe(true);
-    expect(visibleIds()).not.toContain("notes/a.md");
-    expect(visibleIds()).toContain("notes");
-  });
-
-  test("expanding a directory fetches its children and asks the canvas to fit them", async () => {
-    const { tab } = await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "workspace", mode: "filesystem", expanded: { "": true } }),
-    );
-    expect(canvas.props!.nodes.some((n) => n.id === "notes/a.md"), "not loaded yet").toBe(false);
-
-    canvas.props!.onSelect("notes");
-    await settle(2);
-    canvas.props!.onSetAsScope();
-    await settle();
-
-    expect(tab.expanded.notes).toBe(true);
-    expect(graphServer.fsGraphCalls.some((c) => c.path === "notes" && c.depth === 1)).toBe(true);
-    expect(visibleIds()).toEqual(expect.arrayContaining(["notes/a.md", "notes/deep"]));
-    expect(canvas.props!.expansionFitRequest?.ids).toEqual(
-      expect.arrayContaining(["notes", "", "notes/a.md", "notes/deep"]),
-    );
-  });
-
-  test("a file scope shows everything it loaded", async () => {
-    await mountGraphPanel(
-      GraphPanel,
-      layout,
-      graphTab({ scopeId: "file:notes/a.md", mode: "filesystem" }),
-    );
-    expect(visibleIds().length).toBe(canvas.props!.nodes.length);
-  });
-});
-
 describe("the tab menu", () => {
   test("is the scope row, the depth slider, the filters and Close, each group behind a separator", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
     await settle(2);
     const bubble = document.body.querySelector(".tab-menu-bubble")!;

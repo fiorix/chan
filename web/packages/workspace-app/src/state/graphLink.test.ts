@@ -16,8 +16,6 @@ function tab(overrides: Partial<GraphTab>): GraphTab {
     kind: "graph",
     id: "graph-1",
     title: "graph",
-    mode: "semantic",
-    scopeId: "workspace",
     depth: 1,
     expanded: { "": true },
     filters: {
@@ -54,36 +52,24 @@ describe("graph link serialization", () => {
     expect(parsed?.selectedNodeId).toBeNull();
   });
 
-  it("round-trips a directory-scoped graph with a selected node", () => {
+  it("round-trips the depth, the selection, the opened directories and the filters", () => {
     const t = tab({
-      mode: "semantic",
-      scopeId: "dir:crates/gateway-common",
       depth: 3,
       selectedNodeId: "directory:crates/gateway-common",
+      expanded: { "": true, crates: true, "crates/gateway-common": true },
     });
     const link = graphLinkFor(t);
     expect(link.startsWith(GRAPH_LINK_PREFIX)).toBe(true);
     const parsed = parseGraphLink(link);
-    expect(parsed).not.toBeNull();
-    expect(parsed?.scopeId).toBe("dir:crates/gateway-common");
-    expect(parsed?.depth).toBe(3);
-    expect(parsed?.mode).toBe("semantic");
-    expect(parsed?.selectedNodeId).toBe("directory:crates/gateway-common");
-    expect(parsed?.filters).toEqual(t.filters);
+    expect(parsed).toEqual({
+      depth: 3,
+      selectedNodeId: "directory:crates/gateway-common",
+      expanded: t.expanded,
+      filters: t.filters,
+    });
   });
 
-  it("round-trips filesystem + language modes and a non-default filter set", () => {
-    const fs = parseGraphLink(
-      graphLinkFor(tab({ mode: "filesystem", scopeId: "file:notes/a.md" })),
-    );
-    expect(fs?.mode).toBe("filesystem");
-    expect(fs?.scopeId).toBe("file:notes/a.md");
-
-    const lang = parseGraphLink(
-      graphLinkFor(tab({ mode: "language", scopeId: "language:Rust", depth: 0 })),
-    );
-    expect(lang?.mode).toBe("language");
-
+  it("round-trips a non-default filter set", () => {
     const filtered = tab({
       filters: {
         link: true,
@@ -101,26 +87,45 @@ describe("graph link serialization", () => {
     );
   });
 
-  it("encodes tag scopes (with '#') and paths safely", () => {
-    const parsed = parseGraphLink(
-      graphLinkFor(tab({ scopeId: "tag:#infra", selectedNodeId: "#infra" })),
-    );
-    expect(parsed?.scopeId).toBe("tag:#infra");
+  it("encodes a tag (with '#') safely", () => {
+    const parsed = parseGraphLink(graphLinkFor(tab({ selectedNodeId: "#infra" })));
     expect(parsed?.selectedNodeId).toBe("#infra");
   });
 
-  it("rejects non-graph links and missing scope", () => {
+  it("reads a link that names a scope of its own as the workspace with that node selected", () => {
+    // Links as notes hold them from when a graph could be scoped to a node,
+    // or be the filesystem's or a language's graph (`m=f`, `m=l`).
+    const read = (query: string) => parseGraphLink(`${GRAPH_LINK_PREFIX}${query}`);
+
+    expect(read("s=dir%3Acrates%2Fgateway-common&d=3&m=s")).toMatchObject({
+      depth: 3,
+      selectedNodeId: "crates/gateway-common",
+      expanded: { "": true, crates: true, "crates/gateway-common": true },
+    });
+    expect(read("s=tag%3A%23infra&m=s")?.selectedNodeId).toBe("#infra");
+    expect(read("s=file%3Anotes%2Fa.md&m=f")).toMatchObject({
+      selectedNodeId: "notes/a.md",
+      expanded: { "": true },
+    });
+    expect(read("s=language%3ARust&m=l&d=0")).toMatchObject({ depth: 1, selectedNodeId: "language:Rust" });
+    // The node the link itself selects wins over its scope's.
+    expect(read("s=tag%3A%23infra&m=s&n=notes%2Fa.md")?.selectedNodeId).toBe("notes/a.md");
+  });
+
+  it("still writes the scope and mode a link is refused without", () => {
+    const params = new URLSearchParams(graphLinkFor(tab({})).slice(GRAPH_LINK_PREFIX.length));
+    expect(params.get("s")).toBe("workspace");
+    expect(params.get("m")).toBe("s");
+  });
+
+  it("rejects non-graph links and a link with no scope", () => {
     expect(parseGraphLink("https://example.com")).toBeNull();
     expect(parseGraphLink("[[notes/a.md]]")).toBeNull();
     expect(parseGraphLink("chan://graph?d=2&m=s")).toBeNull();
     expect(parseGraphLink("")).toBeNull();
   });
 
-  it("defaults depth=1 and mode=semantic when omitted", () => {
-    const parsed = parseGraphLink(`${GRAPH_LINK_PREFIX}s=workspace`);
-    expect(parsed?.scopeId).toBe("workspace");
-    expect(parsed?.depth).toBe(1);
-    expect(parsed?.mode).toBe("semantic");
-    expect(parsed?.selectedNodeId).toBeNull();
+  it("defaults depth=1 and no selection when omitted", () => {
+    expect(parseGraphLink(`${GRAPH_LINK_PREFIX}s=workspace`)).toMatchObject({ depth: 1, selectedNodeId: null });
   });
 });

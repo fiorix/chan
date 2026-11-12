@@ -4940,26 +4940,21 @@ function openGraphAtDestination(
   }
 }
 
-// Every opener below opens the one graph: the whole workspace, rooted at
-// its own node, with the node the caller is about selected. A directory
+// Every opener below opens the graph: the whole workspace, rooted at its
+// own node, with the node the caller is about selected. A directory
 // comes with the path down to it opened, so its children show; a file, a
 // tag, a mention, a contact or a language is revealed by its selection.
 
 /** The graph with the directory at `path` selected and opened; the
  *  workspace's own node for the root. */
 function directorySelection(path: string): OpenGraphOptions {
-  return {
-    mode: "semantic",
-    depth: 1,
-    pendingSelectId: path,
-    expanded: openedForPath(path),
-  };
+  return { depth: 1, pendingSelectId: path, expanded: openedForPath(path) };
 }
 
 /** The graph with the node `select` names selected: a file's path, or a
  *  tag's, mention's or language's node id. */
 function nodeSelection(select: string): OpenGraphOptions {
-  return { mode: "semantic", depth: 1, pendingSelectId: select };
+  return { depth: 1, pendingSelectId: select };
 }
 
 /** Spawn a graph tab on the focused surface's context: the focused file
@@ -5068,8 +5063,6 @@ export function openGraphFromLink(
   const parsed = parseGraphLink(link);
   if (!parsed) return false;
   openGraphAtDestination({
-    mode: parsed.mode,
-    scopeId: parsed.scopeId,
     depth: parsed.depth,
     filters: parsed.filters,
     pendingSelectId: parsed.selectedNodeId,
@@ -5195,27 +5188,16 @@ function resolveBrowserSpawnContext(): SpawnContext {
 }
 
 function resolveGraphSpawnContext(tab: GraphTab): SpawnContext {
-  // The semantic graph is the whole workspace; what anchors a spawn from
-  // it is the selected node: a directory, or a file with its directory.
-  // A tag, a mention, a language and the workspace's own node have no
-  // path, so they anchor at the workspace root.
-  if (tab.mode === "semantic") {
-    const id = tab.selectedNodeId ?? tab.pendingSelectId ?? "";
-    if (id.startsWith("directory:")) return { dir: id.slice("directory:".length) };
-    if (id === "" || id.startsWith("#") || id.startsWith("@@") || id.startsWith("language:")) {
-      return { dir: "" };
-    }
-    return { dir: parentDir(id), file: id };
+  // The graph is the whole workspace; what anchors a spawn from it is the
+  // selected node: a directory, or a file with its directory. A tag, a
+  // mention, a language and the workspace's own node have no path, so
+  // they anchor at the workspace root.
+  const id = tab.selectedNodeId ?? tab.pendingSelectId ?? "";
+  if (id.startsWith("directory:")) return { dir: id.slice("directory:".length) };
+  if (id === "" || id.startsWith("#") || id.startsWith("@@") || id.startsWith("language:")) {
+    return { dir: "" };
   }
-  const scopeId = tab.scopeId;
-  if (scopeId.startsWith("file:")) {
-    const file = scopeId.slice("file:".length);
-    return { dir: parentDir(file), file };
-  }
-  if (scopeId.startsWith("dir:")) {
-    return { dir: scopeId.slice("dir:".length) };
-  }
-  return { dir: "" };
+  return { dir: parentDir(id), file: id };
 }
 
 // ---- overlay z-order stack ----------------------------------------------
