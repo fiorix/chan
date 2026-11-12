@@ -241,17 +241,80 @@ export function fuzzyDeckScore(query: string, text: string): number | null {
   return score;
 }
 
+// One band per kind of hit. The position and length penalties inside a band
+// stay under BAND_REACH, so a hit never sinks into the band below it, and the
+// loosest hit, a subsequence, sits under every band.
+const TITLE_WORD_START = 40_000;
+const TITLE_INSIDE_WORD = 30_000;
+const OTHER_WORD_START = 20_000;
+const OTHER_INSIDE_WORD = 10_000;
+const BAND_REACH = 5_000;
+
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+
+/** Where `word` sits in `text`, both lowercased: at a word's start when any
+ * occurrence is at one, else at its first occurrence. null means absent. */
+function wordHit(word: string, text: string): { start: boolean; at: number } | null {
+  let first = -1;
+  for (let at = text.indexOf(word); at >= 0; at = text.indexOf(word, at + 1)) {
+    if (at === 0 || !WORD_CHARACTER.test(text[at - 1] ?? "")) return { start: true, at };
+    if (first < 0) first = at;
+  }
+  return first < 0 ? null : { start: false, at: first };
+}
+
+/** One query word against one row. The title is read first, so a word the
+ * title holds never scores as a hit elsewhere. */
+function wordScore(word: string, title: string, others: readonly string[]): number | null {
+  const inTitle = wordHit(word, title);
+  if (inTitle) {
+    const band = inTitle.start ? TITLE_WORD_START : TITLE_INSIDE_WORD;
+    return band - Math.min(inTitle.at, 400) * 8 - Math.min(title.length, 400);
+  }
+  let best: number | null = null;
+  for (const text of others) {
+    const hit = wordHit(word, text);
+    if (!hit) continue;
+    const score = (hit.start ? OTHER_WORD_START : OTHER_INSIDE_WORD) - Math.min(hit.at, 400) * 8;
+    if (best === null || score > best) best = score;
+  }
+  if (best !== null) return best;
+  const loose = fuzzyDeckScore(word, [title, ...others].join(" "));
+  return loose === null ? null : Math.max(1, Math.min(BAND_REACH - 1, loose));
+}
+
+/**
+ * Rows matching `query`, best first. The query is split on whitespace and
+ * every word must match the row's title, breadcrumb, subtitle or search text,
+ * in any order. A word in the title outranks one found elsewhere, and a word
+ * that starts a word outranks one inside a word. Rows that can run come before
+ * disabled ones; ties fall to the title, then the id. An empty query returns
+ * the rows as given.
+ */
 export function rankDeckItems(items: readonly DeckItem[], query: string): DeckItem[] {
-  const q = query.trim();
-  if (!q) return [...items];
-  return items
-    .map((item) => ({
-      item,
-      score: fuzzyDeckScore(q, `${item.title} ${item.breadcrumb} ${item.searchText}`),
-    }))
-    .filter((row): row is { item: DeckItem; score: number } => row.score !== null)
+  const words = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [...items];
+  const ranked: { item: DeckItem; score: number }[] = [];
+  for (const item of items) {
+    const title = item.title.toLocaleLowerCase();
+    const others = [item.breadcrumb, item.subtitle ?? "", item.searchText].map((text) =>
+      text.toLocaleLowerCase(),
+    );
+    let score = 0;
+    for (const word of words) {
+      const hit = wordScore(word, title, others);
+      if (hit === null) {
+        score = -1;
+        break;
+      }
+      score += hit;
+    }
+    if (score >= 0) ranked.push({ item, score });
+  }
+  return ranked
     .sort(
       (a, b) =>
+        Number(a.item.disabled === true) - Number(b.item.disabled === true) ||
         b.score - a.score ||
         a.item.title.localeCompare(b.item.title, undefined, { sensitivity: "base" }) ||
         a.item.id.localeCompare(b.item.id),
