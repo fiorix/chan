@@ -371,6 +371,18 @@ fn resolve_scope(
     })?;
     let root: PathBuf = workspace.root().to_path_buf();
     let rel = normalize_rel(path);
+    // A path the walk never enters is not there to this route either, so a
+    // caller cannot read `.git`, `.chan` or an excluded directory by naming
+    // it: it answers as a path that does not exist.
+    if rel
+        .split('/')
+        .any(|segment| walk_skips(segment, workspace.walk_filter()))
+    {
+        return Err(FsGraphError::new(
+            StatusCode::NOT_FOUND,
+            format!("no such path: {rel}"),
+        ));
+    }
     let abs = if rel.is_empty() {
         root.clone()
     } else {
@@ -733,6 +745,12 @@ fn ensure_parent_inside_workspace(root: &Path, abs: &Path, rel: &str) -> Result<
 /// Trim a leading slash and collapse `.` segments. Pure-`..` requests
 /// pass through unchanged; `resolve_safe` will reject them with the
 /// standard error wire shape so this helper does not have to.
+/// Whether the walk leaves out an entry named `name`: chan's own `.chan`,
+/// the repository's `.git`, and the workspace's excluded directory names.
+fn walk_skips(name: &str, filter: &chan_workspace::fs_ops::WalkFilter) -> bool {
+    name == ".chan" || name == ".git" || filter.is_excluded(name)
+}
+
 fn normalize_rel(requested: &str) -> String {
     let trimmed = requested.trim_start_matches('/');
     if trimmed.is_empty() || trimmed == "." {
@@ -1095,7 +1113,7 @@ impl FsGraphWalker {
         // plots its whole dependency tree (60K-131K nodes). The skip
         // applies regardless of file type so a `.git` symlink can't slip
         // a dependency tree back in.
-        if name_str == ".chan" || name_str == ".git" || self.filter.is_excluded(&name_str) {
+        if walk_skips(&name_str, &self.filter) {
             return None;
         }
         let child_rel = if parent_rel.is_empty() {
@@ -1989,6 +2007,92 @@ mod tests {
             err.message.contains("escape"),
             "expected escape rejection, got: {}",
             err.message
+        );
+    }
+
+    // The route reads nothing the walk never enters: a path into `.git`,
+    // `.chan` or an excluded directory answers as one that is not there, in
+    // the file scope and the directory scope, paged or not, and the same as
+    // a directory that is missing; a sibling the walk enters answers.
+    #[tokio::test]
+    async fn the_route_answers_a_path_the_walk_skips_as_missing() {
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = super::super::tests::served_state();
+        for dir in [
+            ".git/objects",
+            ".chan",
+            "node_modules/pkg",
+            "src/.git",
+            "src/lib",
+        ] {
+            fs::create_dir_all(root.path().join(dir)).unwrap();
+        }
+        fs::write(root.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(root.path().join("node_modules/pkg/index.js"), b"x\n").unwrap();
+        fs::write(root.path().join("src/lib/a.rs"), b"fn a() {}\n").unwrap();
+
+        let get = |query: String| {
+            let state = Arc::clone(&state);
+            async move {
+                crate::router(state)
+                    .oneshot(
+                        axum::http::Request::get(format!("/api/fs-graph?{query}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        for path in [
+            ".git",
+            ".git/objects",
+            ".chan",
+            "node_modules",
+            "node_modules/pkg",
+            "src/.git",
+        ] {
+            for query in [
+                format!("scope=directory&path={path}&depth=1"),
+                format!("scope=directory&path={path}&depth=1&limit=128"),
+            ] {
+                super::super::refusal_tests::assert_refusal(
+                    get(query).await,
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": format!("no such path: {path}") }),
+                )
+                .await;
+            }
+        }
+        super::super::refusal_tests::assert_refusal(
+            get("scope=file&path=.git/HEAD".into()).await,
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no such path: .git/HEAD" }),
+        )
+        .await;
+        super::super::refusal_tests::assert_refusal(
+            get("scope=directory&path=src/gone&depth=1".into()).await,
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no such path: src/gone" }),
+        )
+        .await;
+        let response = get("scope=directory&path=src&depth=1".into()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let graph: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"src/lib"), "the walk enters src: {ids:?}");
+        assert!(
+            !ids.contains(&"src/.git"),
+            "nor lists the skipped name: {ids:?}"
         );
     }
 
