@@ -78,12 +78,60 @@ describe("rankDeckItems", () => {
     expect(ids(rankDeckItems(items, "tab"))).toEqual(["title", "elsewhere"]);
   });
 
-  it("keeps a loose subsequence match, below every contiguous one", () => {
+  it("matches a compact abbreviation of the title, below every whole hit", () => {
     const items = [
-      row("loose", "New terminal"),
-      row("keyword", "Zoom", { searchText: "print" }),
+      row("terminal", "Terminal settings"),
+      row("close", "Close window"),
+      row("keyword", "Zoom", { searchText: "xtrmnlx" }),
     ];
-    expect(ids(rankDeckItems(items, "nt"))).toEqual(["keyword", "loose"]);
+    // t, r, m, n and l cover eight characters of "terminal"; ten are allowed.
+    expect(ids(rankDeckItems(items, "trmnl"))).toEqual(["keyword", "terminal"]);
+    // c, l, s and w cover seven characters of "close window"; eight are allowed.
+    expect(ids(rankDeckItems(items, "clsw"))).toEqual(["close"]);
+    expect(ids(rankDeckItems(items, "clsw trmnl")), "no row abbreviates both").toEqual([]);
+  });
+
+  it("allows an abbreviation's letters a stretch of twice its length and no more", () => {
+    const items = [row("new", "New terminal"), row("spread", "The release machine")];
+    // n, w, t and m cover exactly eight characters of "new terminal".
+    expect(ids(rankDeckItems(items, "nwtm"))).toEqual(["new"]);
+    // n to t covers five; a two-letter word is allowed four.
+    expect(ids(rankDeckItems(items, "nt"))).toEqual([]);
+    // "new terminal" holds term whole. In "the release machine" t, e, r and m
+    // stand in order across thirteen characters, and four letters get eight.
+    expect(ids(rankDeckItems(items, "term"))).toEqual(["new"]);
+  });
+
+  it("takes the tightest stretch, not the first", () => {
+    // From the first t the letters cover nine characters; from the third, four.
+    expect(ids(rankDeckItems([row("start", "Start terminal")], "trm"))).toEqual(["start"]);
+    const items = [row("late", "Stage two trim"), row("early", "Trim stage two")];
+    expect(ids(rankDeckItems(items, "trm")), "an earlier stretch of the same length leads").toEqual([
+      "early",
+      "late",
+    ]);
+  });
+
+  it("drops a row that holds a word's letters in order only outside its title", () => {
+    const items = [
+      // Close together, as a title would have to hold them.
+      row("near", "Window 1", { searchText: "tee room" }),
+      row("crumb", "Hide window", { breadcrumb: "tee room" }),
+      row("sub", "Open window", { subtitle: "tee room" }),
+      // Far apart, as a path or a keyword list holds them.
+      row("far", "Close window", { searchText: "/home/alex/notes the release machine geekom" }),
+      row("whole", "Focus window", { searchText: "terminal" }),
+    ];
+    expect(ids(rankDeckItems(items, "term"))).toEqual(["whole"]);
+  });
+
+  it("matches a word of one letter only where the letter stands", () => {
+    const items = [
+      row("title", "Zoom"),
+      row("keyword", "Alpha", { searchText: "jazz" }),
+      row("none", "Split right", { searchText: "pane" }),
+    ];
+    expect(ids(rankDeckItems(items, "z"))).toEqual(["title", "keyword"]);
   });
 
   it("lists rows that can run before disabled ones", () => {
