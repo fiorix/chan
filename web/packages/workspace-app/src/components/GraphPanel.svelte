@@ -1,8 +1,9 @@
 <script lang="ts">
-  // Graph tab body. Loads the graph for the tab's scope (`load`) and
-  // hands it to GraphCanvas, which lays it out with d3-force and
-  // paints it on a Canvas 2D context; pan / zoom / node drag / hover
-  // / selection live there too.
+  // Graph tab body. Draws the window's shared graph (`state/graphData`,
+  // one copy for every tab) over the tab's own filesystem spine
+  // (`loadSpine`) and hands it to GraphCanvas, which lays it out with
+  // d3-force and paints it on a Canvas 2D context; pan / zoom / node drag
+  // / hover / selection live there too.
   //
   // The semantic graph is one graph (`graph/selectionView`): the whole
   // workspace, rooted at its own node, which the canvas pins at the bottom.
@@ -25,8 +26,7 @@
     FsGraphEdge,
     FsGraphNode,
     FsGraphResponse,
-    GraphViewEdge,
-    GraphViewNode,
+    GraphView,
   } from "../api/types";
   import {
     activeGraphTab,
@@ -55,6 +55,7 @@
     treeExpanded,
   } from "../state/store.svelte";
   import { drafts, refreshDrafts } from "../state/drafts.svelte";
+  import { ensureGraphLoaded, graphData, refreshGraph } from "../state/graphData.svelte";
   import { graphPaletteStyleFor } from "../state/graphPalette.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { onDestroy, tick, untrack } from "svelte";
@@ -98,6 +99,7 @@
     type DraftLayer,
   } from "../graph/draftNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
+  import { NO_GRAPH, graphEdgeKey, withSpine, type DrawnGraph } from "../graph/sharedGraph";
   import {
     graphNodeIds,
     openBelow,
@@ -121,10 +123,10 @@
   // with a `graph`-kind tab), so the scope/state come straight from
   // the tab. Every graph tab in
   // the pane stays mounted and hidden through the visibility contract,
-  // so `visible` tracks the `active` prop. The load + depth-probe +
-  // watcher effects gate on it: a hidden graph does no background
-  // fetch/paint and reloads once on re-activation if it missed an
-  // in-scope edit while hidden.
+  // so `visible` tracks the `active` prop. The load and watcher effects
+  // gate on it: a hidden graph fetches nothing, takes nothing of the
+  // shared graph and paints nothing, and catches up once when it is
+  // shown again.
   const graphState = $derived(tab);
   const visible = $derived(active);
 
@@ -180,17 +182,17 @@
     }
   }
 
-  /// Bumped to load the graph again when a directory is opened whose
-  /// children the loaded graph does not hold.
+  /// Bumped to fetch the spine again when a directory is opened whose
+  /// children the drawn graph does not hold.
   let spineReload = $state(0);
   /// Directories a reload was already asked for, so one that is empty on
   /// disk asks once.
   const spineAsked = new Set<string>();
 
-  /// The loaded graph holds the whole tree once the index has answered.
-  /// Until then it holds the filesystem spine only as deep as the opened
-  /// directories reached at the last load, so one opened past that has no
-  /// children to show: load again, which fetches the spine down to it.
+  /// The shared graph holds the whole tree once the index has answered.
+  /// Until then the tab draws its filesystem spine only as deep as the
+  /// opened directories reached at its last fetch, so one opened past that
+  /// has no children to show: fetch the spine again, down to it.
   function loadOpenedChildren(): void {
     const withChildren = new Set<string>();
     for (const n of nodes) {
@@ -205,7 +207,7 @@
     if (missing) spineReload += 1;
   }
 
-  /// Levels of the filesystem spine a load fetches: one past the deepest
+  /// Levels of the filesystem spine a fetch asks for: one past the deepest
   /// opened directory, so every opened directory's children are in it.
   function spineDepth(): number {
     let deepest = 0;
@@ -363,7 +365,7 @@
   // The graph view renders files (media arrive as file nodes too),
   // folders, tags, mentions and languages: the canvas's node and edge
   // types, imported above. The wire types also name a `date` node and edge
-  // kind; `mapGraphNode` and `renderableGraphEdge` drop both at load.
+  // kind; `drawnGraph` (graph/sharedGraph) drops both.
 
   /// Chip toggles. `tag`, `mention` and `language` are edge-kind
   /// filters: off, their edges hide, and a meta node renders only
@@ -395,16 +397,37 @@
 
   // ---- state -------------------------------------------------------------
 
-  let nodes: RenderedNode[] = $state([]);
-  let edges: RenderedEdge[] = $state([]);
+  /// The view of the window's shared graph this tab draws, and whether it
+  /// was still streaming when taken (`graphData.partial`). The tab takes it
+  /// while shown and keeps it while hidden (see the effect that takes it).
+  /// Held raw: the view is the store's own object, never a copy.
+  let taken = $state.raw<{ view: GraphView; partial: boolean } | null>(null);
+  /// The tab's own filesystem spine (`loadSpine`), under the canvas's types.
+  let spine = $state.raw<DrawnGraph>(NO_GRAPH);
+  let spineLoading = $state(true);
+  let spineError = $state<string | null>(null);
+  let spineSeq = 0;
+  /// The spine's request found the workspace root gone. The tab then draws
+  /// nothing, the shared graph included: what the index still holds of a
+  /// missing workspace is not shown behind the error.
+  let rootGone = $state(false);
+  /// What the tab draws from: the shared graph over the spine. With nothing
+  /// of the spine's own to add these are the shared graph's arrays
+  /// themselves, the same in every tab of the window.
+  const graph = $derived(rootGone ? NO_GRAPH : withSpine(spine, taken?.view ?? null));
+  const nodes = $derived(graph.nodes);
+  const edges = $derived(graph.edges);
+  const loading = $derived(spineLoading || graphData.loading);
+  const error = $derived(spineError ?? graphData.error);
+  /// The tab draws a whole graph: its spine is in, and the shared graph it
+  /// took is complete and is the one the window holds now.
+  const graphWhole = $derived(
+    !loading && taken !== null && !taken.partial && taken.view === graphData.view,
+  );
   /// Set once `showSelectedDirectoryFiles` has had its one run.
   let shownDirectoryFiles = false;
-  let loading = $state(true);
-  let error: string | null = $state(null);
   let watchReloadTimer: ReturnType<typeof setTimeout> | null = null;
   let seenGraphReloadNonce = graphReloadSignal.nonce;
-  let graphLoadAbort: AbortController | null = null;
-  let graphLoadSeq = 0;
   // Keep-alive load gating. PLAIN locals, never rendered:
   // they are read/written only inside the load + watcher effects, so
   // they cannot trip Svelte's state_unsafe_mutation guard (that fires
@@ -412,9 +435,9 @@
   // first load LAZY on first activation rather than on mount (the
   // each-block mounts every graph tab at session restore; mount-gating
   // would fire N loads at once). `graphDirty` records that a hidden
-  // graph missed an in-scope watcher edit, so it reloads exactly once
+  // graph missed a watcher edit, so it fetches its spine exactly once
   // when next shown. `lastLoadedKey` lets the visible-load decision
-  // tell a real scope/depth/mode change from an idempotent re-fire.
+  // tell a real change of the load key from an idempotent re-fire.
   let hasLoadedOnce = false;
   let graphDirty = false;
   let lastLoadedKey: string | null = null;
@@ -566,24 +589,26 @@
   /// through `fileBucket` (state/kinds.ts), the bucketer the canvas
   /// paints with, so a node is counted, hidden and coloured as one kind.
 
-  /// Forced reload of the graph. Called by the launcher's `Reload graph`
-  /// command and by the index-settle effect.
-  async function reloadGraph(): Promise<void> {
+  /// Forced reload of the graph, by the launcher's `Reload graph` command:
+  /// the tab's spine, and the window's shared graph, which every surface
+  /// that draws it takes once it has arrived whole.
+  function reloadGraph(): void {
     closeTabMenu();
     lastLoadedKey = loadKey;
     graphDirty = false;
-    await load();
+    void loadSpine();
+    void refreshGraph();
   }
 
   // The launcher's `Reload graph` reaches the fetch through the chan:command
-  // bridge, since the /api/graph call lives here. Only the
+  // bridge, since the tab's spine is fetched here. Only the
   // graph the launcher itself targeted responds, so the command's
   // active-surface gate and the reloading graph agree.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
       const name = (e as CustomEvent).detail?.name;
       if (activeGraphTab()?.id !== tab.id) return;
-      if (name === "app.graph.reload") void reloadGraph();
+      if (name === "app.graph.reload") reloadGraph();
       // The depth is the selected node's, which only the panel knows.
       else if (name === "app.graph.depth.increase") setDepth(Math.min(depthValue + 1, depthCap));
       else if (name === "app.graph.depth.decrease") setDepth(Math.max(depthValue - 1, depthMin));
@@ -1230,17 +1255,6 @@
   /// up from the same spot whatever is selected.
   const FOCAL_IDS = [""];
 
-  /// The edge when its kind is one the graph draws (link / tag /
-  /// mention / contains / language / symlink / hardlink), else null; a
-  /// `date` edge is dropped here.
-  function renderableGraphEdge(e: GraphViewEdge): RenderedEdge | null {
-    return e.kind === "date" ? null : (e as RenderedEdge);
-  }
-
-  function graphEdgeKey(e: GraphViewEdge): string {
-    return `${e.source}\u0000${e.target}\u0000${e.kind}\u0000${e.rank ?? ""}`;
-  }
-
   /// Resolve a `pendingSelectId` (set by "Graph from here") to the real
   /// rendered node id. The select is a workspace PATH: for a file that
   /// path IS the node id, but a directory node's id is `directory:<path>`
@@ -1260,154 +1274,154 @@
     return null;
   }
 
-  async function load(): Promise<void> {
-    const seq = ++graphLoadSeq;
-    graphLoadAbort?.abort();
-    const controller = new AbortController();
-    graphLoadAbort = controller;
-    loading = true;
-    error = null;
+  /// Fetches the tab's filesystem spine: the tree as deep as its opened
+  /// directories go, read straight from disk. It is what the tab draws
+  /// before the shared graph's first batch and while the index cannot
+  /// answer, and it carries the tree's symlinks and hardlinks as deep as
+  /// the tab has the tree opened. The shared graph is laid over it
+  /// (`withSpine`): a file (bare-path id) or a directory (normalized to
+  /// `directory:<path>`) collides on id and the shared graph's node is the
+  /// one drawn; what only the spine carries stays.
+  async function loadSpine(): Promise<void> {
+    const seq = ++spineSeq;
+    spineLoading = true;
+    spineError = null;
+    // The first spine fills in page by page. A later one replaces the drawn
+    // spine once it is whole, so a reload shows no shrunken tree on the way.
+    const first = spine === NO_GRAPH;
     try {
-      // The graph is the whole workspace whatever is selected, with the
-      // filesystem spine fetched as deep as the opened directories go.
-      const graphScope = { scope: "workspace" as const, path: "" };
       const levels = spineDepth();
       const renderedNodesById = new Map<string, RenderedNode>();
       const renderedEdgesByKey = new Map<string, RenderedEdge>();
-      // Do NOT blank `nodes` / `edges` to `[]` here: the fs spine is
-      // seeded into the maps and published below, so an index-settle
-      // RE-load keeps the existing graph on screen instead of flashing
-      // empty across the await. A one-frame empty on the very first load
-      // (before the spine arrives) is fine.
       const publish = (): void => {
-        if (seq !== graphLoadSeq) return;
-        nodes = [...renderedNodesById.values()];
-        edges = [...renderedEdgesByKey.values()];
-        const pending = graphState.pendingSelectId;
-        if (pending !== null) {
-          const resolved = resolveSelectId(pending, renderedNodesById);
-          if (resolved !== null) {
-            selectedId = resolved;
-            // Restoring the existing selection must preserve a closed panel.
-            if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
-            graphState.pendingSelectId = null;
-          }
-        }
+        spine = {
+          nodes: [...renderedNodesById.values()],
+          edges: [...renderedEdgesByKey.values()],
+        };
       };
-      // Seed the always-available filesystem `contains` spine FIRST so the
-      // directory / file skeleton renders immediately, even before the
-      // index has settled. The semantic stream then merges its richer
-      // nodes (link / tag / mention / language) ON TOP of the same maps:
-      // a file (bare-path id) or a directory (normalized to
-      // `directory:<path>`) collides on id and the semantic node replaces
-      // the fs-seeded one; everything else layers on.
-      {
-        const spineNodesById = new Map<string, FsGraphNode>();
-        let spineEdges: FsGraphEdge[] = [];
-        let cursor: string | undefined;
-        let fs: FsGraphResponse | undefined;
-        do {
-          fs = await api.fsGraph({
-            scope: "directory",
-            path: "",
-            depth: levels,
-            limit: GRAPH_BATCH_NODES,
-            cursor,
-          });
-          if (seq !== graphLoadSeq) return;
-          for (const node of fs.nodes) spineNodesById.set(node.id, node);
-          const spineNodes = [...spineNodesById.values()];
-          const oldEdgeKeys = new Set(spineEdges.map(fsEdgeKey));
-          spineEdges = joinFsHardlinks(spineNodes, [...spineEdges, ...fs.edges]);
-          const newEdges = spineEdges.filter((edge) => !oldEdgeKeys.has(fsEdgeKey(edge)));
-          // Directory ids that need the `directory:` prefix so the fs
-          // spine collapses onto the semantic graph: the fs-graph names
-          // every node by bare path, where the semantic graph keeps the
-          // bare path for a file's node. The root is "" in both. File /
-          // ghost / symlink-leaf endpoints keep their bare path.
-          const fsDirIds = new Set<string>();
-          for (const n of spineNodes) {
-            if (isFsDirectory(n)) fsDirIds.add(n.id);
-          }
-          const normalizeId = (id: string): string =>
-            fsDirIds.has(id) ? directoryNodeId(id) : id;
-          for (const mapped of mapFsNodes(fs)) {
-            const id = normalizeId(mapped.id);
-            renderedNodesById.set(id, { ...mapped, id });
-          }
-          for (const mapped of mapFsEdges({ ...fs, nodes: spineNodes, edges: newEdges })) {
-            const source = normalizeId(mapped.source);
-            const target = normalizeId(mapped.target);
-            const edge = { ...mapped, source, target };
-            renderedEdgesByKey.set(graphEdgeKey(edge), edge);
-          }
-          publish();
-          cursor = fs.cursor ?? undefined;
-          if (!fs.done && cursor) {
-            await yieldToFrame();
-            if (seq !== graphLoadSeq) return;
-          }
-        } while (!fs.done && cursor);
-      }
-      await api.graphStream(
-        {
-          ...graphScope,
+      const spineNodesById = new Map<string, FsGraphNode>();
+      let spineEdges: FsGraphEdge[] = [];
+      let cursor: string | undefined;
+      let fs: FsGraphResponse | undefined;
+      do {
+        fs = await api.fsGraph({
+          scope: "directory",
+          path: "",
           depth: levels,
-        },
-        {
-          signal: controller.signal,
-          onNodes(batch) {
-            for (const n of batch) {
-              const mapped = mapGraphNode(n);
-              if (mapped) renderedNodesById.set(mapped.id, mapped);
-            }
-            publish();
-          },
-          onEdges(batch) {
-            for (const e of batch) {
-              const mapped = renderableGraphEdge(e);
-              if (mapped) renderedEdgesByKey.set(graphEdgeKey(e), mapped);
-            }
-            publish();
-          },
-        },
-      );
-      if (seq !== graphLoadSeq) return;
-      publish();
-      // A new selection opens Details; restoring the selected node keeps
-      // the tab's saved visibility.
+          limit: GRAPH_BATCH_NODES,
+          cursor,
+        });
+        if (seq !== spineSeq) return;
+        for (const node of fs.nodes) spineNodesById.set(node.id, node);
+        const spineNodes = [...spineNodesById.values()];
+        const oldEdgeKeys = new Set(spineEdges.map(fsEdgeKey));
+        spineEdges = joinFsHardlinks(spineNodes, [...spineEdges, ...fs.edges]);
+        const newEdges = spineEdges.filter((edge) => !oldEdgeKeys.has(fsEdgeKey(edge)));
+        // Directory ids that need the `directory:` prefix so the fs
+        // spine collapses onto the semantic graph: the fs-graph names
+        // every node by bare path, where the semantic graph keeps the
+        // bare path for a file's node. The root is "" in both. File /
+        // ghost / symlink-leaf endpoints keep their bare path.
+        const fsDirIds = new Set<string>();
+        for (const n of spineNodes) {
+          if (isFsDirectory(n)) fsDirIds.add(n.id);
+        }
+        const normalizeId = (id: string): string =>
+          fsDirIds.has(id) ? directoryNodeId(id) : id;
+        for (const mapped of mapFsNodes(fs)) {
+          const id = normalizeId(mapped.id);
+          renderedNodesById.set(id, { ...mapped, id });
+        }
+        for (const mapped of mapFsEdges({ ...fs, nodes: spineNodes, edges: newEdges })) {
+          const source = normalizeId(mapped.source);
+          const target = normalizeId(mapped.target);
+          const edge = { ...mapped, source, target };
+          renderedEdgesByKey.set(graphEdgeKey(edge), edge);
+        }
+        if (first) publish();
+        cursor = fs.cursor ?? undefined;
+        if (!fs.done && cursor) {
+          await yieldToFrame();
+          if (seq !== spineSeq) return;
+        }
+      } while (!fs.done && cursor);
+      if (!first) publish();
+      rootGone = false;
+    } catch (e) {
+      if (seq !== spineSeq) return;
+      if (isWorkspaceRootMissingError(e)) {
+        // Do not leave the persisted/indexed graph dimly visible behind the
+        // error after the source root is gone. The dirty editor owns its
+        // buffer; a graph owns no unsaved state and converges to unavailable.
+        rootGone = true;
+        selectedId = null;
+      }
+      spineError = (e as Error).message;
+    } finally {
+      if (seq === spineSeq) spineLoading = false;
+    }
+  }
+
+  // The window's shared graph is asked for when the tab is first shown and
+  // again whenever it is dropped under a shown tab (the view goes null). The
+  // request is the window's, whoever asks: a second tab, or an inspector's
+  // references, starts no second one. The load's own writes are untracked,
+  // so a stream that keeps failing is not restarted from here.
+  const graphDropped = $derived(graphData.view === null);
+  $effect(() => {
+    if (!visible) return;
+    void graphDropped;
+    untrack(() => void ensureGraphLoaded());
+  });
+
+  // A shown tab draws the view the window holds. A hidden tab takes nothing:
+  // it keeps what it last drew, does no work while the graph changes under
+  // it, and takes the current view when it is next shown. A view still
+  // streaming is taken only by a tab that draws no whole graph (none yet,
+  // or the empty one of an index that could not answer), so a reload keeps
+  // the drawn graph on screen until its successor is complete, and a
+  // dropped view (null) is never taken.
+  $effect(() => {
+    if (!visible) return;
+    const view = graphData.view;
+    const partial = graphData.partial;
+    untrack(() => {
+      if (view === null) return;
+      if (taken !== null && taken.view === view && taken.partial === partial) return;
+      const drawsWhole = taken !== null && !taken.partial && taken.view.nodes.length > 0;
+      if (partial && drawsWhole) return;
+      taken = { view, partial };
+    });
+  });
+
+  // A selection waiting on the graph (`pendingSelectId`: an opener's, or the
+  // one a reload or a moved tab restores) lands as soon as the drawn graph
+  // holds its node, and is dropped when the whole graph does not hold it.
+  $effect(() => {
+    const byId = nodeById;
+    const whole = graphWhole;
+    untrack(() => {
       const pending = graphState.pendingSelectId;
-      if (pending !== null && renderedNodesById.has(pending)) {
-        selectedId = pending;
-        if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
-      } else if (pending !== null) {
-        graphState.pendingSelectId = null;
+      if (pending !== null) {
+        const resolved = resolveSelectId(pending, byId);
+        if (resolved !== null) {
+          selectedId = resolved;
+          // A new selection opens Details; restoring the selected node keeps
+          // the tab's saved visibility.
+          if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
+          graphState.pendingSelectId = null;
+        } else if (whole) {
+          graphState.pendingSelectId = null;
+        }
       }
       // A tab fresh from an opener, on a directory: open it down to its
       // files, once.
-      if (openedFresh && !shownDirectoryFiles) {
+      if (whole && openedFresh && !shownDirectoryFiles) {
         shownDirectoryFiles = true;
         showSelectedDirectoryFiles();
       }
-    } catch (e) {
-      if (seq === graphLoadSeq && (e as DOMException).name !== "AbortError") {
-        if (isWorkspaceRootMissingError(e)) {
-          // Do not leave the persisted/indexed graph dimly visible behind the
-          // error after the source root is gone. The dirty editor owns its
-          // buffer; a graph owns no unsaved state and converges to unavailable.
-          nodes = [];
-          edges = [];
-          selectedId = null;
-        }
-        error = (e as Error).message;
-      }
-    } finally {
-      if (seq === graphLoadSeq) {
-        loading = false;
-        graphLoadAbort = null;
-      }
-    }
-  }
+    });
+  });
 
   function mapFsNodes(fs: FsGraphResponse): RenderedNode[] {
     return fs.nodes.map((n): RenderedNode => {
@@ -1465,53 +1479,27 @@
     });
   }
 
-  function mapGraphNode(n: GraphViewNode): RenderedNode | null {
-    if (n.kind === "file" || n.kind === "tag" || n.kind === "mention" || n.kind === "language") {
-      return n as RenderedNode;
-    }
-    if (n.kind === "media") {
-      return {
-        kind: "file",
-        id: n.id,
-        label: n.label,
-        path: n.path,
-        missing: n.missing,
-      };
-    }
-    if (n.kind === "directory") {
-      return {
-        kind: "folder",
-        id: n.id,
-        label: `${n.label || "workspace"}/`,
-        path: n.path,
-        files: n.files,
-        code: n.code,
-      };
-    }
-    return null;
-  }
-
-  /// The stable identity of "what graph to load". The graph loads the whole
-  /// workspace once: its selection and its depth only choose what of it is
-  /// drawn, so neither reloads it, and the one thing that does is a
-  /// directory opened past what was loaded (`spineReload`). The reload
-  /// effect tracks THIS key and runs `load()` untracked, so nothing
-  /// `load()` reads on the way (the expanded set, the pending selection)
-  /// is a reload trigger.
+  /// The stable identity of "what spine to fetch". The tab draws from the
+  /// whole workspace: its selection and its depth only choose what of it is
+  /// drawn, so neither fetches anything, and the one thing that does is a
+  /// directory opened past what the spine holds (`spineReload`). The load
+  /// effect tracks THIS key and runs `loadSpine()` untracked, so nothing
+  /// `loadSpine()` reads on the way (the expanded set) is a trigger.
   const loadKey = $derived(`graph|${spineReload}`);
 
   /// Keep-alive load gating. A graph tab stays mounted while hidden,
   /// so "visible" does not mean "just mounted": this effect decides
-  /// per activation whether a fetch is warranted:
+  /// per activation whether the tab's spine is fetched:
   ///   - HIDDEN: never fetch (the whole point -- no background load).
   ///     If the load key changed while hidden, mark dirty so the next
-  ///     activation refetches once. (A hidden in-scope watcher edit
-  ///     also sets graphDirty, in the watcher effect below.)
+  ///     activation refetches once. (A hidden watcher edit also sets
+  ///     graphDirty, in the watcher effect below.)
   ///   - VISIBLE: fetch only on the first activation (lazy, not mount),
-  ///     on a real scope/depth/mode change, or when dirty. Then latch
+  ///     on a change of the key, or when dirty. Then latch
   ///     hasLoadedOnce, record the key, and clear dirty.
-  /// `load()` runs untracked so its internal reads don't register as
-  /// reload triggers; only `visible` + `loadKey` do.
+  /// `loadSpine()` runs untracked so its internal reads don't register as
+  /// triggers; only `visible` + `loadKey` do. The shared graph has its own
+  /// two effects above: asked for when shown, taken while shown.
   $effect(() => {
     // Read both triggers up front so the effect tracks exactly them.
     const show = visible;
@@ -1527,10 +1515,14 @@
       hasLoadedOnce = true;
       lastLoadedKey = key;
       graphDirty = false;
-      untrack(() => void load());
+      untrack(() => void loadSpine());
     }
   });
 
+  // A change in the workspace. The shared graph fetches itself once after
+  // the burst the change belongs to (`noteGraphChanged`, at the store's
+  // signal sites) and this tab takes the answer; what the tab fetches here
+  // is its own spine.
   $effect(() => {
     const nonce = graphReloadSignal.nonce;
     if (nonce === seenGraphReloadNonce) return;
@@ -1552,35 +1544,9 @@
       if (visible) {
         lastLoadedKey = loadKey;
         graphDirty = false;
-        void load();
+        void loadSpine();
       }
     }, 250);
-  });
-
-  /// Layer the index-derived graph in once indexing finishes. The load
-  /// effect above tracks only `visible` + `loadKey`, and the watcher path
-  /// only fires on real file edits -- neither covers the initial index of
-  /// PRE-EXISTING files. A graph opened mid-index shows the
-  /// always-available fs spine immediately (seeded in `load()`), so `nodes`
-  /// is non-empty, but the link / tag / mention / language edges only
-  /// arrive once the index settles. Fire `reloadGraph()` on the
-  /// `indexBuilding` true→false edge so those layer on. Guards: edge-only
-  /// via `prevIndexBuilding` (no reload loop); `visible`-only (don't wake a
-  /// backgrounded tab). NOT gated on `nodes.length === 0`:
-  /// the fs spine keeps `nodes` populated, so an empty-only guard
-  /// would never fire the re-layer. Distinct trigger from the
-  /// graphReloadSignal watcher (a save's reindex), so no double-load.
-  /// `visible` is read untracked so only `indexBuilding` re-fires this
-  /// effect.
-  let prevIndexBuilding = false;
-  $effect(() => {
-    const building = indexBuilding;
-    const wasBuilding = prevIndexBuilding;
-    prevIndexBuilding = building;
-    if (!wasBuilding || building) return; // not a true -> false edge
-    untrack(() => {
-      if (visible) void reloadGraph();
-    });
   });
 
   /// Persist the live selection so it survives a window reload. The
@@ -1594,10 +1560,11 @@
   let lastSyncedSelect: string | null = null;
   $effect(() => {
     const id = keptSelection(selectedId);
-    // A restore (gn -> pendingSelectId) or re-scope resolves through
-    // load(); skip until it settles so we neither clobber the restored
-    // selection with the initial null nor persist a transient mid-resolve
-    // value. setSelected clears pendingSelectId, so user clicks pass.
+    // A restore (gn -> pendingSelectId) or re-scope resolves once the
+    // graph holds its node; skip until then so we neither clobber the
+    // restored selection with the initial null nor persist a transient
+    // mid-resolve value. setSelected clears pendingSelectId, so user
+    // clicks pass.
     if (graphState.pendingSelectId !== null) return;
     if (id === lastSyncedSelect) return;
     lastSyncedSelect = id;
@@ -1609,7 +1576,8 @@
 
   onDestroy(() => {
     if (watchReloadTimer) clearTimeout(watchReloadTimer);
-    graphLoadAbort?.abort();
+    // A spine request still in flight publishes nothing.
+    spineSeq += 1;
   });
 
   /// Selection callback handed to GraphCanvas. Tapping a node

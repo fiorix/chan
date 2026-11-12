@@ -28,6 +28,7 @@ import {
   settle,
   type CanvasProps,
 } from "../__tests__/graphPanel";
+import { invalidateGraph, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import { layout, moveTab, tabLabel, type GraphTab, type LeafNode } from "../state/tabs.svelte";
@@ -40,6 +41,7 @@ const mounted: Array<Record<string, unknown>> = [];
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   graphServer.view = {
     nodes: [
       g.dir(""),
@@ -170,10 +172,13 @@ describe("a graph tab moved to another pane", () => {
       graphTab({ id: "lens", title: "path=workspace", pendingSelectId: "@@bob" }),
     );
     expect((first.tabs[0] as GraphTab).selectedNodeId).toBe("@@bob");
+    // The window's graph has since been fetched again, and the node is gone.
     graphServer.view = {
       nodes: graphServer.view.nodes.filter((n) => n.id !== "@@bob"),
       edges: graphServer.view.edges.filter((e) => e.target !== "@@bob"),
     };
+    await refreshGraph();
+    await settle();
 
     const { tab, moved } = await moveAcross(second);
     expect(moved.selectedId).toBeNull();

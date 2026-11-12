@@ -34,6 +34,7 @@ import {
   visibleIds,
   type CanvasProps,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { draftPath } from "../__tests__/drafts";
 import { api } from "../api/client";
 import type { DraftListEntry } from "../api/types";
@@ -113,6 +114,7 @@ function listed(rows: DraftListEntry[]): void {
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   resetDraftsForTests();
   serveGraph();
 });

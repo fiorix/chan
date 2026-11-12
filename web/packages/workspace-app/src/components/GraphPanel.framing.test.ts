@@ -31,6 +31,7 @@ import {
   settle,
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { layout } from "../state/tabs.svelte";
 
@@ -136,6 +137,7 @@ beforeEach(() => {
   canvasHost.width = 986;
   canvasHost.height = 726;
   resetGraphServer();
+  invalidateGraph();
   serveGraph();
   seedRandom(17);
 });

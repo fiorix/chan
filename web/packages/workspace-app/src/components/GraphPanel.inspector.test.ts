@@ -31,6 +31,7 @@ import {
   settle,
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
@@ -112,6 +113,7 @@ let timers: TimerTrack;
 beforeEach(async () => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   serveGraph();
   installDemoWorkspace({
     metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 4, textCount: 4 },

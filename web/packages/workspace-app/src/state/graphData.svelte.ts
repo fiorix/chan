@@ -1,11 +1,11 @@
-// Shared lazy-loaded graph view, used by both GraphPanel (canvas)
-// and FileInfoBody (browser inspector references). One network call
-// per cached view; both consumers read the same payload.
+// The window's one copy of the workspace graph, loaded lazily and shared by
+// every surface that reads it: each graph tab's canvas (GraphPanel) and the
+// inspectors' references (FileInfoBody and its kin). One network call per
+// cached view, however many readers.
 //
-// The graph is small per chan (a single workspace's wiki/tag/mention
-// edges), so caching the whole thing is cheaper than per-file
-// metadata round-trips. A burst of watcher events refetches it once,
-// after the burst, so a freshly-saved tag shows up in the inspector
+// Caching the whole graph is cheaper than per-file metadata round-trips, and
+// a graph tab draws from the whole of it. A burst of watcher events refetches
+// it once, after the burst, so a freshly-saved tag shows up in the inspector
 // without a manual reload. Index readiness invalidates a view fetched
 // while the graph route answered empty during recovery. A graph
 // answer marked gated also waits for the next idle index-status poll.
@@ -13,32 +13,29 @@
 import { api } from "../api/client";
 import type { GraphView, GraphViewEdge, GraphViewNode } from "../api/types";
 
-type GraphState = {
-  view: GraphView | null;
-  loading: boolean;
-  error: string | null;
-  gated: boolean;
+class GraphState {
+  /// Replaced whole and never edited in place, so it is held raw: a reader
+  /// walks every node and edge, and a deep proxy would cost each reader a
+  /// signal per field it reads.
+  view = $state.raw<GraphView | null>(null);
+  loading = $state(false);
+  error = $state<string | null>(null);
+  gated = $state(false);
   /// True while the view is a first load's accumulation that no stream has
   /// completed, as after that load fails: a reader shows it as incomplete,
   /// and the next load streams afresh instead of refreshing it as complete.
-  partial: boolean;
-};
+  partial = $state(false);
+}
 
-export const graphData = $state<GraphState>({
-  view: null,
-  loading: false,
-  error: null,
-  gated: false,
-  partial: false,
-});
+export const graphData = new GraphState();
 
 let inflight: Promise<void> | null = null;
 let inflightAbort: AbortController | null = null;
 let inflightSeq = 0;
 
 /// A burst of filesystem changes ends when this long passes with no change;
-/// the graph is then fetched once. GraphPanel's own reload and the file
-/// tree's watch relists keep the same step.
+/// the graph is then fetched once. A graph tab's reload of its own spine
+/// and the file tree's watch relists keep the same step.
 export const GRAPH_QUIET_MS = 250;
 /// A stream that delivers no event for this long is aborted as stalled and
 /// fails, so a fetch the burst's end waits on always ends. It must outlast
@@ -220,6 +217,16 @@ export function invalidateGraph(): void {
 export function reloadGraph(): Promise<void> {
   invalidateGraph();
   return ensureGraphLoaded();
+}
+
+/// Fetch the graph again now, for a surface asked to reload. A complete view
+/// stays on screen until the answer replaces it. A fetch in flight is
+/// abandoned for this one, and a burst whose end has not come is forgotten:
+/// this fetch is the one it would make.
+export function refreshGraph(): Promise<void> {
+  cancelGraphRefresh();
+  inflightAbort?.abort();
+  return loadGraph();
 }
 
 /// Outgoing-edge groupings for a file path. Returns

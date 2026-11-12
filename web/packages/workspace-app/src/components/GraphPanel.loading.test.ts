@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 //
-// When a graph tab loads and reloads, and what it shows while the workspace
-// index is not ready. GraphPanel is mounted over a fixed graph; the assertions
-// count the requests the api stub served and read the panel's status bar,
-// placeholder and the node set it hands the canvas.
+// What a graph tab asks the server for and when, and what it shows while the
+// workspace index is not ready. The tab draws the window's shared graph
+// (`state/graphData`) over a filesystem spine of its own. GraphPanel is
+// mounted over a fixed graph; the assertions count the requests the api stub
+// served and read the panel's status bar, placeholder and the node set it
+// hands the canvas.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -17,6 +19,8 @@ vi.mock("../api/client", async (importOriginal) =>
 );
 
 import GraphPanel from "./GraphPanel.svelte";
+import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import {
   canvas,
   fsg,
@@ -31,6 +35,7 @@ import {
   unmountGraphPanels,
   visibleIds,
 } from "../__tests__/graphPanel";
+import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import type { IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
@@ -75,6 +80,7 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   serveGraph();
   indexStatus.value = null;
 });
@@ -85,7 +91,7 @@ afterEach(() => {
   timers.release();
 });
 
-/// Every graph request the panel has made so far.
+/// Every graph request made so far: the window's stream and the tab's spine.
 function loads(): number {
   return graphServer.graphStreamCalls + graphServer.fsGraphCalls.length;
 }
@@ -135,11 +141,10 @@ describe("app.graph.reload", () => {
 describe("what reloads the graph", () => {
   test("a selection or a depth change does not: both choose from what is loaded", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
-    // Each load of the panel fetches the spine once. The inspector a
-    // selection opens reads the window's shared graph, a stream of its own.
-    const spines = () => graphServer.fsGraphCalls.length;
-    const before = spines();
-    expect(before, "the first load").toBe(1);
+    // The first load is one spine request and one stream. The inspector a
+    // selection opens reads the window's shared graph, the one the tab draws.
+    const before = loads();
+    expect(before, "the first load").toBe(2);
 
     canvas.props!.onSelect("#t");
     await settle();
@@ -147,7 +152,7 @@ describe("what reloads the graph", () => {
     await settle();
     canvas.props!.onSelect("directory:notes");
     await settle();
-    expect(spines()).toBe(before);
+    expect(loads()).toBe(before);
   });
 
   test("an inspector, filter or expansion change does not", async () => {
@@ -175,6 +180,30 @@ describe("what reloads the graph", () => {
     await settle();
     expect(canvas.props!.nodes.length).toBe(drawn);
   });
+
+  test("a reload draws the new graph once it has arrived whole, not as it streams", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab());
+    const ids = () => canvas.props!.nodes.map((n) => n.id);
+    expect(ids()).toContain("#t");
+    // The next answer has one tag for another.
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes.filter((n) => n.id !== "#t"), g.tag("u")],
+      edges: [...graphServer.view.edges.filter((e) => e.target !== "#t"), g.edge(A, "#u", "tag")],
+    };
+    let release!: () => void;
+    graphServer.streamGate = new Promise<void>((r) => (release = r));
+
+    // The window drops its graph and streams it afresh, as it does when the
+    // index becomes ready.
+    const reload = reloadGraph();
+    await settle();
+    expect(ids(), "the drawn graph stays while its successor is in flight").toContain("#t");
+    release();
+    await reload;
+    await settle();
+    expect(ids()).toContain("#u");
+    expect(ids()).not.toContain("#t");
+  });
 });
 
 describe("the filesystem spine under the semantic graph", () => {
@@ -185,6 +214,20 @@ describe("the filesystem spine under the semantic graph", () => {
     const seeds = graphServer.fsGraphCalls.filter((c) => c.depth === 1 && c.path === "");
     expect(seeds.map((c) => c.cursor), "two pages of two").toEqual([undefined, "2"]);
     expect(graphServer.graphStreamCalls).toBe(1);
+  });
+
+  test("is drawn alone until the shared graph's first batch", async () => {
+    let release!: () => void;
+    graphServer.streamGate = new Promise<void>((r) => (release = r));
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab());
+
+    const ids = () => canvas.props!.nodes.map((n) => n.id).sort();
+    expect(ids(), "the tree from disk, one level").toEqual(["", "directory:docs", "directory:notes", "directory:src"]);
+    expect(target.querySelector(".canvas .stream-status"), "still loading").not.toBeNull();
+    release();
+    await settle();
+    expect(ids()).toEqual(expect.arrayContaining(["#t", GONE, "directory:src"]));
+    expect(target.querySelector(".canvas .stream-status")).toBeNull();
   });
 
   test("seeds directories under the semantic ids, the root as the empty id", async () => {
@@ -243,17 +286,49 @@ describe("while the workspace index is not ready", () => {
     expect(canvas.props!.visibleEdges.some((e) => e.target === GONE)).toBe(false);
   });
 
-  test("the graph reloads once when indexing finishes", async () => {
+  test("the tab asks for nothing when indexing finishes, and draws the graph the window reloads", async () => {
     setIndex("building");
     await mountGraphPanel(GraphPanel, layout, graphTab());
-    const before = graphServer.graphStreamCalls;
+    const before = loads();
 
     setIndex("idle");
     await settle();
-    expect(graphServer.graphStreamCalls).toBe(before + 1);
-    setIndex("idle");
+    expect(loads(), "the window's index poll reloads the shared graph, not the tab").toBe(before);
+
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.tag("late")],
+      edges: [...graphServer.view.edges, g.edge(A, "#late", "tag")],
+    };
+    // What the poll does on the way to idle.
+    await reloadGraph();
     await settle();
-    expect(graphServer.graphStreamCalls, "not again without a new build").toBe(before + 1);
+    expect(graphServer.graphStreamCalls).toBe(2);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("#late");
+  });
+});
+
+describe("when the workspace root is gone", () => {
+  test("the tab draws nothing and says why, though the window still holds a graph", async () => {
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: A }));
+    expect(canvas.props!.nodes.length).toBeGreaterThan(0);
+    expect(canvas.props!.selectedId).toBe(A);
+    const words = "workspace root does not exist: /ws";
+    const gone = () => new ApiError(404, words, { error: words, code: "workspace_root_missing" });
+    vi.mocked(api.fsGraph).mockRejectedValueOnce(gone());
+    vi.mocked(api.graphStream).mockRejectedValueOnce(gone());
+
+    reloadCommand();
+    await settle();
+    expect(canvas.props!.nodes, "nothing of the graph the index still holds").toHaveLength(0);
+    expect(canvas.props!.selectedId).toBeNull();
+    expect(target.querySelector(".canvas .placeholder.error")?.textContent).toBe(words);
+    expect(target.querySelector(".statusbar .stat")?.textContent?.trim()).toMatch(/^0\/0 nodes/);
+
+    // The root is back: the next reload draws the graph again.
+    reloadCommand();
+    await settle();
+    expect(canvas.props!.nodes.length).toBeGreaterThan(0);
+    expect(target.querySelector(".canvas .placeholder.error")).toBeNull();
   });
 });
 
@@ -270,17 +345,31 @@ describe("watching the directories it shows", () => {
     expect(fbTreeInstance(id)).toBeNull();
   });
 
-  test("a change anywhere in the workspace reloads the graph, whatever is selected", async () => {
+  test("a change anywhere in the workspace costs one stream and one spine request, whatever is selected", async () => {
     await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
-    // The reload is debounced; run every timer a change schedules, however
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.dir("src"), g.file("src/other.rs")],
+      edges: [
+        ...graphServer.view.edges,
+        g.edge("", "directory:src", "contains"),
+        g.edge("directory:src", "src/other.rs", "contains"),
+      ],
+    };
+    // Both reloads are debounced; run every timer a change schedules, however
     // long its delay.
     vi.useFakeTimers();
     try {
-      const before = graphServer.graphStreamCalls;
+      const streams = graphServer.graphStreamCalls;
+      const spines = graphServer.fsGraphCalls.length;
+      // The store's two cues for a change: the shared graph's quiet window,
+      // and the signal the graph tabs take.
+      noteGraphChanged(() => true);
       graphReloadSignal.paths = ["src/other.rs"];
       graphReloadSignal.nonce += 1;
       await vi.runAllTimersAsync();
-      expect(graphServer.graphStreamCalls).toBe(before + 1);
+      expect(graphServer.graphStreamCalls - streams, "the window's graph, once").toBe(1);
+      expect(graphServer.fsGraphCalls.length - spines, "the tab's spine, once").toBe(1);
+      expect(canvas.props!.nodes.map((n) => n.id)).toContain("src/other.rs");
     } finally {
       vi.useRealTimers();
     }

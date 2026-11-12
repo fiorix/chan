@@ -23,6 +23,7 @@ import {
   settle,
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import { layout } from "../state/tabs.svelte";
@@ -34,6 +35,7 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   graphServer.view = {
     nodes: [g.dir(""), g.dir("notes"), g.file("notes/a.md")],
     edges: [g.edge("", "directory:notes", "contains"), g.edge("directory:notes", "notes/a.md", "contains")],

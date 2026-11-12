@@ -16,6 +16,11 @@
 //
 // This module imports no component and no api module, so the mock factories
 // above can load it without a cycle.
+//
+// The panel draws the window's shared graph (`state/graphData`), which is
+// module state and outlives a test: a test file drops it before each test
+// with `invalidateGraph()`, beside `resetGraphServer()`. It cannot be dropped
+// from here, since the store imports the api module the factories mock.
 
 import { mount, tick, unmount, type Component } from "svelte";
 import { vi } from "vitest";
@@ -65,8 +70,8 @@ export function canvasProbeModule(): { default: (anchor: unknown, props: CanvasP
 }
 
 /// The graph the api stub serves. `view` answers graphStream (the semantic
-/// graph); `fs` answers fsGraph by directory path, trimmed to the requested
-/// depth.
+/// graph, which the window's shared store asks for); `fs` answers fsGraph
+/// (a tab's spine) by directory path, trimmed to the requested depth.
 export const graphServer = {
   view: { nodes: [], edges: [] } as GraphView,
   fs: { nodes: [], edges: [] } as { nodes: FsGraphNode[]; edges: FsGraphEdge[] },

@@ -1380,9 +1380,8 @@ export function onWatchEvent(e: unknown): void {
       forgetLinkKindsAtFrame();
     }
     if (hasGraphTab()) {
-      // Carry the touched path(s) so each open graph reloads only when the
-      // change is in ITS scope (GraphPanel path-filters the signal). An
-      // empty set means the event carried no path -> reload to stay safe.
+      // The cue for the open graph tabs, with the touched path(s); an
+      // empty set means the event carried no path.
       graphReloadSignal.paths = watchedPaths;
       graphReloadSignal.nonce += 1;
     }
@@ -3650,8 +3649,8 @@ export async function handleDraftPromoted(path: string): Promise<void> {
     // The promotion's own watch frame joins the same burst.
     noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
-      // A promoted draft becomes a real file at `path`; reload any graph
-      // whose scope covers it (GraphPanel path-filters the signal).
+      // A promoted draft becomes a real file at `path`: the cue for the
+      // open graph tabs.
       graphReloadSignal.paths = [path];
       graphReloadSignal.nonce += 1;
     }
@@ -3706,8 +3705,7 @@ export async function noteDraftCreated(path: string): Promise<void> {
   if (windowCaps.workspace) {
     noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
-      // New draft at `path`; reload any graph whose scope covers it
-      // (GraphPanel path-filters the signal).
+      // New draft at `path`: the cue for the open graph tabs.
       graphReloadSignal.paths = [path];
       graphReloadSignal.nonce += 1;
     }
@@ -4916,14 +4914,14 @@ export function closeSettings(): void {
 // Open + scope picker state, plus a `depth` knob for how far the
 // file/group scopes expand into their neighbors in the link graph.
 
-/// Incremented by watcher events while the graph overlay is open.
-/// GraphPanel consumes this as a lightweight reload signal and
-/// debounces the actual `/api/graph` request locally. `paths` carries
-/// the workspace-relative path(s) the event touched so each GraphPanel
-/// can gate its reload on whether the change is in ITS scope: editing a
-/// file that is not in the open graph must NOT reload it (without the
-/// gate, any change to any file in the workspace triggered a graph
-/// reload). Empty `paths` means "unknown" -> reload to stay safe.
+/// Incremented by watcher events while a graph tab is open. A shown
+/// GraphPanel takes it as the cue to fetch its filesystem spine again,
+/// debounced locally, and a hidden one to do so when next shown. The
+/// `/api/graph` fetch is not the panel's: the shared graph has its own
+/// quiet window (`noteGraphChanged`, called beside every bump). `paths`
+/// carries the workspace-relative path(s) the event touched; a graph tab
+/// spans the workspace, so it reloads whatever they are. Empty `paths`
+/// means the event named none.
 export const graphReloadSignal = $state<{ nonce: number; paths: string[] }>({
   nonce: 0,
   paths: [],

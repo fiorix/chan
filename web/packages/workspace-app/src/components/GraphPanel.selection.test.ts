@@ -31,6 +31,7 @@ import {
   unmountGraphPanels,
   visibleIds,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { openedForPath } from "../graph/selectionView";
 import { layout, type GraphTab } from "../state/tabs.svelte";
@@ -95,6 +96,7 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   serveGraph();
 });
 

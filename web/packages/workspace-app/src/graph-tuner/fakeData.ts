@@ -2,11 +2,12 @@
 //
 // Mirrors what GraphCanvas.svelte actually consumes in production (the
 // RenderedNode / RenderedEdge shapes), NOT the raw server GraphView.
-// GraphPanel maps `media`->file, `directory`->folder and drops `date`
-// before handing the graph to GraphCanvas, so this generator emits the
-// post-map kinds directly: file (doc / source / binary / media by
-// extension, plus `contact`), tag, mention, language, folder (incl. the
-// id:"" workspace root); edges are link / tag / mention / contains /
+// The graph tab maps `media`->file, `directory`->folder and drops `date`
+// (`graph/sharedGraph`) before the graph reaches GraphCanvas, so this
+// generator emits the post-map kinds directly: file (doc / source /
+// binary / media by extension, plus `contact`), tag, mention, language,
+// folder (incl. the id:"" workspace root); edges are link / tag /
+// mention / contains /
 // language / symlink / hardlink. Ids follow the server's schemes (a file's
 // is its path, a directory's `directory:<path>`, a tag's `#name`, a
 // mention's `@@name`), so the rules the Graph tab runs
