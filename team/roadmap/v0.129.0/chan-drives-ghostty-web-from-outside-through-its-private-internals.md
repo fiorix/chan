@@ -66,7 +66,7 @@ Each part lands in a release once it is green, in this order; one release can ta
 
 - v0.127.0 keeps what is tested and working; nothing in this item lands there.
 - xterm.js stays as chan's second backend. Whether chan drops it once the widget is solid is a separate decision.
-- The vendored libghostty-vt stays at 1.0.0 unless a part needs a 1.x minor. The core's own issues (the selection lost on a resize, an unbounded feed, double counts across soft wraps) can be reported upstream separately.
+- The vendored libghostty-vt is at 1.0.1, taken on the owner's word on 2026-11-12, and stays there unless a part needs a later 1.x. The core's own issues (the selection lost on a resize, an unbounded feed, double counts across soft wraps) can be reported upstream separately.
 - After the import, upstream ghostty-web changes are taken by hand, if at all.
 
 ## Acceptance

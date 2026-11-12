@@ -24,7 +24,7 @@ chan's terminal widget: the sources of [ghostty-web](https://github.com/coder/gh
 ## chan's own files
 
 - `vt/`: chan's binding of libghostty-vt (`vt/ghosttyVt.ts`), the `Ghostty` object ghostty-web's `Terminal` takes as its `ghostty` option, with the filter copies read text through (`vt/ghosttyCopy.ts`) and their tests. `vt/index.ts` is the package's `./vt` export.
-- `vendor/ghostty-vt/`: Ghostty's own signed release build of libghostty-vt 1.0.0, the core chan's terminals run, exported as `./vendor/ghostty-vt/ghostty-vt.wasm`. Its README records where it comes from, its hash, and how to verify and re-pin it.
+- `vendor/ghostty-vt/`: Ghostty's own signed release build of libghostty-vt 1.0.1, the core chan's terminals run, exported as `./vendor/ghostty-vt/ghostty-vt.wasm`. Its README records where it comes from, its hash, and how to verify and re-pin it.
 - `vt/tsconfig.json` and `vitest.config.ts`: how `vt/` compiles and is checked, and the package's test run (below).
 
 ## Notes for chan
