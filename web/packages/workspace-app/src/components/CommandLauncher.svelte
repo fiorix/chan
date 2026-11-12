@@ -1,10 +1,12 @@
 <script lang="ts">
   // Context provider for the shared command deck. The command catalog and the
   // settings index say what exists; state/commands/deck turns them into the
-  // sectioned list, the typed results and the option lists, and this component
-  // adds the scope rail, the icons, the Computers rows and the running of a
-  // row. The shared deck owns presentation, the keyboard, motion and the
-  // persisted draft.
+  // sectioned list, the typed results and the option lists. The Computers
+  // rows are the shared Computers tree's, the one the Computers screen lists:
+  // this component states this window's library snapshot as that tree's
+  // model and carries its actions out through the library-window functions.
+  // It adds the scope rail, the icons and the running of a row. The shared
+  // deck owns presentation, the keyboard, motion and the persisted draft.
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
     rankDeckItems,
@@ -13,12 +15,25 @@
     type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
+  import {
+    computersConfirmBridge,
+    computersDeck,
+    createComputersConfirmations,
+    type ComputersBridge,
+    type ComputersContext,
+    type ComputersEntry,
+    type ComputersModel,
+    type ComputersWindow,
+    type ComputersWorkspace,
+    type ComputersWorkspaceCondition,
+  } from "@chan/web-shared/computers-deck";
   import { privateText } from "@chan/web-shared/privacy";
   import { windowDisplayName } from "@chan/web-shared/window-label";
   import {
     AppWindow,
     ChartNoAxesColumn,
     Command as CommandIcon,
+    ExternalLink,
     Eye,
     EyeOff,
     FilePlus,
@@ -27,6 +42,7 @@
     Folder,
     FolderRoot,
     Layers,
+    Monitor,
     MonitorCog,
     Network,
     PanelTop,
@@ -73,7 +89,6 @@
   } from "../state/tabs.svelte";
   import { refocusRefused } from "../state/focusGuard";
   import { sessionWindowId } from "../api/client";
-  import { isTauriDesktop } from "../api/desktop";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
   import {
@@ -84,31 +99,41 @@
     type ScopedLibrarySnapshot,
     type ScopedLibraryWindow,
     type ScopedLibraryWorkspace,
+    type ScopedWorkspaceStatus,
   } from "../api/libraryCommand";
-  import { scopedWorkspaceOpenable } from "../api/workspaceStatus";
   import {
-    buryLibraryWindow,
     createLibraryWindow,
-    focusLibraryWindow,
-    openLibraryWindow,
-    showLibraryWindow,
-    type CreateLibraryWindowAction,
+    libraryWindowActions,
+    runLibraryWindowAction,
     type LibraryWindowBridge,
   } from "../api/libraryWindows";
   import { SETTINGS_SECTIONS } from "./settings/sections";
   import { settingsIndex } from "./settings/settingsIndex";
   import "../state/commands/install";
 
-  type ComputerCommandId = "new-window" | "windows";
-  type WindowActionId = "focus" | "hide" | "show" | "open" | "close";
+  let {
+    allComputers,
+  }: {
+    /// Show the screen of this window's app that lists every computer, with
+    /// the query typed here for it to search. Given where the app has such a
+    /// screen: the Computers scope then ends with the row that opens it.
+    allComputers?: (query: string) => void | Promise<void>;
+  } = $props();
 
   /// A deck row and what choosing it does. A catalog or settings row comes
-  /// from the builders with `after` set; a Computers row is built here, and
-  /// its run answers to the deck's own card: a confirmation to put, or a
-  /// promise the deck awaits.
+  /// from the builders with `after` set. A Computers row comes from the
+  /// shared tree, and its run answers to the deck's own card: a confirmation
+  /// to put, or a promise the deck awaits.
   type Entry = DeckRow;
 
   const COMPUTERS_SECTION = "Computers";
+  /// Every type of Computers row sits in this deck's one Computers scope.
+  const COMPUTERS_SCOPES = {
+    windows: "computers",
+    workspaces: "computers",
+    machines: "computers",
+    gateways: "computers",
+  };
 
   type IconComponent = typeof SearchIcon;
   const categoryIcons: Record<CommandCategory, IconComponent> = {
@@ -151,16 +176,14 @@
   let scopedLibraryLoading = $state(false);
   let scopedLibrarySettled = $state(false);
   let scopedLibraryError: string | null = $state(null);
+  // The server answered that it has no scoped route: no library stands
+  // behind this window.
+  let scopedLibraryAbsent = $state(false);
   let scopedLibraryLoad: Promise<void> | null = null;
   // Local assignable alias for Svelte's ownership contract. Both names point
   // at the same imported state proxy; CommandDeck mutates fields, never swaps
   // the draft object.
   let deckDraft = $state(launcherDraft);
-  // The count a Close card was painted with, and the reading that owns that
-  // card, both keyed by window. A reading a later one has overtaken keeps its
-  // hands off both.
-  const confirmedCloseCounts = new Map<string, unknown>();
-  const closePreparationVersions = new Map<string, number>();
 
   // Bumped after a row that changes in place has run, so the rows are read
   // again when its state lives outside the reactive graph.
@@ -176,13 +199,10 @@
 
   const ctx = $derived(commandContext());
   // A path the catalog builders own is a choice's options or a Settings
-  // section. Any other non-empty path is a Computers branch: `windows`
-  // carries a second element, the window whose own actions are being shown.
+  // section. Any other non-empty path names pages of the Computers tree: a
+  // workspace's or a window's, outermost first.
   const catalogMode = $derived(isCatalogPath(launcherDraft.path));
-  const computerMode = $derived(
-    catalogMode ? null : ((launcherDraft.path[0] as ComputerCommandId | undefined) ?? null),
-  );
-  const windowMode = $derived(computerMode === "windows" ? launcherDraft.path[1] ?? null : null);
+  const computerMode = $derived(!catalogMode && launcherDraft.path.length > 0);
 
   /// The focused tab's app: what the App scope is named after. An extension
   /// tab carries its extension's display name as its title.
@@ -216,16 +236,23 @@
     // A window with no workspace behind it has nothing to list there.
     ...(ctx.caps.workspace ? [{ id: "workspace", label: "Workspace", icon: FolderRoot }] : []),
     { id: "settings", label: "Settings", icon: Settings2 },
-    {
-      id: "computers",
-      label: COMPUTERS_SECTION,
-      icon: MonitorCog,
-      // Enabled over a snapshot, and while the first request is unanswered,
-      // so a window about to get its library reads Connecting. A route that
-      // has failed with no snapshot to show leaves the orb disabled through
-      // the requests that follow, each poll's among them.
-      available: scopedLibrary !== null || (scopedLibraryLoading && scopedLibraryError === null),
-    },
+    // A window with no library behind it has no computers to list, so the
+    // rail leaves the scope out.
+    ...(scopedLibraryAbsent
+      ? []
+      : [
+          {
+            id: "computers",
+            label: COMPUTERS_SECTION,
+            icon: MonitorCog,
+            // Enabled over a snapshot, and while the first request is
+            // unanswered, so a window about to get its library reads
+            // Connecting. A route that has failed with no snapshot to show
+            // leaves the orb disabled through the requests that follow, each
+            // poll's among them.
+            available: scopedLibrary !== null || (scopedLibraryLoading && scopedLibraryError === null),
+          },
+        ]),
   ]);
 
   // The recent commands as they stood when the deck opened. A command run
@@ -271,14 +298,16 @@
       .then((snapshot) => {
         scopedLibrary = snapshot;
         scopedLibraryError = null;
+        scopedLibraryAbsent = false;
       })
       .catch((error) => {
-        // A server without the scoped route simply leaves the fourth orb quiet.
-        // Other failures stay recoverable: the next open/poll remints after the
-        // source /ws reconnects.
+        // A server without the scoped route has no library behind this
+        // window. Other failures stay recoverable: the next open/poll remints
+        // after the source /ws reconnects.
         scopedLibraryError = errorText(error);
         if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
           scopedLibrary = null;
+          scopedLibraryAbsent = true;
         }
       })
       .finally(() => {
@@ -306,7 +335,7 @@
   /// Privacy mode names every window `Window` and every workspace
   /// `Workspace`, as the launcher's deck does: a row is a deck option, which
   /// cannot hold a reveal button.
-  function scopedWindowTitle(window: ScopedLibraryWindow): string {
+  function scopedWindowName(window: ScopedLibraryWindow): string {
     return privateText(windowDisplayName(window), "Window");
   }
 
@@ -316,19 +345,111 @@
     return privateText(workspace.label || workspace.path.split("/").filter(Boolean).at(-1) || workspace.path, "Workspace");
   }
 
-  /// A workspace window is named by the row that lists its workspace, as the
-  /// launcher's deck names it. The snapshot holds one library's rows, so the
-  /// record's path picks the row. A window whose workspace no row lists is
-  /// named from its own path, cut at `/` alone: a `\` can be part of a Unix
-  /// directory's name.
-  function scopedWindowContext(window: ScopedLibraryWindow): string {
-    if (window.control) return "Control terminal";
-    if (window.kind === "terminal") return "Terminal";
-    const workspace = scopedLibrary?.workspaces.find((row) => row.path === window.workspace_path);
-    if (workspace) return scopedWorkspaceName(workspace);
+  /// The workspace of a window no row lists, named from the window's own
+  /// path, cut at `/` alone: a `\` can be part of a Unix directory's name.
+  function unlistedWorkspaceName(window: ScopedLibraryWindow): string {
     const name = window.workspace_path?.split("/").filter(Boolean).at(-1);
     return name ? privateText(name, "Workspace") : "Workspace";
   }
+
+  /// How a workspace's mount reads in the Computers tree. Total over the
+  /// union, so a new status has to decide this rather than inherit an answer.
+  function workspaceCondition(status: ScopedWorkspaceStatus): ComputersWorkspaceCondition {
+    switch (status) {
+      case "stopped":
+        return "idle";
+      case "starting":
+      case "closing":
+      case "removing":
+        return "busy";
+      case "running":
+        return "ready";
+      case "locked":
+        return "foreign";
+      case "unavailable":
+        return "degraded";
+      case "error":
+        return "failed";
+    }
+  }
+
+  /// This window's library as the Computers tree reads it: one machine, the
+  /// workspaces the snapshot lists and the windows this surface can act on,
+  /// each under the workspace row that lists its root. The capability names
+  /// one library and grants a new window and a new terminal window, nothing
+  /// else, so the model states those two and the tree offers no more. The
+  /// records ride beside the model: the tree hands back keys.
+  const library = $derived.by<{
+    model: ComputersModel;
+    windows: Map<string, ScopedLibraryWindow>;
+  } | null>(() => {
+    const snapshot = scopedLibrary;
+    if (!snapshot) return null;
+    const own = sessionWindowId();
+    const windows = new Map<string, ScopedLibraryWindow>();
+    // A window this surface can do nothing to has no row.
+    const listed = snapshot.windows.filter((window) => libraryWindowActions(window).length > 0);
+
+    function windowModel(window: ScopedLibraryWindow, context?: string): ComputersWindow {
+      windows.set(window.window_id, window);
+      return {
+        key: window.window_id,
+        name: scopedWindowName(window),
+        kind: window.kind,
+        context,
+        // The names privacy mode conceals stay findable.
+        search: [window.label, window.title, window.workspace_path ?? "", window.kind].join(" "),
+        hidden: window.hidden,
+        control: window.control,
+        current: window.window_id === own,
+        actions: libraryWindowActions(window),
+      };
+    }
+
+    const workspaces = snapshot.workspaces.map((workspace): ComputersWorkspace => {
+      const name = scopedWorkspaceName(workspace);
+      return {
+        key: workspace.workspace_id,
+        name,
+        search: `${workspace.label} ${workspace.path}`,
+        on: workspace.on,
+        condition: workspaceCondition(workspace.status),
+        reason: workspace.error ? privateText(workspace.error, "Workspace unavailable") : undefined,
+        // The first row that lists a root takes its windows, so no window
+        // is listed twice.
+        windows: listed
+          .filter(
+            (window) =>
+              window.kind === "workspace" &&
+              window.workspace_path === workspace.path &&
+              !windows.has(window.window_id),
+          )
+          .map((window) => windowModel(window, name)),
+      };
+    });
+    const loose = listed
+      .filter((window) => !windows.has(window.window_id))
+      .map((window) =>
+        windowModel(window, window.kind === "workspace" ? unlistedWorkspaceName(window) : undefined),
+      );
+
+    return {
+      model: {
+        machines: [
+          {
+            key: "local",
+            kind: "local",
+            name: "This machine",
+            search: "local computer library",
+            workspaces,
+            windows: loose,
+          },
+        ],
+        may: { terminal: true, window: true, allComputers: allComputers !== undefined },
+      },
+      windows,
+    };
+  });
 
   // The deck keeps the capability lifecycle and the snapshot; how a window is
   // created, raised, or buried differs between a browser and chan-desktop and
@@ -341,267 +462,117 @@
     currentWindowId: sessionWindowId,
   };
 
-  function focusScopedWindow(window: ScopedLibraryWindow): Promise<void> {
-    return focusLibraryWindow(libraryWindowBridge, window);
+  function gone(what: string): Error {
+    return new Error(`That ${what} is no longer available`);
   }
 
-  function showScopedWindow(window: ScopedLibraryWindow): Promise<void> {
-    return showLibraryWindow(libraryWindowBridge, window);
+  /// Show the screen that lists every computer, with what was typed here for
+  /// it to search. A query that found the row by the row's own words names
+  /// nothing to look for there.
+  function showAllComputers(): void | Promise<void> {
+    const query = launcherDraft.query.trim();
+    const row = computers?.entries.find((entry) => entry.pinned);
+    const own = row !== undefined && query !== "" && rankDeckItems([row], query).length > 0;
+    return allComputers?.(own ? "" : query);
   }
 
-  function openScopedWindow(window: ScopedLibraryWindow): Promise<void> {
-    return openLibraryWindow(libraryWindowBridge, window);
-  }
-
-  function createScopedWindow(action: CreateLibraryWindowAction): Promise<void> {
-    return createLibraryWindow(libraryWindowBridge, action);
-  }
-
-  function buryScopedWindow(window: ScopedLibraryWindow, close: boolean): Promise<void> {
-    return buryLibraryWindow(libraryWindowBridge, window, close);
-  }
-
-  function computerCommandEntry(
-    id: ComputerCommandId,
-    title: string,
-    description: string,
-    icon: Entry["icon"],
-    keywords = "",
-  ): Entry {
-    return {
-      id: `computers:${id}`,
-      title,
-      breadcrumb: `Computers › ${description}`,
-      searchText: `${title} ${description} ${keywords}`,
-      scope: "computers",
-      icon,
-      kind: "branch",
-      next: [id],
-    };
-  }
-
-  /// One row per window that exists, each a branch into that window's own
-  /// actions. Open versus hidden rides the breadcrumb.
-  function scopedWindowBranch(window: ScopedLibraryWindow): Entry {
-    const title = scopedWindowTitle(window);
-    const context = scopedWindowContext(window);
-    const state = window.hidden ? "Hidden" : "Open";
-    const here = window.window_id === sessionWindowId() ? `${context} (this window)` : context;
-    return {
-      id: `computers:window:${window.window_id}`,
-      title,
-      breadcrumb: `Computers › Windows › ${state} › ${here}`,
-      searchText: [title, window.title, window.label, window.workspace_path ?? "", context, state, "window"].join(" "),
-      scope: "computers",
-      icon: window.kind === "terminal" ? Terminal : AppWindow,
-      kind: "branch",
-      next: ["windows", window.window_id],
-    };
-  }
-
-  /// A browser can focus its own popup. A native or unknown-origin record has
-  /// only a visibility action and an explicit browser Open from this surface.
-  ///
-  /// A window this host's registry does not hold (`managed: false`) is offered
-  /// only what can be carried out on it. Hide, Close and the un-hide behind
-  /// Show act on that registry, so it is offered none of them. A visible one
-  /// keeps Focus in chan-desktop, where the window watcher opens it under the
-  /// label the native focus command targets. A browser is offered nothing: the
-  /// launch route redirects to the record's own page, which this host may not
-  /// serve.
-  function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
-    if (window.managed === false) return !window.hidden && isTauriDesktop() ? ["focus"] : [];
-    const manageable = !window.control;
-    const browserOnly = !isTauriDesktop() && window.origin !== "browser";
-    const actions: WindowActionId[] = browserOnly
-      ? window.hidden ? ["show", "open"] : ["open"]
-      : [window.hidden ? "show" : "focus"];
-    if (manageable && !window.hidden) actions.push("hide");
-    if (manageable) actions.push("close");
-    return actions;
-  }
-
-  function scopedWindowEntry(command: WindowActionId, window: ScopedLibraryWindow): Entry {
-    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : command === "open" ? "Open in this browser" : "Close";
-    const title = scopedWindowTitle(window);
-    const context = scopedWindowContext(window);
-    return {
-      id: `computers:${command}:${window.window_id}`,
-      title: verb,
-      breadcrumb: `Computers › Windows › ${title}`,
-      searchText: [verb, title, window.title, window.label, window.workspace_path ?? "", context].join(" "),
-      scope: "computers",
-      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : command === "open" ? AppWindow : X,
-      awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "focus" || command === "show" || command === "open",
-      confirm: command === "close" ? closeConfirmation(window) : undefined,
-      run:
-        command === "focus"
-          ? () => focusScopedWindow(window)
-          : command === "show"
-            ? () => showScopedWindow(window)
-            : command === "open"
-              ? () => openScopedWindow(window)
-              : command === "hide"
-                ? () => buryScopedWindow(window, false)
-                : () => closeAfterFreshConfirmation(window),
-    };
-  }
-
-  function closeMessage(count: unknown): string {
-    if (typeof count !== "number") return "Open sessions in this window may stop.";
-    if (count === 0) return "This window will close.";
-    return `${count} terminal session${count === 1 ? "" : "s"} in this window will stop.`;
-  }
-
-  function informedCloseConfirmation(
-    window: ScopedLibraryWindow,
-    count: unknown,
-  ): DeckConfirm {
-    return {
-      title: `Close ${scopedWindowTitle(window)}?`,
-      message: closeMessage(count),
-      actionLabel: "Close",
-      danger: true,
-    };
-  }
-
-  /// Claim the next reading slot for a window's Close card. Every count read
-  /// takes one before it asks, so the reading that answers last is the only one
-  /// still entitled to describe the card.
-  function nextCloseReading(windowId: string): number {
-    const version = (closePreparationVersions.get(windowId) ?? 0) + 1;
-    closePreparationVersions.set(windowId, version);
-    return version;
-  }
-
-  function closeReadingIsCurrent(windowId: string, version: number): boolean {
-    return closePreparationVersions.get(windowId) === version;
-  }
-
-  /// The capability route answers the host-wide figure, the same one the
-  /// launcher's Close card names. A failure leaves the generic warning rather
-  /// than a number nobody can stand behind.
-  async function readCloseCount(window: ScopedLibraryWindow): Promise<unknown> {
-    try {
-      return await loadScopedWindowLiveTerminals(window.window_id);
-    } catch {
-      return null;
-    }
-  }
-
-  /// Raising the card reads the count, so the question names a number instead
-  /// of warning in general terms.
-  function closeConfirmation(window: ScopedLibraryWindow): () => Promise<DeckConfirm> {
-    return async () => {
-      const version = nextCloseReading(window.window_id);
-      const count = await readCloseCount(window);
-      if (closeReadingIsCurrent(window.window_id, version)) {
-        confirmedCloseCounts.set(window.window_id, count);
-      }
-      return informedCloseConfirmation(window, count);
-    };
-  }
-
-  /// Close reads the count again and stops to confirm a second time when it
-  /// moved, so the window goes only on a number the user has just seen. The
-  /// reading is slotted like the card's: one overtaken by a newer read
-  /// describes a card that is no longer on screen, so it asks again rather than
-  /// closing on what it found.
-  async function closeAfterFreshConfirmation(
-    window: ScopedLibraryWindow,
-  ): Promise<void | DeckConfirm> {
-    const version = nextCloseReading(window.window_id);
-    const recorded = confirmedCloseCounts.get(window.window_id);
-    const hadRecorded = confirmedCloseCounts.has(window.window_id);
-    const fresh = await readCloseCount(window);
-    if (!closeReadingIsCurrent(window.window_id, version)) {
-      return informedCloseConfirmation(window, fresh);
-    }
-    if (!hadRecorded || fresh !== recorded) {
-      confirmedCloseCounts.set(window.window_id, fresh);
-      return informedCloseConfirmation(window, fresh);
-    }
-    confirmedCloseCounts.delete(window.window_id);
-    await buryScopedWindow(window, true);
-  }
-
-  function scopedWorkspaceEntry(workspace: ScopedLibraryWorkspace): Entry {
-    const name = scopedWorkspaceName(workspace);
-    return {
-      id: `computers:new-window:${workspace.workspace_id}`,
-      title: name,
-      breadcrumb: "Computers › New window › This machine",
-      searchText: `${name} ${workspace.path} workspace new window`,
-      scope: "computers",
-      icon: AppWindow,
-      awaitResult: true,
-      dismissImmediatelyOnSuccess: true,
-      run: () =>
-        createScopedWindow({
-          action: "new_workspace_window",
-          workspace_id: workspace.workspace_id,
-        }),
-    };
-  }
-
-  function computerTargetEntries(path: readonly string[]): Entry[] {
-    const snapshot = scopedLibrary;
-    if (!snapshot) return [];
-    const [branch, windowId] = path;
-    switch (branch) {
-      case "new-window":
-        return snapshot.workspaces
-          .filter((workspace) => scopedWorkspaceOpenable(workspace.status))
-          .map(scopedWorkspaceEntry);
-      case "windows": {
-        // The roster order is the server's: this window first, then terminals
-        // before workspaces, then ordinal.
-        if (windowId === undefined) {
-          return snapshot.windows
-            .filter((window) => scopedWindowActions(window).length > 0)
-            .map(scopedWindowBranch);
+  // How the Computers tree reaches this window's library. Each action runs
+  // before its first await as far as `window.open`, so a keyboard activation
+  // keeps the browser's popup grant.
+  const computersBridge: ComputersBridge = {
+    run(command) {
+      switch (command.target) {
+        case "window": {
+          const window = library?.windows.get(command.key);
+          if (!window) throw gone("window");
+          return runLibraryWindowAction(libraryWindowBridge, window, command.action);
         }
-        const window = snapshot.windows.find((candidate) => candidate.window_id === windowId);
-        if (!window) return [];
-        return scopedWindowActions(window).map((action) => scopedWindowEntry(action, window));
+        case "workspace":
+          if (command.action !== "new-window") break;
+          return createLibraryWindow(libraryWindowBridge, {
+            action: "new_workspace_window",
+            workspace_id: command.key,
+          });
+        case "machine":
+          if (command.action !== "new-terminal") break;
+          return createLibraryWindow(libraryWindowBridge, { action: "new_terminal" });
+        case "app":
+          if (command.action !== "all-computers") break;
+          return showAllComputers();
       }
-      default:
-        return [];
-    }
-  }
-
-  /// A new terminal window on this machine. The capability names one library,
-  /// so there is no machine to choose and the row runs at once.
-  const newTerminalWindowEntry: Entry = {
-    id: "computers:new-terminal",
-    title: "New terminal window",
-    breadcrumb: "Computers › This machine",
-    searchText: "new terminal window this machine computer library shell",
-    scope: "computers",
-    icon: Terminal,
-    awaitResult: true,
-    dismissImmediatelyOnSuccess: true,
-    run: () => createScopedWindow({ action: "new_terminal" }),
+      // The tree offers what the model says this window may do, which is
+      // the actions above.
+      throw gone("command");
+    },
+    // The capability route answers the host-wide figure for a window, the one
+    // the Computers screen's Close card names, read when the card is raised.
+    liveTerminals: (target, key) =>
+      target === "window" ? loadScopedWindowLiveTerminals(key) : Promise.resolve(null),
+    // This window may not turn a workspace off, so the tree never asks.
+    turnOff: () => Promise.reject(gone("command")),
   };
 
-  /// The Computers root over a snapshot: empty until one has arrived.
-  const computerRootEntries = $derived.by<Entry[]>(() => {
-    if (!scopedLibrary) return [];
-    // One target-first Windows branch instead of a Focus/Hide/Show/Close
-    // quartet that showed the same roster four times.
-    return [
-      newTerminalWindowEntry,
-      computerCommandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
-      computerCommandEntry(
-        "windows",
-        "Windows",
-        "Choose a window",
-        Layers,
-        "focus show hide close open activate control terminal",
-      ),
-    ];
-  });
+  const computersContext: ComputersContext = {
+    bridge: computersBridge,
+    // The count a Close card was painted with lives here, for as long as
+    // this launcher stays mounted.
+    confirmations: createComputersConfirmations(computersConfirmBridge(computersBridge)),
+    // Every icon a row of this window's model draws.
+    icons: {
+      window: AppWindow,
+      terminal: Terminal,
+      workspace: Folder,
+      computers: MonitorCog,
+      local: Monitor,
+      focus: Focus,
+      show: Eye,
+      hide: EyeOff,
+      open: ExternalLink,
+      close: X,
+    },
+    scopes: COMPUTERS_SCOPES,
+    // `New terminal` is this deck's word for a terminal tab.
+    terminalTitle: "New terminal window",
+  };
+
+  /// The Computers tree where the launcher stands: the page a Computers path
+  /// names, or the tree's root. Null until a snapshot has arrived.
+  const computers = $derived(
+    library
+      ? computersDeck(
+          library.model,
+          {
+            path: computerMode ? launcherDraft.path : [],
+            filter: null,
+            query: launcherDraft.query,
+          },
+          computersContext,
+        )
+      : null,
+  );
+
+  /// The tree's rows as a typed query lists them: ranked, then the row the
+  /// tree pins, which leads out of this library and so ends the list whatever
+  /// was typed. An empty query keeps the tree's own order and sections.
+  function computerRows(entries: readonly ComputersEntry[], query: string): Entry[] {
+    if (!query) return [...entries];
+    const ranked = rankDeckItems(entries.filter((entry) => !entry.pinned), query) as ComputersEntry[];
+    return [...ranked, ...entries.filter((entry) => entry.pinned)];
+  }
+
+  /// The tree's rows as a list of every scope holds them. Each says it is a
+  /// Computers row, as a command's row names its scope: the tree's own
+  /// breadcrumb starts below that, at the type of object, and a type that
+  /// only repeats the scope's name is left out.
+  function amongScopes(entries: readonly ComputersEntry[]): Entry[] {
+    return entries.map((entry) => ({
+      ...entry,
+      breadcrumb:
+        entry.breadcrumb === COMPUTERS_SECTION
+          ? COMPUTERS_SECTION
+          : `${COMPUTERS_SECTION} › ${entry.breadcrumb}`,
+    }));
+  }
 
   /// What the Computers scope shows in place of its root while no snapshot
   /// has arrived. Connecting only while the first request is unanswered, as
@@ -622,37 +593,6 @@
     disabled: true,
   });
 
-  // Typed search crosses every level, so it carries the window rows AND each
-  // window's actions: `focus deploy shell` must still act in one Enter rather
-  // than only descending into that window.
-  const computerDeepEntries = $derived.by<Entry[]>(() => {
-    const snapshot = scopedLibrary;
-    if (!snapshot) return [];
-    return [
-      newTerminalWindowEntry,
-      ...computerTargetEntries(["new-window"]),
-      ...computerTargetEntries(["windows"]),
-      ...snapshot.windows.flatMap((window) =>
-        scopedWindowActions(window).map((action) => scopedWindowEntry(action, window)),
-      ),
-    ];
-  });
-
-  /// The Computers root as browsing lists it, under its heading. A typed
-  /// query lists the same rows flat, with no heading.
-  const computerSectionEntries = $derived(
-    computerRootEntries.map((entry): Entry => ({ ...entry, section: COMPUTERS_SECTION })),
-  );
-
-  /// The Computers scope's own list: the root while browsing, and every
-  /// level flattened under a typed query.
-  function computerScopeEntries(query: string): Entry[] {
-    if (!scopedLibrary) return [computerStatusEntry];
-    if (!query) return computerSectionEntries;
-    const branches = computerRootEntries.filter((entry) => entry.next !== undefined);
-    return rankDeckItems([...branches, ...computerDeepEntries], query) as Entry[];
-  }
-
   /// The rows of the branch the path names, when the catalog builders own
   /// it: null for a Computers path, and for a branch this window no longer
   /// offers.
@@ -670,34 +610,32 @@
     if (catalogMode) {
       return (rankDeckItems(catalogBranch ?? [], query) as DeckRow[]).map(withIcon);
     }
-    if (computerMode) {
-      return rankDeckItems(computerTargetEntries(launcherDraft.path), query) as Entry[];
+    if (computerMode || scope === "computers") {
+      if (computers) return computerRows(computers.entries, query);
+      return computerMode ? [] : [computerStatusEntry];
     }
-    if (scope === "computers") return computerScopeEntries(query);
     const source = deckSource();
+    const machine = scope === null && computers ? amongScopes(computers.entries) : [];
     if (!query) {
-      // Browsing ends with this machine's Computers rows; a scope shows its
-      // own sections alone.
-      const rows = browseRows(source, scope, openSettingsAt).map(withIcon);
-      return scope === null ? [...rows, ...computerSectionEntries] : rows;
+      // Browsing ends with this machine's rows under one heading; the
+      // Computers scope lists them under the tree's own sections.
+      return [
+        ...browseRows(source, scope, openSettingsAt).map(withIcon),
+        ...machine.map((entry) => ({ ...entry, section: COMPUTERS_SECTION })),
+      ];
     }
-    // Typed search crosses menu levels and includes this invoking library's
-    // leaves.
-    const leaves = scope === null ? computerDeepEntries : [];
-    return searchRows(source, scope, query, openSettingsAt, leaves).map(withIcon);
+    // Typed search crosses every level: this machine's objects and each of
+    // their actions rank with the commands, so `focus deploy shell` acts in
+    // one Enter.
+    return searchRows(source, scope, query, openSettingsAt, machine).map(withIcon);
   });
 
   /// Where the deck stands, for the chip beside the query.
   const crumbs = $derived.by<string[] | undefined>(() => {
-    if (catalogMode || !computerMode) {
+    if (!computerMode) {
       return deckCrumbs(deckSource(), launcherDraft.scope, launcherDraft.path);
     }
-    const branch = computerRootEntries.find((entry) => entry.next?.[0] === computerMode);
-    const trail = [COMPUTERS_SECTION, branch?.title ?? COMPUTERS_SECTION];
-    const window = windowMode
-      ? scopedLibrary?.windows.find((candidate) => candidate.window_id === windowMode)
-      : undefined;
-    return window ? [...trail, scopedWindowTitle(window)] : trail;
+    return [COMPUTERS_SECTION, ...(computers?.crumbs ?? [])];
   });
 
   const placeholder = $derived(crumbs?.at(-1) ?? "Search");
@@ -707,20 +645,16 @@
     persistLauncherDraft();
   });
 
-  // Close records are per window and this deck stays mounted for the life of
-  // the window, so a window that leaves the roster takes its records with it.
-  // A snapshot that has not arrived says nothing about the roster, so it
-  // forgets nothing.
+  // A Close card's count is kept per window and this launcher stays mounted
+  // for the life of the window, so a window that leaves the roster takes its
+  // count with it. A snapshot that has not arrived says nothing about the
+  // roster, so it forgets nothing.
   $effect(() => {
-    const snapshot = scopedLibrary;
-    if (!snapshot) return;
-    const live = new Set(snapshot.windows.map((window) => window.window_id));
-    for (const key of [...confirmedCloseCounts.keys()]) {
-      if (!live.has(key)) confirmedCloseCounts.delete(key);
-    }
-    for (const key of [...closePreparationVersions.keys()]) {
-      if (!live.has(key)) closePreparationVersions.delete(key);
-    }
+    if (!library) return;
+    computersContext.confirmations.retain(
+      new Set(library.windows.keys()),
+      new Set(library.model.machines.flatMap((machine) => machine.workspaces.map((row) => row.key))),
+    );
   });
 
   /// Say why the deck moved under the user, then clear the notice.
@@ -733,17 +667,17 @@
     }, 2400);
   }
 
-  // The roster is polled while the deck is open, so a window can close from
-  // somewhere else while its own actions are on screen. Fall back to the list
-  // rather than an empty body; the recovery below only fires once a selection
-  // is lost, which leaves an unselected submenu blank. A window that stays in
-  // the roster and offers no action, as a restored draft can name, has no row
-  // in the list either, so its path returns to the root.
+  // The roster is polled while the launcher is open, so a window or a
+  // workspace can leave from somewhere else while its page is on screen, and
+  // a restored draft can name one this window does not list. Fall back to the
+  // nearest page that still names an object, the root when none does, and
+  // say why briefly. A draft restored before the first answer waits for it.
   $effect(() => {
-    if (!launcherDraft.visible || !scopedLibrarySettled || !windowMode) return;
-    const window = scopedLibrary?.windows.find((candidate) => candidate.window_id === windowMode);
-    if (window && scopedWindowActions(window).length > 0) return;
-    launcherDraft.path = window ? [] : ["windows"];
+    if (!launcherDraft.visible || !scopedLibrarySettled || !computerMode) return;
+    const path = computers?.path ?? [];
+    if (path.length === launcherDraft.path.length) return;
+    direction = "back";
+    launcherDraft.path = path;
     launcherDraft.selectedId = null;
     launcherDraft.operation = null;
     flashContextChanged();
@@ -832,16 +766,26 @@
     }
   }
 
+  /// Open a branch or a page. The query found the row; what the row opens is
+  /// listed whole and in its own order.
+  function enter(path: string[]): void {
+    direction = "forward";
+    launcherDraft.query = "";
+    launcherDraft.path = path;
+    launcherDraft.selectedId = null;
+  }
+
+  /// Right on a row Enter would run: open the row's own page.
+  function expand(item: DeckItem): void {
+    const page = visibleEntries.find((candidate) => candidate.id === item.id)?.page;
+    if (page) enter(page);
+  }
+
   async function choose(item: DeckItem): Promise<void | DeckConfirm> {
     const entry = visibleEntries.find((candidate) => candidate.id === item.id);
     if (!entry) return;
     if (entry.next) {
-      direction = "forward";
-      // The query found the row; what it opens is listed whole and in its
-      // own order. A Computers branch keeps the query, which its rows match.
-      if (isCatalogPath(entry.next)) launcherDraft.query = "";
-      launcherDraft.path = entry.next;
-      launcherDraft.selectedId = null;
+      enter(entry.next);
       return;
     }
     if (entry.recent) noteCommandRun(entry.recent);
@@ -857,8 +801,18 @@
       await entry.run?.();
       return;
     }
-    // A Computers row. A run that answers with a confirmation is asking the
-    // deck to put that question instead of reporting success.
+    // A Computers row.
+    if (!entry.awaitResult) {
+      // What the row opens covers this window, so the launcher leaves as the
+      // row starts. The row reads the query before the draft is cleared.
+      const started = entry.run?.();
+      closeCommandLauncher();
+      clearLauncherDraft();
+      await started;
+      return;
+    }
+    // A run that answers with a confirmation is asking the deck to put that
+    // question instead of reporting success.
     return (await entry.run?.()) as void | DeckConfirm;
   }
 
@@ -897,6 +851,7 @@
   {direction}
   onClose={closeCommandLauncher}
   onChoose={choose}
+  onExpand={expand}
   onError={commandFailed}
   onBack={back}
   {onScope}

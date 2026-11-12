@@ -363,11 +363,11 @@ describe("focus when the launcher closes", () => {
     const target = await openFromOrigin();
     (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
     await flush();
-    row(target, "Windows").click();
-    await flush();
-    row(target, "Window 2 [notes]").click();
-    await flush();
-    row(target, "Hide").click();
+    // The window is the scope's first row; Right opens its page.
+    const selected = target.querySelector('[role="option"][aria-selected="true"] .deck-result-title');
+    expect(selected?.textContent).toBe("Window 2 [notes]");
+    await press(target, "ArrowRight");
+    row(target, "Hide window").click();
     await flush();
     expect(target.querySelector(".deck-operation"), "the success card").not.toBeNull();
     await new Promise((resolve) => setTimeout(resolve, 300));

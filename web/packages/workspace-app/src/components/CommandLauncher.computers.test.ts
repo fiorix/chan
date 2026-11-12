@@ -2,9 +2,10 @@
 //
 // The Computers scope's one entry while this window has no library snapshot.
 // It reads Connecting while the first request to the scoped route is
-// unanswered, and unavailable once the route has failed, through the requests
-// that follow: the deck asks again at each open and at each poll. The route
-// is mocked.
+// unanswered, and unavailable once the route has refused, through the requests
+// that follow: the deck asks again at each open and at each poll. A route the
+// server does not have takes the scope off the rail instead. The route is
+// mocked.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -21,7 +22,7 @@ vi.mock("../api/libraryCommand", () => ({
 
 import CommandLauncher from "./CommandLauncher.svelte";
 import { ApiError } from "../api/errors";
-import { clearLauncherDraft, launcherPanel, overlayStack } from "../state/store.svelte";
+import { clearLauncherDraft, launcherDraft, launcherPanel, overlayStack } from "../state/store.svelte";
 import { resetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -58,7 +59,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-test("the Computers entry reads unavailable through a later request once the scoped route has answered 404", async () => {
+test("the Computers entry reads unavailable through a later request once the scoped route has refused", async () => {
   let refuse: (error: unknown) => void = () => {};
   scopedLibrary.load
     .mockImplementationOnce(() => new Promise((_, reject) => (refuse = reject)))
@@ -69,9 +70,13 @@ test("the Computers entry reads unavailable through a later request once the sco
   await tick();
   expect(titles(), "the entry while the first request is unanswered").toEqual(["Connecting to this computer\u2026"]);
 
-  refuse(new ApiError(404, "no launcher route"));
+  refuse(new ApiError(403, "window has no live presence"));
   await flush();
-  expect(titles(), "the entry once the route has answered 404").toEqual(["Computers unavailable"]);
+  expect(titles(), "the entry once the route has refused").toEqual(["Computers unavailable"]);
+  expect(
+    target.querySelector(".deck-result-path")?.textContent,
+    "the entry says the window was not granted its library",
+  ).toBe("This window was not granted library access");
 
   launcherPanel.open = false;
   await flush();
@@ -79,6 +84,22 @@ test("the Computers entry reads unavailable through a later request once the sco
   await flush();
   expect(
     { titles: titles(), requests: scopedLibrary.load.mock.calls.length },
-    "the entry during the request that follows the 404",
+    "the entry during the request that follows the refusal",
   ).toEqual({ titles: ["Computers unavailable"], requests: 2 });
+});
+
+test("a server with no scoped route takes the Computers scope off the rail and the launcher off it", async () => {
+  let refuse: (error: unknown) => void = () => {};
+  scopedLibrary.load.mockImplementationOnce(() => new Promise((_, reject) => (refuse = reject)));
+  launcherPanel.open = true;
+  await flush();
+  (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
+  await tick();
+  expect(titles()).toEqual(["Connecting to this computer\u2026"]);
+
+  refuse(new ApiError(404, "no launcher route"));
+  await flush();
+  expect(target.querySelector('[aria-label="Computers scope"]'), "the orb").toBeNull();
+  expect(launcherDraft.scope, "the scope the launcher stood on").toBeNull();
+  expect(titles()).not.toContain("Computers unavailable");
 });

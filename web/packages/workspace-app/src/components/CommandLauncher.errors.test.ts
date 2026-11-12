@@ -119,7 +119,7 @@ describe("scoped command rejection destinations", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flush();
     await search("hide notes");
-    row("Hide").click();
+    row("Hide Window 2 [Notes]").click();
     await flush();
     expect(scoped.run).toHaveBeenCalledExactlyOnceWith({ action: "set_window_visibility", window_id: "w-other", hidden: true });
     expect(launcherDraft.operation?.kind).toBe("pending");
@@ -135,7 +135,7 @@ describe("scoped command rejection destinations", () => {
       expect(notified).not.toHaveBeenCalled();
       expect(ui.status).toBeNull();
     } else {
-      const sentence = `Hide: Hide ${surface} refused`;
+      const sentence = `Hide Window 2 [Notes]: Hide ${surface} refused`;
       expect(notified).toHaveBeenCalledExactlyOnceWith(sentence);
       expect(ui.status).toBe(sentence);
       expect(statusTarget.querySelector('[aria-label="status message"]')?.textContent).toContain(sentence);

@@ -315,9 +315,20 @@ describe("browsing", () => {
     expect(sections()).toEqual([
       "Terminal", "New tab", "Tab", "Pane", "Window", "Workspace", "Settings", "Computers",
     ]);
+    // This machine's rows close the list under one heading, objects first.
     expect(rows().filter((candidate) => candidate.dataset.section === "Computers").map((r) => r.textContent)).toEqual([
-      "New terminal window", "New window", "Windows",
+      "Project A", "New terminal window",
     ]);
+  });
+
+  test("the Computers scope lists the same rows under the tree's own sections", async () => {
+    await open();
+    await scope("computers");
+    expect(rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`)).toEqual([
+      "Workspaces: Project A",
+      "New: New terminal window",
+    ]);
+    expect(crumbs()).toBe("Computers");
   });
 
   test("a command that cannot run here is hidden", async () => {
@@ -331,16 +342,37 @@ describe("browsing", () => {
     );
     await open();
     expect(row("New terminal window").dataset.kind).toBe("action");
-    expect(row("New terminal window").dataset.breadcrumb).toBe("Computers › This machine");
+    expect(row("New terminal window").dataset.breadcrumb).toBe("Computers › New");
     await click("New terminal window");
     expect(fake.run).toHaveBeenCalledExactlyOnceWith({ action: "new_terminal" });
   });
 
-  test("a workspace to open a window of sits under This machine", async () => {
+  test("a workspace opens a new window of itself, and its page holds the same action", async () => {
+    vi.spyOn(window, "open").mockImplementation(
+      () => ({ close: vi.fn(), focus: vi.fn(), closed: false, document: document.implementation.createHTMLDocument(), location: { href: "about:blank" } }) as unknown as Window,
+    );
     await open();
+    expect(row("Project A").dataset).toMatchObject({ value: "on", expandable: "true", breadcrumb: "Computers › Workspaces" });
+    (target.querySelector('.probe-expand[data-id="computers:workspace:project-a"]') as HTMLButtonElement).click();
+    await flush();
+    expect(crumbs()).toBe("Computers > Project A");
+    expect(rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`)).toEqual([
+      "Actions: New window",
+    ]);
     await click("New window");
-    expect(row("Project A").dataset.breadcrumb).toBe("Computers › New window › This machine");
-    expect(crumbs()).toBe("Computers > New window");
+    expect(fake.run).toHaveBeenCalledExactlyOnceWith({ action: "new_workspace_window", workspace_id: "project-a" });
+  });
+
+  test("this machine is found by its name, and its page lists what the window may do there", async () => {
+    await open();
+    await type("this machine");
+    expect(row("This machine").dataset).toMatchObject({ kind: "branch", breadcrumb: "Computers" });
+    await click("This machine");
+    expect(crumbs()).toBe("Computers > This machine");
+    expect(rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`)).toEqual([
+      "Actions: New terminal window",
+      "Workspaces: Project A",
+    ]);
   });
 });
 

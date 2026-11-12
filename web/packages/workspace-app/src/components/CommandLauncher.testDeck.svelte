@@ -1,8 +1,10 @@
 <script lang="ts">
   // A stand-in for the shared deck that prints what the launcher hands it:
   // each row with the fields the deck draws, the scopes and the crumbs. A
-  // click on a row answers as the deck's Enter does, so a test reads the
-  // launcher's lists without depending on how the deck lays them out.
+  // click on a row answers as the deck's Enter does, and a click on the
+  // button after a row that has a page of its own as the deck's Right does,
+  // so a test reads the launcher's lists without depending on how the deck
+  // lays them out.
   import type {
     DeckConfirm,
     DeckDraft,
@@ -19,6 +21,7 @@
     crumbs,
     placeholder,
     onChoose,
+    onExpand,
     onBack,
     onScope,
     onClearScope,
@@ -31,6 +34,7 @@
     crumbs?: string[];
     placeholder?: string;
     onChoose: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
+    onExpand?: (item: DeckItem) => void;
     onBack: () => void;
     onScope: (scope: DeckScopeId) => void;
     onClearScope: () => void;
@@ -96,8 +100,12 @@
         data-danger={item.danger === true}
         data-disabled={item.disabled === true}
         data-shortcut={item.shortcut ?? ""}
+        data-expandable={item.expandable === true}
         onclick={() => choose(item)}
       >{item.title}</button>
+      {#if item.expandable}
+        <button class="probe-expand" data-id={item.id} onclick={() => onExpand?.(item)}>page</button>
+      {/if}
     {/each}
   </div>
 {/if}
