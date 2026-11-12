@@ -17,9 +17,14 @@ import { workspace } from "../../../state/store.svelte";
 export const WORKSPACE_STATE_MAX_AGE_MS = 5000;
 
 /// What a write answers while an earlier write of the same setting is still
-/// on its way. A control disables itself for that long; the launcher has no
-/// such state and is told instead.
+/// on its way. A control disables itself for that long, and so does a
+/// launcher row that shows the change under way; any other caller is told
+/// instead.
 const IN_FLIGHT = "An earlier change to this setting is still in progress";
+
+/// What enabling semantic search answers when it was asked to download
+/// nothing and the selected model is not on disk.
+const MODEL_NOT_ON_DISK = "The embedding model has not been downloaded";
 
 type SemanticModel = SemanticModelRegistry["models"][number];
 
@@ -190,6 +195,19 @@ export function semanticModelLabel(model: SemanticModel): string {
   return `${model.label} - ${meta.join(" - ")}`;
 }
 
+/// The model that turning semantic search on would download first, as the
+/// registry names it, or as the server does while the registry has not been
+/// read. Null when the model is on disk, and while nothing has loaded.
+export function semanticModelToDownload(): { name: string; size: string | null } | null {
+  if (!semantic.state) return null;
+  const selected = selectedSemanticModel();
+  if (selected?.downloaded || semantic.state.model_present) return null;
+  return {
+    name: selected?.label ?? semantic.state.model_name,
+    size: selected?.size_label ?? null,
+  };
+}
+
 function semanticRefused(err: unknown): string {
   const refusal = (err as Error).message;
   semantic.error = refusal;
@@ -197,14 +215,20 @@ function semanticRefused(err: unknown): string {
 }
 
 /// Enable or disable semantic search. Enabling downloads the selected model
-/// first when it is not on disk, polling the state while it lands. Never
-/// rejects: it answers the refusal, which is also `semantic.error`, or null
-/// once the write landed.
-export async function setSemanticEnabled(next: boolean): Promise<string | null> {
+/// first when it is not on disk, polling the state while it lands; with
+/// `download` false it downloads nothing, and answers a refusal while the
+/// model is not on disk. Never rejects: it answers the refusal, which is
+/// also `semantic.error` when the server gave it, or null once the write
+/// landed.
+export async function setSemanticEnabled(
+  next: boolean,
+  { download = true }: { download?: boolean } = {},
+): Promise<string | null> {
   if (!semantic.state) return "Semantic search has not loaded";
   if (semantic.downloading || semantic.enabling) return IN_FLIGHT;
+  const onDisk = semanticModelToDownload() === null;
+  if (next && !onDisk && !download) return MODEL_NOT_ON_DISK;
   semantic.error = null;
-  const onDisk = selectedSemanticModel()?.downloaded || semantic.state.model_present;
   semanticOrder.begin();
   try {
     if (!next) {

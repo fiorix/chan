@@ -786,6 +786,7 @@ describe("a setting of this workspace, with the overlay closed", () => {
   test("semantic search enables at once when the model is on disk", async () => {
     const entry = settingEntry("workspace.semantic");
     await vi.waitFor(() => expect(entry.read()).toBe(false));
+    expect(entry.confirm!(true)).toBeNull();
 
     await entry.write!(true);
 
@@ -798,17 +799,68 @@ describe("a setting of this workspace, with the overlay closed", () => {
     expect(entry.read()).toBe(false);
   });
 
-  test("semantic search downloads the selected model first when it is missing", async () => {
+  test("turning semantic search on asks before it downloads a model that is not on disk", async () => {
     semanticState = { ...semanticState, model_present: false };
     models.models[0]!.downloaded = false;
     const entry = settingEntry("workspace.semantic");
     await vi.waitFor(() => expect(entry.read()).toBe(false));
 
-    await entry.write!(true);
+    const question = entry.confirm!(true)!;
+    expect(question).toMatchObject({ title: "Download BGE small?", actionLabel: "Download" });
+    expect(question.message).toContain("has not been downloaded yet (130 MB)");
+    // Turning it off downloads nothing, so it asks nothing.
+    expect(entry.confirm!(false)).toBeNull();
+
+    // The write alone sends nothing: the download is the question's.
+    await expect(entry.write!(true)).rejects.toThrow("has not been downloaded");
+    expect(api.semanticDownload).not.toHaveBeenCalled();
+    expect(api.semanticEnable).not.toHaveBeenCalled();
+    expect(entry.read()).toBe(false);
+
+    await question.write();
 
     expect(vi.mocked(api.semanticDownload).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.semanticEnable).mock.invocationCallOrder[0]!,
     );
+    expect(entry.read()).toBe(true);
+    // The model is on disk now.
+    expect(entry.confirm!(true)).toBeNull();
+  });
+
+  test("the question names the model as the server does while the registry has not been read", async () => {
+    semanticState = { ...semanticState, model_present: false };
+    vi.mocked(api.semanticModels).mockRejectedValue(new Error("registry unavailable"));
+    const entry = settingEntry("workspace.semantic");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+
+    const question = entry.confirm!(true)!;
+    expect(question.title).toBe("Download bge-small?");
+    expect(question.message).toContain("has not been downloaded yet. ");
+  });
+
+  test("the semantic search entry reads downloading from the answer until the download ends", async () => {
+    semanticState = { ...semanticState, model_present: false };
+    models.models[0]!.downloaded = false;
+    const entry = settingEntry("workspace.semantic");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+    let finishDownload = (): void => {};
+    vi.mocked(api.semanticDownload).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (finishDownload = resolve));
+      semanticState = { ...semanticState, model_present: true };
+      return { ...semanticState };
+    });
+    expect(entry.progress!()).toBeNull();
+
+    const written = entry.confirm!(true)!.write();
+    expect(entry.progress!()).toBe("downloading");
+    await vi.waitFor(() => expect(api.semanticDownload).toHaveBeenCalledTimes(1));
+    // A second answer while it runs is refused and starts nothing.
+    await expect(entry.confirm!(true)!.write()).rejects.toThrow("still in progress");
+    expect(api.semanticDownload).toHaveBeenCalledTimes(1);
+
+    finishDownload();
+    await written;
+    expect(entry.progress!()).toBeNull();
     expect(entry.read()).toBe(true);
   });
 

@@ -6,7 +6,8 @@
 //
 // An entry reads and writes without the overlay: the machine preferences
 // through the record this window was served, and every other value through
-// the state module that owns it.
+// the state module that owns it. A toggle whose write would do more than
+// store the value, as a download is, says so as a question to put first.
 
 import { privacy, setPrivacy } from "@chan/web-shared/privacy";
 import { isTauriDesktop } from "../../api/desktop";
@@ -62,6 +63,7 @@ import {
   semantic,
   semanticCompiledIn,
   semanticModelLabel,
+  semanticModelToDownload,
   setReportsEnabled,
   setSemanticEnabled,
   setSemanticModel,
@@ -76,6 +78,17 @@ export type SettingOption = {
   value: string;
   /// The option's word, verbatim as the overlay's control shows it.
   label: string;
+};
+
+/// What a toggle's write asks before it does more than store the value,
+/// with the write the answer allows.
+export type SettingQuestion = {
+  title: string;
+  message: string;
+  /// The word on the answer that goes ahead.
+  actionLabel: string;
+  /// Runs once the question has been put and answered with that word.
+  write: () => void | Promise<void>;
 };
 
 export type SettingSpec = {
@@ -93,6 +106,14 @@ export type SettingSpec = {
   read: () => boolean | string | null;
   /// Apply a value. Present on a toggle and a choice.
   write?: (value: boolean | string) => void | Promise<void>;
+  /// On a toggle: the question a write of `value` raises, or null when it
+  /// raises none. `write` never does the part that is asked about; only the
+  /// question's own `write` does, so nothing runs it unasked.
+  confirm?: (value: boolean | string) => SettingQuestion | null;
+  /// On a toggle: a word for a change still under way, shown in place of
+  /// the value, or null when none is. The field takes no other change
+  /// meanwhile.
+  progress?: () => string | null;
   /// Whether this window shows the field, by the overlay's own gates.
   available: () => boolean;
   /// The catalog command that changes the same setting, when one exists. The
@@ -390,6 +411,21 @@ function workspaceRead<T>(read: () => T): () => T {
 async function refusing(run: Promise<string | null>): Promise<void> {
   const refusal = await run;
   if (refusal) throw new Error(refusal);
+}
+
+/// What turning semantic search on asks while its model is not on disk: the
+/// download, by the model's name and size. The overlay's toggle starts the
+/// same download at a press and reports it beside itself.
+function semanticDownloadQuestion(value: boolean | string): SettingQuestion | null {
+  const model = value === true ? semanticModelToDownload() : null;
+  if (!model) return null;
+  const size = model.size ? ` (${model.size})` : "";
+  return {
+    title: `Download ${model.name}?`,
+    message: `Semantic search runs on this embedding model, which has not been downloaded yet${size}. The download may take a few minutes, and semantic search turns on when it finishes.`,
+    actionLabel: "Download",
+    write: () => refusing(setSemanticEnabled(true)),
+  };
 }
 
 /// Write the viewer's privacy policy, whose owner reports a failed save as
@@ -854,18 +890,23 @@ const ENTRIES: readonly SettingEntry[] = [
     kind: "open",
     read: () => indexStatus.value?.state ?? null,
   },
-  heldToggle(
-    {
-      id: "workspace.semantic",
-      section: "workspace",
-      heading: "Semantic search",
-      caption: "Enable semantic search (Hybrid mode)",
-      keywords: ["embedding", "vector"],
-      available: () => inWorkspace() && semanticCompiledIn(),
-    },
-    workspaceRead(() => semantic.state?.semantic_enabled ?? null),
-    (on) => refusing(setSemanticEnabled(on)),
-  ),
+  {
+    ...heldToggle(
+      {
+        id: "workspace.semantic",
+        section: "workspace",
+        heading: "Semantic search",
+        caption: "Enable semantic search (Hybrid mode)",
+        keywords: ["embedding", "vector"],
+        available: () => inWorkspace() && semanticCompiledIn(),
+      },
+      workspaceRead(() => semantic.state?.semantic_enabled ?? null),
+      // The download is the question's to run.
+      (on) => refusing(setSemanticEnabled(on, { download: false })),
+    ),
+    confirm: semanticDownloadQuestion,
+    progress: () => (semantic.downloading ? "downloading" : null),
+  },
   {
     ...entryWords({
       id: "workspace.embeddingModel",
