@@ -1,9 +1,5 @@
-import type {
-  CanvasRenderer,
-  FontMetrics,
-  GhosttyCell,
-  IRenderable,
-} from "@chan/ghostty-web-ng";
+import type { CanvasRenderer, FontMetrics } from "@chan/ghostty-web-ng";
+import { VtFlag, type VtCell, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 export type CellDimensions = {
   width: number;
@@ -21,7 +17,7 @@ type GhosttyCellTextRenderer = GhosttyRendererLike & {
   ctx?: CanvasRenderingContext2D;
   devicePixelRatio?: number;
   renderCellText?: (
-    cell: GhosttyCell,
+    cell: VtCell,
     column: number,
     row: number,
     overrideColor?: string,
@@ -45,10 +41,9 @@ type GhosttyOverlayScrollbarRenderer = GhosttyRendererLike & {
   ctx?: CanvasRenderingContext2D;
   devicePixelRatio?: number;
   render?: (
-    buffer: IRenderable,
+    term: VtTerminal,
     forceAll?: boolean,
     viewportY?: number,
-    scrollbackProvider?: unknown,
     scrollbarOpacity?: number,
   ) => void;
   renderScrollbar?: (
@@ -65,8 +60,6 @@ type GhosttyScrollbarClickSource = {
 };
 
 const XTERM_DOM_MEASURE_REPETITIONS = 32;
-const CELL_FLAG_INVISIBLE = 32;
-const CELL_FLAG_FAINT = 128;
 const customGlyphRenderers = new WeakSet<object>();
 const overlayScrollbarRenderers = new WeakSet<object>();
 
@@ -214,7 +207,7 @@ export function installGhosttyCustomGlyphs(
     row,
     overrideColor,
   ): void => {
-    if (cell.grapheme_len > 0 || !isCustomGlyph(cell.codepoint)) {
+    if (cell.cluster !== null || !isCustomGlyph(cell.codepoint)) {
       original.call(renderer, cell, column, row, overrideColor);
       return;
     }
@@ -223,14 +216,14 @@ export function installGhosttyCustomGlyphs(
     // decorations, but suppress the font's disconnected glyph.
     original.call(
       renderer,
-      { ...cell, codepoint: 32, grapheme_len: 0 },
+      { ...cell, codepoint: 32, cluster: null },
       column,
       row,
       overrideColor,
     );
-    if ((cell.flags & CELL_FLAG_INVISIBLE) !== 0) return;
+    if ((cell.flags & VtFlag.INVISIBLE) !== 0) return;
     const metrics = renderer.getMetrics();
-    const faint = (cell.flags & CELL_FLAG_FAINT) !== 0;
+    const faint = (cell.flags & VtFlag.FAINT) !== 0;
     if (isCustomBoxGlyph(cell.codepoint)) {
       drawCustomBoxGlyph(context, metrics, cell.codepoint, column, row, faint);
       return;
@@ -282,21 +275,19 @@ export function installGhosttyOverlayScrollbar(
 
   let paintedOverlay = false;
   mutable.render = (
-    buffer,
+    term,
     forceAll,
     viewportY,
-    scrollbackProvider,
     scrollbarOpacity = 1,
   ): void => {
-    const paintsOverlay = Boolean(scrollbackProvider) && scrollbarOpacity > 0;
+    const paintsOverlay = scrollbarOpacity > 0;
     const needsFreshPixels = paintsOverlay || paintedOverlay;
     paintedOverlay = paintsOverlay;
     originalRender.call(
       renderer,
-      buffer,
+      term,
       forceAll === true || needsFreshPixels,
       viewportY,
-      scrollbackProvider,
       scrollbarOpacity,
     );
   };

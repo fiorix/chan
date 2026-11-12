@@ -150,7 +150,7 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
 
   /// One frame as the widget's render loop issues it.
   const frame = (painter: Painter, forceAll: boolean) => {
-    painter.renderer.render(core, forceAll, painter.term.getViewportY(), painter.term, 0);
+    painter.renderer.render(core, forceAll, painter.term.getViewportY(), 0);
     core.getCursor();
   };
 

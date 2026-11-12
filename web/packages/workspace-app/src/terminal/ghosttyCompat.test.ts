@@ -191,7 +191,7 @@ async function pinnedTerminal(options: {
     /// One frame as the widget's render loop issues it, at the given
     /// overlay opacity, through whatever render the renderer holds now.
     frame(opacity = 0): void {
-      renderer.render(core, false, term.getViewportY(), term, opacity);
+      renderer.render(core, false, term.getViewportY(), opacity);
     },
   };
 }
@@ -606,7 +606,7 @@ async function ghosttyScreen() {
       Array.from({ length: GHOSTTY_ROWS + SCROLLBACK_LINES }, () => line).join("\r\n"),
   );
   expect(pinned.term.getScrollbackLength()).toBe(SCROLLBACK_LINES);
-  const reads = vi.spyOn(pinned.core, "getLine");
+  const reads = vi.spyOn(pinned.core, "readRow");
 
   return {
     context: pinned.context,
@@ -617,7 +617,7 @@ async function ghosttyScreen() {
       /// many rows the frame actually rendered.
       paint(target: CanvasRenderer, opacity: number): number {
         reads.mockClear();
-        target.render(pinned.core, false, 0, pinned.term, opacity);
+        target.render(pinned.core, false, 0, opacity);
         return reads.mock.calls.length;
       },
     },
