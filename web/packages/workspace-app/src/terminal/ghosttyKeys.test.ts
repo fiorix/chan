@@ -253,7 +253,7 @@ function inputTerminal(
   document.body.append(host);
   hosts.push(host);
   const data: string[] = [];
-  const handler = new InputHandler(vt as never, host, (text) => data.push(text), () => {}, undefined,
+  const handler = new InputHandler(vt, host, (text) => data.push(text), () => {}, undefined,
     () => false, () => false, undefined, textarea);
   const cancelled = { reached: false };
   if (cancelHost) host.addEventListener("beforeinput", (event) => { cancelled.reached = true; event.preventDefault(); });
@@ -659,7 +659,7 @@ function ghostty(init: Init, platform: XtermPlatform, applicationCursorMode = fa
   const out: Outcome = { data: "", scrolled: 0, prevented: false };
   const protocol = createTerminalKeyboardProtocolState();
   const handler = new InputHandler(
-    vt as never,
+    vt,
     host,
     (d) => (out.data += d),
     () => {},

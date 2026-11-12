@@ -34,7 +34,7 @@
 /// cannot cure a failure of the instance. Callers fall back to xterm.js
 /// for each terminal whose load fails.
 
-import type { Ghostty, Terminal } from "@chan/ghostty-web-ng";
+import type { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
 import type { TerminalPreferences } from "../api/types";
 
@@ -45,7 +45,7 @@ export type TerminalBackend = "xterm" | "ghostty";
 export type GhosttyKit = {
   /// A fresh WASM instance for ONE terminal; never share it (see the
   /// module comment).
-  instantiate: (host?: VtHost) => Promise<Ghostty>;
+  instantiate: (host?: VtHost) => Promise<GhosttyVt>;
   Terminal: typeof Terminal;
 };
 
@@ -71,7 +71,7 @@ export function ghosttyKitFrom(
   return {
     Terminal: lib.Terminal,
     // The release build imports nothing from its host.
-    instantiate: async (host) => new GhosttyVt(await WebAssembly.instantiate(module, {}), host).asGhostty(),
+    instantiate: async (host) => new GhosttyVt(await WebAssembly.instantiate(module, {}), host),
   };
 }
 

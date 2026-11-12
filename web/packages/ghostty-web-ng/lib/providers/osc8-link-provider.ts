@@ -10,6 +10,7 @@
  * so we just need to scan for contiguous regions with the same ID.
  */
 
+import type { VtTerminal } from '../../vt/ghosttyVt';
 import type { IBufferRange, ILink, ILinkProvider } from '../types';
 
 /**
@@ -112,118 +113,6 @@ export class OSC8LinkProvider implements ILinkProvider {
     callback(links.length > 0 ? links : undefined);
   }
 
-  /**
-   * Find the full extent of a link by scanning for contiguous cells
-   * with the same hyperlink_id. Handles multi-line links.
-   */
-  private findLinkRange(hyperlinkId: number, startY: number, startX: number): IBufferRange {
-    const buffer = this.terminal.buffer.active;
-
-    // Find the start of the link (scan backwards)
-    let minY = startY;
-    let minX = startX;
-
-    // Scan backwards on current line
-    while (minX > 0) {
-      const line = buffer.getLine(minY);
-      if (!line) break;
-
-      const cell = line.getCell(minX - 1);
-      if (!cell || cell.getHyperlinkId() !== hyperlinkId) break;
-      minX--;
-    }
-
-    // If at start of line, check if link continues from previous line
-    if (minX === 0 && minY > 0) {
-      let prevY = minY - 1;
-
-      while (prevY >= 0) {
-        const prevLine = buffer.getLine(prevY);
-        if (!prevLine || prevLine.length === 0) break;
-
-        // Check if last cell of previous line has same hyperlink_id
-        const lastCell = prevLine.getCell(prevLine.length - 1);
-        if (!lastCell || lastCell.getHyperlinkId() !== hyperlinkId) break;
-
-        // Link continues from previous line - find where it starts
-        minY = prevY;
-        minX = 0;
-
-        // Scan backwards on this line
-        for (let x = prevLine.length - 1; x >= 0; x--) {
-          const cell = prevLine.getCell(x);
-          if (!cell || cell.getHyperlinkId() !== hyperlinkId) {
-            minX = x + 1;
-            break;
-          }
-        }
-
-        // If entire line is part of link, continue to previous line
-        if (minX === 0) {
-          prevY--;
-        } else {
-          break;
-        }
-      }
-    }
-
-    // Find the end of the link (scan forwards)
-    let maxY = startY;
-    let maxX = startX;
-
-    // Scan forwards on current line
-    const currentLine = buffer.getLine(maxY);
-    if (currentLine) {
-      while (maxX < currentLine.length - 1) {
-        const cell = currentLine.getCell(maxX + 1);
-        if (!cell || cell.getHyperlinkId() !== hyperlinkId) break;
-        maxX++;
-      }
-
-      // If at end of line, check if link continues to next line
-      if (maxX === currentLine.length - 1) {
-        let nextY = maxY + 1;
-        const maxBuffer = buffer.length;
-
-        while (nextY < maxBuffer) {
-          const nextLine = buffer.getLine(nextY);
-          if (!nextLine || nextLine.length === 0) break;
-
-          // Check if first cell of next line has same hyperlink_id
-          const firstCell = nextLine.getCell(0);
-          if (!firstCell || firstCell.getHyperlinkId() !== hyperlinkId) break;
-
-          // Link continues to next line - find where it ends
-          maxY = nextY;
-          maxX = 0;
-
-          // Scan forwards on this line
-          for (let x = 0; x < nextLine.length; x++) {
-            const cell = nextLine.getCell(x);
-            if (!cell) break;
-            if (cell.getHyperlinkId() !== hyperlinkId) {
-              maxX = x - 1;
-              break;
-            }
-            maxX = x;
-          }
-
-          // If entire line is part of link, continue to next line
-          if (maxX === nextLine.length - 1) {
-            nextY++;
-          } else {
-            break;
-          }
-        }
-      }
-    }
-
-    return {
-      start: { x: minX, y: minY },
-      end: { x: maxX, y: maxY },
-    };
-  }
-
   dispose(): void {
     // No resources to clean up
   }
@@ -248,9 +137,8 @@ export interface ITerminalForOSC8Provider {
         | undefined;
     };
   };
-  wasmTerm?: {
-    getHyperlinkUri(row: number, col: number): string | null;
-    getScrollbackHyperlinkUri(offset: number, col: number): string | null;
-    getScrollbackLength(): number;
-  };
+  wasmTerm?: Pick<
+    VtTerminal,
+    'getHyperlinkUri' | 'getScrollbackHyperlinkUri' | 'getScrollbackLength'
+  >;
 }

@@ -1,4 +1,5 @@
-import { Terminal, type Ghostty } from "@chan/ghostty-web-ng";
+import { Terminal } from "@chan/ghostty-web-ng";
+import type { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { describe, expect, test } from "vitest";
 
 // The widget compiles from source with its own tsconfig.json, whose ES2020
@@ -10,7 +11,7 @@ import { describe, expect, test } from "vitest";
 describe("the ghostty widget's class fields", () => {
   test("a field declared without an initializer is not an own property until it is assigned", () => {
     // The constructor only stores the core; nothing here calls into it.
-    const term = new Terminal({ ghostty: {} as Ghostty, cols: 20, rows: 4 });
+    const term = new Terminal({ ghostty: {} as GhosttyVt, cols: 20, rows: 4 });
     for (const field of ["selectionManager", "renderer", "wasmTerm", "inputHandler", "canvas", "element"]) {
       expect(Object.hasOwn(term, field), field).toBe(false);
     }

@@ -46,7 +46,7 @@ async function pinnedTerminal(input: string) {
     } as unknown as typeof HTMLCanvasElement.prototype.getContext,
   );
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ ghostty: vt.asGhostty(), cols: COLS, rows: ROWS });
+  const term = new Terminal({ ghostty: vt, cols: COLS, rows: ROWS });
   const wasmTerm = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
   wasmTerm.write(input);
   term.wasmTerm = wasmTerm;
@@ -189,6 +189,19 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(4, 1) }));
     expect(writes).toEqual([COMMAND]);
     expect(writes[0]).toBe(chordText(term));
+    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+  });
+
+  test("a press and release without a drag selects nothing and copies nothing", async () => {
+    const clipboard = browserClipboard();
+    const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
+    const at = { clientX: 2 * cell.width + 1, clientY: 1 };
+    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at }));
+    expect(writes).toEqual([]);
+    expect(term.hasSelection()).toBe(false);
     expect(clipboard.write).not.toHaveBeenCalled();
     expect(clipboard.writeText).not.toHaveBeenCalled();
   });

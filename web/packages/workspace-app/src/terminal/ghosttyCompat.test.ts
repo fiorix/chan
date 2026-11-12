@@ -506,7 +506,7 @@ describe("Ghostty overlay scrollbar clicks", () => {
     // on its own instance of the vendored core, as backend.ts's kit hands it.
     const module = await WebAssembly.compile(readFileSync(VENDORED));
     const terminal = new Terminal({
-      ghostty: new GhosttyVt(await WebAssembly.instantiate(module, {})).asGhostty(),
+      ghostty: new GhosttyVt(await WebAssembly.instantiate(module, {})),
     }) as unknown as {
       handleMouseDown?: unknown;
     };

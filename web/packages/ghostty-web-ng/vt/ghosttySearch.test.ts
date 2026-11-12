@@ -13,7 +13,7 @@ beforeAll(async () => {
 
 async function terminal(cols: number, rows: number, scrollbackLimit = 1000): Promise<VtTerminal> {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  return vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
+  return vt.createTerminal(cols, rows, { scrollbackLimit });
 }
 
 /// Writes `n` lines, each ended by CRLF, a thousand at a time.

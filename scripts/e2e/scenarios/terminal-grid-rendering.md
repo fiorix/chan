@@ -25,6 +25,8 @@ preferences, plus a second-tab arm per backend:
 | `ghostty-os-default`      | ghostty    | `os-default`      |
 | `ghostty-source-code-pro` | ghostty    | `source-code-pro` |
 
+The Linux driver also paints the ghostty reference patterns (TG-07) on the `os-default` arm.
+
 Which xterm renderer a desktop carries is a runtime capability answer, not a
 property of these four scenario names. The Linux driver keeps DOM as its
 default explicit reference and `--include-renderers` adds WebGL. The Linux
@@ -83,6 +85,29 @@ different faces and must NOT render identically -- measured cell heights of
 18.65px and 21.35px at the same 14px size are those two faces separating, and
 seeing them converge would mean the preference stopped being honoured.
 
+### TG-07 A reference pattern paints what the run it is compared with painted
+
+The grid pattern reaches default colours, box and block glyphs and ASCII text only, so a change to the widget's renderer can keep it intact while it repaints everything else. The ghostty pattern arms cover the rest, each on a fresh terminal at TerminalTab's dark palette (read out of `TerminalTab.svelte`):
+
+| Scenario                                | What it paints                  |
+| --------------------------------------- | ------------------------------- |
+| `ghostty-os-default-attrs`              | colours and attributes          |
+| `ghostty-os-default-glyphs`             | wide and combined glyphs, wraps |
+| `ghostty-os-default-scrollback`         | history rows in a scrolled view |
+| `ghostty-os-default-selection`          | a selection over four rows      |
+| `ghostty-os-default-cursor-STYLE-glyph` | a cursor on a glyph             |
+| `ghostty-os-default-cursor-STYLE-blank` | a cursor on a blank cell        |
+
+- `attrs`: explicit backgrounds and foregrounds from the 16-colour palette, the 256-colour table and RGB; bold, faint, italic, the underline styles, blink, inverse, invisible, strikethrough and overline, alone and combined; block and box glyphs under attributes; cells that have a background and no character, from an erase in a colour (EL, ECH). Its first row puts explicit black backgrounds (the palette's, the 256-colour table's, RGB) beside default ones.
+- `glyphs`: CJK with and without attributes, emoji with a skin tone, ZWJ sequences and variation selectors, combining marks and clusters, a wide character that does not fit in the last column and wraps, and a soft-wrapped row.
+- `scrollback`: 41 rows of output viewed 12 rows back, so history rows (with the attributes above, and one row that soft-wrapped) fill the top of the view and screen rows the bottom. The arm waits for the overlay scrollbar to fade out before it reports, since a frame taken mid-fade does not reproduce, so the scrollbar itself is not in the PNG.
+- `selection`: a selection from inside row 2 to inside row 5 over coloured, inverse, wide, combined and box-glyph cells; the first, middle and last rows of a selection are painted by separate branches.
+- `cursor-STYLE-glyph` and `cursor-STYLE-blank`: a visible cursor in each style the widget draws (`block`, `underline`, `bar`), on a glyph and on a blank cell.
+
+They are references, not measures: each asserts only that it painted where it wrote (at least 1% ink) and nothing where nothing was written (TG-04), so that a page that drew nothing cannot pass for a match. The PNG is the oracle. `--compare DIR` fails every PNG that is not byte-identical to the one of the same name an earlier run wrote in `DIR`, and every PNG in `DIR` of a scenario the driver no longer has (within `--only`), so a renderer change is accepted by a run at its base with `--out DIR` and one at its tip with `--compare DIR`. Both runs belong in one environment: the PNGs depend on the WebKitGTK build and on the installed fonts, and a rig guest has DejaVu only, so CJK and most emoji paint as missing-glyph boxes there. They still exercise the renderer's two-cell backgrounds, decorations and grapheme lookup.
+
+They run on the `os-default` arm only, because on Linux both preferences resolve to the same chain (TG-06) and a second font arm would paint the same PNGs, and under the Linux driver only; the Windows driver keeps the grid pattern.
+
 ## Current status
 
 ### Linux
@@ -119,6 +144,13 @@ pixel row on the 21px cell pitch.
 This works without a GPU because what these scenarios measure is glyph
 rasterisation, which is CPU-side. A frame rate would not survive the same
 treatment.
+
+The reference patterns (TG-07) reproduce byte for byte across three runs under Xvfb in a rig guest (WebKitGTK 2.52.6, DejaVu fonts). What the patterns record today, so that a difference at a renderer change is read against what was there and not against what ought to be:
+
+- An explicit background of RGB (0,0,0) is left unpainted: the renderer takes a zero background for the default and keeps the theme's, so `\e[48;2;0;0;0m` and `\e[48;5;16m` cells show the theme background, while `\e[40m` paints the palette's black (`#0c0c0d` in the dark theme) and RGB (1,1,1) paints.
+- In a scrolled-back view, a history row's grapheme cluster is looked up in the screen row at the same viewport row, so the row `history 12` paints a blank where its cluster of `e` and U+0301 is.
+- Selected text is painted in the renderer's default selection foreground, `#1e1e1e`, since chan's theme names none.
+- Every underline style paints one straight underline; overline adds nothing to a cell and blinking text stays lit.
 
 ### Windows
 

@@ -396,7 +396,7 @@ describe("ghostty secret masking over the pinned build", () => {
       } as unknown as typeof HTMLCanvasElement.prototype.getContext,
     );
     const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ ghostty: vt.asGhostty(), cols: COLS, rows: ROWS });
+    const term = new Terminal({ ghostty: vt, cols: COLS, rows: ROWS });
     term.wasmTerm = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
     const canvas = document.createElement("canvas");
     const renderer = new CanvasRenderer(canvas, {

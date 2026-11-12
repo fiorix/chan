@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { Terminal, type Ghostty, type GhosttyTerminal } from "@chan/ghostty-web-ng";
+import { Terminal } from "@chan/ghostty-web-ng";
+import type { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { describe, expect, test } from "vitest";
 import type { TerminalPreferences } from "../api/types";
 import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";
@@ -46,7 +47,7 @@ describe("ghostty kit instances", () => {
   }
 
   /// Cells on screen holding the disposed terminal's marker byte.
-  function staleCells(term: GhosttyTerminal): number {
+  function staleCells(term: VtTerminal): number {
     term.update();
     const { rows } = term.getDimensions();
     let stale = 0;
@@ -63,7 +64,7 @@ describe("ghostty kit instances", () => {
   /// A closed terminal with a screenful of history, then a new terminal on
   /// `next` at ghostty-web's default 80x24 resized to the real grid -- the
   /// order TerminalTab takes (open, then the first fit).
-  function disposeThenSpawn(prev: Ghostty, next: Ghostty): GhosttyTerminal {
+  function disposeThenSpawn(prev: GhosttyVt, next: GhosttyVt): VtTerminal {
     const closed = prev.createTerminal(100, 30, { scrollbackLimit: 10000 });
     let out = "";
     for (let i = 0; i < 500; i++) out += `${MARKER.repeat(90)}\r\n`;

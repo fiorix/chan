@@ -1,4 +1,4 @@
-import type { IDisposable, IEvent } from './interfaces';
+import type { IEvent } from './interfaces';
 
 export class EventEmitter<T> {
   private listeners: Array<(arg: T) => void> = [];

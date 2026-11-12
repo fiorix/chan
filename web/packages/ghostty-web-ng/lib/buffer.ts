@@ -15,15 +15,14 @@
  * ```
  */
 
+import type { VtTerminal } from '../vt/ghosttyVt';
 import { EventEmitter } from './event-emitter';
-import type { GhosttyTerminal } from './ghostty';
 import { CellFlags } from './ghostty';
 import type {
   IBuffer,
   IBufferCell,
   IBufferLine,
   IBufferNamespace,
-  IDisposable,
   IEvent,
 } from './interfaces';
 import type { Terminal } from './terminal';
@@ -51,7 +50,7 @@ export class BufferNamespace implements IBufferNamespace {
 
   get active(): IBuffer {
     // Query WASM to determine which buffer is active
-    const wasmTerm = (this.terminal as any).wasmTerm as GhosttyTerminal | undefined;
+    const wasmTerm = this.terminal.wasmTerm;
     if (!wasmTerm) {
       return this.normal; // Default to normal if not initialized
     }
@@ -204,8 +203,8 @@ export class Buffer implements IBuffer {
     return this.nullCell;
   }
 
-  private getWasmTerm(): GhosttyTerminal | undefined {
-    return (this.terminal as any).wasmTerm as GhosttyTerminal | undefined;
+  private getWasmTerm(): VtTerminal | undefined {
+    return this.terminal.wasmTerm;
   }
 }
 
@@ -294,11 +293,9 @@ export class BufferLine implements IBufferLine {
  */
 export class BufferCell implements IBufferCell {
   private cell: GhosttyCell;
-  private x: number;
 
-  constructor(cell: GhosttyCell, x: number) {
+  constructor(cell: GhosttyCell, _x: number) {
     this.cell = cell;
-    this.x = x;
   }
 
   getChars(): string {

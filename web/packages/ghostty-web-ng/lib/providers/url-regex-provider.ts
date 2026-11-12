@@ -8,7 +8,7 @@
  * take precedence over regex-detected URLs.
  */
 
-import type { IBufferRange, ILink, ILinkProvider } from '../types';
+import type { ILink, ILinkProvider } from '../types';
 
 /**
  * URL Regex Provider

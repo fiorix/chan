@@ -12,7 +12,7 @@
 
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
-import type { GhosttyCell, ILink } from './types';
+import type { GhosttyCell } from './types';
 import { CellFlags } from './types';
 
 // Interface for objects that can be rendered
@@ -101,7 +101,6 @@ export class CanvasRenderer {
   private theme: Required<ITheme>;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
-  private palette: string[];
 
   // Cursor blinking state
   private cursorVisible: boolean = true;
@@ -153,26 +152,6 @@ export class CanvasRenderer {
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
-
-    // Build color palette (16 ANSI colors)
-    this.palette = [
-      this.theme.black,
-      this.theme.red,
-      this.theme.green,
-      this.theme.yellow,
-      this.theme.blue,
-      this.theme.magenta,
-      this.theme.cyan,
-      this.theme.white,
-      this.theme.brightBlack,
-      this.theme.brightRed,
-      this.theme.brightGreen,
-      this.theme.brightYellow,
-      this.theme.brightBlue,
-      this.theme.brightMagenta,
-      this.theme.brightCyan,
-      this.theme.brightWhite,
-    ];
 
     // Measure font metrics
     this.metrics = this.measureFont();
@@ -418,9 +397,6 @@ export class CanvasRenderer {
       this.previousHoveredLinkRange = this.hoveredLinkRange;
     }
 
-    // Track if anything was actually rendered
-    let anyLinesRendered = false;
-
     // Determine which rows need rendering.
     // We also include adjacent rows (above and below) for each dirty row to handle
     // glyph overflow - tall glyphs like Devanagari vowel signs can extend into
@@ -446,8 +422,6 @@ export class CanvasRenderer {
       if (!rowsToRender.has(y)) {
         continue;
       }
-
-      anyLinesRendered = true;
 
       // Fetch line from scrollback or visible screen
       let line: GhosttyCell[] | null = null;
@@ -788,26 +762,6 @@ export class CanvasRenderer {
    */
   public setTheme(theme: ITheme): void {
     this.theme = { ...DEFAULT_THEME, ...theme };
-
-    // Rebuild palette
-    this.palette = [
-      this.theme.black,
-      this.theme.red,
-      this.theme.green,
-      this.theme.yellow,
-      this.theme.blue,
-      this.theme.magenta,
-      this.theme.cyan,
-      this.theme.white,
-      this.theme.brightBlack,
-      this.theme.brightRed,
-      this.theme.brightGreen,
-      this.theme.brightYellow,
-      this.theme.brightBlue,
-      this.theme.brightMagenta,
-      this.theme.brightCyan,
-      this.theme.brightWhite,
-    ];
   }
 
   /**

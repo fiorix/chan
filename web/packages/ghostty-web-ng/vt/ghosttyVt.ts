@@ -1,6 +1,6 @@
-/// Ghostty's VT core from Ghostty's own release build, bound to the
-/// `Ghostty` instance ghostty-web's `Terminal` takes as its `ghostty`
-/// option.
+/// Ghostty's VT core from Ghostty's own release build, bound as the core
+/// ghostty-web's `Terminal` takes as its `ghostty` option. The widget's
+/// sources in `lib/` are typed against the classes here.
 ///
 /// WHY: ghostty-web ships a wasm it compiles from a patched Ghostty
 /// snapshot with its own C entry points: render-state getters, a polled
@@ -16,7 +16,7 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
-import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "@chan/ghostty-web-ng";
+import type { GhosttyCell } from "@chan/ghostty-web-ng";
 import { copiedText } from "./ghosttyCopy";
 
 /// Enum values of the pinned build, by upstream C type.
@@ -440,7 +440,7 @@ export type VtHost = {
   onResizeReply: (data: string) => void;
 };
 
-/// The `Ghostty` object ghostty-web's `Terminal` takes as `ghostty`.
+/// The core ghostty-web's `Terminal` takes as its `ghostty` option.
 export class GhosttyVt {
   private readonly wasm: VtWasm;
   private readonly terminals = new Map<number, VtTerminal>();
@@ -466,19 +466,12 @@ export class GhosttyVt {
     );
   }
 
-  createKeyEncoder(): KeyEncoder {
-    return new VtKeyEncoder(this.wasm) as unknown as KeyEncoder;
+  createKeyEncoder(): VtKeyEncoder {
+    return new VtKeyEncoder(this.wasm);
   }
 
-  createTerminal(cols = 80, rows = 24, config?: VtTerminalConfig): GhosttyTerminal {
-    const terminal = new VtTerminal(this.wasm, this, cols, rows, config);
-    return terminal as unknown as GhosttyTerminal;
-  }
-
-  /// The binding as the type ghostty-web's `Terminal` option names. Its
-  /// class has private fields, so no other object can be assignable to it.
-  asGhostty(): Ghostty {
-    return this as unknown as Ghostty;
+  createTerminal(cols = 80, rows = 24, config?: VtTerminalConfig): VtTerminal {
+    return new VtTerminal(this.wasm, this, cols, rows, config);
   }
 
   register(handle: number, terminal: VtTerminal): void {

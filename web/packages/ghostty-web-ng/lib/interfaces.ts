@@ -2,7 +2,7 @@
  * xterm.js-compatible interfaces
  */
 
-import type { Ghostty } from './ghostty';
+import type { GhosttyVt } from '../vt/ghosttyVt';
 
 export interface ITerminalOptions {
   cols?: number; // Default: 80
@@ -22,9 +22,8 @@ export interface ITerminalOptions {
   // Scrolling options
   smoothScrollDuration?: number; // Duration in ms for smooth scroll animation (default: 100, 0 = instant)
 
-  // Internal: Ghostty WASM instance (optional, for test isolation)
-  // If not provided, uses the module-level instance from init()
-  ghostty?: Ghostty;
+  // The core this terminal runs on, through chan's libghostty-vt binding.
+  ghostty: GhosttyVt;
 }
 
 export interface ITheme {

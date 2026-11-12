@@ -12,6 +12,7 @@ import {
   STYLE_FLAG_BITS,
   upstreamKey,
   upstreamKeyEncoderOption,
+  type VtTerminal,
 } from "./ghosttyVt";
 
 /// Ghostty's release wasm, vendored in this package (vitest runs in the
@@ -197,7 +198,7 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
     }
     // ghostty-web's build hands `visible` over as the wasm's integer;
     // its callers only test it for truth.
-    const cursor = (t: GhosttyTerminal) => {
+    const cursor = (t: GhosttyTerminal | VtTerminal) => {
       const c = t.getCursor();
       return { x: c.x, y: c.y, visible: Boolean(c.visible) };
     };
