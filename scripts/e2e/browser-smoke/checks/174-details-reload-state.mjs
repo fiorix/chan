@@ -55,8 +55,8 @@ export default {
       await page.waitForSelector('.search input');
       assert.equal(await page.$(details), null, 'the Search Details preference survives a reload while Search is closed');
       await page.click('.search', { button: 'right' });
-      await page.waitForFunction(() => [...document.querySelectorAll('[role="menuitem"]')].some(el => el.textContent.includes('Show Details')));
-      await page.evaluate(() => [...document.querySelectorAll('[role="menuitem"]')].find(el => el.textContent.includes('Show Details')).click());
+      await page.waitForFunction(() => [...document.querySelectorAll('[role="menuitemcheckbox"][aria-checked="false"]')].some(el => el.querySelector('.menu-row-label')?.textContent.trim() === 'Details (search)'));
+      await page.evaluate(() => [...document.querySelectorAll('[role="menuitemcheckbox"][aria-checked="false"]')].find(el => el.querySelector('.menu-row-label')?.textContent.trim() === 'Details (search)').click());
       await page.waitForSelector(details);
       await waitSearchBit('1');
       await page.reload({ waitUntil: "networkidle0" });

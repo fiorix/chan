@@ -1,21 +1,22 @@
-// Toggle group broadcast over a group with a member in a window no page
+// Group broadcast toggled over a group with a member in a window no page
 // holds. A member's broadcast flag is flipped only by its window's page, which
 // the server asks with a window command; a window no page holds (one the
 // desktop's Hide put away, or one whose page was closed) never answers, so a
 // group toggle that waited for that member to join could turn the group on
-// but never off, and the menu would read Select All whatever it did.
+// but never off, and the tab menu's Group broadcast row would read off
+// whatever it did.
 //
 // A second page opens a window of its own and a terminal in the check's group,
 // its layout saved, and then closes: the session stays, in a window no page
 // holds, as a terminal left behind by an earlier check would. The main window
 // opens a terminal in the same group and toggles group broadcast twice. The
-// first toggle must turn broadcast on with the menu reading Deselect All, the
-// second must turn it off with the menu reading Select All again. The member
-// must still be listed, in a window with no page, after both toggles, or the
-// run proved nothing. Then the second page reopens its window: the member is
-// live again and rejoins the group, so a toggle turns it on through its page
-// and the next turns the group off, which proves the check sees a member in
-// another window at all.
+// first toggle must turn broadcast on with the menu's Group broadcast row
+// checked, the second must turn it off with the row unchecked again. The
+// member must still be listed, in a window with no page, after both toggles,
+// or the run proved nothing. Then the second page reopens its window: the
+// member is live again and rejoins the group, so a toggle turns it on through
+// its page and the next turns the group off, which proves the check sees a
+// member in another window at all.
 //
 // The group is the check's own, so a toggle reaches no terminal another check
 // left in a shared group. The check closes both terminals and leaves broadcast
@@ -109,8 +110,9 @@ async function waitSavedTerminal(page, token, windowId, name) {
 }
 
 /// What the main window shows of the group's broadcast: the active tab's
-/// marker and its title, and the tab menu's Select All row, read with the
-/// menu open and then closed again.
+/// marker and its title, and the check of the tab menu's Group broadcast row
+/// (`checked`, null when the menu has no such row), read with the menu open
+/// and then closed again.
 async function readBroadcast(page) {
   const marker = await page.$eval(MARKER, (node) => node.getAttribute("title")).catch(() => null);
   const strip = await page.$(".pane .tabs .tab.active .path");
@@ -119,9 +121,9 @@ async function readBroadcast(page) {
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
   await page.waitForSelector(MENU, { visible: true, timeout: 10_000 });
   const menu = await page.evaluate((menuSelector) => ({
-    label: [...document.querySelectorAll(`${menuSelector} .mbtn-label`)]
-      .map((node) => node.textContent?.trim() ?? "")
-      .find((text) => text === "Select All" || text === "Deselect All") ?? null,
+    checked: [...document.querySelectorAll(`${menuSelector} button[role="menuitemcheckbox"]`)]
+      .find((row) => row.querySelector(".mbtn-label")?.textContent?.trim() === "Group broadcast")
+      ?.getAttribute("aria-checked") ?? null,
     otherWindows: [...document.querySelectorAll(`${menuSelector} .broadcast-other-windows-label ~ .target-row .target-name`)]
       .map((node) => node.textContent?.trim() ?? ""),
   }), MENU);
@@ -132,8 +134,8 @@ async function readBroadcast(page) {
 
 /// Toggle group broadcast in the main window and read what it then shows:
 /// once the marker and the roster read as `expect` says, the menu until its
-/// label does. A reading that never arrives is returned as it last stood, for
-/// the caller to judge, after a bounded wait.
+/// row's check does. A reading that never arrives is returned as it last
+/// stood, for the caller to judge, after a bounded wait.
 async function toggle(page, token, label, expect) {
   await page.bringToFront();
   await dispatchCommand(page, "app.terminal.broadcastToggle");
@@ -144,7 +146,7 @@ async function toggle(page, token, label, expect) {
   let reading;
   for (;;) {
     reading = { label, ...(await readBroadcast(page)), members: await groupMembers(page, token) };
-    if (reading.label === expect.label || Date.now() > deadline) return reading;
+    if (reading.checked === expect.checked || Date.now() > deadline) return reading;
     await sleep(300);
   }
 }
@@ -187,9 +189,9 @@ export default {
         (members) => members[HOME]?.window === homeWindow && members[AWAY]?.window === AWAY_WINDOW);
 
       const first = await toggle(page, token, "first toggle",
-        { on: true, label: "Deselect All", roster: (members) => members[HOME]?.broadcast === true });
+        { on: true, checked: "true", roster: (members) => members[HOME]?.broadcast === true });
       const second = await toggle(page, token, "second toggle",
-        { on: false, label: "Select All", roster: (members) => members[HOME]?.broadcast === false });
+        { on: false, checked: "false", roster: (members) => members[HOME]?.broadcast === false });
       const still = { row: await windowRow(page, token, AWAY_WINDOW), members: await groupMembers(page, token) };
       details.windowlessToggles = { first, second, still };
       console.log(`[smoke]   windowless ${JSON.stringify(details.windowlessToggles)}`);
@@ -199,9 +201,9 @@ export default {
         failures.push(`the away member did not stay in a window with no page, so the toggles proved nothing: ${JSON.stringify(still)}`);
       }
       if (!first.marker) failures.push("the first toggle did not turn broadcast on");
-      if (first.label !== "Deselect All") failures.push(`after the first toggle the menu reads ${JSON.stringify(first.label)}, not "Deselect All"`);
+      if (first.checked !== "true") failures.push(`after the first toggle the menu's Group broadcast row reads aria-checked ${JSON.stringify(first.checked)}, not "true"`);
       if (second.marker) failures.push(`the second toggle left broadcast on (${second.marker}): the group cannot be cleared`);
-      if (second.label !== "Select All") failures.push(`after the second toggle the menu reads ${JSON.stringify(second.label)}, not "Select All"`);
+      if (second.checked !== "false") failures.push(`after the second toggle the menu's Group broadcast row reads aria-checked ${JSON.stringify(second.checked)}, not "false"`);
       if (failures.length > 0) throw new Error(`${failures.join("; ")}; ${JSON.stringify(details.windowlessToggles)}`);
 
       // The window comes back: its member rejoins the group with its own flag.
@@ -211,12 +213,12 @@ export default {
         ({ row, tabs }) => row?.connected === true && tabs.includes(AWAY));
       const join = await toggle(page, token, "toggle with the window back", {
         on: true,
-        label: "Deselect All",
+        checked: "true",
         roster: (members) => members[HOME]?.broadcast === true && members[AWAY]?.broadcast === true,
       });
       const leave = await toggle(page, token, "toggle to clear it", {
         on: false,
-        label: "Select All",
+        checked: "false",
         roster: (members) => members[HOME]?.broadcast === false && members[AWAY]?.broadcast === false,
       });
       details.liveToggles = { join, leave };
@@ -225,8 +227,8 @@ export default {
       if (!(join.members[AWAY]?.broadcast === true && join.otherWindows.includes(AWAY))) {
         live.push(`with its window back the member did not rejoin: ${JSON.stringify(join)}`);
       }
-      if (!join.marker || join.label !== "Deselect All") live.push(`the toggle with the window back shows ${JSON.stringify(join)}`);
-      if (leave.marker || leave.label !== "Select All" || leave.members[AWAY]?.broadcast !== false) {
+      if (!join.marker || join.checked !== "true") live.push(`the toggle with the window back shows ${JSON.stringify(join)}`);
+      if (leave.marker || leave.checked !== "false" || leave.members[AWAY]?.broadcast !== false) {
         live.push(`the toggle to clear the group shows ${JSON.stringify(leave)}`);
       }
       if (live.length > 0) throw new Error(live.join("; "));

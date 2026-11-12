@@ -119,14 +119,14 @@ export default {
       await targetTab.click({ button: "right" });
       await page.waitForSelector(".terminal-tab-menu-bubble");
       let selected = false;
-      for (const button of await page.$$(".terminal-tab-menu-bubble button.mbtn")) {
-        if (await button.evaluate((node) => node.textContent?.includes("Select All"))) {
+      for (const button of await page.$$('.terminal-tab-menu-bubble button.mbtn[role="menuitemcheckbox"][aria-checked="false"]')) {
+        if (await button.evaluate((node) => node.querySelector(".mbtn-label")?.textContent?.trim() === "Group broadcast")) {
           await button.click();
           selected = true;
           break;
         }
       }
-      assert.ok(selected, "the tab menu offers Select All for the broadcast group");
+      assert.ok(selected, "the tab menu offers Group broadcast, reading off, for the broadcast group");
       details.group = await page.$$eval(".terminal-tab-menu-bubble .target-row input", (nodes) =>
         nodes.map((node) => ({ checked: node.checked, name: node.closest(".target-row")?.textContent?.trim() })));
       assert.ok([`${TARGET} (self)`, SOURCE].every((name) =>
