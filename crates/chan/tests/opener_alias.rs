@@ -34,6 +34,8 @@ struct Fixture {
     run: PathBuf,
     /// The child's working directory: `docs/` and `notes.md`.
     files: PathBuf,
+    /// `files` as the OS reports it to the child (getcwd): canonical.
+    cwd: PathBuf,
 }
 
 fn fixture() -> Fixture {
@@ -50,11 +52,13 @@ fn fixture() -> Fixture {
     }
     std::fs::create_dir(files.join("docs")).unwrap();
     std::fs::write(files.join("notes.md"), "# notes\n").unwrap();
+    let cwd = std::fs::canonicalize(&files).unwrap();
     Fixture {
         _dir: dir,
         bin,
         run,
         files,
+        cwd,
     }
 }
 
@@ -78,7 +82,17 @@ impl Fixture {
         cmd
     }
 
+    /// The absolute path a relative argument becomes. The opener joins it
+    /// onto the working directory as the OS reports it, the canonical one, as
+    /// `cs open` does (`chan_shell::absolutize`), so under a symlinked TMPDIR
+    /// (`make test-symlink-tmpdir`) it is not `files` as spelled.
     fn path(&self, rel: &str) -> String {
+        self.cwd.join(rel).into_os_string().into_string().unwrap()
+    }
+
+    /// `files` as this fixture spells it, for an absolute argument or a
+    /// `file://` URI, which the opener sends as given.
+    fn spelled(&self, rel: &str) -> String {
         self.files.join(rel).into_os_string().into_string().unwrap()
     }
 }
@@ -167,7 +181,7 @@ fn each_name_prints_its_own_usage() {
 fn outside_chan_each_path_goes_to_the_running_desktop() {
     let f = fixture();
     let requests = fake_desktop(&f, opened);
-    let uri = format!("file://{}", f.path("a%20b.md"));
+    let uri = format!("file://{}", f.spelled("a%20b.md"));
     let output = f
         .command("chan-files")
         .args(["docs", "notes.md", "later.md", &uri])
@@ -178,7 +192,7 @@ fn outside_chan_each_path_goes_to_the_running_desktop() {
         f.path("docs"),
         f.path("notes.md"),
         f.path("later.md"),
-        f.path("a b.md"),
+        f.spelled("a b.md"),
     ];
     assert_eq!(
         drain(&requests),
@@ -216,8 +230,30 @@ fn no_path_opens_the_working_directory() {
     let requests = fake_desktop(&f, opened);
     let output = f.command("chan-edit").output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
-    let cwd = std::fs::canonicalize(&f.files).unwrap();
-    assert_eq!(drain(&requests), [open_path(cwd.to_str().unwrap())]);
+    assert_eq!(drain(&requests), [open_path(f.cwd.to_str().unwrap())]);
+}
+
+/// Under a working directory reached through a symlink, a relative argument
+/// resolves against the directory the link names, as `cs open` resolves it,
+/// and an absolute one spelled through the link goes as spelled.
+#[test]
+fn a_relative_path_resolves_against_the_physical_working_directory() {
+    let f = fixture();
+    let requests = fake_desktop(&f, opened);
+    let link = f.files.parent().unwrap().join("through-a-link");
+    symlink(&f.files, &link).unwrap();
+    let docs = link.join("docs").into_os_string().into_string().unwrap();
+    let output = f
+        .command("chan-files")
+        .current_dir(&link)
+        .args(["notes.md", &docs])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        drain(&requests),
+        [open_path(&f.path("notes.md")), open_path(&docs)]
+    );
 }
 
 /// A fake chan terminal server: `Identify` answers as a desktop, an
