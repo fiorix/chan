@@ -608,11 +608,23 @@ fn write_devserver_unit(
             devserver_chan_home().as_deref(),
             tunnel.as_ref(),
         ),
-        &std::env::var_os("PATH").unwrap_or_default(),
+        &unit_search_path(std::env::vars_os()),
         installed.as_deref(),
         std::io::stdin().is_terminal(),
     );
     write_rendered_devserver_unit(&unit_path, &unit, tunnel.is_some())
+}
+
+/// The `PATH` a unit written from `parent`, this process's environment,
+/// records: as the user had it. A `chan devserver start` run from the
+/// AppImage, through its `chan` wrapper, has its mount's entries ahead of the
+/// user's `PATH`, and the unit outlives that mount: recorded, its entries
+/// would name directories under `/tmp` that no longer exist, searched first
+/// at every service start ([`chan_server::appimage_host_var`]).
+fn unit_search_path(
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::ffi::OsString {
+    chan_server::appimage_host_var("PATH", parent).unwrap_or_default()
 }
 
 /// `unit` with the `PATH` line [`keeps_recorded_service_path`] chooses when
@@ -825,6 +837,36 @@ fn devserver_systemd_unit_spec(
 mod tests {
     use super::*;
     use crate::devserver::persisted::devserver_addr_from_persisted_args;
+
+    /// A unit written from an AppImage records the user's `PATH`, none of
+    /// the mount's entries ahead of it; off an AppImage, the `PATH` as it is.
+    #[test]
+    fn a_unit_written_from_the_appimage_records_the_users_path() {
+        let mount = "/tmp/.mount_ChanCLI";
+        let block = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("{mount}/{entry}"))
+            .join(":");
+        let appimage: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".to_string()),
+            ("PATH", format!("{block}:/usr/local/bin:/usr/bin")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        assert_eq!(
+            unit_search_path(appimage.clone()),
+            "/usr/local/bin:/usr/bin"
+        );
+        let plain: Vec<_> = appimage
+            .into_iter()
+            .filter(|(key, _)| key != "APPDIR")
+            .collect();
+        assert_eq!(
+            unit_search_path(plain),
+            std::ffi::OsString::from(format!("{block}:/usr/local/bin:/usr/bin"))
+        );
+    }
 
     #[test]
     fn a_fresh_systemd_marker_uses_the_running_or_pinned_address() {
