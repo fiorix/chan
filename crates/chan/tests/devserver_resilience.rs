@@ -2711,13 +2711,6 @@ fn desktop_requests(requests: &Mutex<Vec<serde_json::Value>>) -> Vec<String> {
         .collect()
 }
 
-/// A stand-in for the desktop GUI binary. A serve that launches the desktop
-/// runs what `$APPIMAGE` names, and this script records that it ran by
-/// creating the returned marker.
-///
-/// The serve runs `$APPIMAGE` only as its own AppImage, one whose runtime set
-/// `$APPDIR` to the directory its executable lies in, so a launch sets both:
-/// [`appdir_of_chan`] beside this script.
 /// The directory of the chan binary under test, as the `$APPDIR` an AppImage
 /// runtime would set for it.
 fn appdir_of_chan() -> String {
@@ -2728,6 +2721,13 @@ fn appdir_of_chan() -> String {
         .to_string()
 }
 
+/// A stand-in for the desktop GUI binary. A serve that launches the desktop
+/// runs what `$APPIMAGE` names, and this script records that it ran by
+/// creating the returned marker.
+///
+/// The serve runs `$APPIMAGE` only as its own AppImage, one whose runtime set
+/// `$APPDIR` to the directory its executable lies in, so a launch sets both:
+/// [`appdir_of_chan`] beside this script.
 fn desktop_launcher(sandbox: &Sandbox) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let script = sandbox.scratch.path().join("desktop-gui");
