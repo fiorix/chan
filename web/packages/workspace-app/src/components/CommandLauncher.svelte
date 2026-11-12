@@ -115,9 +115,12 @@
     allComputers,
     toggleChord,
   }: {
-    /// Show the screen of this window's app that lists every computer, with
-    /// the query typed here for it to search. Given where the app has such a
-    /// screen: the Computers scope then ends with the row that opens it.
+    /// Show the screen of this window's app that lists every computer. It is
+    /// handed the query typed here, for a screen that can search for it; the
+    /// one such screen, chan-desktop's Computers panel, is shown by a toggle
+    /// that takes no argument, so the app drops the query there. Given where
+    /// the app has such a screen: the Computers scope then ends with the row
+    /// that opens it.
     allComputers?: (query: string) => void | Promise<void>;
     /// Whether a key is the chord this window opens the launcher with, the
     /// built-in one or one the user assigned. The open deck closes on it.
