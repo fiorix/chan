@@ -50,11 +50,11 @@ const ROWS: Array<{ title: string; rows: WordSource[] }> = [
   {
     title: "Stage (Enter to commit, Esc to discard)",
     rows: [
-      { own: "Stage Terminal", because: STAGED },
-      { own: "Stage File Browser", because: STAGED },
-      { own: "Stage Graph", because: STAGED },
-      { own: "Stage Dashboard", because: STAGED },
-      { own: "Stage New Draft", because: STAGED },
+      { own: "Stage terminal", because: STAGED },
+      { own: "Stage file browser", because: STAGED },
+      { own: "Stage graph", because: STAGED },
+      { own: "Stage dashboard", because: STAGED },
+      { own: "Stage new draft", because: STAGED },
       { own: "Stage Excalidraw", because: STAGED },
     ],
   },
@@ -110,6 +110,16 @@ describe("the Hybrid Nav help", () => {
     });
   });
 
+  test("every row is sentence case, a product's name aside", () => {
+    const rows = [...help.querySelectorAll("dd")].map((row) => row.textContent ?? "");
+    expect(rows.length).toBeGreaterThan(20);
+    for (const words of rows) {
+      expect(words[0], words).toBe(words[0]!.toUpperCase());
+      const rest = words.replace(/\bExcalidraw\b/g, "").slice(1);
+      expect(rest, words).toBe(rest.toLowerCase());
+    }
+  });
+
   test("reads as the launcher does", () => {
     const rows = [...help.querySelectorAll("dd")].map((row) => row.textContent);
     for (const title of [
@@ -146,8 +156,8 @@ describe("the Hybrid Nav help", () => {
   test("names each cap by its action for assistive tech", () => {
     const caps = [...help.querySelectorAll<HTMLButtonElement>("button.kbd-button")];
     for (const [key, action] of [
-      ["t", "Stage Terminal"],
-      ["f", "Stage File Browser"],
+      ["t", "Stage terminal"],
+      ["f", "Stage file browser"],
       ["e", "Stage Excalidraw"],
       ["[", "Move divider left"],
       ["0", "Equalize panes"],

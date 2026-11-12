@@ -60,11 +60,11 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
   test("a workspace window lists every action", async () => {
     const actions = await actionsFor("", false);
     for (const action of [
-      "Stage Terminal",
-      "Stage File Browser",
-      "Stage Graph",
-      "Stage Dashboard",
-      "Stage New Draft",
+      "Stage terminal",
+      "Stage file browser",
+      "Stage graph",
+      "Stage dashboard",
+      "Stage new draft",
       "Stage Excalidraw",
       "Right file browser dock",
     ]) {
@@ -75,47 +75,47 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
   test("a standalone window with a filesystem lists the browser and the Dashboard, not the workspace surfaces", async () => {
     const actions = await actionsFor("terminal", true);
     // The file surface this window really has, and the Dashboard it opens.
-    expect(actions).toContain("Stage File Browser");
+    expect(actions).toContain("Stage file browser");
     expect(actions).toContain("Right file browser dock");
     expect(actions).toContain("Left file browser dock");
-    expect(actions).toContain("Stage Dashboard");
+    expect(actions).toContain("Stage dashboard");
     // The workspace surfaces it does not: App.svelte returns early on each of
     // these, so advertising them would be advertising dead keys.
     for (const action of [
-      "Stage Graph",
-      "Stage New Draft",
+      "Stage graph",
+      "Stage new draft",
       "Stage Excalidraw",
     ]) {
       expect(actions, action).not.toContain(action);
     }
     // Everything capability-free stays.
-    expect(actions).toContain("Stage Terminal");
+    expect(actions).toContain("Stage terminal");
     expect(actions).toContain("Move focus");
   });
 
   test("a standalone window with a draft store adds the draft rows, not the workspace ones", async () => {
     const actions = await actionsFor("terminal", true, true);
     for (const action of [
-      "Stage File Browser",
-      "Stage New Draft",
+      "Stage file browser",
+      "Stage new draft",
       "Stage Excalidraw",
-      "Stage Terminal",
-      "Stage Dashboard",
+      "Stage terminal",
+      "Stage dashboard",
     ]) {
       expect(actions, action).toContain(action);
     }
     // Graph stays a workspace surface.
-    expect(actions).not.toContain("Stage Graph");
+    expect(actions).not.toContain("Stage graph");
   });
 
   test("a terminals-only window lists the Dashboard and no file or workspace surface, and drops the empty Dock group", async () => {
     const actions = await actionsFor("terminal", false);
-    expect(actions).toContain("Stage Terminal");
-    expect(actions).toContain("Stage Dashboard");
+    expect(actions).toContain("Stage terminal");
+    expect(actions).toContain("Stage dashboard");
     for (const action of [
-      "Stage File Browser",
-      "Stage Graph",
-      "Stage New Draft",
+      "Stage file browser",
+      "Stage graph",
+      "Stage new draft",
       "Stage Excalidraw",
       "Right file browser dock",
     ]) {
@@ -135,10 +135,10 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     }
     for (const action of [
       "Swap tile with neighbour",
-      "Stage Terminal",
-      "Stage File Browser",
-      "Stage Dashboard",
-      "Stage New Draft",
+      "Stage terminal",
+      "Stage file browser",
+      "Stage dashboard",
+      "Stage new draft",
       "Flip pane",
     ]) {
       expect(actions, action).not.toContain(action);
@@ -147,8 +147,8 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
 
   test("a control terminal is terminals-only too, and lists no Dashboard", async () => {
     const actions = await actionsFor("control", true);
-    expect(actions).toContain("Stage Terminal");
-    expect(actions).not.toContain("Stage File Browser");
-    expect(actions).not.toContain("Stage Dashboard");
+    expect(actions).toContain("Stage terminal");
+    expect(actions).not.toContain("Stage file browser");
+    expect(actions).not.toContain("Stage dashboard");
   });
 });
