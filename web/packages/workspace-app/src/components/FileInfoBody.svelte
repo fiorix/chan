@@ -96,6 +96,7 @@
   let {
     path,
     label,
+    surface = "browser",
     onOpen,
     onReveal,
     showRefs = false,
@@ -111,13 +112,15 @@
     /// graph reads the same name the canvas shows. Files / FB folders
     /// leave it undefined and fall back to the basename.
     label?: string;
+    /// The surface whose commands the action row names. The editor passes
+    /// `file` for the file it has open; every other host shows a selection,
+    /// and its actions are the file browser's.
+    surface?: "file" | "browser";
     onOpen?: () => void;
-    /// Image / directory counterpart to `onOpen`. Renders a
-    /// "Show in file browser" button on image entries and a
-    /// "Show Directory" button on directory entries; the host reveals
-    /// the path in its tree and closes itself. Absent = no button
-    /// (e.g. when the inspector already lives inside the file
-    /// browser).
+    /// The reveal counterpart to `onOpen`: the host shows the entry in a
+    /// file browser tab and closes itself. It backs the reveal action on a
+    /// file and a directory's open action. Absent = no reveal action (e.g.
+    /// when the inspector already lives inside the file browser).
     onReveal?: () => void;
     /// When true in a workspace window, fetch + render tags / mentions /
     /// dates / links / backlinks for files.
@@ -135,15 +138,11 @@
     /// not destinations" behavior the file browser and search
     /// overlays still want).
     onContactNavigate?: (path: string) => void;
-    /// "Graph from here" button for file selections. Graph overlay binds
-    /// this to scope the current graph to the selected file (and
-    /// re-pin it as the focal node). Other hosts leave it absent so
-    /// the button doesn't render outside the graph.
+    /// The graph action: the host opens a graph scoped to the entry. A
+    /// host that cannot leaves it absent and the action does not render.
     onSetAsScope?: () => void;
-    /// "New Terminal" button for directory selections, opening a
-    /// terminal with the directory as cwd. The dashboard Search slot
-    /// binds this; other hosts leave it absent so the button doesn't
-    /// render (directory-only, gated on `isDir`).
+    /// The host's own terminal action for a directory, opening a terminal
+    /// with the directory as cwd. Absent = the shared from-here terminal.
     onNewTerminal?: () => void;
     /// Whether the Upload button renders. Default true so the File
     /// Browser / editor / Graph-tab inspectors keep it; the dashboard
@@ -549,11 +548,11 @@
   /// actions exist for this entry) comes from the shared classifier
   /// in `state/fileActions` -- the same policy the FileTree context
   /// menu consumes -- so the two surfaces can never drift. Only the
-  /// handler/label mapping lives here. The surface still matters
-  /// through capabilities: the editor "Show Details" inspector binds
-  /// no onOpen (the file is already open there), so its file main
-  /// action is "Show file" instead of "Open".
-  /// "Open" for a directory: a NEW File Browser tab expanded into the
+  /// handler and command mapping lives here. The host still matters
+  /// through capabilities: the editor's Details inspector binds no
+  /// onOpen (the file is already open there), so its file main action
+  /// reveals the file instead of opening it.
+  /// A directory's open action: a NEW File Browser tab expanded into the
   /// directory. The dashboard binds onReveal to the same reveal-and-enter
   /// call, so prefer it when present; other surfaces fall back to the
   /// shared revealPathInBrowser primitive.
@@ -592,62 +591,74 @@
     openTerminalInActivePane(terminalFromHereTarget(entry.path, false));
   }
 
-  /// Maps a classifier action id to this surface's handlers and
-  /// labels. Only called with `entry` set (actionModel returns null
-  /// before any mapping).
+  /// The file browser's command for each classifier action. An inspector
+  /// over a selection (the file browser's, a graph node, a search hit) acts
+  /// on that selection as the file browser does, so it takes these words.
+  const BROWSER_COMMANDS: Record<FileActionId, string> = {
+    open: "app.browser.open",
+    showFile: "app.browser.openInBrowser",
+    viewMedia: "app.browser.viewMedia",
+    download: "app.browser.downloadSelection",
+    upload: "app.browser.uploadSelection",
+    newTerminal: "app.browser.newTerminal",
+    exportPdf: "app.browser.exportPdf",
+    graphFromHere: "app.browser.newGraph",
+  };
+
+  /// The editor's command for each action its Details panel offers on the
+  /// open file. An action the editor has no command for (a file tab is never
+  /// a directory or a media file) keeps the file browser's.
+  const EDITOR_COMMANDS: Partial<Record<FileActionId, string>> = {
+    showFile: "app.editor.showInBrowser",
+    download: "app.editor.download",
+    newTerminal: "app.editor.terminalFromHere",
+    exportPdf: "app.editor.exportPdf",
+    graphFromHere: "app.editor.graphFromHere",
+  };
+
+  function commandFor(id: FileActionId): string {
+    return (surface === "file" ? EDITOR_COMMANDS[id] : undefined) ?? BROWSER_COMMANDS[id];
+  }
+
+  /// Maps a classifier action id to its command on the host surface and to
+  /// this body's handler. Only called with `entry` set (actionModel returns
+  /// null before any mapping).
   function actionFor(id: FileActionId): InspectorAction {
     const e = entry!;
     const p = e.path;
+    const command = commandFor(id);
     switch (id) {
       case "open":
         return e.is_dir
-          ? { label: "Open", onClick: openDirInBrowser }
-          : { label: "Open", onClick: () => onOpen?.() };
+          ? { command, onClick: openDirInBrowser }
+          : { command, onClick: () => onOpen?.() };
       // Search binds both Open + reveal; the reveal-only main is the
-      // editor "Show Details" case (file already open there).
+      // editor's Details case (file already open there).
       case "showFile":
-        return { label: "Show file", onClick: () => onReveal?.() };
+        return { command, onClick: () => onReveal?.() };
       // Same routing as the file tree's double-click / Enter: image ->
       // zoom with the directory sibling set, audio/video/PDF -> their
       // setless viewers.
       case "viewMedia":
-        return {
-          label: isImage(p)
-            ? "View / Zoom"
-            : isVideo(p)
-              ? "View Video"
-              : isAudio(p)
-                ? "View Audio"
-                : "View PDF",
-          onClick: () => void openMediaViewer(p),
-        };
+        return { command, onClick: () => void openMediaViewer(p) };
       case "download":
-        return {
-          label: e.is_dir ? "Download tarball" : "Download file",
-          onClick: downloadSelection,
-          title: downloadTitle,
-        };
+        return { command, onClick: downloadSelection, title: downloadTitle };
       case "upload":
-        return { label: "Upload file here", onClick: triggerUpload, title: uploadTitle };
+        return { command, onClick: triggerUpload, title: uploadTitle };
       case "newTerminal": {
         // Drafts are scratch space, but the two draft shapes route
         // differently: a draft DIRECTORY roots the terminal in the
         // directory itself (newTerminalHere); a draft FILE opens in its
         // parent directory with its basename seeded (draftTerminalHere).
         const isDraft = e.path === draftsDir() || isDraftPath(e.path);
-        if (isDraft) {
-          return e.is_dir
-            ? { label: "Terminal from here", onClick: newTerminalHere }
-            : { label: "Terminal from here", onClick: draftTerminalHere };
-        }
-        return { label: "New terminal here", onClick: newTerminalHere };
+        return { command, onClick: isDraft && !e.is_dir ? draftTerminalHere : newTerminalHere };
       }
       // Markdown documents export to PDF on every surface (web and
       // desktop alike; the save path differs, not the availability).
       case "exportPdf":
-        return { label: "Export to PDF", onClick: exportSelectionToPdf };
+        return { command, onClick: exportSelectionToPdf };
       case "graphFromHere":
-        return { label: "Graph from here", onClick: () => onSetAsScope?.() };
+        return { command, onClick: () => onSetAsScope?.() };
     }
   }
 
@@ -759,12 +770,12 @@
      on every surface (File Browser, editor, Graph) so the inspector has
      one consistent layout: header -> actions -> lazy content. The
      contextual actions differ by entry kind:
-       - editable file: Open (gated on the server content kind, so an
+       - editable file: open (gated on the server content kind, so an
          odd-suffix plaintext file opens like the tree double-click);
-       - media: View/Zoom (image), View Audio, View Video, or View PDF;
-       - every entry: Upload + Download;
-       - host-provided: Show File/Directory (onReveal), Graph from here
-         (onSetAsScope).
+       - media: view, in the viewer of its kind;
+       - a directory: upload; every entry but a draft: download;
+       - host-provided: reveal (onReveal), graph (onSetAsScope).
+     Each action is worded by its command's title on the host surface.
      A full-path toggle reveals the workspace-relative path (header shows
      the basename). -->
 {#snippet actionsSection()}

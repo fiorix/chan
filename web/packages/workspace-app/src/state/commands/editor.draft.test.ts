@@ -3,9 +3,9 @@
 // The editor's commands that go by the active file's place in the workspace
 // (its parent directory, a terminal there, a graph scoped to it, its row in
 // the file browser) are not offered on a workspace's draft, which has none,
-// and neither is Delete file: a draft is discarded from its own flow. Save
-// draft is offered on a draft alone. Copy path copies the draft's path as a
-// person reads it.
+// and neither are Delete file and Duplicate file: a draft is no file of the
+// workspace, and is discarded from its own flow. Save draft is offered on a
+// draft alone. Copy path copies the draft's path as a person reads it.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { draftPath } from "../../__tests__/drafts";
@@ -20,6 +20,7 @@ const BY_PLACE = [
   "app.editor.graphFromHere",
   "app.editor.showInBrowser",
   "app.file.delete",
+  "app.file.duplicate",
 ];
 
 function onFileSurface(): CommandContext {
