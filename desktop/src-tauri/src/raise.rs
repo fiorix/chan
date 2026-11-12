@@ -354,7 +354,9 @@ mod tests {
 
     /// A source pin: the window calls run in the order a minimized window
     /// needs (restored before it is shown and focused), the minimized reading
-    /// is taken before the restore changes it, and the settle comes last.
+    /// is taken before the restore changes it, and the settle comes last and
+    /// does what its choice names. The macOS arm is compiled on macOS alone,
+    /// so only this pin sees it go missing on another host.
     #[test]
     fn the_raise_restores_shows_and_focuses_before_it_settles() {
         let raise = body(
@@ -369,6 +371,38 @@ mod tests {
                 "window.show()?",
                 "window.set_focus()?",
                 "settle_for(Platform::CURRENT, was_minimized)",
+                "Settle::ActivateApp => {",
+                "activate_app(window);",
+                "Settle::FocusOnceRestored => focus_once_restored(window.clone())",
+            ],
+        );
+    }
+
+    #[test]
+    fn the_current_platform_is_the_one_built_for() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(Platform::CURRENT, Platform::MacOs);
+        #[cfg(windows)]
+        assert_eq!(Platform::CURRENT, Platform::Windows);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        assert_eq!(Platform::CURRENT, Platform::Gtk);
+    }
+
+    /// A source pin: the wait for a restore reads the window's minimized
+    /// state and focuses that same window.
+    #[test]
+    fn the_wait_reads_and_focuses_the_raised_window() {
+        let focus = body(
+            production(include_str!("raise.rs")),
+            "\nfn focus_once_restored(",
+        );
+        in_order(
+            focus,
+            &[
+                "focus_when_restored(",
+                "|| window.is_minimized().ok(),",
+                "if let Err(e) = window.set_focus() {",
+                ".await;",
             ],
         );
     }
