@@ -24,9 +24,6 @@ import {
   canReopenClosedTab,
 } from "../tabs.svelte";
 import { shellProfiles } from "../shellProfiles.svelte";
-// The extension tab's own commands, loaded with the catalog's core so the
-// App scope of an extension tab is never short of them.
-import "./extension";
 
 type ReuseSpec = Omit<Command, "available" | "run"> & Partial<Pick<Command, "available">>;
 
