@@ -161,6 +161,9 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
   // the current config, in every window type (workspace or standalone
   // terminal, where api.workspace() would 404 but api.config() works).
   let wasOpen = false;
+  /// A link aimed this open at a field, which takes the focus the surface
+  /// would otherwise take for itself.
+  let aimed = false;
   $effect(() => {
     const open = settingsPanel.open;
     if (open && !wasOpen) {
@@ -289,9 +292,6 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
   const LANDED_MARK_MS = 1600;
   const FOCUSABLE =
     "input:not([disabled]), select:not([disabled]), button:not([disabled]), textarea:not([disabled])";
-  /// A link aimed this open at a field, which takes the focus the surface
-  /// would otherwise take for itself.
-  let aimed = false;
   let cancelLanding: (() => void) | null = null;
   let marked: { el: HTMLElement; timer: ReturnType<typeof setTimeout> } | null = null;
 
@@ -322,8 +322,16 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
     marked = { el: anchor, timer: setTimeout(unmark, LANDED_MARK_MS) };
   }
 
+  /// Whether the focus sits on something inside the surface other than the
+  /// surface itself.
+  function focusTaken(): boolean {
+    const held = document.activeElement;
+    return held instanceof HTMLElement && held !== settingsEl && settingsEl?.contains(held) === true;
+  }
+
   /// Land on `field` of `section` once it renders. Leaving the section, a
-  /// later link, or closing the surface ends the wait.
+  /// later link, or closing the surface ends the wait, and a control the
+  /// user reached for meanwhile keeps the focus.
   function land(section: SettingsSectionId, field: string): void {
     cancelLanding?.();
     let observer: MutationObserver | null = null;
@@ -336,7 +344,7 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
       if (cancelLanding === stop) cancelLanding = null;
     };
     cancelLanding = stop;
-    const attempt = (): boolean => {
+    const attempt = (waited: boolean): boolean => {
       if (!live) return true;
       if (!settingsPanel.open || activeSection !== section) {
         stop();
@@ -345,19 +353,16 @@ function setSaveStatus(keys: readonly string[], status: SaveStatus): void {
       const anchor = anchorOf(field);
       if (!anchor) return false;
       stop();
-      landOn(anchor);
+      if (!waited || !focusTaken()) landOn(anchor);
       return true;
     };
     void tick().then(() => {
-      if (attempt() || !contentEl) return;
-      observer = new MutationObserver(() => void attempt());
+      if (attempt(false) || !contentEl) return;
+      // The surface holds the keyboard while the field is on its way.
+      settingsEl?.focus({ preventScroll: true });
+      observer = new MutationObserver(() => void attempt(true));
       observer.observe(contentEl, { childList: true, subtree: true });
-      timer = setTimeout(() => {
-        // The field never rendered: the surface still takes the focus.
-        const waiting = live;
-        stop();
-        if (waiting && settingsPanel.open) settingsEl?.focus({ preventScroll: true });
-      }, LANDING_WAIT_MS);
+      timer = setTimeout(stop, LANDING_WAIT_MS);
     });
   }
 

@@ -382,11 +382,18 @@ function workspaceRead<T>(read: () => T): () => T {
   };
 }
 
-/// Run a write whose owner reports a refusal as state, and reject with it.
-async function refusing(run: Promise<void>, refusal: () => string | null): Promise<void> {
-  await run;
-  const message = refusal();
-  if (message) throw new Error(message);
+/// Run a write whose owner answers a refusal instead of rejecting, and
+/// reject with it.
+async function refusing(run: Promise<string | null>): Promise<void> {
+  const refusal = await run;
+  if (refusal) throw new Error(refusal);
+}
+
+/// Write the viewer's privacy policy, whose owner reports a failed save as
+/// state.
+async function writePrivacy(patch: Parameters<typeof setPrivacy>[0]): Promise<void> {
+  await setPrivacy(patch);
+  if (privacy.error) throw new Error(privacy.error);
 }
 
 const ENTRIES: readonly SettingEntry[] = [
@@ -400,7 +407,7 @@ const ENTRIES: readonly SettingEntry[] = [
       keywords: ["screen sharing", "recording", "conceal", "hide"],
     },
     () => privacy.enabled,
-    (enabled) => refusing(setPrivacy({ enabled }), () => privacy.error || null),
+    (enabled) => writePrivacy({ enabled }),
   ),
   heldToggle(
     {
@@ -411,8 +418,7 @@ const ENTRIES: readonly SettingEntry[] = [
       qualified: true,
     },
     () => privacy.mask_terminal_secrets,
-    (mask_terminal_secrets) =>
-      refusing(setPrivacy({ mask_terminal_secrets }), () => privacy.error || null),
+    (mask_terminal_secrets) => writePrivacy({ mask_terminal_secrets }),
   ),
   choice(
     {
@@ -845,7 +851,7 @@ const ENTRIES: readonly SettingEntry[] = [
       available: () => inWorkspace() && semanticCompiledIn(),
     },
     workspaceRead(() => semantic.state?.semantic_enabled ?? null),
-    (on) => refusing(setSemanticEnabled(on), () => semantic.error),
+    (on) => refusing(setSemanticEnabled(on)),
   ),
   {
     ...entryWords({
@@ -865,7 +871,7 @@ const ENTRIES: readonly SettingEntry[] = [
       }));
     },
     read: workspaceRead(() => semantic.models?.current_model ?? null),
-    write: (value) => refusing(setSemanticModel(String(value)), () => semantic.error),
+    write: (value) => refusing(setSemanticModel(String(value))),
   },
   {
     ...entryWords({
@@ -888,7 +894,7 @@ const ENTRIES: readonly SettingEntry[] = [
       available: inWorkspace,
     },
     workspaceRead(() => reports.state?.enabled ?? null),
-    (on) => refusing(setReportsEnabled(on), () => reports.error),
+    (on) => refusing(setReportsEnabled(on)),
   ),
   {
     ...entryWords({

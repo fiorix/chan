@@ -14,6 +14,11 @@ import { workspace } from "../../../state/store.svelte";
 
 export const WORKSPACE_STATE_MAX_AGE_MS = 5000;
 
+/// What a write answers while an earlier write of the same setting is still
+/// on its way. A control disables itself for that long; the launcher has no
+/// such state and is told instead.
+const IN_FLIGHT = "An earlier change to this setting is still in progress";
+
 type SemanticModel = SemanticModelRegistry["models"][number];
 
 // ---- chan-reports --------------------------------------------------------
@@ -34,21 +39,25 @@ export async function loadReports(): Promise<void> {
   }
 }
 
-/// Never rejects: a refusal is `reports.error`, with the server's state
-/// read back beside it.
-export async function setReportsEnabled(next: boolean): Promise<void> {
-  if (reports.busy) return;
+/// Never rejects: it answers the refusal, or null once the write landed.
+/// The refusal is also `reports.error`, with the server's state read back
+/// beside it.
+export async function setReportsEnabled(next: boolean): Promise<string | null> {
+  if (reports.busy) return IN_FLIGHT;
   reports.busy = true;
   reports.error = null;
   try {
     reports.state = next ? await api.reportsEnable() : await api.reportsDisable();
+    return null;
   } catch (err) {
-    reports.error = (err as Error).message;
+    const refusal = (err as Error).message;
+    reports.error = refusal;
     try {
       reports.state = await api.reportsState();
     } catch {
       // Keep the original write error visible.
     }
+    return refusal;
   } finally {
     reports.busy = false;
   }
@@ -133,30 +142,38 @@ export function semanticModelLabel(model: SemanticModel): string {
   return `${model.label} - ${meta.join(" - ")}`;
 }
 
+function semanticRefused(err: unknown): string {
+  const refusal = (err as Error).message;
+  semantic.error = refusal;
+  return refusal;
+}
+
 /// Enable or disable semantic search. Enabling downloads the selected model
 /// first when it is not on disk, polling the state while it lands. Never
-/// rejects: a refusal is `semantic.error`.
-export async function setSemanticEnabled(next: boolean): Promise<void> {
-  if (!semantic.state || semantic.downloading || semantic.enabling) return;
+/// rejects: it answers the refusal, which is also `semantic.error`, or null
+/// once the write landed.
+export async function setSemanticEnabled(next: boolean): Promise<string | null> {
+  if (!semantic.state) return "Semantic search has not loaded";
+  if (semantic.downloading || semantic.enabling) return IN_FLIGHT;
   semantic.error = null;
   if (!next) {
     try {
       semantic.state = await api.semanticDisable();
+      return null;
     } catch (err) {
-      semantic.error = (err as Error).message;
+      return semanticRefused(err);
     }
-    return;
   }
   if (selectedSemanticModel()?.downloaded || semantic.state.model_present) {
     semantic.enabling = true;
     try {
       semantic.state = await api.semanticEnable();
+      return null;
     } catch (err) {
-      semantic.error = (err as Error).message;
+      return semanticRefused(err);
     } finally {
       semantic.enabling = false;
     }
-    return;
   }
   semantic.downloading = true;
   stopSemanticPoll();
@@ -173,27 +190,33 @@ export async function setSemanticEnabled(next: boolean): Promise<void> {
     } finally {
       semantic.enabling = false;
     }
+    return null;
   } catch (err) {
     stopSemanticPoll();
-    semantic.error = (err as Error).message;
+    const refusal = semanticRefused(err);
     await refreshSemantic();
+    return refusal;
   } finally {
     semantic.downloading = false;
   }
 }
 
-/// Pick the workspace's embedding model. Never rejects: a refusal is
-/// `semantic.error`.
-export async function setSemanticModel(model: string): Promise<void> {
-  if (!model || model === semantic.models?.current_model || semantic.modelBusy) return;
+/// Pick the workspace's embedding model. Never rejects: it answers the
+/// refusal, which is also `semantic.error`, or null once the model is the
+/// workspace's.
+export async function setSemanticModel(model: string): Promise<string | null> {
+  if (!model || model === semantic.models?.current_model) return null;
+  if (semantic.modelBusy || semantic.downloading || semantic.enabling) return IN_FLIGHT;
   semantic.modelBusy = true;
   semantic.error = null;
   try {
     semantic.state = await api.semanticModelPatch(model);
     await refreshSemantic();
+    return null;
   } catch (err) {
-    semantic.error = (err as Error).message;
+    const refusal = semanticRefused(err);
     await loadSemanticModels();
+    return refusal;
   } finally {
     semantic.modelBusy = false;
   }
@@ -219,9 +242,11 @@ let loading = false;
 
 /// Ask for the reports and semantic state when it has never been read or
 /// has aged out. Safe to call from a derived read: the request starts in a
-/// later turn and nothing is written before it answers.
+/// later turn and nothing is written before it answers. A write in flight
+/// holds it off, since its answer is the newer state.
 export function refreshWorkspaceStateIfStale(): void {
   if (workspace.info === null || loading) return;
+  if (reports.busy || semantic.downloading || semantic.enabling || semantic.modelBusy) return;
   if (loadedAt !== null && Date.now() - loadedAt < WORKSPACE_STATE_MAX_AGE_MS) return;
   loading = true;
   queueMicrotask(() => {

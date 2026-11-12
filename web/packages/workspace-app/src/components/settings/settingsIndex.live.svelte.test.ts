@@ -459,6 +459,26 @@ describe("a setting of this workspace, with the overlay closed", () => {
     expect(entry.read()).toBe(true);
   });
 
+  test("a row derived from an entry loads it and redraws when it arrives", async () => {
+    const entry = settingEntry("workspace.reports");
+    const drawn: unknown[] = [];
+    const stop = $effect.root(() => {
+      // The load starts inside a derived read, where writing state throws.
+      const value = $derived(entry.read());
+      $effect(() => {
+        drawn.push(value);
+      });
+    });
+    flushSync();
+    expect(drawn).toEqual([null]);
+
+    await vi.waitFor(() => {
+      flushSync();
+      expect(drawn).toEqual([null, false]);
+    });
+    stop();
+  });
+
   test("a refused chan-reports write rejects and reads the server's state back", async () => {
     const entry = settingEntry("workspace.reports");
     await vi.waitFor(() => expect(entry.read()).toBe(false));
@@ -466,6 +486,31 @@ describe("a setting of this workspace, with the overlay closed", () => {
 
     await expect(entry.write!(true)).rejects.toThrow("index is busy");
     expect(entry.read()).toBe(false);
+  });
+
+  test("a write behind one still in flight is refused, and no read asks the server meanwhile", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const entry = settingEntry("workspace.reports");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+    let answer = (): void => {};
+    vi.mocked(api.reportsEnable).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (answer = resolve));
+      return { enabled: (reportsEnabled = true) };
+    });
+
+    const first = entry.write!(true);
+    await expect(entry.write!(false)).rejects.toThrow("still in progress");
+    expect(api.reportsDisable).not.toHaveBeenCalled();
+
+    // The write's own answer is the newer state.
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    entry.read();
+    await Promise.resolve();
+    expect(api.reportsState).toHaveBeenCalledTimes(1);
+
+    answer();
+    await first;
+    expect(entry.read()).toBe(true);
   });
 
   test("a read asks again only once the window's copy has aged out", async () => {

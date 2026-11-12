@@ -100,6 +100,8 @@ describe("a link into Settings, opened from closed", () => {
     expect(activeTab()).toBe("Editor");
     expect(anchor("editor.dateFormat")).toBeNull();
     expect(marked()).toEqual([]);
+    // The surface holds the keyboard meanwhile.
+    expect(document.activeElement).toBe(surface());
 
     release();
     await settle();
@@ -107,6 +109,27 @@ describe("a link into Settings, opened from closed", () => {
     const select = anchor("editor.dateFormat")!.querySelector("select");
     expect(document.activeElement).toBe(select);
     expect(marked()).toEqual(["editor.dateFormat"]);
+  });
+
+  test("a control the user reached for during the wait keeps the focus", async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    config = async () => {
+      await held;
+      return json({ revision: 1, preferences: settingsPreferences(), workspaces: [] });
+    };
+    openSettings({ section: "editor", field: "editor.dateFormat" });
+    await settle();
+    const close = target.querySelector<HTMLElement>('button[aria-label="Close"]')!;
+    close.focus();
+
+    release();
+    await settle();
+
+    expect(anchor("editor.dateFormat")).not.toBeNull();
+    expect(document.activeElement).toBe(close);
+    expect(marked()).toEqual([]);
+    expect(scrolled).toEqual([]);
   });
 
   test("the mark is gone a moment later", async () => {
@@ -193,16 +216,21 @@ describe("a link into Settings that is already open", () => {
 });
 
 describe("a link the window cannot follow", () => {
-  test("a field its section does not render is given up on, and the surface takes the focus", async () => {
+  test("a field its section does not render leaves the surface holding the focus, and is given up on", async () => {
     vi.useFakeTimers();
     // The colour rows render only while custom colours are on.
     openSettings({ section: "terminal", field: "terminal.colors.cursor" });
     await settle();
     expect(activeTab()).toBe("Terminal");
+    expect(document.activeElement).toBe(surface());
     expect(marked()).toEqual([]);
-    target.querySelector<HTMLElement>('input[aria-label="Terminal TERM value"]')!.focus();
 
+    // Past the wait, the field appearing lands nowhere.
     vi.advanceTimersByTime(3000);
+    const late = document.createElement("div");
+    late.dataset.setting = "terminal.colors.cursor";
+    target.querySelector(".content")!.append(late);
+    await settle();
 
     expect(document.activeElement).toBe(surface());
     expect(marked()).toEqual([]);
