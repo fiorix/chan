@@ -27,9 +27,11 @@ import type { Preferences } from "../api/types";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import { settingsPreferences } from "../__tests__/settings";
 import { resetLayout } from "../__tests__/tabs";
+import { demoWorkspaceInfo } from "../demo/data";
 import { allCommands, commandContext } from "../state/commands";
 import { clearRecentCommands } from "../state/commands/recent.svelte";
 import * as statusBus from "../state/notify.svelte";
+import { screensaver } from "../state/screensaver.svelte";
 import {
   __testSetStandalonePreferences,
   clearLauncherDraft,
@@ -37,6 +39,7 @@ import {
   launcherPanel,
   openCommandLauncher,
   ui,
+  workspace,
 } from "../state/store.svelte";
 
 const REFUSAL = "configuration is locked";
@@ -61,6 +64,29 @@ function serve(preferences: Preferences, refusing: () => boolean = () => false) 
   __testSetStandalonePreferences(preferences);
   return { writes };
 }
+
+/// Serve `preferences` to a window with a workspace behind it, which holds
+/// them as part of its workspace record.
+function serveWorkspace(preferences: Preferences) {
+  const config = serve(preferences);
+  workspace.info = demoWorkspaceInfo(
+    {
+      metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    },
+    preferences,
+  );
+  return config;
+}
+
+const LOCK_UNLOADED = {
+  enabled: false,
+  timeout_secs: 300,
+  theme: "plain",
+  pin_set: false,
+  locked: false,
+  loaded: false,
+} as const;
 
 const startTheme = { choice: ui.themeChoice, theme: ui.theme };
 let component: Record<string, unknown> | null = null;
@@ -116,6 +142,8 @@ afterEach(() => {
   document.body.innerHTML = "";
   stopRecordingRequests();
   __testSetStandalonePreferences(null);
+  workspace.info = null;
+  Object.assign(screensaver, LOCK_UNLOADED);
   resetShownPreferencesForTests();
   resetWorkspaceStateForTests();
   ui.themeChoice = startTheme.choice;
@@ -201,13 +229,25 @@ describe("a typed query over the settings index", () => {
   });
 
   test("leaves a setting to the command that also changes it", async () => {
-    serve(settingsPreferences());
+    // A workspace window with its screen lock on offers every such setting,
+    // so only the rule can keep one out of the typed list.
+    serveWorkspace(settingsPreferences());
+    Object.assign(screensaver, { ...LOCK_UNLOADED, enabled: true, loaded: true });
     const twins = settingsIndex().filter((spec) => spec.command !== undefined);
     expect(twins.map((spec) => spec.command).sort()).toEqual([
       "app.browser.toggleLeftDock",
       "app.browser.toggleRightDock",
       "app.screensaver.setPin",
     ]);
+    for (const spec of twins) expect(spec.available(), spec.id).toBe(true);
+
+    // The Settings scope lists each as a field of its own.
+    await openSettingsScope();
+    const browsed = rows().map((r) => r.dataset.id);
+    for (const spec of twins) expect(browsed, spec.id).toContain(`setting:${spec.id}`);
+    (target.querySelector(".probe-clear") as HTMLButtonElement).click();
+    await flush();
+
     const ctx = commandContext();
     for (const spec of twins) {
       const command = allCommands().find((candidate) => candidate.id === spec.command)!;
