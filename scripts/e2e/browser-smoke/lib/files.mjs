@@ -165,7 +165,9 @@ export async function selectFile(page, path, { details = false, scope = "" } = {
   await row.click();
   if (details) {
     scope = await paneScope(page, scope);
-    const toggle = await page.$(within(scope, 'button[aria-label="Toggle details"]'));
+    // The toolbar's toggle is the Details button that carries a pressed state.
+    const toggle = await page.$(within(scope, 'button[aria-label="Details"][aria-pressed]'));
+    if (!toggle) throw new Error("the Files tab has no Details toggle");
     if (await toggle.evaluate((el) => el.getAttribute("aria-pressed") !== "true")) await toggle.click();
     await page.waitForFunction(({ selector, path }) => document.querySelector(`${selector} aside[aria-label="Details"] h3[title]`)?.getAttribute("title") === path, { timeout: 15_000 }, { selector: scope, path: filePath(path) });
   }
