@@ -529,7 +529,10 @@ export type TerminalTab = {
   secretMasking?: boolean;
   /// Set when this terminal's masker stopped working. Masking then stays off
   /// whatever asks for it, Privacy mode included, until its toggle is used
-  /// again. Local to this window and never serialized.
+  /// again. The mark is that masker's: the component is drawn once however
+  /// its tab moves, so a clone carries the mark to the same masker, and a
+  /// terminal built again seeds it away with the masker it replaces. Local
+  /// to this window and never serialized.
   secretMaskingFailed?: boolean;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
@@ -2696,9 +2699,13 @@ export function setTerminalProgram(tab: TerminalTab, program: TerminalProgram | 
   tab.terminalProgram = program;
 }
 
-/// Set a terminal's own secret-masking choice as its shell spawns.
+/// Set a terminal's own secret-masking choice as its renderer is built,
+/// and drop the mark an earlier masker left when it failed: the terminal
+/// builds a new masker with each renderer, and a failure is the masker's
+/// that had it.
 export function seedTerminalSecretMasking(tab: TerminalTab, enabled: boolean): void {
   tab.secretMasking = enabled;
+  tab.secretMaskingFailed = undefined;
 }
 
 /// Record that a terminal's masker stopped working. Its own choice goes off

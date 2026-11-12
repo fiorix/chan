@@ -24,6 +24,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import type { TerminalPreferences } from "../api/types";
 import { terminalPreferences } from "../__tests__/standalone";
 import { commandById, commandContext, commandTitle, type Command } from "../state/commands";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import {
@@ -279,7 +280,8 @@ describe("a masker built after its tab's masking was already on", () => {
 });
 
 // A masker that fails leaves its mark on the tab, and masking stays off for
-// that masker whatever asks for it.
+// that masker whatever asks for it. The mark is that masker's: a terminal
+// built again over the same tab has a new one, which starts from the rule.
 describe("a masker's failure", () => {
   async function failed() {
     privacy.enabled = true;
@@ -301,5 +303,47 @@ describe("a masker's failure", () => {
     masking().run();
     await tick();
     expect([tab.secretMaskingFailed, painted(term)]).toEqual([false, MASKED]);
+  });
+
+  test("does not outlive it: the restarted terminal masks under Privacy mode", async () => {
+    await failed();
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
+    expect(confirmState.open, "a terminal with a session asks before it restarts").toBe(true);
+    resolveConfirm(true);
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(2));
+    const restarted = xterm.terminals[1]!;
+    await attach(TerminalSocket.all.at(-1)!);
+
+    rescan(restarted);
+    expect(painted(restarted)).toEqual(MASKED);
+  });
+
+  // What a retry of a terminal that could not be drawn does: a new component,
+  // and so a new masker, over the tab the first one marked.
+  test("does not outlive it: the terminal drawn again over the same tab masks under Privacy mode", async () => {
+    privacy.enabled = true;
+    privacy.mask_terminal_secrets = true;
+    refuseDecorations = true;
+    __testSetStandalonePreferences(terminalPreferences({ secret_masking: false }));
+    const [tab] = seatTerminals([terminalTab()]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const first = mount(TerminalTab, {
+      target,
+      props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
+    });
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    await attach(TerminalSocket.all.at(-1)!);
+    rescan(xterm.terminals[0]!);
+    expect(tab!.secretMaskingFailed, "the first masker failed").toBe(true);
+    refuseDecorations = false;
+    unmount(first);
+    xterm.terminals.splice(0);
+    TerminalSocket.all.splice(0);
+
+    const again = await mountTerminal(TerminalTab, tab!);
+    await attach(TerminalSocket.all.at(-1)!);
+    rescan(again.term);
+    expect(painted(again.term)).toEqual(MASKED);
   });
 });
