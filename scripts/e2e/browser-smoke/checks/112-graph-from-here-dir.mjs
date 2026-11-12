@@ -1,20 +1,29 @@
-// "Graph from here" on a directory must come up showing that directory's
-// files. Three legs, each reading the stat line of the tab it opened:
+// "Graph from here" on a directory opens the graph with that directory
+// selected and opened, so its files show. There is one graph, rooted at the
+// workspace, and it draws the root's own level whatever is selected; a count
+// of what is on screen says nothing by itself about the directory. Each leg
+// therefore reads the tab's stat line with the directory opened and again
+// with it closed, and what the directory brought is the difference.
 //
 //   1. a directory with files among its immediate children, which must
-//      render them;
-//   2. the same scope reached instead by clicking the parent crumb in an
-//      existing tab, which must render the same set, since one scope at one
-//      depth over one workspace is one set however the tab arrived at it;
+//      bring them;
+//   2. the same state reached another way: "Graph from here" on its nested
+//      directory, a click on the parent's breadcrumb, which selects the
+//      parent and changes nothing drawn, then the depth lowered to one
+//      level. One selection at one depth over one tree is one set however
+//      the tab arrived at it;
 //   3. a directory whose files are one level below, which is the shape that
 //      came up as folder bubbles with no file on screen while the payload
 //      that tab had already fetched carried them.
 //
+// The depth is the selected directory's: the levels opened below it, 0 when
+// it is closed. The check lowers it with the "Graph depth: decrease" command.
+//
 // Two legs agreeing on a graph with no files in it would be a green check
 // over the bug, so the floors are absolute as well as differential, and they
-// are computed from the panel's own sources (the `/api/fs-graph` walk it
-// seeds its spine from, and the `/api/graph` payload it renders) rather than
-// restated from the fixture.
+// are computed from the server's own answers (the `/api/fs-graph` walk the
+// panel seeds its spine from, and `/api/graph`) rather than restated from
+// the fixture.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
@@ -26,15 +35,15 @@ const NESTED = `${DIR}/nested`;
 // renders as folder bubbles with no file on screen when the graph opens one
 // level deep, while its inspector counts the subtree's files.
 const DEEP = "from-here-deep";
-// Deliberately free of tags, @@mentions and links: meta-nodes pass the scope
-// filter unconditionally, so keeping them out of the fixture keeps the
-// node/edge arithmetic below about the filesystem spine alone.
+// Deliberately free of tags, @@mentions and links: a tag or a mention is
+// drawn once a file that carries it is, so keeping them out of the fixture
+// keeps the node/edge arithmetic below about the filesystem spine alone.
 const FILES = [
-  [`${DIR}/alpha.md`, "# Alpha\n\nDirect child of the scope directory.\n"],
-  [`${DIR}/beta.md`, "# Beta\n\nSecond direct child of the scope directory.\n"],
-  [`${NESTED}/gamma.md`, "# Gamma\n\nOne level below the scope directory.\n"],
-  [`${DEEP}/one/x.md`, "# X\n\nOnly reachable one level below the scope.\n"],
-  [`${DEEP}/two/y.md`, "# Y\n\nAlso one level below the scope.\n"],
+  [`${DIR}/alpha.md`, "# Alpha\n\nDirect child of the directory.\n"],
+  [`${DIR}/beta.md`, "# Beta\n\nSecond direct child of the directory.\n"],
+  [`${NESTED}/gamma.md`, "# Gamma\n\nOne level below the directory.\n"],
+  [`${DEEP}/one/x.md`, "# X\n\nOnly reachable one level below the directory.\n"],
+  [`${DEEP}/two/y.md`, "# Y\n\nAlso one level below the directory.\n"],
 ];
 
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -46,11 +55,11 @@ function seed(root) {
   for (const [rel, body] of FILES) writeFileSync(join(root, rel), body);
 }
 
-/// What the scope directory's own subtree holds, read from the semantic
-/// payload the panel itself loads: the directories one level down, and the
-/// files at the shallowest level that has any. The floor the graph must
-/// clear is expressed in these rather than in fixture constants, so the
-/// check states the contract instead of restating the fixture.
+/// What a directory's own subtree holds, read from the server's graph of it:
+/// the directories one level down, and the files at the shallowest level
+/// that has any. The floor the graph must clear is expressed in these rather
+/// than in fixture constants, so the check states the contract instead of
+/// restating the fixture.
 function subtreeShape(page, token, dir) {
   return page.evaluate(
     async ({ bearer, root }) => {
@@ -93,7 +102,8 @@ function subtreeShape(page, token, dir) {
 /// (the keep-alive load gating) and a hidden one still lays out, so a plain
 /// `.graph-tab` query reads whichever copy the DOM lists first and a later
 /// leg silently reports an earlier leg's numbers. `.active` is the panel's
-/// own live/hidden flag, the same one `aria-hidden` mirrors.
+/// own live/hidden flag, the same one `aria-hidden` mirrors. `selected` is
+/// the last step of the breadcrumb over Details: the selected directory.
 function readVisibleStat(page) {
   return page.evaluate(() => {
     const panel = document.querySelector(".graph-tab.active");
@@ -109,25 +119,13 @@ function readVisibleStat(page) {
       totalNodes: Number(match[2]),
       visibleEdges: Number(match[3]),
       totalEdges: Number(match[4]),
-      crumbs,
+      selected: crumbs[crumbs.length - 1] ?? "",
     };
   });
 }
 
-async function waitForLoadedGraph(page) {
-  await page.waitForFunction(
-    () => {
-      const panel = document.querySelector(".graph-tab.active");
-      if (!panel || !panel.querySelector("canvas")) return false;
-      const stat = panel.querySelector(".statusbar .stat")?.textContent ?? "";
-      const match = stat.match(/(\d+)\/(\d+) nodes/);
-      return Boolean(match) && Number(match[2]) > 0;
-    },
-    { timeout: 60_000, polling: 250 },
-  );
-  // The spine seeds first and the semantic stream merges on top, so the
-  // counts move for a moment after the first non-zero reading. Settle on two
-  // identical samples rather than racing the merge.
+/// The stat line once it holds: two identical samples, 250 ms apart.
+async function settledStat(page) {
   let last = null;
   for (let round = 0; round < 40; round += 1) {
     const now = await readVisibleStat(page);
@@ -138,7 +136,39 @@ async function waitForLoadedGraph(page) {
   return last;
 }
 
-/// Navigate to a directory's parent so its own context menu supplies the graph scope.
+/// The active graph tab once its load is over and the directory named
+/// `selected` is the selection. The selection resolves as soon as the spine
+/// brings its node, and a tab opened on a directory opens it down to its
+/// files only when the load ends, so a reading taken while the graph still
+/// streams is not the graph the tab comes up with.
+async function waitForLoadedGraph(page, selected) {
+  await page.waitForFunction(
+    (name) => {
+      const panel = document.querySelector(".graph-tab.active");
+      if (!panel || !panel.querySelector("canvas")) return false;
+      if (panel.querySelector(".canvas > .stream-status, .canvas > .placeholder")) return false;
+      const stat = panel.querySelector(".statusbar .stat")?.textContent ?? "";
+      const match = stat.match(/(\d+)\/(\d+) nodes/);
+      if (!match || Number(match[2]) === 0) return false;
+      const crumbs = [...panel.querySelectorAll(".scope-crumbs .crumb")];
+      return crumbs[crumbs.length - 1]?.textContent?.trim() === name;
+    },
+    { timeout: 60_000, polling: 250 },
+    posix.basename(selected),
+  );
+  return settledStat(page);
+}
+
+/// Lower the selected directory's depth one step and read the stat line.
+async function lowerDepth(page) {
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.graph.depth.decrease" } })),
+  );
+  await delay(300);
+  return settledStat(page);
+}
+
+/// Navigate to a directory's parent so its own context menu opens the graph on it.
 async function graphFromRow(page, scope, relPath) {
   await showFiles(page, scope);
   const parent = posix.dirname(relPath);
@@ -219,18 +249,21 @@ export default {
     const paneSelector = `.pane[data-pane-id="${paneId}"]`;
     await showFiles(page, paneSelector);
 
-    // The row's own graph action supplies the first scope.
+    // Leg 1: the row's own graph action, then the directory closed.
     await graphFromRow(page, paneSelector, DIR);
-    const fromHere = await waitForLoadedGraph(page);
+    const fromHere = await waitForLoadedGraph(page, DIR);
     if (!fromHere) throw new Error("from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-dir");
+    const closed = await lowerDepth(page);
+    if (!closed) throw new Error("the closed directory's graph never reported a stat line");
 
-    // Leg 2: the reference. Open the nested directory the same way, then walk
-    // one crumb back up to the parent, which re-scopes THAT tab in place to
-    // the scope leg 1 opened cold.
+    // Leg 2: the reference. Open the nested directory the same way, select
+    // the parent from the breadcrumb, then close the nested directory by
+    // lowering the parent's depth to one level: the state leg 1 opened cold.
     await graphFromRow(page, paneSelector, NESTED);
-    await waitForLoadedGraph(page);
-    const rescoped = await page.evaluate((label) => {
+    const nested = await waitForLoadedGraph(page, NESTED);
+    if (!nested) throw new Error("the nested directory's graph never reported a stat line");
+    const hopped = await page.evaluate((label) => {
       const panel = document.querySelector(".graph-tab.active");
       const crumb = [...(panel?.querySelectorAll(".scope-crumbs .crumb") ?? [])].find(
         (candidate) => candidate.textContent?.trim() === label,
@@ -239,10 +272,13 @@ export default {
       crumb.click();
       return true;
     }, DIR);
-    if (!rescoped) throw new Error(`breadcrumb hop not offered: ${DIR}`);
-    const viaRescope = await waitForLoadedGraph(page);
-    if (!viaRescope) throw new Error("re-scoped graph never reported a stat line");
-    await ctx.shot("graph-from-here-dir-rescoped");
+    if (!hopped) throw new Error(`breadcrumb step not offered: ${DIR}`);
+    const viaCrumb = await waitForLoadedGraph(page, DIR);
+    if (!viaCrumb) throw new Error("the graph never reported a stat line after the breadcrumb step");
+    await ctx.shot("graph-from-here-dir-crumb");
+    const lowered = await lowerDepth(page);
+    if (!lowered) throw new Error("the graph never reported a stat line after the depth was lowered");
+    await ctx.shot("graph-from-here-dir-lowered");
 
     // Leg 3: the directory that has no file among its immediate children.
     // Its files are in the payload this tab already fetched, so a graph that
@@ -252,60 +288,80 @@ export default {
       ctx.skip(`deep fixture not indexed yet: ${JSON.stringify(deepShape)}`);
     }
     await graphFromRow(page, paneSelector, DEEP);
-    const deep = await waitForLoadedGraph(page);
+    const deep = await waitForLoadedGraph(page, DEEP);
     if (!deep) throw new Error("deep from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-deep-dir");
+    // One step per level it opened, down to closed.
+    let deepClosed = deep;
+    for (let level = 0; level < deepShape.shallowestFileDepth; level += 1) {
+      deepClosed = await lowerDepth(page);
+      if (!deepClosed) throw new Error("the closed deep directory's graph never reported a stat line");
+    }
 
-    const evidence = { spine, fromHere, viaRescope, deepShape, deep };
+    const evidence = { spine, fromHere, closed, nested, viaCrumb, lowered, deepShape, deep, deepClosed };
 
     // Each reading came off the tab it names. A panel read is only worth as
     // much as this: hidden graph tabs stay mounted, so a leg that silently
     // reported an earlier leg's numbers would agree with itself perfectly.
-    const scopeOf = (stat) => stat.crumbs[stat.crumbs.length - 1];
     for (const [label, stat, want] of [
       ["fromHere", fromHere, DIR],
-      ["viaRescope", viaRescope, DIR],
+      ["closed", closed, DIR],
+      ["nested", nested, NESTED],
+      ["viaCrumb", viaCrumb, DIR],
+      ["lowered", lowered, DIR],
       ["deep", deep, DEEP],
+      ["deepClosed", deepClosed, DEEP],
     ]) {
-      if (scopeOf(stat) !== want) {
+      if (stat.selected !== posix.basename(want)) {
         throw new Error(
-          `${label} read the wrong graph panel: scope ${scopeOf(stat)}, expected ${want}`,
+          `${label} read the wrong graph panel: ${stat.selected} selected, expected ${want}`,
         );
       }
     }
 
-    // The scope directory, the workspace-root anchor, every child directory,
-    // and the files at the shallowest level that holds any. Meta-nodes can
-    // only add, so this is a floor.
-    const deepMinNodes = deepShape.childDirs + deepShape.filesAtShallowest + 2;
-    if (deep.visibleNodes < deepMinNodes) {
+    // Opened down to its files, the deep directory brings every child
+    // directory and the files at the shallowest level that holds any.
+    // Meta-nodes can only add, so this is a floor.
+    const deepBrought = deep.visibleNodes - deepClosed.visibleNodes;
+    const deepMinBrought = deepShape.childDirs + deepShape.filesAtShallowest;
+    if (deepBrought < deepMinBrought) {
       throw new Error(
         `"Graph from here" on ${DEEP} came up without its files: ` +
-          `${JSON.stringify(evidence)} (expected >= ${deepMinNodes} nodes)`,
+          `${JSON.stringify(evidence)} (expected >= ${deepMinBrought} nodes more than closed)`,
       );
     }
 
-    // Absolute: the scope directory's own files are on screen. One node per
-    // direct file plus the directory and the workspace-root anchor; one
-    // `contains` edge per direct file plus the directory's own spine edge.
-    // Meta-nodes and language edges can only add, so these are floors.
-    const minNodes = spine.directFiles + 2;
-    const minEdges = spine.directFiles + 1;
-    if (fromHere.visibleNodes < minNodes || fromHere.visibleEdges < minEdges) {
+    // Absolute: the directory's own files are on screen. Opened, it brings
+    // one node and one `contains` edge per direct file. Its child
+    // directories, meta-nodes and language edges can only add, so these are
+    // floors.
+    const broughtNodes = fromHere.visibleNodes - closed.visibleNodes;
+    const broughtEdges = fromHere.visibleEdges - closed.visibleEdges;
+    if (broughtNodes < spine.directFiles || broughtEdges < spine.directFiles) {
       throw new Error(
         `"Graph from here" on ${DIR} came up without its files: ` +
-          `${JSON.stringify(evidence)} (expected >= ${minNodes} nodes, >= ${minEdges} edges)`,
+          `${JSON.stringify(evidence)} (expected >= ${spine.directFiles} nodes and edges more than closed)`,
       );
     }
 
-    // Differential: one scope at one depth renders one set, however the tab
-    // arrived at it.
+    // A breadcrumb step selects its directory and draws nothing more or less.
     if (
-      fromHere.visibleNodes !== viaRescope.visibleNodes ||
-      fromHere.visibleEdges !== viaRescope.visibleEdges
+      viaCrumb.visibleNodes !== nested.visibleNodes ||
+      viaCrumb.visibleEdges !== nested.visibleEdges
     ) {
       throw new Error(
-        `from-here and re-scoped graphs disagree at ${DIR}: ${JSON.stringify(evidence)}`,
+        `selecting ${DIR} from the breadcrumb changed what is drawn: ${JSON.stringify(evidence)}`,
+      );
+    }
+
+    // Differential: one selection at one depth renders one set, however the
+    // tab arrived at it.
+    if (
+      fromHere.visibleNodes !== lowered.visibleNodes ||
+      fromHere.visibleEdges !== lowered.visibleEdges
+    ) {
+      throw new Error(
+        `from-here and breadcrumb-then-depth graphs disagree at ${DIR}: ${JSON.stringify(evidence)}`,
       );
     }
 

@@ -12,18 +12,18 @@
 // be the first row and the active one, and Enter must close the panel and
 // leave an editor tab on that path, holding the token. The panel is then given
 // the seed document's tag, `#graph-smoke`; its tag row must be the first row,
-// and a double-click on it must open the tag-scoped graph tab, drawn as check
-// 110 reads it: a canvas with extent, a status line counting visible nodes,
-// no error placeholder, and once the layout settles every counted node
-// painted inside the canvas, framed in its middle. The document also names a
-// mention found nowhere else; its row opens the mention's graph the same way,
-// framed alike. Enter and the double-click are the panel's two ways to open a
+// and a double-click on it must open the graph with the tag selected, drawn
+// as check 110 reads it: a tab titled after the tag, a canvas with extent, a
+// status line counting visible nodes, no error placeholder, and once the
+// layout settles every counted node painted inside the canvas, framed from
+// the workspace's node. The document also names a mention found nowhere
+// else; its row opens the graph on the mention the same way, framed alike. Enter and the double-click are the panel's two ways to open a
 // row; a single click only selects.
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor } from "../lib/drafts.mjs";
-import { framingFailures, steadyGraphDiscs, traceGraphDiscs } from "../lib/graph-discs.mjs";
+import { rootedFailures, steadyGraphDiscs, traceGraphDiscs } from "../lib/graph-discs.mjs";
 
 const RUN = Date.now().toString(36);
 const PANEL = '[role="dialog"][aria-label="Search"]';
@@ -61,10 +61,10 @@ async function waitFirstRow(page, label, what) {
   return rows;
 }
 
-/// Open the panel's row for `query` with a double-click and read the lens it
-/// opens: the tab titled `scope`, its canvas and status line, and its node
-/// discs once they hold, which must sit framed in the canvas.
-async function openLens(ctx, page, query, scope, label) {
+/// Open the panel's row for `query` with a double-click and read the graph it
+/// opens: the tab titled `title`, its canvas and status line, and its node
+/// discs once they hold, which must sit framed from the root.
+async function openGraphRow(ctx, page, query, title, label) {
   await openPanelWith(page, query);
   const rows = await waitFirstRow(page, query, `the ${label} row ${query}`);
   await ctx.shot(`218-${label}-hit`, page);
@@ -72,8 +72,8 @@ async function openLens(ctx, page, query, scope, label) {
   await row.click({ count: 2 });
   await page.waitForSelector(PANEL, { hidden: true, timeout: 10_000 });
   await page.waitForSelector(".graph-tab canvas", { timeout: 30_000 });
-  await waitFor(`the graph tab ${scope} active`, 15_000, () =>
-    page.evaluate((title) => [...document.querySelectorAll(".tab.active")].some((tab) => tab.textContent?.includes(title)), scope),
+  await waitFor(`the graph tab ${title} active`, 15_000, () =>
+    page.evaluate((text) => [...document.querySelectorAll(".tab.active")].some((tab) => tab.textContent?.includes(text)), title),
   );
   const graph = await page.waitForFunction(() => {
     const host = document.querySelector(".graph-tab");
@@ -94,8 +94,8 @@ async function openLens(ctx, page, query, scope, label) {
   if (await page.$(".graph-tab .placeholder.error")) throw new Error(`the ${label} graph drew its error placeholder`);
   const framed = await steadyGraphDiscs(page, ".graph-tab");
   await ctx.shot(`218-${label}-graph`, page);
-  const failures = framingFailures(framed, graph.visibleNodes);
-  if (failures.length) throw new Error(`the ${label} graph is not framed in its canvas: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
+  const failures = rootedFailures(framed, graph.visibleNodes);
+  if (failures.length) throw new Error(`the ${label} graph is not framed from its root: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
   return { rows: rows.slice(0, 3), graph, framed };
 }
 
@@ -155,10 +155,10 @@ export default {
 
       // A tag hit, then a mention hit, each opened by a double-click. The tag's
       // graph tab closes first, so the page holds one graph tab at a time.
-      result.tag = await openLens(ctx, page, TAG, `tag=${TAG}`, "tag");
+      result.tag = await openGraphRow(ctx, page, TAG, `path=${TAG}`, "tag");
       await command(page, "app.tab.close");
       await page.waitForSelector(".graph-tab", { hidden: true, timeout: 10_000 });
-      result.mention = await openLens(ctx, page, mention, `mention=${mention}`, "mention");
+      result.mention = await openGraphRow(ctx, page, mention, `path=${mention}`, "mention");
       console.log(`[smoke]   ${result.browser}; indexed after ${result.indexedAfterMs}ms; content rows ${JSON.stringify(result.contentRows.slice(0, 3))}; tag ${JSON.stringify(result.tag)}; mention ${JSON.stringify(result.mention)}`);
       return result;
     } catch (error) {

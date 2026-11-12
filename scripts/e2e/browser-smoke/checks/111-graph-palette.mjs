@@ -1,8 +1,8 @@
 // A custom contact hue written outside the page through chan config set must repaint the running graph without reloading. The directory listing, kind chips, inspector, JSON tree and empty-pane carousel keep their theme hues. A non-hex value in preferences.toml resets that key to its theme default.
 //
-// The graph under test is a tag lens scoped on this check's own
-// fixture tag, so its `.graph-tab.active` is distinguishable from any
-// graph tab an earlier check left open.
+// The graph under test is opened on this check's own fixture tag and
+// titled after it, so its `.graph-tab.active` is distinguishable from
+// any graph tab an earlier check left open.
 
 import { appendFileSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +12,9 @@ const CONTACT = "palette-contact.md";
 const NOTE = "palette-note.md";
 const DATA = "palette-data.json";
 const TAG = "#palette-smoke";
-const LENS_TITLE = `tag=${TAG}`;
+const GRAPH_TITLE = `path=${TAG}`;
+/// The tag's button among a document's Details.
+const TAG_BUTTON = "button.ref.tag";
 const CUSTOM_CONTACT = "#00ff00";
 const CUSTOM_DOC = "#ff00ff";
 const BASELINE_SAMPLES = 5;
@@ -76,26 +78,26 @@ export default {
     };
 
     // Every graph read targets the ACTIVE graph tab, which this check
-    // keeps pointed at its own tag lens.
+    // keeps pointed at the graph it opened on its tag.
     const graphTab = () => page.$(".graph-tab.active");
-    const activateLens = async () => {
+    const activateGraph = async () => {
       // Tabs activate on mousedown, so this must be a real mouse click,
       // not a synthetic HTMLElement.click().
       const handle = await page.evaluateHandle((title) => {
         const tab = [...document.querySelectorAll(".tab")].find((candidate) =>
           candidate.textContent?.includes(title),
         );
-        if (!tab) throw new Error(`graph lens tab missing: ${title}`);
+        if (!tab) throw new Error(`graph tab missing: ${title}`);
         return tab;
-      }, LENS_TITLE);
+      }, GRAPH_TITLE);
       const element = handle.asElement();
-      if (!element) throw new Error(`graph lens tab not an element: ${LENS_TITLE}`);
+      if (!element) throw new Error(`graph tab not an element: ${GRAPH_TITLE}`);
       await element.click();
       await page.waitForSelector(".graph-tab.active canvas", { timeout: 10_000 });
       await page.waitForFunction(
         (title) => document.querySelector(".tab.active")?.textContent?.includes(title),
         { timeout: 10_000, polling: 200 },
-        LENS_TITLE,
+        GRAPH_TITLE,
       );
     };
     const canvasHueCount = (hex) =>
@@ -223,22 +225,21 @@ export default {
       if (!chipBaseline) throw new Error("inspector contact chip unreadable");
 
       mark("directory-chip-baselines-done");
-      // Open the tag lens on the fixture note.
+      // Open the graph on the fixture note's tag.
       await selectFile(page, NOTE, { details: true });
       await page.waitForFunction(
-        (tag) =>
-          [...document.querySelectorAll('button[title="open in graph (scoped to this tag)"]')]
-            .some((button) => button.textContent?.trim() === tag),
+        ({ selector, tag }) =>
+          [...document.querySelectorAll(selector)].some((button) => button.textContent?.trim() === tag),
         { timeout: 30_000, polling: 250 },
-        TAG,
+        { selector: TAG_BUTTON, tag: TAG },
       );
-      await page.evaluate((tag) => {
-        const button = [
-          ...document.querySelectorAll('button[title="open in graph (scoped to this tag)"]'),
-        ].find((candidate) => candidate.textContent?.trim() === tag);
-        if (!button) throw new Error(`tag lens button vanished: ${tag}`);
+      await page.evaluate(({ selector, tag }) => {
+        const button = [...document.querySelectorAll(selector)].find(
+          (candidate) => candidate.textContent?.trim() === tag,
+        );
+        if (!button) throw new Error(`tag button vanished: ${tag}`);
         button.click();
-      }, TAG);
+      }, { selector: TAG_BUTTON, tag: TAG });
       mark("tag-button-clicked");
       await page.waitForSelector(".graph-tab.active canvas", { timeout: 30_000 });
       await page.waitForFunction(
@@ -251,9 +252,9 @@ export default {
         { timeout: 30_000, polling: 250 },
       );
 
-      mark("lens-rendered");
-      // A fresh tag lens can seat a neighboring node just beyond the bottom
-      // edge. Zoom out through the graph UI so the color probe samples it.
+      mark("graph-rendered");
+      // Zoom out through the graph UI, so the color probe samples every node
+      // well inside the canvas.
       const graph = await graphTab();
       const canvas = await graph?.$("canvas");
       const canvasBounds = await canvas?.boundingBox();
@@ -324,7 +325,7 @@ export default {
       mark(`live-graph-colors: ${JSON.stringify(liveColors)}`);
       // The override lands as an inline custom-property block on
       // .graph-tab, then the canvas MutationObserver repaints.
-      await activateLens();
+      await activateGraph();
       // The browser re-serializes the inline style block (whitespace
       // around the colon), so match on a whitespace-stripped form.
       await page.waitForFunction(
@@ -427,7 +428,7 @@ export default {
         throw new Error(`preferences.toml does not carry the custom hue:\n${toml}`);
       }
       writeFileSync(prefsPath, toml.replaceAll(CUSTOM_CONTACT, "chartreuse"));
-      await activateLens();
+      await activateGraph();
       await page.waitForFunction(
         () =>
           !(document.querySelector(".graph-tab.active")?.getAttribute("style") ?? "").includes(
