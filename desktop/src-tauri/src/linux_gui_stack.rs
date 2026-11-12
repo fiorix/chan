@@ -397,11 +397,35 @@ mod linux {
         }
     }
 
+    /// Where `ldconfig` is looked for, in order: by name through `PATH`, then
+    /// the two places distributions install it, since a desktop session's
+    /// `PATH` often leaves out the `sbin` directories and the re-exec would
+    /// otherwise be skipped without a word.
+    const LDCONFIG: [&str; 3] = ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"];
+
     fn ldconfig_cache() -> Option<String> {
-        let out = Command::new("ldconfig").arg("-p").output().ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        ldconfig_cache_with(|program| Command::new(program).arg("-p").output())
+    }
+
+    /// `ldconfig -p`'s listing through the first of [`LDCONFIG`] that
+    /// resolves; `run` runs one of them. A candidate that does not resolve is
+    /// skipped, and one that runs and fails ends the search.
+    fn ldconfig_cache_with(
+        mut run: impl FnMut(&str) -> std::io::Result<std::process::Output>,
+    ) -> Option<String> {
+        for program in LDCONFIG {
+            match run(program) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+                Ok(out) => {
+                    return out
+                        .status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+                }
+            }
+        }
+        None
     }
 
     // `ldconfig -p` entries look like:
@@ -427,13 +451,13 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            dma_buf_disabled, nvidia_proprietary_driver, reexec_command, reexec_done,
-            renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
+            dma_buf_disabled, ldconfig_cache_with, nvidia_proprietary_driver, reexec_command,
+            reexec_done, renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
         };
         use std::ffi::{OsStr, OsString};
         use std::fs;
         use std::path::Path;
-        use std::process::Command;
+        use std::process::{Command, ExitStatus, Output};
 
         fn root_with(marker: Option<&str>) -> tempfile::TempDir {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -550,6 +574,67 @@ mod linux {
             };
             assert_eq!(env(APPLIED_ENV), Some(OsString::from("1")));
             assert_eq!(env("LD_LIBRARY_PATH"), Some(ld_path.to_os_string()));
+        }
+
+        fn ran(code: i32, stdout: &str) -> std::io::Result<Output> {
+            use std::os::unix::process::ExitStatusExt;
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn missing() -> std::io::Result<Output> {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+
+        /// `ldconfig` is run by name first, then from `/sbin` and `/usr/sbin`
+        /// when the name does not resolve, so a `PATH` without the `sbin`
+        /// directories still reaches the listing; the lookup is driven here
+        /// by a fake runner, whatever the host's `PATH` holds.
+        #[test]
+        fn ldconfig_is_found_by_name_then_in_sbin_then_in_usr_sbin() {
+            for (found, tried) in [
+                ("ldconfig", &["ldconfig"][..]),
+                ("/sbin/ldconfig", &["ldconfig", "/sbin/ldconfig"]),
+                (
+                    "/usr/sbin/ldconfig",
+                    &["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"],
+                ),
+            ] {
+                let mut asked = Vec::new();
+                let listing = ldconfig_cache_with(|program| {
+                    asked.push(program.to_string());
+                    if program == found {
+                        ran(0, "listing")
+                    } else {
+                        missing()
+                    }
+                });
+                assert_eq!(listing.as_deref(), Some("listing"), "{found}");
+                assert_eq!(asked, tried, "{found}");
+            }
+            assert_eq!(ldconfig_cache_with(|_| missing()), None, "none resolves");
+        }
+
+        /// An `ldconfig` that resolves and fails, or cannot be run, ends the
+        /// search: only one that does not resolve is passed over.
+        #[test]
+        fn an_ldconfig_that_runs_and_fails_ends_the_search() {
+            for answer in [
+                ran(1, "partial"),
+                Err(std::io::ErrorKind::PermissionDenied.into()),
+            ] {
+                let mut answer = Some(answer);
+                let mut asked = 0;
+                let listing = ldconfig_cache_with(|_| {
+                    asked += 1;
+                    answer.take().unwrap_or_else(|| ran(0, "listing"))
+                });
+                assert_eq!(listing, None);
+                assert_eq!(asked, 1);
+            }
         }
 
         #[test]
