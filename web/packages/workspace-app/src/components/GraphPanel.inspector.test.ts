@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
 // The graph tab's inspector and the scope row of its menu: what selecting a
-// node shows, and where its Open, Graph from here and chip actions lead.
+// node shows, and where its Open, New graph here (Graph from here on a tag,
+// a mention or a language) and chip actions lead.
 // GraphPanel is mounted over a fixed graph while the rest of the api runs on
 // the in-memory demo workspace, so the inspector finds real tree entries and
 // the actions open real tabs.
@@ -191,11 +192,11 @@ describe("a file node", () => {
     expect(paneTabs().find((t): t is FileTab => t.kind === "file")?.path).toBe("notes/a.md");
   });
 
-  test("Graph from here opens a new semantic tab on its directory, preselected", async () => {
+  test("New graph here opens a new semantic tab on its directory, preselected", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select(A);
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     const [spawned] = newGraphTabs(tab.id);
     expect(spawned).toMatchObject({
@@ -207,11 +208,11 @@ describe("a file node", () => {
     expect(tab.scopeId, "the tab it came from keeps its scope").toBe("workspace");
   });
 
-  test("Graph from here on a root-level file opens the workspace", async () => {
+  test("New graph here on a root-level file opens the workspace", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select(README);
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace" });
   });
@@ -224,7 +225,7 @@ describe("a file the editor cannot open", () => {
     const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select("notes/bundle.zip");
 
-    const main = await inspectorButton(target, "Download file");
+    const main = await inspectorButton(target, "Download");
     expect(main.classList.contains("pill-main")).toBe(true);
     await expect(inspectorButton(target, "Open")).rejects.toThrow("no inspector action Open");
     expect(paneTabs().some((t) => t.kind === "file"), "no editor tab").toBe(false);
@@ -274,11 +275,11 @@ describe("a directory node", () => {
     expect(browserSelection.path).toBe("notes/deep");
   });
 
-  test("Graph from here re-roots a new tab at the directory itself", async () => {
+  test("New graph here re-roots a new tab at the directory itself", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select(NOTES);
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({
       mode: "semantic",
@@ -288,7 +289,7 @@ describe("a directory node", () => {
     });
   });
 
-  test("in the filesystem graph, Open and Graph from here treat it as a directory too", async () => {
+  test("in the filesystem graph, Open and New graph here treat it as a directory too", async () => {
     const { tab, target } = await mountGraphPanel(
       GraphPanel,
       layout,
@@ -296,7 +297,7 @@ describe("a directory node", () => {
     );
     await select("notes");
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "dir:notes" });
 
@@ -391,12 +392,12 @@ describe("the menu's scope row", () => {
 });
 
 describe("the workspace root", () => {
-  test("shows the workspace inspector; Open reveals the workspace, Graph from here re-roots there", async () => {
+  test("shows the workspace inspector; Open reveals the workspace, New graph here re-roots there", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
     await select("");
     expect(target.querySelector(".inspector .kind-chip.workspace")).not.toBeNull();
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace", pendingSelectId: "" });
 

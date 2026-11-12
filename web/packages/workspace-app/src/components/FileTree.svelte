@@ -1,3 +1,36 @@
+<script module lang="ts">
+  import { registerRowActions } from "../state/commands/browser";
+  import { classifyFileActions, type FileActionId, type FileActionSet } from "../state/fileActions";
+  import { draftsDir, isDraftPath, tree } from "../state/store.svelte";
+  import { windowCaps } from "../state/windowCaps";
+
+  /// The actions the row menu offers for an entry, main first, from the
+  /// shared classifier (state/fileActions): the same applicability policy
+  /// the inspector pill/dropdown consumes.
+  function rowActions(path: string, isDir: boolean): FileActionSet {
+    return classifyFileActions(
+      {
+        path,
+        isDir,
+        // The server-projected kind (content-sniffed on per-directory
+        // listings) decides editable-vs-binary, matching the inspector;
+        // rows missing from the flat listing fall back to path
+        // classification inside the classifier.
+        serverKind: tree.entries.find((e) => e.path === path)?.kind,
+        isDraft: path === draftsDir() || isDraftPath(path),
+      },
+      // The graph is built from the workspace index, so a window with no
+      // workspace behind it has nothing to graph FROM: the row would spawn a
+      // tab that can never load.
+      { open: true, reveal: true, graph: windowCaps.workspace, upload: true },
+    );
+  }
+
+  // The catalog offers Open, View and Export to PDF for a selection when
+  // this menu offers the row for it.
+  registerRowActions(rowActions);
+</script>
+
 <script lang="ts">
   // Recursive tree view of the workspace.
   //
@@ -6,9 +39,11 @@
   // menu for create/rename/delete.
 
   import {
+    Check,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
+    Command as CommandIcon,
     Copy,
     Download,
     Eye,
@@ -37,13 +72,9 @@
   import { basename, parentDir, formatSize, formatMtime } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor, isOpenableTextKind } from "../state/kinds";
-  import { windowCaps } from "../state/windowCaps";
-  import {
-    classifyFileActions,
-    fileMediaKind,
-    type FileActionId,
-  } from "../state/fileActions";
   import { exportPathToPdf } from "../state/fileActionExecutors";
+  import { commandTitle } from "../state/commands";
+  import "../state/commands/install";
   import {
     dirtyPaths,
     layout,
@@ -52,7 +83,7 @@
     openTerminalInPane,
   } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, SHORTCUTS } from "../state/shortcuts";
   import {
     browserSelection,
     fbActivateInstance,
@@ -60,8 +91,7 @@
     clearTreeDirError,
     clearTreeLoadingForPath,
     copyTextToClipboard,
-    draftsDir,
-    isDraftPath,
+    openCommandLauncherFromMenu,
     workspace,
     fbClearSelection as fbClearSelectionFor,
     fbClipboard,
@@ -79,7 +109,6 @@
     ensureFbTreeInstance,
     fbTreeInstance,
     persistFbTreeInstanceExpansion,
-    tree,
   } from "../state/store.svelte";
   import { notify } from "../state/notify.svelte";
 
@@ -655,10 +684,12 @@
   /// Per-type menu rows from the shared classifier
   /// (state/fileActions): the same applicability policy the inspector
   /// pill/dropdown consumes, so a video right-clicked in the tree
-  /// offers the same View / Download actions its inspector would.
-  /// Every handler is tree-local and variant-independent. Copy Path /
-  /// Rename / Delete are NOT part of this model (the tree's separate
-  /// destructive and path-mutation policy below).
+  /// offers the same View and Download actions its inspector would.
+  /// Every row is worded by the title of the catalog command that does
+  /// the same for the selection, and every handler is tree-local and
+  /// variant-independent. Copy path, Rename or move and Delete are NOT
+  /// part of this model (the tree's separate destructive and
+  /// path-mutation policy below).
   type IconComponent = typeof Upload;
   type MenuActionRow = {
     id: FileActionId;
@@ -668,63 +699,80 @@
     onClick: () => void;
   };
 
+  /// The catalog command a classifier action's row is worded from. In the
+  /// tree a directory's open and a file's reveal both open a new file
+  /// browser on the entry.
+  function rowCommand(id: FileActionId, isDir: boolean): string {
+    switch (id) {
+      case "open":
+        return isDir ? "app.browser.openInBrowser" : "app.browser.open";
+      case "showFile":
+        return "app.browser.openInBrowser";
+      case "viewMedia":
+        return "app.browser.viewMedia";
+      case "download":
+        return "app.browser.downloadSelection";
+      case "upload":
+        return "app.browser.uploadSelection";
+      case "newTerminal":
+        return "app.browser.newTerminal";
+      case "exportPdf":
+        return "app.browser.exportPdf";
+      case "graphFromHere":
+        return "app.browser.newGraph";
+    }
+  }
+
   function menuRowFor(id: FileActionId, path: string, isDir: boolean): MenuActionRow {
+    const label = commandTitle(rowCommand(id, isDir));
     switch (id) {
       case "open":
         return {
           id,
-          label: isDir ? "Open in File Browser" : "Open",
+          label,
           icon: isDir ? FolderOpen : FileText,
+          // A file opens as Enter opens it, which is what the launcher's
+          // Open runs on the selection.
           onClick: () => {
-            menu = null;
             if (isDir) openSelectionInFileBrowser(path);
-            else openFileRow(path);
+            else runCommand("open");
           },
         };
       case "showFile":
         return {
           id,
-          label: "Open in File Browser",
+          label,
           icon: FolderOpen,
           onClick: () => openSelectionInFileBrowser(path),
         };
-      case "viewMedia": {
-        const media = fileMediaKind(path);
+      case "viewMedia":
         return {
           id,
-          label:
-            media === "image"
-              ? "View / Zoom"
-              : media === "video"
-                ? "View Video"
-                : media === "audio"
-                  ? "View Audio"
-                  : "View PDF",
+          label,
           icon: Eye,
           onClick: () => {
             menu = null;
             void openMediaViewer(path);
           },
         };
-      }
       case "download":
         return {
           id,
-          label: "Download",
+          label,
           icon: Download,
           onClick: () => downloadSelection(path, isDir),
         };
       case "upload":
         return {
           id,
-          label: "Upload",
+          label,
           icon: Upload,
           onClick: () => uploadSelection(path, isDir),
         };
       case "newTerminal":
         return {
           id,
-          label: "New Terminal",
+          label,
           icon: TerminalIcon,
           chord: chordFor("app.terminal.toggle") ?? "",
           onClick: () => terminalFromHere(path, isDir),
@@ -732,7 +780,7 @@
       case "exportPdf":
         return {
           id,
-          label: "Export to PDF",
+          label,
           icon: FileText,
           onClick: () => {
             menu = null;
@@ -742,7 +790,7 @@
       case "graphFromHere":
         return {
           id,
-          label: "New Graph",
+          label,
           icon: Network,
           chord: chordFor("app.graph.toggle") ?? "",
           onClick: () => graphThis(path, isDir),
@@ -752,31 +800,35 @@
 
   const menuActions = $derived.by<MenuActionRow[]>(() => {
     if (!menu) return [];
-    // The server-projected kind (content-sniffed on per-directory
-    // listings) decides editable-vs-binary, matching the inspector;
-    // rows missing from the flat listing fall back to path
-    // classification inside the classifier.
-    const entryKind = tree.entries.find((e) => e.path === menu!.path)?.kind;
-    const set = classifyFileActions(
-      {
-        path: menu.path,
-        isDir: menu.isDir,
-        serverKind: entryKind,
-        isDraft: menu.path === draftsDir() || isDraftPath(menu.path),
-      },
-      // The graph is built from the workspace index, so a window with no
-      // workspace behind it has nothing to graph FROM: the row would spawn a
-      // tab that can never load.
-      { open: true, reveal: true, graph: windowCaps.workspace, upload: true },
-    );
+    const set = rowActions(menu.path, menu.isDir);
     return [set.main, ...set.secondary].map((id) =>
       menuRowFor(id, menu!.path, menu!.isDir),
     );
   });
 
-  /// Unified "New File or Directory" entry. Opens a single
-  /// PathPromptModal with `kind: "either"`; trailing slash → dir,
-  /// otherwise → file.
+  /// The clipboard rows, each worded by its catalog command and run by the
+  /// key that does the same.
+  const CLIPBOARD_ROWS = [
+    { command: "copy", id: "app.browser.copySelection" },
+    { command: "cut", id: "app.browser.cutSelection" },
+    { command: "paste", id: "app.browser.pasteSelection" },
+  ] as const;
+
+  // The launcher's own toggle is a chord with no catalog row, so its menu row
+  // takes the shortcut table's words.
+  const LAUNCHER = "app.launcher.toggle";
+  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+
+  /// Open the launcher from the row menu, with the keyboard handed back to
+  /// the tree first so the launcher returns it there when it closes.
+  function openCommandsFromMenu(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    menu = null;
+    openCommandLauncherFromMenu(row, focusTree);
+  }
+
+  /// The one creation entry. Opens a single PathPromptModal with
+  /// `kind: "either"`; trailing slash → dir, otherwise → file.
   async function newFileOrDir(parentPath: string): Promise<void> {
     menu = null;
     await fileOps.createFileOrDir(parentPath);
@@ -803,7 +855,7 @@
     tab.expanded = ancestors.length > 0 ? ancestors : undefined;
     menu = null;
   }
-  /// Flip routes through the surface-supplied `onFlip`
+  /// Flip pane routes through the surface-supplied `onFlip`
   /// callback (FBSurface → Pane.svelte → `flipHybrid(pane.id)`).
   /// Gated on `onFlip` existence so dock + overlay variants don't
   /// surface the entry.
@@ -1587,26 +1639,27 @@
 {#if menu}
   <div class="ctx" role="menu" tabindex="-1" aria-label="File actions" onkeydown={menuKeydown} use:portal use:clampMenu={{ x: menu.x, y: menu.y }} use:focusMenu>
     <!-- In-tree selection menu. Section label first ("From
-         selection"), the dir-only "New File or Directory" creation
-         entry (file-vs-dir detected from the path's trailing slash),
-         then the per-type action rows from the shared classifier
-         (state/fileActions -- the same applicability policy the
-         inspector consumes; handlers + labels are tree-local). For an
-         ordinary non-draft file, a tree-only Upload row follows:
-         single-file replacement through the picker
+         selection"), the dir-only creation entry (file-vs-dir detected
+         from the path's trailing slash), then the per-type action rows
+         from the shared classifier (state/fileActions: the same
+         applicability policy the inspector consumes; handlers are
+         tree-local). For an ordinary non-draft file, a tree-only Upload
+         row follows: single-file replacement through the picker
          (fileOps.replaceFileAt), the transfer counterpart of the
-         classifier's directory upload. Drafts never get it; the
-         fileOps contract refuses writes there. Copy Path / Rename /
-         Delete follow as the tree's separate destructive +
-         path-mutation policy (this is the only surface for those). A
-         Flip entry renders at the foot when `onFlip` is wired (tab
-         variant only; dock + overlay variants pass no onFlip so the
-         entry hides). -->
+         classifier's directory upload. Drafts never get it; the fileOps
+         contract refuses writes there. The clipboard rows and the
+         marking toggle come next, then Copy path, Rename or move and
+         Delete as the tree's separate destructive + path-mutation
+         policy (this is the only surface for those). The foot holds
+         Flip pane when `onFlip` is wired (tab variant only; dock +
+         overlay variants pass no onFlip so the entry hides) and the
+         launcher's row. Every action row takes its words from the
+         command catalog. -->
     <div class="from-selection-label">From selection</div>
     {#if menu.isDir}
       <button role="menuitem" onclick={() => newFileOrDir(menu!.path)}>
         <FilePlus size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>New File or Directory</span>
+        <span class="menu-row-label">{commandTitle("app.browser.newFsEntry")}</span>
       </button>
     {/if}
     {#each menuActions as row (row.id)}
@@ -1622,37 +1675,47 @@
     {#if !menu.isDir && menu.path !== draftsDir() && !isDraftPath(menu.path)}
       <button role="menuitem" onclick={() => uploadSelection(menu!.path, false)}>
         <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span>Upload</span>
+        <span class="menu-row-label">{commandTitle("app.browser.uploadSelection")}</span>
       </button>
     {/if}
     <div class="ctx-sep" role="separator"></div>
-    {#each [{ command: "copy", label: "Copy" }, { command: "cut", label: "Cut" }, { command: "paste", label: "Paste" }, { command: "selectMode", label: selectionMode ? "Leave selection mode" : "Select multiple" }] as action}
-      <button role="menuitem" disabled={action.command === "paste" && !fbClipboard.mode} onclick={() => runCommand(action.command as BrowserCommand)}>
-        <span class="menu-row-label">{action.label}</span><span class="menu-row-chord">{browserCommandChord(action.command as BrowserCommand, browserKeys.vim)}</span>
+    {#each CLIPBOARD_ROWS as action (action.command)}
+      <button role="menuitem" disabled={action.command === "paste" && !fbClipboard.mode} onclick={() => runCommand(action.command)}>
+        <span class="menu-row-label">{commandTitle(action.id)}</span><span class="menu-row-chord">{browserCommandChord(action.command, browserKeys.vim)}</span>
       </button>
     {/each}
+    <button role="menuitemcheckbox" aria-checked={selectionMode} onclick={() => runCommand("selectMode")}>
+      <span class="menu-row-label">{commandTitle("app.browser.selectMultiple")}</span>
+      {#if selectionMode}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+      <span class="menu-row-chord">{browserCommandChord("selectMode", browserKeys.vim)}</span>
+    </button>
     <div class="ctx-sep" role="separator"></div>
     <button role="menuitem" onclick={() => runCommand("copyPath")}>
       <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span>Copy Path</span>
+      <span class="menu-row-label">{commandTitle("app.browser.copyPath")}</span>
     </button>
     <button role="menuitem" onclick={() => runCommand("rename")}>
       <Pencil size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span class="menu-row-label">Rename / Move</span><span class="menu-row-chord">{browserCommandChord("rename", browserKeys.vim)}</span>
+      <span class="menu-row-label">{commandTitle("app.browser.renameSelection")}</span><span class="menu-row-chord">{browserCommandChord("rename", browserKeys.vim)}</span>
     </button>
     <button role="menuitem" class="danger" onclick={() => runCommand("delete")}>
       <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span class="menu-row-label">Delete</span>
+      <span class="menu-row-label">{commandTitle("app.browser.deleteSelection")}</span>
       <span class="menu-row-chord">{browserCommandChord("delete", browserKeys.vim)}</span>
     </button>
+    <div class="ctx-sep" role="separator"></div>
     {#if onFlip}
-      <div class="ctx-sep" role="separator"></div>
       <button role="menuitem" onclick={flipFromMenu}>
         <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
-        <span class="menu-row-label">Flip</span>
+        <span class="menu-row-label">{commandTitle("app.pane.flip")}</span>
         <span class="menu-row-chord">{chordFor("app.pane.flip") ?? ""}</span>
       </button>
     {/if}
+    <button role="menuitem" onclick={openCommandsFromMenu}>
+      <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+      <span class="menu-row-label">{launcherLabel}</span>
+      <span class="menu-row-chord">{chordFor(LAUNCHER) ?? ""}</span>
+    </button>
   </div>
 {/if}
 

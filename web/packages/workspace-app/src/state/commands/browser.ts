@@ -3,13 +3,23 @@
 // in a workspace window, and two commands here act beyond the tab and are
 // listed where they act: the side docks with the window, and Workspace
 // details with the workspace.
+//
+// The file browser's own menu and the tree's row menu word their rows from
+// these titles. Open, View and Export to PDF are offered for a selection
+// when the row menu offers them for that row: the tree hands this module the
+// rule its menu reads (registerRowActions).
 
 import {
+  dispatchChanCommand,
   registerCommands,
   onSurface,
   workspaceOnly,
   type CommandContext,
 } from "../commands";
+import { browserView, toggleBrowserView, type BrowserView } from "../browserView.svelte";
+import type { FileActionId, FileActionSet } from "../fileActions";
+import { exportPathToPdf } from "../fileActionExecutors";
+import { openMediaViewer } from "../mediaOpen";
 import {
   browserSelection,
   browserSidePanes,
@@ -218,8 +228,46 @@ async function pasteFileBrowserClipboard(): Promise<void> {
   if (landed.length > 0) fbSelectSet(landed);
 }
 
+/// What a file browser's row menu offers for an entry, main action first.
+export type RowActions = (path: string, isDir: boolean) => FileActionSet;
+
+let rowActions: RowActions | null = null;
+
+/// Hand the catalog the rule the tree's row menu draws its rows by, so the
+/// launcher offers for the selection what the menu offers for its row. The
+/// tree registers it as it loads. The rule reads the kind tables, which
+/// import the whole icon set, and the catalog stays loadable without them;
+/// until a tree has loaded, the commands that ask are offered for nothing.
+export function registerRowActions(classify: RowActions): void {
+  rowActions = classify;
+}
+
+function selectionOffers(action: FileActionId): boolean {
+  const sel = activeSelection();
+  if (!sel || !rowActions) return false;
+  const { main, secondary } = rowActions(sel.path, sel.isDir);
+  return main === action || secondary.includes(action);
+}
+
+/// One switch of the active file browser tab's view, null with no such tab.
+function activeView(key: keyof BrowserView): boolean | null {
+  const id = activeBrowserInstanceId();
+  return id ? browserView(id)[key] : null;
+}
+
+function toggleActiveView(key: keyof BrowserView): void {
+  const id = activeBrowserInstanceId();
+  if (id) toggleBrowserView(id, key);
+}
+
 const needsSelection = (): string => "Needs a selection";
 const needsClipboard = (): string => "Needs a copied or cut selection";
+
+/// Why a command for one kind of entry cannot run: nothing is selected, or
+/// the selection is not `needed`.
+function needsSelected(needed: string): () => string {
+  return () => (activeSelection() ? `Needs ${needed}` : needsSelection());
+}
 
 registerCommands([
   {
@@ -236,16 +284,57 @@ registerCommands([
     run: () => void fileOps.createFileOrDir(targetDirFromSelection()),
   },
   {
-    id: "app.browser.openInBrowser",
-    title: "Open in new file browser",
+    id: "app.browser.open",
+    title: "Open",
     category: "File Browser",
     scope: "app",
     surface: "browser",
     order: 1,
     requirement: "files",
+    keywords: ["enter", "editor", "directory"],
+    available: (ctx) => onBrowser(ctx) && selectionOffers("open"),
+    unavailableReason: needsSelected("a directory or a file an editor opens"),
+    // Entering a directory moves the surface's own location, so the open
+    // reaches the active file browser as a chan:command and runs there what
+    // Enter runs on the selection.
+    run: () => dispatchChanCommand("app.browser.open"),
+  },
+  {
+    id: "app.browser.openInBrowser",
+    title: "Open in new file browser",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 2,
+    requirement: "files",
     keywords: ["Open in new File Browser", "files", "tree", "reveal"],
     available: onBrowser,
     run: openSelectionInFileBrowser,
+  },
+  {
+    id: "app.browser.viewMedia",
+    title: "View",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 3,
+    requirement: "files",
+    keywords: [
+      "View / Zoom",
+      "View Video",
+      "View Audio",
+      "View PDF",
+      "image",
+      "zoom",
+      "play",
+      "viewer",
+    ],
+    available: (ctx) => onBrowser(ctx) && selectionOffers("viewMedia"),
+    unavailableReason: needsSelected("an image, a video, an audio file or a PDF"),
+    run: () => {
+      const sel = activeSelection();
+      if (sel) openMediaViewer(sel.path);
+    },
   },
   {
     id: "app.browser.uploadSelection",
@@ -253,7 +342,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 2,
+    order: 4,
     kind: "open",
     requirement: "files",
     keywords: ["import", "replace", "file"],
@@ -266,7 +355,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 3,
+    order: 5,
     requirement: "files",
     keywords: ["export", "save"],
     available: (ctx) => onBrowser(ctx) && activeSelection() !== null,
@@ -279,7 +368,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 4,
+    order: 6,
     // Spawns a terminal; the selection rides along as plain spawn data.
     requirement: "terminal",
     keywords: ["New terminal", "shell", "cwd"],
@@ -287,12 +376,28 @@ registerCommands([
     run: newTerminalFromSelection,
   },
   {
+    id: "app.browser.exportPdf",
+    title: "Export to PDF",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 7,
+    requirement: "files",
+    keywords: ["pdf", "print", "document"],
+    available: (ctx) => onBrowser(ctx) && selectionOffers("exportPdf"),
+    unavailableReason: needsSelected("a markdown file"),
+    run: () => {
+      const sel = activeSelection();
+      if (sel) void exportPathToPdf(sel.path);
+    },
+  },
+  {
     id: "app.browser.newGraph",
     title: "New graph here",
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 5,
+    order: 8,
     // The graph surface reads the workspace index.
     requirement: "workspace",
     keywords: ["New graph", "graph", "network", "scope"],
@@ -305,7 +410,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 6,
+    order: 9,
     requirement: "files",
     keywords: ["Copy selection", "clipboard", "files", "duplicate"],
     available: (ctx) => onBrowser(ctx) && selectedPaths().length > 0,
@@ -318,7 +423,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 7,
+    order: 10,
     requirement: "files",
     keywords: ["Cut selection", "clipboard", "move", "files"],
     available: (ctx) => onBrowser(ctx) && selectedPaths().length > 0,
@@ -331,7 +436,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 8,
+    order: 11,
     requirement: "files",
     keywords: ["Paste file browser clipboard", "copy", "cut", "move", "files"],
     available: (ctx) => onBrowser(ctx) && fbClipboard.mode !== null,
@@ -339,12 +444,26 @@ registerCommands([
     run: () => void pasteFileBrowserClipboard(),
   },
   {
+    id: "app.browser.selectMultiple",
+    title: "Select multiple",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 12,
+    kind: "toggle",
+    requirement: "files",
+    keywords: ["Leave selection mode", "selection mode", "mark", "multi-select"],
+    available: onBrowser,
+    state: () => activeView("selectionMode"),
+    run: () => toggleActiveView("selectionMode"),
+  },
+  {
     id: "app.browser.copyPath",
     title: "Copy path",
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 9,
+    order: 13,
     requirement: "files",
     keywords: ["clipboard", "file", "directory"],
     available: (ctx) => onBrowser(ctx) && activeSelection() !== null,
@@ -357,7 +476,7 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 10,
+    order: 14,
     kind: "open",
     requirement: "files",
     keywords: ["Rename / move", "rename", "move", "path"],
@@ -371,12 +490,42 @@ registerCommands([
     category: "File Browser",
     scope: "app",
     surface: "browser",
-    order: 11,
+    order: 15,
     requirement: "files",
     keywords: ["remove", "trash"],
     available: (ctx) => onBrowser(ctx) && activeSelection() !== null,
     unavailableReason: needsSelection,
     run: deleteSelection,
+  },
+  {
+    id: "app.browser.hiddenFiles",
+    title: "Hidden files",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 16,
+    kind: "toggle",
+    requirement: "files",
+    keywords: ["Show hidden files", "dotfiles", "dot files"],
+    available: onBrowser,
+    state: () => activeView("showHidden"),
+    run: () => toggleActiveView("showHidden"),
+  },
+  {
+    // The file browser's own keys, which are not in the shortcut table; the
+    // qualifier tells the row from the Keyboard Shortcuts settings.
+    id: "app.browser.keyboardHelp",
+    title: "Keyboard shortcuts (file browser)",
+    category: "File Browser",
+    scope: "app",
+    surface: "browser",
+    order: 17,
+    kind: "toggle",
+    requirement: "files",
+    keywords: ["Keyboard shortcuts", "keys", "help", "vim"],
+    available: onBrowser,
+    state: () => activeView("helpOpen"),
+    run: () => toggleActiveView("helpOpen"),
   },
   {
     id: "app.browser.clearClipboard",

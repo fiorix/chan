@@ -1,8 +1,11 @@
 // Graph surface commands: available when a graph tab is the active
 // surface. Net-new actions mutate the active GraphTab directly (its
 // fields are $state, so the graph re-renders reactively, matching the
-// pane's own menu). Reload is the exception: the fetch lives inside
-// GraphPanel, so it arrives there as a chan:command. See
+// pane's own menu). Reload and Scope details are the exceptions: the
+// fetch and the loaded nodes live inside GraphPanel, so they arrive
+// there as a chan:command. The graph menu lists its filter rows from
+// graphFilterRows, the list the Filters command offers as options, so
+// the menu and the launcher name and offer the same filters. See
 // state/commands.ts for the Command shape and the onSurface helper.
 
 import { openChoice, registerCommands, dispatchChanCommand, onSurface } from "../commands";
@@ -25,9 +28,14 @@ function onGraph(fn: (tab: GraphTab) => void): () => void {
   };
 }
 
-type FilterKind = Exclude<keyof GraphFilters, "link">;
+/// A filter a person can turn on and off. The tab's `link` slot is none:
+/// a link shows whenever both its ends do.
+export type GraphFilterKind = Exclude<keyof GraphFilters, "link">;
 
-const FILTER_KINDS: readonly FilterKind[] = [
+/// One filter a graph tab offers, with the word for it.
+export type GraphFilterRow = { kind: GraphFilterKind; label: string };
+
+const FILTER_KINDS: readonly GraphFilterKind[] = [
   "tag",
   "mention",
   "language",
@@ -46,16 +54,19 @@ function scopeKind(tab: GraphTab): "workspace" | "file" | "dir" | "other" {
   return "other";
 }
 
-/// The filters a graph tab offers and the word for each, as the graph menu
-/// lists them. A language graph filters languages alone. A filesystem graph
-/// over the workspace, a file or a directory names three of the kinds after
-/// what they hide there and has no media or language filter. Every other
-/// graph offers them all, the folder filter only over the whole workspace.
-function graphFilters(tab: GraphTab): { kind: FilterKind; label: string }[] {
+/// The filters a graph tab offers and the word for each, in the order the
+/// graph menu and the Filters command both list them. A language graph
+/// filters languages alone. A filesystem graph over the workspace, a file or
+/// a directory names three of the kinds after what they hide there and has no
+/// media or language filter. Every other graph offers them all, the folder
+/// filter only over the whole workspace; a semantic graph of a directory
+/// keeps its language filter because the server emits each file's language
+/// edge for a scoped graph too.
+export function graphFilterRows(tab: GraphTab): GraphFilterRow[] {
   if (tab.mode === "language") return [{ kind: "language", label: "language" }];
   const scope = scopeKind(tab);
   if (tab.mode === "filesystem" && scope !== "other") {
-    const words: Partial<Record<FilterKind, string>> = {
+    const words: Partial<Record<GraphFilterKind, string>> = {
       tag: "symlink",
       mention: "hardlink",
       folder: "directory",
@@ -67,10 +78,16 @@ function graphFilters(tab: GraphTab): { kind: FilterKind; label: string }[] {
       return label ? [{ kind, label }] : [];
     });
   }
-  const words: Partial<Record<FilterKind, string>> = { mention: "contact", img: "media" };
+  const words: Partial<Record<GraphFilterKind, string>> = { mention: "contact", img: "media" };
   return FILTER_KINDS.filter((kind) => kind !== "folder" || scope === "workspace").map(
     (kind) => ({ kind, label: words[kind] ?? kind }),
   );
+}
+
+/// Turn one of a graph tab's filters on or off. A menu row and its option of
+/// the Filters command both toggle through here.
+export function toggleGraphFilter(tab: GraphTab, kind: GraphFilterKind): void {
+  tab.filters[kind] = !tab.filters[kind];
 }
 
 /// The active graph tab's depth as a row's value.
@@ -81,12 +98,27 @@ function depthState(): string | null {
 
 registerCommands([
   {
+    id: "app.graph.scopeDetails",
+    title: "Scope details",
+    category: "Graph",
+    scope: "app",
+    surface: "graph",
+    order: 0,
+    kind: "open",
+    requirement: "workspace",
+    keywords: ["scope", "inspector", "root"],
+    available: (ctx) => onSurface(ctx, "graph"),
+    // The scope's node is one of the nodes the panel loaded, so the panel
+    // finds it and shows its details.
+    run: () => dispatchChanCommand("app.graph.scopeDetails"),
+  },
+  {
     id: "app.graph.depth.increase",
     title: "Increase depth",
     category: "Graph",
     scope: "app",
     surface: "graph",
-    order: 0,
+    order: 1,
     requirement: "workspace",
     keywords: ["Graph depth: increase", "depth", "expand", "more", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
@@ -102,7 +134,7 @@ registerCommands([
     category: "Graph",
     scope: "app",
     surface: "graph",
-    order: 1,
+    order: 2,
     requirement: "workspace",
     keywords: ["Graph depth: decrease", "depth", "collapse", "less", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
@@ -112,14 +144,14 @@ registerCommands([
     }),
   },
   {
-    // One row per filter with a check on each that is on, as the graph
-    // menu lists them.
+    // One option per filter the graph menu lists, with a check on each that
+    // is on.
     id: "app.graph.filters",
     title: "Filters",
     category: "Graph",
     scope: "app",
     surface: "graph",
-    order: 2,
+    order: 3,
     kind: "choice",
     requirement: "workspace",
     keywords: [
@@ -137,19 +169,17 @@ registerCommands([
     state: () => {
       const tab = activeGraphTab();
       if (!tab) return null;
-      const filters = graphFilters(tab);
+      const filters = graphFilterRows(tab);
       return `${filters.filter(({ kind }) => tab.filters[kind]).length} of ${filters.length}`;
     },
     options: () => {
       const tab = activeGraphTab();
       if (!tab) return [];
-      return graphFilters(tab).map(({ kind, label }) => ({
+      return graphFilterRows(tab).map(({ kind, label }) => ({
         id: kind,
         label,
         checked: tab.filters[kind],
-        run: () => {
-          tab.filters[kind] = !tab.filters[kind];
-        },
+        run: () => toggleGraphFilter(tab, kind),
       }));
     },
     run: () => openChoice("app.graph.filters"),
