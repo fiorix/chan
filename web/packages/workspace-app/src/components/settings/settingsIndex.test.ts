@@ -128,15 +128,36 @@ describe("settled words", () => {
     expect(settingEntry("browser.rightDock").keywords).toContain("Side panes");
   });
 
-  test("a control named by its caption reads as its field, then the caption", () => {
+  test("a toggle is named by its heading alone, and its former words still find it", () => {
+    // Each was once worded `Heading: caption`, from the two parts listed.
+    const reworded = [
+      ["global.privacyTerminalMasking", "Mask terminal secrets in privacy mode", "Privacy mode", "Also enable terminal secret masking"],
+      ["global.dashboardCarousel", "Dashboard auto-rotate", "Dashboard carousel", "Auto-rotate"],
+      ["global.paneStrip", "Pane strip auto-hide", "Pane strip", "Auto-hide"],
+      ["browser.vim", "Vim navigation", "Keyboard navigation", "Vim navigation"],
+    ] as const;
+    for (const [id, label, ...former] of reworded) {
+      const entry = settingEntry(id);
+      expect([entry.label, entry.heading, entry.kind], id).toEqual([label, label, "toggle"]);
+      for (const word of former) {
+        expect([entry.label, ...(entry.keywords ?? [])], `${id} is found by "${word}"`).toContain(word);
+      }
+    }
     expect(settingEntry("global.privacy").label).toBe("Privacy mode");
-    expect(settingEntry("global.privacyTerminalMasking").label).toBe(
-      "Privacy mode: Also enable terminal secret masking",
-    );
-    expect(settingEntry("global.paneStrip").label).toBe("Pane strip: Auto-hide");
-    expect(settingEntry("browser.vim").label).toBe("Keyboard navigation: Vim navigation");
     // A caption the label leaves out is still searchable.
     expect(settingEntry("terminal.mcpEnv").label).toBe("MCP discovery");
     expect(settingEntry("terminal.mcpEnv").keywords).toContain("Enable in new terminals");
+  });
+
+  test("one of several controls under a heading reads as the heading, then its caption", () => {
+    expect(settingEntry("terminal.colors.cursor").label).toBe("Custom terminal colours: Cursor");
+    expect(settingEntry("workspace.screenLock.theme").label).toBe("Screen lock: Theme");
+    // Only a field that holds several controls is worded that way.
+    const qualified = settingsIndex().filter((spec) => spec.label.includes(": "));
+    expect([...new Set(qualified.map((spec) => settingEntry(spec.id).heading))]).toEqual([
+      "Custom terminal colours",
+      "Custom graph colours",
+      "Screen lock",
+    ]);
   });
 });

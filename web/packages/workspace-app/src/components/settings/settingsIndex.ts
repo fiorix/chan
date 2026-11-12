@@ -120,10 +120,9 @@ export type PreferenceAccess = {
 };
 
 /// An index entry with the words the overlay renders it from. The label is
-/// the heading of the field that holds the control. Where the heading alone
-/// does not say what the control changes (one of several controls, or a
-/// pill whose caption carries the meaning), the label reads
-/// `Heading: caption`.
+/// the heading of the field that holds the control, which alone names what
+/// the control changes. A control that is one of several under a heading
+/// reads `Heading: caption`.
 export type SettingEntry = SettingSpec & {
   heading: string;
   /// The control's own word in the overlay: a pill's caption, a row's label.
@@ -413,9 +412,9 @@ const ENTRIES: readonly SettingEntry[] = [
     {
       id: "global.privacyTerminalMasking",
       section: "global",
-      heading: "Privacy mode",
-      caption: "Also enable terminal secret masking",
-      qualified: true,
+      heading: "Mask terminal secrets in privacy mode",
+      caption: "Mask terminal secrets",
+      keywords: ["Privacy mode", "Also enable terminal secret masking"],
     },
     () => privacy.mask_terminal_secrets,
     (mask_terminal_secrets) => writePrivacy({ mask_terminal_secrets }),
@@ -452,10 +451,9 @@ const ENTRIES: readonly SettingEntry[] = [
     {
       id: "global.dashboardCarousel",
       section: "global",
-      heading: "Dashboard carousel",
+      heading: "Dashboard auto-rotate",
       caption: "Auto-rotate",
-      qualified: true,
-      keywords: ["slides", "cycling"],
+      keywords: ["slides", "cycling", "Dashboard carousel"],
     },
     {
       get: (p) => p.empty_pane_carousel_cycling ?? true,
@@ -481,10 +479,9 @@ const ENTRIES: readonly SettingEntry[] = [
     {
       id: "global.paneStrip",
       section: "global",
-      heading: "Pane strip",
+      heading: "Pane strip auto-hide",
       caption: "Auto-hide",
-      qualified: true,
-      keywords: ["tab strip"],
+      keywords: ["tab strip", "Pane strip"],
       available: () => !windowTabBar.on,
     },
     {
@@ -758,9 +755,8 @@ const ENTRIES: readonly SettingEntry[] = [
     {
       id: "browser.vim",
       section: "browser",
-      heading: "Keyboard navigation",
-      caption: "Vim navigation",
-      qualified: true,
+      heading: "Vim navigation",
+      keywords: ["Keyboard navigation"],
     },
     () => browserKeys.vim,
     setBrowserVim,
