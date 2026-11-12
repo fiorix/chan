@@ -1868,6 +1868,8 @@
             onSetAsScope={windowCaps.workspace
               ? () => openFsGraphForFile(tab.path)
               : undefined}
+            onDownload={() => void downloadFile(tab)}
+            onExportPdf={() => void exportFileToPdf(tab)}
           />
         {/if}
       </Inspector>

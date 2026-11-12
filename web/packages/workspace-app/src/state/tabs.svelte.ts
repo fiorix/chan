@@ -4339,7 +4339,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     const unsavable =
       unsaved && isExcalidraw(tab.path) ? validateJsonBuffer(tab.content) : null;
     if (unsaved && unsavable === null) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     if ((contentIsEmpty || isPristineSeed) && !info.has_attachments) {
@@ -4362,7 +4362,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       return true;
     }
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const promoted = await decidingStale(tab.path, () =>
       api.promoteDraft(tab.path, decision.target),
@@ -4393,13 +4393,14 @@ function refreshAfterDraftChange(): Promise<unknown> {
   return Promise.all([refreshDrafts(), import("./store.svelte").then((m) => m.refreshTree())]);
 }
 
-/// A draft has its own close and promotion flows, so an unsaved buffer stays
-/// open with one notice instead of joining the ordinary close dialog. The
-/// notice gives the reason on the tab's save line where there is one, and
-/// otherwise what held the save. A download or an export of an open file
-/// asks the same of any file tab before it reads the server's copy, and
-/// goes no further on a no.
-export async function saveDraftEdits(tab: FileTab): Promise<boolean> {
+/// Save the tab's unsaved text, wait for the save and answer whether the tab
+/// is saved. For a caller that must not go on with text the server lacks: a
+/// draft's close and its promotion, which keep an unsaved draft open instead
+/// of joining the ordinary close dialog, and a download or an export of an
+/// open file, which read the server's copy. A tab left unsaved gets one
+/// notice: the reason on its save line where there is one, and otherwise
+/// what held the save.
+export async function saveTabEdits(tab: FileTab): Promise<boolean> {
   let held: SaveHold = null;
   try {
     held = await performSave(tab);
@@ -4472,7 +4473,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // module). Resolved at user-action time, never at module-eval.
     const { uiPathPrompt } = await import("./store.svelte");
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     // The draft Save reuses PathPromptModal (autocomplete, live status
@@ -4523,7 +4524,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // file case, trailing-slash folder for the dir case). `promoteDraft`
     // takes it verbatim.
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const promoted = await decidingStale(tab.path, () => api.promoteDraft(tab.path, target));
     notifyDraftPromoted(promoted.path);

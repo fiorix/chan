@@ -13,6 +13,8 @@
   //     enabled here via showRefs.
   //   - FileEditorTab: shown beside the currently edited file. Filesystem
   //     facts work in every file window; references need a workspace.
+  //     Download and Export to PDF are the editor's own there (onDownload,
+  //     onExportPdf), which save the tab before they read the server's copy.
   //
   // Directory mode walks the flat tree to compute aggregate counts +
   // size + most-recent mtime. The walk is O(N) in tree size and only
@@ -106,6 +108,8 @@
     onContactNavigate,
     onSetAsScope,
     onNewTerminal,
+    onDownload,
+    onExportPdf,
     allowUpload = true,
   }: {
     path: string | null;
@@ -146,6 +150,13 @@
     /// The host's own terminal action for a directory, opening a terminal
     /// with the directory as cwd. Absent = the shared from-here terminal.
     onNewTerminal?: () => void;
+    /// The host's own Download and Export to PDF for the entry. Both of this
+    /// body's ask the server for the path, and the editor holds text the
+    /// server may not have yet, so it binds the two that save its tab first.
+    /// Absent = the path's, which is right wherever the entry is a selection
+    /// and no editor of the host's holds it.
+    onDownload?: () => void;
+    onExportPdf?: () => void;
     /// Whether the Upload button renders. Default true so the File
     /// Browser / editor / Graph-tab inspectors keep it; the dashboard
     /// Search slot passes false (read-only index view: Download only).
@@ -626,7 +637,7 @@
       case "viewMedia":
         return { command, onClick: () => void openMediaViewer(p) };
       case "download":
-        return { command, onClick: downloadSelection, title: downloadTitle };
+        return { command, onClick: onDownload ?? downloadSelection, title: downloadTitle };
       // The picker the file browser's Upload raises for the same entry.
       case "upload":
         return { command, onClick: () => uploadToEntry(p, e.is_dir), title: uploadTitle };
@@ -641,7 +652,7 @@
       // Markdown documents export to PDF on every surface (web and
       // desktop alike; the save path differs, not the availability).
       case "exportPdf":
-        return { command, onClick: exportSelectionToPdf };
+        return { command, onClick: onExportPdf ?? exportSelectionToPdf };
       case "graphFromHere":
         return { command, onClick: () => onSetAsScope?.() };
     }

@@ -2,10 +2,13 @@
 //
 // The launcher's Settings scope over the real settings index and the real
 // catalog: every field this window shows is listed once under its rail
-// section, a toggle and a choice change through the index with the overlay
-// closed, a refused write is reported, and a setting a command also changes
-// is left to the command among typed results. A stand-in deck prints the
-// rows; `/api/config` is the recorded double the settings suites use.
+// section, the two dock fields only in a window over a workspace; a toggle
+// and a choice change through the index with the overlay closed, a refused
+// write is reported, and a press on a setting of this workspace sends no
+// read beside its write, so the row keeps the write's answer; and a setting
+// a command also changes is left to the command among typed results. A
+// stand-in deck prints the rows; `/api/config` is the recorded double the
+// settings suites use.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";

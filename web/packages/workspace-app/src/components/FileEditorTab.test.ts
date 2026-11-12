@@ -1177,6 +1177,70 @@ describe("a menu row and its command", () => {
     expect(seen, "the save was tried and nothing was sent").toEqual(["write three two one # Plan"]);
   });
 
+  // The file inspector draws the panel of a file that is no workspace draft,
+  // and its Download and Export to PDF are the editor's two functions there.
+  // A live document session takes a workspace file's edits as they are
+  // typed, so the sessions are off here: the file saves by the classic
+  // autosave alone, as a file of a standalone window does.
+  test("a file's Details actions save what was typed before they send the file, and send nothing when the save fails", async () => {
+    localStorage.setItem("chan.docsync", "0");
+    await refreshTree();
+    const tab = seat(fileTab({ inspectorOpen: true }));
+    const { target } = await render(tab);
+    await settle();
+    const seen: string[] = [];
+    let refusal: Error | null = null;
+    vi.spyOn(api, "write").mockImplementation(async (_path, content) => {
+      seen.push(`write ${content.split("\n")[0]}`);
+      if (refusal) throw refusal;
+      return { mtime: 200, mtime_ns: "200" };
+    });
+    vi.spyOn(fileOps, "downloadPathWithProgress").mockImplementation(() => void seen.push("download"));
+    vi.mocked(exportPathToPdf).mockImplementation(async () => void seen.push("export"));
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    /// Opens the caret menu and presses the action of the command `id`.
+    const press = (id: string): void => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      const found = [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")].find(
+        (el) => el.textContent?.trim() === commandById(id)!.title,
+      );
+      if (!found) throw new Error(`no Details action ${id}`);
+      found.click();
+    };
+    const type = async (text: string): Promise<void> => {
+      editorView(target).dispatch({ changes: { from: 0, insert: text } });
+      await settle(1);
+    };
+
+    expect(details.querySelector(".drafts-chip"), "the file inspector's body").toBeNull();
+    await type("one ");
+    press("app.editor.download");
+    await vi.waitFor(() => expect(seen).toEqual(["write one # Plan", "download"]));
+
+    seen.splice(0);
+    await type("two ");
+    press("app.editor.exportPdf");
+    await vi.waitFor(() => expect(seen).toEqual(["write two one # Plan", "export"]));
+
+    seen.splice(0);
+    refusal = new Error("no space left on device");
+    await type("three ");
+    for (const id of ["app.editor.download", "app.editor.exportPdf"]) {
+      ui.status = null;
+      press(id);
+      await vi.waitFor(() =>
+        expect(ui.status, id).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+      );
+    }
+    // The autosave may try the save once more while the tab stays unsaved.
+    expect(seen.slice(0, 2), "each press tried the save").toEqual([
+      "write three two one # Plan",
+      "write three two one # Plan",
+    ]);
+    expect(seen.filter((entry) => !entry.startsWith("write ")), "nothing was sent").toEqual([]);
+  });
+
   test("a workspace draft that is not Markdown offers Download alone", async () => {
     const tab = seat(
       fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
