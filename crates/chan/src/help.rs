@@ -882,10 +882,10 @@ each path; one that does not is reported (chan-desktop did not answer)
 and the rest are not sent. With no desktop running, the desktop's own
 `chan-files` and `chan-edit` start it with the paths; the standalone
 chan CLI says no desktop is running and exits 1. So does
-CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login or
-no DISPLAY or WAYLAND_DISPLAY). A path that cannot be opened is
-reported, in argument order, and the rest still open; the exit status is
-then 1.
+CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login,
+or off macOS no DISPLAY or WAYLAND_DISPLAY). A path that cannot be
+opened is reported, in argument order, and the rest still open; the exit
+status is then 1.
 "#;
 
 /// `chan-files` / `chan-edit` examples.
@@ -938,10 +938,11 @@ and its first window is that terminal. Such a launch exits 1 with the
 reason and opens nothing, from Chan Desktop's chan-term too, when the
 running desktop refuses the window or does not answer (chan-desktop did
 not answer), with CHAN_NO_DESKTOP_HANDOFF set, and in a session with no
-display (an SSH login, or no DISPLAY or WAYLAND_DISPLAY). A launch with
-a command, --hold, --app-id or --title is one window in a process of
-its own, which ends when the window closes; it exits with the command's
-status, and with 127 and no window when the command is not found.
+display (an SSH login, or off macOS no DISPLAY or WAYLAND_DISPLAY). A
+launch with a command, --hold, --app-id or --title is one window in a
+process of its own, which ends when the window closes; it exits with the
+command's status, and with 127 and no window when the command is not
+found.
 
 The standalone chan CLI cannot open a window or start a desktop, so its
 chan-term only asks a running chan-desktop for that shell window. It

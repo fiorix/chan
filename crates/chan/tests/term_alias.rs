@@ -305,7 +305,8 @@ fn a_desktop_that_refuses_is_reported() {
 /// `CHAN_NO_DESKTOP_HANDOFF` and a headless session each stop the request
 /// before anything is sent, and say which stopped it. An SSH login is
 /// headless everywhere; a session with no `DISPLAY` or `WAYLAND_DISPLAY` is
-/// headless everywhere but macOS, where the check reads neither.
+/// headless everywhere but macOS, where the check reads neither and the
+/// refusal names neither.
 #[test]
 fn the_handoff_opt_out_and_a_headless_session_refuse_before_sending() {
     let f = fixture();
@@ -321,8 +322,15 @@ fn the_handoff_opt_out_and_a_headless_session_refuse_before_sending() {
         "Error: CHAN_NO_DESKTOP_HANDOFF is set, so chan-term asks chan-desktop for no window; \
          unset CHAN_NO_DESKTOP_HANDOFF\n"
     );
-    let headless = "Error: chan-term opens its window in chan-desktop, and this session has no \
-                    display (an SSH login, or no DISPLAY or WAYLAND_DISPLAY)\n";
+    let headless = format!(
+        "Error: chan-term opens its window in chan-desktop, and this session has no display \
+         ({})\n",
+        if cfg!(target_os = "macos") {
+            "an SSH login"
+        } else {
+            "an SSH login, or no DISPLAY or WAYLAND_DISPLAY"
+        }
+    );
     let ssh = f
         .term(&[])
         .env("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 50000")
