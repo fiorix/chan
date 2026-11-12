@@ -1704,9 +1704,11 @@ describe("the way to every computer", () => {
   test("the Computers scope ends with All computers... where the window's app has that screen", async () => {
     const target = openBeside(vi.fn());
     await flush();
-    expect(titles(target), "the list of every scope holds the ways in alone").toEqual([
-      "Search", "New terminal window", "Workspaces", "Windows",
+    // The list of every scope ends with it too, a fourth row under Computers.
+    expect(titles(target)).toEqual([
+      "Search", "New terminal window", "Workspaces", "Windows", "All computers...",
     ]);
+    expect(sectionTitles(target)).toEqual(["Window", "Computers"]);
     await openComputers(target);
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New", "Chan Desktop"]);
     expect(titles(target)).toEqual([
@@ -1717,10 +1719,23 @@ describe("the way to every computer", () => {
     expect(titles(target)).not.toContain("All computers...");
   });
 
+  test("the row that ends the list of every scope shows that screen, with nothing to search for", async () => {
+    const show = vi.fn();
+    const target = openBeside(show);
+    await flush();
+    await selectRow(target, "All computers...");
+    expect(titles(target).at(-1)).toBe(selectedTitle(target));
+    await key(target, "Enter");
+    await flush();
+    expect(show).toHaveBeenCalledExactlyOnceWith("");
+    expect(launcherPanel.open).toBe(false);
+    expect([launcherDraft.scope, launcherDraft.path, launcherDraft.query]).toEqual([null, [], ""]);
+  });
+
   test("a window whose app has no such screen lists no such row", async () => {
     const target = openLauncher();
     await flush();
-    expect(titles(target)).not.toContain("All computers...");
+    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
     await openComputers(target);
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New"]);
     await typeQuery(target, "geekom");

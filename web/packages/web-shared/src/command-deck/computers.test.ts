@@ -347,7 +347,9 @@ describe("Select", () => {
 });
 
 describe("Theme", () => {
-  it("is a choice that names the current theme and opens the themes", () => {
+  const themed = (theme: "system" | "light" | "dark"): ComputersModel => desktopModel({ desktop: { theme } });
+
+  it("is a choice that names the choice made and opens the themes", () => {
     const theme = row(build(desktopModel()), "Theme");
     expect([theme.section, theme.kind, theme.value, theme.next]).toEqual([
       "Chan Desktop",
@@ -356,49 +358,59 @@ describe("Theme", () => {
       ["app:theme"],
     ]);
     expect(theme.run).toBeUndefined();
-    expect(row(build(desktopModel({ desktop: { theme: "light" } })), "Theme").value).toBe("Light");
+    expect(row(build(themed("light")), "Theme").value).toBe("Light");
+    // The choice, whichever theme the system resolves it to.
+    expect(row(build(themed("system")), "Theme").value).toBe("System");
   });
 
-  it("lists the themes with a check on the current one, in the Settings words and order", () => {
+  it("lists System, Light and Dark, the Settings words and order, with a check on the choice", () => {
     const deck = build(desktopModel(), { path: ["app:theme"] });
     expect(deck.entries.map((entry) => [entry.title, entry.checked])).toEqual([
+      ["System", false],
       ["Light", false],
       ["Dark", true],
     ]);
     expect([deck.path, deck.crumbs, deck.title]).toEqual([["app:theme"], ["Theme"], "Theme"]);
     expect(deck.entries.every((entry) => entry.breadcrumb === "Chan Desktop › Theme")).toBe(true);
-    const light = build(desktopModel({ desktop: { theme: "light" } }), { path: ["app:theme"] });
-    expect(light.entries.map((entry) => entry.checked)).toEqual([true, false]);
+    const checks = (theme: "system" | "light" | "dark"): unknown[] =>
+      build(themed(theme), { path: ["app:theme"] }).entries.map((entry) => entry.checked);
+    expect(checks("light")).toEqual([false, true, false]);
+    expect(checks("system")).toEqual([true, false, false]);
   });
 
-  it("switches in place: the row carries its theme to the bridge and keeps the deck open", async () => {
+  it("switches in place: the row carries its choice to the bridge and keeps the deck open", async () => {
     const { ctx, commands } = harness();
     const deck = build(desktopModel(), { path: ["app:theme"] }, ctx);
     const light = row(deck, "Light");
     expect([light.stays, light.awaitResult, light.confirm]).toEqual([true, undefined, undefined]);
     await light.run?.();
     await row(deck, "Dark").run?.();
+    await row(deck, "System").run?.();
     expect(commands).toEqual([
       { target: "app", action: "theme", theme: "light" },
       { target: "app", action: "theme", theme: "dark" },
+      { target: "app", action: "theme", theme: "system" },
     ]);
   });
 
-  it("is one step away in a typed list, each theme a row that reads alone", async () => {
+  it("is one step away in a typed list, each choice a row that reads alone", async () => {
     const { ctx, commands } = harness();
     const typed = build(desktopModel(), { query: "x" }, ctx);
     expect(titles(typed).filter((title) => title.startsWith("Theme"))).toEqual([
       "Theme",
+      "Theme: System",
       "Theme: Light",
       "Theme: Dark",
     ]);
     const light = row(typed, "Theme: Light");
     expect([light.breadcrumb, light.checked, light.stays]).toEqual(["Chan Desktop", false, true]);
     expect(row(typed, "Theme: Dark").checked).toBe(true);
+    expect(row(typed, "Theme: System").checked).toBe(false);
     // The words the row had before it was a choice still find it.
     expect(light.searchText).toContain("switch to light theme");
-    await light.run?.();
-    expect(commands).toEqual([{ target: "app", action: "theme", theme: "light" }]);
+    expect(row(typed, "Theme: System").searchText).toContain("follow os");
+    await row(typed, "Theme: System").run?.();
+    expect(commands).toEqual([{ target: "app", action: "theme", theme: "system" }]);
   });
 
   it("has no row and no page where the host is not the desktop", () => {
@@ -1269,7 +1281,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
 
   function points(
     machine: Partial<ComputersMachine>,
-    may: ComputersMay = { terminal: true, window: true, allComputers: true },
+    may: ComputersMay = { terminal: true, window: true },
   ): { rows: ComputersEntry[]; commands: ComputersCommand[]; model: ComputersModel; ctx: ComputersContext } {
     const { ctx: bare, commands } = harness();
     const ctx = { ...bare, scopes, terminalTitle: "New terminal window" };
@@ -1291,6 +1303,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
     ]);
     expect(rows.every((entry) => entry.scope === "computers" && entry.breadcrumb === "Computers")).toBe(true);
     expect(new Set(rows.map((entry) => entry.id)).size).toBe(3);
+    expect(rows.filter((entry) => entry.pinned || entry.expandable), "none of the tree's objects").toEqual([]);
   });
 
   it("run the terminal in one step and open each type's page as a branch", async () => {
@@ -1328,9 +1341,24 @@ describe("the ways into the tree, for a list that holds other things", () => {
     expect(points(full, { window: true }).rows.map((entry) => entry.title)).toEqual(["Workspaces", "Windows"]);
   });
 
-  it("hold neither the tree's objects nor the way to every computer", () => {
-    const { rows } = points(full);
-    expect(rows.filter((entry) => entry.pinned || entry.expandable)).toEqual([]);
+  it("end with the way to every computer where the host has that screen, and only there", async () => {
+    const { rows, commands, model, ctx } = points(full, { terminal: true, window: true, allComputers: true });
+    expect(rows.map((entry) => `${entry.section}: ${entry.title}`)).toEqual([
+      "Computers: New terminal window",
+      "Computers: Workspaces",
+      "Computers: Windows",
+      "Computers: All computers...",
+    ]);
+    const all = rows[3];
+    // The same row that ends the tree's root: it leaves as it starts.
+    const inTree = row(build(model, {}, ctx), "All computers...");
+    expect([all.id, all.pinned, all.awaitResult, all.next]).toEqual([inTree.id, true, false, undefined]);
+    expect([all.breadcrumb, all.scope]).toEqual(["Computers", "computers"]);
+    await all.run?.();
+    expect(commands).toEqual([{ target: "app", action: "all-computers" }]);
+    // It stands where there is nothing else to list, too.
+    expect(points({}, { allComputers: true }).rows.map((entry) => entry.title)).toEqual(["All computers..."]);
+    expect(points(full).rows.map((entry) => entry.title)).not.toContain("All computers...");
   });
 });
 

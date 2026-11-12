@@ -160,12 +160,14 @@ export interface ComputersMay {
   allComputers?: boolean;
 }
 
-/** The themes a Computers screen switches between. */
-export type ComputersTheme = "light" | "dark";
+/** What a Computers screen's theme may be set to: the system's preference,
+ * or one theme whatever the system prefers. */
+export type ComputersTheme = "system" | "light" | "dark";
 
 /** Chan Desktop, where it is the app that hosts the Computers screen: it has
  * commands of its own. */
 export interface ComputersDesktop {
+  /** The choice made, which is not the theme showing while it is `system`. */
   theme: ComputersTheme;
 }
 
@@ -266,6 +268,7 @@ export type ComputersIconName =
   | "card"
   | "copy"
   | "add"
+  | "system"
   | "light"
   | "dark"
   | "select"
@@ -383,9 +386,14 @@ const FILTER_ICON: Record<ComputersFilter, ComputersIconName> = {
   gateways: "gateway",
 };
 
-// The words the window's Settings uses for the same themes, in its order.
-const THEME_WORDS: Record<ComputersTheme, string> = { light: "Light", dark: "Dark" };
-const THEMES: readonly ComputersTheme[] = ["light", "dark"];
+// The words the window's Settings uses for the same choices, in its order.
+// `keywords` are other words a query may use for one; no row shows them.
+const THEMES: readonly ComputersTheme[] = ["system", "light", "dark"];
+const THEME_WORDS: Record<ComputersTheme, { label: string; keywords: string }> = {
+  system: { label: "System", keywords: "follow os automatic default" },
+  light: { label: "Light", keywords: "switch to light theme" },
+  dark: { label: "Dark", keywords: "switch to dark theme" },
+};
 const THEME_TITLE = "Theme";
 
 // Path parts that name a page with no object behind it: every object of one
@@ -1112,18 +1120,19 @@ function createEntries(b: Builder, section?: string): Created[] {
   return rows;
 }
 
-/** The themes as rows, the current one checked. Choosing one keeps the deck
- * open on the list. A `leaf` is titled to read alone in a ranked list. */
+/** The theme choices as rows, the current one checked. Choosing one keeps
+ * the deck open on the list. A `leaf` is titled to read alone in a ranked
+ * list. */
 function themeOptionEntries(b: Builder, desktop: ComputersDesktop, leaf: boolean): ComputersEntry[] {
   return THEMES.map((theme) => {
-    const word = THEME_WORDS[theme];
+    const { label, keywords } = THEME_WORDS[theme];
     return {
       id: `computers:theme:${theme}`,
-      title: leaf ? `${THEME_TITLE}: ${word}` : word,
+      title: leaf ? `${THEME_TITLE}: ${label}` : label,
       breadcrumb: leaf
         ? COMPUTERS_SECTIONS.desktop
         : `${COMPUTERS_SECTIONS.desktop} › ${THEME_TITLE}`,
-      searchText: `${THEME_TITLE} ${word} appearance switch to ${theme} theme`,
+      searchText: `${THEME_TITLE} ${label} appearance ${keywords}`,
       scope: b.scopes.machines,
       icon: b.ctx.icons[theme],
       checked: theme === desktop.theme,
@@ -1149,12 +1158,12 @@ function screenEntries(b: Builder, sectioned: boolean): ComputersEntry[] {
       id: "computers:theme",
       title: THEME_TITLE,
       breadcrumb: layout.breadcrumb,
-      searchText: searchText(THEME_TITLE, layout, "appearance light dark switch"),
+      searchText: searchText(THEME_TITLE, layout, "appearance system light dark switch"),
       scope: layout.scope,
       icon: b.ctx.icons[desktop.theme],
       section: layout.section,
       kind: "choice",
-      value: THEME_WORDS[desktop.theme],
+      value: THEME_WORDS[desktop.theme].label,
       next: [...b.base, THEME_PAGE],
     });
   }
@@ -1201,14 +1210,18 @@ function typeEntry(b: Builder, filter: ComputersFilter, section?: string): Compu
 }
 
 /** The way from a tree that holds one machine to the screen that holds every
- * one. */
-function allComputersEntries(b: Builder, section?: string): ComputersEntry[] {
+ * one. `breadcrumb` says where the row is listed from. */
+function allComputersEntries(
+  b: Builder,
+  section?: string,
+  breadcrumb: string = COMPUTERS_SECTIONS.desktop,
+): ComputersEntry[] {
   if (!b.model.may.allComputers) return [];
   const act: Act = {
     ...appAct(b, "all-computers", "All computers...", "every machine devserver gateway screen"),
     icon: "computers",
   };
-  const layout = { section, breadcrumb: COMPUTERS_SECTIONS.desktop, scope: b.scopes.machines };
+  const layout = { section, breadcrumb, scope: b.scopes.machines };
   return [{ ...actEntry(b, act, undefined, act.label, layout), pinned: true }];
 }
 
@@ -1491,7 +1504,8 @@ export function computersDeck(model: ComputersModel, view: ComputersView, ctx: C
 /** The ways into the tree, for a list that holds other things beside it and
  * has no room for the tree itself: a new terminal on this machine, which is
  * one step, then one row per type of object the model holds, which opens
- * that type's page. Each row carries the one heading they share. */
+ * that type's page, then the way to every computer where the host has one.
+ * Each row carries the one heading they share. */
 export function computersEntryPoints(model: ComputersModel, ctx: ComputersContext): ComputersEntry[] {
   const section = COMPUTERS_SECTIONS.machines;
   const b: Builder = { model, ctx, scopes: ctx.scopes ?? COMPUTERS_TYPE_SCOPES, base: [] };
@@ -1508,6 +1522,7 @@ export function computersEntryPoints(model: ComputersModel, ctx: ComputersContex
   }
   if (everyWorkspace(model).length > 0) rows.push(typeEntry(b, "workspaces", section));
   if (everyWindow(model).length > 0) rows.push(typeEntry(b, "windows", section));
+  rows.push(...allComputersEntries(b, section, section));
   return rows;
 }
 
