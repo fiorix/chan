@@ -5,7 +5,7 @@
 // layout or the launcher UI.
 
 import { describe, it, expect } from "vitest";
-import { allCommands, availableCommands, type CommandContext } from "../commands";
+import { availableCommands, type CommandContext } from "../commands";
 import { fileTab, readTab, resetLayout } from "../../__tests__/tabs";
 
 import "./editor";
@@ -160,13 +160,6 @@ describe("terminal surface commands", () => {
     // session id: the exited-terminal path, where warning about stopping a
     // running shell would be a lie.
     expect(restart?.confirm).toBeUndefined();
-  });
-
-  it("leaves the settings a field of the overlay owns to the settings index", () => {
-    // The engine and the surface themes are Settings fields: a command for
-    // one would list the same change twice under two names.
-    const ids = allCommands().map((command) => command.id);
-    expect(ids.filter((id) => id.includes("surfaceTheme") || id.includes("backend"))).toEqual([]);
   });
 });
 

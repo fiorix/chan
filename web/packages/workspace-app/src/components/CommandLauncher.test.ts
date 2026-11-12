@@ -1325,11 +1325,13 @@ describe("contextual command deck", () => {
   });
 
   test("Tab steps through the scopes this window offers", async () => {
+    showFlip = true;
     const target = openLauncher();
     await flush();
     // No tab is focused, so the App scope is skipped.
     await key(target, "Tab");
     expect(launcherDraft.scope).toBe("pane");
+    expect(titles(target)).toEqual(["Flip pane"]);
     await key(target, "Tab");
     expect(launcherDraft.scope).toBe("window");
     expect(titles(target)).toEqual(["Search"]);
