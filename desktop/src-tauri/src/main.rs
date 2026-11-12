@@ -690,7 +690,7 @@ impl DevserverFeed {
     /// `wait_for_devserver`'s `info` and mints the control row under it; without
     /// this seed, `library_id_of` returns `None` until a later window syncs the
     /// mapping, so the launcher cannot match the control row's `library_id` to this
-    /// devserver and groups it under a blank `↗` header. Seeding here makes
+    /// devserver and lists it apart, in a fallback block. Seeding here makes
     /// `entry_from_devserver` carry the real id from the FIRST render so the control
     /// row groups under its parent devserver immediately. Idempotent; a later
     /// snapshot read re-caches the same value.
@@ -2586,7 +2586,7 @@ async fn connect_devserver_impl_inner(
     state.devservers.set(id.clone(), conn.clone());
     // Seed this devserver's `library_id` into the launcher
     // feed BEFORE the control mint so the launcher resolves the control row's group
-    // to the devserver's NAME from the FIRST render, not a blank `↗`. Without it
+    // to the devserver's NAME from the FIRST render, not apart from it. Without it
     // `library_id_of` stays None until a window syncs the mapping, and the launcher
     // (which matches the control row's `library_id` against each devserver's
     // reported id) groups it separately. Non-empty only: `info.library_id` defaults
@@ -8299,7 +8299,7 @@ mod tests {
                 ("lib-a::w-a", "sdme Window 1"),
                 ("lib-a::w-c", "sdme Window 3"),
                 // The title it cannot read is composed from the record.
-                ("lib-a::w-f", "\u{2197}\u{FE0E} sdme Window 1"),
+                ("lib-a::w-f", "\u{2191}\u{FE0E} sdme Window 1"),
             ]),
             "every native window but the hidden ones, the OS's invisible one included",
         );
@@ -8347,7 +8347,7 @@ mod tests {
         let remote = record("lib-a", workspace, Some("/home/u/chan"));
         assert_eq!(
             record_menu_title(&remote, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom / chan Window 1 [notes]"
+            "\u{2191}\u{FE0E} geekom / chan Window 1 [notes]"
         );
         assert_eq!(record_menu_title(&remote, None), "chan Window 1 [notes]");
         let mut control = record("lib-a", chan_server::WindowKind::Terminal, None);
@@ -9870,7 +9870,7 @@ mod tests {
         // window snapshot exists. Seeding it must make `library_id_of` resolve
         // immediately so the launcher's `DevserverEntry` carries the real id from
         // the FIRST render and groups the control row under its parent devserver  --
-        // instead of a blank `↗` until a later window syncs the mapping.
+        // instead of apart from it until a later window syncs the mapping.
         let feed = DevserverFeed::default();
         // No window snapshot yet → unresolvable without the seed.
         assert_eq!(feed.library_id_of("ds-1"), None);
