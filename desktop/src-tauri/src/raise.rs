@@ -106,7 +106,9 @@ fn settle_for(platform: Platform, was_minimized: bool) -> Settle {
 }
 
 /// Unhide a hidden app, make `window` key and activate the app, on the main
-/// thread. `activateIgnoringOtherApps:` is the call tao's `set_focus` makes.
+/// thread; a window that can no longer be read by then asks for nothing, so
+/// the app is left as it is. `activateIgnoringOtherApps:` is the call tao's
+/// `set_focus` makes.
 /// macOS 14 deprecates it for a cooperative `activate`, which the system may
 /// decline while another app is active, as one is when a second launch asks
 /// chan to come forward.
@@ -119,18 +121,20 @@ fn activate_app(window: &WebviewWindow) {
         let Some(mtm) = objc2::MainThreadMarker::new() else {
             return;
         };
+        let Ok(ns_window) = target.ns_window() else {
+            return;
+        };
+        // SAFETY: on the main thread (the marker above), and `ns_window` is
+        // the live NSWindow Tauri owns for this window, borrowed for this
+        // call.
+        let Some(ns_window) = (unsafe { ns_window.cast::<NSWindow>().as_ref() }) else {
+            return;
+        };
         let app = NSApplication::sharedApplication(mtm);
         if app.isHidden() {
             app.unhideWithoutActivation();
         }
-        if let Ok(ns_window) = target.ns_window() {
-            // SAFETY: on the main thread (the marker above), and `ns_window`
-            // is the live NSWindow Tauri owns for this window, borrowed for
-            // this call.
-            if let Some(ns_window) = unsafe { ns_window.cast::<NSWindow>().as_ref() } {
-                ns_window.makeKeyAndOrderFront(None);
-            }
-        }
+        ns_window.makeKeyAndOrderFront(None);
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
     });
@@ -408,8 +412,9 @@ mod tests {
     }
 
     /// A source pin of the macOS settle, read on every host: it runs on the
-    /// main thread, unhides the app before it keys the window, and activates
-    /// the app last, as `set_focus` keys before it activates.
+    /// main thread, does nothing for a window that can no longer be read,
+    /// unhides the app before it keys the window, and activates the app last,
+    /// as `set_focus` keys before it activates.
     #[test]
     fn the_app_is_unhidden_then_the_window_keyed_then_the_app_activated() {
         let activate = body(production(include_str!("raise.rs")), "\nfn activate_app(");
@@ -418,6 +423,8 @@ mod tests {
             &[
                 "window.run_on_main_thread(move || {",
                 "objc2::MainThreadMarker::new()",
+                "let Ok(ns_window) = target.ns_window() else {\n            return;\n        };",
+                "let Some(ns_window) = (unsafe { ns_window.cast::<NSWindow>().as_ref() }) else {\n            return;\n        };",
                 "if app.isHidden() {",
                 "app.unhideWithoutActivation();",
                 "ns_window.makeKeyAndOrderFront(None);",
