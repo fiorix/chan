@@ -246,13 +246,15 @@ registerCommands([
   {
     // The terminal's own find bar, under the id whose chord opens it from a
     // focused terminal. The page's find command opens the same bar when the
-    // desktop sends it; the terminal's row is this one.
+    // desktop sends it; the terminal's row is this one. It takes the order
+    // the editor's Find holds, so the find steps the editor's module lists
+    // on both tabs, just past that order, follow it here too.
     id: "terminal.find",
     title: "Find",
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 7,
+    order: 8,
     kind: "open",
     requirement: "terminal",
     keywords: ["Find in terminal", "search", "find bar", "scrollback"],
@@ -269,7 +271,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 8,
+    order: 9,
     requirement: "terminal",
     keywords: ["Copy selection", "clipboard", "selection", "scrollback"],
     available: onTerminal,
@@ -281,7 +283,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 9,
+    order: 10,
     requirement: "terminal",
     keywords: ["clipboard", "insert"],
     available: onTerminal,
@@ -293,7 +295,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 10,
+    order: 11,
     requirement: "terminal",
     keywords: ["clipboard", "history", "output", "buffer"],
     available: onTerminal,
@@ -305,7 +307,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 11,
+    order: 12,
     kind: "toggle",
     // Rich Prompt drafts into the tenant's drafts store.
     requirement: "drafts",
@@ -320,7 +322,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 12,
+    order: 13,
     kind: "toggle",
     // The toolbar lives in the Rich Prompt, so the command is offered only
     // while the active terminal shows it.

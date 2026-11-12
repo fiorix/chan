@@ -107,6 +107,17 @@ describe("the terminal body menu's commands", () => {
   });
 });
 
+describe("the terminal's Find", () => {
+  // The editor's module lists Find next and Find previous on a terminal tab
+  // too, at orders just past its own Find's. The terminal's Find holds that
+  // same order, with a whole step before Copy, so the steps follow it.
+  test("sits where the editor's Find does, a whole step ahead of Copy", () => {
+    const find = command("terminal.find").order!;
+    expect(find).toBe(command("app.find.open").order);
+    expect(command("terminal.copy").order! - find).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("the terminal's commands", () => {
   test("are listed in the order its menus offer them: the tab menu's rows, then the body menu's", () => {
     const ordered = allCommands()
