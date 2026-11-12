@@ -13,9 +13,11 @@ import { fileTab, terminalTab } from "../__tests__/tabs";
 import { closePaneTree, openPaneTree, paneTree, PANE_TREE_ANCHOR_ATTR } from "../state/paneTree.svelte";
 import type { ProgramStatusRecord } from "../state/programStatus";
 import {
+  allTerminalTabs,
   applyTerminalRoster,
   layout,
   paneMode,
+  setTerminalTmuxPane,
   tabFocusPulse,
   type LeafNode,
   type Node,
@@ -193,6 +195,17 @@ describe("rendering", () => {
     expect(rowTitles()).toEqual(["Shell", "plan.md", "Logs", "Build"]);
     expect(rows().map((row) => row.querySelector(".kind")!.textContent)).toEqual(["Terminal", "Editor", "Terminal", "Terminal"]);
     expect(document.querySelectorAll(".side-empty"), "the right pane's empty side B").toHaveLength(1);
+  });
+
+  test("a pane's head shows where the pane sits and its number, and the tab it shows is named on its row alone", async () => {
+    await open();
+    const heads = [...document.querySelectorAll<HTMLElement>(".pane-head")];
+    expect(heads.map((head) => head.textContent!.replace(/\s+/g, " ").trim())).toEqual(["Pane 1", "Pane 2"]);
+    expect(heads.map((head) => head.querySelectorAll(".glyph rect.on").length)).toEqual([1, 1]);
+    // The left pane shows Shell and the right one Build, each named once.
+    const text = panel()!.textContent!;
+    expect(text.split("Shell").length - 1).toBe(1);
+    expect(text.split("Build").length - 1).toBe(1);
   });
 
   test("marks the current tab, each side's active tab and a tab's program status", async () => {
@@ -397,8 +410,17 @@ describe("a tmux window", () => {
     onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "window_labeled", label: name });
   }
 
+  /// The name of the tab each pane shows, as its group's accessible name
+  /// carries it.
   function paneLabels(): string[] {
-    return [...document.querySelectorAll(".pane-label")].map((label) => label.textContent!.trim());
+    return [...document.querySelectorAll('.list > [role="group"]')].map((group) =>
+      group.getAttribute("aria-label")!.replace(/^Pane \d+: /, "").replace(/, active$/, ""),
+    );
+  }
+
+  /// What each pane's head shows.
+  function paneHeads(): string[] {
+    return [...document.querySelectorAll(".pane-head")].map((head) => head.textContent!.replace(/\s+/g, " ").trim());
   }
 
   test("each row shows what tmux calls its pane, and a window rename moves the window's name alone", async () => {
@@ -412,6 +434,7 @@ describe("a tmux window", () => {
     expect(windowName()).toBe("Terminal Window 3 [bash]");
     expect(rowTitles()).toEqual(["bash", "top"]);
     expect(paneLabels()).toEqual(["bash", "top"]);
+    expect(paneHeads(), "each name shows once, on its pane's row").toEqual(["Pane 1", "Pane 2"]);
 
     hearWindowRename("top");
     await vi.waitFor(() => expect(windowName()).toBe("Terminal Window 3 [top]"));
@@ -451,6 +474,55 @@ describe("a tmux window", () => {
     windowTabBar.on = true;
     await open();
     expect(rowTitles()).toEqual(["tmux %0", "tmux %1"]);
+  });
+
+  // The layout and the roster a page received for a tmux -CC window of three
+  // panes, bash on the left and bash over top on the right, whose bash titled
+  // each pane root@host:~ at every prompt, recorded from a devserver in a
+  // test guest. The roster names each pane by its command.
+  const RECORDED_LAYOUT = {
+    children: [
+      { h: 33, kind: "pane", session: "ff20bf160dba56fa7423ab57e04d13d5", w: 70 },
+      {
+        children: [
+          { h: 16, kind: "pane", session: "a1dfeb9421a1451ccc81e4a65de4e550", w: 83 },
+          { h: 16, kind: "pane", session: "c808adc3359fd80a74297804d349f834", w: 83 },
+        ],
+        h: 33,
+        kind: "column",
+        w: 83,
+      },
+    ],
+    h: 33,
+    kind: "row",
+    w: 154,
+  };
+  const RECORDED_ROSTER = [
+    { id: "c808adc3359fd80a74297804d349f834", tab_name: "top", tmux_name: "top", tab_group: "tmux", window_id: "w-89092b6343df86de", window_live: true, broadcast: false },
+    { id: "ff20bf160dba56fa7423ab57e04d13d5", tab_name: "bash", tmux_name: "bash", tab_group: "tmux", window_id: "w-89092b6343df86de", window_live: true, broadcast: false },
+    { id: "87d0117470aa9d688bc3a2951b83091d", tab_name: "Terminal-1", tab_group: "default", window_id: "w-fb03896a7a6676d7", window_live: false, broadcast: false },
+    { id: "a1dfeb9421a1451ccc81e4a65de4e550", tab_name: "bash-2", tmux_name: "bash", tab_group: "tmux", window_id: "w-89092b6343df86de", window_live: true, broadcast: false },
+  ];
+  // Which tmux pane each session shows, as each terminal's session frame says.
+  const RECORDED_PANES: Record<string, string> = {
+    ff20bf160dba56fa7423ab57e04d13d5: "%0",
+    a1dfeb9421a1451ccc81e4a65de4e550: "%1",
+    c808adc3359fd80a74297804d349f834: "%2",
+  };
+
+  test("a window laid out and named as the server sends it: each head its place and number, each row its pane's command", async () => {
+    // The frame names the window it is for; here, this page's.
+    onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "tmux_layout", layout: RECORDED_LAYOUT });
+    for (const tab of allTerminalTabs()) {
+      const pane = tab.terminalSessionId ? RECORDED_PANES[tab.terminalSessionId] : undefined;
+      if (pane) setTerminalTmuxPane(tab, { connection: 1, pane });
+    }
+    onWatchEvent({ type: "terminal_roster", sessions: RECORDED_ROSTER });
+    windowTabBar.on = true;
+    await open();
+    expect(paneHeads()).toEqual(["Pane 1", "Pane 2", "Pane 3"]);
+    expect(rowTitles()).toEqual(["bash", "bash", "top"]);
+    expect(paneLabels()).toEqual(["bash", "bash", "top"]);
   });
 
   test("a window rename before the first read shows at that read", async () => {

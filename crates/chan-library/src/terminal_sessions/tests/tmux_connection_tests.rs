@@ -732,24 +732,20 @@ fn panes_tmux_calls_the_same_show_that_name_and_differ_only_in_tab_name() {
     assert_eq!(rig.shown_name(&second), "bash");
 }
 
-/// The name is the pane's title, and its foreground command while the title
-/// is the one tmux gave it or is empty; a title outlives the program that
-/// set it. With neither, the pane reads as its id again.
+/// The name is the pane's foreground command, whatever title the pane has:
+/// the one tmux gave it, one a shell sets at every prompt, one a program
+/// set, or none. With no command the pane reads as its id again.
 #[test]
-fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_title() {
+fn a_pane_is_named_by_its_command_whatever_its_title() {
     let (mut rig, pane) = attached();
     for (line, name) in [
         (pane_name(0, "bash", None), "bash"),
-        (pane_name(0, "vim", None), "vim"),
-        (
-            pane_name(0, "vim", Some("notes.md - vim")),
-            "notes.md - vim",
-        ),
-        (
-            pane_name(0, "bash", Some("notes.md - vim")),
-            "notes.md - vim",
-        ),
+        (pane_name(0, "bash", Some("user@devbox:~/src")), "bash"),
+        (pane_name(0, "top", Some("user@devbox:~/src")), "top"),
+        (pane_name(0, "vim", Some("notes.md - vim")), "vim"),
+        (pane_name(0, "bash", Some("notes.md - vim")), "bash"),
         (pane_name(0, "bash", Some("")), "bash"),
+        (pane_name(0, "", Some("a title")), "tmux %0"),
         (pane_name(0, "", Some("")), "tmux %0"),
         (pane_name(0, "", None), "tmux %0"),
         (pane_name(0, "top", None), "top"),
@@ -764,11 +760,67 @@ fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_title() {
             "a name leaves the group"
         );
     }
-    // A title longer than a terminal's name may be is cut to that bound.
+    // A command longer than a terminal's name may be is cut to that bound.
     let long = "n".repeat(300);
-    rig.feed(&pane_name(0, "bash", Some(&long)));
+    rig.feed(&pane_name(0, &long, Some("a title")));
     rig.work();
     assert_eq!(tab_name(&pane), "n".repeat(128));
+}
+
+/// What tmux 3.6 sent while bash titled each pane `user@host:dir` at every
+/// prompt, as Arch's bash.bashrc does in a tmux terminal, and one pane ran
+/// top under that title: the subscription and rename lines of
+/// `fixtures/tmux-control/15-shell-titles.raw`, in order. Each pane reads as
+/// its command, the one running top as `top`, never as the shell's title,
+/// while tmux names the window after its active pane's command.
+#[test]
+fn a_pane_a_shell_titles_reads_as_its_command() {
+    let (mut rig, shell) = attached();
+    rig.feed(
+        b"%layout-change @0 8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} \
+8205,80x24,0,0{40x24,0,0,0,39x24,41,0,1} *\r\n",
+    );
+    rig.work();
+    let other = rig.pane(1);
+    let steps: [(&[u8], &str, &str); 5] = [
+        (
+            b"%subscription-changed chan-pane-name $0 @0 0 %0 : 0 4 13 bash user@tmuxvm:~\r\n",
+            "bash",
+            "tmux %1",
+        ),
+        (
+            b"%window-renamed @0 tmux\r\n\
+%subscription-changed chan-pane-name $0 @0 0 %1 : 0 4 13 bash user@tmuxvm:~\r\n\
+%window-renamed @0 bash\r\n",
+            "bash",
+            "bash",
+        ),
+        (
+            b"%subscription-changed chan-pane-name $0 @0 0 %1 : 0 3 13 top user@tmuxvm:~\r\n\
+%window-renamed @0 top\r\n",
+            "bash",
+            "top",
+        ),
+        (
+            b"%subscription-changed chan-pane-name $0 @0 0 %0 : 0 4 16 bash user@tmuxvm:/tmp\r\n",
+            "bash",
+            "top",
+        ),
+        (
+            b"%subscription-changed chan-pane-name $0 @0 0 %1 : 0 4 13 bash user@tmuxvm:~\r\n\
+%window-renamed @0 bash\r\n",
+            "bash",
+            "bash",
+        ),
+    ];
+    for (lines, first, second) in steps {
+        rig.feed(lines);
+        rig.work();
+        let step = String::from_utf8_lossy(lines);
+        assert_eq!(rig.shown_name(&shell), first, "{step}");
+        assert_eq!(rig.shown_name(&other), second, "{step}");
+    }
+    assert_eq!(tab_name(&other), "bash-2", "tab names stay unique");
 }
 
 #[test]
@@ -1241,12 +1293,12 @@ fn names_reported_before_the_pane_session_exists_reach_the_window_and_the_sessio
     // while the registry has not made the pane's session.
     let list = added_window_list(&mut rig, "zsh");
     rig.feed(&list);
-    rig.feed(&pane_name(5, "zsh", Some("notes")));
+    rig.feed(&pane_name(5, "vim", Some("notes")));
     rig.work();
     rig.work();
     let pane = rig.pane(5);
-    assert_eq!(tab_name(&pane), "notes");
-    assert_eq!(rig.shown_name(&pane), "notes");
+    assert_eq!(tab_name(&pane), "vim");
+    assert_eq!(rig.shown_name(&pane), "vim");
     assert_eq!(pane.live_metadata().group, "tmux");
     assert!(calls(&hook).iter().any(|c| c == "label w-2 zsh"));
 }

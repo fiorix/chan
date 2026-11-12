@@ -405,8 +405,8 @@ fn against_a_real_tmux() {
 }
 
 /// The pane names subscription against a real tmux: what a pane is called
-/// when it is new, when a program titles it, when the program is gone, and
-/// what a window's rename and a hostile command name do.
+/// when it is new, when a shell or a program titles it, when a program runs
+/// and is gone, and what a window's rename and a hostile command name do.
 #[test]
 fn pane_names_against_a_real_tmux() {
     let Ok(bin) = std::env::var("CHAN_TMUX_BIN") else {
@@ -437,28 +437,29 @@ fn pane_names_against_a_real_tmux() {
     let second = PaneId::parse(&second).unwrap();
     t.wait_name(second, "sh");
 
-    // A program titles its pane (OSC 2): that pane takes the title and the
-    // other pane of the window keeps its own name.
-    t.type_into(second, b"printf '\\033]2;build log\\007'\r");
-    t.wait_name(second, "build log");
-    assert_eq!(t.names_of(first).last().unwrap(), "sh");
-
-    // The title outlives the program that set it, and a command run under it
-    // does not replace it. OSC 0 sets it as OSC 2 does.
+    // The pane is titled as a shell titles it at every prompt (OSC 0), then
+    // runs a program under that title, which leaves it standing: the pane
+    // reads as the command in front, the program and then the shell again,
+    // and never as the title. Neither does a title set with OSC 2.
     t.type_into(
         second,
-        b"sh -c \"printf '\\033]0;left by a program\\007'\"; sleep 2\r",
+        b"printf '\\033]0;user@devbox:~/src\\007'; sleep 2\r",
     );
-    t.wait_name(second, "left by a program");
-    t.settle(Duration::from_millis(3200));
-    assert_eq!(t.names_of(second).last().unwrap(), "left by a program");
-
-    // An emptied title names nothing: the command does again.
-    t.type_into(second, b"printf '\\033]2;\\007'\r");
+    t.wait_name(second, "sleep");
     t.wait_name(second, "sh");
+    t.type_into(second, b"printf '\\033]2;build log\\007'\r");
+    t.settle(Duration::from_millis(2200));
+    assert!(
+        t.names_of(second)
+            .iter()
+            .all(|name| name == "sh" || name == "sleep"),
+        "a title names no pane: {:?}",
+        t.names_of(second)
+    );
+    // The other pane of the window keeps its own name.
+    assert_eq!(t.names_of(first).last().unwrap(), "sh");
 
-    // Under the default title the name follows the foreground command, there
-    // and back.
+    // The name follows the foreground command, there and back.
     t.type_into(first, b"sleep 2\r");
     t.wait_name(first, "sleep");
     t.wait_name(first, "sh");

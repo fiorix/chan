@@ -1,4 +1,5 @@
-//! Replays the captures in `fixtures/tmux-control/` (real tmux 3.8 output).
+//! Replays the captures in `fixtures/tmux-control/` (real tmux 3.8 output,
+//! and 3.6 where a test says so).
 
 use chan_tmux::{
     parse_layout, parse_message, Client, Command, Decoder, Event, Expect, Frame, Kind, Limits,
@@ -213,31 +214,63 @@ fn notifications_of_a_layout_session() {
     assert!(matches!(msgs[0], Message::SessionsChanged));
 }
 
-/// Two panes of one window as tmux 3.8 reported them: each under the title
-/// tmux gave it, then one with a title a program set and with that title
-/// emptied. The window's rename in between names no pane.
-#[test]
-fn pane_names_of_a_split_window() {
-    let msgs = messages("14-pane-names.raw");
-    let names: Vec<(PaneId, &str)> = msgs
-        .iter()
+/// The pane names a capture's subscription lines carry, in order.
+fn pane_names(msgs: &[Message]) -> Vec<(PaneId, &str)> {
+    msgs.iter()
         .filter_map(|m| match m {
             Message::PaneName { pane, name } => Some((*pane, name.as_str())),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+/// Two panes of one window as tmux 3.8 reported them: each under the title
+/// tmux gave it, then one with a title a program set and with that title
+/// emptied, each line naming the pane by its command. The window's rename
+/// in between names no pane.
+#[test]
+fn pane_names_of_a_split_window() {
+    let msgs = messages("14-pane-names.raw");
     assert_eq!(
-        names,
+        pane_names(&msgs),
         vec![
             (PaneId(0), "sh"),
             (PaneId(1), "sh"),
-            (PaneId(1), "build log"),
+            (PaneId(1), "sh"),
             (PaneId(1), "sh"),
         ]
     );
     assert!(msgs.contains(&Message::WindowRenamed {
         window: WindowId(0),
         name: "renamed".into()
+    }));
+    assert!(
+        !msgs.iter().any(|m| matches!(m, Message::Other { .. })),
+        "every notification of the capture is one the crate reads: {msgs:?}"
+    );
+}
+
+/// Two panes as tmux 3.6 reported them while bash titled each one
+/// `user@host:dir` at every prompt: the panes read as their commands, the
+/// one running top under the shell's title as `top`, and never as the
+/// title, as tmux's own rename names the window after the active pane's
+/// command.
+#[test]
+fn pane_names_under_a_shell_that_titles_its_panes() {
+    let msgs = messages("15-shell-titles.raw");
+    assert_eq!(
+        pane_names(&msgs),
+        vec![
+            (PaneId(0), "bash"),
+            (PaneId(1), "bash"),
+            (PaneId(1), "top"),
+            (PaneId(0), "bash"),
+            (PaneId(1), "bash"),
+        ]
+    );
+    assert!(msgs.contains(&Message::WindowRenamed {
+        window: WindowId(0),
+        name: "top".into()
     }));
     assert!(
         !msgs.iter().any(|m| matches!(m, Message::Other { .. })),

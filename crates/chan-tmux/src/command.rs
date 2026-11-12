@@ -29,12 +29,13 @@ const LIST_PANES_FORMAT: &str = "#{pane_id} #{pane_active}";
 pub(crate) const PANE_NAMES_SUBSCRIPTION: &str = "chan-pane-name";
 // Whether the title is the one tmux gives a new pane (its host's name), the
 // byte lengths of the command's name and of the title, then the two texts.
-// Only tmux can tell a default title, since the host is its own. The lengths
-// are what lets the parser refuse a line a text cut short: a tmux as old as
-// 3.2 prints a foreground command's name as the process gave it, line breaks
-// included, so nothing but the text's own length vouches that the line holds
-// all of it. The parser picks between the texts, because a format cannot
-// state the length of a conditional's result.
+// The pane is named by its command alone; the title and its flag stay in
+// the line, which keeps the shape the recorded captures the tests replay
+// (tmux 3.2a, 3.6a and 3.8) hold, and the parser checks them with the rest.
+// The lengths are what lets the parser refuse a line a text cut short: a
+// tmux as old as 3.2 prints a foreground command's name as the process gave
+// it, line breaks included, so nothing but the text's own length vouches
+// that the line holds all of it.
 const PANE_NAMES_FORMAT: &str = "#{==:#{pane_title},#{host}} #{n:pane_current_command} #{n:pane_title} #{pane_current_command} #{pane_title}";
 const PANE_STATE_FORMAT: &str = "#{pane_id} #{cursor_x} #{cursor_y} #{pane_in_mode} #{alternate_on} #{scroll_region_upper} #{scroll_region_lower} #{pane_width} #{pane_height} #{history_size}";
 
@@ -85,7 +86,7 @@ pub enum Command {
     ListPanes(WindowId),
     /// Subscribe to the name of every pane in the attached session (tmux 3.2
     /// and later). tmux looks at the panes once a second and reports each
-    /// one first and whenever its name is another, as a
+    /// one first and whenever its command or its title is another, as a
     /// [`Message::PaneName`](crate::Message::PaneName); a pane that joins a
     /// window is reported again. No reply carries a name: a reply block ends
     /// on a line a program in a pane could write, and a notification is one

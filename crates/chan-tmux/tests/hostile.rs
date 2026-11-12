@@ -272,21 +272,38 @@ fn named(pane: u32, name: &str) -> Message {
 }
 
 #[test]
-fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_or_blank_title() {
-    // A title a program set names the pane, whatever it holds: spaces, the
-    // separator the line itself uses, format syntax, bytes past ASCII.
+fn a_pane_is_named_by_its_command_whatever_its_title() {
+    // The title a shell sets at every prompt, as Arch's bash.bashrc does with
+    // `printf "\033]0;%s@%s:%s\007"`, names nothing: the shell at the prompt
+    // does, and so does a program run under that title, which leaves it
+    // standing.
+    assert_eq!(
+        pane_name(&pane_name_line(
+            0,
+            false,
+            b"bash",
+            b"user@devbox:~/src/chan"
+        )),
+        named(0, "bash")
+    );
+    assert_eq!(
+        pane_name(&pane_name_line(0, false, b"top", b"user@devbox:~/src/chan")),
+        named(0, "top")
+    );
+    // A title a program set for itself names nothing either, whatever it
+    // holds: spaces, the separator the line itself uses, format syntax,
+    // bytes past ASCII.
     let title = "vim: notes.md : #{pane_id} #(id), caf\u{e9}";
     assert_eq!(
         pane_name(&pane_name_line(3, false, b"vim", title.as_bytes())),
-        named(3, title)
+        named(3, "vim")
     );
-    // The title tmux gives a new pane is its host's name, which names no
-    // pane: the foreground command does.
+    // Nor does the title tmux gives a new pane, its host's name, or a title
+    // a program emptied or left blank.
     assert_eq!(
         pane_name(&pane_name_line(0, true, b"bash", b"build-host")),
         named(0, "bash")
     );
-    // So does a title a program emptied or left blank.
     assert_eq!(
         pane_name(&pane_name_line(1, false, b"top", b"")),
         named(1, "top")
@@ -297,13 +314,17 @@ fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_or_blank_titl
     );
     // The ends are trimmed; nothing inside is.
     assert_eq!(
-        pane_name(&pane_name_line(2, false, b"sh", b"  two  words  ")),
+        pane_name(&pane_name_line(2, false, b"  two  words  ", b"sh")),
         named(2, "two  words")
     );
-    // tmux may have neither text: the name is empty, and the line still
-    // holds both separators.
+    // tmux may have no command: the name is empty, a title there or not, and
+    // the line still holds both separators.
     assert_eq!(
         pane_name(&pane_name_line(4, true, b"", b"build-host")),
+        named(4, "")
+    );
+    assert_eq!(
+        pane_name(&pane_name_line(4, false, b"", b"a title")),
         named(4, "")
     );
     assert_eq!(pane_name(&pane_name_line(4, false, b"", b"")), named(4, ""));
@@ -437,17 +458,26 @@ fn a_pane_name_carries_no_control_character_and_any_bytes_parse() {
     let title = b"\x1b]0;x\x07 t\x08 ";
     assert_eq!(
         pane_name(&pane_name_line(0, false, b"sh", title)),
-        named(0, "]0;x t")
+        named(0, "sh")
     );
     // Bytes that are not UTF-8 are replaced, never refused: a name is shown,
     // not obeyed.
     assert_eq!(
-        pane_name(&pane_name_line(0, false, b"sh", b"\xff\xfe ok")),
+        pane_name(&pane_name_line(0, false, b"\xff\xfe ok", b"t")),
         named(0, "\u{fffd}\u{fffd} ok")
     );
-    // A long title is a line like any other, inside the line bound.
+    assert_eq!(
+        pane_name(&pane_name_line(0, false, b"sh", b"\xff\xfe ok")),
+        named(0, "sh")
+    );
+    // A long title or command is a line like any other, inside the line
+    // bound.
     let long = vec![b'n'; 100_000];
-    let Message::PaneName { name, .. } = pane_name(&pane_name_line(0, false, b"sh", &long)) else {
+    assert_eq!(
+        pane_name(&pane_name_line(0, false, b"sh", &long)),
+        named(0, "sh")
+    );
+    let Message::PaneName { name, .. } = pane_name(&pane_name_line(0, false, &long, b"t")) else {
         panic!("a pane name");
     };
     assert_eq!(name.len(), 100_000);
