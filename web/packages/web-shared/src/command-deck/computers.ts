@@ -340,12 +340,14 @@ const FILTER_LABEL: Record<ComputersFilter, string> = {
   gateways: COMPUTERS_SECTIONS.gateways,
 };
 
-const WINDOW_WORDS: Record<WindowActionId, { label: string; verb: string }> = {
-  focus: { label: "Focus window", verb: "Focus" },
-  show: { label: "Show window", verb: "Show" },
-  hide: { label: "Hide window", verb: "Hide" },
-  open: { label: "Open window", verb: "Open" },
-  close: { label: "Close window", verb: "Close" },
+// `label` and `verb` are the cards' words. `keywords` are other words a
+// query may use for the action; no row shows them.
+const WINDOW_WORDS: Record<WindowActionId, { label: string; verb: string; keywords: string }> = {
+  focus: { label: "Focus window", verb: "Focus", keywords: "activate foreground" },
+  show: { label: "Show window", verb: "Show", keywords: "unhide" },
+  hide: { label: "Hide window", verb: "Hide", keywords: "bury" },
+  open: { label: "Open window", verb: "Open", keywords: "in this browser" },
+  close: { label: "Close window", verb: "Close", keywords: "remove" },
 };
 
 const RECENT_WINDOWS = 5;
@@ -522,6 +524,7 @@ function windowActs(b: Builder, window: ComputersWindow): Act[] {
       label: words.label,
       phrase: `${words.verb} ${window.name}`,
       icon: action,
+      keywords: words.keywords,
       quick: action === "focus" || action === "open",
       run: () => b.ctx.bridge.run({ target: "window", key: window.key, action }),
     };

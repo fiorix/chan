@@ -907,6 +907,10 @@ describe("typed search", () => {
     expect(row(deck, "Connect parked").searchText).toContain("reconnect");
     expect(row(deck, "Add devserver").searchText).toContain("new");
     expect(row(deck, "Turn on and open notes").searchText).toContain("new window");
+    const native = devserverModel({
+      machines: [local({ windows: [win("n", { name: "Window 3", actions: ["open", "hide", "close"] })] })],
+    });
+    expect(row(build(native, { query: "x" }), "Open Window 3").searchText).toContain("in this browser");
   });
 
   it("shows a row that cannot run, disabled, with its reason", () => {
