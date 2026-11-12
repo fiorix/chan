@@ -178,7 +178,9 @@
   /// File Browser's does. The loaded graph holds the whole tree, so this
   /// only flips the directory's flag in the opened set and the drawn set
   /// follows; closing keeps what was opened below it for the next opening.
-  /// The preceding tap already set the selection, so this reads it.
+  /// The preceding tap already set the selection, so this reads it. The
+  /// window's session follows the tab's opened set as a whole, not each
+  /// key, so this schedules its saves.
   function onGraphDoubleClick(): void {
     if (!selectedNode || selectedNode.kind !== "folder") return;
     const path = selectedNode.path;
@@ -190,6 +192,8 @@
       loadOpenedChildren();
       void requestExpansionFitAfterUpdate(path, before);
     }
+    schedulePersistStateToHash();
+    scheduleSessionSave();
   }
 
   /// Bumped to fetch the whole spine again when a directory is opened whose
