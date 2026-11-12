@@ -272,6 +272,29 @@ pub fn start_dir(launch: &TerminalLaunch) -> PathBuf {
     cwd
 }
 
+/// The start directory as a request to chan-desktop spells it, which is UTF-8
+/// text: `cwd`, else `home` with a warning for the caller to log, as
+/// [`resolve_working_dir`] falls back for a `--dir` that names no directory,
+/// because a launcher whose directory the request cannot spell must still get
+/// a window. `Err` when neither is UTF-8, or there is no home to fall back to.
+fn requested_dir(cwd: PathBuf, home: Option<&Path>) -> Result<(String, Option<String>), String> {
+    let cwd = match cwd.into_os_string().into_string() {
+        Ok(cwd) => return Ok((cwd, None)),
+        Err(cwd) => PathBuf::from(cwd),
+    };
+    let unspellable = format!(
+        "{} is not valid UTF-8, which a request to chan-desktop cannot carry",
+        cwd.display()
+    );
+    match home.and_then(Path::to_str) {
+        Some(home) => Ok((
+            home.to_string(),
+            Some(format!("{unspellable}; starting in {home}")),
+        )),
+        None => Err(unspellable),
+    }
+}
+
 /// `chan-term` for a launch that runs the user's shell: a terminal window of
 /// the running chan-desktop in the start directory, which the desktop has
 /// [`opener::ANSWER_BOUND`] to open, as a path of `chan-files` does. Nothing
@@ -300,14 +323,15 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -
              login, or no DISPLAY or WAYLAND_DISPLAY)"
         );
     }
-    let cwd = start_dir(&launch);
-    let Some(cwd_text) = cwd.to_str() else {
-        bail!(
-            "{} is not valid UTF-8, which a request to chan-desktop cannot carry",
-            cwd.display()
-        );
+    let home = std::env::home_dir();
+    let (cwd_text, warning) = match requested_dir(start_dir(&launch), home.as_deref()) {
+        Ok(dir) => dir,
+        Err(why) => bail!("{why}"),
     };
-    match ask_desktop(cwd_text).await {
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
+    match ask_desktop(&cwd_text).await {
         CliOpenTerminal::Opened => Ok(()),
         CliOpenTerminal::Refused { reply } => bail!(
             "chan-desktop did not open a terminal in {cwd_text}: {}",
@@ -319,7 +343,7 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -
         CliOpenTerminal::NotListening => {
             opener::launch_desktop(
                 NAME,
-                Opening::Terminal(cwd_text),
+                Opening::Terminal(&cwd_text),
                 opener::when_no_desktop(personality),
             )
             .await
@@ -721,6 +745,36 @@ mod tests {
         assert!(
             warning.contains("/gone") && warning.contains("/home/u"),
             "{warning}"
+        );
+    }
+
+    /// A start directory the request can spell goes as it is; one it cannot,
+    /// a name that is not UTF-8, falls back to the home directory with a
+    /// warning naming both, and with no UTF-8 home there is nothing to send.
+    #[cfg(unix)]
+    #[test]
+    fn a_start_directory_that_is_not_utf8_falls_back_to_home_with_a_warning() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(
+            requested_dir(PathBuf::from("/srv/notes"), Some(Path::new("/home/u"))),
+            Ok(("/srv/notes".to_string(), None))
+        );
+        let raw = || PathBuf::from(OsString::from_vec(b"/srv/caf\xe9".to_vec()));
+        let (dir, warning) = requested_dir(raw(), Some(Path::new("/home/u"))).unwrap();
+        assert_eq!(dir, "/home/u");
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "/srv/caf\u{fffd} is not valid UTF-8, which a request to chan-desktop cannot \
+                 carry; starting in /home/u"
+            )
+        );
+        let unspellable =
+            "/srv/caf\u{fffd} is not valid UTF-8, which a request to chan-desktop cannot carry";
+        assert_eq!(requested_dir(raw(), None), Err(unspellable.to_string()));
+        assert_eq!(
+            requested_dir(raw(), Some(raw().as_path())),
+            Err(unspellable.to_string())
         );
     }
 
