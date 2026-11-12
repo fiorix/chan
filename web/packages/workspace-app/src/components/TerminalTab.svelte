@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { privacy } from "@chan/web-shared/privacy";
   import { clientDetached } from "../api/clientSession";
   import { tick, untrack } from "svelte";
   import {
@@ -7,12 +6,10 @@
     Clipboard,
     ClipboardPaste,
     Command as CommandIcon,
-    EyeOff,
-    MessageSquare,
     Pencil,
     Radio,
     Search,
-    Type,
+    Settings2,
     Users,
     X,
   } from "@lucide/svelte";
@@ -50,19 +47,24 @@
     eventMatchesShortcut,
     resolvedEventKey,
     shouldEscapeTerminal,
+    SHORTCUTS,
   } from "../state/shortcuts";
+  import { commandContext, commandState, commandTitle, type CommandContext } from "../state/commands";
+  // The menus name their rows through the catalog, which this fills.
+  import "../state/commands/install";
   import {
-    allTerminalTabs,
     applyTerminalSessionMetadata,
     applyGlobalTerminalName,
     broadcastTerminalInput,
-    crossWindowBroadcastMembers,
     closeTab,
     clearTerminalSession,
     ensureTerminalKeyboardProtocol,
     dismissTerminalEnvironmentPrompt,
     failTerminalMetadataRename,
+    failTerminalSecretMasking,
+    flipHybrid,
     isTerminalMoving,
+    panesHaveSides,
     registerTerminalCancelSink,
     registerTerminalCloseSink,
     registerTerminalInputSink,
@@ -73,9 +75,9 @@
     reproveRestoredPrompt,
     resolveTerminalMetadataRename,
     resolvePromptCancelled,
-    setTerminalBroadcastEnabled,
-    setTerminalBroadcastTarget,
+    seedTerminalSecretMasking,
     toggleTerminalGroupBroadcast,
+    toggleTerminalSecretMasking,
     setTerminalActivity,
     setTerminalActivityPulsing,
     setTerminalPendingGlobalName,
@@ -90,9 +92,10 @@
     setTerminalSession,
     setTerminalSubmitAgent,
     tabFocusPulse,
-    terminalBroadcastMemberIds,
+    terminalBroadcastTargets,
     terminalEnvironmentPromptDismissed,
     terminalMetadataDraft,
+    terminalSecretMaskingOn,
     terminalStaleEnvironmentVariables,
     terminalTabGroup,
     terminalTabName,
@@ -227,7 +230,6 @@
   import BubbleOverlay from "./BubbleOverlay.svelte";
   import {
     forgetRichPromptChrome,
-    isRichPromptToolbarOpen,
     isRichPromptVisible,
     toggleRichPromptForTab,
     toggleRichPromptToolbar,
@@ -369,13 +371,11 @@
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
   // Visual-only masking owner for this terminal: xterm decorations or a
-  // painter over ghostty's canvas, disposed with the terminal; the enabled
-  // bit is session-scoped per tab.
+  // painter over ghostty's canvas, disposed with the terminal. Whether it
+  // masks is the tab's own state, which the launcher's toggle reads and
+  // flips too.
   let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
-  let secretMaskingEnabled = $state(false);
-  let secretMaskingFailed = $state(false);
-  const privacyMasking = $derived(privacy.enabled && privacy.mask_terminal_secrets);
-  const effectiveSecretMasking = $derived(!secretMaskingFailed && (secretMaskingEnabled || privacyMasking));
+  const effectiveSecretMasking = $derived(terminalSecretMaskingOn(tab));
   $effect(() => { secretMasker?.setEnabled(effectiveSecretMasking); });
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
@@ -592,38 +592,16 @@
     if (!a) return { x: 0, y: 0 };
     return { x: Math.round(a.left), y: Math.round(a.bottom + 4) };
   });
-  // Self appears at the top of the broadcast target list with a
-  // "self" marker. Checking the self row sets `broadcastEnabled`
-  // (this tab joins the broadcast group); other rows route to
-  // `setTerminalBroadcastTarget`. The self row is the only knob that
-  // controls THIS tab's participation (no umbrella on/off button).
-  // Broadcast is group-scoped: the picker only lists terminals in this
-  // tab's group, so you can only ever target same-group peers.
-  const broadcastTargets = $derived(
-    allTerminalTabs()
-      .filter((t) => terminalTabGroup(t) === terminalTabGroup(tab))
-      .sort((a, b) => {
-        if (a.id === tab.id) return -1;
-        if (b.id === tab.id) return 1;
-        return 0;
-      }),
-  );
-  const selectedBroadcastTargets = $derived(new Set(terminalBroadcastMemberIds(tab)));
-  // Same-group terminals in OTHER windows of this tenant that a page holds.
-  // Listed below the local rows under an "other windows" label; toggling one
-  // routes through the server to its owning window (group-wide selection
-  // spans windows).
-  const crossWindowMembers = $derived(crossWindowBroadcastMembers(tab));
-  // "Select All" / "Deselect All" reflects the WHOLE group across windows:
-  // every local row (self via broadcastEnabled, others via selection) AND
-  // the own broadcast toggle of every cross-window member a page holds.
-  const allBroadcastTargetsSelected = $derived(
-    broadcastTargets.length + crossWindowMembers.length > 0 &&
-      broadcastTargets.every((target) =>
-        target.id === tab.id ? tab.broadcastEnabled : selectedBroadcastTargets.has(target.id),
-      ) &&
-      crossWindowMembers.every((m) => m.broadcast),
-  );
+  // The broadcast list, which the launcher's choice lists too. Self leads
+  // it with a "self" marker, and its row is the only knob for THIS tab's
+  // participation (no umbrella on/off button). Broadcast is group-scoped:
+  // the list holds only terminals in this tab's group, so you can only ever
+  // target same-group peers. Members in OTHER windows of this tenant that a
+  // page holds follow under an "other windows" label; toggling one routes
+  // through the server to its owning window.
+  const broadcastTargets = $derived(terminalBroadcastTargets(tab));
+  const localBroadcastTargets = $derived(broadcastTargets.filter((target) => !target.otherWindow));
+  const otherWindowBroadcastTargets = $derived(broadcastTargets.filter((target) => target.otherWindow));
   const metadataDraft = $derived(terminalMetadataDraft(tab));
   const metadataPending = $derived(Boolean(tab.terminalMetadataPending));
   const staleEnvironmentVariables = $derived(terminalStaleEnvironmentVariables(tab));
@@ -1173,10 +1151,13 @@
       ? null
       : new MouseModeFilter();
     // The preference and window kind seed each fresh tab. The menu/launcher
-    // toggle changes only this instance, so a respawn uses the rule again.
-    secretMaskingEnabled = windowModeSecretMaskingEnabled(terminalPrefs?.secret_masking, {
-      terminalControl: ui.terminalControl,
-    });
+    // toggle changes only this terminal, so a respawn uses the rule again.
+    seedTerminalSecretMasking(
+      tab,
+      windowModeSecretMaskingEnabled(terminalPrefs?.secret_masking, {
+        terminalControl: ui.terminalControl,
+      }),
+    );
     const secretMaskSuffixes =
       terminalPrefs?.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES;
     const fontPref = terminalPrefs?.font ?? "os-default";
@@ -1462,11 +1443,10 @@
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
     primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu);
-    // The masker logged and disabled itself; sync the toggle state so the
-    // menu label stays truthful, and tell the user visibly.
+    // The masker logged and disabled itself; record it on the tab so the
+    // toggle's check stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
-      secretMaskingEnabled = false;
-      secretMaskingFailed = true;
+      failTerminalSecretMasking(tab);
       setTransientStatus("Secret masking stopped working in this terminal");
     };
     if (backend === "xterm") {
@@ -2255,10 +2235,20 @@
     return chordFor(id) ?? "";
   }
 
-  // Rich Prompt: the right-click "Show/Hide Rich Prompt" entry mirrors the
-  // `terminal.richPrompt` chord (App.svelte onWindowKey); the label comes
-  // from the shortcut store so menu and keymap can't drift.
-  const richPromptChord = $derived(chordFor("terminal.richPrompt") ?? "");
+  // The command context as it reads with this terminal focused. A toggle's
+  // state is the catalog's, read for the tab its context names, and a menu's
+  // rows are about the terminal the menu belongs to.
+  const menuContext = $derived<CommandContext>({
+    ...commandContext(),
+    activeSurface: "terminal",
+    activeTabId: tab.id,
+  });
+
+  // The launcher's own toggle has no catalog row; the shortcut table names it.
+  const launcherLabel = SHORTCUTS.find((s) => s.id === "app.launcher.toggle")?.label ?? "";
+
+  // Rich Prompt: the row mirrors the `terminal.richPrompt` chord (App.svelte
+  // onWindowKey) and calls the toggle the chord's command reaches.
   function toggleRichPromptFromMenu(): void {
     closeTabMenu();
     toggleRichPromptForTab(tab.id);
@@ -2784,18 +2774,12 @@
     await copyToClipboard(text);
   }
 
-  function toggleSecretMasking(): void {
+  // The masking row. The launcher's command flips the same choice through
+  // the same function and leaves the keyboard where the launcher has it.
+  function toggleSecretMaskingFromMenu(): void {
     closeTabMenu();
-    if (privacyMasking && !secretMaskingFailed) {
-      setTransientStatus("Secret masking is enabled by Privacy mode");
-      return;
-    }
-    secretMaskingFailed = false;
-    secretMaskingEnabled = !secretMaskingEnabled;
+    if (!toggleTerminalSecretMasking(tab)) return;
     secretMasker?.setEnabled(effectiveSecretMasking);
-    setTransientStatus(
-      `Secret masking ${secretMaskingEnabled ? "enabled" : "disabled"} for this terminal`,
-    );
     focusTerminal();
   }
 
@@ -2909,11 +2893,13 @@
     await writeClipboardText(cwd);
   }
 
-  // The command launcher runs at the app root, but a terminal's live $CWD
-  // and session lifecycle live in this component, so the launcher's
-  // live-PTY terminal actions arrive as chan:command events the focused
-  // terminal handles. Only the active tab of the focused pane responds, so
-  // the launcher's active-surface gate and the acting terminal agree.
+  // The command launcher runs at the app root, but a terminal's live $CWD,
+  // its session lifecycle and its renderer live in this component, so the
+  // launcher's live-PTY terminal actions arrive as chan:command events the
+  // focused terminal handles. Only the active tab of the focused pane
+  // responds, so the launcher's active-surface gate and the acting terminal
+  // agree. Find, Copy, Paste and Copy scrollback each call the function
+  // their menu row calls.
   //
   // The find family rides the same bus: on desktop the key bridge claims
   // the find chords before the webview sees the keydown and fires
@@ -2933,8 +2919,10 @@
       if (name === "app.terminal.restart") void restart();
       else if (name === "app.terminal.copyCwd") void copyTerminalCwd();
       else if (name === "app.terminal.newFsEntry") openNewFsEntry();
-      else if (name === "app.terminal.secretMasking.toggle") toggleSecretMasking();
-      else if (name === "app.find.open") openFind();
+      else if (name === "terminal.copy") void copySelectionOrScrollback();
+      else if (name === "terminal.paste") void pasteClipboard();
+      else if (name === "app.terminal.copyScrollback") void copyScrollback();
+      else if (name === "terminal.find" || name === "app.find.open") openFind();
       else if (name === "app.find.next" && findOpen) stepFind("older");
       else if (name === "app.find.prev" && findOpen) stepFind("newer");
     };
@@ -3202,6 +3190,16 @@
     toggleTerminalGroupBroadcast(tab);
   }
 
+  function toggleDetailsFromMenu(): void {
+    setTabInspectorOpen(tab, !tab.inspectorOpen);
+    closeTabMenu();
+  }
+
+  function flipFromMenu(): void {
+    closeTabMenu();
+    flipHybrid(paneId);
+  }
+
   function onTerminalContextMenu(e: MouseEvent): void {
     e.preventDefault();
     requestTerminalCwd();
@@ -3223,6 +3221,19 @@
   onkeydown={menuKeys.bubble}
   onpointerdown={onDocPointerDown}
 />
+
+<!-- A toggle command's row: the command's title and chord, with a check
+     while the command reports itself on for this terminal. -->
+{#snippet toggleRow(id: string, onclick: () => void)}
+  {@const on = commandState(id, menuContext) === true}
+  <button class="mbtn" role="menuitemcheckbox" aria-checked={on} {onclick}>
+    <span class="mbtn-icon">
+      {#if on}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+    </span>
+    <span class="mbtn-label">{commandTitle(id)}</span>
+    <span class="mbtn-chord">{chordLabel(id)}</span>
+  </button>
+{/snippet}
 
 <div
   class="terminal-tab"
@@ -3253,76 +3264,54 @@
     >
       {#if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
-             body): Find + Copy (selection or scrollback) + Paste + Copy
-             Scrollback, the Rich Prompt rows, then the window's Commands.
-             Name / Group / broadcast / MCP / spawn config lives on the
-             tab-name menu. -->
+             body): the live engine and the masking toggle, Find + Copy
+             (selection or scrollback) + Paste + Copy scrollback, the Rich
+             Prompt rows, then the window's command launcher. Each action
+             row is worded by its catalog command. Name / Group / broadcast
+             / MCP / spawn config lives on the tab-name menu. -->
         <div class="action-list">
           <div class="terminal-backend-label" data-terminal-backend={backend}>
             <span>Terminal engine</span>
             <span class="terminal-backend-value">{backend}</span>
           </div>
-          <button class="mbtn" role="menuitem" onclick={toggleSecretMasking}>
-            <span class="mbtn-icon">
-              <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
-            </span>
-            <span class="mbtn-label">
-              Secret masking: {effectiveSecretMasking ? "on" : "off"}
-            </span>
-            <span class="mbtn-chord"></span>
-          </button>
+          {@render toggleRow("app.terminal.secretMasking.toggle", toggleSecretMaskingFromMenu)}
           <div class="msep" role="separator"></div>
           <button class="mbtn" role="menuitem" onclick={openFind}>
             <span class="mbtn-icon">
               <Search size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Find</span>
-            <span class="mbtn-chord">{chordFor("terminal.find") ?? ""}</span>
+            <span class="mbtn-label">{commandTitle("terminal.find")}</span>
+            <span class="mbtn-chord">{chordLabel("terminal.find")}</span>
           </button>
           <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Copy</span>
-            <span class="mbtn-chord">{chordFor("terminal.copy") ?? ""}</span>
+            <span class="mbtn-label">{commandTitle("terminal.copy")}</span>
+            <span class="mbtn-chord">{chordLabel("terminal.copy")}</span>
           </button>
           <button class="mbtn" role="menuitem" onclick={pasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Paste</span>
-            <span class="mbtn-chord">{chordFor("terminal.paste") ?? ""}</span>
+            <span class="mbtn-label">{commandTitle("terminal.paste")}</span>
+            <span class="mbtn-chord">{chordLabel("terminal.paste")}</span>
           </button>
           <button class="mbtn" role="menuitem" onclick={copyScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Copy Scrollback</span>
-            <span class="mbtn-chord"></span>
+            <span class="mbtn-label">{commandTitle("app.terminal.copyScrollback")}</span>
+            <span class="mbtn-chord">{chordLabel("app.terminal.copyScrollback")}</span>
           </button>
           <!-- Rich Prompt drafts into the tenant's drafts store, so it
                needs one: this row calls the toggle directly, past the
                command gates, and a tenant without the store serves no
                drafts route. -->
           {#if windowCaps.drafts}
-            <button class="mbtn" role="menuitem" onclick={toggleRichPromptFromMenu}>
-              <span class="mbtn-icon">
-                <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />
-              </span>
-              <span class="mbtn-label">
-                {isRichPromptVisible(tab.id) ? "Hide Rich Prompt" : "Show Rich Prompt"}
-              </span>
-              <span class="mbtn-chord">{richPromptChord}</span>
-            </button>
+            {@render toggleRow("terminal.richPrompt", toggleRichPromptFromMenu)}
             {#if isRichPromptVisible(tab.id)}
-              <button class="mbtn" role="menuitem" onclick={toggleRichPromptToolbarFromMenu}>
-                <span class="mbtn-icon">
-                  <Type size={16} strokeWidth={1.75} aria-hidden="true" />
-                </span>
-                <span class="mbtn-label">
-                  {isRichPromptToolbarOpen(tab.id) ? "Hide Style Toolbar" : "Show Style Toolbar"}
-                </span>
-              </button>
+              {@render toggleRow("terminal.richPromptToolbar", toggleRichPromptToolbarFromMenu)}
             {/if}
           {/if}
           <!-- The window's commands, after this terminal's own, as the
@@ -3332,7 +3321,7 @@
             <span class="mbtn-icon">
               <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Commands</span>
+            <span class="mbtn-label">{launcherLabel}</span>
             <span class="mbtn-chord">{chordLabel("app.launcher.toggle")}</span>
           </button>
         </div>
@@ -3410,111 +3399,90 @@
             {staleEnvironmentVariables.length === 1 ? "still reflects" : "still reflect"}
             this shell's spawn metadata. Restart to update the environment.
           </span>
-          <button type="button" onclick={() => void restart()}>Restart now</button>
+          <button type="button" onclick={() => void restart()}>{commandTitle("app.terminal.restart")}</button>
           <button type="button" onclick={() => dismissTerminalEnvironmentPrompt(tab)}>Later</button>
         </div>
       {/if}
       <!-- Terminal tab menu. Header rows stay above the broadcast
-           controls; command-discovery actions live in the launcher. -->
+           controls; command-discovery actions live in the launcher. Each
+           action row is worded by its catalog command, and the menu ends as
+           every tab menu does, with the pane's flip and the tab's close. -->
       <div class="action-list">
-        <!-- Per-tab broadcast selector, at the top of the menu right
-             after the Group row. There is no umbrella "Broadcast
-             Input On/Off" rocker; the per-row checkboxes are the only
-             controls. Self appears at the top of the list with a "self"
-             marker. -->
+        <!-- Per-tab broadcast list, at the top of the menu right after the
+             Group row, under the name of the launcher's choice that lists
+             the same terminals. The group toggle turns every row on or
+             off; there is no umbrella on/off for this tab alone, whose own
+             row leads the list with a "self" marker. -->
         <div class="broadcast-section-label">
           <span class="mbtn-icon">
             <Radio size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
-          <span>broadcast input on/off</span>
+          <span>{commandTitle("app.terminal.broadcastTargets")}</span>
         </div>
-        <button class="mbtn" onclick={toggleAllBroadcastTargets}>
-          <span class="mbtn-icon"></span>
-          <span class="mbtn-label">
-            {allBroadcastTargetsSelected ? "Deselect All" : "Select All"}
-          </span>
-          <span class="mbtn-chord"
-            >{chordFor("app.terminal.broadcastToggle") ?? ""}</span
-          >
-        </button>
-        {#each broadcastTargets as target (target.id)}
-          {@const isSelf = target.id === tab.id}
-          {@const isChecked = isSelf
-            ? tab.broadcastEnabled
-            : selectedBroadcastTargets.has(target.id)}
+        {@render toggleRow("app.terminal.broadcastToggle", toggleAllBroadcastTargets)}
+        {#each localBroadcastTargets as target (target.id)}
           <label class="target-row">
             <span class="target-check">
               <input
                 type="checkbox"
-                checked={isChecked}
-                onchange={(e) => {
-                  const next = (e.currentTarget as HTMLInputElement).checked;
-                  if (isSelf) {
-                    setTerminalBroadcastEnabled(tab, next);
-                  } else {
-                    setTerminalBroadcastTarget(tab, target.id, next);
-                  }
-                }}
+                checked={target.on}
+                onchange={(e) => void target.set((e.currentTarget as HTMLInputElement).checked)}
               />
-              {#if isChecked}
+              {#if target.on}
                 <Check size={13} strokeWidth={2} aria-hidden="true" />
               {/if}
             </span>
             <span class="target-name">
-              {terminalTabName(target)}
-              {#if isSelf}
+              {target.name}
+              {#if target.self}
                 <span class="target-self">(self)</span>
               {/if}
             </span>
           </label>
         {/each}
-        {#if crossWindowMembers.length > 0}
+        {#if otherWindowBroadcastTargets.length > 0}
           <!-- Same-group terminals in OTHER windows. Toggling one routes
                through the server to its owning window, which flips its tab
                (re-syncs the flag + lights its sign). Group-wide selection
                spans windows; the checkbox reflects the member's own toggle
                from the roster, updated reactively after the round-trip. -->
           <div class="broadcast-other-windows-label">other windows</div>
-          {#each crossWindowMembers as member (member.id)}
+          {#each otherWindowBroadcastTargets as target (target.id)}
             <label class="target-row">
               <span class="target-check">
                 <input
                   type="checkbox"
-                  checked={member.broadcast}
-                  onchange={(e) =>
-                    void api.setTerminalSessionBroadcast(
-                      member.id,
-                      (e.currentTarget as HTMLInputElement).checked,
-                    )}
+                  checked={target.on}
+                  onchange={(e) => void target.set((e.currentTarget as HTMLInputElement).checked)}
                 />
-                {#if member.broadcast}
+                {#if target.on}
                   <Check size={13} strokeWidth={2} aria-hidden="true" />
                 {/if}
               </span>
               <span class="target-name">
-                {member.tab_name ?? "terminal"}
+                {target.name}
               </span>
             </label>
           {/each}
         {/if}
         <div class="msep" role="separator"></div>
-        <button class="mbtn" role="menuitemcheckbox" aria-checked={!!tab.inspectorOpen} onclick={() => {
-          setTabInspectorOpen(tab, !tab.inspectorOpen);
-          closeTabMenu();
-        }}>
-          <span class="mbtn-icon">
-            {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
-          </span>
-          <span class="mbtn-label">Details</span>
-          <span class="mbtn-chord">{chordLabel("app.terminal.details")}</span>
-        </button>
+        {@render toggleRow("app.terminal.details", toggleDetailsFromMenu)}
         <div class="msep" role="separator"></div>
+        {#if panesHaveSides()}
+          <button class="mbtn" onclick={flipFromMenu}>
+            <span class="mbtn-icon">
+              <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
+            <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
+          </button>
+        {/if}
         <button class="mbtn" onclick={closeFromMenu}>
           <span class="mbtn-icon">
             <X size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
-          <span class="mbtn-label">Close</span>
-          <span class="mbtn-chord">{chordFor("app.tab.close") ?? ""}</span>
+          <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
+          <span class="mbtn-chord">{chordLabel("app.tab.close")}</span>
         </button>
       </div>
       {/if}
@@ -3572,7 +3540,7 @@
     />
     {#if tab.inspectorOpen}
       <Inspector
-        title="Details"
+        title={commandTitle("app.terminal.details")}
         floating
         reserveSpace
         bind:width={() => tab.inspectorWidth ?? 280, (width) => (tab.inspectorWidth = width)}

@@ -17,6 +17,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
+import { allCommands } from "../state/commands";
 import { chordFor, osChord, SHORTCUTS } from "../state/shortcuts";
 import { showSurvey, surveyState } from "../state/survey.svelte";
 import { handleTerminalClipboardChord } from "../terminal/clipboardChord";
@@ -37,7 +38,10 @@ import {
 
 installTerminalDom();
 
-const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
+const clipboard = {
+  writeText: vi.fn(async (_text: string) => {}),
+  readText: vi.fn(async () => ""),
+};
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
 
 afterEach(() => {
@@ -46,6 +50,8 @@ afterEach(() => {
   surveyState.windowWide = null;
   document.getSelection()?.removeAllRanges();
   clipboard.writeText.mockClear();
+  clipboard.readText.mockReset();
+  clipboard.readText.mockResolvedValue("");
   vi.restoreAllMocks();
 });
 
@@ -153,14 +159,12 @@ describe("the chord registry", () => {
 
   test("binds copy and paste to Cmd+C and Cmd+V in the Terminal group, noting the other OSes", () => {
     expect(entry("terminal.copy")).toMatchObject({
-      label: "Copy selection",
       web: "Cmd+C",
       native: "Cmd+C",
       group: "Terminal",
       note: "Ctrl+Shift+C on Linux / Windows",
     });
     expect(entry("terminal.paste")).toMatchObject({
-      label: "Paste",
       web: "Cmd+V",
       native: "Cmd+V",
       group: "Terminal",
@@ -216,6 +220,73 @@ describe("in a mounted terminal off the Mac", () => {
   });
 });
 
+// The catalog's Copy, Paste and Copy scrollback reach the focused terminal as
+// commands, from the launcher or a chord the user assigned, and run what its
+// menu rows run.
+describe("the terminal's clipboard commands", () => {
+  function run(id: string): void {
+    const command = allCommands().find((candidate) => candidate.id === id);
+    if (!command) throw new Error(`no command ${id}`);
+    command.run();
+  }
+
+  async function attached(focused = true) {
+    const [tab] = seatTerminals([terminalTab()]);
+    const mounted = await mountTerminal(TerminalTab, tab!, { focused });
+    await attach(TerminalSocket.all.at(-1)!);
+    return mounted;
+  }
+
+  afterEach(() => {
+    xterm.serialized = "";
+  });
+
+  test("Copy copies the selection, and the scrollback when nothing is selected, as its row does", async () => {
+    const { term } = await attached();
+    xterm.serialized = "line one\nline two";
+    term.selection = "selected text";
+    run("terminal.copy");
+    await vi.waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([["selected text"]]));
+
+    term.selection = "";
+    run("terminal.copy");
+    await vi.waitFor(() =>
+      expect(clipboard.writeText.mock.calls).toEqual([["selected text"], ["line one\nline two"]]),
+    );
+  });
+
+  test("Copy scrollback copies the scrollback whatever is selected", async () => {
+    const { term } = await attached();
+    xterm.serialized = "line one\nline two";
+    term.selection = "selected text";
+    run("app.terminal.copyScrollback");
+    await vi.waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([["line one\nline two"]]));
+  });
+
+  test("Paste hands the clipboard's text to the terminal and gives it the keyboard", async () => {
+    const { term } = await attached();
+    clipboard.readText.mockResolvedValue("pasted text");
+    const focused = term.focusCount;
+    run("terminal.paste");
+    await vi.waitFor(() => expect(term.pasted).toEqual(["pasted text"]));
+    await vi.waitFor(() => expect(term.focusCount).toBe(focused + 1));
+  });
+
+  test("a terminal outside the focused pane leaves them to the one inside it", async () => {
+    const { term } = await attached(false);
+    xterm.serialized = "line one";
+    term.selection = "selected text";
+    clipboard.readText.mockResolvedValue("pasted text");
+    run("terminal.copy");
+    run("app.terminal.copyScrollback");
+    run("terminal.paste");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(clipboard.readText).not.toHaveBeenCalled();
+    expect(term.pasted).toEqual([]);
+  });
+});
+
 describe("on the desktop, where the webview has no Clipboard API", () => {
   async function attachedOnDesktop(
     write: (cmd: string, args?: unknown) => Promise<unknown> = async () => undefined,
@@ -259,12 +330,12 @@ describe("on the desktop, where the webview has no Clipboard API", () => {
     );
   });
 
-  test("the menu's Copy Scrollback copies the scrollback through the native clipboard", async () => {
+  test("the menu's Copy scrollback copies the scrollback through the native clipboard", async () => {
     const { target, invoke } = await attachedOnDesktop();
     xterm.serialized = "line one\nline two";
 
     await openBodyMenu(target);
-    menuRow("Copy Scrollback").click();
+    menuRow("Copy scrollback").click();
 
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("write_clipboard_text", { text: "line one\nline two" }),

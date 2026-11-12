@@ -345,11 +345,11 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
     platform.expectNoBypass();
   });
 
-  test("Copy Scrollback copies the wrapped command as one line", async () => {
+  test("Copy scrollback copies the wrapped command as one line", async () => {
     const { target } = await renderGhostty();
     platform.enter();
     await openBodyMenu(target);
-    menuRow("Copy Scrollback").click();
+    menuRow("Copy scrollback").click();
     await tick();
     expect(platform.takeWrites()).toEqual([`${COMMAND}\n$`]);
     platform.expectNoBypass();

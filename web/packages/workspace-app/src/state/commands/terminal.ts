@@ -1,29 +1,35 @@
 // Terminal surface commands: available when a terminal tab is the active
 // surface, excluding the control-terminal singleton whose chrome and
-// lifecycle belong to the connect flow. Group broadcast, rename and set
-// group act on the active terminal tab directly; the live-PTY actions
-// dispatch a chan:command that the owning app/TerminalTab path handles,
-// since live CWD, session lifecycle, and secret masking live outside this
-// catalog. The terminal's theme and its engine are fields of the Settings
-// overlay and reach the launcher through the settings index. Register with
-// registerCommands. See state/commands.ts for the Command shape and helpers.
+// lifecycle belong to the connect flow. They are listed in the order the
+// terminal's two menus offer them, the tab menu's and then the body menu's.
+// What the tab object holds (name, group, broadcast, Details, secret masking)
+// is changed on the active terminal tab directly, and its state is read for
+// the tab the context names; what needs the live renderer or its PTY
+// (restart, find, copy, paste, the working directory) dispatches a
+// chan:command the focused TerminalTab answers with the function its own
+// menu row calls. The terminal's theme and its engine are fields of the
+// Settings overlay and reach the launcher through the settings index.
+// Register with registerCommands. See state/commands.ts for the Command
+// shape and helpers.
 
 import {
   registerCommands,
   dispatchChanCommand,
   onSurface,
+  openChoice,
   type CommandContext,
 } from "../commands";
 import { uiPrompt } from "../store.svelte";
 import {
   activeTerminalTab,
   allTerminalTabs,
-  crossWindowBroadcastMembers,
   renameTerminalTab,
   setTabInspectorOpen,
-  terminalBroadcastMemberIds,
-  terminalTabGroup,
+  terminalBroadcastTargets,
+  terminalSecretMaskingOn,
   terminalTabName,
+  toggleTerminalSecretMasking,
+  type TerminalBroadcastTarget,
   type TerminalTab,
 } from "../tabs.svelte";
 import {
@@ -40,11 +46,21 @@ function onWorkspaceTerminal(ctx: CommandContext): boolean {
   return onTerminal(ctx) && !ctx.terminalOnly;
 }
 
-/// The active terminal tab's value for a toggle's state, null when no
-/// terminal tab is active.
-function terminalState(read: (tab: TerminalTab) => boolean): () => boolean | null {
-  return () => {
-    const tab = activeTerminalTab();
+/// The terminal tab a context names as the focused one, null when it names
+/// none. State is read through the context and not from the layout's active
+/// pane, so a terminal's own menu can ask about its terminal by name.
+function terminalIn(ctx: CommandContext): TerminalTab | null {
+  if (ctx.activeSurface !== "terminal" || ctx.activeTabId === null) return null;
+  return allTerminalTabs().find((tab) => tab.id === ctx.activeTabId) ?? null;
+}
+
+/// The value a toggle's state reads off the context's terminal tab, null
+/// when the context names none.
+function terminalState(
+  read: (tab: TerminalTab) => boolean,
+): (ctx: CommandContext) => boolean | null {
+  return (ctx) => {
+    const tab = terminalIn(ctx);
     return tab ? read(tab) : null;
   };
 }
@@ -72,15 +88,14 @@ async function setActiveTerminalGroup(): Promise<void> {
 /// toggle itself flips on, so the row reads on exactly when choosing it
 /// would turn the group off.
 function groupBroadcastOn(tab: TerminalTab): boolean {
-  const group = terminalTabGroup(tab);
-  const local = allTerminalTabs().filter((t) => terminalTabGroup(t) === group);
-  const cross = crossWindowBroadcastMembers(tab);
-  if (local.length === 0 && cross.length === 0) return false;
-  const selected = new Set(terminalBroadcastMemberIds(tab));
-  return (
-    local.every((t) => (t.id === tab.id ? tab.broadcastEnabled : selected.has(t.id))) &&
-    cross.every((member) => member.broadcast)
-  );
+  const targets = terminalBroadcastTargets(tab);
+  return targets.length > 0 && targets.every((target) => target.on);
+}
+
+/// A broadcast target as a flat list names it. The terminal's menu marks its
+/// own row the same way.
+function broadcastTargetLabel(target: TerminalBroadcastTarget): string {
+  return target.self ? `${target.name} (self)` : target.name;
 }
 
 registerCommands([
@@ -142,10 +157,48 @@ registerCommands([
     order: 3,
     kind: "toggle",
     requirement: "terminal",
-    keywords: ["Toggle group broadcast", "broadcast", "group", "select all", "input"],
+    keywords: [
+      "Toggle group broadcast",
+      "Select All",
+      "Deselect All",
+      "broadcast",
+      "group",
+      "input",
+    ],
     available: onTerminal,
     state: terminalState(groupBroadcastOn),
     run: () => dispatchChanCommand("app.terminal.broadcastToggle"),
+  },
+  {
+    // One row per terminal the active one can broadcast to, with a check on
+    // each that is on, as the tab menu lists them.
+    id: "app.terminal.broadcastTargets",
+    title: "Broadcast targets",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 4,
+    kind: "choice",
+    requirement: "terminal",
+    keywords: ["broadcast input on/off", "broadcast", "input", "group", "terminals"],
+    available: onTerminal,
+    state: (ctx) => {
+      const tab = terminalIn(ctx);
+      if (!tab) return null;
+      const targets = terminalBroadcastTargets(tab);
+      return `${targets.filter((target) => target.on).length} of ${targets.length}`;
+    },
+    options: (ctx) => {
+      const tab = terminalIn(ctx);
+      if (!tab) return [];
+      return terminalBroadcastTargets(tab).map((target) => ({
+        id: target.id,
+        label: broadcastTargetLabel(target),
+        checked: target.on,
+        run: () => target.set(!target.on),
+      }));
+    },
+    run: () => openChoice("app.terminal.broadcastTargets"),
   },
   {
     id: "app.terminal.details",
@@ -153,7 +206,7 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 4,
+    order: 5,
     kind: "toggle",
     requirement: "terminal",
     keywords: ["Toggle details", "inspector", "info", "program status"],
@@ -165,14 +218,15 @@ registerCommands([
     },
   },
   {
-    // The terminal's own component holds whether its masking is on, so the
-    // catalog cannot read it: this flips it and reports no state.
+    // Reads on while Privacy mode holds masking on too, where choosing it
+    // changes nothing and the status line says why.
     id: "app.terminal.secretMasking.toggle",
     title: "Secret masking (this terminal)",
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 5,
+    order: 6,
+    kind: "toggle",
     requirement: "terminal",
     keywords: [
       "Toggle secret masking for this terminal",
@@ -183,7 +237,67 @@ registerCommands([
       "demo",
     ],
     available: onTerminal,
-    run: () => dispatchChanCommand("app.terminal.secretMasking.toggle"),
+    state: terminalState(terminalSecretMaskingOn),
+    run: () => {
+      const tab = activeTerminalTab();
+      if (tab) toggleTerminalSecretMasking(tab);
+    },
+  },
+  {
+    // The terminal's own find bar, under the id whose chord opens it from a
+    // focused terminal. The page's find command opens the same bar when the
+    // desktop sends it; the terminal's row is this one.
+    id: "terminal.find",
+    title: "Find",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 7,
+    kind: "open",
+    requirement: "terminal",
+    keywords: ["Find in terminal", "search", "find bar", "scrollback"],
+    icon: "search",
+    available: onTerminal,
+    run: () => dispatchChanCommand("terminal.find"),
+  },
+  {
+    // The copy chord is the terminal's own key and copies a selection only.
+    // Choosing the command is asking for a result, so with nothing selected
+    // it copies the scrollback, as the menu row does.
+    id: "terminal.copy",
+    title: "Copy",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 8,
+    requirement: "terminal",
+    keywords: ["Copy selection", "clipboard", "selection", "scrollback"],
+    available: onTerminal,
+    run: () => dispatchChanCommand("terminal.copy"),
+  },
+  {
+    id: "terminal.paste",
+    title: "Paste",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 9,
+    requirement: "terminal",
+    keywords: ["clipboard", "insert"],
+    available: onTerminal,
+    run: () => dispatchChanCommand("terminal.paste"),
+  },
+  {
+    id: "app.terminal.copyScrollback",
+    title: "Copy scrollback",
+    category: "Terminal",
+    scope: "app",
+    surface: "terminal",
+    order: 10,
+    requirement: "terminal",
+    keywords: ["clipboard", "history", "output", "buffer"],
+    available: onTerminal,
+    run: () => dispatchChanCommand("app.terminal.copyScrollback"),
   },
   {
     id: "terminal.richPrompt",
@@ -191,11 +305,11 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 9,
+    order: 11,
     kind: "toggle",
     // Rich Prompt drafts into the tenant's drafts store.
     requirement: "drafts",
-    keywords: ["Show/Hide Rich Prompt", "prompt", "composer"],
+    keywords: ["Show/Hide Rich Prompt", "Show Rich Prompt", "Hide Rich Prompt", "prompt", "composer"],
     available: onWorkspaceTerminal,
     state: terminalState((tab) => isRichPromptVisible(tab.id)),
     run: () => dispatchChanCommand("terminal.richPrompt"),
@@ -206,12 +320,20 @@ registerCommands([
     category: "Terminal",
     scope: "app",
     surface: "terminal",
-    order: 10,
+    order: 12,
     kind: "toggle",
     // The toolbar lives in the Rich Prompt, so the command is offered only
     // while the active terminal shows it.
     requirement: "drafts",
-    keywords: ["Toggle Rich Prompt style toolbar", "style", "toolbar", "format", "markdown"],
+    keywords: [
+      "Toggle Rich Prompt style toolbar",
+      "Show Style Toolbar",
+      "Hide Style Toolbar",
+      "style",
+      "toolbar",
+      "format",
+      "markdown",
+    ],
     available: (ctx) => {
       const t = activeTerminalTab();
       return onWorkspaceTerminal(ctx) && t !== null && isRichPromptVisible(t.id);

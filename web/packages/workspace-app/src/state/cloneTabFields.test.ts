@@ -77,6 +77,8 @@ function loadedTerminalTab(): TerminalTab {
     tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
     tmuxPane: { connection: 1, pane: "%0" },
     tmuxHostGrid: { cols: 80, rows: 24 },
+    secretMasking: true,
+    secretMaskingFailed: true,
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",

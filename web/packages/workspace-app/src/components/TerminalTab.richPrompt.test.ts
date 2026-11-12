@@ -223,32 +223,61 @@ describe("closing the terminal", () => {
   });
 });
 
+/// The catalog's title for `id`, failing on an id nothing registers.
+function title(id: string): string {
+  const command = allCommands().find((c) => c.id === id);
+  if (!command) throw new Error(`no command ${id}`);
+  return command.title;
+}
+
+/// The open menu's row for the toggle `id`: whether it is there, and
+/// whether it announces and draws its check.
+function toggleRow(id: string): { row: HTMLButtonElement; on: boolean } | null {
+  const row = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find(
+    (b) => b.querySelector(".mbtn-label")?.textContent?.trim() === title(id),
+  );
+  if (!row) return null;
+  expect(row.getAttribute("role"), id).toBe("menuitemcheckbox");
+  const on = row.getAttribute("aria-checked") === "true";
+  expect(row.querySelector(".mbtn-icon svg") !== null, `${id} draws its check`).toBe(on);
+  return { row, on };
+}
+
 describe("the doors to the composer", () => {
+  const PROMPT = "terminal.richPrompt";
+  const TOOLBAR = "terminal.richPromptToolbar";
+
   test("the body menu's row names the chord the keymap holds when it opens", async () => {
     const { target } = await attached();
-    const before = chordFor("terminal.richPrompt");
-    assignOverride("terminal.richPrompt", "Mod+Alt+J");
+    const before = chordFor(PROMPT);
+    assignOverride(PROMPT, "Mod+Alt+J");
     try {
-      const rebound = chordFor("terminal.richPrompt");
+      const rebound = chordFor(PROMPT);
       expect(rebound, "the override took").not.toBe(before);
       await openBodyMenu(target);
-      expect(menuRow("Show Rich Prompt").querySelector(".mbtn-chord")?.textContent, "the rebound chord").toBe(rebound);
+      expect(menuRow(title(PROMPT)).querySelector(".mbtn-chord")?.textContent, "the rebound chord").toBe(rebound);
     } finally {
-      clearOverride("terminal.richPrompt");
+      clearOverride(PROMPT);
     }
   });
 
-  test("the body menu's row shows or hides it and names the chord", async () => {
+  test("the body menu's row is the command's title with a check while it shows, and names the chord", async () => {
     const { tab, target } = await attached();
     const labels = await openBodyMenu(target);
-    expect(labels).toContain("Show Rich Prompt");
-    const row = menuRow("Show Rich Prompt");
-    expect(row.querySelector(".mbtn-chord")?.textContent).toBe(chordFor("terminal.richPrompt") ?? "");
-    row.click();
+    expect(labels).toContain("Rich Prompt");
+    const closed = toggleRow(PROMPT)!;
+    expect(closed.on).toBe(false);
+    expect(closed.row.querySelector(".mbtn-chord")?.textContent).toBe(chordFor(PROMPT) ?? "");
+    closed.row.click();
     await tick();
     expect(isRichPromptVisible(tab.id)).toBe(true);
 
-    expect(await openBodyMenu(target)).toContain("Hide Rich Prompt");
+    await openBodyMenu(target);
+    const open = toggleRow(PROMPT)!;
+    expect(open.on).toBe(true);
+    open.row.click();
+    await tick();
+    expect(isRichPromptVisible(tab.id)).toBe(false);
   });
 
   test("a composer opened on a terminal without a draft records the draft it creates", async () => {
@@ -265,22 +294,33 @@ describe("the doors to the composer", () => {
     caps.drafts = false;
     const { target } = await attached();
     const labels = await openBodyMenu(target);
-    expect(labels.some((l) => l.endsWith("Rich Prompt"))).toBe(false);
+    expect(labels.some((l) => l.includes("Rich Prompt"))).toBe(false);
   });
 
-  test("the body menu offers the style toolbar's row only while the composer shows", async () => {
+  test("the body menu offers the style toolbar's row only while the composer shows, worded and checked by its command", async () => {
     const { tab, target } = await attached();
-    expect(await openBodyMenu(target)).not.toContain("Show Style Toolbar");
+    await openBodyMenu(target);
+    expect(toggleRow(TOOLBAR)).toBeNull();
 
     showRichPromptForTab(tab.id);
     await tick();
-    expect(await openBodyMenu(target)).toContain("Show Style Toolbar");
-    menuRow("Show Style Toolbar").click();
+    // With the composer showing the menu holds its two rows, the toolbar's
+    // after the composer's own.
+    const labels = await openBodyMenu(target);
+    expect(labels.slice(labels.indexOf(title(PROMPT)), labels.indexOf(title(PROMPT)) + 2)).toEqual([
+      "Rich Prompt",
+      "Rich Prompt style toolbar",
+    ]);
+    const closed = toggleRow(TOOLBAR)!;
+    expect(closed.on).toBe(false);
+    closed.row.click();
     await tick();
     expect(isRichPromptToolbarOpen(tab.id)).toBe(true);
 
-    expect(await openBodyMenu(target)).toContain("Hide Style Toolbar");
-    menuRow("Hide Style Toolbar").click();
+    await openBodyMenu(target);
+    const open = toggleRow(TOOLBAR)!;
+    expect(open.on).toBe(true);
+    open.row.click();
     await tick();
     expect(isRichPromptToolbarOpen(tab.id)).toBe(false);
   });
