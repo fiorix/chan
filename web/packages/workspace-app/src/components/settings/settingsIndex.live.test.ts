@@ -4,7 +4,7 @@
 // shows its new value at once, and a value another window changes arrives
 // with the served record.
 
-import { flushSync } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { privacy, setPrivacy } from "@chan/web-shared/privacy";
 
@@ -24,6 +24,7 @@ import {
 } from "../../state/store.svelte";
 import { resetShownPreferencesForTests } from "./preferenceState.svelte";
 import { settingEntry, settingsIndex } from "./settingsIndex";
+import SettingRow from "./settingRowTestHost.svelte";
 import {
   WORKSPACE_STATE_MAX_AGE_MS,
   resetWorkspaceStateForTests,
@@ -72,8 +73,22 @@ function configChanged(config: Config): void {
 
 const startTheme = { choice: ui.themeChoice, theme: ui.theme };
 const startControl = ui.terminalControl;
+const rows: Array<Record<string, unknown>> = [];
+
+/// Draw the entry `id` as a launcher row does, and read what the row shows.
+function drawRow(id: string): () => string {
+  const target = document.createElement("div");
+  document.body.append(target);
+  rows.push(mount(SettingRow, { target, props: { id } }) as Record<string, unknown>);
+  return () => {
+    flushSync();
+    return target.textContent ?? "";
+  };
+}
 
 afterEach(async () => {
+  for (const row of rows.splice(0)) unmount(row);
+  document.body.innerHTML = "";
   stopRecordingRequests();
   __testSetStandalonePreferences(null);
   workspace.info = null;
@@ -301,27 +316,18 @@ describe("a machine preference, with the overlay closed", () => {
   test("a row drawn from an entry redraws on a write and on the served record", async () => {
     const config = serve(settingsPreferences());
     const mcp = settingEntry("terminal.mcpEnv");
-    const drawn: unknown[] = [];
-    const stop = $effect.root(() => {
-      $effect(() => {
-        drawn.push(mcp.read());
-      });
-    });
-    flushSync();
-    expect(drawn).toEqual([false]);
+    const row = drawRow("terminal.mcpEnv");
+    expect(row()).toBe("false");
 
     const written = mcp.write!(true);
-    flushSync();
-    expect(drawn.at(-1)).toBe(true);
+    expect(row()).toBe("true");
     await written;
 
     __testSetStandalonePreferences({
       ...config.stored(),
       terminal: { ...config.stored().terminal, mcp_env: false },
     });
-    flushSync();
-    expect(drawn.at(-1)).toBe(false);
-    stop();
+    expect(row()).toBe("false");
   });
 });
 
@@ -459,24 +465,13 @@ describe("a setting of this workspace, with the overlay closed", () => {
     expect(entry.read()).toBe(true);
   });
 
-  test("a row derived from an entry loads it and redraws when it arrives", async () => {
-    const entry = settingEntry("workspace.reports");
-    const drawn: unknown[] = [];
-    const stop = $effect.root(() => {
-      // The load starts inside a derived read, where writing state throws.
-      const value = $derived(entry.read());
-      $effect(() => {
-        drawn.push(value);
-      });
-    });
-    flushSync();
-    expect(drawn).toEqual([null]);
-
-    await vi.waitFor(() => {
-      flushSync();
-      expect(drawn).toEqual([null, false]);
-    });
-    stop();
+  test("a row drawn from an entry starts its load and redraws when the value arrives", async () => {
+    // The load starts inside the row's derived read, where writing state
+    // throws.
+    const row = drawRow("workspace.reports");
+    expect(row()).toBe("null");
+    await vi.waitFor(() => expect(row()).toBe("false"));
+    expect(api.reportsState).toHaveBeenCalledTimes(1);
   });
 
   test("a refused chan-reports write rejects and reads the server's state back", async () => {
