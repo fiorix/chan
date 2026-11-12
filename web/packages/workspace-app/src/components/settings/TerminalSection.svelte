@@ -76,24 +76,14 @@
   // already-open terminals keep the flag and suffixes they started
   // with.
   //
-  // The row reads what a new terminal of this window starts with: the
-  // stored choice, or with none stored the window's default, by the rule
-  // the terminal itself is seeded with. "Use default" is offered only
-  // while a choice is stored, and removes it with a write of `null`,
-  // which the config route takes as "clear"; a key left out of the
-  // terminal object keeps the stored choice. A cleared choice sits in the
-  // edit buffer as `null` until the server's view replaces it.
-  const secretMaskingStored = $derived(prefs.terminal.secret_masking ?? null);
+  // The row reads the stored choice: On, Off, or Default while none is
+  // stored, when a new terminal takes its window's default by the rule
+  // the terminal itself is seeded with. Default removes a stored choice,
+  // which then sits in the edit buffer as `null` until the server's view
+  // replaces it.
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
-
-  function useDefaultSecretMasking(): void {
-    commit((p) => ({
-      ...p,
-      terminal: { ...p.terminal, secret_masking: null },
-    }));
-  }
 
   const SCROLLBACK_STEP = 10;
 
@@ -254,18 +244,15 @@
 <SettingField
   setting={SECRET_MASKING}
   pref="terminal.secret_masking"
-  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. Default stores no choice: masking is then on in a control terminal and off in every other window. The terminal menu has an ephemeral per-tab toggle."
 >
-  <PillToggle
-    label={SECRET_MASKING.caption}
-    checked={toggledIn(SECRET_MASKING, prefs)}
-    ontoggle={(on) => commitSetting(commit, SECRET_MASKING, on)}
+  <PillRadio
+    name="settings-terminal-secret-masking"
+    ariaLabel="Secret masking"
+    value={chosenIn(SECRET_MASKING, prefs)}
+    options={optionsOf(SECRET_MASKING)}
+    onselect={(choice) => commitSetting(commit, SECRET_MASKING, choice)}
   />
-  {#if secretMaskingStored !== null}
-    <button type="button" class="plain-button" onclick={useDefaultSecretMasking}>
-      Use default
-    </button>
-  {/if}
   <details class="suffixes">
     <summary>Suffixes ({secretMaskSuffixes.length})</summary>
     <ChipList names={secretMaskSuffixes} readonly ariaLabel="Secret mask suffixes" />

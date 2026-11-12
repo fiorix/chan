@@ -547,15 +547,13 @@ describe("settings surface render", () => {
     await flush();
     // The row states that masking applies on both backends.
     expect(target.textContent).toContain("xterm.js and ghostty backends alike");
-    const pill = [...target.querySelectorAll("label.pill")].find((e) =>
-      e.textContent?.includes("Mask secrets in new terminals"),
-    ) as HTMLLabelElement;
-    expect(pill, "secret masking pill").not.toBeNull();
-    const checkbox = pill.querySelector(
-      'input[type="checkbox"]',
-    ) as HTMLInputElement;
-    expect(checkbox.checked).toBe(false);
-    checkbox.click();
+    const pill = [
+      ...target.querySelectorAll('[role="radiogroup"][aria-label="Secret masking"] label.pill'),
+    ].find((e) => e.textContent?.trim() === "On") as HTMLLabelElement;
+    expect(pill, "secret masking's On pill").toBeDefined();
+    const on = pill.querySelector('input[type="radio"]') as HTMLInputElement;
+    expect(on.checked).toBe(false);
+    on.click();
     await flush();
     const body = patchBodies[patchBodies.length - 1]!;
     expect(Object.keys(body)).toEqual(["terminal"]);

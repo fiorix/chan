@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 //
-// The secret masking row of Settings > Terminal. It reads what a new terminal
-// of this window starts with: the stored choice, or with none stored the
-// window's default, on in a control terminal and off in every other window.
-// Its toggle stores a choice, and "Use default", offered only while a choice
-// is stored, removes it with a write of `null`. The fetch stand-in answers in
-// the turn it is asked, so no case waits on a timer.
+// The secret masking row of Settings > Terminal: a choice of On, Off and
+// Default. It reads the stored choice, and Default while none is stored,
+// whatever kind of window shows it. On and Off store a choice; Default
+// removes it with a write of `null`. The fetch stand-in answers in the turn
+// it is asked, so no case waits on a timer.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { json } from "../../__tests__/fetch";
@@ -22,27 +21,36 @@ function config(choice?: boolean): Record<string, unknown> {
   return { ...preferences, terminal: { ...preferences.terminal, secret_masking: choice } };
 }
 
-function rowParts(target: HTMLElement): { toggle: HTMLInputElement; useDefault: HTMLButtonElement | null; field: HTMLElement } {
-  const pill = [...target.querySelectorAll<HTMLLabelElement>("label.pill")].find(
-    (candidate) => candidate.textContent?.trim() === "Mask secrets in new terminals",
+function field(target: HTMLElement): HTMLElement {
+  return target.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Secret masking"]')!.closest<HTMLElement>(
+    ".field",
   )!;
-  const field = pill.closest<HTMLElement>(".field")!;
-  const useDefault =
-    [...field.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.trim() === "Use default",
-    ) ?? null;
-  return { toggle: pill.querySelector("input")!, useDefault, field };
 }
 
-/// What the row shows: its reading, whether "Use default" is offered, and
-/// the refusal it reports.
-function row(target: HTMLElement): { on: boolean; useDefault: boolean; refusal: string | null } {
-  const { toggle, useDefault, field } = rowParts(target);
+function options(target: HTMLElement): HTMLInputElement[] {
+  return [...field(target).querySelectorAll<HTMLInputElement>('[role="radiogroup"] input[type="radio"]')];
+}
+
+/// The pill of the option worded `word`.
+function option(target: HTMLElement, word: string): HTMLInputElement {
+  return options(target).find((input) => input.closest("label")?.textContent?.trim() === word)!;
+}
+
+/// What the row shows: the options in order, the one it holds, and the
+/// refusal it reports.
+function row(target: HTMLElement): { options: string[]; held: string[]; refusal: string | null } {
+  const word = (input: HTMLInputElement): string => input.closest("label")?.textContent?.trim() ?? "";
   return {
-    on: toggle.checked,
-    useDefault: useDefault !== null,
-    refusal: field.querySelector(".save-error")?.textContent?.trim() ?? null,
+    options: options(target).map(word),
+    held: options(target)
+      .filter((input) => input.checked)
+      .map(word),
+    refusal: field(target).querySelector(".save-error")?.textContent?.trim() ?? null,
   };
+}
+
+function holds(word: string, refusal: string | null = null): ReturnType<typeof row> {
+  return { options: ["On", "Off", "Default"], held: [word], refusal };
 }
 
 /// Let a write's round trip land: turns of the microtask queue until
@@ -61,63 +69,58 @@ describe("Settings > Terminal > Secret masking", () => {
   });
 
   test.each([
-    ["a control terminal", true, true],
-    ["another window", false, false],
-  ] as const)("with no choice stored, in %s the row reads the window's default and offers nothing to clear", async (_window, control, on) => {
+    ["a control terminal", true],
+    ["another window", false],
+  ] as const)("with no choice stored, in %s the row holds Default and writes nothing", async (_window, control) => {
     ui.terminalControl = control;
     const { target, writes } = await openSettings("Terminal", config());
 
-    expect(row(target)).toEqual({ on, useDefault: false, refusal: null });
+    expect(row(target)).toEqual(holds("Default"));
     expect(writes).toEqual([]);
   });
 
   test.each([
-    ["off", "a control terminal", true, false],
-    ["on", "a control terminal", true, true],
-    ["on", "another window", false, true],
-    ["off", "another window", false, false],
-  ] as const)("with %s stored, in %s the row reads the choice and offers Use default", async (_choice, _window, control, choice) => {
+    ["Off", "a control terminal", true, false],
+    ["On", "a control terminal", true, true],
+    ["On", "another window", false, true],
+    ["Off", "another window", false, false],
+  ] as const)("with %s stored, in %s the row holds the choice", async (word, _window, control, choice) => {
     ui.terminalControl = control;
     const { target } = await openSettings("Terminal", config(choice));
 
-    expect(row(target)).toEqual({ on: choice, useDefault: true, refusal: null });
+    expect(row(target)).toEqual(holds(word));
   });
 
   test.each([
-    ["a control terminal", true],
-    ["another window", false],
-  ] as const)("in %s the toggle stores a choice against the window's default, which the row then reads", async (_window, control) => {
-    ui.terminalControl = control;
+    ["On", true],
+    ["Off", false],
+  ] as const)("%s stores the choice, which the row then holds", async (word, choice) => {
     const { target, writes, requests } = await openSettings("Terminal", config());
-    expect(row(target).on, "the window's default").toBe(control);
 
-    rowParts(target).toggle.click();
+    option(target, word).click();
     await landed(requests, requests.length + 2);
 
-    expect(writes).toEqual([{ terminal: { ...TERMINAL, secret_masking: !control } }]);
-    expect(row(target)).toEqual({ on: !control, useDefault: true, refusal: null });
+    expect(writes).toEqual([{ terminal: { ...TERMINAL, secret_masking: choice } }]);
+    expect(row(target)).toEqual(holds(word));
   });
 
   test.each([
-    ["a control terminal", true],
-    ["another window", false],
-  ] as const)("in %s Use default sends null for the choice, and the row reads the window's default again", async (_window, control) => {
-    ui.terminalControl = control;
-    const { target, writes, requests } = await openSettings("Terminal", config(!control));
-    expect(row(target), "the stored choice").toEqual({ on: !control, useDefault: true, refusal: null });
+    ["On", true],
+    ["Off", false],
+  ] as const)("with %s stored, Default sends null for the choice, and the row holds Default", async (word, choice) => {
+    const { target, writes, requests } = await openSettings("Terminal", config(choice));
+    expect(row(target), "the stored choice").toEqual(holds(word));
 
-    rowParts(target).useDefault?.click();
+    option(target, "Default").click();
     await landed(requests, requests.length + 2);
 
     expect(writes).toEqual([{ terminal: { ...TERMINAL, secret_masking: null } }]);
-    expect(row(target)).toEqual({ on: control, useDefault: false, refusal: null });
+    expect(row(target)).toEqual(holds("Default"));
   });
 
-  test("a write of another terminal setting after Use default names no masking choice", async () => {
-    ui.terminalControl = true;
+  test("a write of another terminal setting after Default names no masking choice", async () => {
     const { target, writes, requests } = await openSettings("Terminal", config(false));
-    expect(row(target).useDefault, "Use default is offered").toBe(true);
-    rowParts(target).useDefault?.click();
+    option(target, "Default").click();
     await landed(requests, requests.length + 2);
 
     const mcp = [...target.querySelectorAll<HTMLLabelElement>("label.pill")]
@@ -127,25 +130,24 @@ describe("Settings > Terminal > Secret masking", () => {
     await landed(requests, requests.length + 2);
 
     expect(writes.at(-1)).toEqual({ terminal: { ...TERMINAL, mcp_env: true } });
-    expect(row(target)).toEqual({ on: true, useDefault: false, refusal: null });
+    expect(row(target)).toEqual(holds("Default"));
   });
 
-  test("a server that does not take null for the choice leaves the row reading the stored choice and says so", async () => {
-    ui.terminalControl = true;
+  test("a server that does not take null for the choice leaves the row holding the stored choice and says so", async () => {
     const refused = "preferences.terminal.secret_masking: invalid type: null, expected a boolean";
     const { target, writes, requests } = await openSettings("Terminal", config(false), (slice) =>
       (slice.terminal as Record<string, unknown>).secret_masking === null
         ? json({ error: refused }, { status: 422 })
         : null,
     );
-    expect(row(target).useDefault, "Use default is offered").toBe(true);
+    expect(row(target)).toEqual(holds("Off"));
 
-    rowParts(target).useDefault?.click();
+    option(target, "Default").click();
     // The read before the write, the refused write, and the read that puts
     // the server's value back.
     await landed(requests, requests.length + 3);
 
     expect(writes).toEqual([{ terminal: { ...TERMINAL, secret_masking: null } }]);
-    expect(row(target)).toEqual({ on: false, useDefault: true, refusal: `Not saved: ${refused}` });
+    expect(row(target)).toEqual(holds("Off", `Not saved: ${refused}`));
   });
 });

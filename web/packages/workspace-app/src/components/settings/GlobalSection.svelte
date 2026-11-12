@@ -40,9 +40,15 @@
   hint="While recording or sharing your screen, hide computer and gateway names, addresses, connection scripts and tokens, workspace paths in Computers, WireGuard file paths and public keys, connection errors, launcher notices and action details, window labels in Computers and window titles, terminal program details, the Metrics slide's host name and chan home path, the command launcher's window labels and workspace names, and the Workspace slide's root path. Reveal individual fields where an eye button is shown. Shared across Chan desktop windows, or browser tabs at the same address. Screen recording is not detected automatically."
 >
   <PillToggle label={PRIVACY.caption} checked={privacy.enabled} disabled={!privacy.ready || privacy.saving} ontoggle={(enabled) => void setPrivacy({ enabled })} />
-  <PillToggle setting={PRIVACY_MASKING.id} label={PRIVACY_MASKING.caption} checked={privacy.mask_terminal_secrets} disabled={!privacy.ready || privacy.saving} ontoggle={(mask_terminal_secrets) => void setPrivacy({ mask_terminal_secrets })} />
   {#if privacy.error}<p role="alert">{privacy.error}</p>{/if}
   {#if !privacy.ready}<button type="button" onclick={retryPrivacy}>Retry privacy settings</button>{/if}
+</SettingField>
+
+<SettingField
+  setting={PRIVACY_MASKING}
+  hint="While privacy mode is on, every terminal masks secret-looking values, whatever its own secret masking is set to. Each terminal returns to its own setting when privacy mode goes off."
+>
+  <PillToggle label={PRIVACY_MASKING.caption} checked={privacy.mask_terminal_secrets} disabled={!privacy.ready || privacy.saving} ontoggle={(mask_terminal_secrets) => void setPrivacy({ mask_terminal_secrets })} />
 </SettingField>
 
 <SettingField

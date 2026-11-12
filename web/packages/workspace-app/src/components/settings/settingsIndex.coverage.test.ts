@@ -103,7 +103,7 @@ function expectRenderedIsIndexed(target: HTMLElement, section: string): string[]
       expect(text(anchor.querySelector(".meta h3")), entry.id).toBe(entry.heading);
       // A pill with a word of its own shows the entry's caption.
       if (entry.kind === "toggle" && entry.caption !== entry.heading) {
-        expect(text(anchor.querySelector("label.pill:not([data-setting]) span")), entry.id).toBe(entry.caption);
+        expect(text(anchor.querySelector("label.pill span")), entry.id).toBe(entry.caption);
       }
     } else if (anchor.matches(".keymap-mount")) {
       expect(entry.label).toBe(RAIL.get(section));

@@ -256,20 +256,56 @@ describe("a machine preference, with the overlay closed", () => {
     });
   });
 
-  test("secret masking reads what a new terminal of this window starts with", () => {
+  test("secret masking reads the stored choice, and Default while none is stored", () => {
     const preferences = settingsPreferences();
     serve(preferences);
     const masking = settingEntry("terminal.secretMasking");
+    // Whatever a new terminal of this window would start with.
     ui.terminalControl = false;
-    expect(masking.read()).toBe(false);
+    expect(masking.read()).toBe("default");
     ui.terminalControl = true;
-    expect(masking.read()).toBe(true);
+    expect(masking.read()).toBe("default");
 
-    __testSetStandalonePreferences({
-      ...preferences,
-      terminal: { ...preferences.terminal, secret_masking: false },
-    });
-    expect(masking.read()).toBe(false);
+    for (const [stored, value] of [
+      [true, "on"],
+      [false, "off"],
+    ] as const) {
+      __testSetStandalonePreferences({
+        ...preferences,
+        terminal: { ...preferences.terminal, secret_masking: stored },
+      });
+      expect(masking.read()).toBe(value);
+    }
+  });
+
+  test("secret masking writes On and Off as the choice, and Default as its removal", async () => {
+    const config = serve(settingsPreferences());
+    const masking = settingEntry("terminal.secretMasking");
+
+    for (const [value, sent] of [
+      ["on", true],
+      ["off", false],
+      ["default", null],
+    ] as const) {
+      const written = masking.write!(value);
+      // Before the server has answered.
+      expect(masking.read()).toBe(value);
+      await written;
+      expect(config.writes.at(-1)).toEqual({ terminal: { ...TERMINAL, secret_masking: sent } });
+      configChanged(config);
+      expect(masking.read()).toBe(value);
+    }
+    expect(config.writes).toHaveLength(3);
+  });
+
+  test("secret masking's Default sends nothing while no choice is stored", async () => {
+    const config = serve(settingsPreferences());
+    const masking = settingEntry("terminal.secretMasking");
+
+    await masking.write!("default");
+
+    expect(config.writes).toEqual([]);
+    expect(masking.read()).toBe("default");
   });
 
   test("a field edited in the overlay reads as the overlay words its value", () => {

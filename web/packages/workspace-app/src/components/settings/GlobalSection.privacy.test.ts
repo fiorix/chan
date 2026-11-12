@@ -32,3 +32,19 @@ test("Global privacy controls save on the viewing client without changing tenant
   expect(JSON.parse(localStorage.getItem("chan.privacy.v1")!).enabled).toBe(true);
   expect(writes).toEqual([]);
 });
+
+test("Masking terminal secrets in privacy mode is a field of its own, saved on the viewing client", async () => {
+  const { target, writes } = await openSettings("Global");
+  const heading = [...target.querySelectorAll("h3")].find((node) => node.textContent === "Mask terminal secrets in privacy mode");
+  const field = heading!.closest("section")!;
+  const checkboxes = field.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  expect(checkboxes).toHaveLength(1);
+  expect(checkboxes[0]!.checked).toBe(false);
+
+  checkboxes[0]!.click();
+  await settleSettings();
+
+  expect([privacy.mask_terminal_secrets, privacy.enabled]).toEqual([true, false]);
+  expect(JSON.parse(localStorage.getItem("chan.privacy.v1")!).mask_terminal_secrets).toBe(true);
+  expect(writes).toEqual([]);
+});

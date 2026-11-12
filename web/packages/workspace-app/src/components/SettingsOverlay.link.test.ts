@@ -144,13 +144,31 @@ describe("a link into Settings, opened from closed", () => {
     expect(marked()).toEqual([]);
   });
 
-  test("lands on a control that shares its field, not on the field's first control", async () => {
+  test("lands on a control that shares its heading with others, not on the first of them", async () => {
+    const preferences = {
+      ...settingsPreferences(),
+      terminal_colors: {
+        mode: "custom",
+        custom: { background: "#000000", foreground: "#ffffff", cursor: "#00ff00", contrast: "auto" },
+      },
+    };
+    config = () => json({ revision: 1, preferences, workspaces: [] });
+    openSettings({ section: "terminal", field: "terminal.colors.cursor" });
+    await settle();
+
+    const row = anchor("terminal.colors.cursor")!;
+    expect(row.querySelector("label")?.textContent?.trim()).toBe("Cursor");
+    expect(document.activeElement).toBe(row.querySelector("input"));
+    expect(marked()).toEqual(["terminal.colors.cursor"]);
+  });
+
+  test("lands on the privacy mode's terminal masking under its own heading", async () => {
     openSettings({ section: "global", field: "global.privacyTerminalMasking" });
     await settle();
 
-    const pill = anchor("global.privacyTerminalMasking")!;
-    expect(pill.textContent?.trim()).toBe("Also enable terminal secret masking");
-    expect(document.activeElement).toBe(pill.querySelector("input"));
+    const field = anchor("global.privacyTerminalMasking")!;
+    expect(field.querySelector("h3")?.textContent).toBe("Mask terminal secrets in privacy mode");
+    expect(document.activeElement).toBe(field.querySelector('input[type="checkbox"]'));
     expect(marked()).toEqual(["global.privacyTerminalMasking"]);
   });
 
