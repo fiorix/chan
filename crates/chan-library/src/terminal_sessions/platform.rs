@@ -478,6 +478,24 @@ const APPIMAGE_PREPENDED_KEYS: &[&str] = &[
     "QT_PLUGIN_PATH",
 ];
 
+/// The search paths AppRun writes as a block of mount entries ahead of a
+/// value it was handed: `PATH`, `LD_LIBRARY_PATH`, `XDG_DATA_DIRS`,
+/// `PYTHONPATH`, `PERLLIB` and `QT_PLUGIN_PATH`, whose value there is the
+/// user's, and the two GStreamer paths, which AppRun follows with the
+/// `QT_PLUGIN_PATH` it was handed instead. A desktop an older release started
+/// holds that release's blocks after its own in each of them
+/// ([`without_foreign_apprun_blocks`]).
+pub const APPRUN_SEARCH_PATHS: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "XDG_DATA_DIRS",
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+];
+
 /// The host entry linuxdeploy's GTK hook writes right after its own mount
 /// entry, ahead of the user's value: `$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS`.
 const GTK_HOOK_XDG_DATA_DIR: &str = "/usr/share";
@@ -578,12 +596,16 @@ fn scrub_var(mount: &Mount, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
 /// What follows is the user's value as they wrote it, an empty entry of
 /// theirs included, minus any whole AppRun block another AppImage leaked into
 /// it, which goes by its own entries so the user's entries around it stay.
+/// The blocks that chain on, and the leaked ones, are `key`'s own, but for
+/// the two GStreamer paths, whose tail is the `QT_PLUGIN_PATH` AppRun was
+/// handed ([`chained_block_key`]).
 fn host_value(
     mount: &Mount,
     key: &str,
     entries: &[PathBuf],
     reexec_dir: Option<&Path>,
 ) -> Option<Vec<PathBuf>> {
+    let tail = chained_block_key(key);
     let start = match entries.iter().rposition(|entry| mount.holds(entry)) {
         Some(last) => {
             let first = entries
@@ -602,7 +624,7 @@ fn host_value(
                     Some(dir) if entries.get(at).map(PathBuf::as_path) == Some(dir) => at + 1,
                     _ => at,
                 };
-                match apprun_block_at(key, entries, next) {
+                match apprun_block_at(tail, entries, next) {
                     Some(end) => at = after_gtk_hook(key, entries, end + 1),
                     None => break,
                 }
@@ -612,8 +634,19 @@ fn host_value(
         None => 0,
     };
     let rest = &entries[start..];
-    let user = without_whole_blocks(key, rest);
+    let user = without_whole_blocks(tail, rest);
     (start > 0 || user.len() < rest.len()).then_some(user)
+}
+
+/// The key whose AppRun blocks follow this mount's block in `key`: AppRun
+/// writes `GST_PLUGIN_SYSTEM_PATH` and `GST_PLUGIN_SYSTEM_PATH_1_0` as one
+/// entry of its mount and then the `QT_PLUGIN_PATH` it was handed, so an
+/// older parent's Qt block, then the user's `QT_PLUGIN_PATH`, follow there.
+fn chained_block_key(key: &str) -> &str {
+    match key {
+        "GST_PLUGIN_SYSTEM_PATH" | "GST_PLUGIN_SYSTEM_PATH_1_0" => "QT_PLUGIN_PATH",
+        _ => key,
+    }
 }
 
 /// `at`, or past the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] when that is the
@@ -662,13 +695,14 @@ pub fn without_apprun_blocks(key: &str, value: &OsStr) -> OsString {
 }
 
 /// `key` of `vars`, this process's environment, without the AppRun blocks of
-/// any mount but this process's own: everything up to and including this
-/// mount's last entry kept, and the rest as the user had it, as a terminal
-/// gets it. `None` when there is nothing to drop, and off an AppImage. A
-/// desktop an older release started still holds that release's block after
-/// its own in `PATH` and `LD_LIBRARY_PATH`, naming a mount that goes when that
-/// process exits; this is the value to put in their place. For those two
-/// keys, whose blocks are this mount's entries alone. `reexec_dir` is the
+/// any mount but this process's own: everything up to this mount's last
+/// entry kept (with the GTK hook's `/usr/share` after it in
+/// `XDG_DATA_DIRS`), and the rest as the user had it, as a terminal gets it.
+/// `None` when there is nothing to drop, and off an AppImage. A desktop an
+/// older release started still holds that release's blocks after its own in
+/// each of the [`APPRUN_SEARCH_PATHS`], naming a mount that goes when that
+/// process exits; this is the value to put in their place, the one AppRun
+/// would have written from the user's environment. `reexec_dir` is the
 /// directory the GUI-stack re-exec is about to put ahead of this mount's
 /// block in `LD_LIBRARY_PATH`, which the older release's re-exec put ahead of
 /// its block too.
@@ -677,6 +711,22 @@ pub fn without_foreign_apprun_blocks(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
     reexec_dir: Option<&OsStr>,
 ) -> Option<OsString> {
+    let (own, user, len) = own_and_users_entries(key, vars, reexec_dir)?;
+    if own.len() + user.len() == len {
+        return None;
+    }
+    std::env::join_paths(own.into_iter().chain(user)).ok()
+}
+
+/// `key` of `vars` split into this process's own entries, up to its mount's
+/// last one, and the user's after the blocks that chain on from them, with
+/// the number of entries the value had. `None` off an AppImage, or when the
+/// key holds no entry of this mount.
+fn own_and_users_entries(
+    key: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    reexec_dir: Option<&OsStr>,
+) -> Option<(Vec<PathBuf>, Vec<PathBuf>, usize)> {
     let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
     let value_of = |name: &str| {
         vars.iter()
@@ -687,17 +737,9 @@ pub fn without_foreign_apprun_blocks(
     let mount = Mount::new(value_of("APPDIR")?);
     let entries: Vec<PathBuf> = std::env::split_paths(value_of(key)?).collect();
     let own_last = entries.iter().rposition(|entry| mount.holds(entry))?;
-    let mut kept = entries[..=own_last].to_vec();
-    kept.extend(host_value(
-        &mount,
-        key,
-        &entries,
-        reexec_dir.map(Path::new),
-    )?);
-    if kept.len() == entries.len() {
-        return None;
-    }
-    std::env::join_paths(kept).ok()
+    let own = entries[..after_gtk_hook(key, &entries, own_last + 1)].to_vec();
+    let user = host_value(&mount, key, &entries, reexec_dir.map(Path::new))?;
+    Some((own, user, entries.len()))
 }
 
 /// AppRun's block for `key`: the entries it writes ahead of the user's value,
@@ -1865,6 +1907,83 @@ mod appimage_env_tests {
                         "{own_path}:/usr/local/bin:/usr/bin"
                     ))),
                     "{named}"
+                );
+            }
+        }
+
+        /// AppRun's Qt block, under `dir`.
+        fn qt_block(dir: &str) -> String {
+            ["qt4", "qt5"]
+                .iter()
+                .flat_map(|qt| {
+                    [
+                        "usr/lib",
+                        "usr/lib/i386-linux-gnu",
+                        "usr/lib/x86_64-linux-gnu",
+                        "usr/lib32",
+                        "usr/lib64",
+                    ]
+                    .map(|lib| format!("{dir}/{lib}/{qt}/plugins/"))
+                })
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+
+        /// What a desktop an older release started holds in each search path
+        /// AppRun prepends to, as AppRun writes it over the older release's
+        /// environment (read with the 0.128.0 AppImage's AppRun, its parent's
+        /// block chained after its own): each loses the older block and
+        /// keeps its own and the user's value, AppRun's separator included
+        /// when the user had none, as AppRun would write it from the user's
+        /// environment. The GStreamer paths' tail is the `QT_PLUGIN_PATH`
+        /// AppRun was handed, the older Qt block and then the user's.
+        #[test]
+        fn an_older_parents_blocks_leave_each_search_path() {
+            let old = "/tmp/.mount_chanZZ";
+            let perl = |dir: &str| format!("{dir}/usr/share/perl5/:{dir}/usr/lib/perl5/");
+            let xdg = |dir: &str| format!("{dir}/usr/share/:{dir}/usr/share:/usr/share");
+            for user in ["", "/opt/u"] {
+                let cases = [
+                    (
+                        "PYTHONPATH",
+                        format!("{APPDIR}/usr/share/pyshared/"),
+                        format!("{old}/usr/share/pyshared/"),
+                    ),
+                    ("PERLLIB", perl(APPDIR), perl(old)),
+                    ("QT_PLUGIN_PATH", qt_block(APPDIR), qt_block(old)),
+                    (
+                        "GST_PLUGIN_SYSTEM_PATH",
+                        format!("{APPDIR}/usr/lib/gstreamer"),
+                        qt_block(old),
+                    ),
+                    (
+                        "GST_PLUGIN_SYSTEM_PATH_1_0",
+                        format!("{APPDIR}/usr/lib/gstreamer-1.0"),
+                        qt_block(old),
+                    ),
+                    ("XDG_DATA_DIRS", xdg(APPDIR), xdg(old)),
+                ];
+                for (key, own, older) in cases {
+                    let vars = vec![
+                        (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                        (key.into(), format!("{own}:{older}:{user}").into()),
+                    ];
+                    assert_eq!(
+                        without_foreign_apprun_blocks(key, vars, None),
+                        Some(OsString::from(format!("{own}:{user}"))),
+                        "{key} {user:?}"
+                    );
+                }
+            }
+            for key in super::super::APPRUN_SEARCH_PATHS {
+                let fresh = vec![
+                    (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                    (key.into(), format!("{APPDIR}/usr/x/:/opt/u").into()),
+                ];
+                assert_eq!(
+                    without_foreign_apprun_blocks(key, fresh, None),
+                    None,
+                    "{key}"
                 );
             }
         }

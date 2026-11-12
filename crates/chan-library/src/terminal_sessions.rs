@@ -59,7 +59,7 @@ pub use platform::prime_windows_shell;
 pub use platform::user_shell;
 pub use platform::{
     appimage_host_var, hand_appimage_host_env, own_appimage, without_apprun_blocks,
-    without_foreign_apprun_blocks,
+    without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
 };
 use platform::{
     clear_appimage_env, command_builder, locale_selects_utf8, mcp_env,

@@ -212,13 +212,12 @@ mod linux {
         }
 
         // A desktop an older release started holds that release's mount
-        // block after its own in PATH, a directory under /tmp that goes when
-        // that process exits and that every child of this one would search.
-        // Dropped here, single-threaded, where the marker is consumed too.
-        let path = chan_server::without_foreign_apprun_blocks("PATH", std::env::vars_os(), None);
-        if let Some(path) = path {
-            std::env::set_var("PATH", path);
-        }
+        // blocks after its own in each search path AppRun prepends to,
+        // directories under /tmp that go when that process exits and that
+        // every child of this one would search (WebKit's processes, Qt and
+        // Python helpers). Dropped here, single-threaded, where the marker is
+        // consumed too; LD_LIBRARY_PATH once no re-exec has taken it.
+        drop_foreign_apprun_blocks(|key| key != "LD_LIBRARY_PATH");
 
         // Independent, cheap layer: keep WebKit off the dma-buf renderer path
         // that aborts with EGL_BAD_PARAMETER on the affected GPUs. WebKit reads
@@ -230,6 +229,27 @@ mod linux {
             "bundled" => {}
             "system" => apply(true),
             _ => apply(false), // auto (default)
+        }
+
+        // Here when no re-exec was made, or in the image a re-exec started,
+        // whose loader path the re-exec already wrote without them.
+        drop_foreign_apprun_blocks(|key| key == "LD_LIBRARY_PATH");
+    }
+
+    /// Put in place of each of the [`chan_server::APPRUN_SEARCH_PATHS`] that
+    /// `keys` takes the value without an older parent's blocks
+    /// ([`chan_server::without_foreign_apprun_blocks`]), where it holds any.
+    /// Only while the process is single-threaded.
+    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {
+        for key in chan_server::APPRUN_SEARCH_PATHS {
+            if !keys(key) {
+                continue;
+            }
+            if let Some(value) =
+                chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)
+            {
+                std::env::set_var(key, value);
+            }
         }
     }
 
@@ -634,12 +654,14 @@ mod linux {
             );
         }
 
-        /// `prefer_system_gui_stack` drops an older parent's block from this
-        /// process's own `PATH` before anything else it does, while
-        /// single-threaded. A source pin: the value is
-        /// `without_foreign_apprun_blocks`', tested in chan-library.
+        /// `prefer_system_gui_stack` drops an older parent's blocks from each
+        /// search path of this process's own but `LD_LIBRARY_PATH` before
+        /// anything else it does, while single-threaded, and from
+        /// `LD_LIBRARY_PATH` once no re-exec has taken it; each key's value is
+        /// `without_foreign_apprun_blocks`', tested in chan-library. A source
+        /// pin.
         #[test]
-        fn the_boot_drops_an_older_parents_block_from_path() {
+        fn the_boot_drops_an_older_parents_blocks_from_each_search_path() {
             const SELF: &str = include_str!("linux_gui_stack.rs");
             let boot = SELF
                 .split_once("    pub fn prefer_system_gui_stack() {")
@@ -649,16 +671,34 @@ mod linux {
                 .split_once("\n    fn apply(force: bool) {")
                 .expect("apply follows the boot")
                 .0;
-            let cleaned = boot
-                .find("chan_server::without_foreign_apprun_blocks(\"PATH\", std::env::vars_os(), None)")
-                .expect("the boot cleans PATH");
-            let set = boot
-                .find("std::env::set_var(\"PATH\", path);")
-                .expect("and sets it");
-            let webkit = boot
-                .find("set_webkit_env_defaults();")
-                .expect("the WebKit default");
-            assert!(cleaned < set && set < webkit);
+            let order = [
+                "drop_foreign_apprun_blocks(|key| key != \"LD_LIBRARY_PATH\");",
+                "set_webkit_env_defaults();",
+                "match std::env::var(POLICY_ENV)",
+                "drop_foreign_apprun_blocks(|key| key == \"LD_LIBRARY_PATH\");",
+            ];
+            let at: Vec<usize> = order
+                .iter()
+                .map(|step| {
+                    boot.find(step)
+                        .unwrap_or_else(|| panic!("the boot runs {step}"))
+                })
+                .collect();
+            assert!(
+                at.windows(2).all(|pair| pair[0] < pair[1]),
+                "{order:?} in order"
+            );
+            let helper = boot
+                .split_once("    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {")
+                .expect("the helper")
+                .1;
+            for step in [
+                "for key in chan_server::APPRUN_SEARCH_PATHS {",
+                "chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)",
+                "std::env::set_var(key, value);",
+            ] {
+                assert!(helper.contains(step), "the helper runs {step}");
+            }
         }
 
         /// A process without the marker re-execs itself with its own

@@ -98,7 +98,7 @@ pub use chan_library::terminal_sessions::TerminalExit;
 /// hand the child the environment the user had, as a terminal gets it.
 pub use chan_library::terminal_sessions::{
     appimage_host_var, hand_appimage_host_env, own_appimage, without_apprun_blocks,
-    without_foreign_apprun_blocks,
+    without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
 };
 pub use chan_library::terminal_sessions::{
     TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,
