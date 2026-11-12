@@ -4396,8 +4396,10 @@ function refreshAfterDraftChange(): Promise<unknown> {
 /// A draft has its own close and promotion flows, so an unsaved buffer stays
 /// open with one notice instead of joining the ordinary close dialog. The
 /// notice gives the reason on the tab's save line where there is one, and
-/// otherwise what held the save.
-async function saveDraftEdits(tab: FileTab): Promise<boolean> {
+/// otherwise what held the save. A download or an export of an open file
+/// asks the same of any file tab before it reads the server's copy, and
+/// goes no further on a no.
+export async function saveDraftEdits(tab: FileTab): Promise<boolean> {
   let held: SaveHold = null;
   try {
     held = await performSave(tab);

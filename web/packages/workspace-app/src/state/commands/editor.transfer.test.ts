@@ -5,7 +5,9 @@
 // every file tab, a draft's included (Export on Markdown alone), says why
 // where it is not, and hands the file's path to the function the inspector's
 // own row calls. A workspace's draft goes by its draft identity and leaves no
-// record that would store its client path.
+// record that would store its client path. Both read the server's copy, so
+// a tab with text the server lacks is saved first, and a save that fails
+// refuses the action.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { draftPath } from "../../__tests__/drafts";
@@ -41,8 +43,10 @@ vi.mock("../../api/desktop", async (importOriginal) => ({
 vi.mock("../fileActionExecutors", () => ({ exportPathToPdf: vi.fn(async () => {}) }));
 
 import { api } from "../../api/client";
+import type { FileWriteResponse } from "../../api/types";
 import { exportPathToPdf } from "../fileActionExecutors";
-import { fileOps } from "../store.svelte";
+import { fileOps, ui } from "../store.svelte";
+import { registerPendingEditFlush, setTabContent, type FileTab } from "../tabs.svelte";
 import { standaloneDrafts } from "../workspace.svelte";
 
 import "./editor";
@@ -208,5 +212,120 @@ describe("on a standalone window's draft", () => {
     expect(tracked.mock.calls).toEqual([[DRAFT, false]]);
     expect(plain).not.toHaveBeenCalled();
     expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[DRAFT]]);
+  });
+});
+
+// The server's copy trails the editor by the autosave's delay, and for as
+// long as a save keeps failing. A download or an export of it would carry
+// the older text and still report success.
+describe("on a tab with text the server does not hold", () => {
+  const DRAFT = draftPath("untitled");
+
+  /// What reaches the server and what leaves the window, in the order it
+  /// happened. A write answers when `answer` says, so a test can look between
+  /// the request and its answer.
+  function traffic(answer: () => Promise<void> = async () => {}) {
+    const seen: string[] = [];
+    vi.spyOn(api, "write").mockImplementation(async (path, content) => {
+      seen.push(`write ${path}: ${content}`);
+      await answer();
+      return { mtime: 2, mtime_ns: "2" } as FileWriteResponse;
+    });
+    vi.spyOn(fileOps, "downloadPath").mockImplementation((path) => void seen.push(`download ${path}`));
+    vi.spyOn(fileOps, "downloadPathWithProgress").mockImplementation((path) => void seen.push(`download ${path}`));
+    vi.mocked(exportPathToPdf).mockImplementation(async (path) => void seen.push(`export ${path}`));
+    return seen;
+  }
+
+  function seat(tab: FileTab): FileTab {
+    return resetLayout([tab]).tabs[0] as FileTab;
+  }
+
+  test("a draft is saved before Download asks for it and before Export reads it", async () => {
+    let answered: () => void = () => {};
+    const seen = traffic(() => new Promise<void>((resolve) => (answered = resolve)));
+    const tab = seat(fileTab({ id: "draft", path: DRAFT, content: "typed", saved: "" }));
+
+    command(DOWNLOAD).run();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${DRAFT}: typed`]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen, "nothing leaves while the save is unanswered").toEqual([`write ${DRAFT}: typed`]);
+    answered();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${DRAFT}: typed`, `download ${DRAFT}`]));
+    expect(tab.saved).toBe("typed");
+
+    seen.splice(0);
+    setTabContent(tab, "typed more");
+    command(EXPORT).run();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${DRAFT}: typed more`]));
+    answered();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${DRAFT}: typed more`, `export ${DRAFT}`]));
+  });
+
+  test("a save that fails refuses both, with the reason on the status line", async () => {
+    const seen = traffic(async () => {
+      throw new Error("no space left on device");
+    });
+    seat(fileTab({ id: "draft", path: DRAFT, content: "typed", saved: "" }));
+
+    for (const id of [DOWNLOAD, EXPORT]) {
+      ui.status = null;
+      command(id).run();
+      await vi.waitFor(() =>
+        expect(ui.status, id).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+      );
+    }
+    expect(seen, "two saves tried, nothing sent").toEqual([`write ${DRAFT}: typed`, `write ${DRAFT}: typed`]);
+  });
+
+  test("a mounted editor's buffered input is committed first, and is what the save writes", async () => {
+    const seen = traffic();
+    const tab = seat(fileTab({ id: "draft", path: DRAFT }));
+    const forget = registerPendingEditFlush(tab.id, () => setTabContent(tab, "drawn"));
+
+    command(DOWNLOAD).run();
+    forget();
+
+    await vi.waitFor(() => expect(seen).toEqual([`write ${DRAFT}: drawn`, `download ${DRAFT}`]));
+  });
+
+  test("an editor that cannot commit its input refuses both and says so", async () => {
+    const seen = traffic();
+    const tab = seat(fileTab({ id: "draft", path: DRAFT }));
+    const forget = registerPendingEditFlush(tab.id, () => {
+      throw new Error("scene export failed");
+    });
+
+    for (const id of [DOWNLOAD, EXPORT]) {
+      ui.status = null;
+      command(id).run();
+      await vi.waitFor(() =>
+        expect(ui.status, id).toMatch(/was not saved because its editor could not commit its input \(scene export failed\)\.$/),
+      );
+    }
+    forget();
+    expect(seen).toEqual([]);
+  });
+
+  test("a file that is no draft is saved first too, where no live session holds its edits", async () => {
+    const seen = traffic();
+    seat(fileTab({ id: "note", path: "notes/a.md", content: "typed", saved: "older" }));
+
+    command(DOWNLOAD).run();
+    command(EXPORT).run();
+
+    await vi.waitFor(() =>
+      expect(seen).toEqual(["write notes/a.md: typed", "download notes/a.md", "export notes/a.md"]),
+    );
+  });
+
+  test("a tab the server is level with asks for no save and starts at once", () => {
+    const seen = traffic();
+    seat(fileTab({ id: "draft", path: DRAFT }));
+
+    command(DOWNLOAD).run();
+    command(EXPORT).run();
+
+    expect(seen).toEqual([`download ${DRAFT}`, `export ${DRAFT}`]);
   });
 });

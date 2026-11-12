@@ -811,7 +811,7 @@
   /// it, each through the command's own function: Download, and Export to
   /// PDF on Markdown.
   const draftActions = $derived<{ main: InspectorAction; secondary: InspectorAction[] }>({
-    main: { command: "app.editor.download", onClick: () => downloadFile(tab) },
+    main: { command: "app.editor.download", onClick: () => void downloadFile(tab) },
     secondary: isMarkdown(tab.path)
       ? [{ command: "app.editor.exportPdf", onClick: () => void exportFileToPdf(tab) }]
       : [],

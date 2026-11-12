@@ -1133,6 +1133,48 @@ describe("a menu row and its command", () => {
     expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[path], [path]]);
   });
 
+  // The two actions read the server's copy, which trails the editor by the
+  // autosave's delay and for as long as a save keeps failing.
+  test("a draft's Details actions save what was typed before they send the draft, and send nothing when the save fails", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const seen: string[] = [];
+    let refusal: Error | null = null;
+    vi.spyOn(api, "write").mockImplementation(async (_path, content) => {
+      seen.push(`write ${content.split("\n")[0]}`);
+      if (refusal) throw refusal;
+      return { mtime: 200, mtime_ns: "200" };
+    });
+    vi.spyOn(fileOps, "downloadPath").mockImplementation(() => void seen.push("download"));
+    vi.mocked(exportPathToPdf).mockImplementation(async () => void seen.push("export"));
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const type = async (text: string): Promise<void> => {
+      editorView(target).dispatch({ changes: { from: 0, insert: text } });
+      await settle(1);
+    };
+
+    await type("one ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write one # Plan", "download"]));
+
+    seen.splice(0);
+    await type("two ");
+    details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+    flushSync();
+    details.querySelector<HTMLButtonElement>(".action-menu-item")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write two one # Plan", "export"]));
+
+    seen.splice(0);
+    refusal = new Error("no space left on device");
+    await type("three ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() =>
+      expect(ui.status).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+    );
+    expect(seen, "the save was tried and nothing was sent").toEqual(["write three two one # Plan"]);
+  });
+
   test("a workspace draft that is not Markdown offers Download alone", async () => {
     const tab = seat(
       fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
