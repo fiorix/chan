@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Two machine rows can resolve to one library_id: a directly registered devserver beside its gateway roster row, or one box registered twice. The deck flattens machine windows into one keyed list, so only the first claimant of the id is handed them: two rows holding the same WindowRecord objects put one window in that list twice, and each_key_duplicate takes the whole command surface down. Any root-level query reaches that list.
+// Two machine rows can resolve to one library_id: a directly registered devserver beside its gateway roster row, or one box registered twice. The deck lists every machine's windows in one keyed list, so only the first claimant of the id is handed them: two rows holding the same WindowRecord objects put one window in that list twice, and each_key_duplicate takes the whole command surface down. The Windows filter and any root-level query reach that list.
 //
 // Mounted, because the failure is a render throw in the deck itself.
 
@@ -26,16 +26,44 @@ vi.mock("../state/computerActions", () => ({
   canManageWindow: () => true,
   canOpenWorkspaceWindow: () => true,
   closeComputerWindow: vi.fn(),
+  connectAndOpenTerminal: vi.fn(),
   connectComputer: vi.fn(),
+  copyGatewayPublicKey: vi.fn(),
+  detachTmux: vi.fn(),
   focusComputerWindow: vi.fn(),
   liveTerminalCountForWindow: vi.fn(),
+  liveTerminalCountForWorkspace: vi.fn(),
   newTerminal: vi.fn(),
+  newTmuxWindow: vi.fn(),
+  newWorkspaceTerminalWindow: vi.fn(),
   newWorkspaceWindow: vi.fn(),
+  openComputerWindow: vi.fn(),
+  openTmuxWindow: vi.fn(),
   setWindowShown: vi.fn(),
   setWorkspacePower: vi.fn(),
+  showComputerCard: vi.fn(),
+  turnOffWorkspace: vi.fn(),
+  turnOnAndOpenWorkspace: vi.fn(),
 }));
 
+// The rows the host hands the deck: which machine a row sits under is in
+// their sections and second lines, whatever the deck draws of them.
+const deck = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
+
+vi.mock("@chan/web-shared/CommandDeck.svelte", async (importOriginal) => {
+  const real = await importOriginal<Record<string, unknown>>();
+  const Deck = real.default as (anchor: unknown, props: Record<string, unknown>) => unknown;
+  return {
+    ...real,
+    default: function RecordingDeck(anchor: unknown, props: Record<string, unknown>) {
+      deck.props = props;
+      return Deck(anchor, props);
+    },
+  };
+});
+
 import CommandLauncher from "./CommandLauncher.svelte";
+import type { DeckItem } from "@chan/web-shared/command-deck";
 import type { DevserverEntry, TmuxConnectionEntry, WindowRecord, WorkspaceEntry } from "../api/library";
 import { library } from "../state/library.svelte";
 import {
@@ -108,6 +136,15 @@ function titles(): string[] {
   return [...target.querySelectorAll(".deck-result-title")].map((n) => n.textContent ?? "");
 }
 
+function items(): DeckItem[] {
+  return deck.props!.items as DeckItem[];
+}
+
+async function filterBy(scope: string): Promise<void> {
+  (deck.props!.onScope as (id: string) => void)(scope);
+  await tick();
+}
+
 async function query(value: string): Promise<void> {
   const field = target.querySelector(".deck-input") as HTMLInputElement;
   field.value = value;
@@ -153,10 +190,19 @@ describe("Computers deck with two rows on one library", () => {
 
     expect(activeCommandLauncherDraft().visible, "the deck opened").toBe(true);
     expect(target.querySelector(".deck-input"), "the deck mounted").not.toBeNull();
-    expect(titles().length, "the root action set rendered").toBeGreaterThan(0);
+    expect(titles().length, "the root rendered").toBeGreaterThan(0);
   });
 
-  it("survives a root-level query, which reaches the flattened window list", async () => {
+  it("lists the shared library's window once under the Windows filter", async () => {
+    openDeck();
+    await filterBy("windows");
+
+    expect(target.querySelector(".deck-input"), "the deck survived the list").not.toBeNull();
+    const shown = items().filter((row) => row.title.includes("shared terminal"));
+    expect(shown.map((row) => row.section), "the first claimant by name lists it").toEqual(["beta"]);
+  });
+
+  it("survives a root-level query, which reaches every machine's windows", async () => {
     openDeck();
     await query("shared");
     await tick();
@@ -188,15 +234,14 @@ describe("Computers deck with two rows on one library", () => {
     ];
 
     openDeck();
-    const windows = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
-      (button) => button.querySelector(".deck-result-title")?.textContent === "Windows",
-    );
-    expect(windows, "the Windows branch exists").toBeDefined();
-    windows!.click();
-    await tick();
-    const paths = [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent);
-    expect(paths).toContain("Computers › Windows › beta › Open");
-    expect(paths).toContain("Computers › Windows › tmux -CC on beta (main) › Open");
+    await filterBy("windows");
+    expect(items().map((row) => row.section)).toEqual(["beta", "tmux -CC on beta (main)", "New"]);
+    // Typed, the rows interleave and each names its machine.
+    await query("shared terminal");
+    const named = items()
+      .filter((row) => row.id.startsWith("computers:window:"))
+      .map((row) => row.subtitle);
+    expect(named.sort()).toEqual(["beta", "tmux -CC on beta (main)"]);
   });
 
   it("uses the library's machine name for a workspace target", async () => {
@@ -212,13 +257,13 @@ describe("Computers deck with two rows on one library", () => {
     } as WorkspaceEntry];
 
     openDeck();
-    const turnOff = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
-      (button) => button.querySelector(".deck-result-title")?.textContent === "Turn off",
-    );
-    expect(turnOff, "the Turn off branch exists").toBeDefined();
-    turnOff!.click();
-    await tick();
-    const paths = [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent);
-    expect(paths).toContain("Computers › Turn off › beta");
+    await filterBy("workspaces");
+    // The workspace sits on the card of the row that serves it, and names the
+    // row that holds its library's windows.
+    const project = items().find((row) => row.title === "Project");
+    expect([project?.section, project?.subtitle]).toEqual(["zeta", "beta"]);
+    await query("turn off project");
+    const turnOff = items().find((row) => row.title === "Turn off Project");
+    expect(turnOff?.subtitle).toBe("beta");
   });
 });
