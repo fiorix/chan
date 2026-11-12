@@ -143,6 +143,12 @@ export type CommandContext = {
   activeExtensionId: string | null;
 };
 
+/// How a command came to run, where its caller knows. `chord` is the press
+/// of a chord the user assigned to the command, which the window's key
+/// handler runs it for. A launcher row, a menu row and the host bridge name
+/// none.
+export type CommandInvocation = "chord";
+
 export type Command = {
   /// Stable id. Chorded commands reuse their SHORTCUTS id so chordFor(id)
   /// resolves the current chord; chordless commands pick a unique id in
@@ -211,7 +217,9 @@ export type Command = {
   /// action directly. A toggle's run flips it, and a choice's run opens the
   /// launcher on its options (see [`openChoice`]). `arg` is the launcher's
   /// verbatim remainder for acceptsArg commands; everything else ignores it.
-  run: (arg?: string) => void;
+  /// `via` is how the command was invoked, when the caller knows; a command
+  /// that does one thing however it is reached ignores it.
+  run: (arg?: string, via?: CommandInvocation) => void;
 };
 
 // ---- registry ----------------------------------------------------------

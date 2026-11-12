@@ -13,7 +13,6 @@
 // shape and helpers.
 
 import {
-  allCommands,
   registerCommands,
   dispatchChanCommand,
   onSurface,
@@ -38,7 +37,6 @@ import {
   isRichPromptVisible,
   toggleRichPromptToolbar,
 } from "../richPrompt.svelte";
-import { isAssignedTerminalCopyChord } from "../../terminal/clipboardChord";
 
 function onTerminal(ctx: CommandContext): boolean {
   return onSurface(ctx, "terminal") && !ctx.terminalControl;
@@ -268,11 +266,9 @@ registerCommands([
     // The copy chord is the terminal's own key and copies a selection only.
     // Choosing the command is asking for a result, so with nothing selected
     // it copies the scrollback, as the menu row does. A chord the user
-    // assigned to the command is the copy key under another spelling. The
-    // window's key handler runs the command inside that chord's keydown and
-    // hands it nothing, so the run reads the event the window is
-    // dispatching: when it is that keydown, the run tells the terminal a
-    // chord asked, and the terminal copies the selection alone.
+    // assigned to the command is the copy key under another spelling: run
+    // by one, the command tells the terminal a chord asked, and the terminal
+    // copies the selection alone.
     id: "terminal.copy",
     title: "Copy",
     category: "Terminal",
@@ -282,11 +278,8 @@ registerCommands([
     requirement: "terminal",
     keywords: ["Copy selection", "clipboard", "selection", "scrollback"],
     available: onTerminal,
-    run: () =>
-      dispatchChanCommand(
-        "terminal.copy",
-        isAssignedTerminalCopyChord(window.event, allCommands()) ? { chord: true } : {},
-      ),
+    run: (_arg, via) =>
+      dispatchChanCommand("terminal.copy", via === "chord" ? { chord: true } : {}),
   },
   {
     id: "terminal.paste",

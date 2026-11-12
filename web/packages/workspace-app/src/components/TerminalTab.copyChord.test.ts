@@ -3,10 +3,10 @@
 // A chord the user assigns to the terminal's Copy. The app's own key handler
 // runs the command for it, and the terminal answers as it answers its
 // built-in copy chord: the selection goes to the clipboard, and with nothing
-// selected nothing does. The launcher's row for the same command still
-// copies the scrollback then, as the menu's row does. The real App is
-// mounted over the demo transport with the stand-in xterm, so the key takes
-// the path a pressed chord takes.
+// selected nothing does. The menu's row and the launcher's row for the same
+// command still copy the scrollback then. The real App is mounted over the
+// demo transport with the stand-in xterm, so the key takes the path a
+// pressed chord takes.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -21,7 +21,7 @@ import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/a
 import { pressInPage } from "../__tests__/keys";
 import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { xterm, type FakeTerminal } from "../__tests__/xterm";
-import { commandById } from "../state/commands";
+import { commandById, commandTitle } from "../state/commands";
 import { assignOverride, hydrateOverrides } from "../state/keymapOverrides.svelte";
 import { launcherPanel } from "../state/store.svelte";
 import type { Tab } from "../state/tabs.svelte";
@@ -76,10 +76,24 @@ async function idle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
+/// Run Copy as a launcher row does: with nothing said of how.
 function runCopy(): void {
   const command = commandById("terminal.copy");
   if (!command) throw new Error("no command terminal.copy");
   command.run();
+}
+
+/// Choose Copy in the terminal's right-click menu.
+async function chooseMenuCopy(): Promise<void> {
+  document
+    .querySelector(".terminal-tab")!
+    .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+  await settle();
+  const row = [...document.querySelectorAll<HTMLButtonElement>("button.mbtn")].find(
+    (button) => button.querySelector(".mbtn-label")?.textContent?.trim() === commandTitle("terminal.copy"),
+  );
+  if (!row) throw new Error("no Copy row in the terminal's menu");
+  row.click();
 }
 
 describe("a chord assigned to the terminal's Copy", () => {
@@ -94,7 +108,7 @@ describe("a chord assigned to the terminal's Copy", () => {
     await copied(["selected text"]);
   });
 
-  test("does nothing with nothing selected, where the launcher's row copies the scrollback", async () => {
+  test("does nothing with nothing selected, where the menu's row and the launcher's row copy the scrollback", async () => {
     const term = await seed(terminalTab({ id: "shell" }));
     assignOverride("terminal.copy", "Ctrl+Alt+J", "web");
     term.selection = "";
@@ -104,8 +118,11 @@ describe("a chord assigned to the terminal's Copy", () => {
     await idle();
     expect(written(), "the chord").toEqual([]);
 
-    runCopy();
+    await chooseMenuCopy();
     await copied([SCROLLBACK]);
+
+    runCopy();
+    await copied([SCROLLBACK, SCROLLBACK]);
   });
 
   test("leaves the next run of the command a row's", async () => {
