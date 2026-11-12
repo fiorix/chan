@@ -622,14 +622,12 @@
     closeCommandLauncher();
   }
 
-  /// A command that ran leaves the deck closed on a fresh draft that keeps
-  /// the query that found it, which the next opening selects: Enter then
-  /// repeats the command and typing replaces the query.
+  /// A command that ran leaves the deck closed on a fresh draft, so the next
+  /// opening starts on an empty query. A deck that was dismissed keeps what
+  /// was typed.
   function finish(): void {
-    const { query } = draft;
     closeDeck();
     clearCommandLauncherDraft();
-    activeCommandLauncherDraft().query = query;
   }
 
   function back(): void {

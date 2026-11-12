@@ -821,7 +821,7 @@ describe("Computers command deck", () => {
     expect(target.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("keeps the query of a command that ran, for the next opening to repeat", async () => {
+  it("clears the query of a command that ran", async () => {
     open();
     await query("deploy shell focus");
     result("Focus Control terminal").click();
@@ -829,14 +829,34 @@ describe("Computers command deck", () => {
     const closed = activeCommandLauncherDraft();
     expect([closed.visible, closed.query, closed.path, closed.operation]).toEqual([
       false,
-      "deploy shell focus",
+      "",
       [],
       null,
     ]);
     open();
     await tick();
-    expect(input().value).toBe("deploy shell focus");
-    expect(titles()).toContain("Focus Control terminal");
+    expect(input().value).toBe("");
+    expect(outline()[0]).toBe("Recent windows: Control terminal");
+  });
+
+  it("clears the query of a command that opens a dialog as it starts", async () => {
+    open();
+    await query("new workspace");
+    result("New workspace").click();
+    await settle();
+    expect(dialog.open).toBe(true);
+    const closed = activeCommandLauncherDraft();
+    expect([closed.visible, closed.query]).toEqual([false, ""]);
+  });
+
+  it("keeps the query of a deck that was dismissed", async () => {
+    open();
+    await query("deploy shell");
+    await key("Escape");
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    open();
+    await tick();
+    expect(input().value).toBe("deploy shell");
   });
 
   it("carries no query out of a page into the next opening", async () => {
