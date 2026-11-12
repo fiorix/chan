@@ -22,7 +22,11 @@ import CommandLauncher from "./CommandLauncher.svelte";
 import { SETTINGS_SECTIONS } from "./settings/sections";
 import { resetShownPreferencesForTests } from "./settings/preferenceState.svelte";
 import { settingEntry, settingsIndex } from "./settings/settingsIndex";
-import { resetWorkspaceStateForTests } from "./settings/workspace/workspaceState.svelte";
+import {
+  WORKSPACE_STATE_MAX_AGE_MS,
+  resetWorkspaceStateForTests,
+} from "./settings/workspace/workspaceState.svelte";
+import { api } from "../api/client";
 import type { Preferences } from "../api/types";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import { settingsPreferences } from "../__tests__/settings";
@@ -148,6 +152,7 @@ afterEach(() => {
   resetWorkspaceStateForTests();
   ui.themeChoice = startTheme.choice;
   ui.theme = startTheme.theme;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -234,6 +239,53 @@ describe("the Settings scope over the settings index", () => {
       ["ghostty", "false"],
       ["xterm", "true"],
     ]);
+  });
+});
+
+describe("a setting of this workspace, pressed in the Settings scope", () => {
+  test("the press sends no read beside its write, and the row keeps the write's answer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The server: a write takes effect as it is answered, and a read sees
+    // the state as it arrives. A read that arrives while the write is still
+    // unanswered is answered after it, as a slower connection would.
+    let enabled = false;
+    let writeSent = false;
+    let answerWrite = (): void => {};
+    const besideTheWrite: (() => void)[] = [];
+    vi.spyOn(api, "reportsState").mockImplementation(async () => {
+      const seen = { enabled };
+      if (writeSent && !enabled) await new Promise<void>((resolve) => besideTheWrite.push(resolve));
+      return seen;
+    });
+    vi.spyOn(api, "reportsEnable").mockImplementation(async () => {
+      writeSent = true;
+      await new Promise<void>((resolve) => (answerWrite = resolve));
+      enabled = true;
+      return { enabled };
+    });
+    vi.spyOn(api, "buildInfo").mockResolvedValue({
+      version: "0",
+      build: "test",
+      features: { embeddings: false },
+    });
+    serveWorkspace(settingsPreferences());
+    const reports = settingEntry("workspace.reports");
+    await openSettingsScope();
+    await vi.waitFor(() => expect(row(reports.label).dataset.value).toBe("off"));
+
+    // The row has been on screen past the age at which a read asks again.
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    row(reports.label).click();
+    await vi.waitFor(() => expect(writeSent).toBe(true));
+    await flush();
+    answerWrite();
+    await vi.waitFor(() => expect(row(reports.label).dataset.value).toBe("on"));
+
+    for (const answer of besideTheWrite) answer();
+    await flush();
+    expect(row(reports.label).dataset.value).toBe("on");
+    expect(besideTheWrite, "reads sent while the write was unanswered").toHaveLength(0);
+    expect(launcherPanel.open).toBe(true);
   });
 });
 

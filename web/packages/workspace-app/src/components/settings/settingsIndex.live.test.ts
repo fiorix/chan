@@ -27,7 +27,10 @@ import { settingEntry, settingsIndex } from "./settingsIndex";
 import SettingRow from "./settingRowTestHost.svelte";
 import {
   WORKSPACE_STATE_MAX_AGE_MS,
+  loadReports,
+  loadSemantic,
   resetWorkspaceStateForTests,
+  setSemanticEnabled,
 } from "./workspace/workspaceState.svelte";
 
 const REFUSAL = "configuration is locked";
@@ -559,6 +562,205 @@ describe("a setting of this workspace, with the overlay closed", () => {
 
     answer();
     await first;
+    expect(entry.read()).toBe(true);
+  });
+
+  /// Let the answers already released land.
+  async function landed(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  /// Hold every chan-reports read from now on: the server reads its state as
+  /// the request arrives and answers when the returned function is called.
+  function holdReportsReads(): () => void {
+    const held: (() => void)[] = [];
+    vi.mocked(api.reportsState).mockImplementation(async () => {
+      const seen = { enabled: reportsEnabled };
+      await new Promise<void>((resolve) => held.push(resolve));
+      return seen;
+    });
+    return () => {
+      for (const answer of held.splice(0)) answer();
+    };
+  }
+
+  test("a read sent before a write and answered after it does not put the old state back", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const entry = settingEntry("workspace.reports");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+
+    // The window's copy has aged out, so this read asks the server again.
+    const answerReads = holdReportsReads();
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    entry.read();
+    await vi.waitFor(() => expect(api.reportsState).toHaveBeenCalledTimes(2));
+
+    await entry.write!(true);
+    expect(entry.read()).toBe(true);
+
+    // The read saw the state the write replaced.
+    answerReads();
+    await landed();
+    expect(entry.read()).toBe(true);
+  });
+
+  test("a read sent while a write is under way and answered after it is dropped as well", async () => {
+    const entry = settingEntry("workspace.reports");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+    let answerWrite = (): void => {};
+    vi.mocked(api.reportsEnable).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (answerWrite = resolve));
+      return { enabled: (reportsEnabled = true) };
+    });
+
+    const written = entry.write!(true);
+    // The Settings control mounts meanwhile and reads for itself.
+    const answerReads = holdReportsReads();
+    const read = loadReports();
+    answerWrite();
+    await written;
+    expect(entry.read()).toBe(true);
+
+    answerReads();
+    await read;
+    expect(entry.read()).toBe(true);
+  });
+
+  test("a semantic search read sent before a write does not put the old state back", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const entry = settingEntry("workspace.semantic");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+
+    const held: (() => void)[] = [];
+    vi.mocked(api.semanticState).mockImplementation(async () => {
+      const seen = { ...semanticState };
+      await new Promise<void>((resolve) => held.push(resolve));
+      return seen;
+    });
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    entry.read();
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+
+    await entry.write!(true);
+    expect(entry.read()).toBe(true);
+
+    held[0]!();
+    await landed();
+    expect(entry.read()).toBe(true);
+  });
+
+  test("a read sent while a model downloads and answered after it does not put back what it saw", async () => {
+    semanticState = { ...semanticState, model_present: false };
+    models.models[0]!.downloaded = false;
+    const entry = settingEntry("workspace.semantic");
+    const model = settingEntry("workspace.embeddingModel");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+    let finishDownload = (): void => {};
+    vi.mocked(api.semanticDownload).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (finishDownload = resolve));
+      semanticState = { ...semanticState, model_present: true };
+      models.models[0]!.downloaded = true;
+      return { ...semanticState };
+    });
+    let finishEnable = (): void => {};
+    vi.mocked(api.semanticEnable).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (finishEnable = resolve));
+      semanticState = { ...semanticState, semantic_enabled: true, mode: "hybrid" };
+      return { ...semanticState };
+    });
+
+    // The Settings toggle's own write, which downloads the model it lacks.
+    const written = setSemanticEnabled(true);
+    await vi.waitFor(() => expect(api.semanticDownload).toHaveBeenCalled());
+
+    // A read sent while the download runs, as its poll sends, sees no model
+    // on disk and is answered late.
+    const held: (() => void)[] = [];
+    const answerLate = async <T,>(seen: T): Promise<T> => {
+      await new Promise<void>((resolve) => held.push(resolve));
+      return seen;
+    };
+    vi.mocked(api.semanticState).mockImplementationOnce(() => answerLate({ ...semanticState }));
+    vi.mocked(api.semanticModels).mockImplementationOnce(() =>
+      answerLate(JSON.parse(JSON.stringify(models)) as SemanticModelRegistry),
+    );
+    const read = loadSemantic();
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+
+    finishDownload();
+    await vi.waitFor(() => expect(api.semanticEnable).toHaveBeenCalled());
+    expect(model.options?.[0]?.label).toBe("BGE small - 384d - 130 MB - downloaded");
+
+    // The late answers land between the download and the enable.
+    for (const answer of held) answer();
+    await read;
+    expect(model.options?.[0]?.label).toBe("BGE small - 384d - 130 MB - downloaded");
+
+    finishEnable();
+    await expect(written).resolves.toBeNull();
+    expect(entry.read()).toBe(true);
+  });
+
+  test("a read answered right behind a model change's own read-back does not put the old model back", async () => {
+    const entry = settingEntry("workspace.embeddingModel");
+    await vi.waitFor(() => expect(entry.read()).toBe("bge-small"));
+    let answerWrite = (): void => {};
+    vi.mocked(api.semanticModelPatch).mockImplementation(async (model) => {
+      await new Promise<void>((resolve) => (answerWrite = resolve));
+      models = { ...models, current_model: model };
+      return { ...semanticState };
+    });
+    // Every read from here on sees the server's state as it is sent and is
+    // answered when the test says.
+    const held: (() => void)[] = [];
+    const answerLate = async <T,>(seen: T): Promise<T> => {
+      await new Promise<void>((resolve) => held.push(resolve));
+      return seen;
+    };
+    vi.mocked(api.semanticState).mockImplementation(() => answerLate({ ...semanticState }));
+    vi.mocked(api.semanticModels).mockImplementation(() =>
+      answerLate(JSON.parse(JSON.stringify(models)) as SemanticModelRegistry),
+    );
+
+    const written = entry.write!("bge-m3");
+    // Sent while the write is unanswered: it sees the old model.
+    const read = loadSemantic();
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    answerWrite();
+    // The write reads the registry back, which sees the new model.
+    await vi.waitFor(() => expect(held).toHaveLength(4));
+
+    // The read-back is answered first and the older read right behind it,
+    // before the write has ended.
+    for (const answer of [held[2]!, held[3]!, held[0]!, held[1]!]) answer();
+    await written;
+    await read;
+    expect(entry.read()).toBe("bge-m3");
+  });
+
+  test("a read in the same turn as a write starts no refresh beside it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const entry = settingEntry("workspace.reports");
+    await vi.waitFor(() => expect(entry.read()).toBe(false));
+    expect(api.reportsState).toHaveBeenCalledTimes(1);
+    let answerWrite = (): void => {};
+    vi.mocked(api.reportsEnable).mockImplementation(async () => {
+      await new Promise<void>((resolve) => (answerWrite = resolve));
+      return { enabled: (reportsEnabled = true) };
+    });
+
+    // The copy has aged out, and the value is read and its opposite written
+    // in one turn, as a press on a row does.
+    vi.setSystemTime(Date.now() + WORKSPACE_STATE_MAX_AGE_MS + 1);
+    const written = entry.write!(!entry.read());
+    await landed();
+    expect(api.reportsState).toHaveBeenCalledTimes(1);
+
+    answerWrite();
+    await written;
+    // A read after the write is free to ask again.
+    entry.read();
+    await vi.waitFor(() => expect(api.reportsState).toHaveBeenCalledTimes(2));
     expect(entry.read()).toBe(true);
   });
 
