@@ -225,6 +225,60 @@ describe("the filesystem spine under the semantic graph", () => {
     expect(graphServer.graphStreamCalls).toBe(1);
   });
 
+  test("reads the root's level and each opened directory's, parents first, and nothing else", async () => {
+    // Two branches, one opened three levels down; a sibling at each level
+    // the tab does not open.
+    graphServer.view = { nodes: [], edges: [] };
+    const dirs = ["a", "a/b", "a/b/c", "a/side", "z", "z/y"];
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...dirs.map(fsg.dir), ...dirs.map((d) => fsg.file(`${d}/f.md`))],
+      edges: [
+        ...dirs.map((d) => fsg.contains(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : "", d)),
+        ...dirs.map((d) => fsg.contains(d, `${d}/f.md`)),
+      ],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("a/b/c"), "z/y": true } }));
+
+    expect(graphServer.fsGraphCalls).toEqual([
+      { path: "", depth: 1, cursor: undefined },
+      { path: "a", depth: 1, cursor: undefined },
+      { path: "a/b", depth: 1, cursor: undefined },
+      { path: "a/b/c", depth: 1, cursor: undefined },
+    ]);
+    expect(visibleIds(), "the opened tree").toEqual(
+      expect.arrayContaining(["a/f.md", "a/b/f.md", "a/b/c/f.md", "directory:a/side", "directory:z"]),
+    );
+    expect(visibleIds(), "z/ is closed, so z/y is not drawn and not read").not.toContain("directory:z/y");
+  });
+
+  test("a change made while the first spine is read is patched once it lands", async () => {
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((r) => (release = r));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "the first reads are held").toEqual(["", "notes"]);
+
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/late.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/late.md")],
+    };
+    vi.useFakeTimers();
+    try {
+      graphReloadSignal.paths = ["notes/late.md"];
+      graphReloadSignal.nonce += 1;
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+    release();
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "read once, then the change's directory").toEqual([
+      "",
+      "notes",
+      "notes",
+    ]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/late.md");
+  });
+
   test("is drawn alone until the shared graph's first batch", async () => {
     let release!: () => void;
     graphServer.streamGate = new Promise<void>((r) => (release = r));
@@ -523,11 +577,16 @@ describe("watching the directories it shows", () => {
         fsg.contains("notes/fresh", "notes/fresh/x.md"),
       ],
     };
-    // Opened to notes/deep, so the spine holds the levels down to it.
-    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/deep") }));
+    // notes/fresh is opened, but it was not there when the tab read the tree.
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => !n.path.startsWith("notes/fresh"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), "notes/fresh": true } }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("notes/fresh"), fsg.file("notes/fresh/x.md")],
+      edges: graphServer.fs.edges,
+    };
     const { spines } = await change(["notes/fresh", "notes/fresh/x.md", "notes/nowhere/y.md"]);
     expect(spines.map((c) => c.path), "notes/nowhere is no directory the spine holds").toEqual(["notes", "notes/fresh"]);
-    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/fresh/x.md");
+    expect(visibleIds()).toContain("notes/fresh/x.md");
   });
 
   test("a directory gone from disk takes what the spine held below it", async () => {

@@ -238,6 +238,32 @@ describe("graph tabs in a pane", () => {
     expect(ids()).toContain("new.md");
   });
 
+  test("a tab hidden while its first spine is read takes a change made meanwhile when shown", async () => {
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((r) => (release = r));
+    const { pane } = await renderPane();
+    const [one] = canvas.all;
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.file("new.md")], edges: [fsg.contains("", "new.md")] };
+    graphReloadSignal.paths = ["new.md"];
+    graphReloadSignal.nonce += 1;
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    // Hidden before its read lands; the tab shown instead reads its own.
+    pane.activeTabId = "two";
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "one read each, both held").toEqual(["", ""]);
+    release();
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "the hidden tab reads nothing more").toEqual(["", ""]);
+
+    pane.activeTabId = "one";
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "shown, it takes the change").toEqual(["", "", ""]);
+    expect(one!.nodes.map((n) => n.id)).toContain("new.md");
+  });
+
   test("a hidden tab lets go of the graph once the window's has moved on, and keeps what it draws", async () => {
     // Tab two has the root's level drawn and `notes` selected; `notes` is
     // closed, so what it draws leaves out the files below it.

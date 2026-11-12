@@ -102,6 +102,7 @@
     type DraftLayer,
   } from "../graph/draftNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
+  import { ancestorsExpanded } from "../graph/pathVisibility";
   import {
     NO_GRAPH,
     drawnPart,
@@ -218,16 +219,6 @@
     else spineReload += 1;
   }
 
-  /// Levels of the filesystem spine a fetch asks for: one past the deepest
-  /// opened directory, so every opened directory's children are in it.
-  function spineDepth(): number {
-    let deepest = 0;
-    for (const dir of Object.keys(expandedDirs)) {
-      if (dir && expandedDirs[dir]) deepest = Math.max(deepest, dir.split("/").length);
-    }
-    return Math.min(deepest + 1, FS_GRAPH_DEPTH_MAX);
-  }
-
   // ---- the depth, which is the selected node's ---------------------------
 
   /// The directory the depth acts on: the selected one, the root when
@@ -342,6 +333,16 @@
   /// low-alpha layout pass stays within a frame, large enough to keep the
   /// round-trip count down on a big workspace.
   const GRAPH_BATCH_NODES = 128;
+
+  /// Levels a whole fetch of the spine asks for at once. A few in flight
+  /// keep a tab with hundreds of opened directories from waiting on each
+  /// round trip in turn.
+  const SPINE_READS_AHEAD = 4;
+  /// The first spine is drawn once its root's level lands, then at most
+  /// this often: each drawing lays it over the shared graph and the layout
+  /// takes the new nodes, which with thousands of directories opened costs
+  /// more than reading a level.
+  const SPINE_DRAW_MS = 1000;
 
   /// Yield to the next animation frame between batches so the editor, file
   /// browser, terminal, and other graphs stay interactive while a large
@@ -1299,89 +1300,84 @@
     return null;
   }
 
-  /// Fetches the tab's filesystem spine whole: the tree as deep as its
-  /// opened directories go, read straight from disk. It is what the tab
+  /// Fetches the tab's filesystem spine whole: the root's level and the
+  /// level of every opened directory the tree draws, read straight from
+  /// disk, one level a request, so a tab costs what it draws and not a walk
+  /// of the tree down to its deepest opened directory. It is what the tab
   /// draws before the shared graph's first batch and while the index cannot
-  /// answer, and it carries the tree's symlinks and hardlinks as deep as
-  /// the tab has the tree opened. The shared graph is laid over it
-  /// (`withSpine`): a file (bare-path id) or a directory (normalized to
-  /// `directory:<path>`) collides on id and the shared graph's node is the
-  /// one drawn; what only the spine carries stays. A change in the
-  /// workspace patches it (`patchSpine`) rather than fetching it again.
+  /// answer, and it carries the symlinks and hardlinks of the directories
+  /// the tab has open. The shared graph is laid over it (`withSpine`): a
+  /// file (bare-path id) or a directory (normalized to `directory:<path>`)
+  /// collides on id and the shared graph's node is the one drawn; what only
+  /// the spine carries stays. A change in the workspace, and a directory
+  /// opened before the shared graph holds its children, patch it
+  /// (`patchSpine`) rather than fetching it again; a change made while this
+  /// runs is patched once it lands.
   async function loadSpine(): Promise<void> {
     const seq = ++spineSeq;
     spineLoading = true;
     spineError = null;
     // A whole fetch reads every change made before it.
     spineChanges = new Set();
-    // The first spine fills in page by page. A later one replaces the drawn
-    // spine once it is whole, so a reload shows no shrunken tree on the way.
+    // The first spine is drawn as its levels land, at most every
+    // SPINE_DRAW_MS after the root's. A later one replaces the drawn spine
+    // once it is whole, so a reload shows no shrunken tree on the way.
     const first = spine === NO_GRAPH;
+    const read: SpineRead = { nodes: new Map(), edges: [], held: new Set() };
+    const dirs = openedSpineDirs();
+    // Up to SPINE_READS_AHEAD levels are asked for at once and laid down in
+    // order, parents first.
+    const reads: Array<ReturnType<typeof fetchSpineLevel>> = [];
+    let asked = 0;
+    const askAhead = (): void => {
+      while (asked < dirs.length && reads.length < SPINE_READS_AHEAD) {
+        const level = fetchSpineLevel(dirs[asked++], seq);
+        // Awaited in its turn; one in flight when an earlier one fails is
+        // dropped with the fetch.
+        level.catch(() => {});
+        reads.push(level);
+      }
+    };
+    let drawnAt = -Infinity;
+    let undrawn = false;
+    let landed = false;
     try {
-      const levels = spineDepth();
-      const renderedNodesById = new Map<string, RenderedNode>();
-      const renderedEdgesByKey = new Map<string, RenderedEdge>();
-      const publish = (): void => {
-        spine = {
-          nodes: [...renderedNodesById.values()],
-          edges: [...renderedEdgesByKey.values()],
-        };
-      };
-      const spineNodesById = new Map<string, FsGraphNode>();
-      let spineEdges: FsGraphEdge[] = [];
-      let cursor: string | undefined;
-      let fs: FsGraphResponse | undefined;
-      do {
-        fs = await api.fsGraph({
-          scope: "directory",
-          path: "",
-          depth: levels,
-          limit: GRAPH_BATCH_NODES,
-          cursor,
-        });
-        if (seq !== spineSeq) return;
-        for (const node of fs.nodes) spineNodesById.set(node.id, node);
-        const spineNodes = [...spineNodesById.values()];
-        const oldEdgeKeys = new Set(spineEdges.map(fsEdgeKey));
-        spineEdges = joinFsHardlinks(spineNodes, [...spineEdges, ...fs.edges]);
-        const newEdges = spineEdges.filter((edge) => !oldEdgeKeys.has(fsEdgeKey(edge)));
-        // Directory ids that need the `directory:` prefix so the fs
-        // spine collapses onto the semantic graph: the fs-graph names
-        // every node by bare path, where the semantic graph keeps the
-        // bare path for a file's node. The root is "" in both. File /
-        // ghost / symlink-leaf endpoints keep their bare path.
-        const fsDirIds = new Set<string>();
-        for (const n of spineNodes) {
-          if (isFsDirectory(n)) fsDirIds.add(n.id);
+      askAhead();
+      for (const dir of dirs) {
+        const level = await reads.shift()!;
+        if (level === "superseded") return;
+        askAhead();
+        applySpineLevel(read, dir, level);
+        undrawn = true;
+        if (first && performance.now() - drawnAt >= SPINE_DRAW_MS) {
+          publishSpine(read);
+          drawnAt = performance.now();
+          undrawn = false;
         }
-        const normalizeId = (id: string): string =>
-          fsDirIds.has(id) ? directoryNodeId(id) : id;
-        for (const mapped of mapFsNodes(fs)) {
-          const id = normalizeId(mapped.id);
-          renderedNodesById.set(id, { ...mapped, id });
-        }
-        for (const mapped of mapFsEdges({ ...fs, nodes: spineNodes, edges: newEdges })) {
-          const source = normalizeId(mapped.source);
-          const target = normalizeId(mapped.target);
-          const edge = { ...mapped, source, target };
-          renderedEdgesByKey.set(graphEdgeKey(edge), edge);
-        }
-        if (first) publish();
-        cursor = fs.cursor ?? undefined;
-        if (!fs.done && cursor) {
-          await yieldToFrame();
-          if (seq !== spineSeq) return;
-        }
-      } while (!fs.done && cursor);
-      if (!first) publish();
-      spineRead = { nodes: spineNodesById, edges: spineEdges, levels, patched: new Set() };
+      }
+      if (undrawn) publishSpine(read);
+      spineRead = read;
       rootGone = false;
+      landed = true;
     } catch (e) {
       if (seq !== spineSeq) return;
       spineFailed(e);
     } finally {
       if (seq === spineSeq) spineLoading = false;
     }
+    if (landed && seq === spineSeq && (spineChanges === null || spineChanges.size > 0)) {
+      if (visible) takeSpineChanges();
+      else graphDirty = true;
+    }
+  }
+
+  /// The root and every opened directory whose own directories are opened
+  /// too, which is the tree the tab draws, parents first.
+  function openedSpineDirs(): string[] {
+    const dirs = Object.keys(expandedDirs).filter(
+      (dir) => dir && expandedDirs[dir] && ancestorsExpanded("", dir, expandedDirs),
+    );
+    return ["", ...dirs.sort(byDepth)];
   }
 
   function spineFailed(e: unknown): void {
@@ -1396,22 +1392,19 @@
   }
 
   /// The spine as `/api/fs-graph` delivered it, which a change patches: the
-  /// nodes by id, the edges, how many levels below the root the whole fetch
-  /// read, and the directories whose children a patch has read since. Plain,
-  /// never rendered; `spine` is what is drawn of it.
-  let spineRead: {
+  /// nodes by id, the edges, and the directories whose children it holds.
+  /// Plain, never rendered; `spine` is what is drawn of it.
+  type SpineRead = {
     nodes: Map<string, FsGraphNode>;
     edges: FsGraphEdge[];
-    levels: number;
-    patched: Set<string>;
-  } | null = null;
+    held: Set<string>;
+  };
+  let spineRead: SpineRead | null = null;
 
   /// Whether the spine holds the children of the directory at `dir`: one
-  /// less deep than the whole fetch went, or one a patch has read.
+  /// whose level it read.
   function spineHoldsChildren(dir: string): boolean {
-    if (spineRead === null) return false;
-    const level = dir === "" ? 0 : dir.split("/").length;
-    return level < spineRead.levels || spineRead.patched.has(dir);
+    return spineRead?.held.has(dir) ?? false;
   }
 
   /// Path segments whose contents the spine never draws: the repository's
@@ -1420,10 +1413,10 @@
   const UNDRAWN_SEGMENTS: ReadonlySet<string> = new Set([".git", ".hg", ".chan"]);
 
   /// The directories whose children a change at `paths` can have moved
-  /// and the spine holds, or null for a change that named no path, which
-  /// only a whole fetch answers. A draft's path names no workspace
-  /// directory, and a path under `.git`, `.hg` or `.chan` none the spine
-  /// draws.
+  /// and the spine holds or the tree opens, or null for a change that named
+  /// no path, which only a whole fetch answers. A draft's path names no
+  /// workspace directory, and a path under `.git`, `.hg` or `.chan` none the
+  /// spine draws.
   function spineDirsTouched(paths: Iterable<string>): Set<string> | null {
     const dirs = new Set<string>();
     let named = false;
@@ -1433,9 +1426,16 @@
         continue;
       }
       const dir = parentDir(path);
-      if (spineHoldsChildren(dir)) dirs.add(dir);
+      // An opened directory the spine has not read (it was not there when
+      // the tab read the tree) is read once the same patch brings it.
+      if (spineHoldsChildren(dir) || drawsChildren(dir)) dirs.add(dir);
     }
     return named ? dirs : null;
+  }
+
+  /// Whether the tree the tab draws shows the children of `dir`.
+  function drawsChildren(dir: string): boolean {
+    return dir === "" || (expandedDirs[dir] === true && ancestorsExpanded("", dir, expandedDirs));
   }
 
   /// The spine node `n` is a child of the directory at `dir`: an entry in
@@ -1554,7 +1554,7 @@
   /// null level is a directory gone from disk, which takes everything below
   /// it. `dir`'s children count as read from then on.
   function applySpineLevel(
-    read: NonNullable<typeof spineRead>,
+    read: SpineRead,
     dir: string,
     level: { nodes: FsGraphNode[]; edges: FsGraphEdge[] } | null,
   ): void {
@@ -1565,7 +1565,7 @@
     const removed = new Set<string>();
     const dropBelow = (below: string): void => {
       for (const m of read.nodes.values()) if (spineBelow(below, m)) removed.add(m.id);
-      for (const p of read.patched) if (p === below || p.startsWith(`${below}/`)) read.patched.delete(p);
+      for (const held of read.held) if (held === below || held.startsWith(`${below}/`)) read.held.delete(held);
     };
     for (const n of read.nodes.values()) {
       // A ghost is a symlink's missing target, which the symlink's own level
@@ -1584,17 +1584,17 @@
       return !entries.has(e.source);
     });
     if (level === null) {
-      read.patched.delete(dir);
+      read.held.delete(dir);
       return;
     }
     for (const n of level.nodes) read.nodes.set(n.id, n);
     read.edges.push(...level.edges);
-    read.patched.add(dir);
+    read.held.add(dir);
   }
 
   /// Draws `read`: hardlinks joined over every node it holds, and a ghost no
   /// symlink points at any more dropped.
-  function publishSpine(read: NonNullable<typeof spineRead>): void {
+  function publishSpine(read: SpineRead): void {
     const pointed = new Set(read.edges.map((e) => e.target));
     for (const n of read.nodes.values()) {
       if (n.kind === "ghost" && !pointed.has(n.id)) read.nodes.delete(n.id);
@@ -1815,20 +1815,23 @@
   });
 
   /// Takes the changes the spine has not taken yet: a patch of the
-  /// directories they touched, or a whole fetch when one named no path, a
-  /// whole fetch is in flight (it may have read a directory before the
-  /// change), there is no spine yet to patch, or the last fetch failed.
-  /// Syncs lastLoadedKey and clears dirty, since the spine is up to date
-  /// once this lands.
+  /// directories they touched, or a whole fetch when one named no path,
+  /// there is no spine yet to patch, or the last fetch failed. Syncs
+  /// lastLoadedKey and clears dirty, since the spine is up to date once this
+  /// lands.
   function takeSpineChanges(): void {
-    const paths = spineChanges;
-    spineChanges = new Set();
     lastLoadedKey = loadKey;
     graphDirty = false;
+    // A whole fetch in flight may have read a directory before the change:
+    // it takes them as a patch once it lands, rather than starting over,
+    // which on a busy tree would never land.
+    if (spineLoading) return;
+    const paths = spineChanges;
+    spineChanges = new Set();
     // A whole fetch since took them.
     if (paths !== null && paths.size === 0) return;
     const dirs = paths === null ? null : spineDirsTouched(paths);
-    if (dirs === null || spineLoading || spineRead === null || spineError !== null) {
+    if (dirs === null || spineRead === null || spineError !== null) {
       void loadSpine();
     } else {
       void patchSpine(dirs);
