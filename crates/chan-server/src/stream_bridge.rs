@@ -81,12 +81,20 @@ impl<T: Send + 'static> StreamBridge<T> {
     pub(crate) fn into_body(
         self,
         first: Bytes,
-        mut render: impl FnMut(T) -> Bytes + Send + 'static,
+        render: impl FnMut(T) -> Bytes + Send + 'static,
     ) -> Body {
+        Body::from_stream(self.into_stream(first, render))
+    }
+
+    /// The bytes [`Self::into_body`] sends, as a stream, for a route that
+    /// encodes them on the way.
+    pub(crate) fn into_stream(
+        self,
+        first: Bytes,
+        mut render: impl FnMut(T) -> Bytes + Send + 'static,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
         let rest = self.frames().map(move |frame| frame.map(&mut render));
-        Body::from_stream(
-            stream::once(async move { Ok::<Bytes, std::io::Error>(first) }).chain(rest),
-        )
+        stream::once(async move { Ok::<Bytes, std::io::Error>(first) }).chain(rest)
     }
 
     /// Every frame the producer queues, then the stall error when the bound
