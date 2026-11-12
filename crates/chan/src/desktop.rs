@@ -277,10 +277,6 @@ pub(super) fn spawn_desktop_gui_opening(
     paths: &[String],
     terminal: Option<&str>,
 ) -> std::io::Result<Option<std::process::Child>> {
-    use chan_server::handoff::OPEN_TERMINAL_ENV;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
     let exe = std::env::current_exe()?;
 
     // macOS: launching the bare Mach-O inside the `.app` can start the process
@@ -290,6 +286,9 @@ pub(super) fn spawn_desktop_gui_opening(
     // `…/<Name>.app/Contents/MacOS/<bin>`.
     #[cfg(target_os = "macos")]
     {
+        use chan_server::handoff::OPEN_TERMINAL_ENV;
+        use std::process::{Command, Stdio};
+
         if let Some(bundle) = macos_app_bundle(&exe) {
             let mut open = Command::new("/usr/bin/open");
             // `-n` with paths or a terminal: `open --args` aimed at an app
@@ -324,7 +323,27 @@ pub(super) fn spawn_desktop_gui_opening(
     let target = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .unwrap_or(exe);
-    let mut command = Command::new(&target);
+    desktop_gui_command(&target, paths, terminal)
+        .spawn()
+        .map(Some)
+}
+
+/// The command that starts the chan-desktop GUI at `target` to open `paths`,
+/// or the `terminal` a `chan-term` asked for, which goes in
+/// [`OPEN_TERMINAL_ENV`](chan_server::handoff::OPEN_TERMINAL_ENV) and is
+/// removed from the environment otherwise, so an inherited one never opens a
+/// terminal nobody asked for.
+#[cfg(unix)]
+fn desktop_gui_command(
+    target: &Path,
+    paths: &[String],
+    terminal: Option<&str>,
+) -> std::process::Command {
+    use chan_server::handoff::OPEN_TERMINAL_ENV;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new(target);
     match terminal {
         Some(dir) => command.env(OPEN_TERMINAL_ENV, dir),
         None => command.env_remove(OPEN_TERMINAL_ENV),
@@ -334,7 +353,7 @@ pub(super) fn spawn_desktop_gui_opening(
         // `$ARGV0` is the name an AppImage wrapper ran THIS process as, and
         // the desktop's dispatch reads it ahead of argv[0], so it is not
         // passed on either.
-        .arg0(&target)
+        .arg0(target)
         .env_remove("ARGV0")
         .args(paths)
         .stdin(Stdio::null())
@@ -342,9 +361,8 @@ pub(super) fn spawn_desktop_gui_opening(
         .stderr(Stdio::null())
         // New process group so Ctrl-C in the launching terminal doesn't also
         // kill the desktop we just started.
-        .process_group(0)
-        .spawn()
-        .map(Some)
+        .process_group(0);
+    command
 }
 
 /// Launch the chan-desktop GUI as a detached process.
@@ -627,6 +645,45 @@ mod tests {
         assert!(!desktop_companion(false, true));
         assert!(!desktop_companion(true, false));
         assert!(!desktop_companion(false, false));
+    }
+
+    /// The desktop a command starts gets the terminal a `chan-term` asked
+    /// for in the carrier, and has the carrier removed when there is none, so
+    /// one this process inherited opens nothing; it never inherits `$ARGV0`,
+    /// which its dispatch reads ahead of `argv[0]`. The paths are its
+    /// arguments.
+    #[cfg(unix)]
+    #[test]
+    fn the_started_desktop_carries_only_the_asked_terminal_and_no_argv0() {
+        use chan_server::handoff::OPEN_TERMINAL_ENV;
+        use std::ffi::{OsStr, OsString};
+        let env = |command: &std::process::Command, key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        let target = Path::new("/usr/bin/chan-desktop");
+        let terminal = desktop_gui_command(target, &[], Some("/srv/notes"));
+        assert_eq!(terminal.get_program(), target.as_os_str());
+        assert_eq!(terminal.get_args().count(), 0);
+        assert_eq!(
+            env(&terminal, OPEN_TERMINAL_ENV),
+            Some(Some(OsString::from("/srv/notes")))
+        );
+        assert_eq!(env(&terminal, "ARGV0"), Some(None), "ARGV0 is removed");
+        let paths = ["/srv/a.md".to_string(), "/srv/docs".to_string()];
+        let opener = desktop_gui_command(target, &paths, None);
+        assert_eq!(
+            opener.get_args().collect::<Vec<_>>(),
+            ["/srv/a.md", "/srv/docs"]
+        );
+        assert_eq!(
+            env(&opener, OPEN_TERMINAL_ENV),
+            Some(None),
+            "the carrier is removed"
+        );
+        assert_eq!(env(&opener, "ARGV0"), Some(None), "ARGV0 is removed");
     }
 
     #[cfg(target_os = "macos")]

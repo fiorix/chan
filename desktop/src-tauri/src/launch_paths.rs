@@ -372,6 +372,43 @@ mod tests {
         assert_eq!(app.env().args_os, args(&["chan-desktop", "--kept"]));
     }
 
+    /// The carrier a `chan-term` started this desktop with is read once and
+    /// dropped from the environment whatever it holds, so no child of the
+    /// desktop inherits it; only an absolute UTF-8 directory names a
+    /// terminal. It mutates the process environment, so it runs in a test
+    /// process of its own.
+    #[test]
+    fn the_boot_terminal_is_read_once_dropped_and_absolute_only() {
+        if !crate::embedded::in_own_chan_home(
+            "launch_paths::tests::the_boot_terminal_is_read_once_dropped_and_absolute_only",
+        ) {
+            return;
+        }
+        let carrier = handoff::OPEN_TERMINAL_ENV;
+        let absolute = if cfg!(windows) {
+            r"C:\srv\notes"
+        } else {
+            "/srv/notes"
+        };
+        assert_eq!(take_boot_terminal(), None, "no carrier, no terminal");
+        std::env::set_var(carrier, absolute);
+        assert_eq!(take_boot_terminal(), Some(absolute.to_string()));
+        assert_eq!(std::env::var_os(carrier), None, "the carrier is dropped");
+        assert_eq!(take_boot_terminal(), None, "it is read once");
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut refused = vec![OsString::from("notes"), OsString::from("")];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            refused.push(OsString::from_vec(b"/srv/caf\xe9".to_vec()));
+        }
+        for value in refused {
+            std::env::set_var(carrier, &value);
+            assert_eq!(take_boot_terminal(), None, "{value:?} names no terminal");
+            assert_eq!(std::env::var_os(carrier), None, "{value:?} is dropped");
+        }
+    }
+
     /// The boot opens the launch's paths as the handoff would: in one
     /// standalone window, minted for the first path and reused for the next,
     /// holding no terminal of its own, a path it cannot open skipped. A

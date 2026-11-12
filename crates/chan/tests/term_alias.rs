@@ -208,6 +208,36 @@ fn a_shell_launch_goes_to_the_running_desktop() {
     );
 }
 
+/// A start directory whose name is not UTF-8, which the request cannot carry,
+/// still gets a window: the launch asks the running desktop for one in the
+/// home directory and warns, as for a `--dir` that names no directory,
+/// whether the directory is the working one or `--dir`'s. Linux only, since
+/// macOS refuses such a name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_start_directory_that_is_not_utf8_opens_in_home() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStrExt;
+    let f = fixture();
+    let requests = fake_desktop(&f, opened);
+    let raw = f.files.join(OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&raw).unwrap();
+    let here = f.term(&[]).current_dir(&raw).output().unwrap();
+    let mut dir = OsString::from("--dir=");
+    dir.push(&raw);
+    let named = f.term(&[]).arg(dir).output().unwrap();
+    let warning = format!(
+        "is not valid UTF-8, which a request to chan-desktop cannot carry; starting in {}",
+        f.home.display()
+    );
+    for output in [&here, &named] {
+        assert!(output.status.success(), "{}", stderr(output));
+        assert!(stderr(output).contains(&warning), "{}", stderr(output));
+    }
+    let home = f.home.to_str().unwrap().to_string();
+    assert_eq!(terminals(&requests), [home.clone(), home]);
+}
+
 /// A command, `--hold`, `--app-id` and `--title` each need a window this
 /// process owns, which the standalone CLI cannot open: refused with the
 /// reason before anything is sent.

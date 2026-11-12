@@ -9185,6 +9185,22 @@ mod tests {
             .find("launch_paths::from_args(")
             .expect("main reads the launch's paths");
         assert!(paths < guard, "the guard hands over the paths it was given");
+        // The terminal a `chan-term` started this desktop with is taken after
+        // the GUI-stack re-exec, which must carry it in the environment, and
+        // before the guard, which hands it to a desktop on its way up and
+        // starts the async runtime's threads, so neither a thread nor a child
+        // of the desktop finds it there. The guard runs before the app is
+        // built (below).
+        let reexec = main_body
+            .find("linux_gui_stack::prefer_system_gui_stack();")
+            .expect("main prefers the system GUI stack");
+        let terminal = main_body
+            .find("let boot_terminal = launch_paths::take_boot_terminal();")
+            .expect("main takes the launch's terminal");
+        assert!(
+            reexec < terminal && terminal < guard,
+            "the launch's terminal is taken after the GUI-stack re-exec and before the guard"
+        );
         for personality in [
             "run_hidden_mcp_proxy_if_requested()",
             "run_as_cs_if_requested()",
