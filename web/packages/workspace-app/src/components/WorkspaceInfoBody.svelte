@@ -419,7 +419,7 @@
               class="ref contact"
               onclick={c.onClick}
               title={c.path
-                ? `open in graph (scoped to ${c.path})`
+                ? `open in graph (${c.path})`
                 : "open in graph"}
             >{c.label}</button>
           </li>

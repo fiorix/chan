@@ -1928,8 +1928,8 @@
           onOpenDirectory={
             // Language-inspector directory rows route through the
             // same "Graph from here" directory routing the folder
-            // inspector uses: a NEW graph tab scoped to the clicked
-            // directory.
+            // inspector uses: a new graph tab with the clicked
+            // directory selected and opened.
             (path) => graphFromHere(path, true)
           }
           onSetAsScope={
@@ -1983,7 +1983,7 @@
       {/if}
     </span>
     <span class="hint">
-semantic graph · drag to pan · scroll to zoom · click to inspect
+drag to pan · scroll to zoom · click to select · double-click a directory to open it
     </span>
   </div>
   </div>

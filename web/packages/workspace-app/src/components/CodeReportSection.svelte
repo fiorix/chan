@@ -55,7 +55,7 @@
           <button
             type="button"
             class="lang-name"
-            title="open in graph (scoped to this language)"
+            title="open in graph"
             onclick={() => onLanguageClick(lang.name)}
           >{lang.name}</button>
           <span class="lang-files">{lang.files} file{lang.files === 1 ? "" : "s"}</span>
@@ -147,8 +147,8 @@
     font-size: 13px;
     align-items: baseline;
   }
-  /* A <button> so the language name routes to the Graph (scoped to
-     this language). Strip default button chrome, left-align, and add
+  /* A <button> so the language name opens the graph with the
+     language selected. Strip default button chrome, left-align, and add
      hover + focus affordance. Stays a grid cell at column 1. */
   .lang-name {
     color: var(--text);

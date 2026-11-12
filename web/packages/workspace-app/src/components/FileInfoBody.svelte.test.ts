@@ -542,26 +542,26 @@ describe("language and contact links open the graph", () => {
     },
   };
 
-  test("a file's language opens the graph scoped to that language", async () => {
+  test("a file's language opens the graph on that language", async () => {
     h.fileReport = fileStats;
     h.entries = [file("src/main.rs", "text")];
     const target = await render({ path: "src/main.rs" });
 
     const link = target.querySelector<HTMLButtonElement>("button.lang-link");
     expect(link?.textContent).toBe("Rust");
-    expect(link?.title).toBe("open in graph (scoped to this language)");
+    expect(link?.title).toBe("open in graph");
     link!.click();
     expect(openGraphForLanguage).toHaveBeenCalledWith("Rust");
   });
 
-  test("each language row of a directory opens the graph scoped to it", async () => {
+  test("each language row of a directory opens the graph on it", async () => {
     h.prefixReport = prefix;
     h.entries = [dir("src"), file("src/main.rs", "text")];
     const target = await render({ path: "src" });
 
     const names = [...target.querySelectorAll<HTMLButtonElement>("button.lang-name")];
     expect(names.map((b) => b.textContent)).toEqual(["Rust", "TOML"]);
-    expect(names.every((b) => b.title === "open in graph (scoped to this language)")).toBe(true);
+    expect(names.every((b) => b.title === "open in graph")).toBe(true);
     names[1]!.click();
     expect(openGraphForLanguage).toHaveBeenCalledWith("TOML");
   });

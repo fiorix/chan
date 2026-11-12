@@ -58,7 +58,7 @@
     /// Forwarded to FileInfoBody. Graph overlay binds this so a
     /// contact pill clicked in the file inspector selects that
     /// contact's node on the canvas instead of opening a new
-    /// graph scoped to the contact.
+    /// graph tab on the contact.
     onContactNavigate?: (path: string) => void;
     /// "Graph from here" handler. Forwarded to FileInfoBody (files /
     /// images) and TagInfoBody (tag / mention). GraphPanel uses it

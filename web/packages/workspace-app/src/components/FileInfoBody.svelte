@@ -983,7 +983,7 @@
             <button
               type="button"
               class="lang-link"
-              title="open in graph (scoped to this language)"
+              title="open in graph"
               onclick={() => openGraphForLanguage(fileLang)}
             >{fileLang}</button>
           </span>
@@ -1019,7 +1019,7 @@
                   <button
                     class="ref tag"
                     onclick={() => openGraphForTag(t.id, t.label)}
-                    title="open in graph (scoped to this tag)"
+                    title="open in graph"
                   >{t.label}</button>
                 </li>
               {/each}
@@ -1036,7 +1036,7 @@
                     class="ref contact"
                     onclick={c.onClick}
                     title={c.path
-                      ? `open in graph (scoped to ${c.path})`
+                      ? `open in graph (${c.path})`
                       : "open in graph"}
                   >{c.label}</button>
                 </li>
