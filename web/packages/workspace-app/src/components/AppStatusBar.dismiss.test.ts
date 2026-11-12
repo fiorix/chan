@@ -115,7 +115,7 @@ test("a warnings action keeps its own action after replacing a transient", async
   ui.statusAction = { kind: "workspace-warnings", label: "Workspace warnings" };
   await tick();
   expect(bar.querySelector('[aria-label="dismiss status"]')).toBeNull();
-  expect(bar.querySelector('[aria-label="open workspace warnings"]')?.tagName).toBe("BUTTON");
+  expect(bar.querySelector('[aria-label="Show workspace warnings"]')?.tagName).toBe("BUTTON");
   await vi.advanceTimersByTimeAsync(3000);
   expect(ui.status).toBe("Workspace warnings");
   expect(ui.statusAction?.kind).toBe("workspace-warnings");

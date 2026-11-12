@@ -12,7 +12,7 @@
   import { untrack } from "svelte";
   import {
     ArrowLeft,
-    ArrowRight,
+    Check,
     Maximize2,
     Minimize2,
     RotateCw,
@@ -50,6 +50,10 @@
     tree,
   } from "../state/store.svelte";
   import { chordFor } from "../state/shortcuts";
+  import { commandState, commandTitle } from "../state/commands";
+  // The menu names its Details row through the catalog, which this fills.
+  import "../state/commands/install";
+  import { toggleSearchDetails } from "../state/commands/search";
   import Bubble from "./Bubble.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import Inspector from "./Inspector.svelte";
@@ -731,7 +735,7 @@
   const POPOVER_WIDTH = 240;
 
   function toggleInspector(): void {
-    searchPanel.inspectorOpen = !searchPanel.inspectorOpen;
+    toggleSearchDetails();
     menu?.close();
   }
 
@@ -1025,18 +1029,21 @@
 
 {#snippet menuItems()}
   <!-- Section order matches the rest of the right-click menus: view
-       toggles, then the Reload footer. No content/navigation actions
-       (search is read-only) and no Settings entry. -->
+       toggles, then the footer that runs the search again. No
+       content/navigation actions (search is read-only) and no Settings
+       entry. Details is the launcher's toggle, named and checked by its
+       command. Search again runs this panel's own query once more, which
+       nothing outside the open panel can ask for, so it has no command and
+       keeps its own words: it is not the window's reload. -->
+  {@const detailsOn = commandState("app.search.details") === true}
   <li>
-    <button role="menuitem" onclick={toggleInspector}>
-      {#if searchPanel.inspectorOpen}
-        <ArrowRight size={16} strokeWidth={1.75} aria-hidden="true" />
+    <button role="menuitemcheckbox" aria-checked={detailsOn} onclick={toggleInspector}>
+      {#if detailsOn}
+        <Check size={16} strokeWidth={2} aria-hidden="true" />
       {:else}
         <ArrowLeft size={16} strokeWidth={1.75} aria-hidden="true" />
       {/if}
-      <span class="menu-row-label">
-        {searchPanel.inspectorOpen ? "Hide Details" : "Show Details"}
-      </span>
+      <span class="menu-row-label">{commandTitle("app.search.details")}</span>
       <span class="menu-row-chord"></span>
     </button>
   </li>
@@ -1044,7 +1051,7 @@
   <li>
     <button role="menuitem" onclick={reloadSearch}>
       <RotateCw size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span class="menu-row-label">Reload</span>
+      <span class="menu-row-label">Search again</span>
       <span class="menu-row-chord"></span>
     </button>
   </li>

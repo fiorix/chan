@@ -11,8 +11,18 @@
   // Visual style: small, dense, TUI-density. Not an OverlayShell, to
   // keep the focus / Escape semantics inside App.svelte; this is
   // purely a passive informational panel.
+  //
+  // A key that performs a catalog command is worded by that command's
+  // title, so the help, the launcher and the menus name it alike. The keys
+  // that exist only inside the mode keep the help's own words: moving the
+  // focus and swapping tiles by direction, staging a tab (Enter is what
+  // opens it, where the launcher's New rows open one at once), and
+  // committing or discarding the draft.
 
-  import { dashboardOpenAllowed } from "../state/commands";
+  import { commandTitle, dashboardOpenAllowed } from "../state/commands";
+  // The rows name their commands through the catalog, which this fills.
+  import "../state/commands/install";
+  import { chordFor } from "../state/shortcuts";
   import { ui } from "../state/store.svelte";
   import { paneMode } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
@@ -37,6 +47,8 @@
   type Needs = "files" | "drafts" | "workspace" | "ownPanes" | "dashboard";
   type Row = {
     caps: Cap[];
+    /// What the keys do: the title of the command they perform, or the
+    /// help's own words for a key the catalog has no command for.
     action: string;
     needs?: Needs;
   };
@@ -97,8 +109,8 @@
     {
       title: "Split",
       rows: [
-        { caps: [{ label: "/", key: "/" }], action: "Split right" },
-        { caps: [{ label: "?", key: "?" }], action: "Split down" },
+        { caps: [{ label: "/", key: "/" }], action: commandTitle("app.pane.splitRight") },
+        { caps: [{ label: "?", key: "?" }], action: commandTitle("app.pane.splitDown") },
       ],
     },
     {
@@ -108,31 +120,22 @@
       title: "Dock",
       needs: "files",
       rows: [
-        { caps: [{ label: "<", key: "<" }], action: "Toggle right-side file browser dock" },
-        { caps: [{ label: ">", key: ">" }], action: "Toggle left-side file browser dock" },
+        { caps: [{ label: "<", key: "<" }], action: commandTitle("app.browser.toggleRightDock") },
+        { caps: [{ label: ">", key: ">" }], action: commandTitle("app.browser.toggleLeftDock") },
       ],
     },
     {
       // `[` / `]` shift the divider in the direction the bracket
       // points (regardless of which side of the split the focused
-      // pane sits on). `-` / `=` mirror it on the vertical axis.
+      // pane sits on). `-` / `=` mirror it on the vertical axis. One row
+      // per key, each the command that moves the divider that way.
       title: "Resize",
       rows: [
-        {
-          caps: [
-            { label: "[", key: "[" },
-            { label: "]", key: "]" },
-          ],
-          action: "Move divider left / right",
-        },
-        {
-          caps: [
-            { label: "-", key: "-" },
-            { label: "=", key: "=" },
-          ],
-          action: "Move divider up / down",
-        },
-        { caps: [{ label: "0", key: "0" }], action: "Equalize siblings" },
+        { caps: [{ label: "[", key: "[" }], action: commandTitle("app.pane.dividerLeft") },
+        { caps: [{ label: "]", key: "]" }], action: commandTitle("app.pane.dividerRight") },
+        { caps: [{ label: "-", key: "-" }], action: commandTitle("app.pane.dividerUp") },
+        { caps: [{ label: "=", key: "=" }], action: commandTitle("app.pane.dividerDown") },
+        { caps: [{ label: "0", key: "0" }], action: commandTitle("app.pane.equalize") },
       ],
     },
     {
@@ -141,7 +144,7 @@
         { caps: [{ label: "Enter", key: "Enter" }], action: "Commit draft" },
         { caps: [{ label: "Esc", key: "Escape" }], action: "Discard draft" },
         { caps: [{ label: "h", key: "h" }], action: "Toggle this help" },
-        { caps: [{ label: "Tab", key: "Tab" }], action: "Flip side", needs: "ownPanes" },
+        { caps: [{ label: "Tab", key: "Tab" }], action: commandTitle("app.pane.flip"), needs: "ownPanes" },
       ],
     },
   ];
@@ -181,10 +184,15 @@
   function capAria(cap: Cap, action: string): string {
     return cap.aria ?? `${cap.label}: ${action}`;
   }
+
+  // The mode's name and the chord this platform enters it with, override
+  // included.
+  const modeTitle = commandTitle("app.pane.mode");
+  const modeChord = $derived(chordFor("app.pane.mode"));
 </script>
 
-<div class="pane-mode-help" aria-label="Hybrid Nav help" role="dialog">
-  <div class="title">Hybrid Nav (Cmd+.)</div>
+<div class="pane-mode-help" aria-label={`${modeTitle} help`} role="dialog">
+  <div class="title">{modeChord ? `${modeTitle} (${modeChord})` : modeTitle}</div>
   <div class="grid">
     {#each groups as g (g.title)}
       <section class="group">

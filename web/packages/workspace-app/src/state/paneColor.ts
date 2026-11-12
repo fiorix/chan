@@ -151,9 +151,10 @@ export function applyLivePaneColor(color: string | null): void {
   if (hex) document.documentElement.style.setProperty(CSS_VAR, hex);
 }
 
-/// Apply a named focus-colour preset end to end - the ONE shared path for the
-/// pane hamburger button AND the command-launcher `app.pane.focusColor.*`
-/// commands, so the two cannot drift: select the preset (menu checkmark +
+/// Apply a named focus-colour preset end to end - the ONE path behind the
+/// options of the `app.pane.focusColor` command, which the pane hamburger's
+/// colour rows and the launcher both list, so the two cannot drift: select
+/// the preset (menu checkmark +
 /// future splits) via the injected setter, write `--pane-highlight-color` on
 /// the document root so THIS window's active pane recolours immediately (the
 /// border prefers the var over the `data-focus-color` preset, so a
