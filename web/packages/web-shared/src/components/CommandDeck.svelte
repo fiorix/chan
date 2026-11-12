@@ -767,8 +767,10 @@
     // activate an app-level key mode, so letting the execution key bubble
     // would immediately drive that new mode with the same event.
     event.stopPropagation();
-    // A key an input method is composing with belongs to the composition.
-    if (event.isComposing || LONE_MODIFIERS.has(event.key)) return;
+    // A key an input method is composing with belongs to the composition,
+    // and so does the one that commits it: some engines send that Enter once
+    // the composition has ended, marked only by the key code 229.
+    if (event.isComposing || event.keyCode === 229 || LONE_MODIFIERS.has(event.key)) return;
 
     if (event.key === "Escape") {
       event.preventDefault();

@@ -1865,6 +1865,22 @@ describe("CommandDeck focus", () => {
     expect(onChoose).not.toHaveBeenCalled();
     expect(activeTitle()).toBe("Row 1");
   });
+
+  it("leaves the key that commits a composition to the input method", async () => {
+    // WebKit sends the Enter that commits a composition after the composition
+    // has ended: not composing any more, and still the input method's key,
+    // which it marks with key code 229.
+    const onChoose = vi.fn();
+    await mountWith({ items: plainRows(2), onChoose });
+    const enter = await press("Enter", { keyCode: 229 });
+    await press("ArrowDown", { keyCode: 229 });
+    expect(enter.defaultPrevented).toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(activeTitle()).toBe("Row 1");
+
+    await press("Enter", { keyCode: 13 });
+    expect(onChoose, "the next Enter is the deck's").toHaveBeenCalledOnce();
+  });
 });
 
 describe("CommandDeck keyboard hold", () => {
