@@ -176,12 +176,14 @@ registerCommands([
     available: () => showBulk,
     run: () => {},
   },
-  // The extension catalog registers its rows with no scope: the app's own
-  // entry is a spawner, and a command of the app belongs to that app's tab.
+  // The extension catalog's two shapes: the app's own entry is a spawner,
+  // and a command of the app belongs to that app's tab.
   {
     id: "extension.alpha",
     title: "Alpha app",
     category: "Apps",
+    scope: "pane",
+    group: "New tab",
     requirement: "any",
     available: () => showBulk,
     run: () => {},
@@ -190,6 +192,8 @@ registerCommands([
     id: "extension.alpha.run",
     title: "Run alpha",
     category: "Apps",
+    scope: "app",
+    surface: "extension",
     requirement: "any",
     available: () => showBulk,
     run: () => {},
@@ -198,6 +202,8 @@ registerCommands([
     id: "extension.beta.run",
     title: "Run beta",
     category: "Apps",
+    scope: "app",
+    surface: "extension",
     requirement: "any",
     available: () => showBulk,
     run: () => {},

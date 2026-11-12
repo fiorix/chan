@@ -150,10 +150,8 @@ export type Command = {
   id: string;
   title: string;
   category: CommandCategory;
-  /// Where the command acts. Every catalog command declares one, which the
-  /// registry test holds; a row registered without one, as the extension
-  /// catalog's are, is placed by [`commandPlacement`].
-  scope?: CommandScope;
+  /// Where the command acts, which is the launcher scope that lists it.
+  scope: CommandScope;
   /// The tab kinds an `app` command acts on.
   surface?: CommandSurface | readonly CommandSurface[];
   /// The section inside the scope. A pane command names one of
@@ -314,31 +312,22 @@ const SCOPE_GROUPS: Record<Exclude<CommandScope, "app">, string> = {
   settings: "Settings",
 };
 
+/// The ids the extension catalog registers start with this: `extension.<id>`
+/// opens or focuses the app, and `extension.<id>.<command>` is one of that
+/// app's own commands.
 const EXTENSION_PREFIX = "extension.";
-
-/// The placement of a row registered without a scope. The extension catalog
-/// registers two shapes: `extension.<id>` opens or focuses the app, a spawn
-/// action like the rest of New tab, and `extension.<id>.<command>` is one of
-/// that app's own commands. Anything else is listed with the window.
-function unscopedPlacement(command: Command): Pick<Command, "scope" | "surface" | "group"> {
-  if (!command.id.startsWith(EXTENSION_PREFIX)) return { scope: "window" };
-  return command.id.includes(".", EXTENSION_PREFIX.length)
-    ? { scope: "app", surface: "extension" }
-    : { scope: "pane", group: "New tab" };
-}
 
 /// Resolve where the launcher lists `command`.
 export function commandPlacement(command: Command): CommandPlacement {
-  const placed = command.scope ? command : unscopedPlacement(command);
-  const scope = placed.scope ?? "window";
+  const { scope } = command;
   if (scope !== "app") {
-    return { scope, surfaces: [], group: placed.group ?? SCOPE_GROUPS[scope] };
+    return { scope, surfaces: [], group: command.group ?? SCOPE_GROUPS[scope] };
   }
-  const surface = placed.surface ?? [];
+  const surface = command.surface ?? [];
   return {
     scope,
     surfaces: typeof surface === "string" ? [surface] : surface,
-    group: placed.group ?? null,
+    group: command.group ?? null,
   };
 }
 

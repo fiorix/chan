@@ -60,7 +60,7 @@ function catalog(): Command[] {
     command({ id: "t.close", title: "Close tab", scope: "pane", group: "Tab", order: 0 }),
     command({ id: "n.open", title: "Open...", scope: "pane", group: "New tab", order: 2000, acceptsArg: true, keywords: ["Open"] }),
     command({ id: "n.term", title: "New terminal", scope: "pane", group: "New tab", order: 0 }),
-    command({ id: "extension.echo", title: "Echo", scope: undefined, category: "Apps" }),
+    command({ id: "extension.echo", title: "Echo", scope: "pane", group: "New tab", category: "Apps" }),
     command({ id: "a.restart", title: "Restart terminal", scope: "app", surface: "terminal", order: 2, available: onTerminal }),
     command({ id: "a.rename", title: "Rename terminal", scope: "app", surface: "terminal", order: 0, available: onTerminal }),
     command({ id: "a.copy", title: "Copy working directory path", scope: "app", surface: "terminal", available: onTerminal }),
@@ -161,8 +161,8 @@ describe("browsing", () => {
   test("an extension's own commands are its tab's app section, under its name", () => {
     const commands = [
       ...catalog(),
-      command({ id: "extension.echo.say", title: "Say hello", scope: undefined, category: "Apps" }),
-      command({ id: "extension.other.run", title: "Run other", scope: undefined, category: "Apps" }),
+      command({ id: "extension.echo.say", title: "Say hello", scope: "app", surface: "extension", category: "Apps" }),
+      command({ id: "extension.other.run", title: "Run other", scope: "app", surface: "extension", category: "Apps" }),
     ];
     const onEcho = source({
       commands,

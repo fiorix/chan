@@ -73,28 +73,48 @@ describe("where a command acts", () => {
     for (const command of choices) expect(typeof command.options, command.id).toBe("function");
   });
 
-  test("a row registered without a scope is placed by its id", () => {
-    const row = (id: string): Command => ({
+  test("a command is listed where it declares, whatever its id", () => {
+    const row = (id: string, placement: Pick<Command, "scope" | "surface" | "group">): Command => ({
       id,
       title: id,
       category: "Apps",
       requirement: "workspace",
       available: () => true,
       run: () => {},
+      ...placement,
     });
     // The extension catalog's two shapes: the app's own entry spawns its tab,
     // and a command of the app belongs to that app.
-    expect(commandPlacement(row("extension.echo"))).toEqual({
+    expect(commandPlacement(row("extension.echo", { scope: "pane", group: "New tab" }))).toEqual({
       scope: "pane",
       surfaces: [],
       group: "New tab",
     });
-    expect(commandPlacement(row("extension.echo.say"))).toEqual({
+    expect(commandPlacement(row("extension.echo.say", { scope: "app", surface: "extension" }))).toEqual({
       scope: "app",
       surfaces: ["extension"],
       group: null,
     });
-    expect(commandPlacement(row("app.custom.demo")).scope).toBe("window");
+    // The shape of an id places nothing: the declaration does.
+    expect(commandPlacement(row("extension.echo.say", { scope: "window" }))).toEqual({
+      scope: "window",
+      surfaces: [],
+      group: "Window",
+    });
+    expect(commandPlacement(row("app.custom.demo", { scope: "workspace" })).group).toBe("Workspace");
+  });
+
+  test("a command cannot be built without saying where it acts", () => {
+    // @ts-expect-error scope is required on a Command
+    const unplaced: Command = {
+      id: "app.custom.unplaced",
+      title: "Unplaced",
+      category: "Apps",
+      requirement: "any",
+      available: () => true,
+      run: () => {},
+    };
+    expect(SCOPES).not.toContain(unplaced.scope);
   });
 });
 
