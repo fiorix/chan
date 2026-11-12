@@ -2,9 +2,10 @@
 //
 // Where the editor's commands sit in the launcher's list. The list follows
 // the editor's menus: the find family reads as one run, in the order a
-// search goes, on an editor tab and on a terminal tab alike, and the Details
-// inspector's actions keep the inspector's order. The whole catalog is
-// loaded, so a row of another module that sorted in among them would show.
+// search goes, and the Details inspector's actions keep the inspector's
+// order. A terminal tab opens the run with its own Find and takes the two
+// steps from the editor's module. The whole catalog is loaded, so a row of
+// another module that sorted in among them would show.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { fileTab, resetLayout, terminalTab } from "../../__tests__/tabs";
@@ -48,6 +49,8 @@ function run(ids: readonly string[], family: readonly string[]): string[] {
 }
 
 const FIND = ["app.find.open", "app.find.next", "app.find.prev", "app.find.close"];
+/// The family on a terminal tab: the terminal's own Find, then the steps.
+const TERMINAL_FIND = ["terminal.find", "app.find.next", "app.find.prev"];
 
 afterEach(() => {
   resetLayout([]);
@@ -64,7 +67,11 @@ describe("the find family", () => {
   test("lists together on a terminal tab, which has no command to close its bar", () => {
     resetLayout([terminalTab({ id: "shell" })]);
 
-    expect(run(listed("terminal", "Terminal"), FIND)).toEqual(FIND.slice(0, 3));
+    const ids = listed("terminal", "Terminal");
+    expect(run(ids, TERMINAL_FIND)).toEqual(TERMINAL_FIND);
+    // The editor's Find and Close find are a file tab's alone, so a terminal
+    // lists one Find.
+    expect(ids.filter((id) => FIND.includes(id))).toEqual(["app.find.next", "app.find.prev"]);
   });
 
   test("carries the search icon", () => {

@@ -3,10 +3,10 @@
 // they share App.svelte's dispatch and its window-mode guard; net-new
 // actions call their exported action function directly against the active
 // file tab. A view switch the tab holds as state is a toggle named for the
-// thing it shows. The find family is listed here and serves a terminal tab
-// too, whose own listener answers the same ids. See state/commands.ts for
-// the Command shape and the onSurface / dispatchChanCommand / workspaceOnly
-// helpers.
+// thing it shows. The find family is listed here. Its two steps serve a
+// terminal tab too, whose own listener answers the same ids behind the
+// terminal's own Find. See state/commands.ts for the Command shape and the
+// onSurface / dispatchChanCommand / workspaceOnly helpers.
 //
 // The list follows the editor's menus: the tab menu's rows, the body menu's,
 // the Details inspector's actions, then the rest by title. An action a menu
@@ -136,7 +136,9 @@ export function showInFileBrowser(tab: FileTab): void {
 }
 
 /// A find-family command. App.svelte serves the ids for a file tab and the
-/// focused terminal serves them for itself, so each is offered on both.
+/// focused terminal serves the open and the two steps for itself. A step is
+/// offered on both tabs; Find and Close find narrow the surface to a file
+/// tab, since a terminal lists its own Find and closes its bar on Escape.
 function findCommand(
   id: string,
   title: string,
@@ -319,7 +321,8 @@ registerCommands([
   // The find family lists together, in the order a search runs. The three
   // that follow Find take orders just past its own and short of the next
   // whole number, where every other row of the editor and of the terminal
-  // sits, so the family stays adjacent on either tab.
+  // sits, so the family stays adjacent on either tab. On a terminal tab the
+  // two steps follow the terminal's own Find, which holds this Find's order.
   {
     // A terminal lists its own Find in this row's place, under the id of the
     // chord that opens its bar; it still answers this id when the desktop
