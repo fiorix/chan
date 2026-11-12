@@ -666,7 +666,8 @@ function cellText(cell: VtCell | undefined): string {
 }
 
 /// Byte offsets of the scratch area each terminal keeps for out parameters
-/// and the key and value arrays of its multi-get calls.
+/// and the key and value arrays of its multi-get calls. The room for a
+/// cluster's codepoints comes last, so a read past it lands past the area.
 export const SCRATCH = {
   slot: 0, // u32 handle or size_t out value
   slot2: 8, // second u32 out value
@@ -678,15 +679,15 @@ export const SCRATCH = {
   style: 64, // GhosttyStyle (16 bytes)
   codepoints: 80, // GhosttyCodepointBuffer (12 bytes)
   colors: 92, // GhosttyRenderStateColors (784 bytes)
-  graphemes: 876, // u32[GRAPHEME_CAP]
-  cellsView: 1004, // GhosttyCellsView (8 bytes)
-  rowCells: 1012, // GhosttyRenderStateRowCells, the handle a row's cells are read into
-  rowKeys: 1016, // GhosttyRenderStateRowData[2]: CELLS_RAW, CELLS
-  rowValues: 1024, // void*[2]: cellsView, rowCells
-  cellKeys: 1032, // GhosttyRenderStateRowCellsData[2]: STYLE, GRAPHEMES_BUF
-  cellValues: 1040, // void*[2]: style, codepoints
-  dirtyY: 1048, // u16, the row next_dirty moved to
-  size: 1052,
+  cellsView: 876, // GhosttyCellsView (8 bytes)
+  rowCells: 884, // GhosttyRenderStateRowCells, the handle a row's cells are read into
+  rowKeys: 888, // GhosttyRenderStateRowData[2]: CELLS_RAW, CELLS
+  rowValues: 896, // void*[2]: cellsView, rowCells
+  cellKeys: 904, // GhosttyRenderStateRowCellsData[2]: STYLE, GRAPHEMES_BUF
+  cellValues: 912, // void*[2]: style, codepoints
+  dirtyY: 920, // u16, the row next_dirty moved to
+  graphemes: 924, // u32[GRAPHEME_CAP]
+  size: 924 + 32 * 4,
 } as const;
 const GRAPHEME_CAP = 32;
 
