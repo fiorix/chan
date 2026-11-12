@@ -163,13 +163,13 @@ describe("graph tabs in a pane", () => {
     expect(two!.paused).toBe(true);
   });
 
-  test("Close in a tab's menu closes that tab, not the active one", async () => {
+  test("Close tab in a tab's menu closes that tab, not the active one", async () => {
     const { pane } = await renderPane();
     openTabMenu("two", { left: 10, top: 10, right: 10, bottom: 10 });
     await settle(2);
 
     const close = [...document.body.querySelectorAll<HTMLButtonElement>(".tab-menu-bubble button.mbtn")].find(
-      (b) => b.querySelector(".mbtn-label")?.textContent === "Close",
+      (b) => b.querySelector(".mbtn-label")?.textContent === "Close tab",
     );
     close!.click();
     await settle();

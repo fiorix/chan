@@ -34,9 +34,13 @@
   } from "../api/types";
   import {
     activeGraphTab,
+    allPaneTabs,
+    flipHybrid,
+    layout,
     openBrowserInActivePane,
     openGraphInActivePane,
     openInActivePane,
+    panesHaveSides,
     type GraphTab,
   } from "../state/tabs.svelte";
   import {
@@ -45,6 +49,7 @@
     fbSelectSingle,
     graphReloadSignal,
     indexStatus,
+    openCommandLauncherFromMenu,
     openGraphForContact,
     openGraphForLanguage,
     openGraphForMention,
@@ -76,10 +81,12 @@
   import {
     AtSign,
     CodeXml,
+    Command as CommandIcon,
     FileText,
     Folder,
     HardDrive,
     Hash,
+    Settings2,
     X,
   } from "@lucide/svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
@@ -95,7 +102,14 @@
     isOpenableTextKind,
     type FileKind,
   } from "../state/kinds";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, SHORTCUTS } from "../state/shortcuts";
+  import { commandTitle } from "../state/commands";
+  import {
+    graphFilterRows,
+    toggleGraphFilter,
+    type GraphFilterKind,
+  } from "../state/commands/graph";
+  import "../state/commands/install";
   import {
     FS_GRAPH_DEPTH_MAX,
     graphDepthCap,
@@ -610,14 +624,7 @@
   /// `GraphNodeView::File` doesn't carry the `bucket` field
   /// (`ReportFileStats` does), so classification happens here
   /// rather than in a chan-server emit.
-  type FilterKind =
-    | "tag"
-    | "mention"
-    | "language"
-    | "img"
-    | "folder"
-    | "markdown"
-    | "source";
+  type FilterKind = GraphFilterKind;
 
   // ---- state -------------------------------------------------------------
 
@@ -915,15 +922,18 @@
     await load();
   }
 
-  // The launcher's `Reload graph` reaches the fetch through the chan:command
-  // bridge, since the /api/graph call and its depth probe live here. Only the
-  // graph the launcher itself targeted responds, so the command's
-  // active-surface gate and the reloading graph agree.
+  // The launcher's `Reload graph` and `Scope details` reach this panel
+  // through the chan:command bridge, since the /api/graph call, its depth
+  // probe and the loaded nodes live here. Only the graph the launcher itself
+  // targeted responds, so the command's active-surface gate and the acting
+  // graph agree.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
-      if ((e as CustomEvent).detail?.name !== "app.graph.reload") return;
+      const name = (e as CustomEvent).detail?.name;
+      if (name !== "app.graph.reload" && name !== "app.graph.scopeDetails") return;
       if (activeGraphTab()?.id !== tab.id) return;
-      void reloadGraph();
+      if (name === "app.graph.reload") void reloadGraph();
+      else openScopeHeaderInspector();
     };
     window.addEventListener("chan:command", onLauncherCommand);
     return () => window.removeEventListener("chan:command", onLauncherCommand);
@@ -932,6 +942,28 @@
   function closeFromMenu(): void {
     closeTabMenu();
     close();
+  }
+
+  /// Flip the pane that holds this graph, whichever pane has the focus.
+  function flipFromMenu(): void {
+    closeTabMenu();
+    const pane = Object.values(layout.nodes).find(
+      (node) => node.kind === "leaf" && allPaneTabs(node).some((t) => t.id === tab.id),
+    );
+    if (pane) flipHybrid(pane.id);
+  }
+
+  // The launcher's own toggle is a chord with no catalog row, so its menu row
+  // takes the shortcut table's words.
+  const LAUNCHER = "app.launcher.toggle";
+  const launcherLabel = SHORTCUTS.find((shortcut) => shortcut.id === LAUNCHER)?.label ?? LAUNCHER;
+
+  /// Open the launcher from the menu. A graph holds no keyboard caret to
+  /// hand back, so the launcher records the page as its opener.
+  function openCommandsFromMenu(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    closeTabMenu();
+    openCommandLauncherFromMenu(row);
   }
 
   async function loadWorkspaceDepthProbe(): Promise<void> {
@@ -1686,9 +1718,9 @@
     graphState.inspectorOpen = true;
   }
 
-  /// Click on the scope-header row in the
-  /// graph tab-menu opens the inspector for the current scope. Maps
-  /// the scope kind to the matching node id in the current graph
+  /// Click on the scope-header row in the graph tab-menu, or the
+  /// launcher's `Scope details`, opens the inspector for the current
+  /// scope. Maps the scope kind to the matching node id in the current graph
   /// nodes list; workspace root + tag have stable ids, file/dir need a
   /// path-based lookup. No-op when the scope doesn't have a
   /// corresponding node in this view (e.g. a file scope whose file
@@ -2658,7 +2690,7 @@
           class="mbtn graph-scope-row"
           role="menuitem"
           tabindex="-1"
-          title={scopePath || scopeKindLabel}
+          title={`${commandTitle("app.graph.scopeDetails")}: ${scopePath || scopeKindLabel}`}
           onclick={openScopeHeaderInspector}
         >
           <span class="mbtn-icon" aria-hidden="true">
@@ -2715,53 +2747,54 @@
         </span>
       </div>
       <div class="msep graph-filter-sep" role="separator"></div>
-      {#each ["tag", "mention", "language", "img", "folder", "markdown", "source"] as const as kind (kind)}
-        {@const workspaceLike =
-          currentScope?.kind === "workspace"}
-        <!-- The backend emits per-file language edges through
-             `scoped_report_files`, so dir-scoped graphs have
-             language data too. Show the language chip whenever
-             the layout is the semantic graph (not the filesystem
-             / language modes), regardless of path scope. -->
-        {#if (!filesystemMode || (kind !== "img" && kind !== "language")) && (languageMode ? kind === "language" : true) && (kind !== "folder" || filesystemMode || workspaceLike)}
-          <button
-            type="button"
-            class="mbtn filter-row"
-            class:on={show[kind]}
-            onclick={() => (show[kind] = !show[kind])}
-            role="menuitemcheckbox"
-            aria-checked={show[kind]}
-          >
-            <span
-              class="filter-dot"
-              class:filter-dot-off={!show[kind]}
-              style="background:{show[kind] ? FILTER_COLORS[kind] : 'transparent'};border-color:{FILTER_COLORS[kind]}"
-              aria-hidden="true"
-            ></span>
-            <span class="mbtn-label">
-              {#if filesystemMode}
-                {kind === "tag"
-                  ? "symlink"
-                  : kind === "mention"
-                    ? "hardlink"
-                    : kind === "folder"
-                      ? "directory"
-                      : kind}
-              {:else}
-                {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
-              {/if}
-            </span>
-            <span class="filter-count">{counts[kind]}</span>
-          </button>
-        {/if}
+      <!-- One row per filter this graph offers, in the words the
+           launcher's Filters command lists as its options: the rows and
+           the options come from one list. -->
+      {#each graphFilterRows(graphState) as filter (filter.kind)}
+        {@const kind = filter.kind}
+        <button
+          type="button"
+          class="mbtn filter-row"
+          class:on={show[kind]}
+          onclick={() => toggleGraphFilter(graphState, kind)}
+          role="menuitemcheckbox"
+          aria-checked={show[kind]}
+        >
+          <span
+            class="filter-dot"
+            class:filter-dot-off={!show[kind]}
+            style="background:{show[kind] ? FILTER_COLORS[kind] : 'transparent'};border-color:{FILTER_COLORS[kind]}"
+            aria-hidden="true"
+          ></span>
+          <span class="mbtn-label">{filter.label}</span>
+          <span class="filter-count">{counts[kind]}</span>
+        </button>
       {/each}
       <div class="msep" role="separator"></div>
-      <button class="mbtn" onclick={closeFromMenu}>
+      {#if panesHaveSides()}
+        <button class="mbtn" role="menuitem" onclick={flipFromMenu}>
+          <span class="mbtn-icon">
+            <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          </span>
+          <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
+          <span class="mbtn-chord">{chordFor("app.pane.flip") ?? ""}</span>
+        </button>
+      {/if}
+      <button class="mbtn" role="menuitem" onclick={closeFromMenu}>
         <span class="mbtn-icon">
           <X size={16} strokeWidth={1.75} aria-hidden="true" />
         </span>
-        <span class="mbtn-label">Close</span>
+        <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
         <span class="mbtn-chord">{chordFor("app.tab.close") ?? ""}</span>
+      </button>
+      <!-- The window's commands, after this graph's own. -->
+      <div class="msep" role="separator"></div>
+      <button class="mbtn" role="menuitem" onclick={openCommandsFromMenu}>
+        <span class="mbtn-icon">
+          <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+        </span>
+        <span class="mbtn-label">{launcherLabel}</span>
+        <span class="mbtn-chord">{chordFor(LAUNCHER) ?? ""}</span>
       </button>
     </div>
   {/if}

@@ -65,6 +65,7 @@ app.graph.depth.decrease workspace
 app.graph.depth.increase workspace
 app.graph.filters workspace
 app.graph.reload workspace
+app.graph.scopeDetails workspace
 app.graph.toggle workspace
 app.index.rebuild workspace
 app.metadata.export workspace
