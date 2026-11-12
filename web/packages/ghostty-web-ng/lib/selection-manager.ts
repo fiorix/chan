@@ -11,11 +11,10 @@
  */
 
 import { EventEmitter } from './event-emitter';
-import type { VtTerminal } from '../vt/ghosttyVt';
+import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import type { IEvent } from './interfaces';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
-import type { GhosttyCell } from './types';
 
 // ============================================================================
 // Type Definitions
@@ -61,6 +60,10 @@ export class SelectionManager {
   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
   private boundClickHandler: ((e: MouseEvent) => void) | null = null;
   private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
+
+  // The row a read of the selection's text or a click's word or line looks
+  // at, one row at a time.
+  private readonly cells = new VtCells();
 
   // Auto-scroll state for drag selection
   private autoScrollInterval: ReturnType<typeof setInterval> | null = null;
@@ -141,18 +144,8 @@ export class SelectionManager {
       // Fetch line based on absolute row position
       // Absolute row < scrollbackLength means it's in scrollback
       // Absolute row >= scrollbackLength means it's in the screen buffer
-      let line: GhosttyCell[] | null = null;
-
-      if (absRow < scrollbackLength) {
-        // Row is in scrollback
-        line = this.wasmTerm.getScrollbackLine(absRow);
-      } else {
-        // Row is in screen buffer
-        const screenRow = absRow - scrollbackLength;
-        line = this.wasmTerm.getLine(screenRow);
-      }
-
-      if (!line) continue;
+      if (!this.readAbsoluteRow(absRow, scrollbackLength)) continue;
+      const line = this.cells;
 
       // Track the last non-empty column for trimming trailing spaces
       let lastNonEmpty = -1;
@@ -164,21 +157,10 @@ export class SelectionManager {
       // Build the line text
       let lineText = '';
       for (let col = colStart; col <= colEnd; col++) {
-        const cell = line[col];
+        const cell = line.at(col);
         if (cell && cell.codepoint !== 0) {
-          // Use grapheme lookup for cells with multi-codepoint characters
-          let char: string;
-          if (cell.grapheme_len > 0) {
-            // Row is in scrollback or screen - determine which and use appropriate method
-            if (absRow < scrollbackLength) {
-              char = this.wasmTerm.getScrollbackGraphemeString(absRow, col);
-            } else {
-              const screenRow = absRow - scrollbackLength;
-              char = this.wasmTerm.getGraphemeString(screenRow, col);
-            }
-          } else {
-            char = String.fromCodePoint(cell.codepoint);
-          }
+          // A cell with several codepoints carries its whole cluster
+          const char = cell.cluster ?? String.fromCodePoint(cell.codepoint);
           lineText += char;
           if (char.trim()) {
             lastNonEmpty = lineText.length;
@@ -623,20 +605,13 @@ export class SelectionManager {
         // Find actual line length (exclude trailing empty cells)
         // Use scrollback-aware line retrieval (like getSelection does)
         const scrollbackLength = this.wasmTerm.getScrollbackLength();
-        let line: GhosttyCell[] | null = null;
-        if (absoluteRow < scrollbackLength) {
-          // Row is in scrollback
-          line = this.wasmTerm.getScrollbackLine(absoluteRow);
-        } else {
-          // Row is in screen buffer
-          const screenRow = absoluteRow - scrollbackLength;
-          line = this.wasmTerm.getLine(screenRow);
-        }
         // Find last non-empty cell (-1 means empty line)
         let endCol = -1;
-        if (line) {
+        if (this.readAbsoluteRow(absoluteRow, scrollbackLength)) {
+          const line = this.cells;
           for (let i = line.length - 1; i >= 0; i--) {
-            if (line[i] && line[i].codepoint !== 0 && line[i].codepoint !== 32) {
+            const cell = line.at(i)!;
+            if (cell.codepoint !== 0 && cell.codepoint !== 32) {
               endCol = i;
               break;
             }
@@ -906,40 +881,44 @@ export class SelectionManager {
   private getWordAtCell(col: number, row: number): { startCol: number; endCol: number } | null {
     const absoluteRow = this.viewportRowToAbsolute(row);
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    let line: GhosttyCell[] | null;
-    if (absoluteRow < scrollbackLength) {
-      line = this.wasmTerm.getScrollbackLine(absoluteRow);
-    } else {
-      const screenRow = absoluteRow - scrollbackLength;
-      line = this.wasmTerm.getLine(screenRow);
-    }
-    if (!line) return null;
+    if (!this.readAbsoluteRow(absoluteRow, scrollbackLength)) return null;
+    const line = this.cells;
 
     // Word characters: letters, numbers, and common path/URL characters
     // Matches native Ghostty behavior where double-click selects entire paths
     // Includes: / (path sep), . (extensions), ~ (home), @ (emails), + (encodings)
-    const isWordChar = (cell: GhosttyCell) => {
+    const isWordChar = (cell: VtCell | undefined) => {
       if (!cell || cell.codepoint === 0) return false;
       const char = String.fromCodePoint(cell.codepoint);
       return /[\w\-./~@+]/.test(char);
     };
 
     // Only return if we're actually on a word character
-    if (!isWordChar(line[col])) return null;
+    if (!isWordChar(line.at(col))) return null;
 
     // Find start of word
     let startCol = col;
-    while (startCol > 0 && isWordChar(line[startCol - 1])) {
+    while (startCol > 0 && isWordChar(line.at(startCol - 1))) {
       startCol--;
     }
 
     // Find end of word
     let endCol = col;
-    while (endCol < line.length - 1 && isWordChar(line[endCol + 1])) {
+    while (endCol < line.length - 1 && isWordChar(line.at(endCol + 1))) {
       endCol++;
     }
 
     return { startCol, endCol };
+  }
+
+  /**
+   * Read absolute row `row` (history first, then the screen) into this.cells.
+   * False when there is no such row.
+   */
+  private readAbsoluteRow(row: number, scrollbackLength: number): boolean {
+    return row < scrollbackLength
+      ? this.wasmTerm.readHistoryRow(row, this.cells)
+      : this.wasmTerm.readRow(row - scrollbackLength, this.cells);
   }
 
   /**

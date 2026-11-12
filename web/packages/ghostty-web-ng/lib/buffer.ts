@@ -15,9 +15,8 @@
  * ```
  */
 
-import type { VtTerminal } from '../vt/ghosttyVt';
+import { VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import { EventEmitter } from './event-emitter';
-import { CellFlags } from './ghostty';
 import type {
   IBuffer,
   IBufferCell,
@@ -26,7 +25,11 @@ import type {
   IEvent,
 } from './interfaces';
 import type { Terminal } from './terminal';
-import type { GhosttyCell } from './types';
+
+/// A cell nothing was written to, in ghostty-web's default colours.
+function nullCell(): VtCell {
+  return { codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0xcccccc, bg: 0x000000, hyperlink: 0 };
+}
 
 // ============================================================================
 // BufferNamespace - Top-level buffer API
@@ -102,20 +105,7 @@ export class Buffer implements IBuffer {
     this.bufferType = type;
 
     // Create a null cell (codepoint=0, default colors, no flags)
-    const nullCellData: GhosttyCell = {
-      codepoint: 0,
-      fg_r: 204,
-      fg_g: 204,
-      fg_b: 204,
-      bg_r: 0,
-      bg_g: 0,
-      bg_b: 0,
-      flags: 0,
-      width: 1,
-      hyperlink_id: 0,
-      grapheme_len: 0,
-    };
-    this.nullCell = new BufferCell(nullCellData, 0);
+    this.nullCell = new BufferCell(nullCell(), 0);
   }
 
   get type(): 'normal' | 'alternate' {
@@ -169,30 +159,30 @@ export class Buffer implements IBuffer {
       return undefined;
     }
 
-    // Determine if accessing scrollback or visible screen
+    // Determine if accessing scrollback or visible screen. A line keeps its
+    // cells, so each line reads into a view of its own.
     const scrollbackLength = wasmTerm.getScrollbackLength();
-    let cells: GhosttyCell[] | null;
-    let lineNumber: number;
+    const cells = new VtCells();
+    let read: boolean;
     let isWrapped: boolean;
 
     if (this.bufferType === 'normal' && y < scrollbackLength) {
       // Accessing scrollback
-      // WASM getScrollbackLine: offset 0 = oldest, offset (length-1) = newest
+      // History rows: offset 0 = oldest, offset (length-1) = newest
       // Buffer coords: y=0 = oldest, y=(length-1) = newest
-      // So scrollbackOffset = y directly!
-      const scrollbackOffset = y;
-      cells = wasmTerm.getScrollbackLine(scrollbackOffset);
+      // So the history offset is y directly!
+      read = wasmTerm.readHistoryRow(y, cells);
       // TODO: We'd need WASM API to check if scrollback line is wrapped
       // For now, assume not wrapped
       isWrapped = false;
     } else {
       // Accessing visible screen
-      lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
-      cells = wasmTerm.getLine(lineNumber);
+      const lineNumber = this.bufferType === 'normal' ? y - scrollbackLength : y;
+      read = wasmTerm.readRow(lineNumber, cells);
       isWrapped = wasmTerm.isRowWrapped(lineNumber);
     }
 
-    if (!cells) {
+    if (!read) {
       return undefined;
     }
 
@@ -216,11 +206,11 @@ export class Buffer implements IBuffer {
  * A single line in the buffer
  */
 export class BufferLine implements IBufferLine {
-  private cells: GhosttyCell[];
+  private cells: VtCells;
   private _isWrapped: boolean;
   private _length: number;
 
-  constructor(cells: GhosttyCell[], isWrapped: boolean, length: number) {
+  constructor(cells: VtCells, isWrapped: boolean, length: number) {
     this.cells = cells;
     this._isWrapped = isWrapped;
     this._length = length;
@@ -239,27 +229,13 @@ export class BufferLine implements IBufferLine {
       return undefined;
     }
 
-    if (x >= this.cells.length) {
+    const cell = this.cells.at(x);
+    if (!cell) {
       // Cell beyond what was returned (empty/null cell)
-      return new BufferCell(
-        {
-          codepoint: 0,
-          fg_r: 204,
-          fg_g: 204,
-          fg_b: 204,
-          bg_r: 0,
-          bg_g: 0,
-          bg_b: 0,
-          flags: 0,
-          width: 1,
-          hyperlink_id: 0,
-          grapheme_len: 0,
-        },
-        x
-      );
+      return new BufferCell(nullCell(), x);
     }
 
-    return new BufferCell(this.cells[x], x);
+    return new BufferCell(cell, x);
   }
 
   translateToString(trimRight = false, startColumn = 0, endColumn = this._length): string {
@@ -292,9 +268,9 @@ export class BufferLine implements IBufferLine {
  * A single cell in the buffer
  */
 export class BufferCell implements IBufferCell {
-  private cell: GhosttyCell;
+  private cell: VtCell;
 
-  constructor(cell: GhosttyCell, _x: number) {
+  constructor(cell: VtCell, _x: number) {
     this.cell = cell;
   }
 
@@ -337,45 +313,45 @@ export class BufferCell implements IBufferCell {
   }
 
   getFgColor(): number {
-    // Pack RGB into a single number: 0xRRGGBB
-    return (this.cell.fg_r << 16) | (this.cell.fg_g << 8) | this.cell.fg_b;
+    // RGB packed into a single number: 0xRRGGBB
+    return this.cell.fg;
   }
 
   getBgColor(): number {
-    // Pack RGB into a single number: 0xRRGGBB
-    return (this.cell.bg_r << 16) | (this.cell.bg_g << 8) | this.cell.bg_b;
+    // RGB packed into a single number: 0xRRGGBB
+    return this.cell.bg;
   }
 
   isBold(): number {
-    return (this.cell.flags & CellFlags.BOLD) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.BOLD) !== 0 ? 1 : 0;
   }
 
   isItalic(): number {
-    return (this.cell.flags & CellFlags.ITALIC) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.ITALIC) !== 0 ? 1 : 0;
   }
 
   isUnderline(): number {
-    return (this.cell.flags & CellFlags.UNDERLINE) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.UNDERLINE) !== 0 ? 1 : 0;
   }
 
   isStrikethrough(): number {
-    return (this.cell.flags & CellFlags.STRIKETHROUGH) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.STRIKETHROUGH) !== 0 ? 1 : 0;
   }
 
   isBlink(): number {
-    return (this.cell.flags & CellFlags.BLINK) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.BLINK) !== 0 ? 1 : 0;
   }
 
   isInverse(): number {
-    return (this.cell.flags & CellFlags.INVERSE) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.INVERSE) !== 0 ? 1 : 0;
   }
 
   isInvisible(): number {
-    return (this.cell.flags & CellFlags.INVISIBLE) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.INVISIBLE) !== 0 ? 1 : 0;
   }
 
   isFaint(): number {
-    return (this.cell.flags & CellFlags.FAINT) !== 0 ? 1 : 0;
+    return (this.cell.flags & VtFlag.FAINT) !== 0 ? 1 : 0;
   }
 
   /**
@@ -383,7 +359,7 @@ export class BufferCell implements IBufferCell {
    * Used by link detection system
    */
   getHyperlinkId(): number {
-    return this.cell.hyperlink_id;
+    return this.cell.hyperlink;
   }
 
   /**
@@ -399,6 +375,6 @@ export class BufferCell implements IBufferCell {
    * Added for IBufferCell compatibility
    */
   isDim(): boolean {
-    return (this.cell.flags & CellFlags.FAINT) !== 0;
+    return (this.cell.flags & VtFlag.FAINT) !== 0;
   }
 }
