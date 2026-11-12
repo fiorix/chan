@@ -46,7 +46,7 @@ async function pinnedTerminal(input: string) {
     } as unknown as typeof HTMLCanvasElement.prototype.getContext,
   );
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ ghostty: vt.asGhostty(), cols: COLS, rows: ROWS });
+  const term = new Terminal({ ghostty: vt, cols: COLS, rows: ROWS });
   const wasmTerm = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
   wasmTerm.write(input);
   term.wasmTerm = wasmTerm;

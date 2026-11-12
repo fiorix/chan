@@ -104,7 +104,7 @@ async function openTerminal(theme: ITheme, output = OUTPUT): Promise<Terminal> {
     rows: ROWS,
     cursorBlink: false,
     cursorStyle: "block",
-    ghostty: vt.asGhostty(),
+    ghostty: vt,
     smoothScrollDuration: 0,
     theme: { ...theme },
   });
@@ -355,7 +355,7 @@ describe("a theme switch on a live ghostty terminal", () => {
 
   test("a terminal not yet open takes the theme when it opens", async () => {
     const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt.asGhostty(), theme: { ...DARK } });
+    const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt, theme: { ...DARK } });
     expect(applyGhosttyTheme(term, LIGHT)).toBe(false);
     const host = document.createElement("div");
     document.body.append(host);

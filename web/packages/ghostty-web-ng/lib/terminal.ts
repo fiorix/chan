@@ -5,25 +5,25 @@
  *
  * Usage:
  * ```typescript
- * import { init, Terminal } from 'ghostty-web';
+ * import { Terminal } from '@chan/ghostty-web-ng';
+ * import { GhosttyVt } from '@chan/ghostty-web-ng/vt';
  *
- * await init();
- * const term = new Terminal();
+ * const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+ * const term = new Terminal({ ghostty });
  * term.open(document.getElementById('container'));
  * term.write('Hello, World!\n');
  * term.onData(data => console.log('User typed:', data));
  * ```
  */
 
+import type { GhosttyVt, VtTerminal, VtTerminalConfig } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
-import type { Ghostty, GhosttyCell, GhosttyTerminal, GhosttyTerminalConfig } from './ghostty';
-import { getGhostty } from './index';
+import type { GhosttyCell } from './ghostty';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
   IBufferNamespace,
   IBufferRange,
-  IDisposable,
   IEvent,
   IKeyEvent,
   ITerminalAddon,
@@ -63,8 +63,8 @@ export class Terminal implements ITerminalCore {
   public readonly options!: Required<ITerminalOptions>;
 
   // Components (created on open())
-  private ghostty?: Ghostty;
-  public wasmTerm?: GhosttyTerminal; // Made public for link providers
+  private ghostty?: GhosttyVt;
+  public wasmTerm?: VtTerminal; // Made public for link providers
   public renderer?: CanvasRenderer; // Made public for FitAddon
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
@@ -117,7 +117,6 @@ export class Terminal implements ITerminalCore {
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
   private targetViewportY: number = 0; // Target viewport position for smooth scrolling
   private scrollAnimationStartTime?: number;
-  private scrollAnimationStartY?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
   private lastCursorY: number = 0; // Track cursor position for onCursorMove
@@ -134,9 +133,8 @@ export class Terminal implements ITerminalCore {
   private readonly SCROLLBAR_HIDE_DELAY_MS = 1500; // Hide after 1.5 seconds
   private readonly SCROLLBAR_FADE_DURATION_MS = 200; // 200ms fade animation
 
-  constructor(options: ITerminalOptions = {}) {
-    // Use provided Ghostty instance (for test isolation) or get module-level instance
-    this.ghostty = options.ghostty ?? getGhostty();
+  constructor(options: ITerminalOptions) {
+    this.ghostty = options.ghostty;
 
     // Create base options object with all defaults (excluding ghostty)
     const baseOptions = {
@@ -287,7 +285,7 @@ export class Terminal implements ITerminalCore {
   /**
    * Convert terminal options to WASM terminal config.
    */
-  private buildWasmConfig(): GhosttyTerminalConfig | undefined {
+  private buildWasmConfig(): VtTerminalConfig | undefined {
     const theme = this.options.theme;
     const scrollback = this.options.scrollback;
 
@@ -1027,7 +1025,6 @@ export class Terminal implements ITerminalCore {
 
     // Start new animation
     this.scrollAnimationStartTime = Date.now();
-    this.scrollAnimationStartY = this.viewportY;
     this.animateScroll();
   }
 
@@ -1059,7 +1056,6 @@ export class Terminal implements ITerminalCore {
       // Animation complete
       this.scrollAnimationFrame = undefined;
       this.scrollAnimationStartTime = undefined;
-      this.scrollAnimationStartY = undefined;
       return;
     }
 

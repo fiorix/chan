@@ -1,4 +1,4 @@
-import type { GhosttyTerminal } from "@chan/ghostty-web-ng";
+import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 /// What a repaint of the visible rows needs from either backend. xterm.js
 /// queues the row range through refresh(). ghostty-web has no refresh(): its
@@ -11,14 +11,14 @@ export type RefreshableTerminal = {
   refresh?: (start: number, end: number) => void;
   renderer?: {
     render?(
-      buffer: GhosttyTerminal,
+      buffer: VtTerminal,
       forceAll?: boolean,
       viewportY?: number,
       scrollbackProvider?: unknown,
       scrollbarOpacity?: number,
     ): void;
   };
-  wasmTerm?: GhosttyTerminal;
+  wasmTerm?: VtTerminal;
   getViewportY?: () => number;
 };
 

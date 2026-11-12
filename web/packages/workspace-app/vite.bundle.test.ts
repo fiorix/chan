@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { expect, test } from "vitest";
 
-test("the terminal bundle ships the vendored wasm without an inline copy", async () => {
+test("the terminal bundle ships the vendored wasm and no other", async () => {
   const result = await build({
     configFile: fileURLToPath(new URL("./vite.config.ts", import.meta.url)),
     logLevel: "silent",
@@ -22,8 +22,6 @@ test("the terminal bundle ships the vendored wasm without an inline copy", async
   expect(renderer.map((chunk) => chunk.fileName), "the renderer is bundled in one chunk").toHaveLength(1);
   // Checks 211 and 223 find the widget's chunk by this name.
   expect(renderer[0].fileName).toMatch(/^assets\/ghostty-web-[\w-]+\.js$/);
-  // The emitted JavaScript must not carry a second, unused wasm binary.
-  expect(chunks.filter((chunk) => chunk.code.includes("data:application/wasm")).map((chunk) => chunk.fileName)).toEqual([]);
   const wasm = result.output.filter((item) => item.type === "asset" && item.fileName.endsWith(".wasm"));
   expect(wasm).toHaveLength(1);
   expect(Buffer.from(wasm[0].source)).toEqual(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));

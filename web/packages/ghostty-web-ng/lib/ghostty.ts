@@ -37,7 +37,10 @@ export {
 };
 
 /**
- * Main Ghostty WASM wrapper class
+ * Main Ghostty WASM wrapper class: ghostty-web's binding of its own wasm
+ * (`ghostty-vt.wasm` at the package root). The widget runs on chan's
+ * binding (`vt/ghosttyVt.ts`) instead; the binding's differential tests
+ * construct this one over that wasm as their oracle.
  */
 export class Ghostty {
   private exports: GhosttyWasmExports;
@@ -58,100 +61,6 @@ export class Ghostty {
     config?: GhosttyTerminalConfig
   ): GhosttyTerminal {
     return new GhosttyTerminal(this.exports, this.memory, cols, rows, config);
-  }
-
-  static async load(wasmPath?: string): Promise<Ghostty> {
-    // If explicit path provided, use it
-    if (wasmPath) {
-      return Ghostty.loadFromPath(wasmPath);
-    }
-
-    // Resolve path relative to this module
-    const moduleUrl = new URL('../ghostty-vt.wasm', import.meta.url);
-
-    // Build paths to try, prioritizing file system paths for Node/Bun
-    const defaultPaths: string[] = [];
-
-    // For Node/Bun: try absolute file path first (strip file:// protocol)
-    if (moduleUrl.protocol === 'file:') {
-      let filePath = moduleUrl.pathname;
-      // Remove leading slash on Windows paths (e.g., /C:/ -> C:/)
-      if (filePath.match(/^\/[A-Za-z]:\//)) {
-        filePath = filePath.slice(1);
-      }
-      defaultPaths.push(filePath);
-    }
-
-    // Also try other common paths
-    defaultPaths.push(moduleUrl.href, './ghostty-vt.wasm', '/ghostty-vt.wasm');
-
-    let lastError: Error | null = null;
-    for (const path of defaultPaths) {
-      try {
-        return await Ghostty.loadFromPath(path);
-      } catch (e) {
-        lastError = e instanceof Error ? e : new Error(String(e));
-      }
-    }
-    throw lastError || new Error('Failed to load Ghostty WASM');
-  }
-
-  private static async loadFromPath(path: string): Promise<Ghostty> {
-    let wasmBytes: ArrayBuffer | undefined;
-
-    // Try Bun.file first (for Bun environments)
-    if (typeof Bun !== 'undefined' && typeof Bun.file === 'function') {
-      try {
-        const file = Bun.file(path);
-        if (await file.exists()) {
-          wasmBytes = await file.arrayBuffer();
-        }
-      } catch {
-        // Bun.file failed, try next method
-      }
-    }
-
-    // Try Node.js fs module if Bun.file didn't work
-    if (!wasmBytes) {
-      try {
-        const fs = await import('fs/promises');
-        const buffer = await fs.readFile(path);
-        wasmBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      } catch {
-        // fs failed, try fetch
-      }
-    }
-
-    // Fall back to fetch (for browser environments)
-    if (!wasmBytes) {
-      const response = await fetch(path);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
-      }
-      wasmBytes = await response.arrayBuffer();
-      if (wasmBytes.byteLength === 0) {
-        throw new Error(`WASM file is empty (0 bytes). Check path: ${path}`);
-      }
-    }
-
-    if (!wasmBytes) {
-      throw new Error(`Could not load WASM from path: ${path}`);
-    }
-
-    const wasmModule = await WebAssembly.compile(wasmBytes);
-    const wasmInstance = await WebAssembly.instantiate(wasmModule, {
-      env: {
-        log: (ptr: number, len: number) => {
-          const bytes = new Uint8Array(
-            (wasmInstance.exports as GhosttyWasmExports).memory.buffer,
-            ptr,
-            len
-          );
-          console.log('[ghostty-vt]', new TextDecoder().decode(bytes));
-        },
-      },
-    });
-    return new Ghostty(wasmInstance);
   }
 }
 

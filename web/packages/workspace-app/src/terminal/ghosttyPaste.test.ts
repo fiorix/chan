@@ -59,7 +59,7 @@ afterEach(() => {
 /// bracketed paste (DECSET 2004).
 async function openTerminal(bracketed: boolean) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt.asGhostty(), cursorBlink: false, smoothScrollDuration: 0 });
+  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
   const tab = document.createElement("div");
   const host = document.createElement("div");
   tab.append(host);

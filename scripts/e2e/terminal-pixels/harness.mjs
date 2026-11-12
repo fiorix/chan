@@ -477,7 +477,7 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
       cellSize: () => term?.renderer?.getMetrics(),
       onResizeReply: () => {},
     },
-  ).asGhostty();
+  );
   term = new GhosttyTerminal({
     allowTransparency: false,
     cols: COLS,
