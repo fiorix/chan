@@ -150,6 +150,8 @@ The order of operations:
 - `chan-files`, `chan-edit` and a shell-only `chan-term` with no desktop running: `Desktop` starts chan-desktop with the paths or the terminal on Unix; `Standalone` says no desktop is running, since its own executable is not one.
 - `chan upgrade`: `Standalone` replaces its own archive in place; `Desktop` drives the desktop's `tauri-plugin-updater`, since a desktop install is not a loose binary it may overwrite. The Windows NSIS install's console `chan.exe` is the standalone binary marked with `CHAN_DESKTOP_HANDOFF=1`, so it follows the desktop arm for both verbs; Windows publishes no CLI tarball for it to replace.
 
+A `Desktop` command that starts the desktop starts the one its own executable resolves to: the `.app` that holds it, through `open`, on macOS, else that binary by its resolved path, because the command shims are links to it and macOS can name a program by the link it was started through (`desktop::desktop_start`). A binary whose own name is one of the command names (a copy or a hard link called `chan-term`) is refused with the reason, since started under that name it would run the command again rather than the desktop.
+
 Everywhere else the two personalities run identical code. Keeping the fork down to one threaded value is why the desktop shares the entire subcommand surface without forking the dispatcher.
 
 ## The devserver verbs and supervision

@@ -123,8 +123,8 @@ async fn open_in_desktop(
     if !handoff::gui_session_present() {
         bail!(
             "{name} outside a chan terminal opens paths in chan-desktop, and this session has no \
-             display (an SSH login, or no DISPLAY or WAYLAND_DISPLAY); run {name} in a chan \
-             terminal"
+             display ({}); run {name} in a chan terminal",
+            headless_session(cfg!(target_os = "macos"))
         );
     }
     let mut failures = Vec::new();
@@ -154,6 +154,17 @@ async fn open_in_desktop(
         }
     }
     Ok(failures)
+}
+
+/// What a session [`handoff::gui_session_present`] reads as headless lacks,
+/// for the refusals that say so: an SSH login is headless everywhere, and no
+/// `DISPLAY` or `WAYLAND_DISPLAY` only off macOS, whose check reads neither.
+pub(crate) fn headless_session(macos: bool) -> &'static str {
+    if macos {
+        "an SSH login"
+    } else {
+        "an SSH login, or no DISPLAY or WAYLAND_DISPLAY"
+    }
 }
 
 /// One path to the running desktop within [`ANSWER_BOUND`]: one request
@@ -407,6 +418,17 @@ mod tests {
             }
         );
         assert_eq!(when_no_desktop(Personality::Standalone), NoDesktop::Refuse);
+    }
+
+    /// The headless refusals name what the check reads on the platform: an
+    /// SSH login alone on macOS, and the display variables too elsewhere.
+    #[test]
+    fn the_headless_refusal_names_only_what_the_check_reads() {
+        assert_eq!(headless_session(true), "an SSH login");
+        assert_eq!(
+            headless_session(false),
+            "an SSH login, or no DISPLAY or WAYLAND_DISPLAY"
+        );
     }
 
     /// The process a command started settles the launch before the endpoint

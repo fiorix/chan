@@ -325,8 +325,8 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -
     }
     if !handoff::gui_session_present() {
         bail!(
-            "{NAME} opens its window in chan-desktop, and this session has no display (an SSH \
-             login, or no DISPLAY or WAYLAND_DISPLAY)"
+            "{NAME} opens its window in chan-desktop, and this session has no display ({})",
+            opener::headless_session(cfg!(target_os = "macos"))
         );
     }
     let home = std::env::home_dir();

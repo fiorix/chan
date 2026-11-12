@@ -361,9 +361,15 @@ fn the_handoff_opt_out_and_a_headless_session_refuse_before_sending() {
         "Error: CHAN_NO_DESKTOP_HANDOFF is set, so chan-edit hands no path to chan-desktop; \
          run chan-edit in a chan terminal, or unset CHAN_NO_DESKTOP_HANDOFF\n"
     );
-    let headless = "Error: chan-edit outside a chan terminal opens paths in chan-desktop, and \
-                    this session has no display (an SSH login, or no DISPLAY or \
-                    WAYLAND_DISPLAY); run chan-edit in a chan terminal\n";
+    let headless = format!(
+        "Error: chan-edit outside a chan terminal opens paths in chan-desktop, and this session \
+         has no display ({}); run chan-edit in a chan terminal\n",
+        if cfg!(target_os = "macos") {
+            "an SSH login"
+        } else {
+            "an SSH login, or no DISPLAY or WAYLAND_DISPLAY"
+        }
+    );
     let no_display = f
         .command("chan-edit")
         .arg("notes.md")
