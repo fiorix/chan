@@ -1295,6 +1295,7 @@
         <div class="action-list">
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCutSelection}
             disabled={!bodyHasSelection}
           >
@@ -1306,6 +1307,7 @@
           </button>
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCopySelection}
             disabled={!bodyCanCopy}
           >
@@ -1315,7 +1317,7 @@
             <span class="mbtn-label">Copy</span>
             <span class="mbtn-chord"></span>
           </button>
-          <button class="mbtn" onclick={doPasteClipboard}>
+          <button class="mbtn" role="menuitem" onclick={doPasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1325,14 +1327,14 @@
           {#if bodyLinkUrl || bodyPreviewHit}
             <div class="msep" role="separator"></div>
             {#if bodyLinkUrl}
-              <button class="mbtn" onclick={doOpenLink}>
+              <button class="mbtn" role="menuitem" onclick={doOpenLink}>
                 <span class="mbtn-icon">
                   <ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
                 <span class="mbtn-label">Open link</span>
                 <span class="mbtn-chord"></span>
               </button>
-              <button class="mbtn" onclick={doCopyLink}>
+              <button class="mbtn" role="menuitem" onclick={doCopyLink}>
                 <span class="mbtn-icon">
                   <LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1341,7 +1343,7 @@
               </button>
             {/if}
             {#if bodyPreviewHit}
-              <button class="mbtn" onclick={doPreviewLink}>
+              <button class="mbtn" role="menuitem" onclick={doPreviewLink}>
                 <span class="mbtn-icon">
                   <Eye size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1351,7 +1353,7 @@
             {/if}
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={doFind}>
+          <button class="mbtn" role="menuitem" onclick={doFind}>
             <span class="mbtn-icon">
               <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1359,7 +1361,7 @@
             <span class="mbtn-chord">{chordLabel("app.find.open")}</span>
           </button>
           {#if bodyHasSelection}
-            <button class="mbtn" onclick={doOpenSearch}>
+            <button class="mbtn" role="menuitem" onclick={doOpenSearch}>
               <span class="mbtn-icon">
                 <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
@@ -1368,7 +1370,7 @@
             </button>
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={() => void doForceReload()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
             <span class="mbtn-icon">
               <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1376,7 +1378,7 @@
             <span class="mbtn-chord"></span>
           </button>
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={doOpenCommands}>
+          <button class="mbtn" role="menuitem" onclick={doOpenCommands}>
             <span class="mbtn-icon">
               <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1387,7 +1389,7 @@
       {:else}
       <div class="action-list">
         {#if isDraftEditorTab}
-          <button class="mbtn" type="button" onclick={doSaveDraftToWorkspace}>
+          <button class="mbtn" role="menuitem" type="button" onclick={doSaveDraftToWorkspace}>
             <span class="mbtn-icon">
               <Save size={18} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1492,7 +1494,7 @@
           </button>
         {/if}
         <div class="msep" role="separator"></div>
-        <button class="mbtn" onclick={() => void doCopyPathToFile()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doCopyPathToFile()}>
           <span class="mbtn-icon">
             <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
@@ -1502,13 +1504,13 @@
         {#if !isWorkspaceDraftTab}
           <!-- No chord hint: `app.files.delete` (Backspace) only binds in
                FileTree's rows; nothing in the editor tab dispatches it. -->
-          <button class="mbtn" onclick={() => void doDeleteFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDeleteFile()}>
             <span class="mbtn-icon">
               <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">{commandTitle("app.file.delete")}</span>
           </button>
-          <button class="mbtn" onclick={() => void doDuplicateFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDuplicateFile()}>
             <span class="mbtn-icon">
               <Files size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1516,7 +1518,7 @@
             <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
           </button>
         {/if}
-        <button class="mbtn" onclick={() => void doForceReload()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
           <span class="mbtn-icon">
             <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
@@ -1527,7 +1529,7 @@
              window's panes have two sides, then the tab's close. -->
         <div class="msep" role="separator"></div>
         {#if panesHaveSides()}
-          <button class="mbtn" onclick={doFlipPane}>
+          <button class="mbtn" role="menuitem" onclick={doFlipPane}>
             <span class="mbtn-icon">
               <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1535,7 +1537,7 @@
             <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
           </button>
         {/if}
-        <button class="mbtn" onclick={doCloseTab}>
+        <button class="mbtn" role="menuitem" onclick={doCloseTab}>
           <span class="mbtn-icon">
             <X size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>

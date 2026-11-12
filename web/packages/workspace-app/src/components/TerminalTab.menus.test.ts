@@ -549,10 +549,27 @@ describe("every row takes its words from the catalog", () => {
   });
 });
 
-// The tab menu holds fields and toggles, so it is a dialog; the body menu
+// The tab menu holds fields and the broadcast list's checkboxes, so it is a
+// dialog, and its action rows are the items of menus inside it; the body menu
 // holds only actions and toggles, so it is a menu whose buttons are its
-// items.
+// items. A menu item is one only inside a menu.
 describe("the menus' roles", () => {
+  /// The tab menu of a terminal with a peer in its window and a member of
+  /// its group in another, so the broadcast list shows both of its parts.
+  async function openFullTabMenu(): Promise<HTMLElement> {
+    const [tab] = seatTerminals([
+      terminalTab({ id: "term-1", title: "Worker" }),
+      terminalTab({ id: "term-2", title: "Logs" }),
+    ]);
+    await mountTerminal(TerminalTab, tab!);
+    await attach(TerminalSocket.all.at(-1)!);
+    applyTerminalRoster([
+      { id: "sess-far", tab_name: "Far", tab_group: "default", window_id: "far-win", window_live: true, broadcast: false },
+    ]);
+    await openTerminalMenu(tab!);
+    return document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
+  }
+
   test("the tab menu is a named dialog", async () => {
     const { tab } = await attached();
     await openTerminalMenu(tab);
@@ -561,6 +578,49 @@ describe("the menus' roles", () => {
       "dialog",
       "terminal tab settings",
     ]);
+  });
+
+  test("the tab menu's action rows are menu items, a toggle's a checkbox, each inside a menu of the dialog", async () => {
+    const bubble = await openFullTabMenu();
+    const rows = [...bubble.querySelectorAll<HTMLButtonElement>("button.mbtn")].map((button) => ({
+      label: text(button.querySelector(".mbtn-label")),
+      role: button.getAttribute("role"),
+      menu: button.closest('[role="menu"]')?.getAttribute("aria-label") ?? null,
+    }));
+
+    expect(rows).toEqual([
+      { label: title("app.terminal.broadcastToggle"), role: "menuitemcheckbox", menu: title("app.terminal.broadcastTargets") },
+      { label: title("app.terminal.details"), role: "menuitemcheckbox", menu: "terminal tab actions" },
+      { label: title("app.pane.flip"), role: "menuitem", menu: "terminal tab actions" },
+      { label: title("app.tab.close"), role: "menuitem", menu: "terminal tab actions" },
+    ]);
+  });
+
+  test("a menu inside the dialog holds items and separators alone, and the fields and checkboxes stay the dialog's", async () => {
+    const bubble = await openFullTabMenu();
+    const menus = [...bubble.querySelectorAll<HTMLElement>('[role="menu"]')];
+
+    expect(menus).toHaveLength(2);
+    for (const menu of menus) {
+      const held = [...menu.children].map((child) => child.getAttribute("role"));
+      expect(held.filter((role) => !["menuitem", "menuitemcheckbox", "separator"].includes(role ?? "")), menu.getAttribute("aria-label") ?? "").toEqual([]);
+      expect(menu.querySelectorAll("input"), "no field inside a menu").toHaveLength(0);
+    }
+    // Name, Group and the three broadcast targets, none of them in a menu.
+    expect(bubble.querySelectorAll("input")).toHaveLength(5);
+  });
+
+  test("no menu item of either menu sits outside a menu", async () => {
+    const { tab, target } = await attached();
+    for (const open of [() => openTerminalMenu(tab), () => openBodyMenu(target)]) {
+      await open();
+      const bubble = document.body.querySelector<HTMLElement>(".terminal-tab-menu-bubble")!;
+      const items = [...bubble.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+      expect(items.length).toBeGreaterThan(0);
+      expect(items.filter((item) => item.closest('[role="menu"]') === null).map(text)).toEqual([]);
+      closeTabMenu();
+      await tick();
+    }
   });
 
   test("the body menu is a menu of menu items, a toggle's a checkbox", async () => {

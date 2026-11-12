@@ -3406,7 +3406,12 @@
       <!-- Terminal tab menu. Header rows stay above the broadcast
            controls; command-discovery actions live in the launcher. Each
            action row is worded by its catalog command, and the menu ends as
-           every tab menu does, with the pane's flip and the tab's close. -->
+           every tab menu does, with the pane's flip and the tab's close.
+           The bubble is a dialog, since it holds fields and the broadcast
+           list's checkboxes, and a menu item is one only inside a menu. So
+           each run of action rows sits in a menu of its own, which holds
+           nothing but items and separators, and the fields and checkboxes
+           stay the dialog's. -->
       <div class="action-list">
         <!-- Per-tab broadcast list, at the top of the menu right after the
              Group row, under the name of the launcher's choice that lists
@@ -3419,7 +3424,9 @@
           </span>
           <span>{commandTitle("app.terminal.broadcastTargets")}</span>
         </div>
-        {@render toggleRow("app.terminal.broadcastToggle", toggleAllBroadcastTargets)}
+        <div class="menu-rows" role="menu" aria-label={commandTitle("app.terminal.broadcastTargets")}>
+          {@render toggleRow("app.terminal.broadcastToggle", toggleAllBroadcastTargets)}
+        </div>
         {#each localBroadcastTargets as target (target.id)}
           <label class="target-row">
             <span class="target-check">
@@ -3466,24 +3473,26 @@
           {/each}
         {/if}
         <div class="msep" role="separator"></div>
-        {@render toggleRow("app.terminal.details", toggleDetailsFromMenu)}
-        <div class="msep" role="separator"></div>
-        {#if panesHaveSides()}
-          <button class="mbtn" onclick={flipFromMenu}>
+        <div class="menu-rows" role="menu" aria-label="terminal tab actions">
+          {@render toggleRow("app.terminal.details", toggleDetailsFromMenu)}
+          <div class="msep" role="separator"></div>
+          {#if panesHaveSides()}
+            <button class="mbtn" role="menuitem" onclick={flipFromMenu}>
+              <span class="mbtn-icon">
+                <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+              <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
+              <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
+            </button>
+          {/if}
+          <button class="mbtn" role="menuitem" onclick={closeFromMenu}>
             <span class="mbtn-icon">
-              <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+              <X size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
-            <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
+            <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
+            <span class="mbtn-chord">{chordLabel("app.tab.close")}</span>
           </button>
-        {/if}
-        <button class="mbtn" onclick={closeFromMenu}>
-          <span class="mbtn-icon">
-            <X size={16} strokeWidth={1.75} aria-hidden="true" />
-          </span>
-          <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
-          <span class="mbtn-chord">{chordLabel("app.tab.close")}</span>
-        </button>
+        </div>
       </div>
       {/if}
     </div>
@@ -3884,6 +3893,12 @@
     display: flex;
     flex-direction: column;
     padding-top: 4px;
+  }
+  /* A run of rows inside the tab menu's list, laid out as the list lays
+     out its own rows. */
+  .menu-rows {
+    display: flex;
+    flex-direction: column;
   }
   .mbtn {
     display: flex;

@@ -1145,6 +1145,87 @@ describe("a menu row and its command", () => {
   });
 });
 
+// A menu role is true inside a menu. Both of the editor's menus are menus,
+// so every action row of either is a menu item, and a row with a check a
+// menu item checkbox.
+describe("the menus' roles", () => {
+  /// Every button of the open menu, as its label and its role.
+  function buttonRoles(): Array<[string, string | null]> {
+    return [...bubble()!.querySelectorAll<HTMLButtonElement>("button")].map((button) => [
+      button.querySelector(".mbtn-label")?.textContent?.trim() ?? "",
+      button.getAttribute("role"),
+    ]);
+  }
+
+  /// Opens the body menu with every row it can show: a selection, and a
+  /// pointer over both an external and an internal link.
+  async function openFullBodyMenu(): Promise<void> {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first");
+    view.dispatch({ selection: { anchor: at, head: at + "first".length } });
+    h.urlUnderCursor = "https://example.com/doc";
+    h.wikiUnderCursor = { target: "notes/other.md", anchorEl: document.createElement("span") };
+    await rightClickBody(target);
+  }
+
+  test("every row of the body menu is a menu item", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.getAttribute("role")).toBe("menu");
+    expect(buttonRoles()).toEqual(
+      [
+        "Cut",
+        "Copy",
+        "Paste",
+        "Open link",
+        "Copy link",
+        "Preview",
+        "Find",
+        "Search selection",
+        "Reload from disk",
+        "Command launcher",
+      ].map((label) => [label, "menuitem"]),
+    );
+  });
+
+  test("every action row of the tab menu is a menu item, a view row a checkbox", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+
+    expect(bubble()!.getAttribute("role")).toBe("menu");
+    expect(buttonRoles()).toEqual([
+      ["Outline", "menuitemcheckbox"],
+      ["Details", "menuitemcheckbox"],
+      ["Style toolbar", "menuitemcheckbox"],
+      ["Copy file path", "menuitem"],
+      ["Delete file", "menuitem"],
+      ["Duplicate file", "menuitem"],
+      ["Reload from disk", "menuitem"],
+      ["Flip pane", "menuitem"],
+      ["Close tab", "menuitem"],
+    ]);
+  });
+
+  test("a draft's Save draft row is a menu item too", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(buttonRoles()[0]).toEqual(["Save draft", "menuitem"]);
+  });
+
+  test("a disabled row stays a disabled menu item", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    await rightClickBody(target);
+
+    expect([row("Cut").getAttribute("role"), row("Cut").disabled]).toEqual(["menuitem", true]);
+  });
+});
+
 // The editor keeps focus while its menu is open, so an Escape goes first to
 // CodeMirror, which collapses a selection on it. An open menu takes the key
 // before the editor does.
