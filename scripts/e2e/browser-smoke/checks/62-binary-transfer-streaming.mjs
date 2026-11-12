@@ -60,8 +60,31 @@ async function waitFor(probe, description, timeoutMs = 30_000, intervalMs = 50) 
   }
 }
 
-async function monitorResources(pid, promise) {
-  const baseline = processResources(pid);
+/// The server's resources once its RSS has come to rest: read every 100 ms
+/// until two seconds pass within 1 MiB of each other, or for at most 20 s.
+/// A fixture written into the workspace sets the watcher, the index and the
+/// graph to work, and the allocator takes back the room an earlier step's
+/// cleanup returned; a baseline read at once counts all of that against the
+/// step measured after it, whose growth then says how busy the server was
+/// and not what the step holds.
+async function settledResources(pid) {
+  const windowMs = 2_000;
+  const started = Date.now();
+  const readings = [];
+  for (;;) {
+    const now = processResources(pid);
+    const at = Date.now() - started;
+    readings.push({ at, rssBytes: now.rssBytes });
+    const recent = readings.filter((reading) => reading.at >= at - windowMs).map((reading) => reading.rssBytes);
+    const still = at >= windowMs && Math.max(...recent) - Math.min(...recent) <= MiB;
+    if (still || at >= 20_000) return { resources: now, settled: still, settledAfterMs: at };
+    await sleep(100);
+  }
+}
+
+/// The server's peak resources while `promise` runs, against `baseline`, read
+/// before the work starts.
+async function monitorResources(pid, promise, baseline = processResources(pid)) {
   const peak = { ...baseline };
   // The server pid going away mid-transfer is the regression this check
   // hunts, and reading /proc for a pid that is gone throws. Thrown from a
@@ -715,11 +738,16 @@ export default {
       });
 
       // Complete one moderate download to pin exact byte count in addition to
-      // the cancelled multi-gigabyte probes above.
+      // the cancelled multi-gigabyte probes above. The download runs for
+      // seconds, long enough to take in the server's whole reaction to its
+      // new fixture, so its baseline is read once the server has settled: a
+      // download that held the file would still grow by the file's 32 MiB,
+      // over the budget, while one that streams it holds a few chunks.
       const downloadName = `bounded-download-${Date.now()}.bin`;
       const downloadPath = join(ctx.workspaceDir, downloadName);
       writeFileSync(downloadPath, "");
       truncateSync(downloadPath, 32 * MiB);
+      const downloadSettle = await settledResources(serverPid);
       const download = monitorResources(
         serverPid,
         page.evaluate(async (path) => {
@@ -745,6 +773,7 @@ export default {
           }
           return { bytes, firstByteMs };
         }, downloadName),
+        downloadSettle.resources,
       );
       const downloadResult = await download;
       if (downloadResult.value.bytes !== 32 * MiB) {
@@ -756,6 +785,8 @@ export default {
       record("download", {
         ...downloadResult.value,
         fixtureBytes: 32 * MiB,
+        baselineSettled: downloadSettle.settled,
+        baselineSettledAfterMs: downloadSettle.settledAfterMs,
         ...assertResourceBudget("download", downloadResult, resourceLimits),
       });
 
