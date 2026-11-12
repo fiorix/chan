@@ -3755,7 +3755,8 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed:
 }
 
 /// Start this desktop again once a shutdown's drain is done, as Tauri's
-/// restart does: under an AppImage, the image with the managed `Env`'s
+/// restart does: under this process's own AppImage
+/// ([`cs_install::appimage_path`]), the image with the managed `Env`'s
 /// arguments, then exit. Tauri's own restart hands the new process this
 /// process's environment, whose search paths name this process's mount, which
 /// goes with it; here the new process gets the environment the user had
@@ -3764,7 +3765,8 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed:
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn relaunch(app: tauri::AppHandle) {
     #[cfg(target_os = "linux")]
-    let appimage = app.env().appimage.map(|image| (image, app.env().args_os));
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
     #[cfg(not(target_os = "linux"))]
     let appimage = None;
     relaunch_with(
@@ -9400,10 +9402,12 @@ mod tests {
             "\nfn relaunch(app: tauri::AppHandle) {",
             "\n/// [`relaunch`]'s route,",
         );
-        // The call's arguments are pinned in order: the exit follows a start
-        // that worked, Tauri's restart one that failed.
+        // The image is this process's own, and the call's arguments are
+        // pinned in order: the exit follows a start that worked, Tauri's
+        // restart one that failed.
         let wiring = "
-    let appimage = app.env().appimage.map(|image| (image, app.env().args_os));
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
     #[cfg(not(target_os = \"linux\"))]
     let appimage = None;
     relaunch_with(
