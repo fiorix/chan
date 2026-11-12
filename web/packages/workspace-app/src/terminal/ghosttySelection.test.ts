@@ -193,6 +193,19 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     expect(clipboard.writeText).not.toHaveBeenCalled();
   });
 
+  test("a press and release without a drag selects nothing and copies nothing", async () => {
+    const clipboard = browserClipboard();
+    const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
+    const at = { clientX: 2 * cell.width + 1, clientY: 1 };
+    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at }));
+    expect(writes).toEqual([]);
+    expect(term.hasSelection()).toBe(false);
+    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+  });
+
   test("a double click copies the word under it", async () => {
     const clipboard = browserClipboard();
     const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
