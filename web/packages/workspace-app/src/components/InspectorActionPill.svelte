@@ -1,9 +1,11 @@
 <script module lang="ts">
-  /// One inspector action: a label, a click handler, and optional tooltip +
-  /// disabled state. Shared by the inspector bodies that render the
-  /// primary-action pill.
+  /// One inspector action: the catalog command it is, a click handler, and
+  /// optional tooltip + disabled state. The command's title is the action's
+  /// label, so an inspector words an action as the launcher and the menus
+  /// do. Shared by the inspector bodies that render the primary-action pill.
   export type InspectorAction = {
-    label: string;
+    /// The id of the registered command this action is on its host surface.
+    command: string;
     onClick: () => void;
     title?: string;
     disabled?: boolean;
@@ -15,6 +17,8 @@
   // category logic lives in each caller's action model; this component owns
   // the markup, dropdown state, and outside-click / Escape dismissal.
   import { ChevronDown } from "@lucide/svelte";
+  import { commandTitle } from "../state/commands";
+  import "../state/commands/install";
   import { menuEscape } from "./menuEscape";
 
   let {
@@ -61,7 +65,7 @@
       type="button"
       onclick={main.onClick}
       disabled={main.disabled}
-      title={main.title}>{main.label}</button
+      title={main.title}>{commandTitle(main.command)}</button
     >
     {#if secondary.length > 0}
       <button
@@ -76,7 +80,7 @@
   </div>
   {#if menuOpen && secondary.length > 0}
     <div class="action-menu" role="menu" tabindex="-1" onkeydown={menuKeys.bubble}>
-      {#each secondary as item (item.label)}
+      {#each secondary as item (item.command)}
         <button
           class="action-menu-item"
           type="button"
@@ -86,7 +90,7 @@
           onclick={() => {
             menuOpen = false;
             item.onClick();
-          }}>{item.label}</button
+          }}>{commandTitle(item.command)}</button
         >
       {/each}
     </div>
