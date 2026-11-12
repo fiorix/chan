@@ -340,8 +340,11 @@ fn with_no_desktop_running_the_standalone_cli_says_so() {
     }
 }
 
-/// `CHAN_NO_DESKTOP_HANDOFF` and a session with no display each stop the
-/// handoff before anything is sent, and say which stopped it.
+/// `CHAN_NO_DESKTOP_HANDOFF` and a headless session each stop the handoff
+/// before anything is sent, and say which stopped it. An SSH login is
+/// headless everywhere; a session with no `DISPLAY` or `WAYLAND_DISPLAY` is
+/// headless everywhere but macOS, where the check reads neither, so there the
+/// path is sent.
 #[test]
 fn the_handoff_opt_out_and_a_headless_session_refuse_before_sending() {
     let f = fixture();
@@ -367,8 +370,17 @@ fn the_handoff_opt_out_and_a_headless_session_refuse_before_sending() {
         .env_remove("DISPLAY")
         .output()
         .unwrap();
-    assert_eq!(no_display.status.code(), Some(1));
-    assert_eq!(stderr(&no_display), headless);
+    if cfg!(target_os = "macos") {
+        assert_eq!(no_display.status.code(), Some(0));
+        assert_eq!(
+            stderr(&no_display),
+            format!("opened {}\n", f.path("notes.md"))
+        );
+        assert_eq!(drain(&requests), [open_path(&f.path("notes.md"))]);
+    } else {
+        assert_eq!(no_display.status.code(), Some(1));
+        assert_eq!(stderr(&no_display), headless);
+    }
     let ssh = f
         .command("chan-edit")
         .arg("notes.md")

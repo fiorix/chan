@@ -8,7 +8,16 @@ declare its MIME types; each must pass `desktop-file-validate`.
 
   check-desktop-entries.py [DIR]          the entries in DIR (default: the
                                           shared ones under packaging/)
-  check-desktop-entries.py --appimage F   the entries inside the AppImage F
+  check-desktop-entries.py --appimage F   the AppImage F: its root's desktop
+                                          file and the entries it carries
+  check-desktop-entries.py --appdir D     the same for D, an AppImage's
+                                          extracted tree
+
+The AppImage's AppRun runs the Exec of the first desktop file it reads in the
+image's root, in directory order, and linuxdeploy links into that root the
+first desktop file it lists under `usr/share/applications`. So each of the
+two holds Chan's entry alone, whatever order a filesystem lists them in, and
+the AppImage carries the two entries under `usr/share/chan/applications`.
 
 Exits 0 when every entry passes, 1 with one line per finding otherwise, and 2
 when it cannot run (no desktop-file-validate, no AppImage, one that will not
@@ -32,6 +41,10 @@ ENTRIES = {
     "chan-edit.desktop": ("chan-edit", {"text/markdown"}),
 }
 FIELD_CODES = {"%U", "%u", "%F", "%f"}
+# The binary the AppImage's root entry runs, and where the image carries the
+# two entries: away from `usr/share/applications`, which linuxdeploy reads.
+MAIN_BINARY = "chan-desktop"
+APPIMAGE_ENTRIES = "usr/share/chan/applications"
 
 
 def desktop_entry(path: Path) -> dict[str, str]:
@@ -80,29 +93,64 @@ def findings(directory: Path, validate: str) -> list[str]:
     return found
 
 
+def desktop_files(directory: Path) -> list[str]:
+    """The names in `directory` AppRun's filter takes: those ending `.desktop`."""
+    if not directory.is_dir():
+        return []
+    return sorted(path.name for path in directory.iterdir() if path.name.endswith(".desktop"))
+
+
+def appdir_findings(tree: Path, validate: str) -> list[str]:
+    found = []
+    root = desktop_files(tree)
+    if len(root) != 1:
+        found.append(
+            f"the AppImage root holds {len(root)} desktop files ({', '.join(root) or 'none'}); "
+            f"AppRun runs the Exec of the first it reads, so the root holds one, running {MAIN_BINARY}"
+        )
+    elif not (tree / root[0]).is_file():
+        found.append(f"{root[0]} in the AppImage root leads to no file")
+    else:
+        exec_line = desktop_entry(tree / root[0]).get("Exec", "")
+        if exec_line.split()[:1] != [MAIN_BINARY]:
+            found.append(
+                f"{root[0]} in the AppImage root must run {MAIN_BINARY}, got {exec_line!r}"
+            )
+    listed = desktop_files(tree / "usr/share/applications")
+    if len(listed) > 1:
+        found.append(
+            f"usr/share/applications holds {', '.join(listed)}; linuxdeploy links the first it "
+            "lists into the AppImage root, so it holds the root's entry alone"
+        )
+    return found + findings(tree / APPIMAGE_ENTRIES, validate)
+
+
 class CannotRun(Exception):
     """The check cannot run: the exit-2 case."""
 
 
-def appimage_entries(appimage: Path, into: Path) -> Path:
-    """Extract the AppImage's `usr/share/applications` into `into`."""
+def appimage_tree(appimage: Path, into: Path) -> Path:
+    """Extract the parts of the AppImage the check reads into `into`: the
+    root's desktop files, `usr/share/applications` and the carried entries."""
     if not appimage.is_file():
         raise CannotRun(f"no AppImage at {appimage}")
-    try:
-        subprocess.run(
-            [str(appimage.resolve()), "--appimage-extract", "usr/share/applications/*"],
-            cwd=into,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        detail = getattr(error, "stderr", b"") or b""
-        detail = detail.decode(errors="replace").strip().replace("\n", "; ")
-        raise CannotRun(
-            f"{appimage} --appimage-extract failed: {error}" + (f": {detail}" if detail else "")
-        ) from error
-    return into / "squashfs-root/usr/share/applications"
+    for pattern in ("*.desktop", "usr/share/applications/*", f"{APPIMAGE_ENTRIES}/*"):
+        try:
+            subprocess.run(
+                [str(appimage.resolve()), "--appimage-extract", pattern],
+                cwd=into,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            detail = getattr(error, "stderr", b"") or b""
+            detail = detail.decode(errors="replace").strip().replace("\n", "; ")
+            raise CannotRun(
+                f"{appimage} --appimage-extract failed: {error}"
+                + (f": {detail}" if detail else "")
+            ) from error
+    return into / "squashfs-root"
 
 
 def main(argv: list[str]) -> int:
@@ -113,26 +161,36 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    modes = (["--appimage"], ["--appdir"])
     with tempfile.TemporaryDirectory(prefix="chan-entries-") as scratch:
-        if argv[:1] == ["--appimage"] and len(argv) == 2:
+        if argv[:1] in modes and len(argv) == 2:
             try:
-                directory = appimage_entries(Path(argv[1]), Path(scratch))
+                if argv[0] == "--appimage":
+                    tree = appimage_tree(Path(argv[1]), Path(scratch))
+                elif Path(argv[1]).is_dir():
+                    tree = Path(argv[1])
+                else:
+                    raise CannotRun(f"no directory at {argv[1]}")
             except CannotRun as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 2
-            source = argv[1]
-        elif len(argv) <= 1 and argv[:1] != ["--appimage"]:
+            found = appdir_findings(tree, validate)
+            passed = (
+                f"{', '.join(ENTRIES)} under {APPIMAGE_ENTRIES} and one desktop file in the root "
+                f"of {argv[1]}"
+            )
+        elif len(argv) <= 1 and argv[:1] not in modes:
             directory = Path(argv[0]) if argv else SHARED
-            source = str(directory)
+            found = findings(directory, validate)
+            passed = f"{', '.join(ENTRIES)} in {directory}"
         else:
             print(__doc__, file=sys.stderr)
             return 2
-        found = findings(directory, validate)
     for finding in found:
         print(f"error: {finding}", file=sys.stderr)
     if found:
         return 1
-    print(f"desktop entries ok: {', '.join(ENTRIES)} in {source}")
+    print(f"desktop entries ok: {passed}")
     return 0
 
 

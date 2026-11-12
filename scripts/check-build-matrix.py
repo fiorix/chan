@@ -368,15 +368,29 @@ def check_opener_contract() -> None:
         for entry in OPENER_ENTRIES:
             for needle in entry_needles:
                 require(text, needle.replace("ENTRY", entry), path)
+    # The AppImage carries the entries outside usr/share/applications: linuxdeploy
+    # links the first desktop file it lists there into the image's root, and
+    # AppRun runs the first it reads in that root.
     linux = json.loads(read("desktop/src-tauri/tauri.conf.json"))["bundle"]["linux"]
-    for bundle in ("deb", "rpm", "appimage"):
+    for bundle, directory in (
+        ("deb", "/usr/share/applications"),
+        ("rpm", "/usr/share/applications"),
+        ("appimage", "/usr/share/chan/applications"),
+    ):
         files = linux.get(bundle, {}).get("files", {})
         for entry in OPENER_ENTRIES:
-            if files.get(f"/usr/share/applications/{entry}") != f"../../packaging/distros/shared/{entry}":
+            if files.get(f"{directory}/{entry}") != f"../../packaging/distros/shared/{entry}":
                 raise ContractError(
                     f"desktop/src-tauri/tauri.conf.json: bundle.linux.{bundle}.files must install "
-                    f"packaging/distros/shared/{entry} at /usr/share/applications/{entry}"
+                    f"packaging/distros/shared/{entry} at {directory}/{entry}"
                 )
+    appimage = linux.get("appimage", {}).get("files", {})
+    swept = sorted(path for path in appimage if path.startswith("/usr/share/applications/"))
+    if swept:
+        raise ContractError(
+            "desktop/src-tauri/tauri.conf.json: bundle.linux.appimage.files must install "
+            f"nothing under /usr/share/applications, got {', '.join(swept)}"
+        )
 
 
 def check_workflow_contract() -> None:
