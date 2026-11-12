@@ -255,6 +255,29 @@ export function availableCommands(ctx: CommandContext): Command[] {
   );
 }
 
+/// The registered command with `id`. A menu row, a help row and a toolbar
+/// button name their action through it, so its words are written once.
+export function commandById(id: string): Command | undefined {
+  return allCommands().find((c) => c.id === id);
+}
+
+/// The title of the command with `id`, as every surface that offers the
+/// action words it. An id nothing registers reads as itself, which a test
+/// over a menu's rows catches before a reader does.
+export function commandTitle(id: string): string {
+  return commandById(id)?.title ?? id;
+}
+
+/// The state the command with `id` reports in `ctx`: a toggle's on or off, a
+/// choice's current label, and null when it reports none or is not
+/// registered.
+export function commandState(
+  id: string,
+  ctx: CommandContext = commandContext(),
+): boolean | string | null {
+  return commandById(id)?.state?.(ctx) ?? null;
+}
+
 /// Whether a dispatched command id may run in a window with `caps`.
 ///
 /// Mirrors the catalog filter for ids that are registered. Some dispatchable
