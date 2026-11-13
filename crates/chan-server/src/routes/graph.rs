@@ -1430,6 +1430,7 @@ pub async fn api_language_graph(
 
 pub async fn api_graph(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<GraphQuery>,
 ) -> Response {
     let workspace = match state.try_workspace() {
@@ -1458,9 +1459,139 @@ pub async fn api_graph(
         .into_response();
     }
     if stream {
-        return stream_graph_response(state.bulk_transfer.stall_signal(), workspace, params).await;
+        return stream_graph_response(
+            state.bulk_transfer.stall_signal(),
+            workspace,
+            params,
+            accepts_gzip(&headers),
+        )
+        .await;
     }
     blocking_response("graph", move || api_graph_sync(workspace, params)).await
+}
+
+/// Whether a request's `Accept-Encoding` takes a gzip answer: its `gzip`
+/// coding, or else its `*`, with a quality above zero.
+fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
+    let mut gzip = None;
+    let mut any = None;
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else { continue };
+        for coding in value.split(',') {
+            let mut parts = coding.split(';');
+            let name = parts.next().unwrap_or("").trim();
+            let quality = parts
+                .filter_map(|param| {
+                    let (key, q) = param.split_once('=')?;
+                    key.trim()
+                        .eq_ignore_ascii_case("q")
+                        .then(|| q.trim().parse::<f32>().ok())?
+                })
+                .next()
+                .unwrap_or(1.0);
+            if name.eq_ignore_ascii_case("gzip") {
+                gzip = Some(quality);
+            } else if name == "*" {
+                any = Some(quality);
+            }
+        }
+    }
+    gzip.or(any).is_some_and(|q| q > 0.0)
+}
+
+/// A body stream gzipped frame by frame: each frame is compressed and
+/// sync-flushed as it arrives, so a client decodes every line the route has
+/// produced while it builds the next. A compressor left to choose its own
+/// block boundaries, as the route's compression layer does, holds those
+/// lines until a block fills, which on a large workspace is long enough for
+/// the client to give the stream up as stalled. The end writes the gzip
+/// trailer; an error ends the stream without one, so a cut answer never
+/// reads as whole.
+fn gzip_each_frame(
+    frames: impl futures::Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    use futures::StreamExt;
+    use std::io::Write;
+
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    futures::stream::unfold(Some((Box::pin(frames), encoder)), |state| async move {
+        let (mut frames, mut encoder) = state?;
+        match frames.next().await {
+            Some(Ok(frame)) => {
+                let out = encoder
+                    .write_all(&frame)
+                    .and_then(|()| encoder.flush())
+                    .map(|()| Bytes::from(std::mem::take(encoder.get_mut())));
+                let next = out.is_ok().then_some((frames, encoder));
+                Some((out, next))
+            }
+            Some(Err(e)) => Some((Err(e), None)),
+            None => Some((encoder.finish().map(Bytes::from), None)),
+        }
+    })
+    .fuse()
+}
+
+/// Holds a graph stream's producer after its `meta` event until the test
+/// that asked lets it go, so the test can read what a client has while the
+/// server is still building. Keyed by the workspace root, so tests that run
+/// at once never share a hold. A test can also shorten the stream's
+/// keep-alive for the requests its own thread opens.
+#[cfg(test)]
+pub(crate) mod stream_hold {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+    type Hold = Arc<(Mutex<bool>, Condvar)>;
+
+    thread_local! {
+        /// The keep-alive period of the graph streams this thread's requests
+        /// open, in place of the route's.
+        pub(crate) static KEEPALIVE: std::cell::Cell<Option<std::time::Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    static HOLDS: LazyLock<Mutex<HashMap<PathBuf, Hold>>> = LazyLock::new(Default::default);
+
+    /// The hold on one workspace's streams; dropping it lets them go.
+    pub(crate) struct Held {
+        root: PathBuf,
+        hold: Hold,
+    }
+
+    /// Hold every graph stream of the workspace at `root` after its `meta`.
+    pub(crate) fn hold(root: &Path) -> Held {
+        let hold: Hold = Arc::default();
+        HOLDS
+            .lock()
+            .unwrap()
+            .insert(root.to_path_buf(), Arc::clone(&hold));
+        Held {
+            root: root.to_path_buf(),
+            hold,
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            HOLDS.lock().unwrap().remove(&self.root);
+            let (released, wake) = &*self.hold;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+    }
+
+    pub(super) fn wait(root: &Path) {
+        let Some(hold) = HOLDS.lock().unwrap().get(root).cloned() else {
+            return;
+        };
+        let (released, wake) = &*hold;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+    }
 }
 
 /// Empty NDJSON graph stream (`meta` + `done`, no nodes/edges) returned
@@ -1535,6 +1666,8 @@ where
     }) {
         return Err(GraphBuildError::Cancelled);
     }
+    #[cfg(test)]
+    stream_hold::wait(workspace.root());
 
     {
         let mut event_emit = |event| send_event(event);
@@ -1552,6 +1685,7 @@ async fn stream_graph_response(
     signal: crate::bulk_transfer::BulkCancel,
     workspace: Arc<chan_workspace::Workspace>,
     p: GraphParams,
+    gzip: bool,
 ) -> Response {
     let mut bridge = crate::stream_bridge::StreamBridge::spawn(signal, move |frames| {
         let result = stream_graph_sync(workspace, p, |bytes| {
@@ -1575,11 +1709,66 @@ async fn stream_graph_response(
             )
         }
     };
-    let body = bridge.into_body(first, |message| match message {
+    let render = |message: GraphStreamMessage| match message {
         GraphStreamMessage::Data(bytes) => bytes,
         GraphStreamMessage::Error(e) => graph_ndjson_error_bytes(e.to_string()),
-    });
+    };
+    let frames = keep_alive(bridge.into_stream(first, render), graph_stream_keepalive());
+    if gzip {
+        // Encoded here rather than by the route's compression layer, which
+        // passes an answer that carries its own encoding through as it is.
+        let body = Body::from_stream(gzip_each_frame(frames));
+        return (
+            [
+                (header::CONTENT_TYPE, "application/x-ndjson"),
+                (header::CONTENT_ENCODING, "gzip"),
+                (header::VARY, "accept-encoding"),
+            ],
+            body,
+        )
+            .into_response();
+    }
+    let body = Body::from_stream(frames);
     ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
+}
+
+/// How long the graph stream may send nothing before it sends an empty
+/// `nodes` batch. A client gives a stream up as stalled after a silence
+/// (the SPA's `GRAPH_STALL_MS`, 30 s), and the build that runs before the
+/// first batch and between batches outlasts that on a large workspace; any
+/// event resets the client's count, and an empty batch adds nothing to the
+/// view.
+const GRAPH_STREAM_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn graph_stream_keepalive() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(period) = stream_hold::KEEPALIVE.with(std::cell::Cell::get) {
+        return period;
+    }
+    GRAPH_STREAM_KEEPALIVE
+}
+
+/// `frames`, with an empty `nodes` event whenever `period` passes with no
+/// frame. The frame the wait was for is not lost: the stream's own pending
+/// receive outlives the wait.
+fn keep_alive(
+    frames: impl futures::Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+    period: std::time::Duration,
+) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    use futures::StreamExt;
+
+    futures::stream::unfold(Box::pin(frames), move |mut frames| async move {
+        match tokio::time::timeout(period, frames.next()).await {
+            Ok(Some(frame)) => Some((frame, frames)),
+            Ok(None) => None,
+            Err(_) => {
+                let empty = graph_ndjson_bytes(&GraphStreamEvent::Nodes { nodes: Vec::new() })
+                    .map_err(std::io::Error::other);
+                Some((empty, frames))
+            }
+        }
+    })
+    .fuse()
 }
 
 fn build_graph_view(
@@ -2439,6 +2628,153 @@ mod tests {
         }
     }
 
+    // A gzip client decodes each line of the graph stream as the route
+    // produces it: while the server is still building, here held after its
+    // `meta` event, the client already holds the `meta` line, and once the
+    // build goes on it reads the rest and the gzip trailer. A compressor that
+    // keeps its output until a block fills sends nothing a client can decode
+    // until the build is over.
+    #[tokio::test]
+    async fn a_gzip_client_decodes_each_graph_stream_line_as_it_is_produced() {
+        use futures::StreamExt;
+        use std::io::Write;
+        use tower::ServiceExt;
+
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let held = stream_hold::hold(workspace.root());
+
+        let request = axum::http::Request::builder()
+            .uri("/api/graph?stream=1")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .map(|value| value.to_str().unwrap()),
+            Some("gzip")
+        );
+        let mut body = response.into_body().into_data_stream();
+        let mut decoded = flate2::write::GzDecoder::new(Vec::new());
+        let first_line = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !decoded.get_ref().contains(&b'\n') {
+                let chunk = body
+                    .next()
+                    .await
+                    .expect("the stream ended while the server was held")
+                    .expect("a body chunk");
+                decoded.write_all(&chunk).unwrap();
+                decoded.flush().unwrap();
+            }
+        })
+        .await;
+        assert!(
+            first_line.is_ok(),
+            "a gzip client decoded no line while the server was still building: {:?}",
+            String::from_utf8_lossy(decoded.get_ref())
+        );
+        assert!(
+            decoded.get_ref().starts_with(b"{\"type\":\"meta\""),
+            "the first line is not the meta event: {}",
+            String::from_utf8_lossy(decoded.get_ref())
+        );
+
+        drop(held);
+        while let Some(chunk) = body.next().await {
+            decoded.write_all(&chunk.unwrap()).unwrap();
+        }
+        let whole = String::from_utf8(decoded.finish().expect("the gzip trailer")).unwrap();
+        assert!(
+            whole.ends_with("{\"type\":\"done\"}\n"),
+            "the stream does not end with its done event: {whole}"
+        );
+    }
+
+    // A stream whose build runs long still reaches its client: while the
+    // producer is held after `meta`, the client keeps getting empty `nodes`
+    // batches, any of which resets a client's stall count, and once the build
+    // goes on it gets the rest.
+    #[tokio::test]
+    async fn a_graph_stream_sends_empty_batches_while_its_build_runs() {
+        use futures::StreamExt;
+        use tower::ServiceExt;
+
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let held = stream_hold::hold(workspace.root());
+        stream_hold::KEEPALIVE
+            .with(|period| period.set(Some(std::time::Duration::from_millis(100))));
+
+        let request = axum::http::Request::builder()
+            .uri("/api/graph?stream=1")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        let held_lines = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while text.lines().count() < 3 {
+                let chunk = body
+                    .next()
+                    .await
+                    .expect("the stream ended while the server was held")
+                    .expect("a body chunk");
+                text.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        })
+        .await;
+        stream_hold::KEEPALIVE.with(|period| period.set(None));
+        assert!(
+            held_lines.is_ok(),
+            "the held stream went silent after: {text:?}"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("{\"type\":\"meta\""), "{text}");
+        assert_eq!(lines[1], "{\"type\":\"nodes\",\"nodes\":[]}");
+        assert_eq!(lines[2], "{\"type\":\"nodes\",\"nodes\":[]}");
+
+        drop(held);
+        while let Some(chunk) = body.next().await {
+            text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+        assert!(text.ends_with("{\"type\":\"done\"}\n"), "{text}");
+    }
+
+    #[test]
+    fn a_request_accepts_gzip_by_its_gzip_coding_or_else_its_wildcard() {
+        let accepts = |value: &str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, value.parse().unwrap());
+            accepts_gzip(&headers)
+        };
+        assert!(accepts("gzip, deflate, br, zstd"));
+        assert!(accepts("GZIP;q=0.5"));
+        assert!(accepts("br, *"));
+        assert!(!accepts("br, zstd"));
+        assert!(!accepts("gzip;q=0, br"));
+        assert!(
+            !accepts("gzip; q=0.0, *"),
+            "an explicit refusal of gzip wins over the wildcard"
+        );
+        assert!(!accepts("identity"));
+        assert!(!accepts_gzip(&axum::http::HeaderMap::new()));
+    }
+
     fn report_file(path: &str, language: &str, code: u64) -> ReportFileStats {
         ReportFileStats {
             path: path.to_string(),
@@ -2589,7 +2925,7 @@ mod tests {
         let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
         let body = crate::stream_bridge::test_support::assert_unread_stream_frees_its_pool_thread(
             "graph stream",
-            || stream_graph_response(bulk.stall_signal(), workspace, params()),
+            || stream_graph_response(bulk.stall_signal(), workspace, params(), false),
         );
         assert!(
             body.is_err(),

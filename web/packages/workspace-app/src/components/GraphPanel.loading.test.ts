@@ -36,10 +36,19 @@ import {
   visibleIds,
 } from "../__tests__/graphPanel";
 import { invalidateGraph, noteGraphChanged, reloadGraph } from "../state/graphData.svelte";
+import { openedForPath } from "../graph/selectionView";
+import { draftClientPath } from "../api/fileIdentity";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import type { IndexStatus } from "../api/types";
+import type { FsGraphNode, IndexStatus } from "../api/types";
 import { fbTreeInstance, graphReloadSignal, indexStatus } from "../state/store.svelte";
-import { layout, type LeafNode } from "../state/tabs.svelte";
+import {
+  activePane,
+  graphTabLabel,
+  layout,
+  restoreLayout,
+  type GraphTab,
+  type LeafNode,
+} from "../state/tabs.svelte";
 
 installGraphDom();
 
@@ -216,6 +225,60 @@ describe("the filesystem spine under the semantic graph", () => {
     expect(graphServer.graphStreamCalls).toBe(1);
   });
 
+  test("reads the root's level and each opened directory's, parents first, and nothing else", async () => {
+    // Two branches, one opened three levels down; a sibling at each level
+    // the tab does not open.
+    graphServer.view = { nodes: [], edges: [] };
+    const dirs = ["a", "a/b", "a/b/c", "a/side", "z", "z/y"];
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...dirs.map(fsg.dir), ...dirs.map((d) => fsg.file(`${d}/f.md`))],
+      edges: [
+        ...dirs.map((d) => fsg.contains(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : "", d)),
+        ...dirs.map((d) => fsg.contains(d, `${d}/f.md`)),
+      ],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("a/b/c"), "z/y": true } }));
+
+    expect(graphServer.fsGraphCalls).toEqual([
+      { path: "", depth: 1, cursor: undefined },
+      { path: "a", depth: 1, cursor: undefined },
+      { path: "a/b", depth: 1, cursor: undefined },
+      { path: "a/b/c", depth: 1, cursor: undefined },
+    ]);
+    expect(visibleIds(), "the opened tree").toEqual(
+      expect.arrayContaining(["a/f.md", "a/b/f.md", "a/b/c/f.md", "directory:a/side", "directory:z"]),
+    );
+    expect(visibleIds(), "z/ is closed, so z/y is not drawn and not read").not.toContain("directory:z/y");
+  });
+
+  test("a change made while the first spine is read is patched once it lands", async () => {
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((r) => (release = r));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "the first reads are held").toEqual(["", "notes"]);
+
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/late.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/late.md")],
+    };
+    vi.useFakeTimers();
+    try {
+      graphReloadSignal.paths = ["notes/late.md"];
+      graphReloadSignal.nonce += 1;
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+    release();
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "read once, then the change's directory").toEqual([
+      "",
+      "notes",
+      "notes",
+    ]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/late.md");
+  });
+
   test("is drawn alone until the shared graph's first batch", async () => {
     let release!: () => void;
     graphServer.streamGate = new Promise<void>((r) => (release = r));
@@ -307,6 +370,68 @@ describe("while the workspace index is not ready", () => {
   });
 });
 
+// While a full rebuild holds the index, the route answers the empty graph
+// marked gated, and the window fetches the graph again once the index poll
+// reads idle. A tag, a mention or a language is known only to the index, so
+// a selection of one waits for that graph; a file or a directory resolves
+// from the spine meanwhile.
+describe("a selection the index has to answer, while the graph is gated", () => {
+  function serveGated(): void {
+    graphServer.gated = true;
+    graphServer.view = { nodes: [], edges: [] };
+  }
+
+  async function indexReady(): Promise<void> {
+    graphServer.gated = false;
+    serveGraph();
+    // What the index poll does on the way to idle.
+    await reloadGraph();
+    await settle();
+  }
+
+  test("an opener's tag waits, and is selected once the index answers", async () => {
+    serveGated();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "#t" }));
+    expect(canvas.props!.nodes.map((n) => n.id), "the spine is drawn").toContain(NOTES);
+    expect(canvas.props!.selectedId).toBeNull();
+    expect(tab.pendingSelectId, "still waiting").toBe("#t");
+
+    await indexReady();
+    expect(canvas.props!.selectedId).toBe("#t");
+    expect(tab.pendingSelectId).toBeNull();
+    expect(visibleIds(), "the note that carries it").toContain(A);
+  });
+
+  test("a restored tab titled after its tag has the tag selected once the index answers", async () => {
+    serveGated();
+    await restoreLayout({ k: "l", t: [{ k: "g", gn: "#t", gnl: "#t", gf: "" }] });
+    const restored = activePane().tabs[0] as GraphTab;
+    const { tab } = await mountGraphPanel(GraphPanel, layout, restored);
+    expect(graphTabLabel(tab)).toBe("path=#t");
+
+    await indexReady();
+    expect(canvas.props!.selectedId).toBe("#t");
+    expect(tab.selectedNodeId).toBe("#t");
+    expect(graphTabLabel(tab)).toBe("path=#t");
+  });
+
+  test("a tag waits no longer once the index reports an error", async () => {
+    serveGated();
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "#t" }));
+    expect(tab.pendingSelectId).toBe("#t");
+    indexStatus.value = { state: "error", message: "index write failed" } as IndexStatus;
+    await settle();
+    expect(tab.pendingSelectId, "dropped: no answer is coming").toBeNull();
+    expect(canvas.props!.selectedId).toBeNull();
+  });
+
+  test("a directory resolves from the spine meanwhile", async () => {
+    serveGated();
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
+    expect(canvas.props!.selectedId).toBe(NOTES);
+  });
+});
+
 describe("when the workspace root is gone", () => {
   test("the tab draws nothing and says why, though the window still holds a graph", async () => {
     const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: A }));
@@ -345,8 +470,24 @@ describe("watching the directories it shows", () => {
     expect(fbTreeInstance(id)).toBeNull();
   });
 
-  test("a change anywhere in the workspace costs one stream and one spine request, whatever is selected", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
+  test("a change costs one stream, and the spine reads again only the directory it touched", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes", expanded: openedForPath("notes") }));
+    graphServer.view = {
+      nodes: [...graphServer.view.nodes, g.file("notes/other.md")],
+      edges: [...graphServer.view.edges, g.edge(NOTES, "notes/other.md", "contains")],
+    };
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/other.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/other.md")],
+    };
+    const { streams, spines } = await change(["notes/other.md"]);
+    expect(streams, "the window's graph, once").toBe(1);
+    expect(spines, "notes/, one level").toEqual([{ path: "notes", depth: 1, cursor: undefined }]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/other.md");
+  });
+
+  test("a change below a directory the spine does not hold reads none of it", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab());
     graphServer.view = {
       nodes: [...graphServer.view.nodes, g.dir("src"), g.file("src/other.rs")],
       edges: [
@@ -355,23 +496,364 @@ describe("watching the directories it shows", () => {
         g.edge("directory:src", "src/other.rs", "contains"),
       ],
     };
-    // Both reloads are debounced; run every timer a change schedules, however
-    // long its delay.
+    const { streams, spines } = await change(["src/other.rs"]);
+    expect(streams).toBe(1);
+    expect(spines, "src/ is closed and its files come with the window's graph").toEqual([]);
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("src/other.rs");
+  });
+
+  test("a save six levels down reads that directory again, not the tree", async () => {
+    // A tree with siblings at every level, and the directory six levels down
+    // opened with every directory above it.
+    const DIR = "a/b/c/d/e/f";
+    const dirs = DIR.split("/").map((_, i, parts) => parts.slice(0, i + 1).join("/"));
+    const siblings = dirs.map((d) => `${d}-sibling`);
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        ...[...dirs, ...siblings].map(fsg.dir),
+        ...[...dirs, ...siblings].map((d) => fsg.file(`${d}/file.md`)),
+      ],
+      edges: [
+        ...[...dirs, ...siblings].map((d) => fsg.contains(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : "", d)),
+        ...[...dirs, ...siblings].map((d) => fsg.contains(d, `${d}/file.md`)),
+      ],
+    };
+    graphServer.fsPageSize = 4;
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: DIR, expanded: openedForPath(DIR) }));
+    expect(visibleIds()).toContain(`${DIR}/file.md`);
+
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file(`${DIR}/saved.md`)],
+      edges: [...graphServer.fs.edges, fsg.contains(DIR, `${DIR}/saved.md`)],
+    };
+    const { spines } = await change([`${DIR}/saved.md`]);
+    expect(spines, "one level of the directory saved in").toEqual([{ path: DIR, depth: 1, cursor: undefined }]);
+    expect(visibleIds()).toContain(`${DIR}/saved.md`);
+    expect(visibleIds(), "what it held elsewhere stays").toContain("a/file.md");
+  });
+
+  test("a file deleted from an opened directory leaves the graph, and a directory takes what was below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        fsg.dir("notes"),
+        fsg.file(A),
+        fsg.file("notes/old.md"),
+        fsg.dir("notes/sub"),
+        fsg.file("notes/sub/s.md"),
+      ],
+      edges: [
+        fsg.contains("", "notes"),
+        fsg.contains("notes", A),
+        fsg.contains("notes", "notes/old.md"),
+        fsg.contains("notes", "notes/sub"),
+        fsg.contains("notes/sub", "notes/sub/s.md"),
+      ],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    expect(visibleIds()).toEqual(expect.arrayContaining([A, "notes/old.md", "directory:notes/sub", "notes/sub/s.md"]));
+
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.file(A)],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", A)],
+    };
+    const { spines } = await change(["notes/old.md", "notes/sub"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes"]);
+    const ids = canvas.props!.nodes.map((n) => n.id);
+    expect(ids).toContain(A);
+    expect(ids).not.toContain("notes/old.md");
+    expect(ids).not.toContain("directory:notes/sub");
+    expect(ids, "under the directory that went").not.toContain("notes/sub/s.md");
+  });
+
+  test("git's own files and a new draft's path read nothing of the spine", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes", expanded: openedForPath("notes") }));
+    const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "draft-1" });
+    const { spines } = await change([".git/index", ".git/HEAD", ".hg/dirstate", ".chan/workspace.toml", draft]);
+    expect(spines).toEqual([]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("directory:.git");
+  });
+
+  test("a directory the spine does not hold is not read, unless the same change brings it", async () => {
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("notes/deep"), fsg.dir("notes/fresh"), fsg.file("notes/fresh/x.md")],
+      edges: [
+        ...graphServer.fs.edges,
+        fsg.contains("notes", "notes/deep"),
+        fsg.contains("notes", "notes/fresh"),
+        fsg.contains("notes/fresh", "notes/fresh/x.md"),
+      ],
+    };
+    // notes/fresh is opened, but it was not there when the tab read the tree.
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((n) => !n.path.startsWith("notes/fresh"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), "notes/fresh": true } }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("notes/fresh"), fsg.file("notes/fresh/x.md")],
+      edges: graphServer.fs.edges,
+    };
+    const { spines } = await change(["notes/fresh", "notes/fresh/x.md", "notes/nowhere/y.md"]);
+    expect(spines.map((c) => c.path), "notes/nowhere is no directory the spine holds").toEqual(["notes", "notes/fresh"]);
+    expect(visibleIds()).toContain("notes/fresh/x.md");
+  });
+
+  test("a directory gone from disk takes what the spine held below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    expect(canvas.props!.nodes.map((n) => n.id)).toContain("notes/sub/s.md");
+
+    // The change names the file alone: its directory answers 404.
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.dir("notes")], edges: [fsg.contains("", "notes")] };
+    const { spines } = await change(["notes/sub/s.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes/sub"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("notes/sub/s.md");
+  });
+
+  test("a file where an opened directory was takes what the spine held below it", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.file("notes/sub")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub")],
+    };
+    await change(["notes/sub/s.md", "notes/sub"]);
+    const ids = canvas.props!.nodes.map((n) => n.id);
+    expect(ids).not.toContain("notes/sub/s.md");
+    expect(ids, "the file, under its bare path").toContain("notes/sub");
+    expect(ids).not.toContain("directory:notes/sub");
+  });
+
+  /// The canvas's edges as `source>target:kind`, broken ones marked.
+  function drawnEdges(): string[] {
+    return (canvas.props!.edges as Array<{ source: string; target: string; kind: string; broken?: boolean }>).map(
+      (e) => `${e.source}>${e.target}:${e.kind}${e.broken ? " broken" : ""}`,
+    );
+  }
+
+  test("a patch keeps the edges below an opened subdirectory it reads again", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/sub"), fsg.file("notes/sub/s.md")],
+      edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/sub"), fsg.contains("notes/sub", "notes/sub/s.md")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes/sub") }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("notes/new.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("notes", "notes/new.md")],
+    };
+    const { spines } = await change(["notes/new.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["notes"]);
+    expect(drawnEdges()).toEqual(
+      expect.arrayContaining([
+        "directory:notes>notes/new.md:contains",
+        "directory:notes/sub>notes/sub/s.md:contains",
+      ]),
+    );
+  });
+
+  test("a change at the root keeps the edges of every top-level directory", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("src"), fsg.file(A), fsg.file("src/main.rs")],
+      edges: [fsg.contains("", "notes"), fsg.contains("", "src"), fsg.contains("notes", A), fsg.contains("src", "src/main.rs")],
+    };
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), src: true } }));
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.file("top.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("", "top.md")],
+    };
+    const { spines } = await change(["top.md"]);
+    expect(spines.map((c) => c.path)).toEqual([""]);
+    expect(drawnEdges()).toEqual(
+      expect.arrayContaining([">top.md:contains", `${NOTES}>${A}:contains`, "directory:src>src/main.rs:contains"]),
+    );
+    expect(visibleIds()).toEqual(expect.arrayContaining([A, "src/main.rs", "top.md"]));
+  });
+
+  test("a symlink into a directory a patch reads is read again with its own", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    const target = fsg.file("notes/x.md");
+    const link = { ...fsg.file("links/l.md"), kind: "symlink" as const, target: "../notes/x.md" };
+    const fsTree = (x: FsGraphNode) => ({
+      nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("links"), x, link],
+      edges: [
+        fsg.contains("", "notes"),
+        fsg.contains("", "links"),
+        fsg.contains("notes", "notes/x.md"),
+        fsg.contains("links", "links/l.md"),
+        { source: "links/l.md", target: "notes/x.md", kind: "symlink" as const },
+      ],
+    });
+    graphServer.fs = fsTree(target);
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("notes"), links: true } }));
+    expect(drawnEdges()).toContain("links/l.md>notes/x.md:symlink");
+
+    // The target goes; the route answers the link's target as a broken ghost.
+    graphServer.fs = fsTree({ ...target, kind: "ghost", broken: true });
+    graphServer.fs.edges = graphServer.fs.edges.filter((e) => e.target !== "notes/x.md" || e.kind === "symlink");
+    const { spines } = await change(["notes/x.md"]);
+    expect(spines.map((c) => c.path)).toEqual(["links", "notes"]);
+    expect(drawnEdges()).toContain("links/l.md>notes/x.md:symlink broken");
+  });
+
+  /// A tree with `releases/v2/a.md` and a symlink at `link` naming
+  /// `releases/v2`, and the same tree once `rm -rf releases/v2` ran, as the
+  /// route answers each: the link's level names its target by its own path,
+  /// a directory while it is there and a broken ghost once it is gone.
+  function releasesTree(link: string, linkDir: string, gone: boolean) {
+    const symlinkNode = { ...fsg.file(link), kind: "symlink" as const, target: "releases/v2" };
+    const target = gone ? { ...fsg.dir("releases/v2"), kind: "ghost" as const, broken: true } : fsg.dir("releases/v2");
+    const linkDirs = linkDir ? [fsg.dir(linkDir)] : [];
+    return {
+      nodes: [
+        fsg.dir(""),
+        fsg.dir("releases"),
+        ...linkDirs,
+        symlinkNode,
+        target,
+        ...(gone ? [] : [fsg.file("releases/v2/a.md")]),
+      ],
+      edges: [
+        fsg.contains("", "releases"),
+        ...(linkDir ? [fsg.contains("", linkDir)] : []),
+        fsg.contains(linkDir, link),
+        { source: link, target: "releases/v2", kind: "symlink" as const },
+        ...(gone ? [] : [fsg.contains("releases", "releases/v2"), fsg.contains("releases/v2", "releases/v2/a.md")]),
+      ],
+    };
+  }
+
+  test("a directory a symlink names takes its files when it goes, the symlink's directory read first", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = releasesTree("latest", "", false);
+    graphServer.fs.nodes.push(fsg.dir("docs"));
+    graphServer.fs.edges.push(fsg.contains("", "docs"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("releases/v2"), docs: true } }));
+    expect(visibleIds()).toContain("releases/v2/a.md");
+
+    graphServer.fs = releasesTree("latest", "", true);
+    graphServer.fs.nodes.push(fsg.dir("docs"));
+    graphServer.fs.edges.push(fsg.contains("", "docs"));
+    const { spines } = await change(["releases/v2/a.md", "releases/v2"]);
+    expect(spines.map((c) => c.path), "the link's directory, the root, sorts first").toEqual(["", "releases"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("releases/v2/a.md");
+    expect(drawnEdges()).toContain("latest>releases/v2:symlink broken");
+  });
+
+  test("a directory a symlink names takes its files when it goes, the target's parent read first", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = releasesTree("zz/latest", "zz", false);
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("releases/v2"), zz: true } }));
+    expect(visibleIds()).toContain("releases/v2/a.md");
+
+    graphServer.fs = releasesTree("zz/latest", "zz", true);
+    const { spines } = await change(["releases/v2/a.md", "releases/v2"]);
+    expect(spines.map((c) => c.path)).toEqual(["releases", "zz"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("releases/v2/a.md");
+    expect(drawnEdges()).toContain("zz/latest>releases/v2:symlink broken");
+  });
+
+  test("a symlink into a closed directory reads broken once its target goes, and the directory is not read", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    const tree = (target: FsGraphNode) => ({
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("b"), target, { ...fsg.file("a/l"), kind: "symlink" as const, target: "../b/x.md" }],
+      edges: [
+        fsg.contains("", "a"),
+        fsg.contains("", "b"),
+        fsg.contains("a", "a/l"),
+        ...(target.kind === "ghost" ? [] : [fsg.contains("b", "b/x.md")]),
+        { source: "a/l", target: "b/x.md", kind: "symlink" as const },
+      ],
+    });
+    graphServer.fs = tree(fsg.file("b/x.md"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("a") }));
+    expect(drawnEdges()).toContain("a/l>b/x.md:symlink");
+
+    graphServer.fs = tree({ ...fsg.file("b/x.md"), kind: "ghost", broken: true });
+    const { spines } = await change(["b/x.md"]);
+    expect(spines.map((c) => c.path), "the link's directory; b/ is closed").toEqual(["a"]);
+    expect(drawnEdges()).toContain("a/l>b/x.md:symlink broken");
+  });
+
+  test("two changes signalled before the tab looks are a change whose paths are not known", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
     vi.useFakeTimers();
     try {
-      const streams = graphServer.graphStreamCalls;
       const spines = graphServer.fsGraphCalls.length;
-      // The store's two cues for a change: the shared graph's quiet window,
-      // and the signal the graph tabs take.
-      noteGraphChanged(() => true);
-      graphReloadSignal.paths = ["src/other.rs"];
+      graphReloadSignal.paths = ["src/one.rs"];
+      graphReloadSignal.nonce += 1;
+      graphReloadSignal.paths = ["notes/two.md"];
       graphReloadSignal.nonce += 1;
       await vi.runAllTimersAsync();
-      expect(graphServer.graphStreamCalls - streams, "the window's graph, once").toBe(1);
-      expect(graphServer.fsGraphCalls.length - spines, "the tab's spine, once").toBe(1);
-      expect(canvas.props!.nodes.map((n) => n.id)).toContain("src/other.rs");
+      const read = graphServer.fsGraphCalls.slice(spines).map((c) => c.path);
+      expect(read, "the spine is read whole, from the root").toContain("");
     } finally {
       vi.useRealTimers();
     }
   });
+
+  test("a change that names no path fetches the spine whole", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab());
+    const { spines } = await change([]);
+    expect(spines).toEqual([{ path: "", depth: 1, cursor: undefined }]);
+  });
+
+  test("a change naming more than a thousand paths fetches the spine whole", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
+    const paths = Array.from({ length: 1001 }, (_, i) => `notes/f${i}.md`);
+    const { spines } = await change(paths);
+    expect(spines.map((c) => c.path), "the root's level and the opened directory's").toEqual(["", "notes"]);
+  });
+
+  test("a patch never reads more directories than a whole fetch", async () => {
+    graphServer.fs = {
+      nodes: [...graphServer.fs.nodes, fsg.dir("docs"), fsg.file("docs/d.md")],
+      edges: [...graphServer.fs.edges, fsg.contains("", "docs"), fsg.contains("docs", "docs/d.md")],
+    };
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ expanded: { ...openedForPath("notes"), docs: true } }),
+    );
+    // Closed, docs/ stays in the spine: a patch would read it again.
+    delete tab.expanded.docs;
+    await settle();
+    const { spines } = await change(["top.md", "notes/new.md", "docs/new.md"]);
+    expect(spines.map((c) => c.path), "the tree the tab draws, not docs/").toEqual(["", "notes"]);
+  });
 });
+
+/// A change at `paths`, as the store signals it, with every timer it
+/// schedules run however long its delay: the shared graph's quiet window and
+/// the tab's own. Answers the streams and the spine requests it cost.
+async function change(paths: string[]): Promise<{
+  streams: number;
+  spines: Array<{ path: string; depth: number; cursor?: string }>;
+}> {
+  vi.useFakeTimers();
+  try {
+    const streams = graphServer.graphStreamCalls;
+    const spines = graphServer.fsGraphCalls.length;
+    noteGraphChanged(() => true);
+    graphReloadSignal.paths = paths;
+    graphReloadSignal.nonce += 1;
+    await vi.runAllTimersAsync();
+    return {
+      streams: graphServer.graphStreamCalls - streams,
+      spines: graphServer.fsGraphCalls.slice(spines),
+    };
+  } finally {
+    vi.useRealTimers();
+  }
+}

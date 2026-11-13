@@ -121,3 +121,31 @@ test("invalidating a gated graph clears its gated state", async () => {
   expect(graphData.view).toBeNull();
   expect(graphData.gated).toBe(false);
 });
+
+test("a rebuild that ends in error fetches the gated graph once more", async () => {
+  vi.useFakeTimers();
+  const empty: GraphView = { nodes: [], edges: [] };
+  const held: GraphView = { nodes: [{ kind: "tag", id: "#held", label: "#held" }], edges: [] };
+  const graph = vi.spyOn(api, "graphStream")
+    .mockImplementationOnce(async (_opts, streamOpts) => {
+      streamOpts?.onMeta?.({ type: "meta", scope: "workspace", path: "", depth: 1, gated: true });
+      return empty;
+    })
+    .mockResolvedValueOnce(held);
+  const building: IndexStatus = { state: "building", current: 0, total: 9, file: "notes/a.md" };
+  const failed: IndexStatus = { state: "error", message: "index write failed" };
+  vi.spyOn(api, "indexStatus").mockResolvedValueOnce(building).mockResolvedValue(failed);
+
+  await ensureGraphLoaded();
+  expect(graphData.gated).toBe(true);
+
+  startIndexStatusPoller();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(graph.mock.calls.length, "still building").toBe(1);
+  await vi.advanceTimersByTimeAsync(1500);
+  expect({ status: indexStatus.value?.state, loads: graph.mock.calls.length, view: graphData.view, gated: graphData.gated }).toEqual({
+    status: "error", loads: 2, view: held, gated: false,
+  });
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(graph.mock.calls.length, "once, not on every poll of the error").toBe(2);
+});

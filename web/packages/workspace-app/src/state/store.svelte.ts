@@ -5198,6 +5198,9 @@ function resolveGraphSpawnContext(tab: GraphTab): SpawnContext {
   if (id === "" || id.startsWith("#") || id.startsWith("@@") || id.startsWith("language:")) {
     return { dir: "" };
   }
+  // A selection still waiting on the graph names a directory by its bare
+  // path, and its opener opened that directory; no opener opens a file.
+  if (tab.expanded[id]) return { dir: id };
   return { dir: parentDir(id), file: id };
 }
 
@@ -6137,11 +6140,17 @@ async function pollIndexStatusOnce(): Promise<void> {
   let nextDelay = SLOW_POLL_MS;
   try {
     const s = await api.indexStatus();
-    if (graphIndexUnavailable(indexStatus.value?.state) || graphIndexUnavailable(s.state) || graphData.gated) {
+    const wasRebuilding = graphIndexUnavailable(indexStatus.value?.state);
+    if (wasRebuilding || graphIndexUnavailable(s.state) || graphData.gated) {
       graphReloadWhenReady = true;
     }
     indexStatus.value = s;
-    if (s.state === "idle" && graphReloadWhenReady) {
+    // A rebuild ends idle, or in error with the index left as it was; the
+    // graph is fetched again either way, so what waits on it (a tab's
+    // selection of a tag) lands or is dropped rather than waiting on an idle
+    // that may not come. An error that is no rebuild's end reloads nothing.
+    const settled = s.state === "idle" || (s.state === "error" && wasRebuilding);
+    if (settled && graphReloadWhenReady) {
       graphReloadWhenReady = false;
       // The graph route can answer empty during recovery, even between
       // two idle polls; refresh a cached view marked gated as well.

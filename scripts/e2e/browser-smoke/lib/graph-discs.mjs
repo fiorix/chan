@@ -59,14 +59,19 @@ export async function untraceGraphDiscs(page) {
 
 /// The last frame's discs on the canvas under `hostSelector`, in device
 /// pixels: how many, their box, the room it leaves to each edge, and how far
-/// the disc nearest the root's seat is from it, `[across, down]`.
+/// the disc nearest the root's seat is from it, `[across, down]`; with the
+/// nodes the host's status line counts as drawn at the same moment
+/// (`counted`, null when it shows none).
 export function readGraphDiscs(page, hostSelector) {
   return page.evaluate(({ host, margin }) => {
     const canvas = document.querySelector(`${host} canvas`);
     const frame = canvas && window.__smokeGraphDiscs?.frames.get(canvas);
     if (!canvas || !frame) return { missing: `no traced frame on ${host} canvas` };
+    const stat = canvas.closest(host)?.querySelector(".statusbar .stat")?.textContent ?? "";
+    const visible = stat.match(/(\d+)\/\d+ nodes/);
+    const counted = visible ? Number(visible[1]) : null;
     const { discs } = frame;
-    if (discs.length === 0) return { canvas: [canvas.width, canvas.height], count: 0 };
+    if (discs.length === 0) return { canvas: [canvas.width, canvas.height], count: 0, counted };
     const round = (n) => Math.round(n * 10) / 10;
     const left = Math.min(...discs.map((d) => d.x - d.r));
     const right = Math.max(...discs.map((d) => d.x + d.r));
@@ -82,13 +87,16 @@ export function readGraphDiscs(page, hostSelector) {
       box: [round(left), round(top), round(right), round(bottom)],
       room: { left: round(left), right: round(canvas.width - right), above: round(top), below: round(canvas.height - bottom) },
       rootOff: [round(nearest.x - seat.x), round(nearest.y - seat.y)],
+      counted,
     };
   }, { host: hostSelector, margin: ROOT_BOTTOM_MARGIN });
 }
 
 /// The discs once their box holds: two reads `gap` ms apart within a pixel on
-/// every side and with the same count. The graph eases into its fit as the
-/// layout settles, over a second or so.
+/// every side, with the same count of discs and the same count on the status
+/// line. The graph eases into its fit as the layout settles, over a second
+/// or so, and the status line counts what the graph holds, which can still
+/// be growing when the first nodes are drawn.
 export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutMs = 20_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = await readGraphDiscs(page, hostSelector);
@@ -96,7 +104,7 @@ export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutM
     await delay(gap);
     const next = await readGraphDiscs(page, hostSelector);
     const held =
-      next.box && last.box && next.count === last.count &&
+      next.box && last.box && next.count === last.count && next.counted === last.counted &&
       next.box.every((v, i) => Math.abs(v - last.box[i]) <= 1);
     if (held) return next;
     if (Date.now() > deadline) throw new Error(`the graph's discs did not hold still in ${timeoutMs} ms: ${JSON.stringify(next)}`);
@@ -104,15 +112,33 @@ export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutM
   }
 }
 
+/// The discs a graph paints that its status line does not count: the
+/// workspace's drafts, which it hangs from the workspace's node as a Drafts
+/// group and one node per listed draft name (graph/draftNodes), and none when
+/// the workspace has no draft. Read from the list the page draws them from.
+export async function draftDiscs(page, token) {
+  const names = await page.evaluate(async (bearer) => {
+    const response = await fetch("/api/drafts", { headers: bearer ? { authorization: `Bearer ${bearer}` } : {} });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return new Set((body.drafts ?? []).map((draft) => draft.name)).size;
+  }, token);
+  if (names === null) throw new Error("the drafts list did not answer");
+  return names > 0 ? names + 1 : 0;
+}
+
 /// Failures of a rooted graph: a disc for each of the `expected` nodes the
-/// status line counts, every disc inside the canvas, and one of them on the
-/// root's seat, halfway across and `ROOT_BOTTOM_MARGIN` above the bottom
-/// edge, within `tolerance` device pixels. The workspace's drafts are drawn
-/// and not counted, so more discs than `expected` is not a failure.
-export function rootedFailures(read, expected, tolerance = 3) {
+/// status line counts and each of the `drafts` discs it does not (see
+/// `draftDiscs`) and no other, every disc inside the canvas, and one of them
+/// on the root's seat, halfway across and `ROOT_BOTTOM_MARGIN` above the
+/// bottom edge, within `tolerance` device pixels.
+export function rootedFailures(read, expected, drafts, tolerance = 3) {
   if (!read.room || !read.rootOff) return [`nothing framed: ${JSON.stringify(read)}`];
+  if (!Number.isInteger(drafts)) throw new Error(`rootedFailures needs the draft disc count, got ${drafts}`);
   const failures = [];
-  if (read.count < expected) failures.push(`${read.count} discs painted for ${expected} counted nodes`);
+  if (read.count !== expected + drafts) {
+    failures.push(`${read.count} discs painted for ${expected} counted nodes and ${drafts} draft discs`);
+  }
   for (const [side, px] of Object.entries(read.room)) {
     if (px < 0) failures.push(`a node is ${-px} px past the canvas's ${side === "left" || side === "right" ? side : side === "above" ? "top" : "bottom"} edge`);
   }

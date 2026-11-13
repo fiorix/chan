@@ -1681,6 +1681,20 @@ describe("resolveSpawnContext", () => {
     ]);
     expect(resolveSpawnContext()).toEqual({ dir: "" });
   });
+
+  // An opener names its node by path and the graph resolves it once loaded;
+  // a spawn before then reads the path the opener left.
+  test("graph opened on a directory, before it loads -> dir only", () => {
+    placeTabs([]);
+    openFsGraphForDirectory("notes/sub");
+    expect(resolveSpawnContext()).toEqual({ dir: "notes/sub" });
+  });
+
+  test("graph opened on a file, before it loads -> parent + file", () => {
+    placeTabs([]);
+    openFsGraphForFile("notes/a.md");
+    expect(resolveSpawnContext()).toEqual({ dir: "notes", file: "notes/a.md" });
+  });
 });
 
 // Per-File-Browser-instance tree metadata. The registry is the keyed

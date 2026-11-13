@@ -168,6 +168,37 @@ async function lowerDepth(page) {
   return settledStat(page);
 }
 
+/// Wait until the server's graph holds still: the same node and edge ids in
+/// reads 500 ms apart for three seconds, with the index idle throughout. The
+/// graph route answers from the index, which takes a change some time after
+/// the file system reports it.
+async function waitGraphSettled(page, token) {
+  const read = () =>
+    page.evaluate(async (bearer) => {
+      const headers = bearer ? { authorization: `Bearer ${bearer}` } : {};
+      const status = await (await fetch("/api/index/status", { headers })).json();
+      const graph = await (await fetch("/api/graph", { headers })).json();
+      if (status.state !== "idle" || graph.gated) return null;
+      const nodes = graph.nodes.map((node) => node.id).sort();
+      const edges = graph.edges.map((edge) => `${edge.source}>${edge.target}:${edge.kind}`).sort();
+      return JSON.stringify([nodes, edges]);
+    }, token);
+  const deadline = Date.now() + 90_000;
+  let last = await read();
+  let since = Date.now();
+  for (;;) {
+    await delay(500);
+    const now = await read();
+    if (now === null || now !== last) {
+      last = now;
+      since = Date.now();
+    } else if (Date.now() - since >= 3_000) {
+      return;
+    }
+    if (Date.now() > deadline) throw new Error("the server's graph did not hold still within 90 s");
+  }
+}
+
 /// Navigate to a directory's parent so its own context menu opens the graph on it.
 async function graphFromRow(page, scope, relPath) {
   await showFiles(page, scope);
@@ -238,7 +269,12 @@ export default {
       ctx.skip(`fixture directory not indexed yet: ${JSON.stringify(spine)}`);
     }
 
-    // Reload after seeding so the first directory listing includes the fixtures.
+    // The legs compare readings taken at different times, so they start once
+    // the server's graph has taken every change made before this check (a
+    // check before it may have removed its fixtures as it ended), and the
+    // page reloads onto that graph. Reloading after seeding also makes the
+    // first directory listing include the fixtures.
+    await waitGraphSettled(page, token);
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
     const paneId = await page.evaluate(() =>

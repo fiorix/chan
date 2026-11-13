@@ -30,6 +30,7 @@ import {
 } from "../__tests__/graphPanel";
 import { invalidateGraph, refreshGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import { layout, moveTab, tabLabel, type GraphTab, type LeafNode } from "../state/tabs.svelte";
 
@@ -71,6 +72,9 @@ afterEach(async () => {
   await settle(2);
   timers.release();
 });
+
+// A panel in a pane writes no state its pane owns.
+failOnOwnershipWarnings();
 
 /// Two panes side by side. `first` holds the tab under test beside a second
 /// graph tab, so the move does not empty and collapse it; `second` holds a

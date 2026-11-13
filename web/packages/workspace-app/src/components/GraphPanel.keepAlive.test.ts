@@ -33,6 +33,7 @@ import {
 } from "../__tests__/graphPanel";
 import { invalidateGraph, noteGraphChanged } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, reorderTab, type LeafNode } from "../state/tabs.svelte";
@@ -59,6 +60,9 @@ afterEach(async () => {
   await settle(2);
   timers.release();
 });
+
+// A panel in a pane writes no state its pane owns.
+failOnOwnershipWarnings();
 
 /// A pane with graph tabs one and two, one active.
 async function renderPane(): Promise<{ pane: LeafNode; panels: () => HTMLElement[] }> {
@@ -180,29 +184,84 @@ describe("graph tabs in a pane", () => {
     const spines = graphServer.fsGraphCalls.length;
     const ids = (c: typeof one) => c!.nodes.map((n) => n.id);
 
+    // A file at the root, whose level every tab's spine holds.
     graphServer.view = {
-      nodes: [...graphServer.view.nodes, g.file("notes/new.md")],
-      edges: [...graphServer.view.edges, g.edge("directory:notes", "notes/new.md", "contains")],
+      nodes: [...graphServer.view.nodes, g.file("new.md")],
+      edges: [...graphServer.view.edges, g.edge("", "new.md", "contains")],
     };
     // The store's two cues for a change: the shared graph's quiet window,
     // and the signal the graph tabs take.
     noteGraphChanged(() => true);
-    graphReloadSignal.paths = ["notes/new.md"];
+    graphReloadSignal.paths = ["new.md"];
     graphReloadSignal.nonce += 1;
     await settle();
     await new Promise((r) => setTimeout(r, 300));
     await settle();
     expect(graphServer.graphStreamCalls - streams, "one stream, whatever the tabs").toBe(1);
     expect(graphServer.fsGraphCalls.length - spines, "the shown tab's spine; the hidden one waits").toBe(1);
-    expect(ids(one)).toContain("notes/new.md");
-    expect(ids(two), "the hidden tab keeps what it drew").not.toContain("notes/new.md");
+    expect(ids(one)).toContain("new.md");
+    expect(ids(two), "the hidden tab keeps what it drew").not.toContain("new.md");
 
     pane.activeTabId = "two";
     await settle();
     expect(graphServer.graphStreamCalls - streams, "showing it asks for no graph").toBe(1);
     expect(graphServer.fsGraphCalls.length - spines, "and for its own spine").toBe(2);
-    expect(ids(two)).toContain("notes/new.md");
+    expect(graphServer.fsGraphCalls.at(-1), "the level the change touched").toMatchObject({ path: "", depth: 1 });
+    expect(ids(two)).toContain("new.md");
     expect(two!.nodes, "the window's one copy again").toBe(one!.nodes);
+  });
+
+  test("a tab hidden before its change's burst ends takes the change when shown", async () => {
+    const { pane } = await renderPane();
+    const [one] = canvas.all;
+    const ids = () => one!.nodes.map((n) => n.id);
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.file("new.md")], edges: [fsg.contains("", "new.md")] };
+    graphServer.view = { nodes: [g.dir("")], edges: [] };
+    noteGraphChanged(() => true);
+    graphReloadSignal.paths = ["new.md"];
+    graphReloadSignal.nonce += 1;
+    await settle(2);
+
+    // Switched away inside the tab's 250 ms wait for the burst to end.
+    pane.activeTabId = "two";
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    const spines = graphServer.fsGraphCalls.length;
+    expect(ids(), "a hidden tab reads nothing").not.toContain("new.md");
+
+    pane.activeTabId = "one";
+    await settle();
+    expect(graphServer.fsGraphCalls.slice(spines), "the level the change touched").toEqual([
+      { path: "", depth: 1, cursor: undefined },
+    ]);
+    expect(ids()).toContain("new.md");
+  });
+
+  test("a tab hidden while its first spine is read takes a change made meanwhile when shown", async () => {
+    let release!: () => void;
+    graphServer.fsGate = new Promise<void>((r) => (release = r));
+    const { pane } = await renderPane();
+    const [one] = canvas.all;
+    graphServer.fs = { nodes: [fsg.dir(""), fsg.file("new.md")], edges: [fsg.contains("", "new.md")] };
+    graphReloadSignal.paths = ["new.md"];
+    graphReloadSignal.nonce += 1;
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    // Hidden before its read lands; the tab shown instead reads its own.
+    pane.activeTabId = "two";
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "one read each, both held").toEqual(["", ""]);
+    release();
+    await settle();
+    await new Promise((r) => setTimeout(r, 300));
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "the hidden tab reads nothing more").toEqual(["", ""]);
+
+    pane.activeTabId = "one";
+    await settle();
+    expect(graphServer.fsGraphCalls.map((c) => c.path), "shown, it takes the change").toEqual(["", "", ""]);
+    expect(one!.nodes.map((n) => n.id)).toContain("new.md");
   });
 
   test("a hidden tab lets go of the graph once the window's has moved on, and keeps what it draws", async () => {

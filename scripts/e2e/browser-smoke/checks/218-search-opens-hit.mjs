@@ -15,15 +15,15 @@
 // and a double-click on it must open the graph with the tag selected, drawn
 // as check 110 reads it: a tab titled after the tag, a canvas with extent, a
 // status line counting visible nodes, no error placeholder, and once the
-// layout settles every counted node painted inside the canvas, framed from
-// the workspace's node. The document also names a mention found nowhere
+// layout settles every counted node and the workspace's drafts painted
+// inside the canvas and nothing else, framed from the workspace's node. The document also names a mention found nowhere
 // else; its row opens the graph on the mention the same way, framed alike. Enter and the double-click are the panel's two ways to open a
 // row; a single click only selects.
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor } from "../lib/drafts.mjs";
-import { rootedFailures, steadyGraphDiscs, traceGraphDiscs } from "../lib/graph-discs.mjs";
+import { draftDiscs, rootedFailures, steadyGraphDiscs, traceGraphDiscs } from "../lib/graph-discs.mjs";
 
 const RUN = Date.now().toString(36);
 const PANEL = '[role="dialog"][aria-label="Search"]';
@@ -94,9 +94,10 @@ async function openGraphRow(ctx, page, query, title, label) {
   if (await page.$(".graph-tab .placeholder.error")) throw new Error(`the ${label} graph drew its error placeholder`);
   const framed = await steadyGraphDiscs(page, ".graph-tab");
   await ctx.shot(`218-${label}-graph`, page);
-  const failures = rootedFailures(framed, graph.visibleNodes);
+  const drafts = await draftDiscs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
+  const failures = rootedFailures(framed, framed.counted, drafts);
   if (failures.length) throw new Error(`the ${label} graph is not framed from its root: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
-  return { rows: rows.slice(0, 3), graph, framed };
+  return { rows: rows.slice(0, 3), graph, drafts, framed };
 }
 
 function activeTabTitle(page) {

@@ -39,6 +39,7 @@ import { persistStateToHash, ui } from "../state/store.svelte";
 import { api, dragScopeMimeToken, sessionWindowId, windowDragScope, windowLibraryId } from "../api/client";
 import { draftClientPath } from "../api/fileIdentity";
 import { fileTab, terminalTab } from "../__tests__/tabs";
+import { failOnOwnershipWarnings } from "../__tests__/svelteWarnings";
 
 const mounted: Array<Record<string, any>> = [];
 
@@ -71,6 +72,9 @@ afterEach(async () => {
   paneSideToggleFlash.versions = {};
   persistStateToHash();
 });
+
+// A tab body in a pane writes no state its pane owns.
+failOnOwnershipWarnings();
 
 function graphTab(partial: Partial<GraphTab> = {}): GraphTab {
   return {
