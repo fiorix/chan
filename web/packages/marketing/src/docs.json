@@ -155,7 +155,7 @@
             {
               "slug": "systemd",
               "title": "systemd integration",
-              "description": "Run the devserver as a systemd user service, restart and upgrade it without losing terminals, and report its metrics to systemd-report."
+              "description": "Run the devserver as a systemd user service on Linux, restart or upgrade it without losing terminals, and report it to systemd-report."
             },
             {
               "slug": "connect",
