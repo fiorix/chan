@@ -18,7 +18,6 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
-import type { GhosttyCell } from "@chan/ghostty-web-ng";
 import { copiedText } from "./ghosttyCopy";
 
 /// Enum values of the pinned build, by upstream C type.
@@ -261,18 +260,6 @@ const UPSTREAM_KEY_ENCODER_OPTION = new Map<number, number>(
 export function upstreamKeyEncoderOption(option: number): number | undefined {
   return UPSTREAM_KEY_ENCODER_OPTION.get(option);
 }
-
-/// ghostty-web's `CellFlags` bits, the shape its renderer reads.
-const FLAG = {
-  BOLD: 1 << 0,
-  ITALIC: 1 << 1,
-  UNDERLINE: 1 << 2,
-  STRIKETHROUGH: 1 << 3,
-  INVERSE: 1 << 4,
-  INVISIBLE: 1 << 5,
-  BLINK: 1 << 6,
-  FAINT: 1 << 7,
-} as const;
 
 /// The device attributes ghostty-web's build reports, kept so programs
 /// that probe them see the same terminal: DA1 `CSI ? 62 ; 22 c` (a
@@ -596,8 +583,6 @@ function writeDeviceAttributes(wasm: VtWasm, out: number): void {
   view.setUint16(secondary + S.rom_cartridge, DA2.rom_cartridge, true);
 }
 
-type Rgb = { r: number; g: number; b: number };
-
 /// Field `range` of a packed 64-bit `GhosttyCell` given as its low and high
 /// 32 bits. No field the binding reads is wider than 24 bits.
 function cellBits(lo: number, hi: number, [lsb, width]: readonly [number, number]): number {
@@ -615,54 +600,6 @@ function cellWidth(wide: number): number {
 /// The 0xRRGGBB of a `GhosttyColorRgb` at `ptr`.
 function readRgb(view: DataView, ptr: number): number {
   return (view.getUint8(ptr) << 16) | (view.getUint8(ptr + 1) << 8) | view.getUint8(ptr + 2);
-}
-
-function rgbOf(color: number): Rgb {
-  return { r: (color >>> 16) & 0xff, g: (color >>> 8) & 0xff, b: color & 0xff };
-}
-
-/// ghostty-web's `CellFlags` for a cell's `VtFlag`s. Any underline style
-/// underlines; overline has no ghostty-web flag.
-function legacyFlags(flags: number): number {
-  let out = 0;
-  if (flags & VtFlag.BOLD) out |= FLAG.BOLD;
-  if (flags & VtFlag.ITALIC) out |= FLAG.ITALIC;
-  if (flags & VtFlag.UNDERLINE) out |= FLAG.UNDERLINE;
-  if (flags & VtFlag.STRIKETHROUGH) out |= FLAG.STRIKETHROUGH;
-  if (flags & VtFlag.INVERSE) out |= FLAG.INVERSE;
-  if (flags & VtFlag.INVISIBLE) out |= FLAG.INVISIBLE;
-  if (flags & VtFlag.BLINK) out |= FLAG.BLINK;
-  if (flags & VtFlag.FAINT) out |= FLAG.FAINT;
-  return out;
-}
-
-/// A row in ghostty-web's cell format.
-function legacyCells(cells: VtCells): GhosttyCell[] {
-  const out: GhosttyCell[] = [];
-  for (let x = 0; x < cells.length; x++) {
-    const cell = cells.at(x)!;
-    const fg = rgbOf(cell.fg);
-    const bg = rgbOf(cell.bg);
-    out.push({
-      codepoint: cell.codepoint,
-      fg_r: fg.r,
-      fg_g: fg.g,
-      fg_b: fg.b,
-      bg_r: bg.r,
-      bg_g: bg.g,
-      bg_b: bg.b,
-      flags: legacyFlags(cell.flags),
-      width: cell.width,
-      hyperlink_id: cell.hyperlink,
-      grapheme_len: cell.cluster ? [...cell.cluster].length - 1 : 0,
-    });
-  }
-  return out;
-}
-
-/// The text a cell shows: its cluster, its codepoint, or a space.
-function cellText(cell: VtCell | undefined): string {
-  return cell?.cluster ?? (cell?.codepoint ? String.fromCodePoint(cell.codepoint) : " ");
 }
 
 /// Byte offsets of the scratch area each terminal keeps for out parameters
@@ -749,8 +686,6 @@ export class VtTerminal {
   /// The history's length at an update, for the reads after it.
   private historyGeneration = -1;
   private historyRows = 0;
-  /// A view for the binding's own one-cell reads.
-  private readonly lookup = new VtCells();
   /// Writes and resizes taken so far. A search compares it with the count
   /// at its last feed to tell whether the matches it holds are current.
   private changes = 0;
@@ -1005,15 +940,9 @@ export class VtTerminal {
     return true;
   }
 
-  getCursor(): {
-    x: number;
-    y: number;
-    viewportX: number;
-    viewportY: number;
-    visible: boolean;
-    blinking: boolean;
-    style: "block";
-  } {
+  /// The cursor's cell on the screen and whether the program shows it.
+  /// Its shape and blinking are the widget's own options.
+  getCursor(): { x: number; y: number; visible: boolean } {
     this.sync();
     const fn = this.wasm.fn;
     const s = this.scratch;
@@ -1023,14 +952,7 @@ export class VtTerminal {
     const view = this.wasm.view();
     const x = view.getUint16(s + SCRATCH.slot, true);
     const y = view.getUint16(s + SCRATCH.slot2, true);
-    // Blinking and shape stay ghostty-web's own options, as with its
-    // binding, so the renderer draws the cursor it is configured for.
-    return { x, y, viewportX: x, viewportY: y, visible: view.getUint8(s + SCRATCH.rgb) !== 0, blinking: false, style: "block" };
-  }
-
-  getColors(): { background: Rgb; foreground: Rgb; cursor: null } {
-    this.sync();
-    return { background: rgbOf(this.bg), foreground: rgbOf(this.fg), cursor: null };
+    return { x, y, visible: view.getUint8(s + SCRATCH.rgb) !== 0 };
   }
 
   /// Replaces the default colors, the cursor color and the 16-color
@@ -1042,36 +964,6 @@ export class VtTerminal {
   setColors(config?: VtTerminalConfig): void {
     this.writeColors(config);
     this.stale = true;
-  }
-
-  // ------------------------------------------------------------------
-  // ghostty-web's cell format, for the tests that hold the binding to
-  // ghostty-web's own build and read cells in that shape
-  // ------------------------------------------------------------------
-
-  /// Screen row `y` in ghostty-web's cell format, cells of its own.
-  getLine(y: number): GhosttyCell[] | null {
-    const cells = new VtCells();
-    return this.readRow(y, cells) ? legacyCells(cells) : null;
-  }
-
-  /// History row `offset`, 0 the oldest, in ghostty-web's cell format.
-  getScrollbackLine(offset: number): GhosttyCell[] | null {
-    const cells = new VtCells();
-    return this.readHistoryRow(offset, cells) ? legacyCells(cells) : null;
-  }
-
-  /// The text of screen row `row`'s cell at `col`: its cluster, its
-  /// codepoint, or a space.
-  getGraphemeString(row: number, col: number): string {
-    return this.readRow(row, this.lookup) ? cellText(this.lookup.at(col)) : " ";
-  }
-
-  /// The text of history row `offset`'s cell at `col`, read through the
-  /// cell's own grid reference.
-  getScrollbackGraphemeString(offset: number, col: number): string {
-    if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, col, offset)) return " ";
-    return this.gridGraphemes() ?? " ";
   }
 
   // ------------------------------------------------------------------
@@ -1308,10 +1200,6 @@ export class VtTerminal {
     const reply = this.wasm.bytes().slice(ptr, ptr + len);
     if (isColorReport(reply) || isVersionReport(reply) || isKittyKeyboardReport(reply)) return;
     this.replies.push(reply);
-  }
-
-  hasResponse(): boolean {
-    return this.replies.length > 0;
   }
 
   /// Everything upstream asked to write back since the last read, as one

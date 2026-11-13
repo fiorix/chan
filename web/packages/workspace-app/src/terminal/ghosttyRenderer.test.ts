@@ -5,7 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
-import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
+import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
@@ -86,6 +86,14 @@ const PARTIAL_SCREEN = [
   row([...ascii("s3 "), [CODER, 2], ...ascii(" end")]),
 ];
 
+/// The whole cluster the core holds at column `col` of screen row `y`, or
+/// of history row `y` with `history`.
+function clusterAt(core: VtTerminal, y: number, col: number, history = false): string | null {
+  const cells = new VtCells();
+  if (!(history ? core.readHistoryRow(y, cells) : core.readRow(y, cells))) return null;
+  return cells.at(col)?.cluster ?? null;
+}
+
 /// The cells of a row that hold a cluster of several codepoints.
 function clusters(cells: [number, string][]): [number, string][] {
   return cells.filter(([, text]) => [...text].length > 1);
@@ -150,10 +158,7 @@ describe("the ghostty renderer scrolled back", () => {
     for (const [offset, { cells }] of HISTORY.entries()) {
       for (const [col, text] of cells) {
         if ([...text].length > 1) {
-          expect(
-            screen.term.wasmTerm!.getScrollbackGraphemeString(offset, col),
-            `history ${offset}, column ${col}`,
-          ).toBe(text);
+          expect(clusterAt(screen.term.wasmTerm!, offset, col, true), `history ${offset}, column ${col}`).toBe(text);
         }
       }
     }
@@ -180,12 +185,12 @@ describe("the ghostty renderer scrolled back", () => {
     // The core holds each cluster in the row it was written to.
     for (const [offset, { cells }] of PARTIAL_HISTORY.entries()) {
       for (const [col, text] of clusters(cells)) {
-        expect(core.getScrollbackGraphemeString(offset, col), `history ${offset}, column ${col}`).toBe(text);
+        expect(clusterAt(core, offset, col, true), `history ${offset}, column ${col}`).toBe(text);
       }
     }
     for (const [y, { cells }] of PARTIAL_SCREEN.entries()) {
       for (const [col, text] of clusters(cells)) {
-        expect(core.getGraphemeString(y, col), `screen row ${y}, column ${col}`).toBe(text);
+        expect(clusterAt(core, y, col), `screen row ${y}, column ${col}`).toBe(text);
       }
     }
 

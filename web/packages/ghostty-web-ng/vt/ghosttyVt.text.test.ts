@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
-import type { GhosttyCell } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
 import { SCREEN_STREAMS, TEXT_STREAMS } from "./__tests__/ghosttyStreams";
-import { GhosttyVt, ghosttyScrollbackText, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, ghosttyScrollbackText, VtCells, VtTerminal, type VtCell } from "./ghosttyVt";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -21,15 +20,24 @@ function write(t: VtTerminal, input: string): void {
   for (let i = 0; i < input.length; i += 65536) t.write(input.slice(i, i + 65536));
 }
 
+/// Row `y` of a terminal counted history first, its cells copied out of
+/// the view they were read into.
+function cellsAt(t: VtTerminal, y: number): VtCell[] {
+  const len = t.getScrollbackLength();
+  const cells = new VtCells();
+  if (!(y < len ? t.readHistoryRow(y, cells) : t.readRow(y - len, cells))) return [];
+  return Array.from({ length: cells.length }, (_, x) => ({ ...cells.at(x)! }));
+}
+
 /// What a row shows, read cell by cell: a blank cell is a space, a wide
 /// character's spacer is nothing, and a cluster is its whole text.
-function shownRow(cells: GhosttyCell[] | null, cluster: (x: number) => string): string {
+function shownRow(cells: VtCell[]): string {
   let text = "";
-  (cells ?? []).forEach((cell, x) => {
-    if (cell.width === 0) return;
+  for (const cell of cells) {
+    if (cell.width === 0) continue;
     if (cell.codepoint === 0) text += " ";
-    else text += cell.grapheme_len > 0 ? cluster(x) : String.fromCodePoint(cell.codepoint);
-  });
+    else text += cell.cluster ?? String.fromCodePoint(cell.codepoint);
+  }
   return text;
 }
 
@@ -52,10 +60,9 @@ function shownLines(rows: ShownRow[]): string {
 function shownRowAt(t: VtTerminal, y: number, keep: (x: number) => boolean = () => true): ShownRow {
   const len = t.getScrollbackLength();
   const history = y < len;
-  const cells = history ? t.getScrollbackLine(y) : t.getLine(y - len);
-  const kept = (cells ?? []).map((cell, x) => (keep(x) ? cell : { ...cell, width: 0 }));
+  const kept = cellsAt(t, y).map((cell, x) => (keep(x) ? cell : { ...cell, width: 0 }));
   return {
-    text: shownRow(kept, (x) => (history ? t.getScrollbackGraphemeString(y, x) : t.getGraphemeString(y - len, x))),
+    text: shownRow(kept),
     continues: history ? t.isScrollbackRowWrapped(y) : t.isRowWrapped(y - len),
   };
 }
@@ -138,7 +145,7 @@ describe("a copy joins the rows a program soft-wrapped", () => {
   test("a wide character that did not fit the last column reads once, with nothing before it", async () => {
     const t = await terminal(10, 3);
     write(t, "x".repeat(9) + "日本語");
-    expect(t.getLine(0)?.[9]?.width, "a spacer holds the last column").toBe(0);
+    expect(cellsAt(t, t.getScrollbackLength())[9]?.width, "a spacer holds the last column").toBe(0);
     expect(t.plainText()).toBe("x".repeat(9) + "日本語");
   });
 
@@ -179,7 +186,7 @@ describe("a range of rows in one core call", () => {
 
   function endsOnSpacerHead(t: VtTerminal, col: number, row: number): boolean {
     const len = t.getScrollbackLength();
-    const cells = (y: number) => (y < len ? t.getScrollbackLine(y) : t.getLine(y - len));
+    const cells = (y: number) => cellsAt(t, y);
     const here = cells(row);
     const next = row + 1 < len + t.rows ? shownRowAt(t, row + 1) : null;
     return (
