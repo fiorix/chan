@@ -21,8 +21,10 @@
 // modes until its file holds the text, under document sessions and under
 // the page's own autosave, then a reload), `open` (a double-click on a
 // Files row), `search` (a query typed into Search and its hit opened by
-// Enter) and `panes` (a split by chord, a focus by click, a tab dragged to
-// the other pane and both closed by chord). The records are facts: what
+// Enter), `panes` (a split by chord, a focus by click, a tab dragged to
+// the other pane and both closed by chord) and `focus` (a pane focus move
+// from a terminal to a file browser, after a press into the terminal, on
+// each terminal backend). The records are facts: what
 // the X clipboard offered
 // (its TARGETS), the clipboard or drop shape the page's own listener saw,
 // the image embeds, the files on disk and their pixels decoded against the
@@ -63,7 +65,7 @@ const pageKept = (before) => `Boolean(window.__flows) && ${pageKey} === ${JSON.s
 const xdo = (...words) => spawnSync("xdotool", words.map(String), { encoding: "utf8", timeout: 10000 });
 
 const IMAGE_GROUPS = ["native", "trusted", "drop", "xdnd"];
-const GROUPS = [...IMAGE_GROUPS, "terminal", "editor", "open", "search", "panes"];
+const GROUPS = [...IMAGE_GROUPS, "terminal", "editor", "open", "search", "panes", "focus"];
 const BACKENDS = ["xterm", "ghostty"];
 // The text the terminal arms paste: a space and a newline, which a paste
 // must carry whole inside one bracketed pair.
@@ -631,7 +633,7 @@ async function run() {
   } catch (error) {
     record({ arm: "bundle", error: String(error) });
   }
-  if (["trusted", "xdnd", "terminal", "open", "panes"].some(want)) {
+  if (["trusted", "xdnd", "terminal", "open", "panes", "focus"].some(want)) {
     const calibration = await calibrate();
     offset = calibration.offset;
     record({ arm: "calibrate", ...calibration });
@@ -1234,6 +1236,143 @@ async function run() {
     await writeBackend(Boolean(ghostty));
   }
 
+  // The pane focus handoff, per backend: a terminal above a file browser in
+  // a split of its own. Each arm presses into the terminal by X input, with
+  // the right button (its menu opens and Escape closes it; on ghostty the
+  // press leaves the hidden textarea holding the keyboard) or the left one,
+  // then moves the focus to the browser's pane by Next pane (Alt+]) or a
+  // click on that pane's strip, and presses ArrowDown. The browser must hold
+  // the keyboard and move its selection; the terminal's shell is a recorder
+  // of every byte its PTY receives, so a key that reached the terminal shows
+  // there. A typed x back in the terminal is each arm's control.
+  async function focusArms(backend) {
+    const rows = [];
+    await writeBackend(backend === "ghostty");
+    const reloadMs = await reloadPage(`the ${backend} focus arms`);
+    const tab = `basic-flows-focus-${backend}-${stamp}`;
+    const made = cs(["terminal", "new", "--tab-name", tab]);
+    const top = layout().activePaneId;
+    const pid = JSON.stringify(top);
+    const setup = { arm: "focus", surface: `${backend}-setup`, reloadMs, terminalNew: { status: made.status, output: (made.stdout + made.stderr).trim().slice(0, 200) }, top };
+    const mounted = await poll(() => help(`h.backendOf(h.host(${pid}))`), (b) => BACKENDS.includes(b), 15000);
+    setup.backend = mounted.value;
+    const live = await poll(async () => scrollbackOf(tab), (text) => Boolean(text), 15000);
+    setup.shellAnswered = live.met;
+    if (setup.backend !== backend || !live.met) return [{ ...setup, error: `the ${backend} terminal did not come up (${setup.backend}, shell ${live.met})` }];
+    const bytesFile = join(args.work, `focus-${backend}-${stamp}.bytes`);
+    cs(["terminal", "write", "--tab-name", tab, `stty raw -echo && exec dd bs=1 status=none of=${bytesFile}\n`]);
+    setup.recorder = (await poll(async () => existsSync(bytesFile), Boolean, 10000)).met;
+    // Rows for the arrows to step through: the seeded workspace's root
+    // lists one folder.
+    for (let i = 0; i < 4; i++) writeFileSync(join(args.ws, `focus-${backend}-${stamp}-${i}.txt`), `${i}\n`);
+    const panesBefore = layout().panes.length;
+    await command("app.pane.splitDown");
+    const split = await poll(async () => layout(), (l) => l.panes.length === panesBefore + 1 && l.activePaneId !== top, 6000);
+    const bottom = split.met ? split.value.activePaneId : null;
+    setup.bottom = bottom;
+    if (!setup.recorder || !bottom) return [{ ...setup, error: `no recorder (${setup.recorder}) or no split (${bottom})` }];
+    await command("app.files.toggle");
+    const bid = JSON.stringify(bottom);
+    const rowsSel = `'.pane[data-pane-id="' + CSS.escape(${bid}) + '"] .browser [role="option"]'`;
+    const listed = await poll(() => page.evaluate(`document.querySelectorAll(${rowsSel}).length`), (n) => n >= 3, 15000);
+    setup.browserRows = listed.value;
+    if (!listed.met) return [{ ...setup, error: `the browser listed ${listed.value} rows` }];
+    // A selection to move: a click by X input on the first row.
+    const first = await page.evaluate(`window.__flowsHelp.center(document.querySelector(${rowsSel}))`);
+    await clickAt(first);
+    rows.push(setup);
+    shot(`focus-${backend}-setup`);
+
+    const selected = () => page.evaluate(`[...document.querySelectorAll(${rowsSel})].filter((r) => r.getAttribute("aria-selected") === "true").map((r) => (r.querySelector('button, [role="button"]') ?? r).textContent.trim()).join("|")`);
+    const holder = () => page.evaluate(`(() => {
+      const a = document.activeElement;
+      const h = window.__flowsHelp.host(${pid});
+      if (!a || a === document.body) return "body";
+      if (h && a === h) return "terminal-host";
+      if (h && h.contains(a)) return "terminal-" + a.tagName.toLowerCase();
+      if (a.closest(".browser")) return "browser-" + (a.getAttribute("role") || a.tagName.toLowerCase());
+      return a.tagName.toLowerCase() + "." + (a.className?.toString?.() ?? "");
+    })()`);
+    const focusedPane = () => page.evaluate(`document.querySelector(".pane.focused")?.getAttribute("data-pane-id") ?? null`);
+    const bytesSince = (offset) => [...readFileSync(bytesFile).subarray(offset)].map((b) => b.toString(16).padStart(2, "0"));
+    const menuOpen = () => page.evaluate(`Boolean(document.querySelector(".terminal-tab-menu-bubble"))`);
+    for (const press of ["right", "left"]) {
+      for (const move of ["next", "strip"]) {
+        const row = { arm: "focus", surface: `${backend}-${press}-${move}` };
+        const host = await help(`h.center(h.host(${pid}))`);
+        // On ghostty the right press is made again until the textarea holds
+        // the keyboard through a short hold: the window regaining focus runs
+        // the terminal's host resume, which focuses its element instead.
+        const wanted = backend === "ghostty" && press === "right" ? "terminal-textarea" : null;
+        row.presses = 0;
+        do {
+          row.presses += 1;
+          if (press === "right") {
+            await clickAt(host, { button: 3 });
+            row.menuOpened = (await poll(menuOpen, Boolean, 5000)).met;
+            xdo("key", "Escape");
+            row.menuClosed = (await poll(menuOpen, (open) => !open, 5000)).met;
+          } else {
+            await clickAt(host);
+          }
+          await sleep(300);
+          row.holder = await holder();
+        } while (wanted && row.holder !== wanted && row.presses < 3);
+        row.paneBefore = await focusedPane();
+        const offset = statSync(bytesFile).size;
+        const before = await selected();
+        if (move === "next") {
+          xdo("windowactivate", "--sync", args.xid);
+          row.keyStatus = xdo("key", "--clearmodifiers", "alt+bracketright").status;
+        } else {
+          const zone = await page.evaluate(`(() => {
+            const z = document.querySelector('.pane[data-pane-id="' + CSS.escape(${bid}) + '"] .tabs .dead-zone');
+            return z && z.getBoundingClientRect().width > 0 ? window.__flowsHelp.center(z) : null;
+          })()`);
+          row.zone = zone;
+          if (!zone) { rows.push({ ...row, error: "the browser pane's strip shows no dead zone to press" }); continue; }
+          row.clickStatus = await clickAt(zone);
+        }
+        const moved = await poll(focusedPane, (id) => id === bottom, 5000);
+        row.paneAfter = moved.value;
+        const taken = await poll(holder, (h) => h.startsWith("browser-"), 3000);
+        row.focus = taken.value;
+        xdo("key", "Down");
+        const stepped = await poll(selected, (now) => now !== before, 3000);
+        row.selection = { before, after: stepped.value, moved: stepped.met };
+        await sleep(500);
+        row.pty = bytesSince(offset);
+        shot(`focus-${row.surface}`);
+        // The control: back in the terminal, a typed x reaches the PTY.
+        const controlOffset = statSync(bytesFile).size;
+        await clickAt(host);
+        await sleep(200);
+        xdo("type", "x");
+        const control = await poll(async () => bytesSince(controlOffset), (b) => b.includes("78"), 5000);
+        row.control = { met: control.met, bytes: control.value };
+        rows.push(row);
+      }
+    }
+    // The split goes with the arms: the browser's pane, made the active one,
+    // then the terminal.
+    const zone = await page.evaluate(`(() => {
+      const z = document.querySelector('.pane[data-pane-id="' + CSS.escape(${bid}) + '"] .tabs .dead-zone');
+      return z ? window.__flowsHelp.center(z) : null;
+    })()`);
+    if (zone) await clickAt(zone);
+    if ((await poll(focusedPane, (id) => id === bottom, 3000)).met) await command("app.pane.kill");
+    cs(["terminal", "close", "--tab-name", tab]);
+    return rows;
+  }
+
+  if (want("focus")) {
+    const ghostty = await settle(`window.__flowsHelp.api("/api/config").then((c) => c.preferences?.terminal?.ghostty ?? false)`);
+    for (const backend of BACKENDS) {
+      try { for (const row of await focusArms(backend)) record(row); } catch (error) { record({ arm: "focus", surface: `${backend}-setup`, error: String(error) }); }
+    }
+    await writeBackend(Boolean(ghostty));
+  }
+
   // 5. A real drop where no zone takes it, last: it must leave the window
   // on its page and upload nothing.
   if (want("xdnd")) {
@@ -1339,6 +1478,7 @@ function verdict() {
   if (want("panes")) outcome.panes = judgePanes();
   if (want("editor")) outcome.editor = judgeEditor();
   if (want("terminal")) outcome.terminal = judgeTerminal();
+  if (want("focus")) outcome.focus = judgeFocus();
 
   const states = Object.values(outcome);
   if (states.includes("fault")) process.exit(10);
@@ -1348,7 +1488,8 @@ function verdict() {
       editor: "text typed in a note's rendered and source modes reached its file under document sessions and under the page's autosave, and a reload showed it in both modes",
       open: "a double-click on a Files row opened the file in the editor",
       search: "a query typed into Search found the file and Enter opened it on the hit",
-      panes: "a pane split by chord, took focus by click, received a tab dragged from the other pane and closed by chord" })[g]).join("; ")}`);
+      panes: "a pane split by chord, took focus by click, received a tab dragged from the other pane and closed by chord",
+      focus: "on both terminal backends, after a left or right press into a terminal, a pane focus move to the file browser below by Alt+] and by a click on its strip handed the browser the keyboard, an ArrowDown moved its selection and no key reached the PTY" })[g]).join("; ")}`);
     process.exit(0);
   }
   process.exit(3);
@@ -1670,6 +1811,30 @@ function verdict() {
 
   // A split by chord, a focus by click, a tab dragged to the other pane and
   // the other pane closed by chord.
+  function judgeFocus() {
+    const states = [];
+    for (const backend of BACKENDS) {
+      const setup = find("focus", `${backend}-setup`);
+      if (!setup || setup.error) { unsure(states, `focus ${backend}: ${setup?.error ?? "no record"}`); continue; }
+      for (const press of ["right", "left"]) {
+        for (const move of ["next", "strip"]) {
+          const surface = `${backend}-${press}-${move}`;
+          const row = find("focus", surface);
+          const how = `${press} press, ${move === "next" ? "Alt+]" : "a click on the browser pane's strip"}`;
+          if (!row || row.error) { unsure(states, `focus ${surface}: ${row?.error ?? "no record"}`); continue; }
+          if (!row.control?.met) { unsure(states, `focus ${surface}: the recorder control read ${JSON.stringify(row.control?.bytes)}, so the PTY reading proves nothing`); continue; }
+          if (press === "right" && !(row.menuOpened && row.menuClosed)) { unsure(states, `focus ${surface}: the terminal's menu did not open and close (${row.menuOpened}, ${row.menuClosed})`); continue; }
+          if (backend === "ghostty" && press === "right" && row.holder !== "terminal-textarea") { unsure(states, `focus ${surface}: after ${row.presses} right presses ${row.holder} held the keyboard, not the textarea the arm is about`); continue; }
+          if (row.paneAfter !== setup.bottom) { unsure(states, `focus ${surface}: the move left pane ${row.paneAfter} focused, not the browser's ${setup.bottom}`); continue; }
+          const facts = `holder after the press ${row.holder}, after the move ${row.focus}, selection ${JSON.stringify(row.selection)}, PTY ${JSON.stringify(row.pty)}`;
+          if (!row.focus?.startsWith("browser-") || !row.selection?.moved || row.pty?.length) fault(states, `focus ${surface} (${how}): ${facts}`);
+          else held(states, `focus ${surface} (${how}): ${facts}`);
+        }
+      }
+    }
+    return stateOf(states);
+  }
+
   function judgePanes() {
     const states = [];
     const row = find("panes", "panes");
