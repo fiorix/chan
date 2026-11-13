@@ -8,9 +8,9 @@
 // showing what it held before, which no single full frame can show.
 
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, Terminal, type ITheme } from "@chan/ghostty-web-ng";
+import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/ghostty-web-ng";
 import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
-import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, onTestFinished, test, vi } from "vitest";
 import { CellPictureContext, type CellPictures } from "../__tests__/cellPictureCanvas";
 import { installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar } from "./ghosttyCompat";
 import { DEFAULT_SECRET_MASK_SUFFIXES } from "./secretMasking";
@@ -172,8 +172,11 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
     // renderer state, painted in one frame.
     const whole = paint(rig.theme);
     (whole.term as unknown as { viewportY: number }).viewportY = viewport(painter);
+    // The selection the renderer under test reads: the rig's, or
+    // ghostty-web's own once a step installs it.
+    const shown = (painter.renderer as unknown as { selectionManager: { getSelectionCoords(): Coords | null } }).selectionManager;
     const fresh = new Selection();
-    fresh.coords = selection.coords;
+    fresh.coords = shown.getSelectionCoords();
     whole.renderer.setSelectionManager(fresh as never);
     const hover = painter.renderer as unknown as { hoveredHyperlinkId: number; hoveredLinkRange: unknown; cursorVisible: boolean };
     whole.renderer.setHoveredHyperlinkId(hover.hoveredHyperlinkId);
@@ -337,6 +340,38 @@ describe("the ghostty renderer's partial redraws", () => {
       "\x1b[4;2Hchanged",
       select({ startCol: 5, startRow: 6, endCol: 9, endRow: 6 }),
       select(null),
+    ]);
+  });
+
+  /// A step that gives the renderer under test ghostty-web's own
+  /// SelectionManager, wired as Terminal.open() wires it.
+  const ownSelection = (r: Rig) => {
+    const manager = new SelectionManager(r.painter.term, r.painter.renderer, r.core, document.createElement("textarea"));
+    onTestFinished(() => manager.dispose());
+    (r.painter.term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
+    r.painter.renderer.setSelectionManager(manager);
+  };
+  const call = (f: (term: Terminal) => void) => (r: Rig) => f(r.painter.term);
+
+  test.each([
+    ["select", call((t) => t.select(4, 1, COLS + 10)), call((t) => t.select(2, 5, 6))],
+    ["selectLines", call((t) => t.selectLines(0, 1)), call((t) => t.selectLines(5, 6))],
+  ])("ghostty-web's %s moves a selection to other rows", async (_name, first, second) => {
+    await run(lines(ROWS), [ownSelection, first, second]);
+  });
+
+  test("ghostty-web's own selection made, moved, dropped and made again", async () => {
+    await run(lines(ROWS), [
+      ownSelection,
+      call((t) => t.select(4, 1, COLS + 10)),
+      call((t) => t.select(2, 3, COLS * 2 + 6)),
+      call((t) => t.selectLines(6, 7)),
+      "\x1b[7;2Hchanged",
+      call((t) => t.selectLines(0, 2)),
+      call((t) => t.clearSelection()),
+      call((t) => t.select(6, 5, 12)),
+      call((t) => t.selectAll()),
+      call((t) => t.select(0, 7, 3)),
     ]);
   });
 

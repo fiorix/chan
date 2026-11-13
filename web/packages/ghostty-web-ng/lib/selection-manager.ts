@@ -254,6 +254,9 @@ export class SelectionManager {
    * xterm.js compatible API
    */
   select(column: number, row: number, length: number): void {
+    // The rows the old selection painted repaint without it
+    this.markCurrentSelectionDirty();
+
     // Clamp to valid ranges
     const dims = this.wasmTerm.getDimensions();
     row = Math.max(0, Math.min(row, dims.rows - 1));
@@ -285,6 +288,9 @@ export class SelectionManager {
    * xterm.js compatible API
    */
   selectLines(start: number, end: number): void {
+    // The rows the old selection painted repaint without it
+    this.markCurrentSelectionDirty();
+
     const dims = this.wasmTerm.getDimensions();
 
     // Clamp to valid row ranges
