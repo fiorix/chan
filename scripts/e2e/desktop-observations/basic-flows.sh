@@ -2,14 +2,15 @@
 # Do the basic flows work on chan-desktop's own engine? This asks it of an
 # image pasted and dropped into the editor and into the Rich Prompt, of the
 # terminal's input, output and text paste on both backends, of typing and
-# saving in the editor, and of opening a file, a search hit and the panes.
+# saving in the editor, of opening a file, a search hit and the panes, and of
+# a pane focus move from a terminal to a file browser.
 #
 # This drives a real chan-desktop on WebKitGTK under Xvfb, with a window
 # manager and a private session bus. The X CLIPBOARD holds a generated PNG,
 # owned by xclip or through GTK (clipboard-owner.py); X input comes from
 # xdotool, and a real drop from a small GTK drag source (drag-source.py).
 #
-# Arms, by group (BASIC_FLOWS_ARMS, a comma list, all nine by default;
+# Arms, by group (BASIC_FLOWS_ARMS, a comma list, all ten by default;
 # basic-flows.mjs runs them through the engine's remote inspector and
 # records what each saw):
 #   native   the clipboard shape WKWebView hands the page, injected: a paste
@@ -83,6 +84,14 @@
 #            must make it active, a drag by X input must move a tab to the
 #            other pane's strip, and Ctrl+Shift+W must close that pane's tabs
 #            and then the pane; read through `cs pane list --json`.
+#   focus    on each backend, a terminal over a file browser in a split of
+#            its own: a press into the terminal by X input (the right button
+#            through its menu, closed with Escape, which on ghostty leaves
+#            the hidden textarea holding the keyboard; then the left one),
+#            then Alt+] or a click on the browser pane's strip, then Down.
+#            The browser must hold the keyboard and move its selection, and
+#            the terminal's shell, a recorder of every byte its PTY gets,
+#            must get none; a typed x back in the terminal is the control.
 # In every selection with an image group, a paste whose items carry the
 # image as a File (which the handler reads from the event without asking
 # the desktop) runs on each surface as the control: it must land, or the
@@ -108,12 +117,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/desktop-observations/lib.sh
 . "$HERE/lib.sh"
 
-BASIC_FLOWS_ARMS="${BASIC_FLOWS_ARMS:-native,trusted,drop,xdnd,terminal,editor,open,search,panes}"
+BASIC_FLOWS_ARMS="${BASIC_FLOWS_ARMS:-native,trusted,drop,xdnd,terminal,editor,open,search,panes,focus}"
 for group in ${BASIC_FLOWS_ARMS//,/ }; do
     case "$group" in
-    native | trusted | drop | xdnd | terminal | editor | open | search | panes) ;;
+    native | trusted | drop | xdnd | terminal | editor | open | search | panes | focus) ;;
     *)
-        echo "basic-flows: cannot run: unknown arm group $group in BASIC_FLOWS_ARMS (native, trusted, drop, xdnd, terminal, editor, open, search, panes)" >&2
+        echo "basic-flows: cannot run: unknown arm group $group in BASIC_FLOWS_ARMS (native, trusted, drop, xdnd, terminal, editor, open, search, panes, focus)" >&2
         exit 2
         ;;
     esac

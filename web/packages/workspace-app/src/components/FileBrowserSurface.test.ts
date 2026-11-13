@@ -1440,7 +1440,8 @@ describe("directory navigation and keyboard interaction", () => {
 
   test("optional Vim is scoped to the widget and resets its prefix on focus loss", async () => {
     const tab = seat(browserTab());
-    const target = await render({ variant: "tab", tab });
+    // Seated in the focused pane, the tree holds the keyboard from the mount.
+    const target = await render({ variant: "tab", tab, focused: true });
     const widget = list(target);
     setBrowserVim(true);
     await key(widget, "G");

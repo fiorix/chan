@@ -171,6 +171,18 @@ export default {
     await ensureSide(page, paneId, "B");
     await dispatchCommand(page, "app.graph.toggle");
     await waitForTabCount(page, paneId, 1);
+    // A new graph tab shows its bare title (GRAPH_TAB_TITLE in
+    // state/tabs.svelte.ts) until its first load selects a node, and then
+    // names that node. Side B's labels are compared after the empty-side
+    // close, so they are read once the graph has made that selection.
+    await page.waitForFunction(
+      (selector) => {
+        const label = document.querySelector(selector)?.querySelector(".path")?.textContent?.trim();
+        return Boolean(label) && label !== "path=workspace";
+      },
+      { timeout: 15_000 },
+      tabSelector(paneId),
+    );
     await dispatchCommand(page, "app.files.toggle");
     await waitForTabCount(page, paneId, 2);
     const sideB = await paneState(page, paneId);

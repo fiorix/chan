@@ -34,8 +34,12 @@ const ghostty = vi.hoisted(() => {
     // The forceAll flag of every render pass asked of the renderer.
     renders: [] as boolean[],
     // When set, focus() does what ghostty-web's does: it focuses the element
-    // the terminal opened in, and again on a zero-delay timer.
+    // the terminal opened in, and again on a zero-delay timer that blur()
+    // cancels; blur() blurs whichever element inside holds focus.
     realFocus: false,
+    // When set, open() makes its element focusable and focuses it, as
+    // ghostty-web's does.
+    openFocus: false,
     // Every theme the component handed the live-switch hook, with the
     // terminal it named.
     themes: [] as Array<{ term: unknown; theme: Record<string, string> }>,
@@ -67,6 +71,7 @@ const ghostty = vi.hoisted(() => {
     };
     applicationCursorKeys = false;
     element: HTMLElement | null = null;
+    focusRetry: ReturnType<typeof setTimeout> | undefined = undefined;
     constructor(options: Record<string, unknown>) {
       this.options = options;
       record.terminals.push(this);
@@ -75,6 +80,10 @@ const ghostty = vi.hoisted(() => {
     open(element?: HTMLElement) {
       this.element = element ?? null;
       record.events.push("open");
+      if (record.openFocus && element) {
+        if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
+        this.focus();
+      }
     }
     attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean) {
       this.keyHandler = handler;
@@ -120,10 +129,15 @@ const ghostty = vi.hoisted(() => {
       const element = this.element;
       if (!record.realFocus || !element) return;
       element.focus();
-      setTimeout(() => element.focus(), 0);
+      clearTimeout(this.focusRetry);
+      this.focusRetry = setTimeout(() => element.focus(), 0);
     }
     blur() {
       record.events.push("blur");
+      if (!record.realFocus) return;
+      clearTimeout(this.focusRetry);
+      const held = document.activeElement;
+      if (held instanceof HTMLElement && this.element?.contains(held)) held.blur();
     }
     getSelection() {
       return "chosen";
@@ -264,6 +278,7 @@ beforeEach(() => {
     bracketedPaste: false,
     pastes: [],
     realFocus: false,
+    openFocus: false,
     themes: [],
   });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
@@ -286,13 +301,13 @@ afterEach(() => {
 
 /// Mount a terminal that spawns on ghostty (the harness's mountTerminal waits
 /// for an xterm instance, which a ghostty terminal never makes).
-async function mountGhostty() {
+async function mountGhostty({ focused = true }: { focused?: boolean } = {}) {
   const [tab] = seatTerminals([terminalTab()]);
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
     target,
-    props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
+    props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused },
   }) as Record<string, unknown>;
   ghosttyMounts.push(component);
   await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
@@ -722,6 +737,42 @@ test("the VT reads current renderer metrics and sends a resize reply to its own 
   expect(host.cellSize()).toEqual({ width: 10, height: 20 });
   host.onResizeReply("\x1b[48;30;100;600;1000t");
   expect(inputs(socket)).toEqual(["\x1b[48;30;100;600;1000t"]);
+});
+
+// ghostty-web's open() focuses the element it opened in, and again on its
+// zero-delay timer. A terminal that spawns or is restored in a background
+// pane takes no keyboard: it leaves it with what held it.
+describe("a ghostty terminal opening in a background pane", () => {
+  test("leaves the keyboard on the field that held it, past ghostty-web's focus retry", async () => {
+    ghostty.record.realFocus = true;
+    ghostty.record.openFocus = true;
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+    try {
+      const { target } = await mountGhostty({ focused: false });
+      expect(target.querySelector(".terminal-host")?.getAttribute("tabindex"), "the host opened focusable").toBe("0");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(document.activeElement).toBe(field);
+    } finally {
+      field.remove();
+    }
+  });
+
+  test("a terminal in the focused pane takes the keyboard", async () => {
+    ghostty.record.realFocus = true;
+    ghostty.record.openFocus = true;
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+    try {
+      const { target } = await mountGhostty();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(document.activeElement).toBe(target.querySelector(".terminal-host"));
+    } finally {
+      field.remove();
+    }
+  });
 });
 
 // ghostty-web tracks DECSET 1004 and sends no report of its own, so the

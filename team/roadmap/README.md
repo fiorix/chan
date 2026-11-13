@@ -23,13 +23,13 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.130.0
 
-Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner kept it to the devserver's metrics as a `systemd-report` source ([sdreport]), the panes drawn flush on the window's edges ([flushedges]), and terminal bug fixes: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now". Among those, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]) and a standalone terminal window loading the saved shortcut overrides ([termkeys]). From the notes v0.129.0 left, four more terminal faults: typing that leaves a ghostty view in history ([typescroll]), a fast stream that loses output past a lag ([streamlag]), pure black backgrounds a ghostty terminal leaves unpainted ([blackbg]), and history pulled into a ConPTY terminal's screen on a resize, read on Windows first ([conpty]). On his word the two rows with a security side join them ("sure, let's include them"): another account holding the Windows claim ([winclaim]), and the AppImage handing its environment to host programs while its CLI searches the current directory for libraries ([appenv]). Then four more on his word: a pasted or delivered text that ends its bracketed paste early with `ESC[201~` ("yes in v0.130.0", [pastend]), and as small fixes ("let's add all as small fixes to v0.130") selected ghostty text drawn in a fixed dark grey ([selfg]) and every ghostty underline style drawn as one straight line ([ulstyle]); the fourth, the gate skill's list of Windows test crates, was a one-line fix with no row. The ghostty-web fork's parts 3 to 6, the FUSE reading, `New` and `Paste`, and the warm `chan-term` launch moved to v0.131.0.
+Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner kept it to the devserver's metrics as a `systemd-report` source ([sdreport]), the panes drawn flush on the window's edges ([flushedges]), and terminal bug fixes: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now". Among those, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]) and a standalone terminal window loading the saved shortcut overrides ([termkeys]). From the notes v0.129.0 left, four more terminal faults: typing that leaves a ghostty view in history ([typescroll]), a fast stream that loses output past a lag ([streamlag]), pure black backgrounds a ghostty terminal leaves unpainted ([blackbg]), and history pulled into a ConPTY terminal's screen on a resize, read on Windows first ([conpty]). On his word the two rows with a security side join them ("sure, let's include them"): another account holding the Windows claim ([winclaim]), and the AppImage handing its environment to host programs while its CLI searches the current directory for libraries ([appenv]). Then four more on his word: a pasted or delivered text that ends its bracketed paste early with `ESC[201~` ("yes in v0.130.0", [pastend]), and as small fixes ("let's add all as small fixes to v0.130") selected ghostty text drawn in a fixed dark grey ([selfg]) and every ghostty underline style drawn as one straight line ([ulstyle]); the fourth, the gate skill's list of Windows test crates, was a one-line fix with no row. The ghostty-web fork's parts 3 to 6, the FUSE reading, `New` and `Paste`, and the warm `chan-term` launch moved to v0.131.0. From the pane-focus build's review he took one more terminal fault as a row of its own ("get its own row"): a ghostty terminal opening in a background pane taking the keyboard for a moment ([ghosttyopen]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [a pane keeps a margin on the window's edge][flushedges] | merged | gate |
 | [systemd-report cannot read the metrics][sdreport] | merged | gate |
-| [a focused browser pane gets no keys][panekeys] | building | build |
+| [a focused browser pane gets no keys][panekeys] | built, unmerged | landed |
 | [a terminal window ignores saved shortcuts][termkeys] | not started | build |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
@@ -40,6 +40,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [a paste ends early at its end marker][pastend] | not started | build |
 | [ghostty selection text turns grey][selfg] | not started | build |
 | [ghostty underlines are all straight][ulstyle] | not started | build |
+| [a background ghostty takes the keyboard][ghosttyopen] | not started | build |
 
 [flushedges]: v0.130.0/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md
 [sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
@@ -54,10 +55,11 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 [pastend]: v0.130.0/a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early.md
 [selfg]: v0.130.0/selected-text-in-a-ghostty-terminal-loses-its-colour-to-a-fixed-dark-grey.md
 [ulstyle]: v0.130.0/every-underline-style-in-a-ghostty-terminal-draws-one-straight-line.md
+[ghosttyopen]: v0.130.0/a-ghostty-terminal-opening-in-a-background-pane-takes-the-keyboard-for-a-moment.md
 
 ### v0.131.0
 
-Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved out of v0.130.0 when he kept that release to the `systemd-report` source, the flush pane edges and terminal bug fixes ("yes v0.131"): the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]); the reading of the AppImage in FUSE mode ([fusemode]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). With them, the rest of the notes v0.129.0 left, as rows: the launcher's file commands acting on the file browser focused last ([fbtarget]); an accessibility press on a tab closing it ([axclose]); a PDF export holding each page as one image ([pdftext]); the model download trusting only bundled roots ([modelroots]) and the CLI's self-update doing the same ("perhaps the cli's self-update can move to v0.131, no rush with this", [updroots]); the Windows-target lint of the whole dependency graph red in the `chan` crate ([winlint]); a heading the editor's parse reaches late having no fold chevron ([foldlate]); three of the graph tab's, a timed-out directory read failing the first load ([graphtimeout]), the window stalling while a large graph streams in ([graphstall]) and a directory keeping its old files after another takes its name ([graphrename]); and two of the raise's, a second launch from a terminal refused focus under focus-stealing prevention ([raisefocus]) and the raise paths that leave a minimized window minimized ([unbury]).
+Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved out of v0.130.0 when he kept that release to the `systemd-report` source, the flush pane edges and terminal bug fixes ("yes v0.131"): the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]); the reading of the AppImage in FUSE mode ([fusemode]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). With them, the rest of the notes v0.129.0 left, as rows: the launcher's file commands acting on the file browser focused last ([fbtarget]); an accessibility press on a tab closing it ([axclose]); a PDF export holding each page as one image ([pdftext]); the model download trusting only bundled roots ([modelroots]) and the CLI's self-update doing the same ("perhaps the cli's self-update can move to v0.131, no rush with this", [updroots]); the Windows-target lint of the whole dependency graph red in the `chan` crate ([winlint]); a heading the editor's parse reaches late having no fold chevron ([foldlate]); three of the graph tab's, a timed-out directory read failing the first load ([graphtimeout]), the window stalling while a large graph streams in ([graphstall]) and a directory keeping its old files after another takes its name ([graphrename]); and two of the raise's, a second launch from a terminal refused focus under focus-stealing prevention ([raisefocus]) and the raise paths that leave a minimized window minimized ([unbury]). Later that day, from the pane-focus build, a reloaded window coming back focused on another pane than its session saved ([reloadfocus]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -77,6 +79,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a renamed directory keeps old files][graphrename] | not started | build |
 | [a terminal launch gets no focus][raisefocus] | not started | build |
 | [a minimized window stays minimized][unbury] | not started | build |
+| [a reload focuses another pane][reloadfocus] | not started | measure |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
@@ -94,6 +97,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [graphrename]: v0.131.0/a-graph-tab-keeps-a-directorys-old-files-after-another-directory-takes-its-name.md
 [raisefocus]: v0.131.0/a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing.md
 [unbury]: v0.131.0/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md
+[reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
 
 ## Completed
 

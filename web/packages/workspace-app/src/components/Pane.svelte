@@ -1539,7 +1539,7 @@
       if (e.button === 0 && (e.target as Element | null)?.closest(".dead-zone")) {
         e.preventDefault();
         setActivePane(pane.id);
-        if (active?.kind === "terminal" || active?.kind === "file") bumpTabFocusPulse();
+        if (active?.kind === "terminal" || active?.kind === "file" || active?.kind === "browser") bumpTabFocusPulse();
         else if (!active) paneEl?.querySelector<HTMLElement>(".welcome")?.focus({ preventScroll: true });
       }
       // The browser blurs the current surface on a right press in empty
@@ -1600,7 +1600,9 @@
             // Keep that default so native tab dragstart still works.
             selectTabInPane(pane.id, t.id);
             setTerminalActivity(t, false);
-          } else if (t.kind === "file") {
+          } else if (t.kind === "file" || t.kind === "browser") {
+            // The press's default action focused the strip after the press
+            // pulse; take the keyboard back to the surface.
             bumpTabFocusPulse();
           }
         }}
@@ -2027,6 +2029,7 @@
         <FileBrowserSurface
           variant="tab"
           tab={active}
+          focused={viewLayout.activePaneId === pane.id}
           onClose={() => {
             void closeTab(pane.id, active.id);
           }}
