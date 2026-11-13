@@ -12,10 +12,13 @@
 //! - macOS: `set_focus` is the only one of the three calls that activates
 //!   the app (it makes the window key and calls `activateIgnoringOtherApps:`),
 //!   and it skips a window that reads miniaturized, as one still leaving the
-//!   Dock may, or not visible, as every window of a hidden app does. So the
-//!   raise does what `set_focus` does whatever the window reads: on the main
-//!   thread, after the window calls, it unhides a hidden app, makes the
-//!   window key and activates the app. For a window that was neither
+//!   Dock may, or not visible, as every window of a hidden app does. A second
+//!   launch on a hidden app raises one of those: `come_forward` picks it from
+//!   the desktop's own books, not from its reads, and unhides the app just
+//!   before the raise, so the window can still read not visible here. The
+//!   raise therefore does what `set_focus` does whatever the window reads: on
+//!   the main thread, after the window calls, it unhides a hidden app, makes
+//!   the window key and activates the app. For a window that was neither
 //!   minimized nor hidden that repeats what `set_focus` already did.
 //! - Linux and FreeBSD, where tao drives GTK: tao queues the restore and the
 //!   show for the GTK main loop and clears its minimized flag only when GTK

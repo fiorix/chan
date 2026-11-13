@@ -691,20 +691,27 @@ impl Drop for BootSettled {
 
 /// Answer a second launch's `Activate` as a Dock click does: raise the last
 /// focused window that still shows, or open a standalone terminal when no
-/// window shows and none is on its way. A desktop shutting down refuses, so
-/// the launch waits for the endpoint instead of exiting beside a desktop
-/// about to go.
+/// window shows and none is on its way. The windows of an app hidden as a
+/// whole show once it is unhidden, which this does, so those the desktop did
+/// not put away itself count as shown ([`shown_windows`]). A desktop shutting
+/// down refuses, so the launch waits for the endpoint instead of exiting
+/// beside a desktop about to go.
 pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     if state.shutdown_started.load(Ordering::SeqCst) {
         return shutting_down();
     }
-    // A hidden app's windows read as not visible; a Dock click unhides it
-    // before anything else.
+    // The choice is read before the unhide below, so it sees the app as the
+    // launch found it: hidden or not, and its windows as they read then.
+    let app_hidden = app_is_hidden(app);
+    let forward = forward_for(app, state, app_hidden);
+    tracing::debug!(app_hidden, ?forward, "asked to come forward");
+    // Unhide the app first, as a Dock click does, so that what comes forward
+    // shows: the raised window, a new terminal, or the windows on their way.
     #[cfg(target_os = "macos")]
     if let Err(e) = app.show() {
         tracing::warn!(error = %e, "unhiding the app to come forward failed");
     }
-    match forward_for(app, state) {
+    match forward {
         Forward::Raise(label) => {
             if let Some(window) = app.get_webview_window(&label) {
                 if let Err(e) = crate::raise::raise_window(&window) {
@@ -758,7 +765,36 @@ enum Forward {
     WindowOnItsWay,
 }
 
-/// Read the desktop's windows and choose ([`forward_choice`]).
+/// Whether the app is hidden as a whole (Cmd+H, or Hide in the app menu), as
+/// AppKit reports it on the main thread. The caller is a runtime worker and
+/// waits for the answer as it waits for a window's visibility
+/// ([`forward_for`]); a main thread it cannot reach reads as not hidden,
+/// which leaves the choice to the windows' reads.
+#[cfg(target_os = "macos")]
+fn app_is_hidden<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let (answer, answered) = std::sync::mpsc::channel();
+    let scheduled = app.run_on_main_thread(move || {
+        let hidden = objc2::MainThreadMarker::new()
+            .map(|mtm| objc2_app_kit::NSApplication::sharedApplication(mtm).isHidden());
+        let _ = answer.send(hidden);
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!(error = %e, "reading whether the app is hidden failed");
+        return false;
+    }
+    answered.recv().ok().flatten().unwrap_or(false)
+}
+
+/// Only macOS hides an app as a whole; elsewhere a hidden window is one the
+/// desktop put away itself, which reads hidden.
+#[cfg(not(target_os = "macos"))]
+fn app_is_hidden<R: Runtime>(_: &AppHandle<R>) -> bool {
+    false
+}
+
+/// Read the desktop's windows and choose ([`forward_choice`]) from the ones
+/// that show ([`shown_windows`]), `app_hidden` being whether the app was
+/// hidden as a whole when the launch asked ([`app_is_hidden`]).
 ///
 /// The caller is the handoff listener's handler, on a runtime worker, and
 /// each window's visibility is a round trip to the main thread that blocks
@@ -767,27 +803,64 @@ enum Forward {
 /// that window is read once its build has run. A main thread that is stuck
 /// answers none, the worker stays parked, and the launch, getting no reply,
 /// exits as beside a desktop that does not answer.
-fn forward_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Forward {
+fn forward_for<R: Runtime>(app: &AppHandle<R>, state: &AppState, app_hidden: bool) -> Forward {
     // Read before the windows. A window the watcher builds between the two
     // reads was on its way at the first, so no terminal opens beside it; in
     // the other order it could be missing from the windows and then no
     // longer on its way.
     let on_its_way = local_window_on_its_way(app, state);
-    let windows = app.webview_windows();
-    let shown: Vec<String> = windows
-        .iter()
-        .filter(|(label, window)| {
-            serve::is_workspace_webview_label(label)
-                && (window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false))
+    let held: Vec<Held> = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| serve::is_workspace_webview_label(label))
+        .map(|(label, window)| Held {
+            reads_shown: window.is_visible().unwrap_or(false)
+                || window.is_minimized().unwrap_or(false),
+            label,
         })
-        .map(|(label, _)| label.clone())
         .collect();
+    // Read after the windows: a window put away between the two reads is
+    // held at the first and put away at the second, so it is not raised.
+    let put_away = crate::last_window::put_away(state);
     let last = state
         .last_focused_window
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    forward_choice(last.as_deref(), &shown, on_its_way)
+    forward_choice(
+        last.as_deref(),
+        &shown_windows(&held, &put_away, app_hidden),
+        on_its_way,
+    )
+}
+
+/// A workspace window this desktop holds, as [`forward_for`] read it.
+#[derive(Debug)]
+struct Held {
+    label: String,
+    /// It read visible or minimized.
+    reads_shown: bool,
+}
+
+/// The windows that show, of those the desktop holds. An app that is not
+/// hidden is taken as its windows read. Every window of an app hidden as a
+/// whole reads not visible until AppKit has put it back on screen, which can
+/// land after the unhide has returned, so a read then races the unhide; a
+/// hidden app is taken from the desktop's own books instead: each window it
+/// holds shows once the app is unhidden, less the ones it put away itself
+/// ([`put_away`](crate::last_window::put_away)), which an unhide leaves
+/// hidden.
+fn shown_windows(held: &[Held], put_away: &HashSet<String>, app_hidden: bool) -> Vec<String> {
+    held.iter()
+        .filter(|window| {
+            if app_hidden {
+                !put_away.contains(&window.label)
+            } else {
+                window.reads_shown
+            }
+        })
+        .map(|window| window.label.clone())
+        .collect()
 }
 
 /// Whether a window of this desktop's own library is about to show: the boot
@@ -1413,11 +1486,12 @@ mod tests {
         }
     }
 
-    /// The reads behind the choice, against a desktop with a window registry.
-    /// While the boot is pending a second launch opens nothing. A boot that
-    /// ended with no window leaves the terminal to the launch. A minted
-    /// terminal's record is on its way until the watcher builds its native
-    /// window, which is then the window raised.
+    /// The reads behind the choice, against a desktop with a window registry,
+    /// for an app hidden as a whole and one that is not alike. While the boot
+    /// is pending a second launch opens nothing. A boot that ended with no
+    /// window leaves the terminal to the launch. A minted terminal's record is
+    /// on its way until the watcher builds its native window, which is then
+    /// the window raised.
     #[test]
     fn a_second_launch_opens_nothing_while_the_boot_or_a_window_is_on_its_way() {
         if !crate::embedded::in_own_chan_home(
@@ -1427,16 +1501,23 @@ mod tests {
         }
         let desktop = crate::tests::handoff_row::Desktop::new();
         let app = desktop.app.handle();
-        assert_eq!(
-            forward_for(app, &desktop.state),
+        let chooses = |expected: Forward, why: &str| {
+            for app_hidden in [false, true] {
+                assert_eq!(
+                    forward_for(app, &desktop.state, app_hidden),
+                    expected,
+                    "{why} (app hidden: {app_hidden})"
+                );
+            }
+        };
+        chooses(
             Forward::WindowOnItsWay,
-            "a pending boot opens its own windows"
+            "a pending boot opens its own windows",
         );
         drop(BootSettled::when_dropped(&desktop.state));
-        assert_eq!(
-            forward_for(app, &desktop.state),
+        chooses(
             Forward::OpenTerminal,
-            "a settled boot with no window and none on its way"
+            "a settled boot with no window and none on its way",
         );
         desktop
             .runtime
@@ -1444,16 +1525,226 @@ mod tests {
             .expect("the boot window rule mints a terminal");
         let records = desktop.embedded().local_window_records();
         assert_eq!(records.len(), 1, "the boot window rule minted one terminal");
-        assert_eq!(
-            forward_for(app, &desktop.state),
+        chooses(
             Forward::WindowOnItsWay,
-            "the terminal has a record and no native window yet"
+            "the terminal has a record and no native window yet",
         );
         let label = window_watcher::native_label(&records[0]);
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
             .build()
             .expect("mock webview window");
-        assert_eq!(forward_for(app, &desktop.state), Forward::Raise(label));
+        chooses(
+            Forward::Raise(label),
+            "the terminal's native window is built",
+        );
+    }
+
+    fn held(label: &str, reads_shown: bool) -> Held {
+        Held {
+            label: label.into(),
+            reads_shown,
+        }
+    }
+
+    fn labels(labels: &[&str]) -> HashSet<String> {
+        labels.iter().map(|label| label.to_string()).collect()
+    }
+
+    /// Every window of an app hidden as a whole reads not visible, and can
+    /// still read so after the unhide has returned. The windows the app
+    /// holds are the ones it shows once unhidden, so the last focused of
+    /// them is raised and no terminal opens beside them; a minimized one
+    /// among them is raised from the Dock.
+    #[test]
+    fn a_hidden_app_raises_the_last_focused_window_it_holds() {
+        let held_two = [held("local::a", false), held("local::b", false)];
+        let shown = shown_windows(&held_two, &HashSet::new(), true);
+        assert_eq!(
+            forward_choice(Some("local::b"), &shown, false),
+            Forward::Raise("local::b".into())
+        );
+        assert_eq!(
+            forward_choice(None, &shown, false),
+            Forward::Raise("local::a".into())
+        );
+        let minimized = shown_windows(&[held("local::m", true)], &HashSet::new(), true);
+        assert_eq!(
+            forward_choice(None, &minimized, false),
+            Forward::Raise("local::m".into())
+        );
+    }
+
+    /// A hidden app with no window opens a terminal, as one that is not
+    /// hidden does.
+    #[test]
+    fn a_hidden_app_with_no_window_opens_a_terminal() {
+        let shown = shown_windows(&[], &HashSet::new(), true);
+        assert_eq!(
+            forward_choice(Some("local::gone"), &shown, false),
+            Forward::OpenTerminal
+        );
+    }
+
+    /// The windows the desktop put away itself stay hidden when the app is
+    /// unhidden: a devserver window hidden in place with its transfer running,
+    /// a window whose hide is under way. A hidden app holding only those
+    /// raises none of them and opens a terminal, as one with no window does.
+    #[test]
+    fn a_hidden_app_holding_only_windows_it_put_away_opens_a_terminal() {
+        let only_put_away = [
+            held("lib-00ff::w-transfer", false),
+            held("local::w-hiding", false),
+        ];
+        let put_away = labels(&["lib-00ff::w-transfer", "local::w-hiding", "local::w-buried"]);
+        let shown = shown_windows(&only_put_away, &put_away, true);
+        assert!(shown.is_empty(), "{shown:?}");
+        assert_eq!(
+            forward_choice(Some("local::w-hiding"), &shown, false),
+            Forward::OpenTerminal
+        );
+    }
+
+    /// A hidden app still booting raises a window it already holds, and
+    /// opens nothing while it holds none, since the boot's own are on their
+    /// way.
+    #[test]
+    fn a_hidden_app_during_the_boot_raises_a_window_it_holds_and_opens_none_otherwise() {
+        let none = shown_windows(&[], &HashSet::new(), true);
+        assert_eq!(forward_choice(None, &none, true), Forward::WindowOnItsWay);
+        let restored = shown_windows(&[held("local::restored", false)], &HashSet::new(), true);
+        assert_eq!(
+            forward_choice(None, &restored, true),
+            Forward::Raise("local::restored".into())
+        );
+    }
+
+    /// An app that is not hidden, which off macOS is every app, is taken as
+    /// its windows read and the books are not asked: a window that reads
+    /// visible or minimized shows, one whose hide is under way among them,
+    /// and one that reads neither does not.
+    #[test]
+    fn an_app_that_is_not_hidden_is_taken_as_its_windows_read() {
+        let windows = [
+            held("local::shown", true),
+            held("local::hiding", true),
+            held("local::unseen", false),
+        ];
+        let put_away = labels(&["local::hiding"]);
+        assert_eq!(
+            shown_windows(&windows, &put_away, false),
+            ["local::shown", "local::hiding"]
+        );
+        let unseen = shown_windows(&[held("local::unseen", false)], &HashSet::new(), false);
+        assert_eq!(forward_choice(None, &unseen, false), Forward::OpenTerminal);
+    }
+
+    /// The reads behind the choice for an app hidden as a whole, against a
+    /// mock desktop: the workspace windows it holds count, less the one it
+    /// buried and the one whose hide is under way, and a window of another
+    /// kind never does. The mock reads every window visible, so here only the
+    /// books keep a window the desktop put away from being raised.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hidden_app_is_read_from_the_desktops_books() {
+        let desk = crate::last_window::tests::Desk::new().await;
+        drop(BootSettled::when_dropped(&desk.state));
+        let app = desk.app.handle();
+        desk.window("about");
+        desk.window("control-terminal-ds");
+        assert_eq!(
+            forward_for(app, &desk.state, true),
+            Forward::OpenTerminal,
+            "no workspace window"
+        );
+        desk.window("local::w-buried");
+        desk.state.bury_window("local::w-buried", "Buried");
+        desk.window("local::w-hiding");
+        desk.state.mark_silent_hide("local::w-hiding");
+        assert_eq!(
+            forward_for(app, &desk.state, true),
+            Forward::OpenTerminal,
+            "only windows the desktop put away"
+        );
+        desk.window("local::w-held");
+        assert_eq!(
+            forward_for(app, &desk.state, true),
+            Forward::Raise("local::w-held".into())
+        );
+    }
+
+    /// Off macOS no app is hidden as a whole, so the windows' reads decide as
+    /// they always have.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_no_app_reads_hidden() {
+        let app = tauri::test::mock_app();
+        assert!(!app_is_hidden(app.handle()));
+    }
+
+    /// The body of the production function whose signature line is
+    /// `signature`, up to its closing brace at column 0.
+    fn production_body(signature: &str) -> &'static str {
+        let (production, _) = include_str!("single_instance.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, rest) = production
+            .split_once(signature)
+            .unwrap_or_else(|| panic!("{signature} exists"));
+        let (body, _) = rest
+            .split_once("\n}\n")
+            .unwrap_or_else(|| panic!("{signature} ends at a column-0 brace"));
+        body
+    }
+
+    fn in_order(source: &str, calls: &[&str]) {
+        let at: Vec<usize> = calls
+            .iter()
+            .map(|call| {
+                source
+                    .find(call)
+                    .unwrap_or_else(|| panic!("{call} is missing from:\n{source}"))
+            })
+            .collect();
+        for (pair, at) in calls.windows(2).zip(at.windows(2)) {
+            assert!(
+                at[0] < at[1],
+                "{} must come before {}:\n{source}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// A source pin: `come_forward` reads whether the app is hidden and makes
+    /// its choice before it unhides the app, so the choice sees the app as
+    /// the launch found it, and unhides it before it acts on the choice.
+    #[test]
+    fn come_forward_chooses_before_it_unhides_the_app() {
+        in_order(
+            production_body("\npub(crate) fn come_forward("),
+            &[
+                "let app_hidden = app_is_hidden(app);",
+                "let forward = forward_for(app, state, app_hidden);",
+                "if let Err(e) = app.show() {",
+                "match forward {",
+            ],
+        );
+    }
+
+    /// A source pin of the macOS read, which only a macOS build compiles: it
+    /// asks AppKit on the main thread and waits for the answer.
+    #[test]
+    fn the_macos_read_asks_appkit_on_the_main_thread_whether_the_app_is_hidden() {
+        in_order(
+            production_body(
+                "\n#[cfg(target_os = \"macos\")]\nfn app_is_hidden<R: Runtime>(app: &AppHandle<R>) -> bool {",
+            ),
+            &[
+                "app.run_on_main_thread(move || {",
+                "objc2::MainThreadMarker::new()",
+                "NSApplication::sharedApplication(mtm).isHidden()",
+                "answered.recv()",
+            ],
+        );
     }
 
     /// A reopen with no visible window, on macOS a Dock click or a second
