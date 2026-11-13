@@ -2020,13 +2020,11 @@
       use:clampMenu={tabMenuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      <!-- Header row showing the
-           current scope path + a kind-appropriate icon. Mirrors
-           the path-row pattern of the
-           Terminal / File Browser / Editor right-click
-           menus. Click on the row routes through the existing
-           inspector-open path so the user can hop from the menu
-           to the scope's inspector view. -->
+      <!-- Header row naming what the graph is of: the workspace, under
+           its icon. Mirrors the path-row pattern of the Terminal / File
+           Browser / Editor right-click menus. A click selects the
+           workspace's own node, which opens its inspector; the tooltip
+           is the title of the command that does the same. -->
       <button
         type="button"
         class="mbtn graph-scope-row"
@@ -2215,10 +2213,11 @@
              "workspace" sub-kind in a darker fill with the HardDrive
              glyph.
              The workspace root is a regular directory inspector
-             with both directory actions wired:
-             "Show in File Browser" (revealPathInBrowser) and
-             "Graph from here" (graphFromHere opens a new graph tab at
-             the workspace root). variant defaults to inspector. -->
+             with both directory actions wired: `Open` (onReveal:
+             revealPathInBrowser, a File Browser tab on the root) and
+             `New graph here` (onSetAsScope: graphFromHere opens a new
+             graph tab with the workspace's node selected). variant
+             defaults to inspector. -->
         <WorkspaceInfoBody
           onReveal={() => revealPathInBrowser("", { enter: true })}
           onSetAsScope={() => graphFromHere("", true)}
