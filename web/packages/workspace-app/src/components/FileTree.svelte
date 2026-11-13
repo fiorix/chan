@@ -411,9 +411,8 @@
   const expanded = $derived(fbTreeInstance(instanceId)?.expanded ?? { "": true });
   let menu = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
 
-  /// `<ul>` element handles keyboard navigation. Focused at mount
-  /// so arrows / Enter are live as soon as the browser opens; the
-  /// host overlay also re-focuses it on open via `focusTree`.
+  /// `<ul>` element handles keyboard navigation. The surface that hosts
+  /// the tree hands it the keyboard through `focusTree`.
   let treeRootEl: HTMLUListElement | undefined = $state();
 
   /// Row -> DOM element map, populated via `bind:this` on each row.
@@ -1103,11 +1102,12 @@
     }
   }
 
-  /// Pull keyboard focus to the tree. Called by the browser overlay
-  /// when it opens so arrows are live without an extra click.
+  /// Pull keyboard focus to the tree, so arrows are live without an extra
+  /// click. The list's scroll stays put: a row comes into view only when the
+  /// selection moves to it.
   export function focusTree(): void {
     activate();
-    treeRootEl?.focus();
+    treeRootEl?.focus({ preventScroll: true });
   }
 
   // ---- find within visible/expanded entries ---------------------------------

@@ -27,15 +27,17 @@
     paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
     seedFbTreeInstanceFromReloadSnapshot, surfaceThemeOverride, toggleBrowserSidePane, tree, workspace,
   } from "../state/store.svelte";
-  import { activeBrowserTab, defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane } from "../state/tabs.svelte";
+  import { activeBrowserTab, defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane, tabFocusPulse } from "../state/tabs.svelte";
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
 
-  let { variant, side, tab, onClose, onFlip }: {
+  let { variant, side, tab, focused = false, onClose, onFlip }: {
     variant: "dock" | "tab";
     side?: "left" | "right";
     tab?: BrowserTab;
+    /// A tab's pane is the focused one; gates when its tree takes the keyboard.
+    focused?: boolean;
     onClose?: () => void;
     onFlip?: () => void;
   } = $props();
@@ -173,11 +175,26 @@
         history = [directory]; historyIndex = 0;
         void tick().then(() => {
           if (treeWrapEl) treeWrapEl.scrollTop = current.scroll ?? 0;
-          treeRef?.focusTree();
         });
       }
     });
     return () => untrack(() => fbWatchDispose(id));
+  });
+
+  // A tab's tree takes the keyboard when its pane becomes the focused one
+  // (Next pane, Hybrid Nav's commit, a press on the pane), when the pane
+  // shows it while focused (a tab switch, a fresh mount), and on a focus
+  // pulse while focused, as the editors do. The `focused` gate keeps a tab in
+  // a background pane, mounted by a session restore or Hybrid Nav's commit,
+  // from taking it. The microtask runs after the pulse has parked the
+  // keyboard on the body.
+  $effect(() => {
+    if (!isTab || !focused) return;
+    tab;
+    tabFocusPulse.value;
+    queueMicrotask(() => {
+      if (focused) treeRef?.focusTree();
+    });
   });
 
   let dockSeeded = false;
@@ -307,6 +324,18 @@
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f" && !e.altKey && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); openFind(); }
     else if (e.key === "Escape" && viewState.helpOpen) { e.preventDefault(); e.stopPropagation(); closeHelp(); }
   }
+  // A press on the tab's own chrome (the toolbar, the status line, the space
+  // under a short listing, and on WebKit a button, which a press does not
+  // focus) leaves the keyboard on the body after the pane took focus; the
+  // tree takes it back. A text selection keeps it there, so a copy copies
+  // the text.
+  function onBrowserClick(): void {
+    if (!isTab || !focused) return;
+    const holder = document.activeElement;
+    if (holder !== null && holder !== document.body) return;
+    if (window.getSelection()?.isCollapsed === false) return;
+    treeRef?.focusTree();
+  }
   function onBrowserContextMenu(e: MouseEvent): void {
     if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [contenteditable=true]")) return;
     e.preventDefault(); activate(); menu?.openAtCursor(e.clientX, e.clientY);
@@ -345,7 +374,7 @@
   }
 </script>
 
-<div class="browser" class:dock={!isTab} data-theme={isTab ? surfaceThemeOverride("browser") : undefined} onfocusin={activate} onpointerdown={activate} oncontextmenu={onBrowserContextMenu} onkeydown={onBrowserKeydown} role="presentation">
+<div class="browser" class:dock={!isTab} data-theme={isTab ? surfaceThemeOverride("browser") : undefined} onfocusin={activate} onpointerdown={activate} onclick={onBrowserClick} oncontextmenu={onBrowserContextMenu} onkeydown={onBrowserKeydown} role="presentation">
   <div class="browser-toolbar">
     {#if isTab}
       <div class="navigation" aria-label="Directory navigation" role="group">
