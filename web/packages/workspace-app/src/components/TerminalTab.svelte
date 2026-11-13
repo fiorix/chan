@@ -1377,6 +1377,7 @@
       );
       termWriter = term;
     }
+    const keyboardBeforeOpen = document.activeElement;
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
@@ -1499,10 +1500,19 @@
         onSecretMaskingFailure,
       );
       if (!focused) {
-        // ghostty-web's open() auto-focuses its textarea (xterm waits for
-        // the `focused` check at the end of start()). Blur back so a
-        // background pane's spawn can't steal keyboard focus.
+        // ghostty-web's open() focuses the element it opened in (xterm waits
+        // for the `focused` check at the end of start()). Blur back and hand
+        // the keyboard to whatever held it, so a spawn or a session restore
+        // in a background pane can't take it.
         term.blur();
+        if (
+          keyboardBeforeOpen instanceof HTMLElement &&
+          keyboardBeforeOpen !== document.body &&
+          keyboardBeforeOpen.isConnected &&
+          !host.contains(keyboardBeforeOpen)
+        ) {
+          keyboardBeforeOpen.focus({ preventScroll: true });
+        }
       }
     }
     refreshTerminalRenderer();
