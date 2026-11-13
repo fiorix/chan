@@ -128,7 +128,7 @@ describe("the ghostty renderer scrolled back", () => {
       /// One frame as the widget's render loop issues it.
       frame() {
         context.texts.length = 0;
-        renderer.render(term.wasmTerm!, false, term.getViewportY(), term, 0);
+        renderer.render(term.wasmTerm!, false, term.getViewportY(), 0);
       },
       /// What the last frame painted on view row `y`: each cell's text by
       /// its column.

@@ -11,10 +11,9 @@ export type RefreshableTerminal = {
   refresh?: (start: number, end: number) => void;
   renderer?: {
     render?(
-      buffer: VtTerminal,
+      term: VtTerminal,
       forceAll?: boolean,
       viewportY?: number,
-      scrollbackProvider?: unknown,
       scrollbarOpacity?: number,
     ): void;
   };
@@ -28,12 +27,11 @@ export function refreshTerminalRows(term: RefreshableTerminal | null): void {
     term.refresh(0, Math.max(0, term.rows - 1));
     return;
   }
-  // The terminal is its own scrollback provider, as in ghostty-web's render
-  // loop. A zero scrollbar opacity leaves the overlay scrollbar to that loop,
-  // which paints it every frame while it is shown.
+  // A zero scrollbar opacity leaves the overlay scrollbar to the widget's
+  // render loop, which paints it every frame while it is shown.
   const render = term.renderer?.render;
   if (typeof render === "function" && term.wasmTerm) {
-    render.call(term.renderer, term.wasmTerm, true, term.getViewportY?.() ?? 0, term, 0);
+    render.call(term.renderer, term.wasmTerm, true, term.getViewportY?.() ?? 0, 0);
   }
 }
 

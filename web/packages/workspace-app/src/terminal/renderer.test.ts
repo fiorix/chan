@@ -21,8 +21,8 @@ describe("terminal renderer helpers", () => {
   });
 
   // ghostty-web has no refresh(); its renderer repaints dirty rows only, so
-  // the repaint is a forced full pass with the terminal as the scrollback
-  // provider and the overlay scrollbar left to the frame loop.
+  // the repaint is a forced full pass with the overlay scrollbar left to the
+  // frame loop.
   test("forces a full ghostty render pass from the viewport offset", () => {
     const calls: unknown[][] = [];
     const wasmTerm = { core: true } as unknown as RefreshableTerminal["wasmTerm"];
@@ -33,7 +33,7 @@ describe("terminal renderer helpers", () => {
       getViewportY: () => 7,
     };
     refreshTerminalRows(term);
-    expect(calls).toEqual([[wasmTerm, true, 7, term, 0]]);
+    expect(calls).toEqual([[wasmTerm, true, 7, 0]]);
   });
 
   test("a ghostty terminal that has not opened has nothing to repaint", () => {

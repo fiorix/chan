@@ -63,7 +63,7 @@ const ghostty = vi.hoisted(() => {
     wasmTerm = {
       getDimensions: () => ({ cols: this.cols, rows: this.rows }),
       isRowDirty: () => false,
-      needsFullRedraw: () => false,
+      beginFrame: () => 0,
     };
     applicationCursorKeys = false;
     element: HTMLElement | null = null;

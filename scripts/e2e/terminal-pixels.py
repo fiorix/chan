@@ -20,7 +20,9 @@ a chain or palette edit moves the measurement with it.
 
 The ghostty pattern arms paint what the grid pattern never reaches: cell
 colours and attributes, wide and combined glyphs, each cursor style, history
-rows, a view part history and part screen, and the selection. Nothing is
+rows, a view part history and part screen, the selection, small changes the
+renderer repaints row by row, the alternate screen, a resize, a theme switch,
+a selection moved and dropped, and the overlay scrollbar. Nothing is
 measured on them beyond a liveness and a blank region; they are byte-level
 references, and --compare holds a run's PNGs to an earlier run's, which is
 how a renderer change is accepted. A PNG of the earlier run that names no
@@ -610,6 +612,12 @@ PATTERN_SCENARIOS = [
     Scenario("ghostty", "os-default", pattern="scrollback"),
     Scenario("ghostty", "os-default", pattern="partial-scroll"),
     Scenario("ghostty", "os-default", pattern="selection"),
+    Scenario("ghostty", "os-default", pattern="redraw"),
+    Scenario("ghostty", "os-default", pattern="alt-screen"),
+    Scenario("ghostty", "os-default", pattern="resize"),
+    Scenario("ghostty", "os-default", pattern="theme"),
+    Scenario("ghostty", "os-default", pattern="select-move"),
+    Scenario("ghostty", "os-default", pattern="scrollbar"),
 ] + [
     Scenario("ghostty", "os-default", pattern=f"cursor-{where}", cursor_style=style)
     for style in ("block", "underline", "bar")

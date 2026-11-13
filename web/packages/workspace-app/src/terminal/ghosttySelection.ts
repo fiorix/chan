@@ -1,19 +1,19 @@
-import type { GhosttyCell, Terminal } from "@chan/ghostty-web-ng";
-import { copiedText, VtTerminal } from "@chan/ghostty-web-ng/vt";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { copiedText, VtCells, VtTerminal, type VtCell } from "@chan/ghostty-web-ng/vt";
 
 // ghostty-web's selection has four defects over chan's binding, and no
 // public call to fix any. Its Select all puts the selection at the absolute
 // row its viewport offset counts (the lines scrolled back), so it selects one
 // screenful counted from the top of the history: the oldest rows, not the
 // rows in view and not the whole buffer. Its `getSelection` reads the
-// selected rows a cell at a time, a few wasm calls a cell, ends every row
-// with a line break, a soft wrap included, and writes a space for each wide
-// character's spacer cell. And its own copies, on mouse release, double and
-// triple click, write the clipboard themselves, around chan's writer. Its
-// double and triple click select within one screen row, so a word or a line
-// the program soft-wrapped is cut at the wrap. Every copy of a selection reads
-// that `getSelection`: the copy chords, the menu, ghostty-web's own copies,
-// and the context menu's textarea.
+// selected rows one at a time, a history row a few wasm calls a cell, ends
+// every row with a line break, a soft wrap included, and writes a space for
+// each wide character's spacer cell. And its own copies, on mouse release,
+// double and triple click, write the clipboard themselves, around chan's
+// writer. Its double and triple click select within one screen row, so a
+// word or a line the program soft-wrapped is cut at the wrap. Every copy of a
+// selection reads that `getSelection`: the copy chords, the menu,
+// ghostty-web's own copies, and the context menu's textarea.
 //
 // This reaches the internal SelectionManager: Select all selects the history
 // and the screen, as xterm.js does; a selection's text is the binding's one
@@ -117,18 +117,21 @@ type ClickSelectionManager = SelectionManagerLike & {
 /// The characters ghostty-web's double click takes as a word.
 const WORD_CHAR = /[\w\-./~@+]/;
 
-function isWordCell(cell: GhosttyCell | undefined): boolean {
+function isWordCell(cell: VtCell | undefined): boolean {
   return !!cell && cell.codepoint !== 0 && WORD_CHAR.test(String.fromCodePoint(cell.codepoint));
 }
 
-function isBlankCell(cell: GhosttyCell | undefined): boolean {
+function isBlankCell(cell: VtCell | undefined): boolean {
   return !cell || cell.codepoint === 0 || cell.codepoint === 32;
 }
 
-/// Row `row` of the history and the screen, 0 the oldest history row.
-function rowAt(core: VtTerminal, row: number): GhosttyCell[] | null {
+/// Row `row` of the history and the screen, 0 the oldest history row, in a
+/// view of its own: a walk across wraps holds more than one row.
+function rowAt(core: VtTerminal, row: number): VtCells | null {
+  const cells = new VtCells();
   const history = core.getScrollbackLength();
-  return row < history ? core.getScrollbackLine(row) : core.getLine(row - history);
+  const read = row < history ? core.readHistoryRow(row, cells) : core.readRow(row - history, cells);
+  return read ? cells : null;
 }
 
 /// Whether row `row` continues the row above it, a soft wrap between them.
@@ -144,24 +147,24 @@ type Extent = { start: Anchor; end: Anchor };
 /// when the cell is not a word character.
 export function wordAcrossWraps(core: VtTerminal, col: number, row: number): Extent | null {
   const cells = rowAt(core, row);
-  if (!cells || !isWordCell(cells[col])) return null;
+  if (!cells || !isWordCell(cells.at(col))) return null;
   let start = { col, absoluteRow: row };
   let startCells = cells;
   for (;;) {
-    while (start.col > 0 && isWordCell(startCells[start.col - 1])) start.col--;
+    while (start.col > 0 && isWordCell(startCells.at(start.col - 1))) start.col--;
     if (start.col > 0 || !continuesAbove(core, start.absoluteRow)) break;
     const above = rowAt(core, start.absoluteRow - 1);
-    if (!above || !isWordCell(above[above.length - 1])) break;
+    if (!above || !isWordCell(above.at(above.length - 1))) break;
     start = { col: above.length - 1, absoluteRow: start.absoluteRow - 1 };
     startCells = above;
   }
   let end = { col, absoluteRow: row };
   let endCells = cells;
   for (;;) {
-    while (end.col < endCells.length - 1 && isWordCell(endCells[end.col + 1])) end.col++;
+    while (end.col < endCells.length - 1 && isWordCell(endCells.at(end.col + 1))) end.col++;
     if (end.col < endCells.length - 1 || !continuesAbove(core, end.absoluteRow + 1)) break;
     const below = rowAt(core, end.absoluteRow + 1);
-    if (!below || !isWordCell(below[0])) break;
+    if (!below || !isWordCell(below.at(0))) break;
     end = { col: 0, absoluteRow: end.absoluteRow + 1 };
     endCells = below;
   }
@@ -177,9 +180,9 @@ export function lineAcrossWraps(core: VtTerminal, row: number): Extent | null {
   let last = row;
   while (continuesAbove(core, last + 1)) last++;
   for (let r = last; r >= first; r--) {
-    const cells = rowAt(core, r) ?? [];
-    for (let c = cells.length - 1; c >= 0; c--) {
-      if (!isBlankCell(cells[c])) return { start: { col: 0, absoluteRow: first }, end: { col: c, absoluteRow: r } };
+    const cells = rowAt(core, r);
+    for (let c = (cells?.length ?? 0) - 1; c >= 0; c--) {
+      if (!isBlankCell(cells?.at(c))) return { start: { col: 0, absoluteRow: first }, end: { col: c, absoluteRow: r } };
     }
   }
   return null;

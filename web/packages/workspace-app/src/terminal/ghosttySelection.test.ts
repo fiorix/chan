@@ -117,6 +117,14 @@ describe("ghostty-web's selection over the pinned build", () => {
     expect(term.getSelection()).toBe("日本語 x\nab");
   });
 
+  test("ghostty-web's own read takes each cluster whole, in the history and on the screen", async () => {
+    const { term, manager, wasmTerm } = await pinnedTerminal("e\u0301 x\r\n1\r\n2\r\n3\r\n4\r\nn\u0303 \u{1f468}\u200d\u{1f469}\u200d\u{1f467}");
+    expect(wasmTerm.getScrollbackLength()).toBe(2);
+    manager.selectionStart = { col: 0, absoluteRow: 0 };
+    manager.selectionEnd = { col: COLS - 1, absoluteRow: 5 };
+    expect(term.getSelection()).toBe("e\u0301 x\n1\n2\n3\n4\nn\u0303 \u{1f468}\u200d\u{1f469}\u200d\u{1f467}");
+  });
+
   test("a soft-wrapped command copies as the one line it is", async () => {
     const command = "$ echo one two three four";
     const { term, manager, wasmTerm, install } = await pinnedTerminal(`${command}\r\nok`);

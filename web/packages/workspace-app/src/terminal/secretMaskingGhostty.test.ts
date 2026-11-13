@@ -8,7 +8,7 @@
 
 import { readFileSync } from "node:fs";
 import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
-import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
+import { ABI, GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
@@ -101,7 +101,7 @@ function ghosttyTerminal(options: {
   const renderable = {
     getDimensions: () => ({ cols, rows }),
     isRowDirty: (row: number) => dirty.has(row),
-    needsFullRedraw: () => fullRedraw,
+    beginFrame: () => (fullRedraw ? ABI.GhosttyRenderStateDirty.FULL : ABI.GhosttyRenderStateDirty.FALSE),
   };
   return {
     term,
@@ -126,7 +126,7 @@ function ghosttyTerminal(options: {
       fills.length = 0;
       reads = 0;
       original.mockClear();
-      (renderer.render as (...args: unknown[]) => void)(renderable, forceAll, viewportY, term, 0);
+      (renderer.render as (...args: unknown[]) => void)(renderable, forceAll, viewportY, 0);
       dirty.clear();
       fullRedraw = false;
       expect(original).toHaveBeenCalledOnce();
@@ -412,7 +412,7 @@ describe("ghostty secret masking over the pinned build", () => {
         term.wasmTerm!.write(text);
       },
       frame() {
-        renderer.render(term.wasmTerm!, false, term.getViewportY(), term, 0);
+        renderer.render(term.wasmTerm!, false, term.getViewportY(), 0);
       },
       /// The pixel at the centre of a cell, in CSS coordinates.
       pixel(x: number, row: number) {

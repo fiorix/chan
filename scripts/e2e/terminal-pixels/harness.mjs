@@ -213,11 +213,39 @@ async function scrollBack(term, rows) {
 const CURSOR_GLYPH = { col: 21, row: 2 };
 const CURSOR_BLANK = { col: 30, row: 6 };
 
+/// Write `bytes` through the widget and wait for the frames that paint
+/// them: the write's callback runs on the frame after the write, and two
+/// more follow, so the render loop has painted the change before the next
+/// step makes another.
+async function step(term, bytes) {
+  await new Promise((resolve) => term.write(bytes, resolve));
+  await nextFrame();
+}
+
+/// The prompt row the redraw pattern types on, and the column after its
+/// prompt.
+const REDRAW_PROMPT = 14;
+const back = () => cup(9, REDRAW_PROMPT);
+
+/// The theme the theme pattern switches to: another dark background, so the
+/// blank region stays background, with its own text, cursor and palette.
+const SWITCHED_THEME = {
+  background: "#202830",
+  foreground: "#c0d0e0",
+  cursor: "#ff9e64",
+  black: "#15161e", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
+  blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#a9b1d6",
+  brightBlack: "#414868", brightRed: "#ff899d", brightGreen: "#9fe044", brightYellow: "#faba4a",
+  brightBlue: "#8db0ff", brightMagenta: "#c7a9ff", brightCyan: "#a4daff", brightWhite: "#c0caf5",
+};
+
 /// The reference patterns, by the scenario's `pattern`. The grid pattern
 /// above is the one the ink measures read; these paint the paths it never
 /// reaches (cell colours and attributes, wide and combined glyphs, each
 /// cursor style, history rows, a view part history and part screen, the
-/// selection), so that a change to the renderer can be held to byte-identical
+/// selection, small changes repainted row by row, the alternate screen, a
+/// resize, a theme switch, a moved selection, the overlay scrollbar), so
+/// that a change to the renderer can be held to byte-identical
 /// PNGs against a run before it. They record what the renderer paints, not
 /// what it ought to: each declares only where it wrote, which must carry ink
 /// so that a page that drew nothing cannot pass for a match, and a region
@@ -397,6 +425,182 @@ const PATTERNS = {
     regions: () => ({
       painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 2, lastRow: 6 },
       blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 8, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // Small changes painted one frame each, which the renderer repaints row
+  // by row: typing at a prompt under a visible cursor, a status field
+  // rewritten in place, a write beside a row whose marks reach into it,
+  // characters deleted, inserted and erased in a colour, a wide character
+  // and a cluster overwritten, a command's output, and a link hovered. The
+  // frames before the last are painted over, so only what a row-by-row
+  // repaint left on the canvas reaches the PNG.
+  redraw: {
+    bytes() {
+      return [
+        "\x1b[?25h",
+        cup(0, 1) + "marks: कि क्ष कि क्ष कि क्ष",
+        cup(0, 2) + "beside the marks " + sgr("44", " blue ") + " plain",
+        cup(0, 3) + "é à̖ ñ ȫ combining",
+        cup(0, 5) + "status: " + sgr("7", " idle ") + " end",
+        cup(0, 7) + "a b c d e f g h i j k l m n o p",
+        cup(0, 9) + "漢字かなカナ wide",
+        cup(0, 11) + "\x1b]8;;https://example.com/a\x1b\\a link here\x1b]8;;\x1b\\ and text",
+        cup(0, 12) + "https://plain.example/b",
+        cup(0, REDRAW_PROMPT) + "user@host $ ",
+      ].join("");
+    },
+    async settle(term) {
+      for (const bytes of [
+        "e", "c", "h", "o", " hi", "\b", "i",
+        cup(8, 5) + sgr("7", " busy ") + "\x1b[K" + back(),
+        cup(0, 2) + sgr("1;31", "N") + back(),
+        cup(4, 7) + "\x1b[3P" + back(),
+        cup(2, 7) + "\x1b[2@" + back(),
+        cup(10, 7) + "\x1b[45m\x1b[4X\x1b[0m" + back(),
+        cup(1, 9) + "x" + back(),
+        cup(2, 3) + "o" + back(),
+        cup(16, 1) + "\x1b[K" + back(),
+        "\r\nhi\r\nuser@host $ ",
+      ]) {
+        await step(term, bytes);
+      }
+      term.renderer.setHoveredHyperlinkId(1);
+      await nextFrame();
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: REDRAW_PROMPT + 2 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: REDRAW_PROMPT + 4, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // The alternate screen entered over a painted primary screen, drawn on,
+  // left, and the primary screen written to after.
+  "alt-screen": {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        cup(0, 1) + "primary " + sgr("32", "screen") + " row one",
+        cup(0, 2) + "primary row two " + sgr("43", " bg "),
+        cup(0, 4) + "primary " + "─│┼█".repeat(4),
+      ].join("");
+    },
+    async settle(term) {
+      for (const bytes of [
+        "\x1b[?1049h",
+        "\x1b[2J" + cup(3, 3) + sgr("1;35", "alternate") + " screen",
+        cup(3, 6) + sgr("7", " a full-screen program ") + cup(0, 9) + "─".repeat(30),
+        "\x1b[?1049l",
+        cup(0, 6) + "back on the primary screen",
+      ]) {
+        await step(term, bytes);
+      }
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: 6 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 9, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A resize to fewer columns and rows, which reflows the primary screen,
+  // a write at the small size, and a resize back.
+  resize: {
+    bytes() {
+      const parts = ["\x1b[?25l"];
+      for (let i = 0; i < 10; i += 1) {
+        parts.push(cup(0, i) + sgr(String(31 + (i % 7)), `row ${i} `) + "words ".repeat(1 + (i % 6)) + "end");
+      }
+      return parts.join("");
+    },
+    async settle(term) {
+      term.resize(COLS - 24, ROWS - 6);
+      await nextFrame();
+      await step(term, cup(0, 11) + "written small");
+      term.resize(COLS, ROWS);
+      await nextFrame();
+      await step(term, cup(30, 13) + "written back");
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 0, lastRow: 13 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 16, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A theme switched on a live terminal the way ghosttyTheme.ts switches it
+  // (the core's colours from the widget's own config builder, then the
+  // renderer's), over default, palette, 256-colour and RGB cells, then a
+  // palette entry and the foreground set by the program.
+  theme: {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        cup(0, 1) + "default text, then the palette:",
+        sampleRow(2, "fg  ", [30, 31, 32, 33, 34, 35, 36, 37, 90, 91, 92, 93, 94, 95, 96, 97].map((n) => [String(n), "Ab"])),
+        sampleRow(3, "bg  ", [41, 42, 43, 44, 45, 46, 47, 100, 101, 102].map((n) => [String(n), "A"])),
+        sampleRow(4, "256 ", [["38;5;208", "Ab"], ["48;5;24", "Ab"], ["38;2;200;120;40", "Ab"], ["7", "In"], ["2", "Fa"]]),
+      ].join("");
+    },
+    async settle(term) {
+      Object.assign(term.options.theme, SWITCHED_THEME);
+      term.wasmTerm.setColors(term.buildWasmConfig());
+      term.renderer.setTheme(term.options.theme);
+      await nextFrame();
+      await step(term, "\x1b]4;1;rgb:00/c0/c0\x07");
+      await step(term, "\x1b]10;rgb:f0/e0/80\x07" + cup(0, 6) + "after the program's colours");
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: 6 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 9, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // A selection made, moved to other rows, dropped and made again, each in
+  // a frame of its own, over coloured and wide cells.
+  "select-move": {
+    bytes() {
+      return [
+        "\x1b[?25l",
+        cup(0, 1) + "first row " + sgr("44", "blue") + " text",
+        cup(0, 2) + "second row 漢字 " + sgr("7", "inv"),
+        cup(0, 3) + "third row " + "0123456789".repeat(3),
+        cup(0, 4) + "fourth row é ñ",
+        cup(0, 5) + "fifth row " + sgr("1;31", "bold red"),
+        cup(0, 6) + "sixth row",
+      ].join("");
+    },
+    async settle(term) {
+      term.select(4, 1, COLS + 10);
+      await nextFrame();
+      term.select(2, 3, COLS * 2 + 6);
+      await nextFrame();
+      term.clearSelection();
+      await nextFrame();
+      term.select(6, 5, 12);
+      await nextFrame();
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: COLS - 1, firstRow: 1, lastRow: 6 },
+      blank: { firstCol: 0, lastCol: COLS - 1, firstRow: 9, lastRow: ROWS - 1 },
+    }),
+  },
+
+  // The overlay scrollbar shown over a view scrolled back into history,
+  // held at a fixed opacity: the scroll's own fade runs on wall-clock time,
+  // so its frames would not reproduce.
+  scrollbar: {
+    bytes() {
+      const lines = [];
+      for (let i = 0; i < 50; i += 1) lines.push(sgr(String(31 + (i % 7)), `history ${i}`) + " " + "─│█ ".repeat(1 + (i % 9)));
+      return "\x1b[?25l" + lines.join("\r\n");
+    },
+    async settle(term) {
+      await scrollBack(term, 8);
+      term.scrollbarOpacity = 0.6;
+      await nextFrame();
+    },
+    regions: () => ({
+      painted: { firstCol: 0, lastCol: 47, firstRow: 0, lastRow: ROWS - 1 },
+      blank: { firstCol: 49, lastCol: 55, firstRow: 0, lastRow: ROWS - 1 },
     }),
   },
 

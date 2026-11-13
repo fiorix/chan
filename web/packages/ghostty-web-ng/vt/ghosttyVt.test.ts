@@ -192,7 +192,7 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
     const b = (await upstream()).createTerminal(80, 24, { scrollbackLimit: 10_000 });
     a.write(input);
     b.write(input);
-    expect(b.update()).not.toBe(0);
+    expect(b.beginFrame()).not.toBe(0);
     for (let y = 0; y < 24; y++) {
       expect(b.getLine(y), `row ${y}`).toEqual(a.getLine(y));
     }
@@ -376,10 +376,10 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
   test("only the rows a write touched are dirty after a clean", async () => {
     const t = (await upstream()).createTerminal(20, 6);
     t.write("a\r\nb\r\nc");
-    expect(t.update()).toBe(2);
-    t.markClean();
+    expect(t.beginFrame()).toBe(2);
+    t.endFrame();
     t.write("\x1b[4;1Hx");
-    expect(t.update()).toBe(1);
+    expect(t.beginFrame()).toBe(1);
     // Row 2 held the cursor before the move, so it redraws too.
     expect([0, 1, 2, 3, 4, 5].map((y) => t.isRowDirty(y))).toEqual([false, false, true, true, false, false]);
     expect(text(t.getLine(3))).toBe("x");
@@ -498,11 +498,10 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
   ] as const)("a default color change by %s redraws the rows drawn before it", async (_name, set, which, rgb) => {
     const t = (await upstream()).createTerminal(20, 4, { fgColor: 0xcccccc, bgColor: 0x101010 });
     t.write("first\r\nsecond");
-    t.update();
-    t.markClean();
+    t.beginFrame();
+    t.endFrame();
     t.write(set);
-    t.update();
-    expect(t.needsFullRedraw()).toBe(true);
+    expect(t.beginFrame()).toBe(ABI.GhosttyRenderStateDirty.FULL);
     for (const y of [0, 1]) {
       const cell = t.getLine(y)![0];
       const got = which === "bg" ? [cell.bg_r, cell.bg_g, cell.bg_b] : [cell.fg_r, cell.fg_g, cell.fg_b];
@@ -512,16 +511,18 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
 
   test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
     type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
-    type Probe = GhosttyTerminal & { scratch: number; wasm: Wasm };
+    type Probe = GhosttyTerminal & { scratch: number; wasm: Wasm; beginFrame(): number };
     const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
     const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
-    // The core keeps its own state (the cursor among it) right past the
-    // scratch, so a plain one-cell write on an identical terminal names the
-    // bytes a write moves on its own.
+    // The core keeps its own state (the cursor and the read position among
+    // it) right past the scratch, so a two-codepoint cluster, which fits
+    // the scratch, written and read on an identical terminal names the
+    // bytes a write and a read move on their own.
     const control = (await upstream()).createTerminal(20, 3) as unknown as Probe;
     const controlBefore = pastScratch(control);
-    control.write("e");
-    control.update();
+    control.write("e\u0301");
+    control.beginFrame();
+    control.getGraphemeString(0, 0);
     const ownState = moved(controlBefore, pastScratch(control));
     const t = (await upstream()).createTerminal(20, 3) as unknown as Probe;
     expect(t.scratch, "the control's layout is this terminal's").toBe(control.scratch);
@@ -540,12 +541,12 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     };
     // One cluster: "e" and n - 1 combining acute accents.
     t.write("e" + "\u0301".repeat(n - 1));
-    t.update();
+    t.beginFrame();
+    const cell = [...t.getGraphemeString(0, 0)];
     expect(ownState, "nothing past the scratch but the core's own state").toEqual(expect.arrayContaining(moved(before, pastScratch(t))));
     const own = allocs.filter(([, len]) => len === n * 4);
     expect(own, "one buffer of four bytes a codepoint").toHaveLength(1);
     expect(frees, "freed with its length").toContainEqual(own[0]);
-    const cell = [...t.getGraphemeString(0, 0)];
     expect(cell[0]).toBe("e");
     expect(cell.length).toBe(n);
   });
@@ -553,9 +554,10 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
   test("a resize reflows and redraws everything", async () => {
     const t = (await upstream()).createTerminal(10, 4);
     t.write("abcdefghijklmno");
-    t.markClean();
+    t.beginFrame();
+    t.endFrame();
     t.resize(20, 4);
-    expect(t.needsFullRedraw()).toBe(true);
+    expect(t.beginFrame()).toBe(ABI.GhosttyRenderStateDirty.FULL);
     expect(text(t.getLine(0))).toBe("abcdefghijklmno");
   });
 
