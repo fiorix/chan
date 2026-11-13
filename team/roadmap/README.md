@@ -25,6 +25,8 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]). He brought one more the same day, built on a branch of its own: a graph tab draws one graph rooted at the workspace, and a tag, mention, contact, language, file or directory is a selection in it ([graph]).
 
+Two of the owner's requests of 2026-11-12 were built without a row of their own. A remote window's title leads with an up arrow (U+2191) where it led with an up-right arrow, the opposite of a local window's down arrow (`909f56e13`). A `tmux -CC` window's bar shows its title and the tmux badge without the active pane's name, the server names a tmux pane by its command, never by the title a shell sets, and in every window the pane tree's head of a pane keeps its place and number and drops the title its row already shows (`3d0183ccd`).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
