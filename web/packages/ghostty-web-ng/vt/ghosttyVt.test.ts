@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Key, KeyEncoderOption, type GhosttyCell, type GhosttyTerminal } from "@chan/ghostty-web-ng";
+import { Key, KeyEncoderOption, type GhosttyCell } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   ORACLE_FIXTURE,
@@ -385,7 +385,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
       fn: { ghostty_wasm_alloc(len: number): number };
       free(ptr: number, len: number): void;
     };
-    const t = (await upstream()).createTerminal(80, 24) as unknown as GhosttyTerminal & {
+    const t = (await upstream()).createTerminal(80, 24) as unknown as Pick<VtTerminal, "write" | "free" | "getLine"> & {
       wasm: Wasm;
       writeBuf: number;
       writeCap: number;
@@ -446,9 +446,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
   });
 
   test("a ranged read formats the selection alone, across history and screen", async () => {
-    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & {
-      plainText(range?: { startCol: number; startRow: number; endCol: number; endRow: number }): string | null;
-    };
+    const t = (await upstream()).createTerminal(20, 3);
     t.write(Array.from({ length: 6 }, (_, i) => `row ${i} abcdefghij`).join("\r\n"));
     expect(t.getScrollbackLength()).toBe(3);
     expect(t.plainText({ startCol: 6, startRow: 2, endCol: 4, endRow: 3 })).toBe("abcdefghij\nrow 3");
@@ -496,7 +494,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
 
   test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
     type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
-    type Probe = GhosttyTerminal & { scratch: number; wasm: Wasm; beginFrame(): number };
+    type Probe = Pick<VtTerminal, "write" | "beginFrame" | "getGraphemeString"> & { scratch: number; wasm: Wasm };
     const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
     const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
     // The core keeps its own state (the cursor and the read position among

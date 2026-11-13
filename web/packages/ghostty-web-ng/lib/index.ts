@@ -22,16 +22,8 @@ export type {
   IUnicodeVersionProvider,
 } from './interfaces';
 
-// Ghostty WASM components (for advanced usage)
-export {
-  Ghostty,
-  GhosttyTerminal,
-  KeyEncoder,
-  CellFlags,
-  DirtyState,
-  KeyEncoderOption,
-} from './ghostty';
-export { Key, KeyAction, Mods } from './types';
+// The key numbering the input handler encodes keys by
+export { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
 
 // Low-level components (for custom integrations)

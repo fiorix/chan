@@ -13,7 +13,6 @@
   "exports": {
     ".": "./lib/index.ts",
     "./vt": "./vt/index.ts",
-    "./ghostty-vt.wasm": "./ghostty-vt.wasm",
     "./vendor/ghostty-vt/ghostty-vt.wasm": "./vendor/ghostty-vt/ghostty-vt.wasm"
   }
 }
