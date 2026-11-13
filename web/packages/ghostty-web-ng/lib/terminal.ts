@@ -102,6 +102,7 @@ export class Terminal implements ITerminalCore {
   private isOpen = false;
   private isDisposed = false;
   private animationFrameId?: number;
+  private focusRetry?: ReturnType<typeof setTimeout>;
   private writeQueue: Uint8Array[] = [];
   private awaitingEcho = false;
 
@@ -753,7 +754,9 @@ export class Terminal implements ITerminalCore {
 
       // Also schedule a delayed focus as backup to ensure it sticks
       // (some browsers may need this if DOM isn't fully settled)
-      setTimeout(() => {
+      clearTimeout(this.focusRetry);
+      this.focusRetry = setTimeout(() => {
+        this.focusRetry = undefined;
         this.element?.focus();
       }, 0);
     }
@@ -764,7 +767,18 @@ export class Terminal implements ITerminalCore {
    */
   blur(): void {
     if (this.isOpen && this.element) {
-      this.element.blur();
+      // A focus() still owes its delayed retry, which would take the
+      // keyboard back after this blur.
+      clearTimeout(this.focusRetry);
+      this.focusRetry = undefined;
+      // A press on the canvas can leave the hidden textarea holding focus
+      // rather than the element, and blur() acts only on the focused element,
+      // so blur whichever of the two holds it. Focus outside stays put.
+      const root = this.element.getRootNode() as Document | ShadowRoot;
+      const focused = root.activeElement as HTMLElement | null | undefined;
+      if (focused && this.element.contains(focused)) {
+        focused.blur();
+      }
     }
   }
 
@@ -1095,6 +1109,8 @@ export class Terminal implements ITerminalCore {
 
     this.isDisposed = true;
     this.isOpen = false;
+    clearTimeout(this.focusRetry);
+    this.focusRetry = undefined;
 
     // Stop render loop and clear write queue
     this.cancelRenderLoop();
