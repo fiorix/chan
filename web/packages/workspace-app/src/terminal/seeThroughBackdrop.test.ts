@@ -4,6 +4,7 @@ import {
   backdropMask,
   installSeeThroughBackdrop,
   terminalHoles,
+  type BackdropHole,
 } from "./seeThroughBackdrop";
 
 /// The SVG inside a mask's data URL.
@@ -34,6 +35,9 @@ function buildBackdrop(): { backdrop: HTMLElement; terminalFace: HTMLElement; ed
   const terminalFace = document.createElement("div");
   terminalFace.className = "pane-card-face";
   terminalFace.style.borderTopLeftRadius = "6px";
+  terminalFace.style.borderTopRightRadius = "6px";
+  terminalFace.style.borderBottomRightRadius = "6px";
+  terminalFace.style.borderBottomLeftRadius = "6px";
   terminalFace.getBoundingClientRect = () => rect(15, 25, 390, 590);
   const tab = document.createElement("div");
   tab.className = "terminal-tab active";
@@ -58,7 +62,7 @@ describe("backdropMask", () => {
   });
 
   it("cuts a rounded hole out of the rectangle", () => {
-    const svg = svgOf(backdropMask(800, 600, [{ x: 5, y: 5, width: 390, height: 590, radius: 6 }]));
+    const svg = svgOf(backdropMask(800, 600, [{ x: 5, y: 5, width: 390, height: 590, radii: [6, 6, 6, 6] }]));
     expect(svg).toContain(
       'd="M0 0H800V600H0Z' +
         "M11 5H389A6 6 0 0 1 395 11V589A6 6 0 0 1 389 595H11A6 6 0 0 1 5 589V11A6 6 0 0 1 11 5Z" +
@@ -67,17 +71,27 @@ describe("backdropMask", () => {
   });
 
   it("cuts a square hole when the radius is zero", () => {
-    const svg = svgOf(backdropMask(100, 100, [{ x: 10, y: 10, width: 20, height: 20, radius: 0 }]));
+    const svg = svgOf(backdropMask(100, 100, [{ x: 10, y: 10, width: 20, height: 20, radii: [0, 0, 0, 0] }]));
     expect(svg).toContain('d="M0 0H100V100H0ZM10 10H30V30H10Z"');
   });
 
+  it("rounds each corner by its own radius", () => {
+    // A pane in the window's top-left corner: only its inner corner, the
+    // bottom-right one, is rounded.
+    const svg = svgOf(backdropMask(800, 600, [{ x: 0, y: 0, width: 400, height: 300, radii: [0, 0, 6, 0] }]));
+    expect(svg).toContain('d="M0 0H800V600H0ZM0 0H400V294A6 6 0 0 1 394 300H0Z"');
+    // The mirror of it, in the bottom-right corner, rounds the top-left one.
+    const mirrored = svgOf(backdropMask(800, 600, [{ x: 400, y: 300, width: 400, height: 300, radii: [6, 0, 0, 0] }]));
+    expect(mirrored).toContain("M406 300H800V600H400V306A6 6 0 0 1 406 300Z");
+  });
+
   it("caps the radius at half the hole's shorter side", () => {
-    const svg = svgOf(backdropMask(100, 100, [{ x: 0, y: 0, width: 20, height: 10, radius: 50 }]));
+    const svg = svgOf(backdropMask(100, 100, [{ x: 0, y: 0, width: 20, height: 10, radii: [50, 50, 50, 50] }]));
     expect(svg).toContain("A5 5 0 0 1");
   });
 
   it("is identical for an identical layout", () => {
-    const hole = { x: 1.04, y: 2.96, width: 50.01, height: 60, radius: 6 };
+    const hole: BackdropHole = { x: 1.04, y: 2.96, width: 50.01, height: 60, radii: [6, 6, 6, 6] };
     expect(backdropMask(800.02, 600, [hole])).toBe(backdropMask(800.04, 600, [{ ...hole }]));
   });
 });
@@ -89,7 +103,15 @@ describe("terminalHoles", () => {
 
   it("returns one hole per pane face showing a terminal, relative to the backdrop", () => {
     const { backdrop } = buildBackdrop();
-    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radius: 6 }]);
+    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radii: [6, 6, 6, 6] }]);
+  });
+
+  it("reads each corner's radius, so a face squared on the window's edge cuts a matching hole", () => {
+    const { backdrop, terminalFace } = buildBackdrop();
+    terminalFace.style.borderTopLeftRadius = "0px";
+    terminalFace.style.borderTopRightRadius = "0px";
+    terminalFace.style.borderBottomLeftRadius = "0px";
+    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radii: [0, 0, 6, 0] }]);
   });
 
   it("skips a face with no size", () => {
@@ -106,7 +128,7 @@ describe("terminalHoles", () => {
     pane.append(terminalFace);
     expect(terminalHoles(backdrop)).toEqual([]);
     pane.classList.remove("sideFlipActive");
-    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radius: 6 }]);
+    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radii: [6, 6, 6, 6] }]);
   });
 });
 
