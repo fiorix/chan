@@ -14,6 +14,7 @@ import { copyTextToClipboard } from "../store.svelte";
 import {
   activeGraphTab,
   graphLinkFor,
+  graphShownDepth,
   type GraphFilters,
   type GraphTab,
 } from "../tabs.svelte";
@@ -56,10 +57,12 @@ export function toggleGraphFilter(tab: GraphTab, kind: GraphFilterKind): void {
 }
 
 /// The depth the active graph tab's panel shows, as a depth step's value.
-/// The panel works it out for the selected node and records it on the tab.
+/// The panel works it out for the selected node when this asks, which is
+/// while the launcher lists a step.
 function depthState(): string | null {
-  const depth = activeGraphTab()?.shownDepth;
-  return depth === undefined ? null : String(depth);
+  const tab = activeGraphTab();
+  const depth = tab ? graphShownDepth(tab) : null;
+  return depth === null ? null : String(depth);
 }
 
 registerCommands([

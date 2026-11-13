@@ -37,9 +37,9 @@
     openGraphInActivePane,
     openInActivePane,
     panesHaveSides,
+    registerGraphDepthReader,
     setGraphPendingSelect,
     setGraphSelection,
-    setGraphShownDepth,
     type GraphTab,
   } from "../state/tabs.svelte";
   import {
@@ -271,12 +271,13 @@
     if (next !== selectedId) graphState.depth = 1;
   }
 
-  // The launcher's depth steps show the depth as their value. It is worked
-  // out here, so a shown tab carries what its control shows.
+  // The launcher's depth steps show the depth as their value, and read it
+  // through this while one of them is listed. Nothing here reads the depth
+  // itself, so it is worked out only while the tab menu or a listed step
+  // shows it. A hidden tab answers none and works nothing out either.
   $effect(() => {
-    if (!visible) return;
-    const shown = depthValue;
-    untrack(() => setGraphShownDepth(tab, shown));
+    const id = tab.id;
+    return untrack(() => registerGraphDepthReader(id, () => (visible ? depthValue : null)));
   });
 
   /// Whether this panel's tab came from an opener and has not yet shown a

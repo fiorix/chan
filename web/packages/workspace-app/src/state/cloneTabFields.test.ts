@@ -160,7 +160,6 @@ function loadedGraphTab(): GraphTab {
     pendingSelectId: "node-9",
     selectedNodeId: "node-3",
     selectedNodeLabel: "src/main.rs",
-    shownDepth: 3,
     inspectorWidth: 287,
   } satisfies Required<GraphTab>;
 }

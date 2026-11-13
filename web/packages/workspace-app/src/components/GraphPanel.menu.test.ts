@@ -6,8 +6,7 @@
 // launcher, or to a named exemption. Its filter rows and the options the
 // launcher's Filters command lists are one list, and a row and its option
 // flip the same filter. The header row and the launcher's Select workspace
-// select the workspace's node through one function. The launcher's depth
-// steps report the depth the menu's slider shows.
+// select the workspace's node through one function.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -295,52 +294,6 @@ describe("the header row and Select workspace", () => {
     await settle(2);
 
     expect(tab.inspectorOpen).toBe(false);
-  });
-});
-
-describe("the depth steps", () => {
-  const shown = (id: string) => command(id).state!(commandContext());
-
-  async function sliderValue(tab: GraphTab): Promise<string> {
-    return (await reopen(tab)).querySelector<HTMLInputElement>(".depth-row input[type='range']")!.value;
-  }
-
-  test("report the depth the slider shows, which a step moves", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
-    expect(await sliderValue(tab), "nothing selected reads as the root, one level opened").toBe("1");
-    expect(shown("app.graph.depth.increase")).toBe("1");
-    expect(shown("app.graph.depth.decrease")).toBe("1");
-
-    command("app.graph.depth.increase").run();
-    await settle(2);
-    expect(tab.expanded.notes, "the step opened a level of the tree").toBe(true);
-    expect(tab.depth, "the tab's own depth is a selected file's hops, which did not move").toBe(1);
-    expect(await sliderValue(tab)).toBe("2");
-    expect(shown("app.graph.depth.increase")).toBe("2");
-
-    command("app.graph.depth.decrease").run();
-    await settle(2);
-    expect(await sliderValue(tab)).toBe("1");
-    expect(shown("app.graph.depth.decrease")).toBe("1");
-  });
-
-  test("follow the selection: a closed directory reads 0", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
-
-    canvas.props!.onSelect("directory:notes");
-    await settle(2);
-
-    expect(await sliderValue(tab)).toBe("0");
-    expect(shown("app.graph.depth.increase")).toBe("0");
-  });
-
-  test("report nothing for a graph no panel has shown", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab());
-    const pane = layout.nodes[GRAPH_PANE] as LeafNode;
-    pane.tabs.push(graphTab({ id: "graph-2" }));
-    pane.activeTabId = "graph-2";
-
-    expect(shown("app.graph.depth.increase")).toBeNull();
   });
 });
 

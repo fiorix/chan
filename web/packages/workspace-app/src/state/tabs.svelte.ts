@@ -659,13 +659,6 @@ export type GraphTab = {
   /// reloading on restore.
   selectedNodeId?: string | null;
   selectedNodeLabel?: string | null;
-  /// The depth the tab's panel shows for the selected node: the levels
-  /// opened below a directory, read from the tree the panel has loaded, or
-  /// the hops of any other node, capped by what the node reaches. Kept here
-  /// so the launcher's depth steps can report it from outside the panel.
-  /// Unset until a panel has shown the tab, and not serialized: the panel
-  /// works it out again.
-  shownDepth?: number;
   /// Per-tab inspector width. Falls back to `paneWidths.graph` when unset.
   inspectorWidth?: number;
 };
@@ -4683,7 +4676,6 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   browserSort: "carry",
   browserDescending: "carry",
   showWorkspace: "carry",
-  shownDepth: "carry",
   slidePreview: "carry",
   spawnCommand: "carry",
   spawnEnv: "carry",
@@ -6078,11 +6070,35 @@ export function setGraphSelection(tab: GraphTab, id: string | null, label: strin
 export function setGraphPendingSelect(tab: GraphTab, id: string | null): void {
   tab.pendingSelectId = id;
 }
-/// The depth a graph tab's panel shows for the selected node, as the panel
-/// reports it whenever it changes.
-export function setGraphShownDepth(tab: GraphTab, depth: number): void {
-  tab.shownDepth = depth;
+
+/// Reads the depth a graph tab's panel shows for the selected node, or null
+/// while the panel shows no tab.
+type GraphDepthReader = () => number | null;
+
+/// The readers of the mounted graph panels, by tab id. The depth is the
+/// selected node's (levels opened below a directory, hops from any other
+/// node) and only the panel can work it out, from the graph it has loaded.
+/// The launcher's depth steps read through here while one of them is listed,
+/// so the panel works nothing out for them the rest of the time. The record
+/// is reactive: a row listed before its panel registered reads again once it
+/// has, and a row whose panel is gone reads none.
+const graphDepthReaders = $state<{ byTab: Record<string, GraphDepthReader> }>({ byTab: {} });
+
+/// Registers the reader of the panel mounted on the graph tab `tabId`.
+/// Returns the call that removes it, for the panel's teardown.
+export function registerGraphDepthReader(tabId: string, read: GraphDepthReader): () => void {
+  graphDepthReaders.byTab[tabId] = read;
+  return () => {
+    if (graphDepthReaders.byTab[tabId] === read) delete graphDepthReaders.byTab[tabId];
+  };
 }
+
+/// The depth the panel of the graph tab `tab` shows now, or null for a tab
+/// no panel shows. Read inside a derived or an effect, it follows the depth.
+export function graphShownDepth(tab: GraphTab): number | null {
+  return graphDepthReaders.byTab[tab.id]?.() ?? null;
+}
+
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {
   tab.content = content;
