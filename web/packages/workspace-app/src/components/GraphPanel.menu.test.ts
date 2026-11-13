@@ -5,8 +5,9 @@
 // option of the Filters command, to the shortcut table's label for the
 // launcher, or to a named exemption. Its filter rows and the options the
 // launcher's Filters command lists are one list, and a row and its option
-// flip the same filter. The launcher's depth steps report the depth the
-// menu's slider shows.
+// flip the same filter. The header row and the launcher's Select workspace
+// select the workspace's node through one function. The launcher's depth
+// steps report the depth the menu's slider shows.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -32,6 +33,7 @@ import {
   resetGraphServer,
   settle,
   unmountGraphPanels,
+  visibleIds,
 } from "../__tests__/graphPanel";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { invalidateGraph } from "../state/graphData.svelte";
@@ -151,7 +153,7 @@ describe("the menu's words", () => {
       ...[
         {
           own: "Workspace",
-          because: "names what the graph is of; its tooltip names the command it runs, Scope details",
+          because: "names what the graph is of; its tooltip is the title of the command it runs, Select workspace",
         },
         "---" as const,
         { own: "Depth", because: "a slider's caption, not an action" },
@@ -169,11 +171,12 @@ describe("the menu's words", () => {
     expect(filterOptions().length).toBeGreaterThan(0);
   });
 
-  test("the scope row's tooltip names the command it runs and what the graph is of", async () => {
+  test("the header row's tooltip is the title of the command it runs", async () => {
     const { bubble } = await openMenu();
 
+    expect(command("app.graph.scopeDetails").title).toBe("Select workspace");
     expect(bubble.querySelector<HTMLElement>(".graph-scope-row")!.title).toBe(
-      `${command("app.graph.scopeDetails").title}: Workspace`,
+      command("app.graph.scopeDetails").title,
     );
   });
 
@@ -217,7 +220,7 @@ describe("the filter rows and the Filters command's options", () => {
   });
 });
 
-describe("the scope row and Scope details", () => {
+describe("the header row and Select workspace", () => {
   test("the row selects the workspace's node, shows its details and closes the menu", async () => {
     const { tab, bubble } = await openMenu();
     expect(tab.inspectorOpen).toBe(false);
@@ -231,7 +234,7 @@ describe("the scope row and Scope details", () => {
     expect(tabMenu.openForTabId).toBeNull();
   });
 
-  test("the command shows the same details", async () => {
+  test("the command makes the same selection", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     expect(tab.inspectorOpen).toBe(false);
 
@@ -240,6 +243,21 @@ describe("the scope row and Scope details", () => {
 
     expect(tab.inspectorOpen).toBe(true);
     expect(canvas.props?.selectedId).toBe("");
+  });
+
+  test("the command takes the place of a selection, with its hops and what it revealed", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
+    canvas.props!.onSelect("notes/a.md");
+    await settle(2);
+    expect(tab.selectedNodeId).toBe("notes/a.md");
+    expect(visibleIds(), "the selected file is revealed in its closed directory").toContain("notes/a.md");
+
+    command("app.graph.scopeDetails").run();
+    await settle(2);
+
+    expect(canvas.props?.selectedId).toBe("");
+    expect(tab.selectedNodeId, "the tab records the workspace's node").toBe("");
+    expect(visibleIds()).not.toContain("notes/a.md");
   });
 
   test("only the graph the launcher is aimed at answers", async () => {

@@ -645,11 +645,11 @@
     void refreshGraph();
   }
 
-  // The launcher's `Reload graph`, `Scope details` and depth steps reach this
-  // panel through the chan:command bridge, since the tab's spine is fetched
-  // here and the loaded nodes and the selection live here. Only the graph
-  // the launcher itself targeted responds, so the command's active-surface
-  // gate and the acting graph agree.
+  // The launcher's `Reload graph`, `Select workspace` and depth steps reach
+  // this panel through the chan:command bridge, since the tab's spine is
+  // fetched here and the loaded nodes and the selection live here. Only the
+  // graph the launcher itself targeted responds, so the command's
+  // active-surface gate and the acting graph agree.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
       const name = (e as CustomEvent).detail?.name;
@@ -1176,7 +1176,7 @@
   }
 
   /// The tab menu's header row names the workspace the graph is of; a click,
-  /// or the launcher's `Scope details`, selects the workspace's own node,
+  /// or the launcher's `Select workspace`, selects the workspace's own node,
   /// which opens its inspector.
   function openScopeHeaderInspector(): void {
     depthFollowsSelection("");
@@ -2028,7 +2028,7 @@
         class="mbtn graph-scope-row"
         role="menuitem"
         tabindex="-1"
-        title={`${commandTitle("app.graph.scopeDetails")}: Workspace`}
+        title={commandTitle("app.graph.scopeDetails")}
         onclick={openScopeHeaderInspector}
       >
         <span class="mbtn-icon" aria-hidden="true">

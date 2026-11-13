@@ -1,7 +1,7 @@
 // Graph surface commands: available when a graph tab is the active
 // surface. Net-new actions mutate the active GraphTab directly (its
 // fields are $state, so the graph re-renders reactively, matching the
-// pane's own menu). Reload, Scope details and the depth are the
+// pane's own menu). Reload, Select workspace and the depth are the
 // exceptions: the fetch, the loaded nodes and the selection the depth
 // belongs to live inside GraphPanel, so they arrive there as a
 // chan:command. The graph menu lists its filter rows from
@@ -65,17 +65,17 @@ function depthState(): string | null {
 registerCommands([
   {
     id: "app.graph.scopeDetails",
-    title: "Scope details",
+    title: "Select workspace",
     category: "Graph",
     scope: "app",
     surface: "graph",
     order: 0,
-    kind: "open",
     requirement: "workspace",
-    keywords: ["scope", "inspector", "root"],
+    keywords: ["root", "node"],
     available: (ctx) => onSurface(ctx, "graph"),
-    // The graph is the workspace's, and its node is one the panel loaded,
-    // so the panel selects it and shows its details.
+    // The selection lives in the panel, so the panel takes it: the
+    // workspace's own node in place of whatever was selected, with its
+    // details shown.
     run: () => dispatchChanCommand("app.graph.scopeDetails"),
   },
   {
