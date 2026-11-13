@@ -186,10 +186,11 @@ const PARTIAL_LINES = 30;
 const PARTIAL_SHOWN = 6;
 const PARTIAL_LAST_COL = 47;
 
-/// Scroll a terminal back `rows` rows and wait for the overlay scrollbar the
-/// scroll shows to hide again.
+/// Scroll a terminal's view to `rows` rows back from the bottom, a fraction
+/// of a row as chan's macOS pixel scroll moves it, and wait for the overlay
+/// scrollbar the scroll shows to hide again.
 async function scrollBack(term, rows) {
-  term.scrollLines(-rows);
+  term.scrollLines(term.getViewportY() - rows);
   if (term.getViewportY() !== rows) {
     throw new Error(`scrolled back ${term.getViewportY()} rows, not ${rows}`);
   }
@@ -608,6 +609,43 @@ const PATTERNS = {
   // cursorStyle picks the shape the renderer draws.
   "cursor-glyph": cursorPattern(CURSOR_GLYPH),
   "cursor-blank": cursorPattern(CURSOR_BLANK),
+
+  // The partly scrolled view reached by a pixel scroll: a row further back,
+  // then half a row down to rest at a fractional offset. The view shows the
+  // rows of the offset's floor, so the PNG is partial-scroll's.
+  "fraction-scroll": {
+    bytes: () => PATTERNS["partial-scroll"].bytes(),
+    async settle(term) {
+      await scrollBack(term, PARTIAL_SHOWN + 1);
+      await scrollBack(term, PARTIAL_SHOWN + 0.5);
+    },
+    regions: () => PATTERNS["partial-scroll"].regions(),
+  },
+
+  // The cursor on a glyph, painted and then hidden where it stands (`tput
+  // civis` at an idle prompt), and the same screen with the cursor hidden
+  // before any frame painted it: the two PNGs are one.
+  "cursor-hide": {
+    ...cursorPattern(CURSOR_GLYPH),
+    async settle(term) {
+      await step(term, "\x1b[?25l");
+    },
+  },
+  "cursor-never": {
+    ...cursorPattern(CURSOR_GLYPH),
+    bytes: () => cursorPattern(CURSOR_GLYPH).bytes() + "\x1b[?25l",
+  },
+
+  // select-move's last selection made alone, in one frame: the PNG
+  // select-move leaves once the selections before it are repainted away.
+  "select-once": {
+    bytes: () => PATTERNS["select-move"].bytes(),
+    async settle(term) {
+      term.select(6, 5, 12);
+      await nextFrame();
+    },
+    regions: () => PATTERNS["select-move"].regions(),
+  },
 };
 
 function cursorPattern(at) {

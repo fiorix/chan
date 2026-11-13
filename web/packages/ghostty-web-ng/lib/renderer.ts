@@ -83,6 +83,7 @@ export class CanvasRenderer {
   private cursorVisible: boolean = true;
   private cursorBlinkInterval?: number;
   private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  private lastCursorShown: boolean = true;
 
   // Viewport tracking (for scrolling)
   private lastViewportY: number = 0;
@@ -236,6 +237,11 @@ export class CanvasRenderer {
     const cursor = term.getCursor();
     const dims = term.getDimensions();
     const scrollbackLength = term.getScrollbackLength();
+    // The history rows the view shows above the screen. A fractional offset
+    // (chan's pixel scroll) shows the rows of its floor, as the hover, the
+    // selection and the masker map them; only the scrollbar reads the
+    // fraction.
+    const historyRows = Math.floor(viewportY);
 
     // A resize, a screen switch, new colours or output that scrolled change
     // every row.
@@ -259,10 +265,13 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line)
+    // Check if cursor position changed or if blinking (need to redraw cursor line).
+    // A cursor hidden or shown where it stands repaints its line as a move
+    // does: the core marks no row dirty for it.
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (cursorMoved || this.cursorBlink) {
+    const cursorShownChanged = cursor.visible !== this.lastCursorShown;
+    if (cursorMoved || cursorShownChanged || this.cursorBlink) {
       // Mark cursor lines as needing redraw
       if (!forceAll && !term.isRowDirty(cursor.y)) {
         // Need to redraw cursor line
@@ -318,7 +327,7 @@ export class CanvasRenderer {
       // Find rows containing the old or new hovered hyperlink
       // Must check the correct buffer based on viewportY (scrollback vs screen)
       for (let y = 0; y < dims.rows; y++) {
-        if (this.readViewRow(term, y, viewportY, scrollbackLength)) {
+        if (this.readViewRow(term, y, historyRows, scrollbackLength)) {
           for (let x = 0; x < this.cells.length; x++) {
             const link = this.cells.at(x)!.hyperlink;
             if (link === this.hoveredHyperlinkId || link === this.previousHoveredHyperlinkId) {
@@ -361,7 +370,7 @@ export class CanvasRenderer {
     for (let y = 0; y < dims.rows; y++) {
       // When scrolled, always force render all lines since we're showing scrollback
       const needsRender =
-        viewportY > 0
+        historyRows > 0
           ? true
           : forceAll || term.isRowDirty(y) || selectionRows.has(y) || hyperlinkRows.has(y);
 
@@ -379,7 +388,7 @@ export class CanvasRenderer {
         continue;
       }
 
-      if (this.readViewRow(term, y, viewportY, scrollbackLength)) {
+      if (this.readViewRow(term, y, historyRows, scrollbackLength)) {
         this.renderLine(this.cells, y, dims.cols);
       }
     }
@@ -389,8 +398,8 @@ export class CanvasRenderer {
 
     // Link underlines are drawn during cell rendering (see renderCell)
 
-    // Render cursor (only if we're at the bottom, not scrolled)
-    if (viewportY === 0 && cursor.visible && this.cursorVisible) {
+    // Render cursor (only if the view shows no history row)
+    if (historyRows === 0 && cursor.visible && this.cursorVisible) {
       this.renderCursor(cursor.x, cursor.y);
     }
 
@@ -399,8 +408,9 @@ export class CanvasRenderer {
       this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
     }
 
-    // Update last cursor position
+    // Update last cursor position and visibility
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
+    this.lastCursorShown = cursor.visible;
 
     // ALWAYS end the frame after rendering, regardless of forceAll: what
     // changed is painted now, and the next frame lists only newer changes.
@@ -408,20 +418,16 @@ export class CanvasRenderer {
   }
 
   /**
-   * Read the row painted at view row `y` into this.cells: scrolled back, the
-   * history rows (from the end of the history) above the screen's first
-   * rows. A fractional `viewportY` counts the history rows from its floor,
-   * so the view row at that floor is past the last history row and reads
-   * nothing. False when the row has nothing to read.
+   * Read the row painted at view row `y` into this.cells: with the view
+   * scrolled back `historyRows` whole rows, the last `historyRows` rows of
+   * the history above the screen's first rows. False when the row has
+   * nothing to read.
    */
-  private readViewRow(term: VtTerminal, y: number, viewportY: number, scrollbackLength: number): boolean {
-    if (viewportY > 0) {
-      if (y < viewportY) {
-        return term.readHistoryRow(scrollbackLength - Math.floor(viewportY) + y, this.cells);
-      }
-      return term.readRow(y - Math.floor(viewportY), this.cells);
+  private readViewRow(term: VtTerminal, y: number, historyRows: number, scrollbackLength: number): boolean {
+    if (y < historyRows) {
+      return term.readHistoryRow(scrollbackLength - historyRows + y, this.cells);
     }
-    return term.readRow(y, this.cells);
+    return term.readRow(y - historyRows, this.cells);
   }
 
   /**
