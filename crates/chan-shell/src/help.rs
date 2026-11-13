@@ -137,7 +137,7 @@ pub(crate) const CS_DOWNLOAD_AFTER: &str = r#"EXAMPLES:
   cs download .
     Downloads the current directory as <leaf>.tar.
   cs download build/out.bin
-    Any file type works here, unlike cs open, which refuses binaries.
+    Any file type works here; cs open only reveals a binary file.
 
 SIDE EFFECTS:
   Queues ONE window command and returns; the transfer runs in the
@@ -151,11 +151,11 @@ CAUTIONS:
   bubble aborts the stream mid-tar.
 
 CAVEATS:
-  Works in workspace windows and standalone terminals, with the same
-  root asymmetry as cs upload: workspace-relative and walled at the
-  workspace root in one, plain filesystem paths under the shell's own
-  reach in the other. Failures after the transfer starts surface in
-  the window, not on this terminal.
+  Works in workspace windows and standalone terminals alike. A path
+  inside the workspace comes from the workspace; any other path the
+  shell's uid can reach comes from the plain filesystem, in either
+  window. Failures after the transfer starts surface in the window,
+  not on this terminal.
 
 SEE ALSO:
   cs upload, cs open, cs export; cs dump-skill --topic transfer.
@@ -440,8 +440,8 @@ CAUTIONS:
   on screen. A stale pane id can still fail when the SPA dequeues it.
 
 CAVEATS:
-  A file whose bytes are not text is refused with "cannot open binary
-  file <rel>".
+  A file whose bytes are not text does not open in the editor: the
+  File Browser opens on its directory with the file selected.
 
   A path OUTSIDE the workspace root is not refused: it is routed. The
   server hands it to the machine's own filesystem surface and opens it
@@ -666,7 +666,7 @@ SEE ALSO:
 "#;
 
 /// `cs session` long help (manpage head).
-pub(crate) const CS_SESSION: &str = r"Inspect library clients and manage workspace leadership.
+pub(crate) const CS_SESSION: &str = r"Inspect library clients and manage session leadership.
 
 DESCRIPTION:
 `list` shows frontend clients across the serving library's workspace
@@ -700,7 +700,7 @@ shared windows, layouts, PTYs and running programs. The frontend stops
 retrying and offers Reconnect. This is an operational disconnect, not
 sign-out or credential revocation; Reconnect resumes the holder.
 
-`handover` asks the workspace leader for leadership and waits for its
+`handover` asks the session leader for leadership and waits for its
 answer; `--to WINDOW` names a different beneficiary. The leader answers
 with `--accept` or `--reject`. `takeover` succeeds when the leader is
 gone, or unconditionally with `--force`.
@@ -735,13 +735,13 @@ pub(crate) const CS_SESSION_AFTER: &str = r#"EXAMPLES:
     end that client's connections while its shared terminals keep running
 
   cs session handover --timeout 60
-    wait up to 60 seconds for the workspace leader's answer
+    wait up to 60 seconds for the session leader's answer
 
   cs session handover --accept
     the leader accepts the pending request
 
   cs session takeover --force
-    seize workspace leadership from a live leader
+    seize session leadership from a live leader
 
 SIDE EFFECTS:
   A workspace rename or reset, accepted handover and takeover broadcast
@@ -786,7 +786,8 @@ Selection is server-wide, not window-scoped: write, list, restart,
 close and scrollback reach every live session this server owns,
 whichever window (or none) hosts it. Of those, none targets a
 window; `new` does, the caller's own, via $CHAN_WINDOW_ID. Every
-subcommand needs $CHAN_CONTROL_SOCKET.
+subcommand but `status` needs $CHAN_CONTROL_SOCKET; `status` writes
+to its own terminal and uses the socket only when it has none.
 
 Subcommand prefixes infer, so `cs te n` / `cs te w` / `cs te l` are
 terminal new / write / list. A bare t is too short to infer: it
@@ -1734,7 +1735,7 @@ CAUTIONS:
 
   Queue cap: 100 entries per target. A write to a full queue is
   dropped ("N at queue cap (dropped)"), and when every match is
-  full the command fails with "matched session(s) at the 100-write
+  full the command fails with "matched session(s) at the 100-entry
   queue cap; nothing queued". A restart respawns the session, so
   anything still queued for it is lost. No selector match is an
   error ("no live terminal session matched"), not a silent no-op.
@@ -1887,10 +1888,10 @@ CAUTIONS:
   already exists in the destination is refused.
 
 CAVEATS:
-  Works in workspace windows and standalone terminals, but with
-  different roots: workspace-relative and walled at the workspace root
-  in one, plain filesystem paths under the shell's own reach in the
-  other. Waiting requests, replacements and picker errors appear in
+  Works in workspace windows and standalone terminals alike. A path
+  inside the workspace lands in the workspace; any other path the
+  shell's uid can reach lands on the plain filesystem, in either
+  window. Waiting requests, replacements and picker errors appear in
   the window's request card or Transfers panel; transfer errors appear
   in the window. No later completion or cancellation reply is returned
   to this terminal.
@@ -1958,18 +1959,23 @@ SIDE EFFECTS:
 CAUTIONS:
   `rm` is destructive and has no undo: the saved layout is gone, so
   the window cannot be reopened. Use `hide` when you want it back.
-  `rm` of a window with live terminals is REFUSED -- "window <id>
-  has N live terminal session(s); re-run with --force to remove
-  them" -- so a removal never kills a running agent by surprise.
-  `--force` removes it and those shells with it. The guard runs
-  server-side, so it holds headless too.
+  `rm` of a window hosted here with live terminals is REFUSED --
+  "window <id> has N live terminal session(s); re-run with --force
+  to remove them" -- so a removal never kills a local agent by
+  surprise. `--force` removes it and those shells with it. The guard
+  runs server-side, so it holds headless too. A connected
+  devserver's window, removed from a desktop terminal, skips that
+  check: the devserver discards it and its shells either way.
   Closing chan's last shown window quits the desktop and ends every
   terminal it holds, the hidden windows' too, so the desktop refuses
   `hide` of its last shown window while any terminal runs, and `rm`
-  of it while terminals of other windows run, `--force` or not:
-  "this is chan's last shown window: hiding it would quit chan and
-  end N running terminal session(s); show or open another window
-  first". Show or open another window, then retry.
+  of it while terminals of other windows run, `--force` or not.
+  `hide` is refused with "this is chan's last shown window: hiding it
+  would quit chan and end N running terminal session(s); show or open
+  another window first", and `rm` with "this is chan's last shown
+  window: closing it would quit chan and end N other running terminal
+  session(s); show or open another window first". Show or open
+  another window, then retry.
   `rm` of an id with neither a window nor a saved layout errors:
   "no window or saved layout for <id>".
 
