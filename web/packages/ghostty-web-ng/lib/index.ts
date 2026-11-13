@@ -24,7 +24,6 @@ export type {
 
 // The key numbering the input handler encodes keys by
 export { Key, KeyAction, KeyEncoderOption, Mods } from './types';
-export type { KeyEvent, RGB, Cursor } from './types';
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';

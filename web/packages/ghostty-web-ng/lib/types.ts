@@ -243,41 +243,6 @@ export enum Mods {
   NUMLOCK = 1 << 5,
 }
 
-/**
- * Key event structure
- */
-export interface KeyEvent {
-  action: KeyAction;
-  key: Key;
-  mods: Mods;
-  consumedMods?: Mods;
-  composing?: boolean;
-  utf8?: string;
-  unshiftedCodepoint?: number;
-}
-
-// ============================================================================
-// Terminal Types
-// ============================================================================
-
-/**
- * RGB color
- */
-export interface RGB {
-  r: number;
-  g: number;
-  b: number;
-}
-
-/**
- * Cursor position and visibility
- */
-export interface Cursor {
-  x: number;
-  y: number;
-  visible: boolean;
-}
-
 // ============================================================================
 // Link Detection System
 // ============================================================================
@@ -400,67 +365,4 @@ export type IEvent<T> = (listener: (data: T) => void) => IDisposable;
 
 export interface IDisposable {
   dispose(): void;
-}
-
-/**
- * Event emitter for custom events
- */
-export class EventEmitter<T> {
-  private listeners: Array<(data: T) => void> = [];
-
-  /** Subscribe to events */
-  public readonly event: IEvent<T> = (listener: (data: T) => void): IDisposable => {
-    this.listeners.push(listener);
-    return {
-      dispose: () => {
-        const index = this.listeners.indexOf(listener);
-        if (index !== -1) {
-          this.listeners.splice(index, 1);
-        }
-      },
-    };
-  };
-
-  /** Emit an event to all listeners */
-  public fire(data: T): void {
-    for (const listener of this.listeners) {
-      listener(data);
-    }
-  }
-
-  /** Remove all listeners */
-  public dispose(): void {
-    this.listeners = [];
-  }
-}
-
-/**
- * Terminal mode identifiers
- *
- * ANSI modes (use with is_ansi = true):
- * - INSERT = 4
- *
- * DEC modes (use with is_ansi = false):
- * - CURSOR_VISIBLE = 25
- * - MOUSE_TRACKING_NORMAL = 1000
- * - MOUSE_TRACKING_BUTTON = 1002
- * - MOUSE_TRACKING_ANY = 1003
- * - FOCUS_EVENTS = 1004
- * - ALT_SCREEN = 1047
- * - ALT_SCREEN_WITH_CURSOR = 1049
- * - BRACKETED_PASTE = 2004
- */
-export enum TerminalMode {
-  // ANSI modes
-  INSERT = 4,
-
-  // DEC modes
-  CURSOR_VISIBLE = 25,
-  MOUSE_TRACKING_NORMAL = 1000,
-  MOUSE_TRACKING_BUTTON = 1002,
-  MOUSE_TRACKING_ANY = 1003,
-  FOCUS_EVENTS = 1004,
-  ALT_SCREEN = 1047,
-  ALT_SCREEN_WITH_CURSOR = 1049,
-  BRACKETED_PASTE = 2004,
 }
