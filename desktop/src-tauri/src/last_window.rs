@@ -70,22 +70,29 @@ pub(crate) fn refusal(gesture: Gesture, reading: &Reading) -> Option<String> {
 
 /// The labels of the windows that keep chan running and are in sight:
 /// watcher-opened local and devserver windows and control terminals, less the
-/// buried ones (a buried control terminal is hidden in place, so it is a
-/// native window the user cannot see) and the ones whose hide is under way (a
-/// flagged hide buries on a later turn of the event loop). The About window is
-/// not one: closing it as the last window ends chan with no guard, so it
-/// cannot stand in for a shown window.
+/// ones the desktop put away ([`put_away`]). The About window is not one:
+/// closing it as the last window ends chan with no guard, so it cannot stand
+/// in for a shown window.
 pub(crate) fn shown_windows<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Vec<String> {
+    let gone = put_away(state);
+    app.webview_windows()
+        .into_keys()
+        .filter(|label| keeps_chan_running(label) && !gone.contains(label))
+        .collect()
+}
+
+/// The labels of the windows the desktop put away itself: the buried ones (a
+/// buried control terminal is hidden in place, so it is a native window the
+/// user cannot see) and the ones whose hide is under way (a flagged hide
+/// buries on a later turn of the event loop).
+pub(crate) fn put_away(state: &AppState) -> HashSet<String> {
     let mut gone: HashSet<String> = state
         .buried_snapshot()
         .into_iter()
         .map(|(label, _)| label)
         .collect();
     gone.extend(state.silent_hides.lock().unwrap().iter().cloned());
-    app.webview_windows()
-        .into_keys()
-        .filter(|label| keeps_chan_running(label) && !gone.contains(label))
-        .collect()
+    gone
 }
 
 fn keeps_chan_running(label: &str) -> bool {
