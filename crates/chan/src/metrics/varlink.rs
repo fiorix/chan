@@ -105,7 +105,9 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "InstanceId",
         kind: Type::String,
-        description: "Identifier of the devserver process; it changes on every restart, when every counter starts over",
+        description:
+            "Identifier of the devserver process; it changes on every restart, when every \
+            counter starts over",
         read: |view| plain(view.identity.instance_id.as_str()),
     },
     Family {
@@ -123,7 +125,8 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "CPUUsageNSec",
         kind: Type::Counter,
-        description: "CPU time the devserver process has used, in nanoseconds; its shells and other child processes are not counted",
+        description: "CPU time the devserver process has used, in nanoseconds; its shells and \
+            other child processes are not counted",
         read: |view| process(view, |process| process.cpu_time_ms.checked_mul(1_000_000)),
     },
     Family {
@@ -135,37 +138,43 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "IOReadBytes",
         kind: Type::Counter,
-        description: "Bytes the devserver process has read, by scope: storage counts storage I/O, process all of the process's I/O",
+        description: "Bytes the devserver process has read, by scope: storage counts storage I/O, \
+            process all of the process's I/O",
         read: |view| io(view, |process| process.read_bytes),
     },
     Family {
         name: "IOWriteBytes",
         kind: Type::Counter,
-        description: "Bytes the devserver process has written, by scope: storage counts storage I/O, process all of the process's I/O",
+        description: "Bytes the devserver process has written, by scope: storage counts storage \
+            I/O, process all of the process's I/O",
         read: |view| io(view, |process| process.written_bytes),
     },
     Family {
         name: "TrafficReceivedBytes",
         kind: Type::Counter,
-        description: "Payload bytes chan has received, by layer; the layers overlap and must not be summed",
+        description: "Payload bytes chan has received, by layer; the layers overlap and must not \
+            be summed",
         read: |view| layers(view, |traffic| traffic.totals.received_bytes),
     },
     Family {
         name: "TrafficSentBytes",
         kind: Type::Counter,
-        description: "Payload bytes chan has sent, by layer; the layers overlap and must not be summed",
+        description: "Payload bytes chan has sent, by layer; the layers overlap and must not be \
+            summed",
         read: |view| layers(view, |traffic| traffic.totals.sent_bytes),
     },
     Family {
         name: "TrafficOpened",
         kind: Type::Counter,
-        description: "Connections, streams or transfer requests chan has opened, by layer; the layers overlap and must not be summed",
+        description: "Connections, streams or transfer requests chan has opened, by layer; the \
+            layers overlap and must not be summed",
         read: |view| layers(view, |traffic| traffic.totals.opened),
     },
     Family {
         name: "TrafficActive",
         kind: Type::Gauge,
-        description: "Connections, streams or transfer requests open now, by layer; the layers overlap and must not be summed",
+        description: "Connections, streams or transfer requests open now, by layer; the layers \
+            overlap and must not be summed",
         read: |view| layers(view, |traffic| traffic.totals.active),
     },
     Family {
@@ -195,7 +204,9 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "TransferJobs",
         kind: Type::Counter,
-        description: "File transfer jobs that ended, by outcome; finished counts jobs that returned, an application error included, and refused counts jobs the queue had no room for",
+        description: "File transfer jobs that ended, by outcome; finished counts jobs that \
+            returned, an application error included, and refused counts jobs the queue had no room \
+            for",
         read: outcomes,
     },
     Family {
@@ -243,13 +254,15 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "HomeLogicalBytes",
         kind: Type::Gauge,
-        description: "Logical size of the regular files in the chan home, in bytes, from the last completed scan",
+        description: "Logical size of the regular files in the chan home, in bytes, from the last \
+            completed scan",
         read: |view| view.storage.logical_bytes.map(plain).unwrap_or_default(),
     },
     Family {
         name: "HomeAllocatedBytes",
         kind: Type::Gauge,
-        description: "Disk space allocated to the regular files in the chan home, in bytes, from the last completed scan",
+        description: "Disk space allocated to the regular files in the chan home, in bytes, from \
+            the last completed scan",
         read: |view| view.storage.allocated_bytes.map(plain).unwrap_or_default(),
     },
     Family {
@@ -1106,7 +1119,8 @@ mod tests {
         assert_eq!(replies, std::slice::from_ref(&no_such_metric));
         assert_eq!(
             journal,
-            "chan metrics: no devserver metrics to report: no devserver is listening on 127.0.0.1:8787\n"
+            "chan metrics: no devserver metrics to report: no devserver is listening on \
+             127.0.0.1:8787\n"
         );
         // A schema this reader does not know is not read at all.
         let (replies, journal) =
