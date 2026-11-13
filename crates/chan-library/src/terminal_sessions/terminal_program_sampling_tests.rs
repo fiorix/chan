@@ -501,7 +501,19 @@ fn terminal_program_process_procfs_lookup_of_held_child() {
         .arg("30")
         .spawn()
         .unwrap();
-    let names = process_names(&[child.id(), u32::MAX]);
+    // The spawn can return before the child's exec has set its name, which
+    // until then is this test thread's: read /proc until exec is observed,
+    // within the bound the shell tests below give it, not once.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let names = loop {
+        let names = process_names(&[child.id(), u32::MAX]);
+        if names.get(&child.id()).map(String::as_str) == Some("sleep")
+            || std::time::Instant::now() >= deadline
+        {
+            break names;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let killed = child.kill();
     let waited = child.wait();
     killed.unwrap();

@@ -303,7 +303,7 @@ fn spawn_daemon_child(
     let exe = crate::devserver::relaunch::resolve_relaunchable_exe()?;
     let home = DaemonHome::of_this_process()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
-    let mut cmd = daemon_command(&exe, addr, tunnel, &home);
+    let mut cmd = daemon_command(&exe, addr, tunnel, &home, std::env::vars_os());
     cmd.stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
     detach_command(&mut cmd);
     cmd.spawn()
@@ -364,14 +364,20 @@ impl DaemonHome {
 }
 
 /// The `__devserver-daemon` command `exe` runs for a daemon bound to `addr`
-/// in `home`, without its output files and before it is detached.
+/// in `home`, without its output files and before it is detached. From an
+/// AppImage `exe` is the `chan` wrapper, which starts the AppImage again, so
+/// the daemon is handed the environment the user had rather than `parent`,
+/// this process's, whose search paths name this process's mount
+/// ([`chan_server::hand_appimage_host_env`]).
 fn daemon_command(
     exe: &Path,
     addr: SocketAddr,
     tunnel: Option<chan_server::DevserverTunnel>,
     home: &DaemonHome,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> Command {
     let mut cmd = Command::new(exe);
+    chan_server::hand_appimage_host_env(&mut cmd, parent);
     cmd.arg("__devserver-daemon")
         .arg(format!("--bind={}", addr.ip()))
         .arg(format!("--port={}", addr.port()))
@@ -813,7 +819,61 @@ mod command_tests {
             "127.0.0.1:0".parse().unwrap(),
             None,
             home,
+            Vec::new(),
         )
+    }
+
+    /// From an AppImage the daemon is the AppImage again, through the
+    /// `chan` wrapper: it gets the user's `LD_LIBRARY_PATH` and `PATH`, none
+    /// of this process's mount, so its own runtime adds one block and its
+    /// terminals get the user's values back.
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_gets_the_users_environment_not_this_mount() {
+        let mount = "/tmp/.mount_ChanCLI";
+        let ld = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]
+        .map(|entry| format!("{mount}/{entry}"))
+        .join(":");
+        let path = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]
+            .map(|entry| format!("{mount}/{entry}"))
+            .join(":");
+        let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".to_string()),
+            ("LD_LIBRARY_PATH", format!("{ld}:")),
+            ("PATH", format!("{path}:/usr/local/bin:/usr/bin")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let home = DaemonHome::from_parts(&absolute("launch"), &absolute("home"), false, true);
+        let cmd = daemon_command(
+            Path::new("/home/u/.local/bin/chan"),
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            &home,
+            parent,
+        );
+        let env = |key: &str| {
+            cmd.get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        };
+        assert_eq!(env("LD_LIBRARY_PATH"), Some(None));
+        assert_eq!(env("PATH"), Some(Some("/usr/local/bin:/usr/bin".into())));
+        assert_eq!(env("APPIMAGE"), Some(None));
+        assert_eq!(env("APPDIR"), Some(None));
     }
 
     /// The detached daemon runs in the resolved chan home, not in the
@@ -896,6 +956,7 @@ mod command_tests {
                 }),
             }),
             &home,
+            Vec::new(),
         );
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         let mut expected = std::ffi::OsString::from("--tunnel-wireguard=");

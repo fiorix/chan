@@ -14,8 +14,13 @@
 //       await importOriginal<typeof import("../api/client")>(),
 //     ));
 //
-// This module imports no component and no api module, so the mock factories
+// This module imports no component and no api client, so the mock factories
 // above can load it without a cycle.
+//
+// The panel draws the window's shared graph (`state/graphData`), which is
+// module state and outlives a test: a test file drops it before each test
+// with `invalidateGraph()`, beside `resetGraphServer()`. It cannot be dropped
+// from here, since the store imports the api module the factories mock.
 
 import { mount, tick, unmount, type Component } from "svelte";
 import { vi } from "vitest";
@@ -27,8 +32,8 @@ import type {
   GraphView,
   GraphViewEdge,
   GraphViewNode,
-  LanguageGraphResponse,
 } from "../api/types";
+import { ApiError } from "../api/errors";
 import { directoryNodeId } from "../graph/canvasNodes";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
 
@@ -66,8 +71,9 @@ export function canvasProbeModule(): { default: (anchor: unknown, props: CanvasP
 }
 
 /// The graph the api stub serves. `view` answers graphStream (the semantic
-/// graph); `fs` answers fsGraph by directory path, trimmed to the requested
-/// depth.
+/// graph, which the window's shared store asks for); `fs` answers fsGraph
+/// (a tab's spine) by directory path, trimmed to the requested depth, with
+/// the scope's ancestors on every page and the route's refusals.
 export const graphServer = {
   view: { nodes: [], edges: [] } as GraphView,
   fs: { nodes: [], edges: [] } as { nodes: FsGraphNode[]; edges: FsGraphEdge[] },
@@ -76,14 +82,16 @@ export const graphServer = {
   fsPageSize: null as number | null,
   /// When set, graphStream waits on it before it delivers anything.
   streamGate: null as Promise<void> | null,
+  /// When set, graphStream's `meta` event says `gated`, as the route's does
+  /// while a full rebuild holds the index; the test serves the empty view
+  /// that answer carries.
+  gated: false,
   /// When set, a paged fsGraph request (the spine seed) waits on it.
   fsGate: null as Promise<void> | null,
-  /// What languageGraph answers for the whole language graph (language mode).
-  languageView: { nodes: [], edges: [], max_depth: 1 } as LanguageGraphResponse,
-  /// What languageGraph answers for a single language's detail.
+  /// What languageGraph answers for a single language's detail, which a
+  /// language node's inspector asks for.
   languageDetail: null as unknown,
   graphStreamCalls: 0,
-  languageGraphCalls: 0,
   fsGraphCalls: [] as Array<{ path: string; depth: number; cursor?: string }>,
 };
 
@@ -92,11 +100,10 @@ export function resetGraphServer(): void {
   graphServer.fs = { nodes: [], edges: [] };
   graphServer.fsPageSize = null;
   graphServer.streamGate = null;
+  graphServer.gated = false;
   graphServer.fsGate = null;
-  graphServer.languageView = { nodes: [], edges: [], max_depth: 1 };
   graphServer.languageDetail = null;
   graphServer.graphStreamCalls = 0;
-  graphServer.languageGraphCalls = 0;
   graphServer.fsGraphCalls = [];
   canvas.props = null;
   canvas.all = [];
@@ -109,12 +116,46 @@ function depthBelow(root: string, path: string): number {
   return path.slice(root.length + 1).split("/").length;
 }
 
-/// The fs graph under `path`, down to `depth` levels, as one final batch.
+/// The directories above `path`, the root first, and their `contains` edges:
+/// what the route sends ahead of every page of a walk under `path`.
+function ancestorChain(path: string): { nodes: FsGraphNode[]; edges: FsGraphEdge[] } {
+  if (path === "") return { nodes: [], edges: [] };
+  const parts = path.split("/");
+  const above = ["", ...parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/"))];
+  const byPath = new Map(graphServer.fs.nodes.map((n) => [n.path, n]));
+  const nodes = above.map((dir) => byPath.get(dir)).filter((n): n is FsGraphNode => n !== undefined);
+  const chain = new Set([...above, path]);
+  const edges = graphServer.fs.edges.filter(
+    (e) => e.kind === "contains" && chain.has(e.source) && chain.has(e.target),
+  );
+  return { nodes, edges };
+}
+
+/// The fs graph under `path`, down to `depth` levels, as one final batch,
+/// with the target of each symlink in it, as the route's walk gives it. The
+/// route refuses a directory scope it cannot walk: 404 for a path that
+/// is not there, 400 for one that is not a directory.
 export function fsResponse(path: string, depth: number): FsGraphResponse {
-  const nodes = graphServer.fs.nodes.filter((n) => {
+  if (path !== "") {
+    const scope = graphServer.fs.nodes.find((n) => n.path === path && n.kind !== "ghost");
+    if (!scope) throw new ApiError(404, `no such path: ${path}`, { error: `no such path: ${path}` });
+    if (scope.kind !== "directory") {
+      const error = `scope=directory requires a directory; ${path} is not`;
+      throw new ApiError(400, error, { error });
+    }
+  }
+  // A ghost is a symlink's missing target, never an entry of a directory.
+  const walked = graphServer.fs.nodes.filter((n) => {
     const d = depthBelow(path, n.path);
-    return d >= 0 && d <= depth;
+    return n.kind !== "ghost" && d >= 0 && d <= depth;
   });
+  // A symlink the walk reaches brings its target's node, wherever it lies.
+  const walkedIds = new Set(walked.map((n) => n.id));
+  const symlinks = graphServer.fs.edges.filter((e) => e.kind === "symlink" && walkedIds.has(e.source));
+  const targets = graphServer.fs.nodes.filter(
+    (n) => !walkedIds.has(n.id) && symlinks.some((e) => e.target === n.id),
+  );
+  const nodes = [...walked, ...targets];
   const ids = new Set(nodes.map((n) => n.id));
   const edges = graphServer.fs.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
   return {
@@ -140,6 +181,13 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         async (
           _scope: unknown,
           opts: {
+            onMeta?: (meta: {
+              type: "meta";
+              scope: "workspace";
+              path: string;
+              depth: number;
+              gated?: true;
+            }) => void;
             onNodes?: (n: GraphViewNode[], view: GraphView) => void;
             onEdges?: (e: GraphViewEdge[], view: GraphView) => void;
           } = {},
@@ -147,6 +195,14 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
           graphServer.graphStreamCalls += 1;
           await Promise.resolve();
           if (graphServer.streamGate) await graphServer.streamGate;
+          // The route's first event, as it sends it for the window's graph.
+          opts.onMeta?.({
+            type: "meta",
+            scope: "workspace",
+            path: "",
+            depth: 6,
+            ...(graphServer.gated ? { gated: true as const } : {}),
+          });
           // One batch of each, with the view accumulated so far beside it,
           // as graphStream passes them.
           const { nodes, edges } = graphServer.view;
@@ -156,27 +212,30 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
         },
       ),
       graph: vi.fn(async () => graphServer.view),
-      languageGraph: vi.fn(async (o: { language?: string } = {}) => {
-        graphServer.languageGraphCalls += 1;
-        if (o.language) {
-          return { nodes: [], edges: [], max_depth: 1, detail: graphServer.languageDetail };
-        }
-        return graphServer.languageView;
-      }),
+      languageGraph: vi.fn(async () => ({
+        nodes: [],
+        edges: [],
+        max_depth: 1,
+        detail: graphServer.languageDetail,
+      })),
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
         if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
         const whole = fsResponse(o.path, o.depth);
+        // Every answer carries the scope's ancestors, as the route's does.
+        const chain = ancestorChain(o.path);
         const size = graphServer.fsPageSize;
-        if (size === null || o.limit === undefined) return whole;
+        if (size === null || o.limit === undefined) {
+          return { ...whole, nodes: [...chain.nodes, ...whole.nodes], edges: [...chain.edges, ...whole.edges] };
+        }
         const start = Number(o.cursor ?? 0);
-        const nodes = whole.nodes.slice(start, start + size);
-        const ids = new Set(nodes.map((n) => n.id));
+        const page = whole.nodes.slice(start, start + size);
+        const ids = new Set(page.map((n) => n.id));
         const done = start + size >= whole.nodes.length;
         return {
           ...whole,
-          nodes,
-          edges: whole.edges.filter((e) => ids.has(e.target)),
+          nodes: [...chain.nodes, ...page],
+          edges: [...chain.edges, ...whole.edges.filter((e) => ids.has(e.target))],
           cursor: done ? null : String(start + size),
           done,
         };
@@ -228,8 +287,6 @@ export function graphTab(over: Partial<GraphTab> = {}): GraphTab {
     kind: "graph",
     id: "graph-1",
     title: "graph",
-    mode: "semantic",
-    scopeId: "workspace",
     depth: 1,
     expanded: {},
     filters: {

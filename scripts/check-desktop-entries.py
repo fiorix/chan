@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Check the desktop entries that make chan a file browser and a Markdown editor.
+"""Check the desktop entries that make chan a file browser, a Markdown editor
+and a terminal.
 
 `chan-files.desktop` and `chan-edit.desktop` are what `xdg-open`, a file
 manager's Open With and `xdg-mime default` see. Each must run its own name
 of the chan binary with a field code, so the launcher hands it the paths, and
-declare its MIME types; each must pass `desktop-file-validate`.
+declare its MIME types. `chan-term.desktop` is what xdg-terminal-exec runs:
+it must run `chan-term`, carry the `TerminalEmulator` category and map each
+of xdg-terminal-exec's options onto chan-term's through its `X-TerminalArg*`
+keys, and no other entry beside it may carry that category, since
+xdg-terminal-exec would run it with chan-term's options. Each must pass
+`desktop-file-validate`.
 
   check-desktop-entries.py [DIR]          the entries in DIR (default: the
                                           shared ones under packaging/)
@@ -17,7 +23,7 @@ The AppImage's AppRun runs the Exec of the first desktop file it reads in the
 image's root, in directory order, and linuxdeploy links into that root the
 first desktop file it lists under `usr/share/applications`. So each of the
 two holds Chan's entry alone, whatever order a filesystem lists them in, and
-the AppImage carries the two entries under `usr/share/chan/applications`.
+the AppImage carries the three entries under `usr/share/chan/applications`.
 
 Exits 0 when every entry passes, 1 with one line per finding otherwise, and 2
 when it cannot run (no desktop-file-validate, no AppImage, one that will not
@@ -35,14 +41,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SHARED = ROOT / "packaging/distros/shared"
 
-# Each entry, the binary name its Exec runs and the MIME types it declares.
+# Each entry, the binary name its Exec runs and the MIME types it declares;
+# an entry with none is the terminal, which takes no path.
 ENTRIES = {
     "chan-files.desktop": ("chan-files", {"inode/directory"}),
     "chan-edit.desktop": ("chan-edit", {"text/markdown"}),
+    "chan-term.desktop": ("chan-term", set()),
 }
 FIELD_CODES = {"%U", "%u", "%F", "%f"}
+TERMINAL_CATEGORY = "TerminalEmulator"
+# xdg-terminal-exec's options and the chan-term option each maps onto; a key
+# ending in `=` appends the value to the same argument.
+TERMINAL_KEYS = {
+    "X-TerminalArgExec": "-e",
+    "X-TerminalArgDir": "--dir=",
+    "X-TerminalArgAppId": "--app-id=",
+    "X-TerminalArgTitle": "--title=",
+    "X-TerminalArgHold": "--hold",
+}
 # The binary the AppImage's root entry runs, and where the image carries the
-# two entries: away from `usr/share/applications`, which linuxdeploy reads.
+# three entries: away from `usr/share/applications`, which linuxdeploy reads.
 MAIN_BINARY = "chan-desktop"
 APPIMAGE_ENTRIES = "usr/share/chan/applications"
 
@@ -64,6 +82,10 @@ def desktop_entry(path: Path) -> dict[str, str]:
     return keys
 
 
+def categories(keys: dict[str, str]) -> set[str]:
+    return {c for c in keys.get("Categories", "").split(";") if c}
+
+
 def findings(directory: Path, validate: str) -> list[str]:
     found = []
     for name, (binary, mime_types) in ENTRIES.items():
@@ -75,7 +97,7 @@ def findings(directory: Path, validate: str) -> list[str]:
         exec_line = keys.get("Exec", "").split()
         if not exec_line or exec_line[0] != binary:
             found.append(f"{name}: Exec must run {binary}, got {keys.get('Exec')!r}")
-        if not FIELD_CODES & set(exec_line[1:]):
+        if mime_types and not FIELD_CODES & set(exec_line[1:]):
             found.append(
                 f"{name}: Exec has no field code ({' '.join(sorted(FIELD_CODES))}), so the "
                 "launcher hands it no path"
@@ -84,13 +106,35 @@ def findings(directory: Path, validate: str) -> list[str]:
         missing = mime_types - declared
         if missing:
             found.append(f"{name}: MimeType lacks {', '.join(sorted(missing))}")
+        if not mime_types:
+            if TERMINAL_CATEGORY not in categories(keys):
+                found.append(
+                    f"{name}: Categories lacks {TERMINAL_CATEGORY}, so xdg-terminal-exec skips it"
+                )
+            for key, value in TERMINAL_KEYS.items():
+                if keys.get(key) != value:
+                    found.append(f"{name}: {key} must be {value!r}, got {keys.get(key)!r}")
         result = subprocess.run(
             [validate, str(path)], capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
             detail = (result.stdout + result.stderr).strip().replace("\n", "; ")
             found.append(f"{name}: desktop-file-validate refused it: {detail}")
-    return found
+    return found + other_terminals(directory)
+
+
+def other_terminals(directory: Path) -> list[str]:
+    """Entries beside the terminal's that claim its category: xdg-terminal-exec
+    would run one with chan-term's options."""
+    terminals = {name for name, (_, mime_types) in ENTRIES.items() if not mime_types}
+    return [
+        f"{name}: Categories has {TERMINAL_CATEGORY}, which only {', '.join(sorted(terminals))} "
+        "may carry: xdg-terminal-exec would run it with chan-term's options"
+        for name in desktop_files(directory)
+        if name not in terminals
+        and (directory / name).is_file()
+        and TERMINAL_CATEGORY in categories(desktop_entry(directory / name))
+    ]
 
 
 def desktop_files(directory: Path) -> list[str]:

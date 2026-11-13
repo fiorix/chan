@@ -11,7 +11,7 @@
 /// and focus stay as they were.
 
 import type { ITheme, Terminal } from "@chan/ghostty-web-ng";
-import { VtTerminal, type VtTerminalConfig } from "./ghosttyVt";
+import { VtTerminal, type VtTerminalConfig } from "@chan/ghostty-web-ng/vt";
 
 /// The widget's private builder of the core's config from
 /// `options.theme`, the one `open()` and `reset()` call, so a switch
@@ -23,8 +23,7 @@ type ConfigBuilder = { buildWasmConfig?: () => VtTerminalConfig | undefined };
 /// what `open()` and `reset()` will use.
 export function applyGhosttyTheme(term: Terminal, theme: ITheme): boolean {
   holdTheme(term.options, theme);
-  // ghostty-web types its core as its own class; chan's binding is not one.
-  const core: unknown = term.wasmTerm;
+  const core = term.wasmTerm;
   const renderer = term.renderer;
   const build = (term as unknown as ConfigBuilder).buildWasmConfig;
   if (!(core instanceof VtTerminal) || !renderer || typeof build !== "function") return false;

@@ -32,6 +32,7 @@ import {
 import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
 import { forgetLinkKinds } from "../editor/widgets/wikilink";
+import { openedForPath, selectionOfScope } from "../graph/selectionView";
 import { uiConfirm } from "./confirm.svelte";
 import { windowCaps } from "./windowCaps";
 import { filesContext } from "./fileContext.svelte";
@@ -638,13 +639,14 @@ export type GraphTab = {
   kind: "graph";
   id: string;
   title: string;
-  mode: "semantic" | "filesystem" | "language";
-  scopeId: string;
+  /// Hops of references the selected file, tag, mention or contact
+  /// reveals. A selected directory's depth is not kept here: it is how far
+  /// `expanded` opens the tree below it.
   depth: number;
-  /// Expanded directory set for the filesystem-mode spine (double-click a
-  /// directory to reveal its next degree). Workspace-relative dir paths;
-  /// the scope root ("") is always expanded. Serialized so the
-  /// expand/collapse state survives a window reload (File Browser parity).
+  /// The directories that are opened, by workspace-relative path
+  /// (double-click a directory, or move the depth with one selected); the
+  /// root ("") is always opened. Serialized so the tree survives a window
+  /// reload (File Browser parity).
   expanded: Record<string, boolean>;
   filters: GraphFilters;
   inspectorOpen: boolean;
@@ -825,14 +827,10 @@ export function truncateTabTitle(label: string): string {
   return `${head}${TAB_TITLE_ELLIPSIS}${tail}`;
 }
 
-/// Title for a Graph tab. Selection wins over scope: when the user
-/// has tapped a node, the tab strip reads as the node's label
-/// (basename for files / dirs, `#tag` for tags, contact name, etc.).
-/// No selection falls back to the scope-derived title cached on
-/// `tab.title`. Even with a selection, the kind= prefix from
-/// `graphTitle()` is kept so the tab strip identifies the lens
-/// shape (path= / tag= / contact= / lang=). Titles without an `=`
-/// (top-level Languages overview, bare strings) render the bare label.
+/// Title for a Graph tab: the selected node's label (basename for files
+/// and directories, `#tag` for tags, `@@name` for mentions) after the
+/// title's `path=` prefix, and `tab.title` itself with nothing selected.
+/// A title without an `=` renders the bare label.
 export function graphTabLabel(t: GraphTab): string {
   const label = t.selectedNodeLabel?.trim();
   if (!label) return t.title;
@@ -968,13 +966,9 @@ export function tabTooltip(t: Tab): string {
     return winner ? `${name}: ${programSummary(winner, status)}` : name;
   }
   if (t.kind === "graph") {
-    // Surface selection + scope so hover disambiguates two Graph tabs
-    // viewing the same scope with different focal nodes, or two with
-    // the same selection under different scopes.
-    if (t.selectedNodeId) {
-      return `Graph: ${t.scopeId} - ${t.selectedNodeId}`;
-    }
-    return `Graph: ${t.scopeId}`;
+    // Surface the selected node's id, so hover disambiguates two Graph
+    // tabs whose labels collide (`index.md` in different directories).
+    return t.selectedNodeId ? `Graph: ${t.selectedNodeId}` : "Graph: workspace";
   }
   if (t.kind === "browser") {
     // Surface the per-tab selection so hover disambiguates two Files
@@ -992,7 +986,7 @@ export function terminalTabName(t: TerminalTab): string {
 }
 
 /// What tmux calls the pane a terminal tab shows, which is how a tmux pane is
-/// labelled: its title, or its command under a title that names nothing. The
+/// labelled: its foreground command, never a title its shell set. The
 /// tab's own name is the session's tab name, which the server keeps unique,
 /// so two panes tmux calls the same differ there by a suffix that says
 /// nothing about either pane. Null for any other tab, and for a pane the
@@ -2087,10 +2081,33 @@ function placeMovedTerminal(p: LeafNode, tab: TerminalTab, snapshot: SerTab | un
 }
 
 export type OpenGraphOptions = Partial<
-  Pick<GraphTab, "mode" | "scopeId" | "depth" | "pendingSelectId" | "title" | "filters">
+  Pick<GraphTab, "depth" | "expanded" | "pendingSelectId" | "title" | "filters">
 > & {
   side?: PaneSide;
 };
+
+/// What every graph tab is titled until a node is selected.
+export const GRAPH_TAB_TITLE = "path=workspace";
+
+/// A graph tab is the one graph of the whole workspace: a tag, a mention,
+/// a contact, a language, a file or a directory is a selection in it. A
+/// saved tab or a link from when a tab carried a scope of its own (`dir:`,
+/// `file:`, `tag:`, `mention:`, `contact:`, `language:`) therefore reads
+/// as the workspace with that node selected, and a directory scope's path
+/// opened. A selection the tab or link names wins over the one its scope
+/// implies.
+function oneGraphOf(
+  scopeId: string,
+  select: string | null,
+  expanded: Record<string, boolean>,
+): { select: string | null; expanded: Record<string, boolean> } {
+  const scoped = selectionOfScope(scopeId);
+  if (!scoped) return { select, expanded };
+  return {
+    select: select ?? scoped.select,
+    expanded: scoped.dir === null ? expanded : { ...openedForPath(scoped.dir), ...expanded },
+  };
+}
 
 export const DEFAULT_GRAPH_FILTERS: GraphFilters = {
   link: true,
@@ -2111,31 +2128,23 @@ export function openGraphInPane(paneId: string, opts: OpenGraphOptions = {}): Gr
   const p = pane(paneId);
   const side = opts.side ?? paneSide(p);
   const tabs = mutablePaneTabs(p, side);
-  const mode = opts.mode ?? "semantic";
-  const scopeId = opts.scopeId ?? "workspace";
   // No dedup on spawn. Each invocation creates a fresh graph tab with
-  // its own scope, filters, and pending selection so the user can
+  // its own selection, filters and opened directories so the user can
   // compare two views side-by-side. Callers that want "activate the
   // existing one" can find it on `pane.tabs` and set `activeTabId`.
   const tab: GraphTab = {
     kind: "graph",
     id: id("graph"),
-    title: opts.title ?? graphTitle(mode, scopeId),
-    mode,
-    scopeId,
+    title: opts.title ?? GRAPH_TAB_TITLE,
     depth: opts.depth ?? 1,
-    expanded: { "": true },
+    expanded: { ...opts.expanded, "": true },
     filters: opts.filters ? { ...opts.filters } : { ...DEFAULT_GRAPH_FILTERS },
     inspectorOpen: false,
-    // A semantic workspace graph (no lens) opens focused on the
-    // workspace-root node (id "", the server's directory_node_id("")), so
-    // focus-on-select spotlights the root neighbourhood and the inspector
-    // opens on it through the same pending-selection path the lenses use.
-    // Lens opens pass their own focal node, which the ?? preserves;
-    // filesystem / language modes have no root focus.
-    pendingSelectId:
-      opts.pendingSelectId ??
-      (scopeId === "workspace" && mode === "semantic" ? "" : null),
+    // The graph opens on a node: the one the caller names, or the
+    // workspace's own (id "", the server's directory_node_id("")), so
+    // focus-on-select spotlights it and the inspector opens on it through
+    // the pending-selection path.
+    pendingSelectId: opts.pendingSelectId ?? "",
   };
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
@@ -2215,49 +2224,6 @@ export function wideScreen(): boolean {
 
 export function defaultBrowserInspectorOpen(): boolean {
   return wideScreen();
-}
-
-/// Title for a Graph tab. The tab name reads as the basename of
-/// whatever the user scoped the graph to (file basename, dir name,
-/// contact name, `#tag`) so the tab strip identifies the subject
-/// directly. Every title carries a `kind=` prefix so the tab strip
-/// also identifies the lens shape (`path=` / `tag=` / `contact=` /
-/// `lang=`). `mode === "language"` is a top-level lens (not per-scope)
-/// and keeps its dedicated `Languages` label.
-export function graphTitle(mode: GraphTab["mode"], scopeId: string): string {
-  if (mode === "language") return "Languages";
-  if (scopeId === "workspace" || scopeId === "global") return "path=workspace";
-  if (scopeId.startsWith("file:")) {
-    const name = basename(scopeId.slice("file:".length));
-    return name ? `path=${name}` : "path=workspace";
-  }
-  if (scopeId.startsWith("dir:")) {
-    const name = basename(scopeId.slice("dir:".length));
-    return name ? `path=${name}/` : "path=workspace";
-  }
-  if (scopeId.startsWith("tag:")) {
-    const tag = scopeId.slice("tag:".length);
-    return `tag=${tag.startsWith("#") ? tag : `#${tag}`}`;
-  }
-  if (scopeId.startsWith("mention:")) {
-    const mention = scopeId.slice("mention:".length);
-    return `mention=${mention.startsWith("@@") ? mention : `@@${mention}`}`;
-  }
-  if (scopeId.startsWith("contact:")) {
-    const name = basename(scopeId.slice("contact:".length));
-    return `contact=${name || scopeId.slice("contact:".length)}`;
-  }
-  if (scopeId.startsWith("language:")) {
-    return `lang=${scopeId.slice("language:".length)}`;
-  }
-  if (scopeId.startsWith("git_repo:")) {
-    return basename(scopeId.slice("git_repo:".length));
-  }
-  // Unknown prefix shape: peel anything before the first colon
-  // so the user at least sees the payload.
-  const colon = scopeId.indexOf(":");
-  if (colon > 0) return scopeId.slice(colon + 1);
-  return scopeId;
 }
 
 type TerminalMetadataSink = (metadata: TerminalMetadata) => boolean;
@@ -4700,7 +4666,6 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   saved: "carry",
   savedMtime: "carry",
   savedMtimeNs: "carry",
-  scopeId: "carry",
   scroll: "carry",
   seedInput: "carry",
   selected: "carry",
@@ -5478,27 +5443,17 @@ export function paneModeOpenGraph(ctx?: SpawnContext): void {
   if (!p || p.kind !== "leaf") return;
   const side = paneSide(p);
   const tabs = mutablePaneTabs(p, side);
-  const mode: GraphTab["mode"] = "semantic";
-  let scopeId = "workspace";
-  let pendingSelectId: string | null = null;
-  if (ctx?.file) {
-    scopeId = `file:${ctx.file}`;
-    pendingSelectId = ctx.file;
-  } else if (ctx?.dir) {
-    scopeId = `dir:${ctx.dir}`;
-    pendingSelectId = ctx.dir;
-  }
+  // The graph, on the context's node: a file selected, a directory
+  // selected and opened, or the workspace's own node.
   const tab: GraphTab = {
     kind: "graph",
     id: id("graph"),
-    title: graphTitle(mode, scopeId),
-    mode,
-    scopeId,
+    title: GRAPH_TAB_TITLE,
     depth: 1,
-    expanded: { "": true },
+    expanded: ctx?.file ? { "": true } : openedForPath(ctx?.dir ?? ""),
     filters: { ...DEFAULT_GRAPH_FILTERS },
     inspectorOpen: false,
-    pendingSelectId,
+    pendingSelectId: ctx?.file ?? ctx?.dir ?? "",
   };
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
@@ -6103,6 +6058,17 @@ export function issueCaretCommand(tab: FileTab, from: number, to: number): void 
 /// it has driven the editor.
 export function clearTabCaretCommand(tab: FileTab): void {
   tab.caretCommand = undefined;
+}
+/// A graph tab's selection, as its panel reports a click: the node, and the
+/// label the tab strip titles the tab with before the graph has loaded.
+export function setGraphSelection(tab: GraphTab, id: string | null, label: string | null): void {
+  tab.selectedNodeId = id;
+  tab.selectedNodeLabel = label;
+}
+/// A graph tab's selection still waiting on the graph, as its panel hands a
+/// restored or moved tab's selection to the path a reload restores it by.
+export function setGraphPendingSelect(tab: GraphTab, id: string | null): void {
+  tab.pendingSelectId = id;
 }
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {
@@ -7094,7 +7060,9 @@ export type SerTab = {
   /// Per-window session payloads ONLY -- kept out of the shareable URL hash since
   /// a member's `env` can carry secrets. See `TerminalTab.teamWorkPending`.
   twk?: TeamDialogConfig;
-  /// Graph tab state.
+  /// Graph tab state. `gm` and `gs` are read, never written: the mode and
+  /// the scope id a tab carried when a graph could be the filesystem's or
+  /// a language's, or scoped to a node.
   gm?: "s" | "f" | "l";
   gs?: string;
   gd?: number;
@@ -7469,12 +7437,6 @@ function decodeGraphTabFilters(s: string | undefined): GraphFilters {
   };
 }
 
-function restoreGraphMode(mode: SerTab["gm"]): GraphTab["mode"] {
-  if (mode === "f") return "filesystem";
-  if (mode === "l") return "language";
-  return "semantic";
-}
-
 /// "Copy link to graph": the launcher serializes a graph tab to a
 /// `chan://graph?...` URL that reproduces the view when opened from a
 /// markdown file. A custom-scheme URL survives a paste into markdown
@@ -7484,29 +7446,33 @@ export const GRAPH_LINK_PREFIX = "chan://graph?";
 
 export function graphLinkFor(tab: GraphTab): string {
   const params = new URLSearchParams();
-  params.set("s", tab.scopeId);
+  // `s` and `m` are the scope and mode a link named when a graph could be
+  // scoped. A link without `s` is refused, here and by the release before
+  // this one, so both are still written, as the only values left.
+  params.set("s", "workspace");
   if (tab.depth !== 1) params.set("d", String(tab.depth));
-  params.set(
-    "m",
-    tab.mode === "filesystem" ? "f" : tab.mode === "language" ? "l" : "s",
-  );
+  params.set("m", "s");
   params.set("f", encodeGraphTabFilters(tab.filters));
-  if (tab.selectedNodeId) params.set("n", tab.selectedNodeId);
+  if (tab.selectedNodeId != null) params.set("n", tab.selectedNodeId);
+  // One `e` per opened directory: a directory's depth is the tree's
+  // state, so a link without it would open on a closed tree.
+  for (const dir of graphExpandedList(tab.expanded)) params.append("e", dir);
   return `${GRAPH_LINK_PREFIX}${params.toString()}`;
 }
 
 export type ParsedGraphLink = {
-  mode: GraphTab["mode"];
-  scopeId: string;
   depth: number;
   filters: GraphFilters;
   selectedNodeId: string | null;
+  expanded: Record<string, boolean>;
 };
 
 /// Parse a `chan://graph?...` link back into the fields needed to open a
-/// graph tab. Returns null when the string is not a graph link or has no
-/// scope. Lenient on the rest: missing depth -> 1, missing mode ->
-/// semantic, missing filters -> all-on (decodeGraphTabFilters default).
+/// graph tab. Returns null when the string is not a graph link or carries
+/// no `s`, which every link is written with. Lenient on the rest: missing
+/// depth -> 1, missing filters -> all-on (decodeGraphTabFilters default).
+/// A link whose `s` names a scope of its own reads as the workspace with
+/// that scope's node selected.
 export function parseGraphLink(link: string): ParsedGraphLink | null {
   const trimmed = link.trim();
   if (!trimmed.startsWith(GRAPH_LINK_PREFIX)) return null;
@@ -7520,18 +7486,16 @@ export function parseGraphLink(link: string): ParsedGraphLink | null {
   if (!scopeId) return null;
   const depthRaw = params.get("d");
   const depth = depthRaw ? Number.parseInt(depthRaw, 10) : 1;
-  const modeChar = params.get("m");
-  return {
-    mode:
-      modeChar === "f"
-        ? "filesystem"
-        : modeChar === "l"
-          ? "language"
-          : "semantic",
+  const one = oneGraphOf(
     scopeId,
+    params.get("n"),
+    graphExpandedFromList(params.getAll("e")),
+  );
+  return {
     depth: Number.isFinite(depth) && depth > 0 ? depth : 1,
     filters: decodeGraphTabFilters(params.get("f") ?? undefined),
-    selectedNodeId: params.get("n"),
+    selectedNodeId: one.select,
+    expanded: one.expanded,
   };
 }
 
@@ -7628,18 +7592,18 @@ function serializeTab(
   if (t.kind === "graph") {
     return {
       k: "g",
-      gm: t.mode === "filesystem" ? "f" : t.mode === "language" ? "l" : "s",
-      gs: t.scopeId,
       ...(t.depth !== 1 ? { gd: t.depth } : {}),
       ...(t.inspectorOpen ? { gi: 1 as const } : {}),
       gf: encodeGraphTabFilters(t.filters),
       ...(graphExpandedList(t.expanded).length
         ? { ge: graphExpandedList(t.expanded) }
         : {}),
-      ...(t.pendingSelectId ? { gp: t.pendingSelectId } : {}),
+      // The workspace's own node has the id "", so both are written
+      // whenever they are set, not whenever they are truthy.
+      ...(t.pendingSelectId != null ? { gp: t.pendingSelectId } : {}),
       // Persist the live selection so reload restores both the selected
       // node and the selection-driven tab title before data reloads.
-      ...(t.selectedNodeId ? { gn: t.selectedNodeId } : {}),
+      ...(t.selectedNodeId != null ? { gn: t.selectedNodeId } : {}),
       ...(t.selectedNodeLabel ? { gnl: t.selectedNodeLabel } : {}),
       ...(t.inspectorWidth && t.inspectorWidth > 0
         ? { iw: Math.round(t.inspectorWidth) }
@@ -7810,25 +7774,28 @@ export function serializeLayout(opts: SerializeLayoutOptions = {}): SerNode | nu
 // caller's job.
 
 function restoreGraphTabFromSer(sertab: SerTab): GraphTab {
-  const mode = restoreGraphMode(sertab.gm);
-  const scopeId = sertab.gs || "workspace";
   // Prefer `gn` (persisted live selection) as the post-restore
   // seed so the user lands on the same focal node. The graph
   // load consumes `pendingSelectId` once; `selectedNodeId`
   // stays so the tab title remains selection-driven.
   const selectedNodeId = typeof sertab.gn === "string" ? sertab.gn : null;
   const selectedNodeLabel = typeof sertab.gnl === "string" ? sertab.gnl : null;
+  // A tab saved with a scope of its own, in any of the modes a graph had,
+  // reads as the one graph with that scope's node selected.
+  const one = oneGraphOf(
+    sertab.gs || "workspace",
+    sertab.gp ?? selectedNodeId,
+    graphExpandedFromList(sertab.ge),
+  );
   return {
     kind: "graph",
     id: id("graph"),
-    title: graphTitle(mode, scopeId),
-    mode,
-    scopeId,
+    title: GRAPH_TAB_TITLE,
     depth: Number.isFinite(sertab.gd) ? Math.max(0, Number(sertab.gd)) : 1,
-    expanded: graphExpandedFromList(sertab.ge),
+    expanded: one.expanded,
     filters: decodeGraphTabFilters(sertab.gf),
     inspectorOpen: sertab.gi === 1,
-    pendingSelectId: sertab.gp ?? selectedNodeId,
+    pendingSelectId: one.select,
     selectedNodeId,
     selectedNodeLabel,
     ...(typeof sertab.iw === "number" && sertab.iw > 0

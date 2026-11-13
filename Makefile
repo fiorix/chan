@@ -287,7 +287,7 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/test-desktop-package-version.py
 
 .PHONY: desktop-entries-check
-desktop-entries-check: ## Check the chan-files and chan-edit desktop entries (Linux: desktop-file-validate).
+desktop-entries-check: ## Check the chan-files, chan-edit and chan-term desktop entries (Linux: desktop-file-validate).
 	$(LINUX_ONLY)
 	$(PYTHON) scripts/test-check-desktop-entries.py
 	$(PYTHON) scripts/check-desktop-entries.py
@@ -840,8 +840,13 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	# gateway-spa, which runs vite build alone, so its check + test belong here
 	# for the same reason. Gate web-shared directly too: package-level tests can
 	# cover command-deck behavior without relying on an importing SPA to do so.
+	# @chan/ghostty-web-ng's check type-checks chan's libghostty-vt binding in
+	# its vt/ and the widget sources lib/index.ts reaches, under the app's
+	# rules, and its tests cover the binding; the workspace app's suite tests
+	# the app's adapters over the binding, not the binding itself.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/web-shared && $(NPM) run test -w @chan/web-shared \
+		&& $(NPM) run check -w @chan/ghostty-web-ng && $(NPM) run test -w @chan/ghostty-web-ng \
 		&& $(NPM) run check -w @chan/launcher && $(NPM) run test -w @chan/launcher \
 		&& $(NPM) run check -w @chan/workspace-app && $(NPM) run test -w @chan/workspace-app \
 		&& $(NPM) run check -w @chan/profile && $(NPM) run test -w @chan/profile \

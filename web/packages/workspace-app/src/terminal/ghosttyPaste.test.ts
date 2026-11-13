@@ -17,9 +17,9 @@ import {
   pasteLineEnds,
   type GhosttyPasteTerminal,
 } from "./ghosttyPaste";
-import { GhosttyVt, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const OPEN = "\x1b[200~";
 const CLOSE = "\x1b[201~";
 
@@ -59,7 +59,7 @@ afterEach(() => {
 /// bracketed paste (DECSET 2004).
 async function openTerminal(bracketed: boolean) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt.asGhostty(), cursorBlink: false, smoothScrollDuration: 0 });
+  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
   const tab = document.createElement("div");
   const host = document.createElement("div");
   tab.append(host);

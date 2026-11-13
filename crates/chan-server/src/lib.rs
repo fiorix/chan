@@ -94,6 +94,13 @@ pub use chan_library::desktop_window_ops::{
     WireguardKeyOutcome, NO_DESKTOP,
 };
 pub use chan_library::terminal_sessions::TerminalExit;
+/// Re-exported so the CLI and the desktop, which start chan's AppImage again,
+/// hand the child the environment the user had, as a terminal gets it.
+pub use chan_library::terminal_sessions::{
+    appimage_host_var, hand_appimage_host_env, own_appimage, own_apprun_value,
+    without_apprun_blocks, without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
+    GUI_STACK_REEXEC_LIBRARY, GUI_STACK_REEXEC_MARKER, GUI_STACK_REEXEC_MARKERS,
+};
 pub use chan_library::terminal_sessions::{
     TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,
 };
@@ -194,6 +201,7 @@ use chan_workspace::{
 };
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 /// Both tenant routers hide extension path capabilities and query bearers
@@ -2061,7 +2069,13 @@ fn router_with_extensions(
         .route("/api/resolve-link", get(api_resolve_link))
         .route("/api/headings/{*path}", get(api_headings))
         .route("/api/links", get(api_links))
-        .route("/api/graph", get(api_graph))
+        // The whole workspace's graph is megabytes of JSON that repeats its
+        // keys and paths, and a window fetches it again after every change.
+        // A client that accepts gzip is sent a small fraction of it.
+        .route(
+            "/api/graph",
+            get(api_graph).layer(CompressionLayer::new().gzip(true)),
+        )
         .route("/api/graph/languages", get(api_language_graph))
         .route("/api/fs-graph", get(api_fs_graph))
         .route("/api/inspector", get(api_inspector))

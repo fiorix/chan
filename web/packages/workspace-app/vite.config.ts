@@ -30,26 +30,9 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 // (src/terminal/xtermKeyboard.ts, src/terminal/keyboardProtocolStream.ts).
 const xtermSrc = join(dirname(require.resolve("@xterm/xterm/package.json")), "src");
 
-// Terminal receives chan's vendored core through its ghostty option; the
-// widget's default loader is unused. That loader names the widget's own wasm
-// as `new URL(..., import.meta.url)`, which vite would emit as a second wasm
-// asset, so the URL is blanked to "data:," before vite sees it.
+// The terminal widget's entry module, whose lazily loaded chunk keeps the
+// name ghostty-web (see chunkFileNames below).
 const ghosttyWidgetEntry = normalize(require.resolve("@chan/ghostty-web-ng"));
-
-function ghosttyExternalWasm(): Plugin {
-  const loader = join(dirname(ghosttyWidgetEntry), "ghostty.ts");
-  const wasmUrl = "new URL('../ghostty-vt.wasm', import.meta.url)";
-  return {
-    name: "ghostty-external-wasm",
-    apply: "build",
-    enforce: "pre",
-    transform(code, id) {
-      if (normalize(id) !== loader) return;
-      if (code.split(wasmUrl).length !== 2) this.error("the ghostty widget's wasm URL was not found exactly once");
-      return { code: code.replace(wasmUrl, 'new URL("data:,", import.meta.url)'), map: null };
-    },
-  };
-}
 
 // Self-host excalidraw's canvas fonts. Excalidraw fetches label fonts at
 // runtime from `EXCALIDRAW_ASSET_PATH + fonts/<Family>/<file>.woff2`;
@@ -123,7 +106,7 @@ function sourceCodeProLicense(): Plugin {
 
 export default defineConfig({
   base: "./",
-  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense(), ghosttyExternalWasm()],
+  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense()],
   resolve: {
     alias: {
       "@chan/web-shared/command-deck": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/command-deck/model.ts"),
@@ -189,7 +172,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     // Guarantees a working localStorage / sessionStorage under every Node the
-    // gate runs on; see vitest.setup.ts for what jsdom does not deliver.
+    // gate runs on, and ends each file's timers with its page; see
+    // vitest.setup.ts for what jsdom does not deliver.
     setupFiles: ["./vitest.setup.ts"],
     alias: [
       { find: /^svelte$/, replacement: svelteClient },

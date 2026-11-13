@@ -9,83 +9,166 @@
   // slider values map 1:1 onto `DEFAULT_FORCE` in src/graph/force.ts: dial
   // a look you like, hit "Copy FORCE", and paste it back into that file to
   // ship it to the live graph.
+  //
+  // What is drawn follows the Graph tab's rules (../graph/selectionView.ts):
+  // the workspace's tree as far as it is opened, with what the selected node
+  // reveals laid over it. Click a node to select it; the depth is that
+  // node's. Double-click a directory to open or close it. The Pins and
+  // Framing choices override the graph's own answer, to try another layout.
 
   import GraphCanvas from "../components/GraphCanvas.svelte";
+  import { directoryNodeId } from "../graph/canvasNodes";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
-  import { FS_GRAPH_DEPTH_MAX, relativeDepth } from "../graph/depth";
   import {
-    defaultSpec, makeTunerGraph,
-    type GraphSpec, type TunerEdge, type TunerGraph, type TunerNode,
+    graphNodeIds, openBelow, openedDepth, openedFor, selectedDirectory, selectionDepthCap,
+    type Opened,
+  } from "../graph/selectionView";
+  import {
+    defaultSpec, makeTunerGraph, tunerSubjects,
+    type GraphSpec, type TunerEdge, type TunerGraph,
   } from "./fakeData";
   // ---- tunable state ----------------------------------------------------
+  //
+  // Every control starts from the page's query string and is written back
+  // to it, so a link reproduces the layout it was copied from.
 
-  let force = $state<GraphForce>({ ...DEFAULT_FORCE });
-  let spec = $state<GraphSpec>({ ...defaultSpec });
-  /// Filesystem depth cutoff, mirroring the Graph tab's workspace-scope
-  /// depth slider: at depth D every file/dir whose path is within D
-  /// levels of the root shows, plus the tags / mentions / languages
-  /// attached to a visible node. Starts high so the full graph shows;
-  /// clamped to the active graph's max depth.
-  let depth = $state(99);
-  let uiTheme = $state<"dark" | "light">("dark");
-  /// Where the workspace-root node is pinned. "center"/"bottom" pin it
-  /// (matching the Graph tab / Dashboard slide); "none" lets the whole
-  /// cluster bbox-center with no anchor.
-  let rootAnchor = $state<"center" | "bottom" | "none">("bottom");
-  let selectedId = $state<string | null>(null);
+  const query = new URLSearchParams(window.location.search);
+  function queryChoice<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+    const value = query.get(name);
+    return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+  }
+  function queryNumber(name: string, fallback: number): number {
+    const value = query.get(name);
+    const parsed = value === null || value === "" ? NaN : Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  const FORCE_KEYS = Object.keys(DEFAULT_FORCE) as (keyof GraphForce)[];
+  const SPEC_KEYS = Object.keys(defaultSpec) as (keyof GraphSpec)[];
+
+  let force = $state<GraphForce>(
+    Object.fromEntries(FORCE_KEYS.map((k) => [k, queryNumber(k, DEFAULT_FORCE[k])])) as GraphForce,
+  );
+  const querySpec = Object.fromEntries(
+    SPEC_KEYS.map((k) => [k, queryNumber(k, defaultSpec[k])]),
+  ) as GraphSpec;
+  let spec = $state<GraphSpec>(querySpec);
+
+  /// Hops of references a selected file, tag, mention or contact reveals.
+  /// It goes back to 1 on every new selection.
+  let hops = $state(queryNumber("hops", 1));
+  /// Which nodes the canvas pins: the graph's own answer (the workspace's
+  /// node), the selected node, or none.
+  const PINS = ["root", "selected", "none"] as const;
+  let pins = $state<(typeof PINS)[number]>(queryChoice("pins", PINS, "root"));
+  /// How the canvas frames the layout: the graph's own answer (bottom), or
+  /// one of the canvas's other framings.
+  const FRAMINGS = ["bottom", "center", "bounds"] as const;
+  let framing = $state<(typeof FRAMINGS)[number]>(queryChoice("framing", FRAMINGS, "bottom"));
+  let uiTheme = $state<"dark" | "light">(queryChoice("theme", ["dark", "light"] as const, "dark"));
+  /// The selected node. The graph starts on the node the query names, the
+  /// workspace's own when it names none, as a graph tab opens.
+  const NOTHING = "(nothing)";
+  const querySelect = query.get("select") ?? "";
+  let selectedId = $state<string | null>(querySelect === NOTHING ? null : querySelect);
   let copied = $state(false);
 
   const activeGraph: TunerGraph = $derived(makeTunerGraph(spec));
+  /// What the Selected menu offers, by kind, in the active dataset.
+  const subjectChoices = $derived(tunerSubjects(spec));
 
-  /// Path-depth of a node: workspace root = 0, top-level = 1, nested = n.
-  /// Non-hierarchical kinds (tag / mention / language) have no path, so
-  /// they return Infinity and ride in only when linked to a visible node.
-  function nodeDepth(n: TunerNode): number {
-    if (n.kind === "tag" || n.kind === "mention" || n.kind === "language") return Infinity;
-    if (n.kind === "folder" && (n.id === "" || n.path === "")) return 0;
-    const path = n.kind === "folder" || n.kind === "file" ? n.path : "";
-    return relativeDepth("", path);
+  /// The tree's state: the directories that are opened. The query lists
+  /// them; with none listed the graph opens as one does on the node it
+  /// starts on.
+  const queryOpen = query.get("open");
+  let opened = $state<Opened>(
+    queryOpen === null
+      ? openedFor(makeTunerGraph(querySpec).nodes, querySelect === NOTHING ? null : querySelect)
+      : Object.fromEntries(["", ...queryOpen.split(",").filter(Boolean)].map((dir) => [dir, true])),
+  );
+
+  // ---- the depth, which is the selected node's ---------------------------
+
+  /// The directory the depth acts on: the selected one, the root when
+  /// nothing is selected, null when the selection is not a directory.
+  const depthDir: string | null = $derived(selectedDirectory(activeGraph.nodes, selectedId));
+  const depthMax: number = $derived(
+    selectionDepthCap(activeGraph.nodes, activeGraph.edges, selectedId),
+  );
+  /// A directory's depth is read from the tree; any other node's is the
+  /// hops its selection reveals.
+  const depth: number = $derived(
+    depthDir !== null
+      ? Math.min(openedDepth(activeGraph.nodes, opened, depthDir), depthMax)
+      : Math.max(1, Math.min(hops, depthMax)),
+  );
+  /// A directory other than the root can be closed, which is depth 0.
+  const depthMin: number = $derived(depthDir !== null && depthDir !== "" ? 0 : 1);
+  function setDepth(value: number): void {
+    if (depthDir !== null) opened = openBelow(activeGraph.nodes, opened, depthDir, value);
+    else hops = value;
   }
 
-  // Cap at FS_GRAPH_DEPTH_MAX to match chan's workspace-scope depth
-  // slider: GraphPanel fetches + caps the fs-graph at that depth
-  // (graph/depth graphDepthCap), so the app can't reveal past it. A generated
-  // tree may be deeper, but the tuner tracks whatever the app actually
-  // allows.
-  const maxDepth: number = $derived.by(() => {
-    let m = 1;
-    for (const n of activeGraph.nodes) {
-      const d = nodeDepth(n);
-      if (d !== Infinity && d > m) m = d;
-    }
-    return Math.min(m, FS_GRAPH_DEPTH_MAX);
-  });
-  const effDepth: number = $derived(Math.min(depth, maxDepth));
+  /// Selecting a node makes the depth that node's: a directory's is read
+  /// from the tree as it stands, any other node starts at one hop.
+  function select(id: string | null): void {
+    selectedId = id;
+    hops = 1;
+  }
+  /// Double-click: open a closed directory, close an opened one.
+  function toggleSelectedDirectory(): void {
+    if (depthDir === null || depthDir === "") return;
+    const isOpen = openedDepth(activeGraph.nodes, opened, depthDir) > 0;
+    opened = openBelow(activeGraph.nodes, opened, depthDir, isOpen ? 0 : 1);
+  }
 
-  // Depth-limited visibility. GraphCanvas takes the FULL node/edge set
-  // plus the visible subset (it filters + preserves positions), same as
-  // GraphPanel; the depth slider drives the subset.
+  // What the canvas is handed, derived as GraphPanel derives it with every
+  // filter chip on: the graph's nodes, the edges between them, and a meta
+  // node only where one of those edges reaches it.
   const visible: { ids: Set<string>; edges: TunerEdge[] } = $derived.by(() => {
-    const dep = new Map<string, number>();
-    for (const n of activeGraph.nodes) dep.set(n.id, nodeDepth(n));
+    const included = graphNodeIds({
+      nodes: activeGraph.nodes,
+      edges: activeGraph.edges,
+      opened,
+      selectedId,
+      depth,
+    });
+    const edges = activeGraph.edges.filter((e) => included.has(e.source) && included.has(e.target));
     const ids = new Set<string>();
     for (const n of activeGraph.nodes) {
-      const d = dep.get(n.id) ?? Infinity;
-      if (d !== Infinity && d <= effDepth) ids.add(n.id);
+      if (included.has(n.id) && (n.kind === "file" || n.kind === "folder")) ids.add(n.id);
     }
-    // Pull in tag / mention / language nodes attached to a visible node.
-    for (const e of activeGraph.edges) {
-      if (dep.get(e.source) === Infinity && ids.has(e.target)) ids.add(e.source);
-      if (dep.get(e.target) === Infinity && ids.has(e.source)) ids.add(e.target);
+    for (const e of edges) {
+      ids.add(e.source);
+      ids.add(e.target);
     }
-    const edges = activeGraph.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
     return { ids, edges };
   });
   const visibleNodeIds: Set<string> = $derived(visible.ids);
-  const focalIds: string[] = $derived(rootAnchor === "none" ? [] : [""]);
-  const focalAnchor: "center" | "bottom" = $derived(
-    rootAnchor === "bottom" ? "bottom" : "center",
+
+  const focalIds: string[] = $derived(
+    pins === "root" ? [""] : pins === "selected" && selectedId !== null ? [selectedId] : [],
   );
+
+  // The query string follows the controls. A value at its default is left
+  // out, so a link names only what was changed.
+  $effect(() => {
+    const next = new URLSearchParams();
+    if (selectedId !== "") next.set("select", selectedId ?? NOTHING);
+    const dirs = Object.keys(opened).filter((dir) => dir !== "" && opened[dir]).sort();
+    if (dirs.length > 0) next.set("open", dirs.join(","));
+    if (hops !== 1) next.set("hops", String(hops));
+    if (pins !== "root") next.set("pins", pins);
+    if (framing !== "bottom") next.set("framing", framing);
+    if (uiTheme !== "dark") next.set("theme", uiTheme);
+    for (const k of FORCE_KEYS) {
+      if (force[k] !== DEFAULT_FORCE[k]) next.set(k, String(force[k]));
+    }
+    for (const k of SPEC_KEYS) {
+      if (spec[k] !== defaultSpec[k]) next.set(k, String(spec[k]));
+    }
+    const search = next.toString();
+    window.history.replaceState(null, "", search ? `?${search}` : window.location.pathname);
+  });
 
   // Drive the theme the same way the app does: data-theme on <html>.
   // GraphCanvas's MutationObserver re-reads the CSS vars on the flip.
@@ -115,6 +198,7 @@
     { key: "hierarchyYSpacing", label: "Hierarchy Y spacing", min: 0, max: 300, step: 5, hint: "vertical gap between filesystem depth bands" },
     { key: "hierarchyYStrength", label: "Hierarchy Y strength", min: 0, max: 1, step: 0.01, hint: "how hard nodes snap to their depth band" },
     { key: "parentXStrength", label: "Parent X strength", min: 0, max: 1, step: 0.01, hint: "pull toward parent dir's X (clusters siblings)" },
+    { key: "metaLift", label: "Meta lift", min: 0, max: 3, step: 0.25, hint: "bands a tag / mention / language sits above its deepest file; 0 leaves it floating at the root's level" },
   ];
 
   // Reassign a NEW object each change so GraphCanvas's reference compare
@@ -173,6 +257,8 @@
     { color: "var(--g-tag)", label: "tag" },
     { color: "var(--g-language)", label: "language" },
     { color: "var(--g-folder)", label: "folder" },
+    { color: "var(--g-symlink)", label: "symlink edge" },
+    { color: "var(--g-hardlink)", label: "hardlink edge" },
     { color: "var(--fb-drafts-fg)", label: "drafts" },
   ];
 </script>
@@ -185,19 +271,79 @@
     </header>
 
     <section>
-      <div class="section-head"><h2>Data</h2></div>
-      <label class="row" title="Filesystem depth (directory expansion), like the Graph tab's workspace-scope depth slider">
-        <span class="name">Depth</span>
-        <span class="val">{effDepth} / {maxDepth}</span>
+      <div class="section-head"><h2>Graph</h2></div>
+      <label class="row inline" title="The selected node; the same as clicking it on the canvas">
+        <span class="name">Selected</span>
+        <select value={selectedId ?? NOTHING} onchange={(e) => select(e.currentTarget.value === NOTHING ? null : e.currentTarget.value)}>
+          <option value={NOTHING}>{NOTHING}</option>
+          <option value="">workspace</option>
+          <optgroup label="directories">
+            {#each subjectChoices.dir as path (path)}
+              <option value={directoryNodeId(path)}>{path}/</option>
+            {/each}
+          </optgroup>
+          <optgroup label="files">
+            {#each subjectChoices.file as path (path)}
+              <option value={path}>{path}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="contacts">
+            {#each subjectChoices.contact as path (path)}
+              <option value={path}>{path}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="tags">
+            {#each subjectChoices.tag as id (id)}
+              <option value={id}>{id}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="mentions">
+            {#each subjectChoices.mention as id (id)}
+              <option value={id}>{id}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="languages">
+            {#each subjectChoices.language as name (name)}
+              <option value={`language:${name}`}>{name}</option>
+            {/each}
+          </optgroup>
+        </select>
+      </label>
+      <label
+        class="row"
+        title={depthDir !== null
+          ? "Directory levels opened below the selected directory (the root when nothing is selected)"
+          : "Hops of references walked from the selected node"}
+      >
+        <span class="name">Depth · {depthDir !== null ? "levels" : "hops"}</span>
+        <span class="val">{depth} / {depthMax}</span>
         <input
           type="range"
-          min="1"
-          max={maxDepth}
+          min={depthMin}
+          max={depthMax}
           step="1"
-          value={effDepth}
-          oninput={(e) => (depth = +e.currentTarget.value)}
+          value={depth}
+          disabled={depthMax <= depthMin}
+          oninput={(e) => setDepth(+e.currentTarget.value)}
         />
       </label>
+      <label class="row inline" title="Which nodes the canvas pins in place">
+        <span class="name">Pins</span>
+        <select value={pins} onchange={(e) => (pins = e.currentTarget.value as typeof pins)}>
+          <option value="root">workspace root</option>
+          <option value="selected">selected node</option>
+          <option value="none">none</option>
+        </select>
+      </label>
+      <label class="row inline" title="Where the automatic fit places the view">
+        <span class="name">Framing</span>
+        <select value={framing} onchange={(e) => (framing = e.currentTarget.value as typeof framing)}>
+          <option value="bottom">bottom</option>
+          <option value="center">center</option>
+          <option value="bounds">bounds</option>
+        </select>
+      </label>
+      <p class="note">Click a node to select it: the depth becomes that node's. Double-click a directory to open or close it.</p>
       <p class="note">{visible.ids.size} / {activeGraph.nodes.length} nodes · {visible.edges.length} / {activeGraph.edges.length} edges</p>
     </section>
 
@@ -245,6 +391,14 @@
           oninput={(e) => updateSpec("seed", Math.trunc(+e.currentTarget.value) || 0)}
         />
       </label>
+      <label class="row inline" title="Every file at the workspace root, no directories">
+        <span class="name">Flat workspace</span>
+        <input
+          type="checkbox"
+          checked={spec.flat === 1}
+          onchange={(e) => updateSpec("flat", e.currentTarget.checked ? 1 : 0)}
+        />
+      </label>
       {#each SPEC_SLIDERS as s (s.key)}
         <label class="row">
           <span class="name">{s.label}</span>
@@ -269,14 +423,6 @@
           {uiTheme}
         </button>
       </label>
-      <label class="row inline">
-        <span class="name">Root anchor</span>
-        <select value={rootAnchor} onchange={(e) => (rootAnchor = e.currentTarget.value as typeof rootAnchor)}>
-          <option value="center">center (pinned)</option>
-          <option value="bottom">bottom (pinned)</option>
-          <option value="none">none (free)</option>
-        </select>
-      </label>
       <div class="legend">
         {#each legend as l (l.label)}
           <span class="chip"><i style:background={l.color}></i>{l.label}</span>
@@ -294,9 +440,10 @@
       {visibleNodeIds}
       visibleEdges={visible.edges}
       {focalIds}
-      {focalAnchor}
+      focalAnchor={framing}
       {selectedId}
-      onSelect={(id) => (selectedId = id)}
+      onSelect={select}
+      onSetAsScope={toggleSelectedDirectory}
       {force}
     />
   </div>
@@ -323,6 +470,8 @@
     --g-source: #4169e1;
     --g-binary: #5e5e62;
     --g-folder: #8e8e93;
+    --g-symlink: #3cc8d8;
+    --g-hardlink: #b4cc3a;
     --g-contact: var(--warn-text);
     --fb-drafts-fg: #e3b341;
   }
@@ -343,6 +492,8 @@
     --g-source: #2851c4;
     --g-binary: #4e4e54;
     --g-folder: #6c6c70;
+    --g-symlink: #0b7f8f;
+    --g-hardlink: #6b8a14;
     --g-contact: var(--warn-text);
     --fb-drafts-fg: #9a6700;
   }

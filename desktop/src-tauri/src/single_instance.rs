@@ -15,8 +15,8 @@
 //! its pipe not created yet, is waited for first. When that desktop does not
 //! answer, or is still shutting down past the wait, the launch says so in a
 //! native message before it exits, unless its stderr is a terminal that has
-//! the log line. The CLI personalities and the default-terminal launch never
-//! reach this: they are dispatched before it in `main`.
+//! the log line. The CLI personalities and the `chan-term` launch never reach
+//! this: they are dispatched before it in `main`.
 //!
 //! The endpoint is per account (the runtime directory on unix, the account's
 //! SID in both pipes' names on Windows), not per `CHAN_HOME`.
@@ -205,13 +205,17 @@ pub(crate) fn decide<C>(
 }
 
 /// Run the check for a GUI launch given `paths` (absolute, from
-/// `launch_paths`): the claimed endpoint for the listener, or `None` to boot
-/// without one. A launch another desktop answers for ends the process here,
-/// its paths handed to that desktop; a launch that boots keeps its paths for
-/// its own boot to open.
-pub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {
+/// `launch_paths`) or the `terminal` a `chan-term` that started it asked for:
+/// the claimed endpoint for the listener, or `None` to boot without one. A
+/// launch another desktop answers for ends the process here, its paths or
+/// its terminal handed to that desktop; a launch that boots keeps them for its
+/// own boot to open.
+pub(crate) fn guard(paths: &[String], terminal: Option<&str>) -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
-        Some(path) => check_at(&path, BOUNDS, paths),
+        Some(path) => match terminal {
+            Some(dir) => check_terminal_at(&path, BOUNDS, dir),
+            None => check_at(&path, BOUNDS, paths),
+        },
         None => Startup::RunWithoutListener {
             why: "no handoff endpoint for this account (no owner-controlled runtime directory \
                   on unix, no readable account SID on Windows)"
@@ -361,9 +365,71 @@ fn show_message(notice: Notice) {
 fn show_message(_: Notice) {}
 
 fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointClaim> {
+    check_with(path, bounds, |budget| {
+        forward_with(
+            paths,
+            budget,
+            bounds.ask,
+            |open, budget| {
+                tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
+            },
+            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+        )
+    })
+}
+
+/// [`check_at`] for a launch that carries a terminal: the holder is asked for
+/// it, an `OpenTerminal`, where a launch without paths asks it to come
+/// forward, since the terminal window it opens is raised
+/// ([`forward_terminal_with`]).
+fn check_terminal_at(path: &Path, bounds: Bounds, dir: &str) -> Startup<EndpointClaim> {
+    check_with(path, bounds, |budget| {
+        forward_terminal_with(
+            dir,
+            budget,
+            |dir, budget| {
+                tauri::async_runtime::block_on(handoff::try_open_terminal_at(path, dir, budget))
+            },
+            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+        )
+    })
+}
+
+/// Hand the launch's terminal to the holder, as [`forward_with`] hands over
+/// paths: the terminal it opened raised its window, so the holder came
+/// forward. A holder that refuses the terminal, without saying it is shutting
+/// down, is asked to come forward as a launch without one would, so the
+/// launch that exits for it still leaves a desktop in front; when that goes
+/// unanswered it is still a desktop that answered, so it reads as the
+/// terminal's refusal and the terminal is not sent again. A holder that says
+/// it is shutting down is answered for at once: the launch waits for it and
+/// boots with the terminal.
+fn forward_terminal_with(
+    dir: &str,
+    budget: Duration,
+    open: impl FnOnce(&str, Duration) -> ActivateReply,
+    activate: impl FnOnce(Duration) -> ActivateReply,
+) -> ActivateReply {
+    match open(dir, budget) {
+        ActivateReply::Refused { reply } if !is_shutting_down(&reply) => {
+            tracing::warn!(%dir, %reply, "the running chan-desktop did not open the terminal");
+            match activate(budget) {
+                ActivateReply::NoReply => ActivateReply::Refused { reply },
+                answered => answered,
+            }
+        }
+        answered => answered,
+    }
+}
+
+fn check_with(
+    path: &Path,
+    bounds: Bounds,
+    forward: impl FnMut(Duration) -> ActivateReply,
+) -> Startup<EndpointClaim> {
     decide(
         claim(path),
-        || ask(path, bounds, paths),
+        || ask(path, bounds, forward),
         |wait| {
             let grace = match wait {
                 Wait::Drain => bounds.drain,
@@ -388,21 +454,15 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     }
 }
 
-fn ask(path: &Path, bounds: Bounds, paths: &[String]) -> Answer<EndpointClaim> {
+fn ask(
+    path: &Path,
+    bounds: Bounds,
+    forward: impl FnMut(Duration) -> ActivateReply,
+) -> Answer<EndpointClaim> {
     ask_with(
         bounds,
         || handoff::endpoint_is_booting_at(path),
-        |budget| {
-            forward_with(
-                paths,
-                budget,
-                bounds.ask,
-                |open, budget| {
-                    tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
-                },
-                |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
-            )
-        },
+        forward,
         || match claim(path) {
             Lock::Taken(claim) => Some(claim),
             Lock::Held | Lock::Unavailable(_) => None,
@@ -647,12 +707,8 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     match forward_for(app, state) {
         Forward::Raise(label) => {
             if let Some(window) = app.get_webview_window(&label) {
-                let _ = window.unminimize();
-                if let Err(e) = window.show() {
-                    tracing::warn!(label = %window.label(), error = %e, "showing the window to come forward failed");
-                }
-                if let Err(e) = window.set_focus() {
-                    tracing::warn!(label = %window.label(), error = %e, "focusing the window to come forward failed");
+                if let Err(e) = crate::raise::raise_window(&window) {
+                    tracing::warn!(label = %window.label(), error = %e, "raising the window to come forward failed");
                 }
             }
         }
@@ -1183,7 +1239,9 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("the test module separates the production code");
         let (_, guard) = production
-            .split_once("\npub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {")
+            .split_once(
+                "\npub(crate) fn guard(paths: &[String], terminal: Option<&str>) -> Option<EndpointClaim> {",
+            )
             .expect("guard exists");
         let (guard, _) = guard.split_once("\n}\n").expect("guard ends");
         let reported = guard
@@ -1271,6 +1329,38 @@ mod tests {
             forward_choice(Some("local::gone"), &[], false),
             Forward::OpenTerminal
         );
+    }
+
+    /// The window `come_forward` picks is raised through the shared raise,
+    /// which restores, shows and focuses it (`raise.rs` pins that order). A
+    /// source pin: it holds the call, not what the platform then does.
+    #[test]
+    fn come_forward_raises_its_window_through_the_shared_raise() {
+        let (production, _) = include_str!("single_instance.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, come_forward) = production
+            .split_once("\npub(crate) fn come_forward(")
+            .expect("come_forward exists");
+        let (come_forward, _) = come_forward
+            .split_once("\n}\n")
+            .expect("come_forward ends at a column-0 brace");
+        let (_, raise) = come_forward
+            .split_once("Forward::Raise(label) => {")
+            .expect("come_forward has a raise arm");
+        let (raise, _) = raise
+            .split_once("Forward::OpenTerminal =>")
+            .expect("the terminal arm follows the raise arm");
+        assert!(
+            raise.contains("crate::raise::raise_window(&window)"),
+            "{raise}"
+        );
+        for own in ["window.unminimize()", "window.show()", "window.set_focus()"] {
+            assert!(
+                !come_forward.contains(own),
+                "come_forward must leave {own} to the shared raise"
+            );
+        }
     }
 
     #[test]
@@ -1399,6 +1489,104 @@ mod tests {
             reopen_for(app, &desktop.state),
             Forward::WindowOnItsWay,
             "a reopen while a minted window has no native window yet opens nothing"
+        );
+    }
+
+    /// A desktop on a temporary endpoint that answers an `OpenTerminal` with
+    /// `terminal` and an `Activate` with `Activated`, reporting each request
+    /// it read: `open_terminal <cwd>` or `activate`.
+    #[cfg(unix)]
+    fn terminal_holder(
+        sock: &Path,
+        terminal: fn() -> Response,
+    ) -> (ListenerHandle, std::sync::mpsc::Receiver<String>) {
+        let (sent, asked) = std::sync::mpsc::channel();
+        let listener = tauri::async_runtime::block_on(async {
+            handoff::start_listener(sock.to_path_buf(), move |req| {
+                let sent = sent.clone();
+                async move {
+                    match req {
+                        handoff::Request::OpenTerminal { cwd, .. } => {
+                            let _ = sent.send(format!("open_terminal {cwd}"));
+                            terminal()
+                        }
+                        handoff::Request::Activate { .. } => {
+                            let _ = sent.send("activate".to_string());
+                            Response::Activated {
+                                desktop_version: "9.9.9".into(),
+                            }
+                        }
+                        _ => Response::Error {
+                            message: "unexpected request".into(),
+                        },
+                    }
+                }
+            })
+        })
+        .unwrap();
+        (listener, asked)
+    }
+
+    /// A launch that carries a `chan-term`'s terminal hands the terminal to
+    /// the desktop it finds, an `OpenTerminal` in its directory, and exits
+    /// without booting; that desktop came forward with the window it opened,
+    /// so it is not asked to come forward as well.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_with_a_terminal_hands_the_terminal_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let (_listener, asked) = terminal_holder(&sock, || Response::TerminalOpened {
+            desktop_version: "9.9.9".into(),
+        });
+        let startup = check_terminal_at(
+            &sock,
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
+            "/srv/notes",
+        );
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+        assert_eq!(startup.exit_code(), Some(0));
+        assert_eq!(
+            asked.try_iter().collect::<Vec<_>>(),
+            ["open_terminal /srv/notes"]
+        );
+    }
+
+    /// A desktop that refuses the terminal it is handed, and is not shutting
+    /// down, is asked to come forward: the launch exits for it, so without
+    /// that nothing would open and nothing would be raised.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_whose_terminal_is_refused_brings_the_desktop_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let (_listener, asked) = terminal_holder(&sock, || Response::Error {
+            message: "embedded local server is unavailable".into(),
+        });
+        let startup = check_terminal_at(
+            &sock,
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
+            "/srv/notes",
+        );
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+        assert_eq!(startup.exit_code(), Some(0));
+        assert_eq!(
+            asked.try_iter().collect::<Vec<_>>(),
+            ["open_terminal /srv/notes", "activate"]
         );
     }
 
@@ -1973,6 +2161,123 @@ mod tests {
             "{answer:?}"
         );
         assert_eq!(sent, 2, "each path is sent once");
+    }
+
+    /// The refusal a desktop with no embedded server gives a terminal.
+    fn terminal_refused() -> ActivateReply {
+        ActivateReply::Refused {
+            reply: serde_json::to_string(&Response::Error {
+                message: "embedded local server is unavailable".into(),
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_holder_that_opens_the_terminal_came_forward() {
+        let mut sent = Vec::new();
+        let reply = forward_terminal_with(
+            "/srv/notes",
+            Duration::from_secs(2),
+            |dir, budget| {
+                sent.push((dir.to_string(), budget));
+                activated()
+            },
+            |_| panic!("a holder that opened the terminal came forward"),
+        );
+        assert_eq!(reply, activated());
+        assert_eq!(sent, [("/srv/notes".to_string(), Duration::from_secs(2))]);
+    }
+
+    /// A holder that refuses the terminal, without saying it is shutting
+    /// down, is asked to come forward as a launch without a terminal would.
+    #[test]
+    fn a_holder_that_refuses_the_terminal_is_asked_to_come_forward() {
+        let mut asked = None;
+        let reply = forward_terminal_with(
+            "/srv/notes",
+            Duration::from_secs(2),
+            |_, _| terminal_refused(),
+            |budget| {
+                asked = Some(budget);
+                activated()
+            },
+        );
+        assert_eq!(reply, activated());
+        assert_eq!(asked, Some(Duration::from_secs(2)));
+    }
+
+    /// A holder that refuses the terminal and leaves the `Activate` after it
+    /// unanswered has answered: it reads as the terminal's refusal, so
+    /// `ask_with` asks once and the terminal is not sent again.
+    #[test]
+    fn a_holder_that_refuses_the_terminal_and_then_is_silent_is_not_asked_again() {
+        let mut sent = 0;
+        let mut forward = |budget| {
+            forward_terminal_with(
+                "/srv/notes",
+                budget,
+                |_, _| {
+                    sent += 1;
+                    terminal_refused()
+                },
+                |_| ActivateReply::NoReply,
+            )
+        };
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::ZERO,
+                ask: Duration::from_secs(5),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || false,
+            &mut forward,
+            || None::<()>,
+        );
+        let ActivateReply::Refused { reply } = terminal_refused() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(&answer, Answer::Refused { reply: got } if *got == reply),
+            "{answer:?}"
+        );
+        assert_eq!(sent, 1, "the terminal is sent once");
+    }
+
+    /// A holder shutting down is answered for at once: the launch waits for
+    /// it and boots with the terminal, so that desktop is asked nothing more.
+    #[test]
+    fn a_holder_shutting_down_is_not_asked_to_come_forward_for_a_terminal() {
+        let shutting = serde_json::to_string(&shutting_down()).unwrap();
+        let reply = forward_terminal_with(
+            "/srv/notes",
+            Duration::from_secs(1),
+            |_, _| ActivateReply::Refused {
+                reply: shutting.clone(),
+            },
+            |_| panic!("a holder shutting down is not asked to come forward"),
+        );
+        assert_eq!(
+            reply,
+            ActivateReply::Refused {
+                reply: shutting.clone()
+            }
+        );
+        assert!(matches!(refusal::<()>(shutting), Answer::ShuttingDown));
+    }
+
+    /// Nothing answered the terminal: `ask_with` asks again, or claims the
+    /// endpoint the holder left.
+    #[test]
+    fn a_holder_that_does_not_answer_the_terminal_is_asked_again() {
+        let reply = forward_terminal_with(
+            "/srv/notes",
+            Duration::from_secs(1),
+            |_, _| ActivateReply::NoReply,
+            |_| panic!("an unanswered launch is not asked to come forward"),
+        );
+        assert_eq!(reply, ActivateReply::NoReply);
     }
 
     /// The Windows twin of `a_launch_beside_a_serving_desktop_hands_over`.

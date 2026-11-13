@@ -48,19 +48,22 @@
         "depends": [],
         "files": {
           "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
-          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",
+          "/usr/share/applications/chan-term.desktop": "../../packaging/distros/shared/chan-term.desktop"
         }
       },
       "rpm": {
         "files": {
           "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
-          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",
+          "/usr/share/applications/chan-term.desktop": "../../packaging/distros/shared/chan-term.desktop"
         }
       },
       "appimage": {
         "files": {
           "/usr/share/chan/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
-          "/usr/share/chan/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+          "/usr/share/chan/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop",
+          "/usr/share/chan/applications/chan-term.desktop": "../../packaging/distros/shared/chan-term.desktop"
         }
       }
     }

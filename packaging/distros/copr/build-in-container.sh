@@ -99,8 +99,8 @@ echo ">> installing $(basename "$rpm_path")" >&2
 dnf -y install "$rpm_path"
 chan --version
 cs --help >/dev/null
-for opener in chan-files chan-edit; do
-    "$opener" --help | grep "^Usage: $opener " >/dev/null
+for name in chan-files chan-edit chan-term; do
+    "$name" --help | grep "^Usage: $name " >/dev/null
 done
 systemd-analyze verify /usr/lib/systemd/user/chan-devserver.service
 
@@ -112,7 +112,8 @@ if [ "$PKG" = chan-desktop ]; then
     grep -aFq 'sudo dnf upgrade' /usr/bin/chan-desktop
     desktop-file-validate /usr/share/applications/chan-desktop.desktop \
         /usr/share/applications/chan-files.desktop \
-        /usr/share/applications/chan-edit.desktop
+        /usr/share/applications/chan-edit.desktop \
+        /usr/share/applications/chan-term.desktop
     ldd_output="$(ldd /usr/bin/chan-desktop)"
     if grep -q 'not found' <<<"$ldd_output"; then
         echo "error: chan-desktop has unresolved shared libraries" >&2

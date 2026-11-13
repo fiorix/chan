@@ -184,7 +184,7 @@
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Ghostty, Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
+  import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
@@ -215,7 +215,7 @@
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
-  import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
+  import { ghosttyScrollbackText, type GhosttyVt } from "@chan/ghostty-web-ng/vt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -1198,7 +1198,7 @@
     // matching the mouse filter's philosophy).
     backend = terminalBackendFromPrefs(terminalPrefs);
     let ghosttyKit: GhosttyKit | null = null;
-    let ghosttyInstance: Ghostty | null = null;
+    let ghosttyInstance: GhosttyVt | null = null;
     if (backend === "ghostty") {
       try {
         ghosttyKit = await loadGhosttyKit();

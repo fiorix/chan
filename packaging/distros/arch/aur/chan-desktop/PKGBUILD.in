@@ -67,6 +67,7 @@ check() {
     desktop-file-validate packaging/distros/shared/chan-desktop.desktop
     desktop-file-validate packaging/distros/shared/chan-files.desktop
     desktop-file-validate packaging/distros/shared/chan-edit.desktop
+    desktop-file-validate packaging/distros/shared/chan-term.desktop
 }
 
 package() {
@@ -76,6 +77,7 @@ package() {
     ln -s chan-desktop "$pkgdir/usr/bin/cs"
     ln -s chan-desktop "$pkgdir/usr/bin/chan-files"
     ln -s chan-desktop "$pkgdir/usr/bin/chan-edit"
+    ln -s chan-desktop "$pkgdir/usr/bin/chan-term"
 
     install -Dm644 packaging/distros/shared/chan-desktop.desktop \
         "$pkgdir/usr/share/applications/chan-desktop.desktop"
@@ -83,6 +85,8 @@ package() {
         "$pkgdir/usr/share/applications/chan-files.desktop"
     install -Dm644 packaging/distros/shared/chan-edit.desktop \
         "$pkgdir/usr/share/applications/chan-edit.desktop"
+    install -Dm644 packaging/distros/shared/chan-term.desktop \
+        "$pkgdir/usr/share/applications/chan-term.desktop"
     install -Dm644 desktop/src-tauri/icons/32x32.png \
         "$pkgdir/usr/share/icons/hicolor/32x32/apps/chan-desktop.png"
     install -Dm644 desktop/src-tauri/icons/64x64.png \

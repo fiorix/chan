@@ -23,6 +23,7 @@ import {
   settle,
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
+import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
 import { layout } from "../state/tabs.svelte";
@@ -34,6 +35,7 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   graphServer.view = {
     nodes: [g.dir(""), g.dir("notes"), g.file("notes/a.md")],
     edges: [g.edge("", "directory:notes", "contains"), g.edge("directory:notes", "notes/a.md", "contains")],
@@ -51,7 +53,7 @@ afterEach(() => {
 });
 
 async function openMenu(): Promise<HTMLElement> {
-  const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+  const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
   openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
   await settle(2);
   const bubble = document.body.querySelector<HTMLElement>(".tab-menu-bubble");
@@ -100,7 +102,7 @@ describe("graph tab menu Escape", () => {
   });
 
   test("passes Escape to the focused surface with no menu open", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
+    await mountGraphPanel(GraphPanel, layout, graphTab());
     const under = document.createElement("button");
     document.body.append(under);
     const seen = vi.fn();

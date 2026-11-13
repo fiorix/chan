@@ -1986,7 +1986,7 @@
                   : active?.kind === "terminal"
                     ? "terminal"
                     : active?.kind === "graph"
-                      ? active.scopeId
+                      ? "graph"
                       : active?.kind === "browser"
                         ? "file browser"
                         : active?.kind === "dashboard"

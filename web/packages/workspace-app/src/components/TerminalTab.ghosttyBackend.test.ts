@@ -8,7 +8,7 @@
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { VtHost } from "../terminal/ghosttyVt";
+import type { VtHost } from "@chan/ghostty-web-ng/vt";
 
 const ghostty = vi.hoisted(() => {
   const record = {
@@ -63,7 +63,7 @@ const ghostty = vi.hoisted(() => {
     wasmTerm = {
       getDimensions: () => ({ cols: this.cols, rows: this.rows }),
       isRowDirty: () => false,
-      needsFullRedraw: () => false,
+      beginFrame: () => 0,
     };
     applicationCursorKeys = false;
     element: HTMLElement | null = null;

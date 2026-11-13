@@ -1,4 +1,5 @@
-import type { CanvasRenderer, IRenderable } from "@chan/ghostty-web-ng";
+import type { CanvasRenderer } from "@chan/ghostty-web-ng";
+import { ABI, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import {
   findSecretMaskSpans,
   SecretAssignmentMatcher,
@@ -22,13 +23,16 @@ export type GhosttyMaskTerminal = {
   getViewportY(): number;
 };
 
+/// What the painter reads of a frame from the terminal the renderer paints:
+/// the grid, whether every row changed, and which rows did.
+type GhosttyMaskFrame = Pick<VtTerminal, "getDimensions" | "beginFrame" | "isRowDirty">;
+
 type GhosttyMaskRenderer = Pick<CanvasRenderer, "getMetrics"> & {
   ctx?: CanvasRenderingContext2D;
   render?: (
-    buffer: IRenderable,
+    term: GhosttyMaskFrame,
     forceAll?: boolean,
     viewportY?: number,
-    scrollbackProvider?: unknown,
     scrollbarOpacity?: number,
   ) => void;
 };
@@ -164,14 +168,13 @@ export class GhosttySecretMasker {
       return;
     }
     const hook: NonNullable<GhosttyMaskRenderer["render"]> = (
-      buffer,
+      term,
       forceAll,
       viewportY,
-      scrollbackProvider,
       scrollbarOpacity,
     ) => {
-      this.#renderFrame(buffer, forceAll === true, viewportY ?? 0, () =>
-        original.call(renderer, buffer, forceAll === true || this.#takeRepaint(), viewportY, scrollbackProvider, scrollbarOpacity),
+      this.#renderFrame(term, forceAll === true, viewportY ?? 0, () =>
+        original.call(renderer, term, forceAll === true || this.#takeRepaint(), viewportY, scrollbarOpacity),
       );
     };
     this.#renderer = renderer;
@@ -186,11 +189,11 @@ export class GhosttySecretMasker {
     return repaint;
   }
 
-  #renderFrame(buffer: IRenderable, forceAll: boolean, viewportY: number, draw: () => void): void {
+  #renderFrame(frame: GhosttyMaskFrame, forceAll: boolean, viewportY: number, draw: () => void): void {
     let paint = false;
     if (this.#enabled && !this.#disposed) {
       try {
-        this.#refresh(buffer, viewportY, forceAll);
+        this.#refresh(frame, viewportY, forceAll);
         paint = true;
       } catch (error) {
         this.#fail("ghostty secret masking scan failed", error);
@@ -205,13 +208,13 @@ export class GhosttySecretMasker {
     }
   }
 
-  #refresh(buffer: IRenderable, viewportY: number, forceAll: boolean): void {
-    const { cols, rows } = buffer.getDimensions();
+  #refresh(frame: GhosttyMaskFrame, viewportY: number, forceAll: boolean): void {
+    const { cols, rows } = frame.getDimensions();
     const active = this.#term.buffer.active;
     const key: FrameKey = {
       type: active.type,
       length: active.length,
-      top: Math.max(0, active.length - rows - Math.floor(viewportY)),
+      top: Math.max(0, active.length - rows - Math.max(0, Math.floor(viewportY))),
       cols,
       rows,
     };
@@ -225,17 +228,17 @@ export class GhosttySecretMasker {
       last.top === key.top &&
       last.cols === key.cols &&
       last.rows === key.rows &&
-      !buffer.needsFullRedraw?.() &&
-      !this.#visibleRowDirty(buffer, rows);
+      frame.beginFrame() !== ABI.GhosttyRenderStateDirty.FULL &&
+      !this.#visibleRowDirty(frame, rows);
     if (unchanged) return;
     this.#rescan = false;
     this.#frame = key;
     this.#spans = this.#scan(active, key);
   }
 
-  #visibleRowDirty(buffer: IRenderable, rows: number): boolean {
+  #visibleRowDirty(frame: GhosttyMaskFrame, rows: number): boolean {
     for (let row = 0; row < rows; row += 1) {
-      if (buffer.isRowDirty(row)) return true;
+      if (frame.isRowDirty(row)) return true;
     }
     return false;
   }

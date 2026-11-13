@@ -61,7 +61,7 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { type SearchState, VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
+import { type SearchState, VtSearch, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 type ResultsEvent = { resultIndex: number; resultCount: number };
 
@@ -1107,7 +1107,7 @@ describe("terminal find on the ghostty backend", () => {
   const match = (row: number) => ({ start: { col: 0, absoluteRow: row }, end: { col: 5, absoluteRow: row } });
 
   beforeAll(() => {
-    ghostty.module = new WebAssembly.Module(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+    ghostty.module = new WebAssembly.Module(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
   });
 
   beforeEach(() => {

@@ -10,8 +10,9 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { ensureSyntaxTree, foldedRanges } from "@codemirror/language";
-import { describe, expect, test } from "vitest";
+import { foldedRanges, syntaxTree } from "@codemirror/language";
+import { describe, expect, test, vi } from "vitest";
+import { parsedState } from "../__tests__/parsedState";
 import { chanMarkdown } from "./markdown/grammar";
 import { headingFold, headingLevelAt, headingFoldRange } from "./fold";
 import { setBlockKind, toggleBulletList } from "./commands/format";
@@ -19,8 +20,7 @@ import { firstSlideHeadingCaret } from "./slides";
 
 function mkState(doc: string, parse = true): EditorState {
   const state = EditorState.create({ doc, extensions: [chanMarkdown()] });
-  if (parse) ensureSyntaxTree(state, state.doc.length, 5000);
-  return state;
+  return parse ? parsedState(state) : state;
 }
 
 /// 1-based number of the first line whose text exactly equals `text`.
@@ -63,14 +63,41 @@ function mkView(doc: string, selHead: number): { view: EditorView; parent: HTMLE
   document.body.appendChild(parent);
   const view = new EditorView({
     parent,
-    state: EditorState.create({
-      doc,
-      selection: { anchor: selHead },
-      extensions: [chanMarkdown()],
-    }),
+    state: parsedState(
+      EditorState.create({
+        doc,
+        selection: { anchor: selHead },
+        extensions: [chanMarkdown()],
+      }),
+    ),
   });
-  ensureSyntaxTree(view.state, view.state.doc.length, 5000);
   return { view, parent };
+}
+
+/// Run `build` with every state's creation parse stopped at its first step,
+/// as on a machine that deschedules the test inside that parse: while a
+/// state is created the clock steps a second at each read, so the parse is
+/// past its 20 ms budget at its first check. Returns what `build` returns
+/// and the states created on the way, so a test can check the cut happened.
+function withShortCreationParse<T>(build: () => T): { built: T; created: EditorState[] } {
+  const create = EditorState.create;
+  const created: EditorState[] = [];
+  const spy = vi.spyOn(EditorState, "create").mockImplementation((config) => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (now += 1000));
+    try {
+      const state = create.call(EditorState, config);
+      created.push(state);
+      return state;
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  try {
+    return { built: build(), created };
+  } finally {
+    spy.mockRestore();
+  }
 }
 
 describe("fold gutter: heading detection from the syntax tree", () => {
@@ -264,9 +291,8 @@ describe("the fold gutter", () => {
     const parent = document.body.appendChild(document.createElement("div"));
     const view = new EditorView({
       parent,
-      state: EditorState.create({ doc: DOC, extensions: [chanMarkdown(), headingFold()] }),
+      state: parsedState(EditorState.create({ doc: DOC, extensions: [chanMarkdown(), headingFold()] })),
     });
-    ensureSyntaxTree(view.state, view.state.doc.length, 5000);
     const marker = parent.querySelector<HTMLElement>(".cm-gutterElement:not(.cm-gutterElement[style*='height: 0'])")
       ?? parent.querySelector<HTMLElement>(".cm-gutterElement");
     // jsdom has no layout, so every gutter click resolves to the first line.
@@ -286,14 +312,15 @@ describe("the fold gutter", () => {
     const parent = document.body.appendChild(document.createElement("div"));
     const view = new EditorView({
       parent,
-      state: EditorState.create({
-        // `## A` is followed at once by `## B`, and `## C` is the last line:
-        // neither has anything to fold.
-        doc: "## A\n## B\nbody\n## C",
-        extensions: [chanMarkdown(), headingFold()],
-      }),
+      state: parsedState(
+        EditorState.create({
+          // `## A` is followed at once by `## B`, and `## C` is the last line:
+          // neither has anything to fold.
+          doc: "## A\n## B\nbody\n## C",
+          extensions: [chanMarkdown(), headingFold()],
+        }),
+      ),
     });
-    ensureSyntaxTree(view.state, view.state.doc.length, 5000);
     // The gutter's hidden spacer carries a chevron of its own for width.
     const painted = [...parent.querySelectorAll<HTMLElement>(".cm-md-fold-chevron")].filter(
       (el) => el.closest<HTMLElement>(".cm-gutterElement")?.style.visibility !== "hidden",
@@ -301,5 +328,27 @@ describe("the fold gutter", () => {
     expect(painted).toHaveLength(1);
     view.destroy();
     parent.remove();
+  });
+});
+
+describe("the fixtures carry a finished tree when the creation parse stops early", () => {
+  test("mkState reads a heading the creation parse did not reach", () => {
+    const doc = ["## A", "## B", "body"].join("\n");
+    const { built: state, created } = withShortCreationParse(() => mkState(doc));
+    expect(headingLevelAt(created[0], doc.indexOf("## B")), "setup: the creation parse stops before `## B`").toBe(0);
+    expect(levelOf(state, "## B")).toBe(2);
+    expect(realRange(rangeOf(state, "## B")).to).toBe(doc.length);
+  });
+
+  test("mkView keeps a chord out of a fence the creation parse did not reach", () => {
+    const doc = ["# Real Heading", "", "```bash", "# install deps", "```"].join("\n");
+    const { built, created } = withShortCreationParse(() => mkView(doc, doc.indexOf("# install deps") + 2));
+    expect(syntaxTree(created[0]).length, "setup: the creation parse stops before the fence").toBeLessThan(
+      doc.indexOf("```bash"),
+    );
+    setBlockKind(built.view, "h2");
+    expect(built.view.state.doc.toString()).toBe(doc);
+    built.view.destroy();
+    built.parent.remove();
   });
 });

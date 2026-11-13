@@ -65,7 +65,7 @@ const checks = [
   { path: "/install/", status: 200, includes: "paru -S chan-desktop-bin</b>" },
   { path: "/install/", status: 200, includes: 'href="/manual/install/#default-terminal"' },
   { path: "/manual/install/", status: 200, includes: 'id="default-terminal"' },
-  { path: "/manual/install/", status: 200, includes: "chan-desktop.desktop &gt; ~/.config/xdg-terminals.list</b>" },
+  { path: "/manual/install/", status: 200, includes: "chan-term.desktop &gt; ~/.config/xdg-terminals.list</b>" },
   { path: "/install/", status: 200, includes: "sudo apt install chan</b>" },
   { path: "/install/", status: 200, includes: "sudo dnf install chan</b>" },
   { path: "/install/", status: 200, includes: "paru -S chan</b>" },

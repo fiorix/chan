@@ -406,10 +406,14 @@
       </div>
       <div class="list" id={LIST_ID} role="listbox" aria-label="Tabs">
         {#each panes as pane (pane.id)}
+          <!-- The head shows where the pane sits and its number, and not the
+               title of the tab it shows: that tab's row, right under it,
+               carries the title. A screen reader hears the group's name as
+               the selection enters it, before any row, so the name keeps
+               that title. -->
           <div class="pane" role="group" aria-label={`Pane ${pane.number}: ${pane.label}${pane.active ? ", active" : ""}`}>
             <div class="pane-head" class:active={pane.active} aria-hidden="true">
               {@render glyph(pane.id)}
-              <span class="pane-label">{pane.label}</span>
               <span class="pane-number">Pane {pane.number}</span>
             </div>
             {#each pane.sides as side (side.side)}
@@ -575,15 +579,9 @@
     stroke: var(--pane-tree-focus);
     opacity: 1;
   }
-  .pane-label {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .pane-number {
     flex: 0 0 auto;
+    margin-left: auto;
     font-weight: 400;
     font-size: 11px;
     color: var(--text-secondary);

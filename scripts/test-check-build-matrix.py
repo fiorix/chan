@@ -276,18 +276,20 @@ ARTIFACT_CASES = (
     artifact("an entry-point link replaces the binary", INSTALL,
              '    ln -s chan "$pkgdir/usr/bin/chan"\n' + INSTALL,
              at="ln -s chan", says="cannot prove this command preserves"),
-    Case("the opener links pass", (pinned(),), None, edit=(
+    Case("the name links pass", (pinned(),), None, edit=(
         INSTALL,
         INSTALL + '\n    ln -s chan "$pkgdir/usr/bin/chan-files"'
-        '\n    ln -s chan "$pkgdir/usr/bin/chan-edit"',
+        '\n    ln -s chan "$pkgdir/usr/bin/chan-edit"'
+        '\n    ln -s chan "$pkgdir/usr/bin/chan-term"',
     )),
     artifact("a link no entry point is named", INSTALL,
              INSTALL + '\n    ln -s chan "$pkgdir/usr/bin/chan-filez"',
              at="ln -s chan", says="cannot prove this command preserves"),
-    Case("validating the opener entries passes", (
+    Case("validating the name entries passes", (
         pinned(),
         "    desktop-file-validate packaging/distros/shared/chan-files.desktop",
         "    desktop-file-validate packaging/distros/shared/chan-edit.desktop",
+        "    desktop-file-validate packaging/distros/shared/chan-term.desktop",
     ), None),
     artifact("validating another file is refused", pinned(),
              pinned() + "\n    desktop-file-validate packaging/distros/shared/other.desktop",

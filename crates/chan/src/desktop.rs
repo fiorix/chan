@@ -204,8 +204,9 @@ async fn maybe_launch_desktop(_root: &Path) -> Option<Result<()>> {
 
 /// Spawn the chan-desktop GUI and hand `root` to it once it's up.
 ///
-/// Only reached from the Desktop personality, so `current_exe()` IS the
-/// chan-desktop binary. Spawns the GUI detached, then polls the well-known
+/// Only reached from the Desktop personality, so this process is the
+/// chan-desktop binary ([`spawn_desktop_gui_opening`] finds what to start
+/// from it). Spawns the GUI detached, then polls the well-known
 /// handoff socket -- the GUI binds it during setup -- re-attempting
 /// `try_handoff` until it opens the workspace or a generous deadline passes
 /// (a cold GUI boot starts the embedded server and a window, which takes a
@@ -255,72 +256,198 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
 /// Launch the chan-desktop GUI as a detached process.
 #[cfg(unix)]
 fn spawn_desktop_gui() -> std::io::Result<()> {
-    spawn_desktop_gui_opening(&[]).map(|_| ())
+    spawn_desktop_gui_opening(&[], None).map(|_| ())
 }
 
 /// Launch the chan-desktop GUI as a detached process given `paths`, which its
-/// boot opens in a standalone window as `chan-desktop PATH...` does. The
+/// boot opens in a standalone window as `chan-desktop PATH...` does, or the
+/// start directory of a `chan-term` shell, which its boot opens a terminal
+/// window in ([`chan_server::handoff::OPEN_TERMINAL_ENV`]). The
 /// process started is returned when it is the desktop's own, so a caller can
 /// read its exit: a launch that finds another desktop hands it the paths and
 /// exits from its single-instance guard. On macOS the process is `open`,
 /// which exits once LaunchServices has the app, so there is none to read;
 /// with paths it asks for a new instance (`-n`), which runs that guard.
 ///
-/// `current_exe()` is the chan-desktop binary (this only runs for the Desktop
-/// personality). We start it with a clean argv0 (NOT `chan`/`cs`) so the
-/// pre-GUI argv probe falls through to a normal GUI launch instead of
-/// re-dispatching as the CLI.
+/// Only the Desktop personality runs this, so this process is the
+/// chan-desktop binary, though `current_exe()` may name it by the command
+/// shim it was started through; [`desktop_start`] decides from that path and
+/// its resolved one which bundle or binary starts, and refuses a binary that
+/// would run a command again instead of the GUI.
 #[cfg(unix)]
 pub(super) fn spawn_desktop_gui_opening(
     paths: &[String],
+    terminal: Option<&str>,
 ) -> std::io::Result<Option<std::process::Child>> {
+    let exe = std::env::current_exe()?;
+    let resolved = exe.canonicalize().ok();
+    // This process's own AppImage only: a deb's chan started under another
+    // application's AppImage environment must not start that AppImage.
+    let appimage = chan_server::own_appimage();
+    let start = desktop_start(
+        &exe,
+        resolved.as_deref(),
+        appimage.as_deref(),
+        cfg!(target_os = "macos"),
+    )?;
+    match start {
+        DesktopStart::Bundle(bundle) => macos_open_command(&bundle, paths, terminal)
+            .spawn()
+            .map(|_| None),
+        DesktopStart::Binary(target) => {
+            desktop_gui_command(&target, paths, terminal, std::env::vars_os())
+                .spawn()
+                .map(Some)
+        }
+    }
+}
+
+/// How [`spawn_desktop_gui_opening`] starts chan-desktop.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum DesktopStart {
+    /// `/usr/bin/open` on this `.app` bundle (macOS): launching the bare
+    /// Mach-O inside it can start the process without LaunchServices
+    /// activating it, where `open` hands the launch to LaunchServices, with
+    /// its activation and its single instance.
+    Bundle(PathBuf),
+    /// This binary, run directly with its own path as `argv[0]`.
+    Binary(PathBuf),
+}
+
+/// What a command of the desktop personality starts, from the path this
+/// process was started through (`exe`, what `current_exe()` returns), that
+/// path with its links resolved (`resolved`, `None` when it cannot be), the
+/// `$APPIMAGE` it runs from, and whether this is macOS.
+///
+/// The command shims are symlinks to the desktop binary, and on macOS
+/// `current_exe()` reads `_NSGetExecutablePath`, which returns the path a
+/// program was started through: a shim's, outside any bundle. So the `.app`
+/// is climbed from the resolved path, then from `exe` for a bundle whose
+/// binary is itself a link. On Linux `current_exe()` reads `/proc/self/exe`,
+/// which is resolved already. An AppImage starts its `$APPIMAGE`, because the
+/// running binary lives on a mount that ends with this process.
+///
+/// A binary started directly runs under its own name, which the desktop's
+/// dispatch reads first, so one named as a command of the binary (a copy or a
+/// hard link called `chan-term`) would run that command again instead of the
+/// GUI, and a command that finds no desktop starts the next: it is refused
+/// with the reason, never started.
+#[cfg(unix)]
+fn desktop_start(
+    exe: &Path,
+    resolved: Option<&Path>,
+    appimage: Option<&Path>,
+    macos: bool,
+) -> std::io::Result<DesktopStart> {
+    let real = resolved.unwrap_or(exe);
+    if macos {
+        if let Some(bundle) = macos_app_bundle(real).or_else(|| macos_app_bundle(exe)) {
+            return Ok(DesktopStart::Bundle(bundle));
+        }
+    }
+    let target = appimage.unwrap_or(real);
+    if let Some(command) = command_name(target) {
+        return Err(std::io::Error::other(format!(
+            "{} is named {command}, which runs chan's {command} command rather than the \
+             desktop; start chan-desktop first",
+            target.display()
+        )));
+    }
+    Ok(DesktopStart::Binary(target.to_path_buf()))
+}
+
+/// The command a program at `path` runs as when started under its own name,
+/// by the name rules of the desktop's dispatch (`cs`, `chan`, `chan-files`,
+/// `chan-edit`, `chan-term`); `None` for any other name, which boots the GUI.
+#[cfg(unix)]
+fn command_name(path: &Path) -> Option<String> {
+    let name = path.as_os_str();
+    let command = chan_shell::invoked_as_cs(name)
+        || chan_shell::invoked_as_chan(name)
+        || crate::invoked_as_opener(name)
+        || crate::term::invoked_as_term(name);
+    command.then(|| {
+        path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// The `/usr/bin/open` command that starts the `.app` at `bundle` to open
+/// `paths`, or the `terminal` a `chan-term` asked for.
+///
+/// The terminal goes through `--env`, which reaches the new instance however
+/// much of `open`'s own environment LaunchServices passes on, and `open`
+/// itself carries neither `$ARGV0` nor a terminal this process inherited.
+/// The started desktop's dispatch reads `$ARGV0` ahead of `argv[0]`, and an
+/// inherited `chan-term` (a New Window sibling's) would run it as a terminal
+/// launch, which finds no desktop and opens the app again; an inherited
+/// carrier would open a terminal nobody asked for.
+#[cfg(unix)]
+fn macos_open_command(
+    bundle: &Path,
+    paths: &[String],
+    terminal: Option<&str>,
+) -> std::process::Command {
+    use chan_server::handoff::OPEN_TERMINAL_ENV;
+    use std::process::{Command, Stdio};
+
+    let mut open = Command::new("/usr/bin/open");
+    // `-n` with paths or a terminal: `open --args` aimed at an app that is
+    // already launching drops the arguments, where a new instance runs the
+    // single-instance guard and hands them to the one on its way up.
+    if !paths.is_empty() || terminal.is_some() {
+        open.arg("-n");
+    }
+    if let Some(dir) = terminal {
+        open.arg("--env").arg(format!("{OPEN_TERMINAL_ENV}={dir}"));
+    }
+    open.arg(bundle);
+    if !paths.is_empty() {
+        open.arg("--args").args(paths);
+    }
+    open.env_remove("ARGV0")
+        .env_remove(OPEN_TERMINAL_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    open
+}
+
+/// The command that starts the chan-desktop GUI at `target` to open `paths`,
+/// or the `terminal` a `chan-term` asked for, which goes in
+/// [`OPEN_TERMINAL_ENV`](chan_server::handoff::OPEN_TERMINAL_ENV) and is
+/// removed from the environment otherwise, so an inherited one never opens a
+/// terminal nobody asked for. Under an AppImage the target is the AppImage
+/// again, so the desktop is handed the environment the user had rather than
+/// `parent`, this process's, whose search paths name this process's mount
+/// ([`chan_server::hand_appimage_host_env`]).
+#[cfg(unix)]
+fn desktop_gui_command(
+    target: &Path,
+    paths: &[String],
+    terminal: Option<&str>,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::process::Command {
+    use chan_server::handoff::OPEN_TERMINAL_ENV;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let exe = std::env::current_exe()?;
-
-    // macOS: launching the bare Mach-O inside the `.app` can start the process
-    // without LaunchServices activating/foregrounding it. Prefer
-    // `open <Name>.app`, which hands launch to LaunchServices (proper
-    // activation + single-instance). Derive the bundle by climbing
-    // `…/<Name>.app/Contents/MacOS/<bin>`.
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(bundle) = macos_app_bundle(&exe) {
-            let mut open = Command::new("/usr/bin/open");
-            // `-n` with paths: `open --args` aimed at an app that is already
-            // launching drops the arguments, where a new instance runs the
-            // single-instance guard and hands them to the one on its way up.
-            if !paths.is_empty() {
-                open.arg("-n");
-            }
-            open.arg(bundle);
-            if !paths.is_empty() {
-                open.arg("--args").args(paths);
-            }
-            return open
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map(|_| None);
-        }
-        // Not in a bundle (dev build): fall through to the direct exec below.
-    }
-
-    // Linux AppImage: `$APPIMAGE` is the real, relaunchable image, while
-    // `current_exe()` is the ephemeral `/tmp/.mount_*` path. Prefer
-    // `$APPIMAGE`; off an AppImage (deb/rpm) `current_exe()` is
-    // `/usr/bin/chan-desktop`, which relaunches fine.
-    let target = std::env::var_os("APPIMAGE")
-        .map(PathBuf::from)
-        .unwrap_or(exe);
-    Command::new(&target)
-        // Clean argv0 so the spawned process boots the GUI, not the alias.
+    let mut command = Command::new(target);
+    chan_server::hand_appimage_host_env(&mut command, parent);
+    match terminal {
+        Some(dir) => command.env(OPEN_TERMINAL_ENV, dir),
+        None => command.env_remove(OPEN_TERMINAL_ENV),
+    };
+    command
+        // argv[0] is the target's own path, which `desktop_start` refuses
+        // when its name is a command's, so the process boots the GUI.
         // `$ARGV0` is the name an AppImage wrapper ran THIS process as, and
         // the desktop's dispatch reads it ahead of argv[0], so it is not
         // passed on either.
-        .arg0(&target)
+        .arg0(target)
         .env_remove("ARGV0")
         .args(paths)
         .stdin(Stdio::null())
@@ -328,9 +455,8 @@ pub(super) fn spawn_desktop_gui_opening(
         .stderr(Stdio::null())
         // New process group so Ctrl-C in the launching terminal doesn't also
         // kill the desktop we just started.
-        .process_group(0)
-        .spawn()
-        .map(Some)
+        .process_group(0);
+    command
 }
 
 /// Launch the chan-desktop GUI as a detached process.
@@ -392,7 +518,7 @@ fn windows_desktop_exe_for(exe: &Path) -> Option<PathBuf> {
 
 /// Climb `…/<Name>.app/Contents/MacOS/<bin>` to the `.app` bundle dir, if
 /// `exe` is laid out that way. Returns None for a loose dev binary.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn macos_app_bundle(exe: &Path) -> Option<PathBuf> {
     let macos_dir = exe.parent()?; // …/Contents/MacOS
     let contents = macos_dir.parent()?; // …/Contents
@@ -615,7 +741,392 @@ mod tests {
         assert!(!desktop_companion(false, false));
     }
 
-    #[cfg(target_os = "macos")]
+    /// The desktop a command starts gets the terminal a `chan-term` asked
+    /// for in the carrier, and has the carrier removed when there is none, so
+    /// one this process inherited opens nothing; it never inherits `$ARGV0`,
+    /// which its dispatch reads ahead of `argv[0]`. The paths are its
+    /// arguments.
+    #[cfg(unix)]
+    #[test]
+    fn the_started_desktop_carries_only_the_asked_terminal_and_no_argv0() {
+        use chan_server::handoff::OPEN_TERMINAL_ENV;
+        use std::ffi::{OsStr, OsString};
+        let env = |command: &std::process::Command, key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        let target = Path::new("/usr/bin/chan-desktop");
+        let terminal = desktop_gui_command(target, &[], Some("/srv/notes"), Vec::new());
+        assert_eq!(terminal.get_program(), target.as_os_str());
+        assert_eq!(terminal.get_args().count(), 0);
+        assert_eq!(
+            env(&terminal, OPEN_TERMINAL_ENV),
+            Some(Some(OsString::from("/srv/notes")))
+        );
+        assert_eq!(env(&terminal, "ARGV0"), Some(None), "ARGV0 is removed");
+        let paths = ["/srv/a.md".to_string(), "/srv/docs".to_string()];
+        let opener = desktop_gui_command(target, &paths, None, Vec::new());
+        assert_eq!(
+            opener.get_args().collect::<Vec<_>>(),
+            ["/srv/a.md", "/srv/docs"]
+        );
+        assert_eq!(
+            env(&opener, OPEN_TERMINAL_ENV),
+            Some(None),
+            "the carrier is removed"
+        );
+        assert_eq!(env(&opener, "ARGV0"), Some(None), "ARGV0 is removed");
+    }
+
+    /// The names the desktop writes command shims for and its dispatch reads.
+    #[cfg(unix)]
+    const COMMANDS: [&str; 5] = ["chan", "cs", "chan-files", "chan-edit", "chan-term"];
+
+    /// An install laid out in a temp dir: `Chan.app/Contents/MacOS/
+    /// chan-desktop`, a loose `target/debug/chan-desktop`, and a `bin`
+    /// directory for links, as `~/.local/bin` is. The root is resolved, so the
+    /// expected paths equal resolved ones under a linked `TMPDIR`.
+    #[cfg(unix)]
+    struct Install {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        bundle: PathBuf,
+        bundle_exe: PathBuf,
+        dev_exe: PathBuf,
+        bin: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Install {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path().canonicalize().expect("resolve the tempdir");
+            let bundle = root.join("Chan.app");
+            let bundle_exe = bundle.join("Contents").join("MacOS").join("chan-desktop");
+            let dev_exe = root.join("target").join("debug").join("chan-desktop");
+            for exe in [&bundle_exe, &dev_exe] {
+                std::fs::create_dir_all(exe.parent().expect("a parent")).expect("binary dir");
+                std::fs::write(exe, b"").expect("binary");
+            }
+            let bin = root.join("bin");
+            std::fs::create_dir(&bin).expect("bin dir");
+            Self {
+                _dir: dir,
+                root,
+                bundle,
+                bundle_exe,
+                dev_exe,
+                bin,
+            }
+        }
+
+        /// A link called `name` in `bin` to `target`, as the shim installer
+        /// writes one.
+        fn link(&self, name: &str, target: &Path) -> PathBuf {
+            let link = self.bin.join(name);
+            std::os::unix::fs::symlink(target, &link).expect("link");
+            link
+        }
+    }
+
+    /// What a process started through `exe` starts, `exe` resolved as
+    /// [`spawn_desktop_gui_opening`] resolves it.
+    #[cfg(unix)]
+    fn start(exe: &Path, appimage: Option<&Path>, macos: bool) -> std::io::Result<DesktopStart> {
+        desktop_start(exe, exe.canonicalize().ok().as_deref(), appimage, macos)
+    }
+
+    /// On macOS `current_exe()` can be the shim a command was started
+    /// through, a link outside the bundle: each resolves to the `.app` that
+    /// holds its binary, which `open` starts, as the bundle's binary does,
+    /// which LaunchServices runs by its own path.
+    #[cfg(unix)]
+    #[test]
+    fn a_shim_starts_the_app_bundle_that_holds_its_binary() {
+        let install = Install::new();
+        let bundle = DesktopStart::Bundle(install.bundle.clone());
+        for name in COMMANDS {
+            let shim = install.link(name, &install.bundle_exe);
+            assert_eq!(start(&shim, None, true).unwrap(), bundle, "{name}");
+        }
+        let nested = install.bin.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let relative = nested.join("chan-term");
+        std::os::unix::fs::symlink("../../Chan.app/Contents/MacOS/chan-desktop", &relative)
+            .unwrap();
+        assert_eq!(
+            start(&relative, None, true).unwrap(),
+            bundle,
+            "a relative link"
+        );
+        assert_eq!(start(&install.bundle_exe, None, true).unwrap(), bundle);
+        // A bundle whose binary links out of it is found from the path the
+        // process was started by, as before resolution.
+        assert_eq!(
+            desktop_start(&install.bundle_exe, Some(&install.dev_exe), None, true).unwrap(),
+            bundle
+        );
+    }
+
+    /// A desktop binary outside any bundle (a dev build) is started directly
+    /// by its resolved path, so the child's `argv[0]` names the desktop, not
+    /// the shim it was reached through; off macOS a bundle is not climbed.
+    #[cfg(unix)]
+    #[test]
+    fn a_loose_desktop_binary_is_started_by_its_resolved_path() {
+        let install = Install::new();
+        let dev = DesktopStart::Binary(install.dev_exe.clone());
+        for macos in [true, false] {
+            assert_eq!(start(&install.dev_exe, None, macos).unwrap(), dev);
+        }
+        for name in COMMANDS {
+            let shim = install.link(name, &install.dev_exe);
+            for macos in [true, false] {
+                assert_eq!(start(&shim, None, macos).unwrap(), dev, "{name} {macos}");
+            }
+        }
+        assert_eq!(
+            start(&install.bundle_exe, None, false).unwrap(),
+            DesktopStart::Binary(install.bundle_exe.clone())
+        );
+    }
+
+    /// A deb or rpm links `/usr/bin/chan-term` and the other names to
+    /// `chan-desktop`. Linux's `current_exe()` already names `chan-desktop`,
+    /// and the link resolves to it as well, so the child runs as the desktop.
+    #[cfg(unix)]
+    #[test]
+    fn a_distro_link_starts_the_desktop_binary_it_names() {
+        let install = Install::new();
+        let usr_bin = install.root.join("usr").join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        let desktop = usr_bin.join("chan-desktop");
+        std::fs::write(&desktop, b"").unwrap();
+        let started = DesktopStart::Binary(desktop.clone());
+        for name in COMMANDS {
+            let link = usr_bin.join(name);
+            std::os::unix::fs::symlink("chan-desktop", &link).unwrap();
+            for exe in [&desktop, &link] {
+                assert_eq!(
+                    start(exe, None, false).unwrap(),
+                    started,
+                    "{}",
+                    exe.display()
+                );
+            }
+        }
+    }
+
+    /// A binary whose own name is a command's (a copy or a hard link of the
+    /// desktop called `chan-term`, or a link that resolves to one), and an
+    /// AppImage named as one, would run that command again instead of the GUI:
+    /// each is refused with its path and the command, on every platform.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_named_as_a_command_is_refused() {
+        let install = Install::new();
+        let copies = install.root.join("copies");
+        std::fs::create_dir(&copies).unwrap();
+        for name in COMMANDS {
+            let copy = copies.join(name);
+            std::fs::hard_link(&install.dev_exe, &copy).unwrap();
+            let shim = install.link(name, &copy);
+            let refusal = format!(
+                "{} is named {name}, which runs chan's {name} command rather than the desktop; \
+                 start chan-desktop first",
+                copy.display()
+            );
+            for exe in [&copy, &shim] {
+                for macos in [true, false] {
+                    let error = start(exe, None, macos).unwrap_err();
+                    assert_eq!(error.to_string(), refusal, "{} {macos}", exe.display());
+                }
+            }
+            let appimage = copies.join(format!("{name}.AppImage"));
+            let error = start(&install.dev_exe, Some(&appimage), false).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("{} is named {name}, ", appimage.display())),
+                "{error}"
+            );
+        }
+        let appimage = install.root.join("Chan_0.129.0_amd64.AppImage");
+        assert_eq!(
+            start(&install.dev_exe, Some(&appimage), false).unwrap(),
+            DesktopStart::Binary(appimage)
+        );
+    }
+
+    /// The `open` command asks for a new instance with paths, after
+    /// `--args`, or with a terminal, in `--env`, and nothing more for a bare
+    /// start; it carries no `$ARGV0` and no inherited carrier of its own, so
+    /// neither can reach the desktop it starts, whose dispatch reads `$ARGV0`
+    /// ahead of `argv[0]`.
+    #[cfg(unix)]
+    #[test]
+    fn the_open_command_carries_the_asked_terminal_and_no_argv0() {
+        use chan_server::handoff::OPEN_TERMINAL_ENV;
+        use std::ffi::{OsStr, OsString};
+        let env = |command: &std::process::Command, key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        let argv = |command: &std::process::Command| {
+            command
+                .get_args()
+                .map(OsStr::to_os_string)
+                .collect::<Vec<_>>()
+        };
+        let strings = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+        let bundle = Path::new("/Applications/Chan.app");
+        let terminal = macos_open_command(bundle, &[], Some("/srv/notes"));
+        assert_eq!(
+            terminal.get_program(),
+            Path::new("/usr/bin/open").as_os_str()
+        );
+        assert_eq!(
+            argv(&terminal),
+            strings(&[
+                "-n",
+                "--env",
+                &format!("{OPEN_TERMINAL_ENV}=/srv/notes"),
+                "/Applications/Chan.app"
+            ])
+        );
+        let paths = ["/srv/a.md".to_string(), "/srv/docs".to_string()];
+        let opener = macos_open_command(bundle, &paths, None);
+        assert_eq!(
+            argv(&opener),
+            strings(&[
+                "-n",
+                "/Applications/Chan.app",
+                "--args",
+                "/srv/a.md",
+                "/srv/docs"
+            ])
+        );
+        let bare = macos_open_command(bundle, &[], None);
+        assert_eq!(argv(&bare), strings(&["/Applications/Chan.app"]));
+        for command in [&terminal, &opener, &bare] {
+            assert_eq!(env(command, "ARGV0"), Some(None), "ARGV0 is removed");
+            assert_eq!(
+                env(command, OPEN_TERMINAL_ENV),
+                Some(None),
+                "an inherited carrier is removed"
+            );
+        }
+    }
+
+    /// An AppImage desktop's environment as its runtime, the GTK hook and
+    /// the GUI-stack re-exec leave it, over a user `PATH` and, when given,
+    /// `LD_LIBRARY_PATH`: the entries are AppRun's format strings.
+    #[cfg(unix)]
+    fn appimage_parent(
+        appdir: &str,
+        user_ld: Option<&str>,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let block = |entries: &[&str]| {
+            entries
+                .iter()
+                .map(|entry| format!("{appdir}/{entry}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
+        let ld = block(&[
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]);
+        let path = block(&["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"]);
+        [
+            ("APPDIR", appdir.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+            ("ARGV0", "chan-term".into()),
+            ("OWD", "/home/u".into()),
+            ("PATH", format!("{path}:/usr/local/bin:/usr/bin")),
+            (
+                "LD_LIBRARY_PATH",
+                format!("/usr/lib/x86_64-linux-gnu:{ld}:{}", user_ld.unwrap_or("")),
+            ),
+            (
+                "XDG_DATA_DIRS",
+                format!("{appdir}/usr/share/:{appdir}/usr/share:/usr/share:"),
+            ),
+            ("GTK_PATH", format!("{appdir}//usr/lib/gtk-3.0")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    /// The desktop a command starts from an AppImage is the AppImage again,
+    /// and gets the user's search paths and nothing of this process's
+    /// mount, with and without a user `LD_LIBRARY_PATH`; its own runtime
+    /// then adds one block. A parent that is no AppImage process hands its
+    /// environment on unchanged: the command touches only its own keys.
+    #[cfg(unix)]
+    #[test]
+    fn the_started_desktop_gets_the_users_environment_not_this_mount() {
+        use std::ffi::{OsStr, OsString};
+        let appdir = "/tmp/.mount_ChanCLI";
+        let target = Path::new("/home/u/Applications/Chan.AppImage");
+        for (user_ld, want_ld) in [(None, None), (Some("/opt/a/lib"), Some("/opt/a/lib"))] {
+            let command = desktop_gui_command(
+                target,
+                &[],
+                Some("/srv/notes"),
+                appimage_parent(appdir, user_ld),
+            );
+            let envs: Vec<(OsString, Option<OsString>)> = command
+                .get_envs()
+                .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
+                .collect();
+            let env = |key: &str| {
+                envs.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(env("PATH"), Some(Some("/usr/local/bin:/usr/bin".into())));
+            assert_eq!(env("LD_LIBRARY_PATH"), Some(want_ld.map(OsString::from)));
+            assert_eq!(env("XDG_DATA_DIRS"), Some(None));
+            for gone in ["APPDIR", "APPIMAGE", "OWD", "GTK_PATH", "ARGV0"] {
+                assert_eq!(env(gone), Some(None), "{gone}");
+            }
+            for (key, value) in &envs {
+                assert!(
+                    !value
+                        .as_ref()
+                        .is_some_and(|value| value.to_string_lossy().contains(appdir)),
+                    "{key:?} keeps the parent's mount"
+                );
+            }
+        }
+        let host: Vec<(OsString, OsString)> = appimage_parent(appdir, Some("/opt/a/lib"))
+            .into_iter()
+            .filter(|(key, _)| key != "APPDIR" && key != "APPIMAGE")
+            .collect();
+        let command = desktop_gui_command(target, &[], None, host);
+        let keys: Vec<&OsStr> = command.get_envs().map(|(key, _)| key).collect();
+        assert_eq!(
+            keys.len(),
+            2,
+            "only the carrier and ARGV0 are removed: {keys:?}"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn macos_app_bundle_climbs_to_dot_app() {
         // The real .app layout resolves to the bundle dir.

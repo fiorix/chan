@@ -3,10 +3,11 @@
 //! `chan_workspace::paths::local_bin_dir`, so a smoke instance stays isolated),
 //! so a chan-desktop install also gives you the `chan` / `cs` command line with
 //! nothing extra to download, and on unix `chan-files` / `chan-edit`, which
-//! open a path in a window. Every name resolves to the running chan-desktop
-//! binary; the `argv[0]` dispatch (`chan_shell::invoked_as_chan` /
-//! `invoked_as_cs`, `chan::invoked_as_opener`) selects the CLI / control-client
-//! path before any GUI init.
+//! open a path in a window, and `chan-term`, which opens a terminal window.
+//! Every name resolves to the running chan-desktop binary; the `argv[0]`
+//! dispatch (`chan_shell::invoked_as_chan` / `invoked_as_cs`,
+//! `chan::invoked_as_opener`, `chan::term::invoked_as_term`) selects the CLI,
+//! the control client or the terminal window before any GUI init.
 //!
 //! The shape of the shim depends on how chan-desktop was installed:
 //!
@@ -42,11 +43,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// The names we own. All point at the same chan-desktop binary; `argv[0]`
-/// dispatch picks the behavior. The Linux desktop entries run `chan-files` and
-/// `chan-edit` by name, so an install the packages do not link (an AppImage, a
-/// release deb or rpm) gets them here.
+/// dispatch picks the behavior. The Linux desktop entries run `chan-files`,
+/// `chan-edit` and `chan-term` by name, so an install the packages do not link
+/// (an AppImage, a release deb or rpm) gets them here.
 #[cfg(unix)]
-const SHIM_NAMES: [&str; 4] = ["chan", "cs", "chan-files", "chan-edit"];
+const SHIM_NAMES: [&str; 5] = ["chan", "cs", "chan-files", "chan-edit", "chan-term"];
 
 /// File stem of the chan-desktop binary. A symlink at `~/.local/bin/<name>`
 /// whose target ends in this stem is recognized as OURS (so a moved/upgraded
@@ -73,15 +74,16 @@ const WRAPPER_OWNS: &str = "# chan-desktop";
 #[cfg(unix)]
 pub const CALLER_PWD_ENV: &str = "CHAN_CALLER_PWD";
 
-/// The AppImage path from `$APPIMAGE`, or `None` when not running from an
-/// AppImage (macOS, `cargo run`, a deb/rpm install). Also consumed by
-/// `linux_gui_stack` to gate the bundle-first loader fixups. Unix-only: the
-/// AppImage / bundle-first loader concept does not exist on Windows.
+/// The AppImage this process runs from, or `None` when not running from an
+/// AppImage (macOS, `cargo run`, a deb/rpm install), including a deb's chan
+/// started under another application's AppImage environment, whose
+/// `$APPIMAGE` is not this process's ([`chan_server::own_appimage`]). Also
+/// consumed by `linux_gui_stack` to gate the bundle-first loader fixups, and
+/// by the New Window sibling and the shim install. Unix-only: the AppImage /
+/// bundle-first loader concept does not exist on Windows.
 #[cfg(unix)]
 pub fn appimage_path() -> Option<PathBuf> {
-    std::env::var_os("APPIMAGE")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+    chan_server::own_appimage()
 }
 
 /// Undo the AppImage `AppRun` chdir: move back to the working directory the
@@ -520,7 +522,8 @@ mod windows_shim {
     /// The two names we own. Both re-exec the same chan-desktop.exe; the
     /// `ARGV0` the wrapper sets picks the behavior. `chan-files` and
     /// `chan-edit` are not among them: a standalone window has no file
-    /// surface on Windows, so they would only fail.
+    /// surface on Windows, so they would only fail. Neither is `chan-term`,
+    /// whose launch grammar serves Linux's xdg-terminal-exec.
     pub(super) const SHIM_NAMES: [&str; 2] = ["chan", "cs"];
 
     /// File stem of the chan-desktop binary an installed exe must match (the
@@ -1770,14 +1773,15 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
 mod tests {
     use super::*;
 
-    /// The Linux desktop entries run `chan-files` and `chan-edit` by name, so
-    /// an install the packages do not link gets each name beside `chan` and
-    /// `cs`, as a wrapper pinning its `argv[0]` or a link to the binary.
+    /// The Linux desktop entries run `chan-files`, `chan-edit` and
+    /// `chan-term` by name, so an install the packages do not link gets each
+    /// name beside `chan` and `cs`, as a wrapper pinning its `argv[0]` or a
+    /// link to the binary.
     #[test]
-    fn every_install_writes_the_opener_names_beside_chan_and_cs() {
+    fn every_install_writes_the_entry_names_beside_chan_and_cs() {
         assert_eq!(
             &SHIM_NAMES[..],
-            &["chan", "cs", "chan-files", "chan-edit"][..]
+            &["chan", "cs", "chan-files", "chan-edit", "chan-term"][..]
         );
         let wrappers = tempfile::tempdir().unwrap();
         let appimage = InstallKind::AppImage(PathBuf::from("/opt/Chan.AppImage"));

@@ -7,7 +7,6 @@
 // Wysiwyg editor with the link resolver stubbed.
 
 import { EditorState } from "@codemirror/state";
-import { ensureSyntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const files = vi.hoisted(() => ({ existing: new Set<string>() }));
@@ -29,21 +28,22 @@ vi.mock("../../api/client", async (importOriginal) => {
 import { codeSpanInternalTarget } from "./wikilink";
 import { computeBubbleSpec } from "../bubbles/triggers";
 import { chanMarkdown } from "../markdown/grammar";
+import { parsedState } from "../../__tests__/parsedState";
 import { installEditorDom, mountWysiwyg, settle, unmountWysiwygs } from "../../__tests__/wysiwyg";
 
 installEditorDom();
 
-/// A parsed (markdown) editor state with the caret at `pos`. ensureSyntaxTree
-/// forces a synchronous parse so computeBubbleSpec's syntaxTree() lookup sees
-/// the InlineCode / FencedCode nodes - no view mount, no DOM.
+/// A parsed (markdown) editor state with the caret at `pos`, so
+/// computeBubbleSpec's syntaxTree() lookup sees the InlineCode / FencedCode
+/// nodes - no view mount, no DOM.
 function stateAt(doc: string, pos: number): EditorState {
-  const state = EditorState.create({
-    doc,
-    selection: { anchor: pos },
-    extensions: [chanMarkdown()],
-  });
-  ensureSyntaxTree(state, doc.length, 10000);
-  return state;
+  return parsedState(
+    EditorState.create({
+      doc,
+      selection: { anchor: pos },
+      extensions: [chanMarkdown()],
+    }),
+  );
 }
 
 // An inline `code` span whose text resolves to a real workspace file renders

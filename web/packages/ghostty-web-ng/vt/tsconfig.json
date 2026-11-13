@@ -1,0 +1,27 @@
+{
+  // The compiler settings of chan's binding and its tests, the workspace
+  // app's. Vite compiles each file under the nearest tsconfig.json that
+  // includes it, and upstream's beside lib/ includes only lib/, so this one
+  // decides how vt/ compiles: an ES2022 target with class fields defined as
+  // fields, as the app's build compiles its own sources. `npm run check`
+  // type-checks vt/ by it under the app's rules, and with it the widget's
+  // sources from lib/index.ts, the package's `.` entry, which vite still
+  // compiles by upstream's tsconfig.json: vite looks for that file only in
+  // the directories above the one it compiles.
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  },
+  "include": ["./**/*", "../lib/index.ts"]
+}

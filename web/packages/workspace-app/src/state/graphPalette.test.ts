@@ -7,6 +7,7 @@ import tuner from "../graph-tuner/GraphTuner.svelte?raw";
 import {
   applyGraphColorPrefs,
   GRAPH_COLOR_ROWS,
+  GRAPH_FS_EDGE_DEFAULTS,
   GRAPH_PALETTE_DEFAULTS,
   graphColorMode,
   graphPaletteStyleFor,
@@ -44,6 +45,18 @@ describe("graph palette defaults: single definition", () => {
       expect(tunerLight).toContain(`${cssVar}: ${hex};`);
     });
   }
+
+  test.each(["symlink", "hardlink"] as const)(
+    "--g-%s matches App.svelte + GraphTuner in both schemes",
+    (kind) => {
+      const dark = `--g-${kind}: ${GRAPH_FS_EDGE_DEFAULTS.dark[kind]};`;
+      const light = `--g-${kind}: ${GRAPH_FS_EDGE_DEFAULTS.light[kind]};`;
+      expect(appDark).toContain(dark);
+      expect(tunerDark).toContain(dark);
+      expect(appLight).toContain(light);
+      expect(tunerLight).toContain(light);
+    },
+  );
 
   test("--g-contact is a zero-pixel alias of --warn-text in all four theme blocks", () => {
     // The contact default is not a palette hex of its own: the token

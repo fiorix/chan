@@ -55,4 +55,12 @@
     document.title = `chan-pixels-error ${e.reason}`;
   });
 </script>
+<!--
+  The product's adapters import chan's binding by its package name, as the
+  app's build resolves it; on this page that is the binding the page itself
+  loads, so both share one module.
+-->
+<script type="importmap">
+  { "imports": { "@chan/ghostty-web-ng/vt": "/vendor/ghostty-web-ng/vt.js" } }
+</script>
 <script type="module" src="/harness.mjs"></script>

@@ -13,7 +13,8 @@
   // strip: they belong to the covered window. On Windows it holds the
   // launcher menubar's menus there instead, since the frameless window wears
   // no menubar, and the window's title after them. A tmux pane has no strip,
-  // so while one is active the band names it and marks the window as tmux's.
+  // so while one is active the band marks the window as tmux's and names no
+  // pane: the window's title names the window.
 
   import { untrack } from "svelte";
   import {
@@ -37,7 +38,7 @@
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
   import { ui } from "../state/store.svelte";
-  import { activeLayout, activeTabInPane, paneMode, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
+  import { activeLayout, paneShowsTmux } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
     WINDOW_TITLE_MOVE,
@@ -78,22 +79,16 @@
   const anchor = { [PANE_TREE_ANCHOR_ATTR]: "" };
 
   // A pane showing a tmux pane draws no strip (Pane.svelte hides it on the
-  // same test), so while one is active the bar shows its name where the
-  // strip would sit: the label the pane tree gives it, which is what tmux
-  // calls that pane. A pane Hybrid Nav stages has no tmux pane yet and reads
-  // as the mode names it; outside the mode a pane with no active tab reads
-  // as the pane tree reads it. Null in any other pane.
-  const tmuxName = $derived.by(() => {
-    const id = viewLayout.activePaneId;
-    const pane = viewLayout.nodes[id];
-    if (!paneShowsTmux(pane)) return null;
-    const tab = pane?.kind === "leaf" ? activeTabInPane(pane) : null;
-    if (tab) return tabLabel(tab);
-    return paneMode.tmux !== null ? "New tmux pane" : "Empty pane";
-  });
+  // same test), so while one is active, a pane Hybrid Nav stages in a tmux
+  // window included, the bar marks the window as tmux's where a window with
+  // sides has its A and B toggle. The bar names no pane: the window's title
+  // ends in its caption, a label given in Computers or else tmux's name for
+  // the window (with automatic renaming, its active pane's command), and
+  // the pane tree names each pane.
+  const tmuxWindow = $derived(paneShowsTmux(viewLayout.nodes[viewLayout.activePaneId]));
 
   // The window's title: the one the desktop sends, or in privacy mode the
-  // generated name alone. Display only, like the tmux name.
+  // generated name alone. Display only.
   const title = $derived(windowName());
   // The naming fields behind the privacy form, and behind the name of a
   // window no title has reached, are read once they are needed: when privacy
@@ -354,14 +349,6 @@
       ><span bind:this={titleRun} data-tauri-drag-region={drag}>{title ?? ""}</span></span
     >
   </div>
-  <!-- The name and the badge are display only, so nothing here reopens the
-       hidden strip or offers a tab action tmux cannot take; on the desktop a
-       press on either drags the window as the band around them does. Each
-       holds its text directly, since Tauri's drag script reads the
-       attribute on the element pressed. -->
-  {#if tmuxName !== null}
-    <div class="tmux-name" class:covered title={tmuxName} data-tauri-drag-region={drag}>{tmuxName}</div>
-  {/if}
   <div
     class="slot"
     class:covered
@@ -372,9 +359,13 @@
   <!-- The title's place at the bar's end while no strip shows in the bar to
        take it: a tmux window, whose title then sits before the badge. -->
   <div class="title-end" {...endPlace}></div>
-  {#if tmuxName !== null}
+  {#if tmuxWindow}
     <!-- Where the A and B toggle sits in a window whose panes have sides;
-         a tmux window's have none. -->
+         a tmux window's have none. Display only, so nothing here reopens
+         the hidden strip or offers a tab action tmux cannot take; on the
+         desktop a press on it drags the window as the band around it does.
+         It holds its text directly, since Tauri's drag script reads the
+         attribute on the element pressed. -->
     <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
   {#if menus.length > 0 || titleShown}
@@ -586,19 +577,6 @@
     100% {
       transform: translateX(0);
     }
-  }
-  /* In the strip's type, at its active tab's weight; a long name gives up
-     the slot's empty stretch first, then ends in an ellipsis. */
-  .tmux-name {
-    flex: 0 1 auto;
-    min-width: 0;
-    padding: 0 8px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text);
   }
   /* Black with white text in either theme: it names tmux, not a state the
      theme colours. In the side toggle's type, and as far from the band's

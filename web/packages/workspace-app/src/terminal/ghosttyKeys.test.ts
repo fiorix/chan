@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { InputHandler } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "./ghosttyKeys";
-import { GhosttyVt } from "./ghosttyVt";
+import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { isTerminalPasteChord } from "./clipboardChord";
 import { createTerminalKeyboardProtocolState, terminalMetaKeyBytes } from "./keymap";
 import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./xtermKeyboard";
@@ -229,7 +229,7 @@ describe("after AltGr or a dead key", () => {
 // The full path: chan's listener in front of ghostty-web's own InputHandler
 // on Ghostty's wasm key encoder, against what chan's xterm.js path sends.
 
-const WASM = "vendor/ghostty-vt/ghostty-vt.wasm";
+const WASM = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 let vt: GhosttyVt;
 const hosts: HTMLElement[] = [];
 
@@ -253,7 +253,7 @@ function inputTerminal(
   document.body.append(host);
   hosts.push(host);
   const data: string[] = [];
-  const handler = new InputHandler(vt as never, host, (text) => data.push(text), () => {}, undefined,
+  const handler = new InputHandler(vt, host, (text) => data.push(text), () => {}, undefined,
     () => false, () => false, undefined, textarea);
   const cancelled = { reached: false };
   if (cancelHost) host.addEventListener("beforeinput", (event) => { cancelled.reached = true; event.preventDefault(); });
@@ -659,7 +659,7 @@ function ghostty(init: Init, platform: XtermPlatform, applicationCursorMode = fa
   const out: Outcome = { data: "", scrolled: 0, prevented: false };
   const protocol = createTerminalKeyboardProtocolState();
   const handler = new InputHandler(
-    vt as never,
+    vt,
     host,
     (d) => (out.data += d),
     () => {},

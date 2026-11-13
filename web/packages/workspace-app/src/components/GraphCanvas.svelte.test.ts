@@ -279,11 +279,11 @@ describe("the hierarchy layout", () => {
     }
   });
 
-  test("holds tag, mention and language nodes near the root's level", () => {
-    // Nodes outside the directory tree have no depth to anchor them; a weak
-    // pull toward the centre line keeps them level with the root instead of
-    // riding their links up to the files. The same layout with and without
-    // that pull, from the same start.
+  test("without a meta lift, holds tag, mention and language nodes near the root's level", () => {
+    // With the lift at 0, nodes outside the directory tree have no band; a
+    // weak pull toward the centre line keeps them level with the root
+    // instead of riding their links up to the files. The same layout with
+    // and without that pull, from the same start.
     const graph = (): { nodes: CanvasNode[]; edges: CanvasEdge[] } => {
       const g = tree();
       g.nodes.push(
@@ -296,7 +296,9 @@ describe("the hierarchy layout", () => {
     const drift = (strength: number, seed: number): number => {
       vi.restoreAllMocks();
       seedRandom(seed);
-      const { api } = render(props(graph(), { force: { ...DEFAULT_FORCE, centerStrength: strength } }));
+      const { api } = render(
+        props(graph(), { force: { ...DEFAULT_FORCE, metaLift: 0, centerStrength: strength } }),
+      );
       // In units of the root's radius, so the fit's zoom cancels out.
       const root = circle(api, "");
       const total = ["#t", "@@alice", "lang:Rust"].reduce(
@@ -308,6 +310,26 @@ describe("the hierarchy layout", () => {
     };
     for (const seed of [1, 2, 3]) {
       expect(drift(DEFAULT_FORCE.centerStrength, seed), `seed ${seed}`).toBeLessThan(drift(0, seed));
+    }
+  });
+
+  test("with a meta lift, seats a tag above the file that carries it", () => {
+    // The lift gives a node outside the directory tree a band of its own,
+    // past the deepest file it is linked to. The same layout with and
+    // without it, from the same start: on screen, above is a smaller y.
+    const heights = (metaLift: number, seed: number): { tag: number; file: number } => {
+      vi.restoreAllMocks();
+      seedRandom(seed);
+      const { api } = render(props(tree(), { force: { ...DEFAULT_FORCE, metaLift } }));
+      const out = { tag: circle(api, "#t").y, file: circle(api, "notes/a.md").y };
+      unmount(mounted.pop()!);
+      return out;
+    };
+    for (const seed of [1, 2, 3]) {
+      const floating = heights(0, seed);
+      expect(floating.tag, `seed ${seed}: no lift, the tag hangs below its file`).toBeGreaterThan(floating.file);
+      const lifted = heights(1, seed);
+      expect(lifted.tag, `seed ${seed}: lifted, the tag sits above its file`).toBeLessThan(lifted.file);
     }
   });
 });
@@ -571,18 +593,81 @@ describe("fitting the view", () => {
     expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
   });
 
-  test("by default a resize leaves the view where it is", () => {
+  test("by default a resize seats the focal at the new size's bottom edge again", () => {
     const { api } = render(props(spine(), { focalIds: [""] }));
     for (let i = 0; i < 400; i += 1) {
       timerFlush();
       runFrames(1);
     }
     runFrames(60);
+    canvasHost.width = 900;
+    canvasHost.height = 500;
+    fireResize();
+    runFrames(120);
+    const root = circle(api, "");
+    expect(root.x).toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+  });
+
+  test("by default keeps every node in the canvas while the layout moves on after the fit", () => {
+    // The clock the refit window reads, so the opening fit's window can be
+    // let close; the test's frames take no time of their own.
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const p = props(spine(), { focalIds: [""] });
+    const { api } = render(p);
+    runFrames(60);
+    now += 10_000;
+    runFrames(60);
+    // A re-tune warms the layout with no change to the nodes, so no refit
+    // window opens; the spine grows taller as it settles.
+    p.force = { ...DEFAULT_FORCE, hierarchyYSpacing: 140 };
+    flushSync();
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+    const root = circle(api, "");
+    expect(root.x, "the root stays on its seat").toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+    for (const node of spine().nodes) {
+      const c = circle(api, node.id);
+      expect(c.y - c.r, `${node.id} below the top edge`).toBeGreaterThanOrEqual(0);
+      expect(c.x - c.r, `${node.id} right of the left edge`).toBeGreaterThanOrEqual(0);
+      expect(c.x + c.r, `${node.id} left of the right edge`).toBeLessThanOrEqual(canvasHost.width);
+    }
+  });
+
+  test("an untouched view answers an expansion request with its own fit", () => {
+    const p = props(spine(), { focalIds: [""] });
+    const { api } = render(p);
+    runFrames(60);
+    p.expansionFitRequest = { nonce: 1, ids: ["directory:a/b", "directory:a/b/c"] };
+    flushSync();
+    runFrames(60);
+    const root = circle(api, "");
+    expect(root.x, "the root stays on its seat").toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+  });
+
+  test("a resize leaves a view the user has panned where it is", () => {
+    const { api, canvas: el } = render(props(spine(), { focalIds: [""] }));
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+    const start = outside(api, spine().nodes.map((node) => node.id), "", 40);
+    mouse(el, "mousedown", start.x, start.y);
+    mouse(el, "mousemove", start.x + 30, start.y - 20);
+    mouse(el, "mouseup", start.x + 30, start.y - 20);
+    runFrames(2);
     const before = circle(api, "");
     canvasHost.width = 900;
     canvasHost.height = 500;
     fireResize();
-    runFrames(90);
+    runFrames(120);
     const after = circle(api, "");
     expect(after.x).toBeCloseTo(before.x, 1);
     expect(after.y).toBeCloseTo(before.y, 1);
@@ -703,6 +788,8 @@ describe("colours and sizes", () => {
     "--g-folder": "#808080",
     "--g-tag": "#10a020",
     "--g-language": "#e030a0",
+    "--g-symlink": "#10b0c0",
+    "--g-hardlink": "#a0c010",
     "--fb-drafts-fg": "#e3b300",
     "--accent": "#00ff00",
   };
@@ -740,6 +827,8 @@ describe("colours and sizes", () => {
       n.edge("notes/c.rs", "notes/z.zip", "link"),
       n.edge("notes/a.md", "#t", "tag"),
       n.edge("notes/c.rs", "language:rust", "language"),
+      n.edge("notes/alice.md", "notes/a.md", "symlink"),
+      n.edge("notes/p.png", "notes/z.zip", "hardlink"),
     ];
     return { nodes, edges };
   }
@@ -811,6 +900,10 @@ describe("colours and sizes", () => {
     expect(strokeOf("notes/c.rs", "notes/z.zip"), "a source file's link").toBe(PALETTE["--g-source"]);
     expect(strokeOf("notes/a.md", "#t")).toBe(PALETTE["--g-tag"]);
     expect(strokeOf("notes/c.rs", "language:rust")).toBe(PALETTE["--g-language"]);
+    expect(strokeOf("notes/alice.md", "notes/a.md"), "a symlink is no link of its source").toBe(
+      PALETTE["--g-symlink"],
+    );
+    expect(strokeOf("notes/p.png", "notes/z.zip"), "two names of one file").toBe(PALETTE["--g-hardlink"]);
   });
 
   test("a directory's disc sits between a leaf's and a document's, the root's is the largest", () => {

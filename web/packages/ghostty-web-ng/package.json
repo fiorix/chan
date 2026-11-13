@@ -6,11 +6,13 @@
   "license": "MIT",
   "author": "Coder",
   "type": "module",
+  "scripts": {
+    "check": "tsc -p vt/tsconfig.json",
+    "test": "vitest run"
+  },
   "exports": {
-    ".": {
-      "types": "./index.d.ts",
-      "default": "./lib/index.ts"
-    },
-    "./ghostty-vt.wasm": "./ghostty-vt.wasm"
+    ".": "./lib/index.ts",
+    "./vt": "./vt/index.ts",
+    "./vendor/ghostty-vt/ghostty-vt.wasm": "./vendor/ghostty-vt/ghostty-vt.wasm"
   }
 }

@@ -111,7 +111,7 @@ describe("Ctrl+D on a tab", () => {
     await settle();
     expect(tabIds()).toEqual([]);
 
-    openGraphInActivePane({ mode: "semantic", scopeId: "workspace" });
+    openGraphInActivePane();
     await settle();
     press(CTRL_D);
     await settle();

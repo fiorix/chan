@@ -13,8 +13,7 @@
  * - Captures all keyboard input (preventDefault on everything)
  */
 
-import type { Ghostty } from './ghostty';
-import type { KeyEncoder } from './ghostty';
+import type { GhosttyVt, VtKeyEncoder } from '../vt/ghosttyVt';
 import type { IKeyEvent } from './interfaces';
 import { Key, KeyAction, KeyEncoderOption, Mods } from './types';
 
@@ -173,11 +172,10 @@ export interface MouseTrackingConfig {
 }
 
 export class InputHandler {
-  private encoder: KeyEncoder;
+  private encoder: VtKeyEncoder;
   private container: HTMLElement;
   private inputElement?: HTMLElement;
   private onDataCallback: (data: string) => void;
-  private onBellCallback: () => void;
   private onKeyCallback?: (keyEvent: IKeyEvent) => void;
   private customKeyEventHandler?: (event: KeyboardEvent) => boolean;
   private getModeCallback?: (mode: number) => boolean;
@@ -210,10 +208,10 @@ export class InputHandler {
 
   /**
    * Create a new InputHandler
-   * @param ghostty - Ghostty instance (for creating KeyEncoder)
+   * @param ghostty - The core binding (for creating the key encoder)
    * @param container - DOM element to attach listeners to
    * @param onData - Callback for terminal data (escape sequences to send to PTY)
-   * @param onBell - Callback for bell/beep event
+   * @param _onBell - Callback for bell/beep event; the handler raises none
    * @param onKey - Optional callback for raw key events
    * @param customKeyEventHandler - Optional custom key event handler
    * @param getMode - Optional callback to query terminal mode state (for application cursor mode)
@@ -222,10 +220,10 @@ export class InputHandler {
    * @param mouseConfig - Optional mouse tracking configuration
    */
   constructor(
-    ghostty: Ghostty,
+    ghostty: GhosttyVt,
     container: HTMLElement,
     onData: (data: string) => void,
-    onBell: () => void,
+    _onBell: () => void,
     onKey?: (keyEvent: IKeyEvent) => void,
     customKeyEventHandler?: (event: KeyboardEvent) => boolean,
     getMode?: (mode: number) => boolean,
@@ -237,7 +235,6 @@ export class InputHandler {
     this.container = container;
     this.inputElement = inputElement;
     this.onDataCallback = onData;
-    this.onBellCallback = onBell;
     this.onKeyCallback = onKey;
     this.customKeyEventHandler = customKeyEventHandler;
     this.getModeCallback = getMode;

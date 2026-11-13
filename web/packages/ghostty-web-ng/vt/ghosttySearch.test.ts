@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
-import type { GhosttyCell } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
-import { ABI, GhosttyVt, LAYOUT, type MatchRange, type VtSearch, VtTerminal } from "./ghosttyVt";
+import { ABI, GhosttyVt, LAYOUT, type MatchRange, type VtSearch, VtCells, VtTerminal } from "./ghosttyVt";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -13,7 +12,7 @@ beforeAll(async () => {
 
 async function terminal(cols: number, rows: number, scrollbackLimit = 1000): Promise<VtTerminal> {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  return vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
+  return vt.createTerminal(cols, rows, { scrollbackLimit });
 }
 
 /// Writes `n` lines, each ended by CRLF, a thousand at a time.
@@ -38,11 +37,17 @@ function scan(s: VtSearch): void {
   throw new Error("the search did not complete");
 }
 
-function text(cells: GhosttyCell[] | null): string {
-  return (cells ?? [])
-    .map((c) => (c.width === 0 ? "" : c.codepoint ? String.fromCodePoint(c.codepoint) : " "))
-    .join("")
-    .trimEnd();
+/// Screen row `y`'s text: a character a cell, a space for an empty one,
+/// nothing for a spacer, trailing blanks dropped.
+function text(t: VtTerminal, y: number): string {
+  const cells = new VtCells();
+  if (!t.readRow(y, cells)) return "";
+  let out = "";
+  for (let x = 0; x < cells.length; x++) {
+    const c = cells.at(x)!;
+    if (c.width !== 0) out += c.codepoint ? String.fromCodePoint(c.codepoint) : " ";
+  }
+  return out.trimEnd();
 }
 
 /// Twelve lines on an 80x5 terminal, every third one with an upper-case
@@ -445,7 +450,7 @@ describe("a search over the binding's terminal", () => {
     expect(() => s.free()).not.toThrow();
     expect(s.state()).toEqual({ total: 0, index: null, active: null, complete: true });
     t.write("more\r\n");
-    expect(text(t.getLine(0))).toBe("line 9 ERROR here");
+    expect(text(t, 0)).toBe("line 9 ERROR here");
     t.free();
   });
 
@@ -647,7 +652,7 @@ describe("the scroll policy", () => {
     expect(viewportRowOfHistoryTop(t)).toBeNull();
     t.write("after\r\n");
     expect(viewportRowOfHistoryTop(t)).toBeNull();
-    expect(text(t.getLine(0)), "the render state is still the active screen").toBe("filler 27");
+    expect(text(t, 0), "the render state is still the active screen").toBe("filler 27");
     s.free();
   });
 
@@ -659,7 +664,7 @@ describe("the scroll policy", () => {
     expect(viewportRowOfHistoryTop(t)).toBe(0);
     t.write("after\r\n");
     expect(viewportRowOfHistoryTop(t), "a write does not bring it back").toBe(0);
-    expect(text(t.getLine(0)), "the render state shows history as the active screen").toBe("old needle line");
+    expect(text(t, 0), "the render state shows history as the active screen").toBe("old needle line");
     s.free();
   });
 });

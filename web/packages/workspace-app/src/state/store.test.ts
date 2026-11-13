@@ -981,9 +981,15 @@ describe("window commands", () => {
     const tab = activePane().tabs.at(-1);
     expect(tab?.kind).toBe("graph");
     const graph = tab as GraphTab;
-    expect(graph.mode).toBe("semantic");
-    expect(graph.scopeId).toBe("dir:crates/chan-tunnel-proto/src");
+    // A link made when a directory was a scope of its own: the graph, with
+    // the link's node selected and that directory opened.
     expect(graph.pendingSelectId).toBe("crates/chan-tunnel-proto/src/h2_duplex.rs");
+    expect(graph.expanded).toEqual({
+      "": true,
+      crates: true,
+      "crates/chan-tunnel-proto": true,
+      "crates/chan-tunnel-proto/src": true,
+    });
   });
 
   test("revealPathInBrowser always OPENS a File Browser tab (never focuses the dock / an existing tab)", () => {
@@ -1364,52 +1370,43 @@ describe("legacy overlay hash retirement", () => {
   });
 });
 
-describe("filesystem graph entrypoints", () => {
+describe("graph from here", () => {
   function activeGraphTab(): GraphTab {
     const tab = activePane().tabs.find((candidate) => candidate.id === activePane().activeTabId);
     expect(tab?.kind).toBe("graph");
     return tab as GraphTab;
   }
 
-  test("file browser graph entrypoints scope to the file's parent or the directory itself", () => {
+  test("on a file opens the one graph with the file selected", () => {
     openFsGraphForFile("notes/a.md");
 
-    let graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    // File trigger scopes to the parent directory, with the
-    // originating file auto-selected so its inspector pops.
-    expect(graph.scopeId).toBe("dir:notes");
-    expect(graph.pendingSelectId).toBe("notes/a.md");
-
-    openFsGraphForDirectory("notes");
-
-    graph = activeGraphTab();
-    // The directory "Graph from here" opens the RICH semantic
-    // graph (all layers, with client-side directory expand/collapse),
-    // not the directories-only filesystem mode.
-    expect(graph.mode).toBe("semantic");
-    // Directory trigger scopes to that subtree directly.
-    expect(graph.scopeId).toBe("dir:notes");
-    expect(graph.pendingSelectId).toBe("notes");
+    const graph = activeGraphTab();
+    expect(graph).toMatchObject({
+      pendingSelectId: "notes/a.md",
+      // The selection reveals the file with its directories; no directory
+      // is opened for it.
+      expanded: { "": true },
+    });
   });
 
-  test("file at workspace root falls back to workspace scope; workspace root directory likewise", () => {
-    openFsGraphForFile("README.md");
+  test("on a directory opens the one graph with the directory selected and opened", () => {
+    openFsGraphForDirectory("notes/sub");
 
-    let graph = activeGraphTab();
-    expect(graph.mode).toBe("filesystem");
-    // No parent directory above a root-level file: workspace scope is
-    // the meaningful neighbourhood.
-    expect(graph.scopeId).toBe("workspace");
-    expect(graph.pendingSelectId).toBe("README.md");
+    const graph = activeGraphTab();
+    expect(graph).toMatchObject({
+      pendingSelectId: "notes/sub",
+      expanded: { "": true, notes: true, "notes/sub": true },
+    });
+  });
 
+  test("on the workspace root selects the workspace's own node", () => {
     openFsGraphForDirectory("");
 
-    graph = activeGraphTab();
-    // Workspace-root "Graph from here" is the rich semantic
-    // graph too (workspace scope, all layers).
-    expect(graph.mode).toBe("semantic");
-    expect(graph.scopeId).toBe("workspace");
+    const graph = activeGraphTab();
+    expect(graph).toMatchObject({
+      pendingSelectId: "",
+      expanded: { "": true },
+    });
   });
 });
 
@@ -1579,14 +1576,13 @@ describe("resolveSpawnContext", () => {
     expect(resolveSpawnContext()).toEqual({ dir: "" });
   });
 
-  test("graph file: scope -> parent + file", () => {
+  test("graph with a file selected -> parent + file", () => {
     placeTabs([
       {
         kind: "graph",
         id: "g-1",
         title: "File Graph",
-        mode: "semantic",
-        scopeId: "file:notes/a.md",
+        selectedNodeId: "notes/a.md",
         depth: 1,
         expanded: { "": true },
         filters: {
@@ -1609,14 +1605,13 @@ describe("resolveSpawnContext", () => {
     });
   });
 
-  test("graph dir: scope -> dir only", () => {
+  test("graph with a directory selected -> dir only", () => {
     placeTabs([
       {
         kind: "graph",
         id: "g-1",
         title: "Dir Graph",
-        mode: "semantic",
-        scopeId: "dir:notes/sub",
+        selectedNodeId: "directory:notes/sub",
         depth: 1,
         expanded: { "": true },
         filters: {
@@ -1636,14 +1631,12 @@ describe("resolveSpawnContext", () => {
     expect(resolveSpawnContext()).toEqual({ dir: "notes/sub" });
   });
 
-  test("graph workspace scope -> workspace root", () => {
+  test("graph with nothing selected -> workspace root", () => {
     placeTabs([
       {
         kind: "graph",
         id: "g-1",
         title: "Graph",
-        mode: "semantic",
-        scopeId: "workspace",
         depth: 1,
         expanded: { "": true },
         filters: {
@@ -1663,14 +1656,13 @@ describe("resolveSpawnContext", () => {
     expect(resolveSpawnContext()).toEqual({ dir: "" });
   });
 
-  test("graph tag: scope -> workspace root (no useful path anchor)", () => {
+  test("graph with a tag selected -> workspace root (no useful path anchor)", () => {
     placeTabs([
       {
         kind: "graph",
         id: "g-1",
         title: "Tag Graph",
-        mode: "semantic",
-        scopeId: "tag:foo",
+        selectedNodeId: "#foo",
         depth: 1,
         expanded: { "": true },
         filters: {
@@ -1688,6 +1680,20 @@ describe("resolveSpawnContext", () => {
       },
     ]);
     expect(resolveSpawnContext()).toEqual({ dir: "" });
+  });
+
+  // An opener names its node by path and the graph resolves it once loaded;
+  // a spawn before then reads the path the opener left.
+  test("graph opened on a directory, before it loads -> dir only", () => {
+    placeTabs([]);
+    openFsGraphForDirectory("notes/sub");
+    expect(resolveSpawnContext()).toEqual({ dir: "notes/sub" });
+  });
+
+  test("graph opened on a file, before it loads -> parent + file", () => {
+    placeTabs([]);
+    openFsGraphForFile("notes/a.md");
+    expect(resolveSpawnContext()).toEqual({ dir: "notes", file: "notes/a.md" });
   });
 });
 

@@ -29,10 +29,10 @@ import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
 import { beforeAll, expect, test } from "vitest";
 import { type FindCount, type FrameScheduler, GhosttyFind, FIND_SCAN_BUDGET_MS } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
-import { GhosttyVt, type VtSearch, VtTerminal } from "./ghosttyVt";
+import { GhosttyVt, type VtSearch, VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { SCROLLBACK_MB_DEFAULT, SCROLLBACK_MB_MAX, scrollbackLinesFromMb } from "./scrollback";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const OUT = env.MEASURE_OUT ?? "";
 const REPS = Number(env.MEASURE_REPS ?? 10);
 const LINES = Number(env.MEASURE_LINES ?? 200_000);

@@ -26,5 +26,5 @@ test("the terminal bundle ships the vendored wasm without an inline copy", async
   expect(chunks.filter((chunk) => chunk.code.includes("data:application/wasm")).map((chunk) => chunk.fileName)).toEqual([]);
   const wasm = result.output.filter((item) => item.type === "asset" && item.fileName.endsWith(".wasm"));
   expect(wasm).toHaveLength(1);
-  expect(Buffer.from(wasm[0].source)).toEqual(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+  expect(Buffer.from(wasm[0].source)).toEqual(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
 });

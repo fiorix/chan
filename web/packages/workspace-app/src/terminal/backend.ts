@@ -3,8 +3,9 @@
 ///
 /// A ghostty terminal is ghostty-web's `Terminal` (renderer, input,
 /// selection) over Ghostty's own release build of libghostty-vt, vendored
-/// in `vendor/ghostty-vt/` and bound to the shape ghostty-web expects by
-/// `ghosttyVt.ts`. ghostty-web's bundled wasm is not loaded.
+/// in the widget package's `vendor/ghostty-vt/` and bound by the package's
+/// `vt/ghosttyVt.ts`, the core the widget is typed against. It is the one
+/// wasm the package carries.
 ///
 /// WHY lazy: the wasm is about 1.2MB. A static import would put that
 /// asset on the critical path for every user whose terminals run on
@@ -33,8 +34,8 @@
 /// cannot cure a failure of the instance. Callers fall back to xterm.js
 /// for each terminal whose load fails.
 
-import type { Ghostty, Terminal } from "@chan/ghostty-web-ng";
-import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "./ghosttyVt";
+import type { Terminal } from "@chan/ghostty-web-ng";
+import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "@chan/ghostty-web-ng/vt";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -44,7 +45,7 @@ export type TerminalBackend = "xterm" | "ghostty";
 export type GhosttyKit = {
   /// A fresh WASM instance for ONE terminal; never share it (see the
   /// module comment).
-  instantiate: (host?: VtHost) => Promise<Ghostty>;
+  instantiate: (host?: VtHost) => Promise<GhosttyVt>;
   Terminal: typeof Terminal;
 };
 
@@ -70,7 +71,7 @@ export function ghosttyKitFrom(
   return {
     Terminal: lib.Terminal,
     // The release build imports nothing from its host.
-    instantiate: async (host) => new GhosttyVt(await WebAssembly.instantiate(module, {}), host).asGhostty(),
+    instantiate: async (host) => new GhosttyVt(await WebAssembly.instantiate(module, {}), host),
   };
 }
 
@@ -115,7 +116,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
 async function compileGhosttyKit(forever: (error: unknown) => never): Promise<GhosttyKit> {
   const [mod, wasmUrl] = await Promise.all([
     import("@chan/ghostty-web-ng"),
-    import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
+    import("@chan/ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm?url"),
   ]);
   const response = await fetch(wasmUrl.default);
   if (!response.ok) {

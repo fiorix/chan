@@ -21,6 +21,7 @@ import {
   ensureGraphLoaded,
   graphData,
   invalidateGraph,
+  refreshGraph,
   reloadGraph,
 } from "./graphData.svelte";
 import {
@@ -349,6 +350,54 @@ describe("a burst of filesystem events fetches the shared graph once, after its 
     teardown();
     await advance(GRAPH_QUIET_MS * 2);
     expect(streams.length - 1).toBe(0);
+  });
+});
+
+describe("a surface's own reload fetches the shared graph again at once", () => {
+  test("the view stays through the fetch, and is the answer itself once it lands", async () => {
+    await loaded();
+    expect(graphData.view, "held as it was answered, behind no copy or proxy").toBe(A);
+    const refresh = refreshGraph();
+    expect(streams.length - 1).toBe(1);
+    streams[1]!.batch(B);
+    expect({ view: graphData.view, loading: graphData.loading }, "kept while the fetch is out").toEqual({
+      view: A,
+      loading: true,
+    });
+    streams[1]!.answer(B);
+    await refresh;
+    expect(graphData.view).toBe(B);
+    expect(graphData.loading).toBe(false);
+  });
+
+  test("a fetch in flight is abandoned for it", async () => {
+    await loaded();
+    event("notes/n1.md");
+    await advance(GRAPH_QUIET_MS);
+    expect(streams.length - 1, "the burst's fetch is out").toBe(1);
+    const refresh = refreshGraph();
+    expect(streams[1]!.signal?.aborted).toBe(true);
+    expect(streams.length - 1).toBe(2);
+    streams[2]!.answer(C);
+    await refresh;
+    expect({ view: graphData.view, loading: graphData.loading, error: graphData.error }).toEqual({
+      view: C,
+      loading: false,
+      error: null,
+    });
+    await advance(GRAPH_QUIET_MS * 2);
+    expect(streams.length - 1, "nothing follows it").toBe(2);
+  });
+
+  test("inside a quiet window it is the burst's only fetch", async () => {
+    await loaded();
+    event("notes/n1.md");
+    await advance(100);
+    const refresh = refreshGraph();
+    streams.at(-1)!.answer(B);
+    await refresh;
+    await advance(GRAPH_QUIET_MS * 2);
+    expect({ fetches: streams.length - 1, view: graphData.view }).toEqual({ fetches: 1, view: B });
   });
 });
 

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { Terminal, type Ghostty, type GhosttyTerminal } from "@chan/ghostty-web-ng";
+import { Terminal } from "@chan/ghostty-web-ng";
+import { VtCells, type GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { describe, expect, test } from "vitest";
 import type { TerminalPreferences } from "../api/types";
 import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";
@@ -42,17 +43,19 @@ describe("ghostty kit instances", () => {
   /// The vendored release wasm (relative to the package directory vitest
   /// runs in).
   async function vendoredModule(): Promise<WebAssembly.Module> {
-    return WebAssembly.compile(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
+    return WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
   }
 
   /// Cells on screen holding the disposed terminal's marker byte.
-  function staleCells(term: GhosttyTerminal): number {
-    term.update();
+  function staleCells(term: VtTerminal): number {
+    term.beginFrame();
     const { rows } = term.getDimensions();
     let stale = 0;
+    const cells = new VtCells();
     for (let y = 0; y < rows; y++) {
-      for (const cell of term.getLine(y) ?? []) {
-        if (cell.codepoint === MARKER.codePointAt(0)) stale++;
+      if (!term.readRow(y, cells)) continue;
+      for (let x = 0; x < cells.length; x++) {
+        if (cells.at(x)!.codepoint === MARKER.codePointAt(0)) stale++;
       }
     }
     return stale;
@@ -63,7 +66,7 @@ describe("ghostty kit instances", () => {
   /// A closed terminal with a screenful of history, then a new terminal on
   /// `next` at ghostty-web's default 80x24 resized to the real grid -- the
   /// order TerminalTab takes (open, then the first fit).
-  function disposeThenSpawn(prev: Ghostty, next: Ghostty): GhosttyTerminal {
+  function disposeThenSpawn(prev: GhosttyVt, next: GhosttyVt): VtTerminal {
     const closed = prev.createTerminal(100, 30, { scrollbackLimit: 10000 });
     let out = "";
     for (let i = 0; i < 500; i++) out += `${MARKER.repeat(90)}\r\n`;

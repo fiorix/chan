@@ -11,7 +11,9 @@
 // `hierarchyYSpacing` + `hierarchyYStrength` drive the filesystem-spine
 // forceY, and `parentXStrength` drives the parent-anchored forceX, so
 // each file node sits above its directory and siblings cluster
-// horizontally under the same parent.
+// horizontally under the same parent. `metaLift` gives the nodes outside
+// the tree (tag / mention / language) a band above the files they are
+// linked to, so the whole graph grows upward from the workspace root.
 
 export type GraphForce = {
   /// forceManyBody strength. Negative = repulsion between every pair of
@@ -45,6 +47,11 @@ export type GraphForce = {
   /// Custom parent-anchored forceX strength: pulls each hierarchical
   /// node toward its parent directory's X so siblings cluster.
   parentXStrength: number;
+  /// Depth bands a tag, mention or language node sits above the deepest
+  /// file it is linked to, held there with `hierarchyYStrength`. At 0
+  /// these nodes take no band: they keep the weak `centerStrength` pull
+  /// toward y = 0, the level of the workspace root.
+  metaLift: number;
 };
 
 /// The live graph's tuning. Tweak here, not in the per-call layout
@@ -61,4 +68,5 @@ export const DEFAULT_FORCE: GraphForce = {
   hierarchyYSpacing: 90,
   hierarchyYStrength: 0.45,
   parentXStrength: 0.18,
+  metaLift: 1,
 };

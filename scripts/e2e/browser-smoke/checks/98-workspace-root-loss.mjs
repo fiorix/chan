@@ -239,7 +239,7 @@ export default {
         throw new Error(`workspace graph setup retained a file selection: ${JSON.stringify(rootListing)}`);
       }
 
-      // The unselected workspace Files tab gives the graph its root scope; its tab-menu slider sets that scope's computed maximum depth.
+      // The unselected workspace Files tab opens the graph on the workspace's own node; its tab-menu slider opens the tree to its deepest level.
       await dispatch(page, "app.graph.toggle");
       await page.waitForSelector(".graph-tab canvas", { timeout: 30_000 });
       await page.waitForFunction(

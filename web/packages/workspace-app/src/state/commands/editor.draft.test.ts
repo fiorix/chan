@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // The editor's commands that go by the active file's place in the workspace
-// (its parent directory, a terminal there, a graph scoped to it, its row in
+// (its parent directory, a terminal there, a graph opened on it, its row in
 // the file browser) are not offered on a workspace's draft, which has none,
 // and neither are Delete file and Duplicate file: a draft is no file of the
 // workspace, and is discarded from its own flow. Save draft is offered on a

@@ -8,13 +8,13 @@
 // has to paint every pixel that terminal paints, and nothing else may change.
 
 import { readFileSync } from "node:fs";
-import { Terminal, type GhosttyCell, type ITheme } from "@chan/ghostty-web-ng";
+import { Terminal, type ITheme } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { applyGhosttyTheme } from "./ghosttyTheme";
-import { VtTerminal, GhosttyVt } from "./ghosttyVt";
+import { VtCells, VtTerminal, GhosttyVt, type VtCell } from "@chan/ghostty-web-ng/vt";
 
-const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
+const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 24;
 const ROWS = 6;
 /// What the software context's measureText reports per character, and the
@@ -104,7 +104,7 @@ async function openTerminal(theme: ITheme, output = OUTPUT): Promise<Terminal> {
     rows: ROWS,
     cursorBlink: false,
     cursorStyle: "block",
-    ghostty: vt.asGhostty(),
+    ghostty: vt,
     smoothScrollDuration: 0,
     theme: { ...theme },
   });
@@ -129,13 +129,30 @@ function core(term: Terminal): VtTerminal {
   return vt;
 }
 
-/// Every cell of the screen and of the history, as the renderer reads them.
-function cells(term: Terminal): GhosttyCell[][] {
+/// Screen row `y`, or history row `y` with `history`, as the renderer reads
+/// it, its cells copied out of the view.
+function row(term: Terminal, y: number, history = false): VtCell[] {
   const vt = core(term);
-  const rows: GhosttyCell[][] = [];
-  for (let y = 0; y < vt.getScrollbackLength(); y++) rows.push(vt.getScrollbackLine(y) ?? []);
-  for (let y = 0; y < ROWS; y++) rows.push(vt.getLine(y) ?? []);
+  const view = new VtCells();
+  if (!(history ? vt.readHistoryRow(y, view) : vt.readRow(y, view))) return [];
+  return Array.from({ length: view.length }, (_, x) => ({ ...view.at(x)! }));
+}
+
+/// Every cell of the screen and of the history, as the renderer reads them.
+function cells(term: Terminal): VtCell[][] {
+  const vt = core(term);
+  const rows: VtCell[][] = [];
+  for (let y = 0; y < vt.getScrollbackLength(); y++) rows.push(row(term, y, true));
+  for (let y = 0; y < ROWS; y++) rows.push(row(term, y));
   return rows;
+}
+
+/// The default colors the binding resolves cells against, read off a cell
+/// nothing was written to: the last column of the screen's last row.
+function defaults(term: Terminal): { foreground: string; background: string } {
+  const cell = row(term, ROWS - 1)[COLS - 1];
+  expect(cell?.codepoint, "an empty cell").toBe(0);
+  return { foreground: fg(cell), background: bg(cell) };
 }
 
 /// The core's own colors, read through its C API rather than the binding's
@@ -208,17 +225,12 @@ function opaque(hex: string): string {
   return `${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},1`;
 }
 
-function rgb(hex: string): { r: number; g: number; b: number } {
-  const value = Number.parseInt(hex.slice(1), 16);
-  return { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
+function fg(cell: VtCell): string {
+  return `#${cell.fg.toString(16).padStart(6, "0")}`;
 }
 
-function fg(cell: GhosttyCell): string {
-  return `#${[cell.fg_r, cell.fg_g, cell.fg_b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function bg(cell: GhosttyCell): string {
-  return `#${[cell.bg_r, cell.bg_g, cell.bg_b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+function bg(cell: VtCell): string {
+  return `#${cell.bg.toString(16).padStart(6, "0")}`;
 }
 
 /// The screen's rows of the second copy of the colored rows.
@@ -230,17 +242,17 @@ describe("a theme switch on a live ghostty terminal", () => {
     const term = await openTerminal(DARK);
     const before = cells(term);
     const beforeColors = coreColors(term);
-    expect(core(term).getColors().background).toEqual(rgb(DARK.background!));
+    expect(defaults(term).background).toBe(DARK.background);
 
     expect(applyGhosttyTheme(term, LIGHT)).toBe(true);
     const fresh = await openTerminal(LIGHT);
     expect(coreColors(term), "the core's own colors").toEqual(coreColors(fresh));
-    expect(core(term).getColors()).toEqual(core(fresh).getColors());
-    expect(core(term).getColors().background).toEqual(rgb(LIGHT.background!));
+    expect(defaults(term)).toEqual(defaults(fresh));
+    expect(defaults(term).background).toBe(LIGHT.background);
     expect(cells(term), "every cell of the screen and the history").toEqual(cells(fresh));
 
     // The 16 colors are the light theme's, as foreground and as background.
-    const screen = (row: number) => core(term).getLine(row)!;
+    const screen = (y: number) => row(term, y);
     const fgRow = screen(SCREEN_FG_ROW).map(fg);
     const bgRow = screen(SCREEN_BG_ROW).map(bg);
     for (let i = 0; i < 8; i++) {
@@ -289,9 +301,9 @@ describe("a theme switch on a live ghostty terminal", () => {
     const fresh = await openTerminal(LIGHT, own);
     expect(coreColors(term)).toEqual(coreColors(fresh));
     expect(cells(term)).toEqual(cells(fresh));
-    expect(fg(core(term).getLine(SCREEN_FG_ROW)![2]!), "the program's red").toBe("#123456");
-    expect(core(term).getColors().background, "the program's background").toEqual(rgb("#203040"));
-    expect(core(term).getColors().foreground, "the program's foreground").toEqual(rgb("#aabbcc"));
+    expect(fg(row(term, SCREEN_FG_ROW)[2]!), "the program's red").toBe("#123456");
+    expect(defaults(term).background, "the program's background").toBe("#203040");
+    expect(defaults(term).foreground, "the program's foreground").toBe("#aabbcc");
     expect(coreColors(term).COLOR_CURSOR, "the program's cursor").toEqual([1, 2, 3]);
   });
 
@@ -302,7 +314,7 @@ describe("a theme switch on a live ghostty terminal", () => {
     const fresh = await openTerminal(partial);
     expect(coreColors(term)).toEqual(coreColors(fresh));
     expect(cells(term)).toEqual(cells(fresh));
-    expect(fg(core(term).getLine(SCREEN_FG_ROW)![2]!)).not.toBe(DARK.red);
+    expect(fg(row(term, SCREEN_FG_ROW)[2]!)).not.toBe(DARK.red);
   });
 
   test("a switch changes nothing else: output, input, selection, scroll position and focus", async () => {
@@ -350,17 +362,17 @@ describe("a theme switch on a live ghostty terminal", () => {
     expect(term.options.theme).toEqual(LIGHT);
 
     term.reset();
-    expect(core(term).getColors().background).toEqual(rgb(LIGHT.background!));
+    expect(defaults(term).background).toBe(LIGHT.background);
   });
 
   test("a terminal not yet open takes the theme when it opens", async () => {
     const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-    const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt.asGhostty(), theme: { ...DARK } });
+    const term = new Terminal({ cols: COLS, rows: ROWS, ghostty: vt, theme: { ...DARK } });
     expect(applyGhosttyTheme(term, LIGHT)).toBe(false);
     const host = document.createElement("div");
     document.body.append(host);
     term.open(host);
     opened.push(term);
-    expect(core(term).getColors().background).toEqual(rgb(LIGHT.background!));
+    expect(defaults(term).background).toBe(LIGHT.background);
   });
 });

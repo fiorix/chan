@@ -18,6 +18,7 @@ mod native_dialog;
 mod native_transfer;
 mod open_events;
 mod privacy;
+mod raise;
 mod registry;
 mod remote_workspace;
 mod revtunnel;
@@ -690,7 +691,7 @@ impl DevserverFeed {
     /// `wait_for_devserver`'s `info` and mints the control row under it; without
     /// this seed, `library_id_of` returns `None` until a later window syncs the
     /// mapping, so the launcher cannot match the control row's `library_id` to this
-    /// devserver and groups it under a blank `↗` header. Seeding here makes
+    /// devserver and lists it apart, in a fallback block. Seeding here makes
     /// `entry_from_devserver` carry the real id from the FIRST render so the control
     /// row groups under its parent devserver immediately. Idempotent; a later
     /// snapshot read re-caches the same value.
@@ -2586,7 +2587,7 @@ async fn connect_devserver_impl_inner(
     state.devservers.set(id.clone(), conn.clone());
     // Seed this devserver's `library_id` into the launcher
     // feed BEFORE the control mint so the launcher resolves the control row's group
-    // to the devserver's NAME from the FIRST render, not a blank `↗`. Without it
+    // to the devserver's NAME from the FIRST render, not apart from it. Without it
     // `library_id_of` stays None until a window syncs the mapping, and the launcher
     // (which matches the control row's `library_id` against each devserver's
     // reported id) groups it separately. Non-empty only: `info.library_id` defaults
@@ -3753,6 +3754,73 @@ fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed:
     });
 }
 
+/// Start this desktop again once a shutdown's drain is done, as Tauri's
+/// restart does: under this process's own AppImage
+/// ([`cs_install::appimage_path`]), the image with the managed `Env`'s
+/// arguments, then exit. Tauri's own restart hands the new process this
+/// process's environment, whose search paths name this process's mount, which
+/// goes with it; here the new process gets the environment the user had
+/// ([`appimage_relaunch_command`]), so its own runtime builds on the user's.
+/// Off an AppImage, and when that start fails, Tauri's restart.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn relaunch(app: tauri::AppHandle) {
+    #[cfg(target_os = "linux")]
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
+    #[cfg(not(target_os = "linux"))]
+    let appimage = None;
+    relaunch_with(
+        appimage,
+        std::env::vars_os(),
+        |mut command| command.spawn().map(drop),
+        || app.exit(0),
+        || app.restart(),
+    );
+}
+
+/// [`relaunch`]'s route, with the start of the new process, the exit and
+/// Tauri's restart passed in, so a test can drive it without a desktop: an
+/// `appimage` (the image and this process's arguments) is started through
+/// [`appimage_relaunch_command`] from `parent`, and a start that works is
+/// followed by the exit; with no image, or when the start fails, Tauri's
+/// restart.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn relaunch_with(
+    appimage: Option<(std::ffi::OsString, Vec<std::ffi::OsString>)>,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    spawn: impl FnOnce(std::process::Command) -> std::io::Result<()>,
+    exit: impl FnOnce(),
+    restart: impl FnOnce(),
+) {
+    if let Some((image, args)) = appimage {
+        match spawn(appimage_relaunch_command(Path::new(&image), &args, parent)) {
+            Ok(()) => return exit(),
+            Err(error) => tracing::error!(
+                %error,
+                "relaunching the AppImage failed; falling back to the restart that keeps this \
+                 environment"
+            ),
+        }
+    }
+    restart()
+}
+
+/// The relaunch of an AppImage desktop: the image at `appimage` with `args`
+/// past `argv[0]`, as Tauri's restart starts it, handed the environment the
+/// user had rather than `parent`, this process's
+/// ([`chan_server::hand_appimage_host_env`]).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn appimage_relaunch_command(
+    appimage: &Path,
+    args: &[std::ffi::OsString],
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(appimage);
+    command.args(args.iter().skip(1));
+    chan_server::hand_appimage_host_env(&mut command, parent);
+    command
+}
+
 /// The launcher update dialog's Restart, answered by the in-window launcher's
 /// IPC (launcher_panel.rs).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4447,15 +4515,11 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
 }
 
 /// Raise the window of a Window menu Open row. The section lists minimized
-/// windows too, and showing and focusing one leaves it minimized on Windows
-/// and the GTK desktops: tao's `set_visible` only sets the window visible
-/// there, and its `set_focus` skips a minimized window on every platform. So
-/// the window is restored first.
+/// windows too, so the row takes the shared raise (`raise.rs`), which
+/// restores a minimized window before it shows and focuses it.
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
-        let _ = w.unminimize();
-        w.show().map_err(err)?;
-        w.set_focus().map_err(err)?;
+        raise::raise_window(&w).map_err(err)?;
     }
     Ok(())
 }
@@ -5193,12 +5257,14 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
 /// CLI in-process with the Desktop personality and EXIT instead of launching
 /// the GUI. This is what makes a desktop install also provide `chan` with no
 /// separate download. The `chan-files` and `chan-edit` names run the same CLI
-/// under their own usage. Mirrors `run_as_cs_if_requested`: a pre-GUI argv
-/// probe that short-circuits `main`. The Desktop personality makes `chan
-/// serve` and the two openers integrate with the running desktop (handoff /
-/// GUI launch) and `chan upgrade` drive the desktop updater rather than
-/// replacing a CLI tarball. Returns `Ok(true)` when it handled the
-/// invocation, `Ok(false)` for a normal GUI launch.
+/// under their own usage, and so does a `chan-term` launch that only runs the
+/// user's shell, which opens in the running desktop's window as their paths
+/// do. Mirrors `run_as_cs_if_requested`: a pre-GUI argv probe that
+/// short-circuits `main`. The Desktop personality makes `chan serve`, the two
+/// openers and `chan-term` integrate with the running desktop (handoff / GUI
+/// launch) and `chan upgrade` drive the desktop updater rather than replacing
+/// a CLI tarball. Returns `Ok(true)` when it handled the invocation,
+/// `Ok(false)` for a normal GUI launch.
 fn run_as_chan_if_requested() -> Result<bool, String> {
     // Stem detection prefers `$ARGV0` (see `chan_shell::invoked_arg0`) so a
     // packaged AppImage invoked via `exec -a chan "$APPIMAGE"` (AppRun drops
@@ -5206,7 +5272,9 @@ fn run_as_chan_if_requested() -> Result<bool, String> {
     // goes to the CLI's parse with the real argv, since an opener's usage is
     // chosen by it and AppRun's argv[0] is the inner binary.
     let arg0 = chan_shell::invoked_arg0();
-    if !chan_shell::invoked_as_chan(&arg0) && !chan::invoked_as_opener(&arg0) {
+    let shell_terminal = chan::term::invoked_as_term(&arg0)
+        && chan::term::is_shell_launch(std::env::args_os().skip(1));
+    if !chan_shell::invoked_as_chan(&arg0) && !chan::invoked_as_opener(&arg0) && !shell_terminal {
         return Ok(false);
     }
     // `chan serve` needs a multi-threaded runtime; everything else runs fine
@@ -5256,6 +5324,7 @@ fn attach_parent_console_for_cli() {
     if !chan_shell::invoked_as_chan(&arg0)
         && !chan_shell::invoked_as_cs(&arg0)
         && !chan::invoked_as_opener(&arg0)
+        && !chan::term::invoked_as_term(&arg0)
     {
         return;
     }
@@ -5571,10 +5640,14 @@ fn main() {
             std::process::exit(1);
         }
     }
+    // `chan-term` (argv[0] stem, `$ARGV0` under an AppImage): read its launch
+    // here, so `chan-term --help`, `--version` and a usage error answer before
+    // any GUI setup. Its window opens below, after the GUI-stack preference.
+    let terminal_launch = terminal_mode::launch_if_invoked();
     // `chan-desktop --version`: print the version and build id and exit. Last
     // of the pre-GUI probes so it cannot shadow `chan --version` reaching the
-    // chan CLI above through a `bin/chan` symlink.
-    if print_version_if_requested() {
+    // chan CLI above through a `bin/chan` symlink, or `chan-term --version`.
+    if terminal_launch.is_none() && print_version_if_requested() {
         return;
     }
     // Linux AppImage only: prefer the host GTK/WebKit/EGL stack over the
@@ -5582,6 +5655,13 @@ fn main() {
     // not abort with EGL_BAD_PARAMETER against a rolling-distro Mesa. No-op
     // off Linux/AppImage and once already applied.
     linux_gui_stack::prefer_system_gui_stack();
+    // The name the dispatch above read is spent. It goes here, after the
+    // GUI-stack re-exec that needs it to dispatch again, so no child of this
+    // process inherits it: `$ARGV0` outranks `argv[0]` in every chan binary's
+    // dispatch, so an inherited `chan-term` (a New Window sibling's) would
+    // turn a `cs` typed in its terminal, or a `chan-files` an `xdg-open` runs,
+    // into a terminal launch.
+    std::env::remove_var("ARGV0");
     init_tracing();
     // The version alone cannot distinguish a branch build from the previous
     // release; the build id can, and this line is where a terminal launch
@@ -5591,23 +5671,21 @@ fn main() {
         build = CHAN_DESKTOP_BUILD_ID,
         "chan-desktop starting"
     );
-    // A default-terminal launch (`-e`, `--dir`, `--app-id`, `--title`,
-    // `--hold`) is one terminal window in its own process with none of the
-    // launcher boot below: no shims, library stores, handoff listener or
-    // window watcher, so it leaves a running chan-desktop alone. It opens a
-    // webview, so it runs after the GUI-stack preference above.
-    match terminal_mode::run_if_requested() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!("chan-desktop: {e}");
-            eprintln!(
-                "usage: chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] \
-                 [-e CMD ARGS... | -- CMD ARGS...]"
-            );
-            std::process::exit(2);
-        }
+    // A `chan-term` launch with a command, `--hold`, `--app-id` or `--title`
+    // is one terminal window in its own process with none of the launcher
+    // boot below: no shims, library stores, handoff listener or window
+    // watcher, so it leaves a running chan-desktop alone. A shell-only one ran
+    // as the CLI above. It opens a webview, so it runs after the GUI-stack
+    // preference above.
+    if let Some(launch) = terminal_launch {
+        terminal_mode::run(launch);
+        return;
     }
+    // The terminal a `chan-term` that started this desktop asked for, read
+    // and dropped before any thread starts. The boot opens it where it would
+    // open its first window, and a launch that finds another desktop hands
+    // it over, as it hands over its paths.
+    let boot_terminal = launch_paths::take_boot_terminal();
     // The paths a GUI launch was given (`chan-desktop PATH...`, the desktop
     // entry's file URIs), read before the endpoint so a launch that hands
     // over hands them over too.
@@ -5631,10 +5709,10 @@ fn main() {
     // paths, and exits here, before the shims, the config, the WireGuard
     // fabric or any window. The claim it returns is the endpoint the
     // listener serves once setup runs.
-    let endpoint_claim = single_instance::guard(&launch_paths);
+    let endpoint_claim = single_instance::guard(&launch_paths, boot_terminal.as_deref());
     // Best-effort on boot: own the `~/.local/bin` shims so a desktop install
-    // also provides the `chan` + `cs` CLI (and on unix `chan-files` and
-    // `chan-edit`) without a separate download. Real
+    // also provides the `chan` + `cs` CLI (and on unix `chan-files`,
+    // `chan-edit` and `chan-term`) without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
     // idempotent + marker-guarded + never clobbers a user-written shim. No-op
     // for a dev build / unrecognized layout; never fatal to boot.
@@ -6160,6 +6238,15 @@ fn main() {
                 // brought back takes an open only once it has connected, which
                 // at boot it has not, so the paths get a window of their own.
                 launch_paths::open_at_boot(Arc::clone(&state_for_restore), &launch_paths).await;
+                // The terminal a `chan-term` started this desktop for opens
+                // next, and stands for the boot window below; a throwaway
+                // window still counts as a row, so the first-open rule mints
+                // nothing beside it.
+                let opened_terminal = launch_paths::open_terminal_at_boot(
+                    Arc::clone(&state_for_restore),
+                    boot_terminal.as_deref(),
+                )
+                .await;
                 // The files macOS asked to open before the boot got here, the
                 // one that launched it among them, open next, beside the
                 // launch's own; later ones open as they come.
@@ -6177,8 +6264,10 @@ fn main() {
                 // There is no launcher window, so a boot that opens nothing
                 // would leave no window at all; open one standalone terminal
                 // then, the window the launcher is toggled in.
-                if let Err(e) = ensure_boot_window(Arc::clone(&state_for_restore)).await {
-                    tracing::warn!(error = %e, "ensuring a boot window failed");
+                if !opened_terminal {
+                    if let Err(e) = ensure_boot_window(Arc::clone(&state_for_restore)).await {
+                        tracing::warn!(error = %e, "ensuring a boot window failed");
+                    }
                 }
             });
 
@@ -7709,7 +7798,7 @@ fn begin_normal_shutdown(
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             ShutdownAction::Restart => {
                 single_instance::release_endpoint(&state);
-                app.restart()
+                relaunch(app)
             }
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
@@ -8274,7 +8363,7 @@ mod tests {
                 ("lib-a::w-a", "sdme Window 1"),
                 ("lib-a::w-c", "sdme Window 3"),
                 // The title it cannot read is composed from the record.
-                ("lib-a::w-f", "\u{2197}\u{FE0E} sdme Window 1"),
+                ("lib-a::w-f", "\u{2191}\u{FE0E} sdme Window 1"),
             ]),
             "every native window but the hidden ones, the OS's invisible one included",
         );
@@ -8322,7 +8411,7 @@ mod tests {
         let remote = record("lib-a", workspace, Some("/home/u/chan"));
         assert_eq!(
             record_menu_title(&remote, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom / chan Window 1 [notes]"
+            "\u{2191}\u{FE0E} geekom / chan Window 1 [notes]"
         );
         assert_eq!(record_menu_title(&remote, None), "chan Window 1 [notes]");
         let mut control = record("lib-a", chan_server::WindowKind::Terminal, None);
@@ -9094,12 +9183,56 @@ mod tests {
             attach.contains("!chan::invoked_as_opener(&arg0)"),
             "the openers reattach the parent console on Windows as chan and cs do"
         );
+        assert!(
+            attach.contains("!chan::term::invoked_as_term(&arg0)"),
+            "chan-term reattaches it too, for its help and its usage errors"
+        );
+    }
+
+    /// A desktop a `chan-term` started opens that terminal in the boot, after
+    /// the launch's paths and before the first-open rule, and the terminal
+    /// stands for the boot window: one window, not a boot terminal beside it.
+    /// A shell-only `chan-term` runs as the CLI, which starts that desktop.
+    #[test]
+    fn a_launch_terminal_opens_in_place_of_the_boot_window() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let boot = source_region(
+            production,
+            "let queued = queue_boot_restore(&state_for_restore);",
+            "spawn_launch_update_check(app.handle().clone());",
+        );
+        let order = [
+            "launch_paths::open_at_boot(",
+            "launch_paths::open_terminal_at_boot(",
+            "embedded.ensure_first_open_terminal()",
+            "if !opened_terminal {\n                    if let Err(e) = ensure_boot_window(",
+        ];
+        let at: Vec<usize> = order
+            .iter()
+            .map(|needle| {
+                boot.find(needle)
+                    .unwrap_or_else(|| panic!("the boot runs {needle}"))
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "the boot runs {order:?} in that order"
+        );
+        let probe = source_region(
+            production,
+            "\nfn run_as_chan_if_requested(",
+            "\nasync fn run_mcp_proxy(",
+        );
+        assert!(probe.contains("chan::term::is_shell_launch(std::env::args_os().skip(1))"));
+        assert!(probe.contains("&& !shell_terminal"));
     }
 
     /// Only the GUI boot refuses a second instance. Every CLI personality
-    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the default-terminal
-    /// launch returns from `main` before the single-instance guard, so none of
-    /// them claims the handoff endpoint or asks a running desktop anything,
+    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the `chan-term` launch
+    /// returns from `main` before the single-instance guard, so none of them
+    /// claims the handoff endpoint or asks a running desktop to come forward,
     /// and the guard runs before the boot touches what a running desktop owns.
     #[test]
     fn cli_personalities_never_reach_the_single_instance_guard() {
@@ -9113,18 +9246,34 @@ mod tests {
         );
         let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
         let guard = main_body
-            .find("single_instance::guard(&launch_paths)")
+            .find("single_instance::guard(&launch_paths, boot_terminal.as_deref())")
             .expect("main runs the single-instance guard with the launch's paths");
         let paths = main_body
             .find("launch_paths::from_args(")
             .expect("main reads the launch's paths");
         assert!(paths < guard, "the guard hands over the paths it was given");
+        // The terminal a `chan-term` started this desktop with is taken after
+        // the GUI-stack re-exec, which must carry it in the environment, and
+        // before the guard, which hands it to a desktop on its way up and
+        // starts the async runtime's threads, so neither a thread nor a child
+        // of the desktop finds it there. The guard runs before the app is
+        // built (below).
+        let reexec = main_body
+            .find("linux_gui_stack::prefer_system_gui_stack();")
+            .expect("main prefers the system GUI stack");
+        let terminal = main_body
+            .find("let boot_terminal = launch_paths::take_boot_terminal();")
+            .expect("main takes the launch's terminal");
+        assert!(
+            reexec < terminal && terminal < guard,
+            "the launch's terminal is taken after the GUI-stack re-exec and before the guard"
+        );
         for personality in [
             "run_hidden_mcp_proxy_if_requested()",
             "run_as_cs_if_requested()",
             "run_as_chan_if_requested()",
             "print_version_if_requested()",
-            "terminal_mode::run_if_requested()",
+            "terminal_mode::run(launch);",
         ] {
             let at = main_body
                 .find(personality)
@@ -9150,15 +9299,16 @@ mod tests {
         }
         assert!(
             !include_str!("terminal_mode.rs").contains("single_instance"),
-            "the default-terminal launch leaves a running desktop alone"
+            "the chan-term launch leaves a running desktop alone"
         );
     }
 
     /// The Window menu's Open section lists minimized windows, so a click on
-    /// a row restores its window before showing and focusing it. A source
-    /// pin: it holds the call and its place, not what the platform then does.
+    /// a row takes the shared raise, which restores its window before showing
+    /// and focusing it (`raise.rs` pins that order). A source pin: it holds
+    /// the call, not what the platform then does.
     #[test]
-    fn an_open_window_row_restores_its_window_before_raising_it() {
+    fn an_open_window_row_takes_the_shared_raise() {
         const MAIN_RS: &str = include_str!("main.rs");
         let boundary = "\n#[cfg(test)]\nmod tests {";
         let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
@@ -9173,20 +9323,180 @@ mod tests {
             "\nfn show_window(",
             "\n/// The devserver library id of a watcher-opened devserver window label",
         );
-        let restore = raise.find("w.unminimize()");
-        let show = raise.find("w.show()").expect("the row shows its window");
-        let focus = raise
-            .find("w.set_focus()")
-            .expect("the row focuses its window");
         assert!(
-            restore.is_some_and(|restore| restore < show) && show < focus,
-            "an open window's row must restore a minimized window before it shows and focuses it"
+            raise.contains("raise::raise_window(&w).map_err(err)?;"),
+            "an open window's row must raise through the shared raise: {raise}"
         );
+        for own in ["w.unminimize()", "w.show()", "w.set_focus()"] {
+            assert!(
+                !raise.contains(own),
+                "an open window's row must leave {own} to the shared raise: {raise}"
+            );
+        }
     }
 
     /// The GUI app is built with the launch's argv less its paths, the `Env`
     /// Tauri's restart relaunches with, so an update's relaunch does not open
     /// the paths again.
+    /// An AppImage desktop relaunches as Tauri's restart starts it, the image
+    /// with the arguments past `argv[0]`, but from the user's environment:
+    /// none of this process's mount reaches the new one, whose own runtime
+    /// adds one block. `relaunch` takes that route before Tauri's restart.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_appimage_relaunch_starts_from_the_users_environment() {
+        use std::ffi::{OsStr, OsString};
+        let mount = "/tmp/.mount_ChanOLD";
+        let ld = [
+            "usr/lib/",
+            "usr/lib/i386-linux-gnu/",
+            "usr/lib/x86_64-linux-gnu/",
+            "usr/lib32/",
+            "usr/lib64/",
+            "lib/",
+            "lib/i386-linux-gnu/",
+            "lib/x86_64-linux-gnu/",
+            "lib32/",
+            "lib64/",
+        ]
+        .map(|entry| format!("{mount}/{entry}"))
+        .join(":");
+        let parent: Vec<(OsString, OsString)> = [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".to_string()),
+            (
+                "LD_LIBRARY_PATH",
+                format!("/usr/lib/x86_64-linux-gnu:{ld}:/opt/a/lib"),
+            ),
+            ("GTK_PATH", format!("{mount}//usr/lib/gtk-3.0")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let args: Vec<OsString> = vec![
+            format!("{mount}/usr/bin/chan-desktop").into(),
+            "--flag".into(),
+        ];
+        let image = Path::new("/home/u/Applications/Chan.AppImage");
+        let command = appimage_relaunch_command(image, &args, parent);
+        assert_eq!(command.get_program(), image.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [OsStr::new("--flag")]
+        );
+        let env = |key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+        };
+        assert_eq!(env("LD_LIBRARY_PATH"), Some(Some("/opt/a/lib".into())));
+        for gone in ["APPDIR", "APPIMAGE", "GTK_PATH"] {
+            assert_eq!(env(gone), Some(None), "{gone}");
+        }
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let relaunch = source_region(
+            production,
+            "\nfn relaunch(app: tauri::AppHandle) {",
+            "\n/// [`relaunch`]'s route,",
+        );
+        // The image is this process's own, and the call's arguments are
+        // pinned in order: the exit follows a start that worked, Tauri's
+        // restart one that failed.
+        let wiring = "
+    let appimage =
+        cs_install::appimage_path().map(|image| (image.into_os_string(), app.env().args_os));
+    #[cfg(not(target_os = \"linux\"))]
+    let appimage = None;
+    relaunch_with(
+        appimage,
+        std::env::vars_os(),
+        |mut command| command.spawn().map(drop),
+        || app.exit(0),
+        || app.restart(),
+    );
+}";
+        assert!(
+            relaunch.trim_end().ends_with(wiring),
+            "relaunch passes, in order:{wiring}"
+        );
+    }
+
+    /// The route itself, driven with stand-ins for the start, the exit and
+    /// Tauri's restart: an AppImage relaunch starts the image from the user's
+    /// environment and then exits, without Tauri's restart; a start that
+    /// fails falls back to that restart and does not exit; with no image it
+    /// is Tauri's restart alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_relaunch_route_starts_the_image_then_exits_else_restarts() {
+        use std::cell::RefCell;
+        use std::ffi::OsString;
+        let mount = "/tmp/.mount_ChanOLD";
+        let parent = || -> Vec<(OsString, OsString)> {
+            vec![
+                ("APPDIR".into(), mount.into()),
+                (
+                    "APPIMAGE".into(),
+                    "/home/u/Applications/Chan.AppImage".into(),
+                ),
+                (
+                    "GTK_PATH".into(),
+                    format!("{mount}//usr/lib/gtk-3.0").into(),
+                ),
+            ]
+        };
+        let image = || {
+            Some((
+                OsString::from("/home/u/Applications/Chan.AppImage"),
+                vec![OsString::from("chan-desktop"), OsString::from("--flag")],
+            ))
+        };
+        for spawn_works in [true, false] {
+            let events = RefCell::new(Vec::new());
+            relaunch_with(
+                image(),
+                parent(),
+                |command| {
+                    let gtk_path_removed = command
+                        .get_envs()
+                        .any(|(key, value)| key == "GTK_PATH" && value.is_none());
+                    events.borrow_mut().push(format!(
+                        "spawn {} {:?} gtk_path_removed={gtk_path_removed}",
+                        command.get_program().to_string_lossy(),
+                        command.get_args().collect::<Vec<_>>()
+                    ));
+                    if spawn_works {
+                        Ok(())
+                    } else {
+                        Err(std::io::ErrorKind::NotFound.into())
+                    }
+                },
+                || events.borrow_mut().push("exit".to_string()),
+                || events.borrow_mut().push("restart".to_string()),
+            );
+            let spawned =
+                "spawn /home/u/Applications/Chan.AppImage [\"--flag\"] gtk_path_removed=true";
+            let then = if spawn_works { "exit" } else { "restart" };
+            assert_eq!(
+                events.into_inner(),
+                [spawned.to_string(), then.to_string()],
+                "spawn_works={spawn_works}"
+            );
+        }
+        let events = RefCell::new(Vec::new());
+        relaunch_with(
+            None,
+            parent(),
+            |_| panic!("no image, no start"),
+            || events.borrow_mut().push("exit"),
+            || events.borrow_mut().push("restart"),
+        );
+        assert_eq!(events.into_inner(), ["restart"]);
+    }
+
     #[test]
     fn a_relaunch_does_not_replay_the_launch_paths() {
         const MAIN_RS: &str = include_str!("main.rs");
@@ -9230,7 +9540,9 @@ mod tests {
         let restarts: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.starts_with("app.restart()"))
+            .filter(|(_, line)| {
+                line.starts_with("app.restart()") || line.starts_with("relaunch(app)")
+            })
             .map(|(at, _)| at)
             .collect();
         assert_eq!(restarts.len(), 2, "both relaunches are pinned");
@@ -9801,7 +10113,7 @@ mod tests {
         // window snapshot exists. Seeding it must make `library_id_of` resolve
         // immediately so the launcher's `DevserverEntry` carries the real id from
         // the FIRST render and groups the control row under its parent devserver  --
-        // instead of a blank `↗` until a later window syncs the mapping.
+        // instead of apart from it until a later window syncs the mapping.
         let feed = DevserverFeed::default();
         // No window snapshot yet → unresolvable without the seed.
         assert_eq!(feed.library_id_of("ds-1"), None);

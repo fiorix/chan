@@ -882,10 +882,10 @@ each path; one that does not is reported (chan-desktop did not answer)
 and the rest are not sent. With no desktop running, the desktop's own
 `chan-files` and `chan-edit` start it with the paths; the standalone
 chan CLI says no desktop is running and exits 1. So does
-CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login or
-no DISPLAY or WAYLAND_DISPLAY). A path that cannot be opened is
-reported, in argument order, and the rest still open; the exit status is
-then 1.
+CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login,
+or off macOS no DISPLAY or WAYLAND_DISPLAY). A path that cannot be
+opened is reported, in argument order, and the rest still open; the exit
+status is then 1.
 "#;
 
 /// `chan-files` / `chan-edit` examples.
@@ -896,6 +896,66 @@ pub(super) const OPENER_AFTER_HELP: &str = r#"EXAMPLES:
     Opens todo.md in the editor, creating it empty when it is missing.
   xdg-mime default chan-edit.desktop text/markdown
     Makes chan the Markdown editor `xdg-open` uses (Linux).
+"#;
+
+/// The usage line `chan-term` prints with a usage error and opens its help
+/// with.
+pub(crate) const CHAN_TERM_USAGE: &str = "\
+Usage: chan-term [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold]
+                 [-e CMD ARGS... | -- CMD ARGS...]";
+
+/// `chan-term --help`. Not a clap command: its grammar is the one
+/// xdg-terminal-exec maps its options onto, where `-e` hands everything after
+/// it to the command verbatim.
+pub(crate) const CHAN_TERM_HELP: &str = r#"Open a terminal window: your shell, or a command, in a window of its own.
+
+Usage: chan-term [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold]
+                 [-e CMD ARGS... | -- CMD ARGS...]
+
+Options:
+  --dir=PATH      Start in PATH; a relative one is read against the
+                  current directory, and one that is no directory falls
+                  back to the home directory
+  --app-id=ID     Give the window the Wayland app_id and X11 class ID
+                  (Linux and FreeBSD)
+  --title=TITLE   Give the window the fixed title TITLE
+  --hold          Keep the window open after the command exits
+  -e CMD ARGS...  Run CMD with ARGS, exactly as given, instead of your
+                  shell; everything after -e is the command's
+  -- CMD ARGS...  The same as -e
+  -h, --help      Print help
+  -V, --version   Print version
+
+chan-term is a name of the chan binary and the command chan-term.desktop
+runs, so it is the terminal xdg-terminal-exec opens once that entry is
+the first in xdg-terminals.list. Every option takes its value after = or
+as the next argument.
+
+A launch that only runs your shell, here or in --dir, opens a terminal
+window of the running chan-desktop, one it does not save, which has 5 s
+to answer. With no desktop running, Chan Desktop's chan-term starts it,
+and its first window is that terminal. Such a launch exits 1 with the
+reason and opens nothing, from Chan Desktop's chan-term too, when the
+running desktop refuses the window or does not answer (chan-desktop did
+not answer), with CHAN_NO_DESKTOP_HANDOFF set, and in a session with no
+display (an SSH login, or off macOS no DISPLAY or WAYLAND_DISPLAY). A
+launch with a command, --hold, --app-id or --title is one window in a
+process of its own, which ends when the window closes; it exits with the
+command's status, and with 127 and no window when the command is not
+found.
+
+The standalone chan CLI cannot open a window or start a desktop, so its
+chan-term only asks a running chan-desktop for that shell window. It
+also exits 1 with the reason when a launch needs a window of its own,
+and when no desktop runs.
+
+EXAMPLES:
+  chan-term --dir ~/src
+    Opens your shell in ~/src.
+  chan-term --title=Build --hold -e make -j8
+    Runs make in a window titled Build that stays open after it exits.
+  echo chan-term.desktop > ~/.config/xdg-terminals.list
+    Makes chan the terminal xdg-terminal-exec opens (Linux).
 "#;
 
 /// The launcher catalog, which is the thing a user reaches for once the

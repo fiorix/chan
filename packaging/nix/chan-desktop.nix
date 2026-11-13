@@ -33,7 +33,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   pname = "chan-desktop";
   inherit version src;
 
-  cargoHash = "sha256-fjGzBfVC33u3lx597eVD9Kl4WEuqKAZY/C7ylPPcVPI=";
+  cargoHash = "sha256-fRLVoOmyhwzqv1E7V2V8ucDgHN1IZbpS3z1Zr4UHHUk=";
 
   npmDeps = fetchNpmDeps {
     name = "${finalAttrs.pname}-${finalAttrs.version}-npm-deps";
@@ -94,6 +94,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     ln -s chan-desktop "$out/bin/cs"
     ln -s chan-desktop "$out/bin/chan-files"
     ln -s chan-desktop "$out/bin/chan-edit"
+    ln -s chan-desktop "$out/bin/chan-term"
 
     install -Dm644 packaging/distros/shared/chan-desktop.desktop \
       "$out/share/applications/chan-desktop.desktop"
@@ -101,6 +102,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
       "$out/share/applications/chan-files.desktop"
     install -Dm644 packaging/distros/shared/chan-edit.desktop \
       "$out/share/applications/chan-edit.desktop"
+    install -Dm644 packaging/distros/shared/chan-term.desktop \
+      "$out/share/applications/chan-term.desktop"
     install -Dm644 desktop/src-tauri/icons/32x32.png \
       "$out/share/icons/hicolor/32x32/apps/chan-desktop.png"
     install -Dm644 desktop/src-tauri/icons/64x64.png \
@@ -118,7 +121,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     desktop-file-validate \
       "$out/share/applications/chan-desktop.desktop" \
       "$out/share/applications/chan-files.desktop" \
-      "$out/share/applications/chan-edit.desktop"
+      "$out/share/applications/chan-edit.desktop" \
+      "$out/share/applications/chan-term.desktop"
     test ! -e "$out/lib/systemd/user/chan-devserver.service"
   '';
 

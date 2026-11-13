@@ -34,7 +34,7 @@ pub const SERVES_CHANGED: &str = "serves-changed";
 /// text-presentation selector, so a font with an emoji form for the arrow
 /// still draws it as monochrome text that stays legible in title-bar fonts.
 const ICON_LOCAL: &str = "\u{2193}\u{FE0E}"; // down arrow: this desktop's own library
-const ICON_REMOTE: &str = "\u{2197}\u{FE0E}"; // up-right arrow: a remote devserver
+const ICON_REMOTE: &str = "\u{2191}\u{FE0E}"; // up arrow: a remote devserver
 
 /// The machine name a local window's title carries where a devserver's title
 /// carries the devserver's name. Lower case, as a host name reads.
@@ -519,7 +519,7 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
 }
 
 /// Open a throwaway standalone terminal window whose first terminal starts in
-/// `cwd`: a default-terminal launch handed over by another chan-desktop
+/// `cwd`: a `chan-term` launch handed over by another chan-desktop
 /// process. Like [`spawn_local_terminal_window`] the watcher opens it at the
 /// shared `/terminal` tenant, but its registry row is never saved, so a
 /// relaunch does not restore it. Refused once a shutdown has started: the
@@ -1392,12 +1392,8 @@ fn on_close_requested(
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
-    let _ = window.unminimize();
-    if let Err(e) = window.show() {
+    if let Err(e) = crate::raise::raise_window(&window) {
         tracing::warn!(label = %label, error = %e, "raising close-confirm window failed");
-    }
-    if let Err(e) = window.set_focus() {
-        tracing::warn!(label = %label, error = %e, "focusing close-confirm window failed");
     }
     let _ = window.eval(CONFIRM_CLOSE_DISPATCH_JS);
 }
@@ -4009,23 +4005,23 @@ mod tests {
         workspace.library_id = "lib-a".into();
         assert_eq!(
             watched_window_title(&workspace, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom / chan Window 1",
+            "\u{2191}\u{FE0E} geekom / chan Window 1",
         );
         workspace.label = "my own title".into();
         assert_eq!(
             watched_window_title(&workspace, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom / chan Window 1 [my own title]",
+            "\u{2191}\u{FE0E} geekom / chan Window 1 [my own title]",
         );
         let mut terminal = titled_record(WindowKind::Terminal, None, 3);
         terminal.library_id = "lib-a".into();
         assert_eq!(
             watched_window_title(&terminal, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom Terminal Window 3",
+            "\u{2191}\u{FE0E} geekom Terminal Window 3",
         );
         terminal.label = "logs".into();
         assert_eq!(
             watched_window_title(&terminal, Some("geekom")),
-            "\u{2197}\u{FE0E} geekom Terminal Window 3 [logs]",
+            "\u{2191}\u{FE0E} geekom Terminal Window 3 [logs]",
         );
     }
 
@@ -4045,6 +4041,24 @@ mod tests {
                 .expect("a remote title leads with its machine");
             assert_eq!(local_rest, remote_rest);
         }
+    }
+
+    /// The glyph alone tells this desktop's window from a devserver's: a
+    /// devserver named `local` composes the same machine and the same rest,
+    /// so only the arrow can set the two apart.
+    #[test]
+    fn the_glyph_alone_tells_a_local_title_from_a_devserver_named_local() {
+        let record = titled_record(WindowKind::Workspace, Some("/srv/notes"), 1);
+        let local = watched_window_title(&record, None);
+        let remote = watched_window_title(&record, Some(LOCAL_MACHINE));
+        assert_ne!(local, remote, "a local and a remote window read alike");
+        let local_rest = local
+            .strip_prefix(ICON_LOCAL)
+            .expect("a local title leads with its glyph");
+        let remote_rest = remote
+            .strip_prefix(ICON_REMOTE)
+            .expect("a remote title leads with its glyph");
+        assert_eq!(local_rest, remote_rest);
     }
 
     /// `cs window list` prints the library's title with the caption after
@@ -4088,7 +4102,7 @@ mod tests {
         record.library_id = "lib-a".into();
         record.title = "\u{2302} /home/geekom/chan Window 1".into();
         let os = watched_window_title(&record, Some("geekom"));
-        assert_eq!(os, "\u{2197}\u{FE0E} geekom / chan Window 1");
+        assert_eq!(os, "\u{2191}\u{FE0E} geekom / chan Window 1");
         assert_eq!(library_window_title(&record), "chan Window 1");
     }
 
@@ -4480,16 +4494,22 @@ mod tests {
         // nothing buries here until the SPA calls back.
         assert!(arm.contains("api.prevent_close();"));
         assert!(arm.contains("window.eval(CONFIRM_CLOSE_DISPATCH_JS)"));
+        // The prompt owner is raised through the shared raise, which
+        // restores, shows and focuses it (`raise.rs` pins that order), before
+        // the prompt is asked for.
         let raise = arm
-            .find("window.show()")
-            .expect("the prompt owner is raised");
-        let focus = arm
-            .find("window.set_focus()")
-            .expect("the prompt owner is focused");
+            .find("crate::raise::raise_window(&window)")
+            .expect("the prompt owner is raised through the shared raise");
         let eval = arm
             .find("window.eval(CONFIRM_CLOSE_DISPATCH_JS)")
             .expect("the close prompt is evaluated");
-        assert!(raise < focus && focus < eval);
+        assert!(raise < eval);
+        for own in ["window.unminimize()", "window.show()", "window.set_focus()"] {
+            assert!(
+                !arm.contains(own),
+                "the prompt owner's raise must leave {own} to the shared raise"
+            );
+        }
         // The real-close cases (control terminal still connecting and pre-SPA
         // connecting screen) return WITHOUT prevent_close.
         assert!(arm.contains("if !ask {"));

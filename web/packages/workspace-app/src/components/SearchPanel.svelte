@@ -505,7 +505,7 @@
   /// emits standalone Mention nodes plus a `file -> @@Name` edge per
   /// referencing document, so the doc count is the mention-edge count.
   /// A mention with no referencing documents is dropped. Selecting a
-  /// row opens the mention lens (a focused graph around the handle).
+  /// row opens the graph with the handle selected.
   const mentionRows = $derived.by<SearchRow[]>(() => {
     const q = searchPanel.query.trim().toLowerCase();
     if (!q) return [];
@@ -897,7 +897,7 @@
               {:else if r.kind === "mention"}
                 <!-- `@@mention` hit. Same compact row shape as the tag
                      hit: the handle label + a doc count. Selecting it
-                     opens the mention lens (focused graph). The label
+                     opens the graph with the handle selected. The label
                      already carries the `@@` sigil from the index. -->
                 <div class="row1">
                   <KindChip kind="mention" compact />
@@ -1011,8 +1011,8 @@
                 close();
                 openGraphForTag(sel.nodeId, sel.label);
               } else if (sel?.kind === "mention") {
-                // Mention rows open the mention lens (focused graph
-                // around the `@@Name` meta-node), mirroring the tag arm.
+                // Mention rows open the graph with the `@@Name` node
+                // selected, mirroring the tag arm.
                 close();
                 openGraphForMention(sel.nodeId, sel.label);
               } else if (sel?.kind === "file") {
