@@ -659,6 +659,13 @@ export type GraphTab = {
   /// reloading on restore.
   selectedNodeId?: string | null;
   selectedNodeLabel?: string | null;
+  /// The depth the tab's panel shows for the selected node: the levels
+  /// opened below a directory, read from the tree the panel has loaded, or
+  /// the hops of any other node, capped by what the node reaches. Kept here
+  /// so the launcher's depth steps can report it from outside the panel.
+  /// Unset until a panel has shown the tab, and not serialized: the panel
+  /// works it out again.
+  shownDepth?: number;
   /// Per-tab inspector width. Falls back to `paneWidths.graph` when unset.
   inspectorWidth?: number;
 };
@@ -4676,6 +4683,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   browserSort: "carry",
   browserDescending: "carry",
   showWorkspace: "carry",
+  shownDepth: "carry",
   slidePreview: "carry",
   spawnCommand: "carry",
   spawnEnv: "carry",
@@ -6069,6 +6077,11 @@ export function setGraphSelection(tab: GraphTab, id: string | null, label: strin
 /// restored or moved tab's selection to the path a reload restores it by.
 export function setGraphPendingSelect(tab: GraphTab, id: string | null): void {
   tab.pendingSelectId = id;
+}
+/// The depth a graph tab's panel shows for the selected node, as the panel
+/// reports it whenever it changes.
+export function setGraphShownDepth(tab: GraphTab, depth: number): void {
+  tab.shownDepth = depth;
 }
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {

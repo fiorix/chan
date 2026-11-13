@@ -55,6 +55,13 @@ export function toggleGraphFilter(tab: GraphTab, kind: GraphFilterKind): void {
   tab.filters[kind] = !tab.filters[kind];
 }
 
+/// The depth the active graph tab's panel shows, as a depth step's value.
+/// The panel works it out for the selected node and records it on the tab.
+function depthState(): string | null {
+  const depth = activeGraphTab()?.shownDepth;
+  return depth === undefined ? null : String(depth);
+}
+
 registerCommands([
   {
     id: "app.graph.scopeDetails",
@@ -81,6 +88,7 @@ registerCommands([
     requirement: "workspace",
     keywords: ["Graph depth: increase", "depth", "expand", "more", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
+    state: depthState,
     // The depth is the selected node's (levels below a directory, hops
     // from any other node), so the panel that knows the selection moves it.
     run: () => dispatchChanCommand("app.graph.depth.increase"),
@@ -95,6 +103,7 @@ registerCommands([
     requirement: "workspace",
     keywords: ["Graph depth: decrease", "depth", "collapse", "less", "neighbors"],
     available: (ctx) => onSurface(ctx, "graph"),
+    state: depthState,
     run: () => dispatchChanCommand("app.graph.depth.decrease"),
   },
   {
