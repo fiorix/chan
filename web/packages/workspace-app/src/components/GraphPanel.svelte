@@ -270,6 +270,7 @@
   function depthFollowsSelection(next: string | null): void {
     if (next !== selectedId) graphState.depth = 1;
   }
+
   // The launcher's depth steps show the depth as their value. It is worked
   // out here, so a shown tab carries what its control shows.
   $effect(() => {
