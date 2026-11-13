@@ -1,6 +1,6 @@
 # A warm chan-term launch opens its window without Chan coming forward on macOS
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 the same day, at v0.130.0's planning; not started.
 
 Record: seen on the owner's Mac walk of v0.129.0's [chan-term row](../done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md) on 2026-11-13 (`dev/v0129/owner/reports/parts-abc-at-8a44e110e.md`, Part B, `T2`), which recorded where the keyboard went without predicting it. Asked whether a warm `chan-term` launch should bring Chan forward on macOS in v0.129.0, the owner answered: "let's add a follow up item for this, no need to fix in this version".
 

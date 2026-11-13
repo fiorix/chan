@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.128.0](../../release/release-v0.128.0.md).
 
-Record before the release: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day; built on 2026-11-11 (the live ghostty repaint, the switch-twice tests for every surface, the browser check); acceptance 4, the OS appearance switch on chan-desktop on macOS, is the owner's. It touches the ghostty widget, so it lands on whichever widget is in place when it is built, before or after the [ghostty-web-ng item](../v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md).
+Record before the release: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day; built on 2026-11-11 (the live ghostty repaint, the switch-twice tests for every surface, the browser check); acceptance 4, the OS appearance switch on chan-desktop on macOS, is the owner's. It touches the ghostty widget, so it lands on whichever widget is in place when it is built, before or after the [ghostty-web-ng item](../v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md).
 
 ## What is there now
 

@@ -1,6 +1,6 @@
 # chan drives ghostty-web from outside, through its private internals
 
-Status: carried to v0.130.0 at the v0.129.0 cut on 2026-11-13: part 2, re-seating the core, shipped in [v0.129.0](../../release/release-v0.129.0.md), with the vendored core at libghostty-vt 1.0.1; parts 3 to 6 follow, not started.
+Status: carried to v0.130.0 at the v0.129.0 cut on 2026-11-13: part 2, re-seating the core, shipped in [v0.129.0](../../release/release-v0.129.0.md), with the vendored core at libghostty-vt 1.0.1; parts 3 to 6 follow, not started. Moved to v0.131.0 by the owner the same day, at v0.130.0's planning.
 
 Record before the v0.129.0 release: carried to v0.129.0 at the v0.128.0 cut on 2026-11-12: part 1, the fork of ghostty-web into the tree, shipped in [v0.128.0](../../release/release-v0.128.0.md); parts 2 to 6 follow. In v0.129.0 part 2 is built: the binding and the vendored core live in the package, the renderer reads the core's render state, three repaint defects found on the way are fixed, the binding's differential tests run against a recording of ghostty-web's own build, ghostty-web's binding, its wasm and the old cell format are deleted, and the vendored core is at libghostty-vt 1.0.1 (the sections at the end). Parts 3 to 6 are not started.
 

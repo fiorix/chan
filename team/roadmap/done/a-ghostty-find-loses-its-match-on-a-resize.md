@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.128.0](../../release/release-v0.128.0.md).
 
-Record before the release: raised by the v0.127.0 find follow-ups and accepted by the owner for v0.128.0 on 2026-11-09, when he kept the follow-ups' fallback for v0.127.0; built on 2026-11-11 (see Built). It touches the ghostty widget, so it lands on whichever widget is in place when it is built, before or after the [ghostty-web-ng item](../v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md).
+Record before the release: raised by the v0.127.0 find follow-ups and accepted by the owner for v0.128.0 on 2026-11-09, when he kept the follow-ups' fallback for v0.127.0; built on 2026-11-11 (see Built). It touches the ghostty widget, so it lands on whichever widget is in place when it is built, before or after the [ghostty-web-ng item](../v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md).
 
 ## What is there now
 

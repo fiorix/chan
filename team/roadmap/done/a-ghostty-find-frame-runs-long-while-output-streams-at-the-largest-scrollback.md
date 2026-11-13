@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.128.0](../../release/release-v0.128.0.md).
 
-Record before the release: accepted by the owner on 2026-11-09 for v0.128.0. Measured in the v0.127.0 find follow-ups, whose report is kept with the round's raw data; nothing is built. It is separate from the [ghostty-web-ng item](../v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) and can land before or after that item's find part, on whichever find controller is in place.
+Record before the release: accepted by the owner on 2026-11-09 for v0.128.0. Measured in the v0.127.0 find follow-ups, whose report is kept with the round's raw data; nothing is built. It is separate from the [ghostty-web-ng item](../v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) and can land before or after that item's find part, on whichever find controller is in place.
 
 ## What is there now
 

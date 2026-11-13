@@ -1,6 +1,6 @@
 # The AppImage's environment fixes are unread in FUSE mode
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started. Its first step is the reading below, on a host that can mount FUSE.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 the same day, at v0.130.0's planning; not started. Its first step is the reading below, on a host that can mount FUSE.
 
 Record: the reading was owed before v0.129.0's release by [the chan-term row](../done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md), its last section, "Not read: FUSE mode". On the list of what stood before the v0.129.0 tag, which named the AppImage under FUSE, the owner moved it to the next version: "appimage: move to next version yes".
 

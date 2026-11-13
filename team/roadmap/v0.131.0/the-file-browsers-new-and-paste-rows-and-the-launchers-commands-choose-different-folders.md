@@ -1,6 +1,6 @@
 # The file browser's New and Paste rows and the launcher's commands of those titles choose different folders
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started. Which rule the row and the command share is his to decide (the section Desired contract).
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 the same day, at v0.130.0's planning; not started. Which rule the row and the command share is his to decide (the section Desired contract).
 
 Record: reported by the independent review of v0.129.0's file-action changes (`dev/v0129/reviews/review-deckfiles-1.md`, finding 3), the changes that made the launcher's `Upload` and the file browser menu's `Upload` row one function on the owner's ruling. Put to him as a candidate for the next version, he answered: "2. new and pase: good, item for next version is correct".
 

@@ -23,25 +23,35 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.130.0
 
-Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]), and four rows the owner confirmed for it that day: the reading of the AppImage in FUSE mode, which he moved out of v0.129.0 ([fusemode]); a standalone terminal window loading the saved shortcut overrides ([termkeys]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). After the tag that day he added a sixth, the devserver's metrics as a `systemd-report` source ([sdreport]), built on a branch on 2026-11-11 and not merged. Later that day he added a seventh from his own use, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]). The owner adds the release's other rows at planning.
+Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner kept it to the devserver's metrics as a `systemd-report` source ([sdreport]), the panes drawn flush on the window's edges ([flushedges]), and terminal bug fixes: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now". Among those, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]) and a standalone terminal window loading the saved shortcut overrides ([termkeys]). The ghostty-web fork's parts 3 to 6, the FUSE reading, `New` and `Paste`, and the warm `chan-term` launch moved to v0.131.0.
+
+| Item | State | Next |
+| --- | --- | --- |
+| [a pane keeps a margin on the window's edge][flushedges] | merged | gate |
+| [systemd-report cannot read the metrics][sdreport] | built, unmerged | build |
+| [a focused browser pane gets no keys][panekeys] | building | build |
+| [a terminal window ignores saved shortcuts][termkeys] | not started | build |
+
+[flushedges]: v0.130.0/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md
+[sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
+[panekeys]: v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md
+[termkeys]: v0.130.0/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md
+
+### v0.131.0
+
+Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved out of v0.130.0 when he kept that release to the `systemd-report` source, the flush pane edges and terminal bug fixes ("yes v0.131"): the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]); the reading of the AppImage in FUSE mode ([fusemode]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [a terminal window ignores saved shortcuts][termkeys] | not started | build |
 | [New and Paste choose two folders][newpaste] | not started | decision |
 | [a warm chan-term leaves Chan behind][warmterm] | not started | build |
-| [systemd-report cannot read the metrics][sdreport] | built, unmerged | build |
-| [a focused browser pane gets no keys][panekeys] | not started | build |
 
-[ghosttyng]: v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
-[fusemode]: v0.130.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
-[termkeys]: v0.130.0/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md
-[newpaste]: v0.130.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
-[warmterm]: v0.130.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
-[sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
-[panekeys]: v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md
+[ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
+[newpaste]: v0.131.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
+[warmterm]: v0.131.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
 
 ## Completed
 
@@ -49,7 +59,7 @@ Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the 
 
 Shipped 2026-11-13; see [release-v0.129.0](../release/release-v0.129.0.md). A no-rc release by the owner's word ("let's go"): twenty-eight `--no-ff` merges from seventeen branches into the integration branch `v0129/int` over `main` at `8ded1bda9` (the v0.128.0 tag), with a merge of `main` for the v0.128.0 record (`8b7a54f18`), documents commits and one fix between them, under five rows; four shipped and are in [`done/`](done/), the raise row with its hidden-app case fixed the day the owner's Mac walk found it. The fifth, the ghostty-web fork, shipped its part 2, re-seating the core, and moves to v0.130.0 for parts 3 to 6. Two of the owner's requests shipped without a row, a remote window's title led by an up arrow and the tmux titles, and so did the Arch snapshot downgrade the v0.128.0 record promised as this release's first merge, which came in near its end.
 
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 2, re-seating the core, shipped; carried to v0.130.0 for parts 3 to 6).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 2, re-seating the core, shipped; carried to v0.130.0 for parts 3 to 6).
 - [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app.
 - [the-command-launcher-is-one-flat-list-behind-dead-keys](done/the-command-launcher-is-one-flat-list-behind-dead-keys.md) - The command launcher is one flat list behind dead keys, and an action has up to five names across the deck, the menus and Settings.
 - [the-default-terminal-is-chan-desktop-under-flags-of-its-own](done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md) - The default terminal is chan-desktop under flags of its own.
@@ -74,7 +84,7 @@ Shipped 2026-11-12; see [release-v0.128.0](../release/release-v0.128.0.md). A no
 - [a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn](done/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md) - A used token's cut is lost when the client hangs up between the commit and the spawn.
 - [basic-flows-break-with-no-end-to-end-check-to-catch-them](done/basic-flows-break-with-no-end-to-end-check-to-catch-them.md) - Basic flows break with no end-to-end check to catch them.
 - [chan-cannot-be-opened-as-a-file-browser-or-markdown-editor](done/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md) - chan cannot be opened as a file browser or Markdown editor.
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
 - [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app (carried to v0.129.0, not started).
 - [copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken](done/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md) - Copying a wrapped command from a ghostty terminal pastes it broken.
 - [ghostty-sends-a-pasted-line-break-as-lf](done/ghostty-sends-a-pasted-line-break-as-lf.md) - ghostty sends a pasted line break as LF where xterm.js sends CR.
