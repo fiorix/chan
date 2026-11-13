@@ -2083,7 +2083,7 @@ pub fn close_window_by_label(app: &AppHandle, label: &str) {
 /// Off macOS these windows carry no menubar while they show their own page
 /// (a window wears the launcher's bar only while its launcher shows), so the
 /// bridge also owns the chords a menubar would own -- New Window
-/// (Ctrl+Shift+N), Toggle Launcher (Ctrl+Shift+P) and Quit (Ctrl+Q), routed
+/// (Ctrl+Shift+N), Computers (Ctrl+Shift+P) and Quit (Ctrl+Q), routed
 /// over IPC like reload/zoom because the SPA command bus is dead on the
 /// connecting screen. The launcher webview never loads this script (it gets
 /// `launcher_panel::LAUNCHER_BRIDGE_JS`), and the window's own page has no

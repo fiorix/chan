@@ -785,7 +785,7 @@ describe("the Rich Prompt chord", () => {
     }
   });
 
-  // Off macOS Ctrl+Shift+P is the desktop's Toggle Launcher, so it must not
+  // Off macOS Ctrl+Shift+P is the desktop's View > Computers, so it must not
   // also open the composer.
   test("Ctrl+Shift+P leaves the composer alone", async () => {
     const tab = terminalTab({ id: "term-launcher-chord" });

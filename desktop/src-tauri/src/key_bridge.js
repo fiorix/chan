@@ -100,9 +100,9 @@
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
   // context-aware helpers in App.svelte. Off-mac the bridge additionally
-  // claims New Window (Ctrl+Shift+N), Toggle Launcher (Ctrl+Shift+P) and
-  // Quit (Ctrl+Q), the chords a menubar would own. New Window and Toggle
-  // Launcher also accept their Ctrl+Shift forms on macOS; Quit leaves
+  // claims New Window (Ctrl+Shift+N), Computers (Ctrl+Shift+P) and
+  // Quit (Ctrl+Q), the chords a menubar would own. New Window and
+  // Computers also accept their Ctrl+Shift forms on macOS; Quit leaves
   // Ctrl+Q with the page there. All three leave the Command forms to the
   // macOS menubar.
   // A focused terminal takes five of these back, because their Ctrl form

@@ -836,7 +836,7 @@
   ///   Cmd+T          -> Terminal (native; Cmd+Alt+T on web Mac)
   ///   Cmd+O          -> File Browser (native; Cmd+Alt+O on web Mac)
   ///   Team Work has no direct chord: `Mod+. p` (Hybrid Nav) or the
-  ///   hamburger. On chan-desktop the menubar owns Cmd+P (Toggle Launcher).
+  ///   hamburger. On chan-desktop the menubar owns Cmd+P (View > Computers).
   ///   Cmd+Shift+M    -> Graph (native + web)
   ///   Mod+. t/o/p/m  -> universal aliases via Hybrid Nav
   ///
@@ -872,7 +872,7 @@
       // window for another (mac-relevant only; a harmless no-op elsewhere).
       if (e.code === "Backquote") return;
       // chan-desktop's macOS menubar acts on the window or the app for these
-      // (Toggle Launcher, New Window, Hide, Minimize, Quit), and WKWebView
+      // (Computers, New Window, Hide, Minimize, Quit), and WKWebView
       // hands the menubar only a key the page did not cancel. Keep the
       // default so the Computers launcher opens over a reconnecting window;
       // stop the key here so nothing in the app acts on it.
@@ -1183,7 +1183,7 @@
     // the focused pane's active terminal only. No-op when the focused tab is
     // not a terminal. Cmd+Shift+P on macOS; Ctrl+Alt+P off macOS on both the
     // desktop webview and the browser (the Win/Super key is ruled out, and
-    // Ctrl+Shift+P is the desktop's Toggle Launcher). Keep in sync with
+    // Ctrl+Shift+P is the desktop's View > Computers). Keep in sync with
     // osChord's RICH_PROMPT_ID branch. Also on the terminal right-click row and
     // the launcher entry.
     if (shortcutLetter(e) === "P") {

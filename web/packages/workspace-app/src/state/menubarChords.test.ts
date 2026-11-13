@@ -18,7 +18,7 @@ const CMD_P = key({ key: "p", code: "KeyP", metaKey: true });
 
 describe("isMenubarWindowChord", () => {
   test.each<[string, Partial<MenubarChordEvent>]>([
-    ["Toggle Launcher", { key: "p", code: "KeyP" }],
+    ["Computers", { key: "p", code: "KeyP" }],
     ["New Window", { key: "N", code: "KeyN", shiftKey: true }],
     ["Quit Chan", { key: "q", code: "KeyQ" }],
     ["Hide", { key: "h", code: "KeyH" }],
@@ -59,7 +59,7 @@ describe("isMenubarWindowChord", () => {
 
 describe("the desktop's menubar", () => {
   test.each([
-    ["view-toggle-launcher", "Toggle Launcher", "CmdOrCtrl+P"],
+    ["view-toggle-launcher", "Computers", "CmdOrCtrl+P"],
     ["app-new-window", "New Window", "CmdOrCtrl+Shift+N"],
     ["chan-quit", "Quit Chan", "CmdOrCtrl+Q"],
   ])("binds %s to the listed chord", (id, item, accelerator) => {

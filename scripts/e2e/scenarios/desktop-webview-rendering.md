@@ -50,7 +50,7 @@ That harness needs python-gobject with the WebKit2 4.1 typelib and a display. Un
 
 **Why this is load-bearing.** The back face is opaque, fills the area, and sits above the content. Nothing degrades gracefully here: when it paints at rest the launcher is not degraded, it is unusable, and every toggle shows it.
 
-**Run.** `python3 scripts/e2e/webview-flip-render.py`, case `launcher ScreenFlip [rest]`. In the real app, open the desktop app, toggle the launcher (View > Toggle Launcher) and read the Computers screen.
+**Run.** `python3 scripts/e2e/webview-flip-render.py`, case `launcher ScreenFlip [rest]`. In the real app, open the desktop app, toggle the Computers screen (View > Computers) and read it.
 
 **Backing.** That harness case. The CSS contract behind it is pinned by `the back face never paints at rest` in `web/packages/launcher/src/lib/flip.test.ts`.
 

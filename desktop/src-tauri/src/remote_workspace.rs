@@ -50,7 +50,8 @@ pub(crate) fn resolve_devserver_target_in(
                 .join("\n");
             Err(format!(
                 "{trimmed:?} matches more than one registered devserver:\n{listing}\n\
-                 Name the one you mean by URL, or remove the duplicate row in the launcher."
+                 Name the one you mean by URL, or remove the duplicate row on the Computers \
+                 screen."
             ))
         }
     }
@@ -107,7 +108,8 @@ pub(crate) fn refuse_unless_connected(
     match conn {
         Some(conn) => Ok(conn),
         None if connecting => Err(format!(
-            "devserver {target:?} is still connecting; wait for the launcher to finish, then retry"
+            "devserver {target:?} is still connecting; wait for the Computers screen to finish, \
+             then retry"
         )),
         None => Err(format!(
             "devserver {target:?} is registered but not connected; run `chan devserver connect \

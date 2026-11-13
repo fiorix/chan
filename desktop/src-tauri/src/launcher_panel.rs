@@ -202,7 +202,7 @@ pub(crate) fn install(app: &AppHandle) {
     }
 }
 
-/// Route the menu's Toggle Launcher: for the window a title bar menu was
+/// Route the menu's Computers item: for the window a title bar menu was
 /// popped up for (`invoked_for`), where the launcher holds the keyboard and no
 /// window reports the focus, else for the focused window, as from a menubar.
 pub(crate) fn toggle_for_menu(app: &AppHandle, invoked_for: Option<&str>) {

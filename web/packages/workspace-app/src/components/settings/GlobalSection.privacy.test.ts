@@ -11,7 +11,7 @@ test("Global privacy hint names the concealed surfaces and the field reveal limi
   for (const detail of [
     "computer and gateway names", "addresses", "connection scripts and tokens",
     "workspace paths in Computers", "WireGuard file paths and public keys", "connection errors",
-    "launcher notices and action details", "window labels in Computers", "window titles",
+    "notices and action details in Computers", "window labels in Computers", "window titles",
     "window titles, terminal program details", "Metrics slide's host name and chan home path",
     "where an eye button is shown", "Shared across Chan desktop windows, or browser tabs at the same address",
     "Screen recording is not detected automatically",

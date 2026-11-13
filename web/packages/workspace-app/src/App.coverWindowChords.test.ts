@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // A full-window cover blocks the app's own chords, and leaves the window's
-// chords to the desktop. On chan-desktop for macOS the Computers launcher is
-// the menubar's View > Toggle Launcher on Cmd+P, and WKWebView hands the
+// chords to the desktop. On chan-desktop for macOS the Computers screen is
+// the menubar's View > Computers on Cmd+P, and WKWebView hands the
 // menubar only a key the page did not cancel, so behind a cover the window
 // key handler keeps the default of the menubar's window-level chords and
 // stops them from reaching anything else in the page. Off macOS the key
@@ -96,7 +96,7 @@ describe("chan-desktop on macOS", () => {
       const event = press(CMD_P);
       await settle();
 
-      expect(event.defaultPrevented, "the menubar's Toggle Launcher gets the key").toBe(false);
+      expect(event.defaultPrevented, "the menubar's Computers item gets the key").toBe(false);
       expect(reachedWindow, "nothing after the cover's guard sees it").toEqual([]);
     });
   }
