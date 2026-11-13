@@ -40,11 +40,12 @@
   import { commandTitle } from "../state/commands";
   // The buttons that run a command are named by it, which this registers.
   import "../state/commands/install";
+  import { sessionWindowId } from "../api/client";
   import { showMarked } from "../api/fileIdentity";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
   import { uploadRequestCount, uploadRequestState } from "../state/uploadRequest.svelte";
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
-  import { selfParticipant, sessionState } from "../state/session.svelte";
+  import { sessionState } from "../state/session.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
 
   let collapsed = $state(false);
@@ -98,15 +99,20 @@
   );
   const paneModeVisible = $derived(paneMode.active);
   // Session role: shown only when the roster is genuinely SPLIT by origin --
-  // at least one local Leader AND at least one remote Follower. A sole-user
-  // all-local roster (his standalone terminals, his workspace windows) stays
-  // quiet; the badge appears only once a real remote (a gateway browser) joins.
-  // Role is origin-derived on the server and read off the /ws roster.
+  // at least one local window AND at least one remote one. A row's `role` on
+  // the /ws roster is its origin (a local socket reads leader, a tunnel socket
+  // follower), so a sole user's all-local roster (standalone terminals,
+  // workspace windows) stays quiet and the badge appears once a gateway
+  // browser joins.
   const roleVisible = $derived(
     sessionState.participants.some((p) => p.role === "leader") &&
       sessionState.participants.some((p) => p.role === "follower"),
   );
-  const role = $derived(selfParticipant()?.role ?? "follower");
+  // The badge names who leads, not where this window connects from: the
+  // roster's `leader` is the one window holding the session's leader slot,
+  // which handover, takeover and the launcher's leader gate act on. Every
+  // other window, local or remote, reads follower.
+  const role = $derived(sessionState.leader === sessionWindowId() ? "leader" : "follower");
 
   // A close hides one section until its content changes. Each closable
   // section names what it shows as tokens; a close records the tokens it
