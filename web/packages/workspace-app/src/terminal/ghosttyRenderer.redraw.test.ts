@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { CanvasRenderer, Terminal, type ITheme } from "@chan/ghostty-web-ng";
 import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { CellPictureContext } from "../__tests__/cellPictureCanvas";
+import { CellPictureContext, type CellPictures } from "../__tests__/cellPictureCanvas";
 import { installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar } from "./ghosttyCompat";
 import { DEFAULT_SECRET_MASK_SUFFIXES } from "./secretMasking";
 import { GhosttySecretMasker } from "./secretMaskingGhostty";
@@ -72,6 +72,10 @@ type Rig = {
   selection: Selection;
   theme: ITheme;
   resize(cols: number, rows: number): void;
+  /// What one full frame of a fresh renderer paints of the terminal
+  /// scrolled back `viewportY` rows. It ends a frame of the core, so a step
+  /// takes it only when the core has changed nothing since the last check.
+  picture(viewportY: number): CellPictures;
 };
 
 /// A step of a run: bytes the program writes, or a change made to the rig.
@@ -144,6 +148,13 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
       rows = r;
       core.resize(c, r);
     },
+    picture(viewportY) {
+      const fresh = paint(rig.theme);
+      (fresh.term as unknown as { viewportY: number }).viewportY = viewportY;
+      frame(fresh, true);
+      fresh.renderer.dispose();
+      return fresh.context.pictures(cols, rows);
+    },
   };
   rig.painter.renderer.setSelectionManager(selection as never);
   const viewport = (painter: Painter) => (painter.term as unknown as { viewportY: number }).viewportY;
@@ -185,6 +196,11 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
 
 const lines = (n: number, prefix = "line") =>
   Array.from({ length: n }, (_, i) => `${prefix} ${String(i).padStart(2, "0")} ${"abcdefghij".slice(0, 2 + (i % 8))}`).join("\r\n");
+
+/// A step that scrolls the view back `y` rows into the history.
+const at = (y: number) => (r: Rig) => {
+  (r.painter.term as unknown as { viewportY: number }).viewportY = y;
+};
 
 const TYPING: Step[] = [
   "e", "c", "h", "o", " hi", "\b", "\b \b", "i", "\r\n", "hi\r\n", "$ ", "ls -l", "\x1b[D", "\x1b[D", "X", "\x1b[C", "\r\n",
@@ -268,10 +284,39 @@ describe("the ghostty renderer's partial redraws", () => {
   });
 
   test("scrolled back and to the bottom again", async () => {
-    const at = (y: number) => (r: Rig) => {
-      (r.painter.term as unknown as { viewportY: number }).viewportY = y;
-    };
     await run(lines(ROWS + 12), [at(3), at(5), "x", at(12), at(0), "y", at(1), at(0), "\r\nz"]);
+  });
+
+  // chan's macOS pixel scroll moves the view by fractions of a row
+  // (ghosttyViewport.ts). Every reader of the offset floors it (the hover,
+  // the selection, the masker), so the view shows the rows of the floor:
+  // at 2.5 and just below 3 those of 2, at 0.5 the screen and its cursor.
+  const JUST_BELOW_3 = 3 - 1e-9;
+  const floored = (y: number) => (r: Rig) => {
+    expect(r.picture(y), `the picture at ${y}`).toEqual(r.picture(Math.floor(y)));
+  };
+
+  test.each([
+    [3, 2.5],
+    [0, 0.5],
+    [3, JUST_BELOW_3],
+  ])("scrolled back from %s rows to %s, a fraction of a row", async (from, to) => {
+    await run(lines(ROWS + 12), [at(from), at(to), floored(to), "x", at(from), at(to), "\r\ny", at(0)]);
+  });
+
+  test("a masked value in the history scrolled back by a fraction of a row", async () => {
+    // The value's row is history row 3 of 7: at an offset of 5 it shows on
+    // view row 1, where the masker's floored offset finds it too.
+    const masked = (y: number, row: number) => (r: Rig) => {
+      const value = r.picture(y)[row].slice(13, 19).flat().join("\n");
+      expect(value, `the value at ${y}`).toContain("#6c6c70");
+      expect(value, `the value at ${y}`).not.toMatch(/text "[a-f]"/);
+    };
+    await run(`${lines(3)}\r\nexport TOKEN=abcdef\r\n${lines(ROWS + 3)}`, [
+      at(5), masked(5, 1),
+      at(5.5), floored(5.5), masked(5.5, 1),
+      at(4.75), floored(4.75), masked(4.75, 0),
+    ], { masking: true });
   });
 
   test("a link hovered and left", async () => {
