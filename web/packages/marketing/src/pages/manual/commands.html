@@ -1,0 +1,160 @@
+<section class="manual-block" id="chan">
+  <h2><a class="heading-anchor" href="#chan">chan</a></h2>
+  <p><code>chan</code> serves workspaces, runs devservers and changes chan's settings, from any shell. Add <code>--help</code> to any command for its flags and examples.</p>
+  <p>A prefix that names one command is enough, at every level: <code>chan w ls</code> is <code>chan workspace ls</code>, and <code>chan de status</code> is <code>chan devserver status</code>. A prefix that fits two commands, such as <code>s</code> for serve and shell, is refused.</p>
+
+  <h3 id="serve-commands"><a class="heading-anchor" href="#serve-commands">Serve a workspace</a></h3>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan serve PATH</code>, <code>chan open PATH</code></td><td>Registers PATH as a workspace and serves it: in Chan Desktop or a devserver when one runs, otherwise on its own for a browser.</td><td><a href="/manual/workspaces/#serve">Workspaces</a></td></tr>
+        <tr><td><code>chan close PATH</code></td><td>Stops serving a workspace and keeps it registered. <code>--forget</code> also forgets it.</td><td><a href="/manual/workspaces/#list">Workspaces</a></td></tr>
+        <tr><td><code>chan ps</code></td><td>Lists the registered workspaces and what serves each. <code>--json</code> prints it for scripts.</td><td><a href="/manual/workspaces/#list">Workspaces</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="workspace-commands"><a class="heading-anchor" href="#workspace-commands">chan workspace</a></h3>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>chan workspace</code></th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>add PATH</code></td><td>Registers a directory without serving it. <code>--semantic-search</code> turns on semantic search for it.</td><td><a href="/manual/workspaces/#open">Workspaces</a></td></tr>
+        <tr><td><code>ls</code></td><td>Lists the registered workspaces, most recent first, with each one's key. Takes <code>--json</code>.</td><td><a href="/manual/workspaces/#list">Workspaces</a></td></tr>
+        <tr><td><code>serve</code>, <code>close</code></td><td>The same as <code>chan serve</code> and <code>chan close</code>.</td><td></td></tr>
+        <tr><td><code>forget PATH</code></td><td>Stops serving a workspace, unregisters it, and deletes chan's data for it. Your files stay.</td><td><a href="/manual/workspaces/#list">Workspaces</a></td></tr>
+        <tr><td><code>index rebuild PATH</code></td><td>Builds the search index and graph again.</td><td><a href="/manual/dashboard/#index">Index</a></td></tr>
+        <tr><td><code>index download-model</code>, <code>list-models</code>, <code>set-model</code>, <code>enable-semantic</code>, <code>disable-semantic</code>, <code>status</code></td><td>Fetch, list and choose the embedding model, turn a workspace's semantic search on or off, and report it.</td><td><a href="/manual/dashboard/#semantic-search">Semantic search</a></td></tr>
+        <tr><td><code>reports enable</code>, <code>reports disable</code></td><td>Turn a workspace's code reports on or off, named with <code>--path PATH</code>. Off deletes the report and asks first; <code>-y</code> skips the question.</td><td><a href="/manual/files/#code-reports">Code reports</a></td></tr>
+        <tr><td><code>search QUERY</code></td><td>Searches and walks the workspace you are in, the one <code>--workspace</code> names, or all with <code>--all-workspaces</code>, as <code>cs search</code> does.</td><td><a href="/manual/search/#terminal-search">Search</a></td></tr>
+        <tr><td><code>graph --from TYPE:VALUE</code></td><td>Walks the graph's relationships from a node, such as <code>file:notes/a.md</code>.</td><td><a href="/manual/search/#terminal-search">Search</a></td></tr>
+        <tr><td><code>status PATH</code></td><td>Reports a workspace's index, graph and code report. Takes <code>--json</code>.</td><td></td></tr>
+        <tr><td><code>metadata export PATH ARCHIVE</code>, <code>import</code>, <code>inspect</code></td><td>Save chan's data for a workspace to a <code>.tar.zst</code> archive, restore it, or list what an archive holds.</td><td><a href="/manual/settings/#settings">Settings</a></td></tr>
+        <tr><td><code>contacts import csv FILE</code></td><td>Writes one contact note per row of a Google Contacts CSV, into <code>--into DIR</code> of <code>--workspace PATH</code>. <code>--dry-run</code> writes nothing.</td><td><a href="/manual/editor/#frontmatter">Contacts</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="devserver-commands"><a class="heading-anchor" href="#devserver-commands">chan devserver</a></h3>
+  <p>The first commands run the devserver of this machine. The rest manage the devservers on Chan Desktop's Computers screen, so they need Chan Desktop running; <code>NAME</code> is the name or URL <code>chan devserver ls</code> shows.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>chan devserver</code></th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>run</code></td><td>Runs the devserver in this terminal until <kbd>Ctrl+C</kbd>.</td><td><a href="/manual/devserver/#start-server">Run a devserver</a></td></tr>
+        <tr><td><code>start</code>, <code>stop</code>, <code>restart</code></td><td>Start the background service and enable it at login or boot, stop and disable it, or restart it on the current binary.</td><td><a href="/manual/devserver/#start-server">Run a devserver</a></td></tr>
+        <tr><td><code>status</code></td><td>Prints the service's state and, in a terminal or with <code>--url</code>, its URL with the token.</td><td><a href="/manual/devserver/#token">The token</a></td></tr>
+        <tr><td><code>join</code></td><td>Starts the service if it is down and stays attached until <kbd>Ctrl+C</kbd>. Connect scripts run it.</td><td><a href="/manual/devserver/#token">The token</a></td></tr>
+        <tr><td><code>rotate-token</code></td><td>Replaces the token and prints the new URL.</td><td><a href="/manual/devserver/#token">The token</a></td></tr>
+        <tr><td><code>register URL</code></td><td>Adds a devserver to the Computers screen without connecting. <code>--name</code> and <code>--script</code> fill the form's Name and Connect script.</td><td><a href="/manual/connect/#cli">Connect</a></td></tr>
+        <tr><td><code>ls</code></td><td>Lists the devservers on the Computers screen with their state. Takes <code>--json</code>.</td><td><a href="/manual/connect/#cli">Connect</a></td></tr>
+        <tr><td><code>connect NAME</code>, <code>disconnect NAME</code></td><td>Connect to a devserver, or drop the connection; it keeps running.</td><td><a href="/manual/connect/#cli">Connect</a></td></tr>
+        <tr><td><code>forget NAME</code></td><td>Removes a devserver and its stored token. A connected one is refused unless you add <code>--force</code>.</td><td><a href="/manual/connect/#cli">Connect</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The commands for this machine's devserver share <code>--bind</code>, <code>--port</code> and <code>--service</code>, and the tunnel flags that <a href="/gateway/publish/#publish">publish a devserver through a gateway</a>.</p>
+
+  <h3 id="other-commands"><a class="heading-anchor" href="#other-commands">Other commands</a></h3>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan metrics</code></td><td>Prints the running devserver's readings: CPU, memory, traffic and disk. <code>--watch</code> repeats them, and <code>--url</code> reads another chan server.</td><td><a href="/manual/devserver/#metrics">Metrics</a></td></tr>
+        <tr><td><code>chan config get [KEY]</code>, <code>chan config set KEY VALUE</code></td><td>Read and write the settings that live outside a workspace, as Settings does, with nothing running.</td><td><a href="/manual/settings/#config">Settings</a></td></tr>
+        <tr><td><code>chan completions SHELL</code></td><td>Prints a completion script for <code>bash</code>, <code>elvish</code>, <code>fish</code>, <code>powershell</code> or <code>zsh</code>.</td><td></td></tr>
+        <tr><td><code>chan dump-skill</code></td><td>Prints chan's manual for agents, built from its own help: <code>--list</code> for its topics, <code>--topic SLUG</code> for one, <code>--full</code> for all of it.</td><td><a href="/manual/teams/#commands">Agent teams</a></td></tr>
+        <tr><td><code>chan upgrade</code></td><td>Replaces this <code>chan</code> with the latest release after asking. <code>--check</code> only reports, <code>--version V</code> picks a release, and <code>-y</code> skips the question.</td><td></td></tr>
+        <tr><td><code>chan shell</code></td><td>The same command as <code>cs</code>.</td><td><a href="#cs">Below</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 id="serve-flags"><a class="heading-anchor" href="#serve-flags">chan serve flags</a></h3>
+  <p><a href="/manual/workspaces/#serve">Workspaces</a> explains <code>--standalone</code>, <code>--desktop</code>, <code>--devserver</code> and <code>--on</code>. <a href="/manual/browser/#standalone">Chan in a browser</a> explains <code>--port</code>, <code>--host</code>, <code>--no-browser</code>, <code>--here</code>, <code>--timeout</code>, <code>--no-settings</code> and <code>--no-token</code>. The rest:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Flag</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>-4</code>, <code>--ipv4</code></td><td>Listens on IPv4 only, on <code>127.0.0.1</code> unless <code>--host</code> names another IPv4 address.</td></tr>
+        <tr><td><code>-6</code>, <code>--ipv6</code></td><td>Listens on IPv6 only, on <code>::1</code> unless <code>--host</code> names another IPv6 address.</td></tr>
+        <tr><td><code>--search-aggression LEVEL</code></td><td>Sets how hard the indexer works for this run: <code>conservative</code>, <code>balanced</code> or <code>aggressive</code>. It overrides <strong>Settings → Search → Search indexing</strong>.</td></tr>
+        <tr><td><code>--prefix /team/alice</code></td><td>Serves under a URL path, so a reverse proxy can put several servers on one host. Each segment takes letters, digits and <code>-</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Only a server the command binds itself can enforce <code>--no-settings</code>, so a serve that would hand the workspace to Chan Desktop or a devserver is refused. Add <code>--standalone</code>.</li>
+      <li><code>--timeout</code> takes a whole number with <code>s</code>, <code>m</code> or <code>h</code>, such as <code>30s</code>; zero is refused.</li>
+      <li><code>--devserver=PORT</code> also takes a URL on this machine, such as <code>--devserver=http://127.0.0.1:9999</code>, always with <code>=</code>. A URL of another host is refused.</li>
+      <li><code>--on NAME</code> takes no other serve flag, and its PATH is a path on that devserver.</li>
+      <li><code>-4</code> or <code>-6</code> with a <code>--host</code> of the other kind is refused.</li>
+      <li><code>chan serve</code> takes a path only; a URL is refused with a pointer to <code>chan devserver register</code>.</li>
+      <li>A path inside a Git, Mercurial or Subversion working tree exits with status 70. See <a href="/manual/troubleshooting/#serve">Troubleshooting</a>.</li>
+      <li><code>chan close</code> and <code>chan workspace forget</code> exit with status 75 while a workspace is still releasing; run them again.</li>
+      <li><code>-v</code>, <code>-vv</code> and <code>-vvv</code> raise logging on every command. <code>chan --version</code> prints the release and the build.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="cs">
+  <h2><a class="heading-anchor" href="#cs">cs</a></h2>
+  <p><code>cs</code> runs inside a chan terminal and drives the window it runs in: it opens files, terminals and panes, writes to and reads other terminals, and reports a program's status on its tab. <code>chan shell</code> is the same command, and prefixes work the same way: <code>cs te l</code> is <code>cs terminal list</code>.</p>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/cs/#verbs"><strong>Script it with cs</strong><span>Every <code>cs</code> command, where each one works, and its output.</span></a>
+  </div>
+</section>
+
+<section class="manual-block" id="programs">
+  <h2><a class="heading-anchor" href="#programs">Other names of chan</a></h2>
+  <p>The <code>chan</code> program also answers to four other names, and does what the name it runs under says.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Name</th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs</code></td><td>Drives the chan window a terminal runs in.</td><td><a href="/manual/cs/#verbs">cs</a></td></tr>
+        <tr><td><code>chan-term</code></td><td>Opens a Chan Desktop terminal window: your shell, or a command in a window of its own.</td><td><a href="/manual/standalone/#commands">Standalone</a></td></tr>
+        <tr><td><code>chan-files PATH</code></td><td>Opens a directory in a standalone terminal window's file browser.</td><td><a href="/manual/standalone/#commands">Standalone</a></td></tr>
+        <tr><td><code>chan-edit PATH</code></td><td>Opens a file in a standalone terminal window's editor.</td><td><a href="/manual/standalone/#commands">Standalone</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Installed by</th><th>Names</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The CLI installer for macOS, Linux and FreeBSD, and Homebrew's <code>chan</code></td><td><code>chan</code>, <code>cs</code></td></tr>
+        <tr><td>The Windows CLI installer</td><td><code>chan</code>, and <code>cs</code> as <code>cs.cmd</code> and a Git Bash <code>cs</code></td></tr>
+        <tr><td>Chan Desktop</td><td>All five, in <code>~/.local/bin</code>. On Windows, only <code>chan</code> and <code>cs</code>.</td></tr>
+        <tr><td>The Arch, Ubuntu, Fedora and Nix packages of <code>chan</code> and of Chan Desktop</td><td>All five</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>If <code>command -v cs</code> finds nothing, link it once:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>ln -s "$(command -v chan)" ~/.local/bin/cs</b></code>{{copyButton}}</div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Chan Desktop repairs the names it wrote in <code>~/.local/bin</code> when they go stale, and leaves alone a name you put there yourself.</li>
+      <li>The <code>chan</code> that Chan Desktop installs hands a workspace to Chan Desktop, and its <code>chan upgrade</code> updates Chan Desktop.</li>
+      <li>The <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code> of the <code>chan</code> packages cannot start Chan Desktop; see <a href="/manual/standalone/#commands">Standalone</a>.</li>
+    </ul>
+  </details>
+</section>

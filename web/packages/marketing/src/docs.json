@@ -191,6 +191,16 @@
               "slug": "shortcuts",
               "title": "Keyboard shortcuts",
               "description": "Every default key on macOS, Windows, Linux and in a browser, and how to change one."
+            },
+            {
+              "slug": "commands",
+              "title": "Commands",
+              "description": "Every chan command and subcommand, the chan serve flags no other page covers, and the other names of the chan binary."
+            },
+            {
+              "slug": "troubleshooting",
+              "title": "Troubleshooting",
+              "description": "What a message or a stuck window means, its likely cause and its fix: Chan Desktop, devservers, cs, chan serve, tmux and Linux defaults."
             }
           ]
         }
