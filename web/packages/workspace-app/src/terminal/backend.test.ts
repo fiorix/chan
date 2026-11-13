@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
-import type { GhosttyVt, VtTerminal } from "@chan/ghostty-web-ng/vt";
+import { VtCells, type GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { describe, expect, test } from "vitest";
 import type { TerminalPreferences } from "../api/types";
 import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";
@@ -51,9 +51,11 @@ describe("ghostty kit instances", () => {
     term.beginFrame();
     const { rows } = term.getDimensions();
     let stale = 0;
+    const cells = new VtCells();
     for (let y = 0; y < rows; y++) {
-      for (const cell of term.getLine(y) ?? []) {
-        if (cell.codepoint === MARKER.codePointAt(0)) stale++;
+      if (!term.readRow(y, cells)) continue;
+      for (let x = 0; x < cells.length; x++) {
+        if (cells.at(x)!.codepoint === MARKER.codePointAt(0)) stale++;
       }
     }
     return stale;

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Key, KeyEncoderOption, type GhosttyCell } from "@chan/ghostty-web-ng";
+import { Key, KeyEncoderOption } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   ORACLE_FIXTURE,
@@ -66,11 +66,24 @@ function typeJson(instance: WebAssembly.Instance): TypeJson {
   return JSON.parse(new TextDecoder().decode(bytes.subarray(ptr, end))) as TypeJson;
 }
 
-function text(cells: GhosttyCell[] | null): string {
-  return (cells ?? [])
-    .map((c) => (c.width === 0 ? "" : c.codepoint ? String.fromCodePoint(c.codepoint) : " "))
-    .join("")
-    .trimEnd();
+/// Screen row `y`, or history row `y` (0 the oldest) with `history`, read
+/// into a view of its own.
+function row(t: Pick<VtTerminal, "readRow" | "readHistoryRow">, y: number, history = false): VtCells {
+  const cells = new VtCells();
+  expect(history ? t.readHistoryRow(y, cells) : t.readRow(y, cells), `${history ? "history" : "screen"} row ${y} reads`).toBe(true);
+  return cells;
+}
+
+/// A row's text: a character a cell, a space for an empty one, nothing for
+/// a spacer, trailing blanks dropped.
+function text(t: Pick<VtTerminal, "readRow" | "readHistoryRow">, y: number, history = false): string {
+  const cells = row(t, y, history);
+  let out = "";
+  for (let x = 0; x < cells.length; x++) {
+    const c = cells.at(x)!;
+    if (c.width !== 0) out += c.codepoint ? String.fromCodePoint(c.codepoint) : " ";
+  }
+  return out.trimEnd();
 }
 
 type Fn = (...args: number[]) => number;
@@ -346,16 +359,17 @@ describe("the core the binding accepts", () => {
   });
 });
 
-describe("upstream's terminal through ghostty-web's binding API", () => {
+describe("upstream's terminal through the binding", () => {
   test("a written row reads back with resolved colors and style flags", async () => {
     const t = (await upstream()).createTerminal(20, 5, { fgColor: 0xd0d0d0, bgColor: 0x101010 });
     t.write("\x1b[1;31mR\x1b[0m\x1b[48;2;1;2;3mB\x1b[0m");
-    const [r, b] = t.getLine(0) ?? [];
+    const cells = row(t, 0);
+    const [r, b, blank] = [cells.at(0)!, cells.at(1)!, cells.at(2)!];
     expect(String.fromCodePoint(r.codepoint)).toBe("R");
-    expect(r.flags & 1).toBe(1);
-    expect([b.bg_r, b.bg_g, b.bg_b]).toEqual([1, 2, 3]);
-    expect([b.fg_r, b.fg_g, b.fg_b]).toEqual([0xd0, 0xd0, 0xd0]);
-    expect(t.getColors().background).toEqual({ r: 0x10, g: 0x10, b: 0x10 });
+    expect(r.flags & VtFlag.BOLD).toBe(VtFlag.BOLD);
+    expect(b.bg).toBe(0x010203);
+    expect(b.fg).toBe(0xd0d0d0);
+    expect(blank.bg, "a cell nothing was written to has the default background").toBe(0x101010);
   });
 
   test("only the rows a write touched are dirty after a clean", async () => {
@@ -367,13 +381,13 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(t.beginFrame()).toBe(1);
     // Row 2 held the cursor before the move, so it redraws too.
     expect([0, 1, 2, 3, 4, 5].map((y) => t.isRowDirty(y))).toEqual([false, false, true, true, false, false]);
-    expect(text(t.getLine(3))).toBe("x");
+    expect(text(t, 3)).toBe("x");
   });
 
   test("an OSC 8 link resolves on screen and in history", async () => {
     const t = (await upstream()).createTerminal(20, 3);
     t.write("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\");
-    expect(t.getLine(0)?.[0].hyperlink_id).toBe(1);
+    expect(row(t, 0).at(0)?.hyperlink).toBe(1);
     expect(t.getHyperlinkUri(0, 1)).toBe("https://example.com/a");
     expect(t.getHyperlinkUri(0, 6)).toBeNull();
     t.write("\r\n\r\n\r\n\r\n");
@@ -385,7 +399,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
       fn: { ghostty_wasm_alloc(len: number): number };
       free(ptr: number, len: number): void;
     };
-    const t = (await upstream()).createTerminal(80, 24) as unknown as Pick<VtTerminal, "write" | "free" | "getLine"> & {
+    const t = (await upstream()).createTerminal(80, 24) as unknown as Pick<VtTerminal, "write" | "free" | "readRow" | "readHistoryRow"> & {
       wasm: Wasm;
       writeBuf: number;
       writeCap: number;
@@ -411,7 +425,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(t.writeCap).toBe(oldCap);
     t.write(" second");
     expect(t.writeBuf, "a smaller write reuses the intact buffer").toBe(oldBuf);
-    expect(text(t.getLine(0))).toBe("first second");
+    expect(text(t, 0)).toBe("first second");
     t.write("x".repeat(oldCap + 1));
     expect(t.writeBuf).not.toBe(oldBuf);
     t.free();
@@ -422,13 +436,12 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     const t = (await upstream()).createTerminal(20, 3);
     const family = "👨‍👩‍👧";
     t.write(`${family}x`);
-    const row = t.getLine(0) ?? [];
-    expect(row[0].grapheme_len).toBeGreaterThan(0);
-    expect(row[0].width).toBe(2);
-    expect(t.getGraphemeString(0, 0)).toBe(family);
-    expect(String.fromCodePoint(row[2].codepoint)).toBe("x");
+    const cells = row(t, 0);
+    expect(cells.at(0)?.cluster).toBe(family);
+    expect(cells.at(0)?.width).toBe(2);
+    expect(String.fromCodePoint(cells.at(2)!.codepoint)).toBe("x");
     t.write("\r\n\r\n\r\n");
-    expect(t.getScrollbackGraphemeString(0, 0)).toBe(family);
+    expect(row(t, 0, true).at(0)?.cluster).toBe(family);
   });
 
   test.each(["screen", "history"])("a cluster beyond the scratch capacity reads whole from %s", async (surface) => {
@@ -436,12 +449,11 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     const cluster = "e" + "\u0301".repeat(33);
     t.write(`${cluster}x`);
     if (surface === "history") t.write("\r\n\r\n\r\n");
-    const row = surface === "history" ? t.getScrollbackLine(0) : t.getLine(0);
-    const read = surface === "history" ? t.getScrollbackGraphemeString(0, 0) : t.getGraphemeString(0, 0);
-    expect(read).toBe(cluster);
-    expect(row?.[0].grapheme_len).toBe(33);
-    expect(row?.[0].width).toBe(1);
-    expect(row?.[1].codepoint).toBe("x".codePointAt(0));
+    const cells = row(t, 0, surface === "history");
+    expect(cells.at(0)?.cluster).toBe(cluster);
+    expect([...cells.at(0)!.cluster!]).toHaveLength(34);
+    expect(cells.at(0)?.width).toBe(1);
+    expect(cells.at(1)?.codepoint).toBe("x".codePointAt(0));
     t.free();
   });
 
@@ -458,7 +470,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     const t = (await upstream()).createTerminal(80, 24, { scrollbackLimit: 5_000 });
     t.write(Array.from({ length: 3_000 }, (_, i) => `line ${i}`).join("\r\n"));
     expect(t.getScrollbackLength()).toBe(3_000 - 24);
-    expect(text(t.getScrollbackLine(0))).toBe("line 0");
+    expect(text(t, 0, true)).toBe("line 0");
   });
 
   test("the line limit holds past the core's default byte cap", async () => {
@@ -472,13 +484,13 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(rows).toBeGreaterThanOrEqual(9_000);
     expect(rows).toBeLessThanOrEqual(11_000);
     // The last line's CRLF leaves the cursor on an empty row below it.
-    expect(text(t.getScrollbackLine(rows - 1))).toBe(`line ${20_000 - 24} ${"x".repeat(40)}`);
+    expect(text(t, rows - 1, true)).toBe(`line ${20_000 - 24} ${"x".repeat(40)}`);
   });
 
   test.each([
-    ["OSC 11, the background", "\x1b]11;rgb:40/00/00\x07", "bg", [64, 0, 0]],
-    ["OSC 10, the foreground", "\x1b]10;rgb:00/80/00\x07", "fg", [0, 128, 0]],
-  ] as const)("a default color change by %s redraws the rows drawn before it", async (_name, set, which, rgb) => {
+    ["OSC 11, the background", "\x1b]11;rgb:40/00/00\x07", "bg", 0x400000],
+    ["OSC 10, the foreground", "\x1b]10;rgb:00/80/00\x07", "fg", 0x008000],
+  ] as const)("a default color change by %s redraws the rows drawn before it", async (_name, set, which, color) => {
     const t = (await upstream()).createTerminal(20, 4, { fgColor: 0xcccccc, bgColor: 0x101010 });
     t.write("first\r\nsecond");
     t.beginFrame();
@@ -486,15 +498,19 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     t.write(set);
     expect(t.beginFrame()).toBe(ABI.GhosttyRenderStateDirty.FULL);
     for (const y of [0, 1]) {
-      const cell = t.getLine(y)![0];
-      const got = which === "bg" ? [cell.bg_r, cell.bg_g, cell.bg_b] : [cell.fg_r, cell.fg_g, cell.fg_b];
-      expect(got, `row ${y} ${which}`).toEqual([...rgb]);
+      const cell = row(t, y).at(0)!;
+      expect(which === "bg" ? cell.bg : cell.fg, `row ${y} ${which}`).toBe(color);
     }
   });
 
   test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
     type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
-    type Probe = Pick<VtTerminal, "write" | "beginFrame" | "getGraphemeString"> & { scratch: number; wasm: Wasm };
+    type Probe = Pick<VtTerminal, "write" | "beginFrame" | "readRow"> & { scratch: number; wasm: Wasm };
+    const clusterAt = (term: Probe) => {
+      const cells = new VtCells();
+      term.readRow(0, cells);
+      return cells.at(0)?.cluster ?? "";
+    };
     const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
     const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
     // The core keeps its own state (the cursor and the read position among
@@ -505,7 +521,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     const controlBefore = pastScratch(control);
     control.write("e\u0301");
     control.beginFrame();
-    control.getGraphemeString(0, 0);
+    clusterAt(control);
     const ownState = moved(controlBefore, pastScratch(control));
     const t = (await upstream()).createTerminal(20, 3) as unknown as Probe;
     expect(t.scratch, "the control's layout is this terminal's").toBe(control.scratch);
@@ -525,7 +541,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     // One cluster: "e" and n - 1 combining acute accents.
     t.write("e" + "\u0301".repeat(n - 1));
     t.beginFrame();
-    const cell = [...t.getGraphemeString(0, 0)];
+    const cell = [...clusterAt(t)];
     expect(ownState, "nothing past the scratch but the core's own state").toEqual(expect.arrayContaining(moved(before, pastScratch(t))));
     const own = allocs.filter(([, len]) => len === n * 4);
     expect(own, "one buffer of four bytes a codepoint").toHaveLength(1);
@@ -541,7 +557,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     t.endFrame();
     t.resize(20, 4);
     expect(t.beginFrame()).toBe(ABI.GhosttyRenderStateDirty.FULL);
-    expect(text(t.getLine(0))).toBe("abcdefghijklmno");
+    expect(text(t, 0)).toBe("abcdefghijklmno");
   });
 
   test("a full reset keeps grapheme clustering on", async () => {
