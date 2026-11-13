@@ -2,8 +2,8 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { ensureSyntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { parsedState } from "../../__tests__/parsedState";
 import { chanMarkdown } from "../markdown/grammar";
 import { renderExcalidrawFile } from "../excalidraw_render";
 import { writeClipboardPayload } from "../../api/clipboard";
@@ -349,13 +349,13 @@ describe("excalidraw edit reveals source with no raster image bubble", () => {
   /// A parsed markdown state with the caret at `pos`, no view mount -
   /// exactly what the bubble controller hands computeBubbleSpec.
   function stateAt(doc: string, pos: number): EditorState {
-    const state = EditorState.create({
-      doc,
-      selection: { anchor: pos },
-      extensions: [chanMarkdown()],
-    });
-    ensureSyntaxTree(state, doc.length, 10000);
-    return state;
+    return parsedState(
+      EditorState.create({
+        doc,
+        selection: { anchor: pos },
+        extensions: [chanMarkdown()],
+      }),
+    );
   }
 
   test("caret inside an .excalidraw image URL opens NO bubble", () => {
