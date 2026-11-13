@@ -707,6 +707,63 @@ describe("watching the directories it shows", () => {
     expect(drawnEdges()).toContain("links/l.md>notes/x.md:symlink broken");
   });
 
+  /// A tree with `releases/v2/a.md` and a symlink at `link` naming
+  /// `releases/v2`, and the same tree once `rm -rf releases/v2` ran, as the
+  /// route answers each: the link's level names its target by its own path,
+  /// a directory while it is there and a broken ghost once it is gone.
+  function releasesTree(link: string, linkDir: string, gone: boolean) {
+    const symlinkNode = { ...fsg.file(link), kind: "symlink" as const, target: "releases/v2" };
+    const target = gone ? { ...fsg.dir("releases/v2"), kind: "ghost" as const, broken: true } : fsg.dir("releases/v2");
+    const linkDirs = linkDir ? [fsg.dir(linkDir)] : [];
+    return {
+      nodes: [
+        fsg.dir(""),
+        fsg.dir("releases"),
+        ...linkDirs,
+        symlinkNode,
+        target,
+        ...(gone ? [] : [fsg.file("releases/v2/a.md")]),
+      ],
+      edges: [
+        fsg.contains("", "releases"),
+        ...(linkDir ? [fsg.contains("", linkDir)] : []),
+        fsg.contains(linkDir, link),
+        { source: link, target: "releases/v2", kind: "symlink" as const },
+        ...(gone ? [] : [fsg.contains("releases", "releases/v2"), fsg.contains("releases/v2", "releases/v2/a.md")]),
+      ],
+    };
+  }
+
+  test("a directory a symlink names takes its files when it goes, the symlink's directory read first", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = releasesTree("latest", "", false);
+    graphServer.fs.nodes.push(fsg.dir("docs"));
+    graphServer.fs.edges.push(fsg.contains("", "docs"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("releases/v2"), docs: true } }));
+    expect(visibleIds()).toContain("releases/v2/a.md");
+
+    graphServer.fs = releasesTree("latest", "", true);
+    graphServer.fs.nodes.push(fsg.dir("docs"));
+    graphServer.fs.edges.push(fsg.contains("", "docs"));
+    const { spines } = await change(["releases/v2/a.md", "releases/v2"]);
+    expect(spines.map((c) => c.path), "the link's directory, the root, sorts first").toEqual(["", "releases"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("releases/v2/a.md");
+    expect(drawnEdges()).toContain("latest>releases/v2:symlink broken");
+  });
+
+  test("a directory a symlink names takes its files when it goes, the target's parent read first", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    graphServer.fs = releasesTree("zz/latest", "zz", false);
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...openedForPath("releases/v2"), zz: true } }));
+    expect(visibleIds()).toContain("releases/v2/a.md");
+
+    graphServer.fs = releasesTree("zz/latest", "zz", true);
+    const { spines } = await change(["releases/v2/a.md", "releases/v2"]);
+    expect(spines.map((c) => c.path)).toEqual(["releases", "zz"]);
+    expect(canvas.props!.nodes.map((n) => n.id)).not.toContain("releases/v2/a.md");
+    expect(drawnEdges()).toContain("zz/latest>releases/v2:symlink broken");
+  });
+
   test("two changes signalled before the tab looks are a change whose paths are not known", async () => {
     await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
     vi.useFakeTimers();

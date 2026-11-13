@@ -1591,6 +1591,14 @@
       if (isFsDirectory(n) && !freshDirs.has(n.id)) dropBelow(n.path);
     }
     if (level === null) dropBelow(dir);
+    // A node of the level that takes the place of a directory the spine
+    // held, and is no directory, takes what was below it: a symlink's level
+    // names its target that way once the target directory is gone (a
+    // ghost), whichever of the two directories is read first.
+    for (const n of level?.nodes ?? []) {
+      const was = read.nodes.get(n.id);
+      if (was !== undefined && isFsDirectory(was) && !isFsDirectory(n)) dropBelow(was.path);
+    }
     for (const id of removed) read.nodes.delete(id);
     read.edges = read.edges.filter((e) => {
       if (removed.has(e.source) || removed.has(e.target)) return false;
