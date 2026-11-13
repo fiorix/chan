@@ -23,17 +23,19 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.129.0
 
-Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]).
+Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]). He brought one more the same day, built on a branch of its own: a graph tab draws one graph rooted at the workspace, and a tag, mention, contact, language, file or directory is a selection in it ([graph]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [a raised minimized window may stay behind][minraise] | built | owner |
 | [the default terminal is chan-desktop's flags][chanterm] | built | owner |
+| [a graph tab draws a graph for each way it opens][graph] | built | owner |
 
 [ghosttyng]: v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [minraise]: v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
 [chanterm]: v0.129.0/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md
+[graph]: v0.129.0/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md
 
 ## Completed
 
