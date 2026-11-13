@@ -29,7 +29,7 @@ Two of the owner's requests of 2026-11-12 were built without a row of their own.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | owner |
 | [a raised minimized window may stay behind][minraise] | built | owner |
 | [the default terminal is chan-desktop's flags][chanterm] | built | owner |
 | [a graph tab draws a graph for each way it opens][graph] | built | owner |
