@@ -17,6 +17,16 @@ export const GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR = 0.5;
 // touches the WheelEvent global (absent in some test environments).
 const DOM_DELTA_PIXEL = 0;
 
+/// The whole history rows a view at viewport offset `offset` shows above the
+/// screen. A pixel scroll leaves the offset a fraction of a row back, and
+/// ghostty-web's renderer, hover and selection and chan's masker all read it
+/// through its floor, so a view less than a row back is the bottom view, its
+/// prompt and cursor included. Every decision here about where the view is
+/// reads the offset through this.
+export function ghosttyHistoryRows(offset: number): number {
+  return Math.max(0, Math.floor(offset));
+}
+
 export type GhosttyViewportTerminal = {
   readonly rows: number;
   getViewportY(): number;
@@ -76,12 +86,19 @@ export class GhosttyViewportController {
   /// viewport is away from the bottom. Restore a user's scrolled viewport
   /// immediately after the synchronous WASM write, advancing the distance
   /// from bottom as new scrollback lines are appended. A viewport at the
-  /// bottom keeps following output natively. Writes never feed the wheel
-  /// path, so programmatic output cannot masquerade as user scroll input.
+  /// bottom keeps following output natively. One less than a row back shows
+  /// no history row: it follows output too, and gets back the fraction its
+  /// gesture gathered, so the next wheel delta adds to it and a slow scroll
+  /// leaves the bottom under streaming output once it reaches a row. Writes
+  /// never feed the wheel path, so programmatic output cannot masquerade as
+  /// user scroll input.
   write(data: string | Uint8Array): void {
     const viewportBefore = this.terminal.getViewportY();
     if (viewportBefore <= 0) {
       this.terminal.write(data);
+    } else if (ghosttyHistoryRows(viewportBefore) === 0) {
+      this.terminal.write(data);
+      this.terminal.scrollToLine(viewportBefore);
     } else {
       const scrollbackBefore = this.terminal.getScrollbackLength();
       this.terminal.write(data);
@@ -103,10 +120,11 @@ export class GhosttyViewportController {
   /// row already on screen leaves the viewport where it is; any other is
   /// centred, clamped to the buffer. ghostty-web's viewport offset counts
   /// the lines scrolled back from the bottom, so screen row `row -
-  /// scrollback + offset` shows `row`, and `scrollToLine` sets that offset,
-  /// although its doc comment describes a line counted from the top. The
-  /// alternate screen has no history: its scrollback length is 0, its rows
-  /// are its own, and the offset clamps to 0.
+  /// scrollback + ghosttyHistoryRows(offset)` shows `row`, and
+  /// `scrollToLine` sets that offset, although its doc comment describes a
+  /// line counted from the top. The alternate screen has no history: its
+  /// scrollback length is 0, its rows are its own, and the offset clamps to
+  /// 0.
   reveal(row: number): void {
     if (this.shows(row)) return;
     const scrollback = this.terminal.getScrollbackLength();
@@ -120,7 +138,7 @@ export class GhosttyViewportController {
   /// count, though the core still holds the old grid until the resize
   /// reaches it, so a reader of the grid as it was passes the old count.
   shows(row: number, rows = this.terminal.rows): boolean {
-    const onScreen = row - this.terminal.getScrollbackLength() + this.terminal.getViewportY();
+    const onScreen = row - this.terminal.getScrollbackLength() + ghosttyHistoryRows(this.terminal.getViewportY());
     return onScreen >= 0 && onScreen < rows;
   }
 

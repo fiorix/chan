@@ -214,7 +214,7 @@ export class GhosttySecretMasker {
     const key: FrameKey = {
       type: active.type,
       length: active.length,
-      top: Math.max(0, active.length - rows - Math.floor(viewportY)),
+      top: Math.max(0, active.length - rows - Math.max(0, Math.floor(viewportY))),
       cols,
       rows,
     };
