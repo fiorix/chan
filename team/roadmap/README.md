@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.130.0
 
-Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]), and four rows the owner confirmed for it that day: the reading of the AppImage in FUSE mode, which he moved out of v0.129.0 ([fusemode]); a standalone terminal window loading the saved shortcut overrides ([termkeys]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). The owner adds the release's other rows at planning.
+Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]), and four rows the owner confirmed for it that day: the reading of the AppImage in FUSE mode, which he moved out of v0.129.0 ([fusemode]); a standalone terminal window loading the saved shortcut overrides ([termkeys]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). After the tag that day he added a sixth, the devserver's metrics as a `systemd-report` source ([sdreport]), built on a branch on 2026-11-11 and not merged. The owner adds the release's other rows at planning.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -32,12 +32,14 @@ Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the 
 | [a terminal window ignores saved shortcuts][termkeys] | not started | build |
 | [New and Paste choose two folders][newpaste] | not started | decision |
 | [a warm chan-term leaves Chan behind][warmterm] | not started | build |
+| [systemd-report cannot read the metrics][sdreport] | built, unmerged | build |
 
 [ghosttyng]: v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.130.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [termkeys]: v0.130.0/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md
 [newpaste]: v0.130.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
 [warmterm]: v0.130.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
+[sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
 
 ## Completed
 

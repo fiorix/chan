@@ -1,0 +1,79 @@
+# systemd-report cannot read the devserver's metrics
+
+Status: accepted for v0.130.0 by the owner on 2026-11-13; built on the branch `feat/systemd-report-metrics`, not merged. What is left is in the last section.
+
+Record: raised on 2026-11-10 by the owner, who wants the devserver's metrics in `systemd-report` with one socket, replacing the Varlink adapter v0.127.0 shipped, and the manual page "systemd integration" delivered with it. Built and pushed on 2026-11-11, three commits over `main` at `fcb9388c8` (the v0.127.0 record): `42d2e8672`, `8c41243ce` and the tip `7c170a309`; the builder's report and evidence are in the gitignored `dev/systemd-metrics/` tree. v0.128.0 and v0.129.0 shipped without it. On 2026-11-13, when the merged branches were cleaned up after the v0.129.0 tag and this one was left as the only branch not in `main`, the owner said: "lets add feat/systemd-report-metrics and ../systemd-report-wt: three commits not in main; to the roadmap". The sections from here to Acceptance are his draft as he wrote it for the builder, with the corrections the build found marked in the section on the branch.
+
+## What is there now
+
+Since v0.127.0, and still at v0.129.0, chan ships `chan metrics --varlink`, a socket-activated adapter (`crates/chan/src/metrics/varlink.rs`, built on Unix) that serves the Varlink interface `io.chan.Metrics` (`crates/chan/src/metrics/io.chan.Metrics.varlink`): one method, `Get`, which answers the whole metrics view (identity, latest sample, optional history, storage) and, with `more=true`, streams newer samples the way `chan metrics --watch` does; a failed read answers `io.chan.Metrics.Unavailable`. Example user units in `docs/systemd/` bind it at `%t/chan-metrics/io.chan.Metrics`. Nothing installs them; they are documentation.
+
+`systemd-report` (systemd v260 and later; read from systemd's `main`, 2026-11-10) never sees that socket:
+
+- It finds sources by listing `$XDG_RUNTIME_DIR/systemd/report/` under `--user`, `/run/systemd/report/` otherwise (`src/report/report.c`, `readdir_sources`: `runtime_directory_generic(scope, "systemd/report")`). An entry must be a socket or symlink whose file name is a valid Varlink interface name. systemd's own sources follow one shape: `units/systemd-report-basic.socket` listens on `/run/systemd/report/io.systemd.Basic`, with `Accept=yes` and `FileDescriptorName=varlink`.
+- It calls `io.systemd.Metrics.List` (or `io.systemd.Metrics.Describe` for `describe-metrics`) with `more=true` and no parameters (`call_collect`, `sd_varlink_observe(vl, method, NULL)`), with a 30 s timeout and a cap of 16384 metrics per source.
+- Each reply is one metric. It is kept only if its `name` is valid (`metrics_name_valid`: the part before the last dot is a valid interface name, the last part a valid field name) and has the socket's file name as a true prefix followed by a dot (`metric_startswith_prefix`), so a socket named `io.chan.Devserver` may only send `io.chan.Devserver.*`.
+- Errors: `MethodNotFound` and `MethodNotImplemented` are ignored at debug level, `io.systemd.Metrics.NoSuchMetric` is read as "no more metrics" at debug level, and anything else is logged as a warning and the source skipped (`on_query_reply`).
+- The interface (`src/shared/varlink-io.systemd.Metrics.c`): `List` replies `(name: string, object: ?string, fields: ?object, value: any)`; `Describe` replies `(name: string, description: string, type: MetricFamilyType)`, where the type is `counter`, `gauge`, `string` or `object`; both require `more`; one error, `NoSuchMetric`. systemd's provider helper (`src/shared/metrics.c`, `metrics_method_list`) accepts no parameters and sets `NoSuchMetric` as the sentinel, so a call with no metrics to send answers that error. Its families name units in the last part (`io.systemd.Basic.ClockBoottimeNSec`, `CPUUsage` in nanoseconds) and split a family by `fields` (`type=user|system`).
+
+The design: <https://amutable.com/blog/it-starts-upstream-systemd-report>; the command: systemd-report(1).
+
+## Desired contract
+
+1. One socket and one interface. `chan metrics --varlink` serves `io.systemd.Metrics` (`List`, `Describe`) and `org.varlink.service` introspection, nothing else. `io.chan.Metrics` goes outright: `Get`, `Unavailable`, the `more` stream and the `.varlink` file. chan is pre-release, so there is no compatibility path.
+2. The source is named `io.chan.Devserver`. The socket unit listens on `%t/systemd/report/io.chan.Devserver` with `FileDescriptorName=varlink`, `SocketMode=0600`, `Accept=yes`, `MaxConnections=16` and `RemoveOnStop=yes`; the service unit is the v0.127.0 one with a new `Description`. The units in the manual page's copy block (`#systemd-report`) are the contract; `docs/systemd/` carries the same two (its service keeps `ExecStart=/usr/bin/chan`, and the docs say to set it).
+3. `List` with `more=true` sends one reply per metric, `{name, value}` plus `fields` where the family has them, every reply but the last with `continues: true`; with no metric to send it answers `io.systemd.Metrics.NoSuchMetric`. `Describe` sends one reply per family, `{name, description, type}`, from one static table that `List` also draws from, so a family `List` can send is always described. Both answer `org.varlink.service.ExpectedMore` without `more`, as sd-varlink does for a method that requires it, and accept absent or empty parameters, answering anything else with `org.varlink.service.InvalidParameter`. `GetInterfaceDescription` returns an `io.systemd.Metrics` description equivalent to systemd's.
+4. The families, each `io.chan.Devserver.` + the name below, read from the view's `identity`, `latest` and `storage`. Values are JSON integers unless the type says string. A metric whose reading is null (no sample yet, no process reading, I/O unavailable, storage pending or failed) is not sent:
+   - `Version`, `Build`, `InstanceId` (string): `identity.version`, `.build`, `.instanceId`. The `InstanceId` description says it changes on every restart, when every counter starts over.
+   - `PID` (gauge): `identity.pid`.
+   - `UptimeSec` (counter): `process.uptimeSeconds`.
+   - `CPUUsageNSec` (counter): `process.cpuTimeMs` times 1,000,000.
+   - `MemoryResidentBytes` (gauge): `process.residentBytes`.
+   - `IOReadBytes`, `IOWriteBytes` (counter, fields `{scope}` from `process.ioScope`, `storage` or `process`): `process.readBytes`, `.writtenBytes`; not sent when the scope is `unavailable`.
+   - `TrafficReceivedBytes`, `TrafficSentBytes`, `TrafficOpened` (counter) and `TrafficActive` (gauge), one metric per layer with fields `{layer}`, one of `network`, `http2`, `yamux`, `reverseConnections`, `transferPayload`: each `Traffic`'s `receivedBytes`, `sentBytes`, `opened`, `active`. The descriptions say the layers overlap and must not be summed.
+   - `TransfersQueued`, `TransfersRunning`, `TransfersWorkerCapacity`, `TransfersQueueCapacity` (gauge): `transfers.queued`, `.running`, `.workerCapacity`, `.queueCapacity`.
+   - `TransferJobs` (counter, fields `{outcome}`, one of `finished`, `cancelled`, `stalled`, `panicked`, `refused`): the matching `transfers` totals.
+   - `GatewayTunnels`, `ReverseListeners`, `YamuxWaiting`, `YamuxServing`, `YamuxServiceCapacity`, `YamuxStreamLimit` (gauge) and `TunnelDialFailures` (counter): the sample's fields of those names.
+   - `HomeLogicalBytes`, `HomeAllocatedBytes`, `HomeFiles` (gauge): `storage.logicalBytes`, `.allocatedBytes`, `.files`, from the last completed scan.
+   No rates, history, sequence numbers, sample timing, hostname (systemd reports it), storage path or scan error. A name may change where systemd's conventions argue for it, if the docs and the manual change with it.
+5. Each `List` reads the devserver once, without history, re-resolving the address and token as the adapter does now, and never starts it. An unreachable devserver, or a schema version the reader does not know, answers `NoSuchMetric` and writes one line to stderr (the journal) saying why.
+6. The connection rules stay: several calls per connection, closed after 60 s with no call or 10 s without reading a reply; a client's close ends the process with status 0, and a frame that breaks the protocol ends it with an error.
+
+## Docs, on the same branch
+
+- The branch `feat/systemd-report-metrics` (off `origin/main` at `fcb9388c8`) already carries the manual page, commit `42d2e8672`: `web/packages/marketing/src/pages/manual/systemd.html` ("systemd integration", between Devserver and Chan in a browser), registered in `src/manual-pages.json` and `scripts/smoke-dist.mjs`, with the Devserver and Dashboard pages pointing at it and the marketing README updated. Its `#systemd-report` section already describes this contract. Verify every claim on the page against the code and the guest run; the service, restart and upgrade sections were checked by reading code (`crates/chan-systemd`, `crates/chan/src/devserver/systemd.rs`), never run. Add one `pre.sample-output` block after the systemd-report commands, a short excerpt of `systemd-report --user metrics io.chan.Devserver` from the guest run.
+- `docs/metrics.md`: replace `## Linux Varlink` with `## systemd-report` (the page links `#systemd-report`), with the family list, and fix the `schemaVersion` and `CHAN_METRICS_TOKEN` paragraphs that name the adapter's `io.chan.Metrics.Unavailable`.
+- `docs/systemd/chan-metrics.socket`, `docs/systemd/chan-metrics@.service`, the `chan metrics --help` text (`crates/chan/src/help.rs`, around lines 615 to 680) and its test needle (`crates/chan/src/cli.rs`, `"io.chan.Metrics"`), `crates/chan/design.md` (the `chan metrics --varlink` paragraph), and every other mention a sweep finds: `rg --text -n -i 'io\.chan\.Metrics|chan-metrics/|varlink' --no-ignore -g '!target' -g '!node_modules' -g '!team/**' -g '!dev/**'`.
+- No `CHANGELOG.md` edit; the GA commit writes it. Follow `.agents/writing-rules.md`: no em dashes, prose not hard-wrapped, the present state only.
+
+## Boundaries
+
+- The user scope only: the devserver is a user service. No system-scope source, no signer.
+- The units stay opt-in and installed by hand. `chan devserver start` does not write them, and no package ships them.
+- `/api/metrics`, the view's schema, `chan metrics` text, `--json` and `--watch`, and the Dashboard do not change.
+- `--varlink` stays Unix-only, as now.
+
+## Acceptance
+
+1. Tests in `metrics/varlink.rs`: `List` over a canned view sends exactly the families, fields and values above, `continues` on all but the last reply; null readings are not sent; `Describe` and `List` agree family for family; every name passes a port of systemd's `metrics_name_valid` and the socket-prefix check; a down devserver, an unknown schema version and an empty view answer `NoSuchMetric`; a call without `more` answers `ExpectedMore` and an unknown parameter `InvalidParameter`; introspection and the kept connection rules pass.
+2. A real systemd of v260 or later in an isolated Linux guest (an sdme container under lima, Arch for instance; never the owner's running devserver), with a throwaway `CHAN_HOME` and the units written by the manual's copy block as published: `systemd-report --user list-sources` lists `io.chan.Devserver`; `describe io.chan.Devserver` (`describe-metrics` on systemd 260) and `metrics io.chan.Devserver` show every family, and under `SYSTEMD_LOG_LEVEL=debug` log no invalid or mismatched metric; `--json=short` carries them; with the devserver stopped, `metrics` exits 0 with no chan metrics and no warning; `varlinkctl introspect` of the source matches systemd's `io.systemd.Metrics` description. Record the systemd version and the transcript.
+3. The scoped own-gate of `.agents/skills/gate/SKILL.md` green after the last edit (`cargo fmt --check`, clippy and `cargo test -p chan` with `RUSTFLAGS="-D warnings"`, `cargo check --workspace`) and `npm run check` in `web/packages/marketing`.
+4. Built on `feat/systemd-report-metrics` in its own worktree, on top of `42d2e8672`, and pushed to that remote branch, nothing merged. The pre-push hook runs the full gate; if an SSH push dies with status 141 after the hook passes, push over HTTPS with `gh` as the credential helper and confirm with `git ls-remote`.
+5. Before the merge: the branch rebased onto `main`, the tests of line 1 and the guest run of line 2 repeated on the rebased tip, a review by a seat that did not build it, and the release's gate green on the merge.
+
+## On the branch, not merged
+
+From the builder's report (`dev/systemd-metrics/report.md`) and its evidence (`dev/systemd-metrics/evidence/`), at the tip `7c170a309`; nothing below was run again when this row was written.
+
+- `8c41243ce` rewrites `crates/chan/src/metrics/varlink.rs`: 28 families in one static table that `List` and `Describe` both read, sd-varlink's rules for `more` and for parameters, the `NoSuchMetric` sentinel; systemd 262's `io.systemd.Metrics` and `org.varlink.service` descriptions as `.varlink` files; `io.chan.Metrics.varlink` removed; the help text, `docs/metrics.md`, the two units in `docs/systemd/` and the design documents follow. `7c170a309` corrects the manual page against the code and the guest run.
+- Corrections to the draft, from the build: systemd 261 and 262 name the verb `describe`, and `describe-metrics` is systemd 260's spelling; `systemd-report` installs in `/usr/lib/systemd/`, outside `PATH`, so the page's commands failed as first published and now name the full path; systemd 260 has `metrics`, `describe-metrics` and `list-sources` only, `generate` and `upload` came in 261 and signing in 262; a decodable view always carries the identity, so the empty case the tests cover is an empty response body and a read with nothing to send; the guest was an sdme container on the Linux host with a private network, not one under lima.
+- Tests: the cases of acceptance line 1 in `metrics/varlink.rs`, and six mutations, each red (`evidence/mutations.txt`).
+- The guest run, systemd 262.2 on Arch with a build of `8c41243ce`: 13 verdicts, all pass (`evidence/transcript.txt`). `list-sources` lists `io.chan.Devserver`; `describe` sends exactly the 28 families; `metrics --json=short` carries all 28 as 48 metrics; debug logging shows no invalid or mismatched metric; `varlinkctl introspect` equals the user manager's text for both interfaces; the source follows a devserver restart with a new `InstanceId` and `PID`; with the devserver stopped `metrics` prints `No metrics available.`, exits 0 with an empty stderr, and the journal holds one line per call saying why.
+- The gate at `7c170a309` was the scoped one of acceptance line 3, green: format, clippy and rustdoc for the `chan` crate with warnings denied, `cargo test -p chan` (497 passed, 1 ignored), both workspace checks, and the marketing package's check. `make pre-push` was not run on the branch.
+- Proven by reading code only, never by a run: the manual page's claims on the live upgrade, the watchdog and crash restarts, the 512-terminal cap, the ssh and ET desktop riding a restart, and the AtBound READY case.
+
+## What is left
+
+- The rebase. At the v0.129.0 tag (`ed89b7f7f`) the branch is 808 commits behind `main`, which has since changed 15 of the 21 files it touches. A trial merge of the tip into the tag conflicts in three: `crates/chan/src/metrics/varlink.rs` and the manual pages `dashboard.html` and `devserver.html`; the rest merge by themselves, unread.
+- Acceptance line 5: the tests and the guest run again on the rebased tip, the review, the gate. The rootfs for the guest, `sr-arch-262`, and the worktree `../systemd-report-wt` are kept on the build host; the guest scripts are in `dev/systemd-metrics/evidence/guest-scripts/`.
+- The CHANGELOG entry, at the release's GA commit: `io.chan.Metrics` goes with no compatibility path (contract line 1), which a reader of v0.127.0 to v0.129.0 must be told.
