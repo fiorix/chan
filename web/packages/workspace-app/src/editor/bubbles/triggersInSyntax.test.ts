@@ -5,20 +5,21 @@
 // the Enter that ends a line destroys the line.
 
 import { EditorState } from "@codemirror/state";
-import { ensureSyntaxTree } from "@codemirror/language";
 import { describe, expect, test } from "vitest";
+import { parsedState } from "../../__tests__/parsedState";
 import { computeBubbleSpec } from "./triggers";
 import { chanMarkdown } from "../markdown/grammar";
 
-/// A parsed markdown state with the caret at `pos`. ensureSyntaxTree forces
-/// the synchronous parse computeBubbleSpec's tree lookups need; no view.
+/// A parsed markdown state with the caret at `pos`: computeBubbleSpec's tree
+/// lookups read the state's tree, and there is no view to parse it.
 function specAt(doc: string, pos: number) {
-  const state = EditorState.create({
-    doc,
-    selection: { anchor: pos },
-    extensions: [chanMarkdown()],
-  });
-  ensureSyntaxTree(state, doc.length, 10000);
+  const state = parsedState(
+    EditorState.create({
+      doc,
+      selection: { anchor: pos },
+      extensions: [chanMarkdown()],
+    }),
+  );
   return computeBubbleSpec(state);
 }
 
