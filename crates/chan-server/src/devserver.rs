@@ -22387,7 +22387,7 @@ mod tests {
         let status = root.status();
         let body = to_bytes(root.into_body(), 1 << 20).await.unwrap();
         let text = std::str::from_utf8(&body).unwrap();
-        let launcher_built = text.contains("Chan Launcher");
+        let launcher_built = text.contains("Computers - Chan");
         assert!(
             launcher_built || text.contains("launcher bundle not built"),
             "root `/` must be served by the launcher fallback (status {status}, body starts: {:.120})",
@@ -22469,7 +22469,7 @@ mod tests {
         let (root_status, root_body) = fetch("/").await;
         let (unknown_status, unknown_body) = fetch("/nonexistent-page").await;
         assert!(
-            unknown_body.contains("Chan Launcher")
+            unknown_body.contains("Computers - Chan")
                 || unknown_body.contains("launcher bundle not built"),
             "unknown path must be answered by the launcher fallback (status {unknown_status}, body starts: {:.120})",
             unknown_body,

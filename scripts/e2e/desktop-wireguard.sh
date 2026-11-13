@@ -514,7 +514,7 @@ proxy_first_arm() {
 LAUNCHER_HREF=""
 launcher_href() {
     local value
-    value="$(node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' 'location.href' 2>>"$WORK/inspect.err")" || return 1
+    value="$(node "$INSPECT" "$INSPECTOR" eval 'Computers - Chan' 'location.href' 2>>"$WORK/inspect.err")" || return 1
     value="${value#\"}"
     LAUNCHER_HREF="${value%\"}"
     case "$LAUNCHER_HREF" in http://127.0.0.1:*'/?t='?*) return 0 ;; esac
@@ -537,7 +537,7 @@ toggle_launcher() {
 
 # A fetch from the launcher page, which goes through the webview's proxy.
 launcher_fetch() {
-    node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' \
+    node "$INSPECT" "$INSPECTOR" eval 'Computers - Chan' \
         "fetch('$1', {mode: 'no-cors'}).then(() => 'sent', e => 'failed: ' + e.message)" \
         >>"$WORK/inspect.out" 2>>"$WORK/inspect.err"
 }
@@ -566,7 +566,7 @@ wrong_key_arm() {
     fi
     # The per-launch bearer comes from the launcher webview, opened from the
     # standalone terminal as in the live-adopt arm.
-    if ! page_listed 'Chan Launcher'; then
+    if ! page_listed 'Computers - Chan'; then
         wait_for 60 "the terminal window's page in the inspector" terminal_listed || arm_rc=1
         if ! toggle_launcher; then arm_rc=1; fi
     fi
@@ -615,7 +615,7 @@ started_grew() { [ "$(count 'gateway WireGuard tunnel started')" -gt "$STARTED_B
 # page, which the toggle chord opens when the start showed none.
 launcher_bearer_arm() {
     local arm_rc=0 control toggled=no token
-    if ! page_listed 'Chan Launcher'; then
+    if ! page_listed 'Computers - Chan'; then
         wait_for 60 "the terminal window's page in the inspector" terminal_listed || arm_rc=1
         if toggle_launcher; then toggled=yes; else arm_rc=1; fi
     fi
@@ -737,13 +737,13 @@ enrollment_ready() {
 # The inspector returns promises as remote objects, without awaiting them.
 # Record completion in the page so a negative probe cannot race its fetch.
 enrollment_probe_settled() {
-    node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' \
+    node "$INSPECT" "$INSPECTOR" eval 'Computers - Chan' \
         "window.__chanWireguardEnrollmentProbe?.url === '$1' && window.__chanWireguardEnrollmentProbe.done === true" \
         > "$WORK/probe-state.json" 2>>"$WORK/inspect.err" || return 1
     grep -qx true "$WORK/probe-state.json"
 }
 enrollment_fetch() {
-    node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' \
+    node "$INSPECT" "$INSPECTOR" eval 'Computers - Chan' \
         "(() => { const probe = window.__chanWireguardEnrollmentProbe = {url: '$1', done: false}; fetch(probe.url, {mode: 'no-cors'}).then(() => { probe.done = true; }, () => { probe.done = true; }); return 'dispatched'; })()" \
         > "$WORK/probe-start.json" 2>>"$WORK/inspect.err" || return 1
     grep -qx '"dispatched"' "$WORK/probe-start.json" || return 1
