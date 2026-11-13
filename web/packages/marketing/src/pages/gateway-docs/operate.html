@@ -1,0 +1,133 @@
+<section class="manual-block" id="operate">
+  <h2><a class="heading-anchor" href="#operate">The admin CLI</a></h2>
+  <p><code>chan-gateway-admin</code> is the operator's view of the whole gateway. Run it as root, with the admin credentials the setup script wrote:</p>
+  <div class="command-copy" data-copy-block><code><span>#</span><b data-copy-value>set -a; . /etc/chan-gateway/admin.env; set +a</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Command</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>overview --since 24h</code></td><td>Accounts, devservers and sign-ins at a glance.</td></tr>
+        <tr><td><code>tunnel ps</code>, <code>proxy ps</code></td><td>Live devservers and proxy nodes. <code>tunnel watch</code> and <code>proxy watch</code> follow them.</td></tr>
+        <tr><td><code>tunnel kill alice &lt;devserver-id&gt;</code></td><td>Force one devserver offline. It may dial again.</td></tr>
+        <tr><td><code>policy set alice --enabled --max-connected-devservers 3</code></td><td>Limit one account's connected devservers.</td></tr>
+        <tr><td><code>policy suspend alice</code>, <code>policy resume alice</code></td><td>Disconnect an account's devservers and refuse new ones, keeping its tokens and its limit; then lift that.</td></tr>
+        <tr><td><code>user block alice@example.com --reason "..."</code></td><td>Revoke every token of the account and refuse its sign-ins.</td></tr>
+        <tr><td><code>user audit alice@example.com</code></td><td>The account's sign-ins, refusals and blocks.</td></tr>
+        <tr><td><code>token list alice@example.com</code>, <code>token revoke &lt;token-uuid&gt;</code></td><td>An account's access tokens.</td></tr>
+        <tr><td><code>session oauth ps --user alice</code></td><td>The account's signed-in browser sessions.</td></tr>
+        <tr><td><code>fleet pause --drain</code>, <code>fleet resume</code></td><td>Cut every session and tunnel at once, then admit again. <code>fleet status</code> shows which.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Add <code>--json</code> to any command for scripts. The exit code is <code>0</code> for success, <code>1</code> for an upstream or network error, <code>2</code> for a bad argument, and <code>3</code> for not found.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>An account is found by its uuid, its email, or its username, tried in that order.</li>
+      <li><code>user unblock</code> lets an account sign in again; its tokens stay revoked.</li>
+      <li>Deleting an account, with <code>user delete</code> or by its holder on the account page, also disconnects its devservers.</li>
+      <li>The controller caps every account at 100 connected devservers, <code>MAX_DEVSERVERS_PER_USER</code> in <code>devserver-control.env</code>; a policy limit applies within that.</li>
+      <li><code>admin.env</code> points at loopback. On another layout, set each <code>CHAN_ADMIN_*_URL</code> to the service's internal address.</li>
+      <li>The <a href="https://github.com/fiorix/chan/blob/main/gateway/crates/admin/README.md">admin README</a> lists every command.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="nodes">
+  <h2><a class="heading-anchor" href="#nodes">More proxy nodes</a></h2>
+  <p>Point <code>proxy.example.com</code> at every node, through DNS or a TCP pass-through balancer, so that every devserver keeps the same tunnel URL. A balancer that terminates TLS carries every tunnel byte. A second node, <code>p2</code>, needs:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>What</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td>DNS, a certificate and an edge for <code>*.p2.proxy.example.com</code>, as on <a href="/gateway/edge/">The edge proxy</a></td><td>On <code>p2</code></td></tr>
+        <tr><td>devserver-proxy, with <code>DEVSERVER_PROXY_ID=p2</code>, <code>DEVSERVER_PROXY_BASE_URL=https://p2.proxy.example.com</code> and a <code>DEVSERVER_PROXY_TOKEN</code> of its own</td><td>On <code>p2</code></td></tr>
+        <tr><td><code>p2=&lt;its token&gt;</code> added to <code>DEVSERVER_PROXY_CREDENTIALS</code>, with <code>;</code> between entries, then a restart of devserver-control</td><td><code>devserver-control.env</code></td></tr>
+        <tr><td>A path to identity's internal listener, <code>7004</code>, and the controller's proxy listener, <code>7101</code></td><td>Between <code>p2</code> and the first server</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The other values of <code>p2</code>'s <code>devserver-proxy.env</code>, such as the verifying keys and <code>IDENTITY_INTERNAL_TOKEN</code>, are the first node's.</li>
+      <li>The controller expands each node id into its origin with <code>DEVSERVER_PROXY_BASE_URL_TEMPLATE</code>, and refuses a node whose <code>DEVSERVER_PROXY_BASE_URL</code> differs.</li>
+      <li>Every internal listener binds loopback. A bind on another address needs <code>CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay</code>, which asserts that an authenticated, encrypted network carries the traffic.</li>
+      <li>With WireGuard, each node also gets an interface and an agent. See <a href="/gateway/wireguard/#nodes">WireGuard</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="upgrade">
+  <h2><a class="heading-anchor" href="#upgrade">Upgrades</a></h2>
+  <p>Every gateway service runs the same release, so upgrade them together.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Set the release's database markers</h3>
+      <p><code>migrate.env</code>, <code>identity.env</code> and <code>profile.env</code> each carry <code>EXPECTED_SQLX_MIGRATION</code> and <code>DATABASE_ROLE_POLICY_VERSION</code> lines. Set them to the values the new release's <code>configure.sh</code> writes: the packages refuse to install over any other.</p>
+    </li>
+    <li>
+      <h3>Stop identity and profile, and install</h3>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>sudo systemctl stop chan-gateway-identity chan-gateway-profile
+sudo apt install ./chan-gateway-profile_*.deb ./chan-gateway-identity_*.deb \
+  ./chan-gateway-devserver-control_*.deb ./chan-gateway-devserver-proxy_*.deb \
+  ./chan-gateway-admin_*.deb</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Apply the schema and restart</h3>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-migrate
+sudo systemctl restart chan-gateway-profile chan-gateway-identity \
+  chan-gateway-devserver-control chan-gateway-devserver-proxy</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+  </ol>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Restart the schema unit even when the release changes nothing in the database: a finished one-shot does not run again by itself.</li>
+      <li>Where identity and profile run on separate hosts, upgrade profile with the schema step, before identity or together with it.</li>
+      <li>The controller and the proxy nodes check at connect that they run the same release.</li>
+      <li>On each WireGuard node, install the agent package of the same release and restart <code>chan-gateway-wireguard-agent</code>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="health">
+  <h2><a class="heading-anchor" href="#health">Health and logs</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Check</th><th>Command</th><th>Healthy</th></tr></thead>
+      <tbody>
+        <tr><td>Every service's log</td><td><code>journalctl -u 'chan-gateway-*' -f</code></td><td></td></tr>
+        <tr><td>identity answers</td><td><code>curl http://127.0.0.1:7000/healthz</code></td><td><code>ok</code></td></tr>
+        <tr><td>profile answers</td><td><code>curl http://127.0.0.1:7001/healthz</code></td><td><code>ok</code></td></tr>
+        <tr><td>The controller is ready</td><td><code>curl http://127.0.0.1:7003/readyz</code></td><td><code>ready</code>; <code>warming</code> until it is</td></tr>
+        <tr><td>The proxy admits devservers</td><td><code>curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: proxy.example.com' http://127.0.0.1:7002/readyz</code></td><td><code>200</code>; <code>503</code> until it does</td></tr>
+        <tr><td>Proxy nodes connected</td><td><code>chan-gateway-admin proxy ps</code></td><td>One row per node</td></tr>
+        <tr><td>Fleet admission</td><td><code>chan-gateway-admin fleet status</code></td><td>Not paused</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>After a start, the controller refuses admissions and admin reads for about 30 seconds while the proxy nodes report in.</li>
+      <li>A proxy that loses the controller for longer than a grace period closes every tunnel and browser session; devservers dial again once it is back.</li>
+      <li><code>pool timed out while waiting for an open connection</code>, with Postgres reachable, means Postgres ran out of connection slots: restart it with <code>sudo systemctl restart postgresql</code>.</li>
+    </ul>
+  </details>
+  <p class="minor">The <a href="https://github.com/fiorix/chan/blob/main/gateway/README.md">gateway README</a> covers every service and its settings, and the <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway design</a> the system.</p>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/"><strong>Gateway overview</strong><span>The architecture, the control plane, and the traffic paths.</span></a>
+    <a class="next-card" href="/manual/gateway/"><strong>Connect to a gateway</strong><span>What the people who use your gateway see.</span></a>
+  </div>
+</section>

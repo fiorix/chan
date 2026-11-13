@@ -54,15 +54,15 @@
         <p>Install ET on both ends. It uses ssh to establish access and its own TCP connection, normally port 2022, to reconnect after interruptions. See the <a href="https://eternalterminal.dev/usermanual/">ET setup guide</a> and <a href="https://github.com/MisterTea/EternalTerminal">command reference</a>.</p>
       </article>
     </div>
-    <p class="guide-note">These are alternative configurations for the same address. The URL's port <code>9901</code> matches the local end of the tunnel; its remote end <code>8787</code> matches <code>--port 8787</code>. For another simultaneous connection, choose a free local port and update both the URL and the tunnel mapping. <a href="/manual/devserver/">Full devserver manual &#8594;</a></p>
+    <p class="guide-note">These are alternative configurations for the same address. The URL's port <code>9901</code> matches the local end of the tunnel; its remote end <code>8787</code> matches <code>--port 8787</code>. For another simultaneous connection, choose a free local port and update both the URL and the tunnel mapping. <a href="/manual/remote/">Remote in the manual &#8594;</a></p>
   </section>
 
   <section class="guide-section" id="remote-tools" aria-labelledby="remote-tools-title">
     <div class="guide-section-heading"><p class="section-label">02 / THE REMOTE TERMINAL</p><h2 id="remote-tools-title">More than a shell connection.</h2><p>Run these commands inside the remote Chan terminal. The same tools also work through a gateway.</p></div>
     <div class="guide-columns">
       <div class="guide-card-stack">
-        <article class="guide-card" id="file-transfers"><h3>Upload. Download.</h3><dl class="guide-commands"><dt><code>cs upload .</code></dt><dd>Choose local files to upload here.</dd><dt><code>cs download report.md</code></dt><dd>Save a remote file to your computer.</dd></dl><a class="text-link" href="/manual/files/#transfers">File transfers &#8594;</a></article>
-        <article class="guide-card" id="clipboard"><h3>Seamless clipboard integration.</h3><p>Copy and paste text, rich text, and images between your remote shell and desktop apps.</p><dl class="guide-commands"><dt><code>cs copy &lt; report.md</code></dt><dd>Copy to your desktop clipboard.</dd><dt><code>cs paste</code></dt><dd>Read your clipboard in the remote shell.</dd></dl><a class="text-link" href="/manual/terminal/#copy-paste">Clipboard integration &#8594;</a></article>
+        <article class="guide-card" id="file-transfers"><h3>Upload. Download.</h3><dl class="guide-commands"><dt><code>cs upload .</code></dt><dd>Choose local files to upload here.</dd><dt><code>cs download report.md</code></dt><dd>Save a remote file to your computer.</dd></dl><a class="text-link" href="/manual/remote-tools/#transfers">File transfers &#8594;</a></article>
+        <article class="guide-card" id="clipboard"><h3>Seamless clipboard integration.</h3><p>Copy and paste text, rich text, and images between your remote shell and desktop apps.</p><dl class="guide-commands"><dt><code>cs copy &lt; report.md</code></dt><dd>Copy to your desktop clipboard.</dd><dt><code>cs paste</code></dt><dd>Read your clipboard in the remote shell.</dd></dl><a class="text-link" href="/manual/remote-tools/#clipboard">Clipboard integration &#8594;</a></article>
       </div>
       <article class="guide-card" id="port-forwarding"><h3><code>cs tunnel</code></h3><p>Forward a remote service to your desktop. In one remote Chan terminal, keep this running:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>cs tunnel 8080</code></pre>{{copyButton}}</div><p>In another remote pane, serve the current directory with <a href="https://docs.python.org/3/library/http.server.html#command-line-interface">Python 3</a>:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>python -m http.server 8080 \
   --bind 127.0.0.1 --directory .</code></pre>{{copyButton}}</div><p>Open <code>http://127.0.0.1:8080</code> in your desktop browser. Chan forwards desktop port 8080 to port 8080 on the remote host. Keep both commands running; <code>Ctrl+C</code> in the tunnel pane closes the forward.</p><p class="guide-note">Requires Chan Desktop. Through a gateway, use the devserver owner's desktop connection.</p></article>
@@ -80,10 +80,10 @@
       <div><code>cs session self --name "laptop"</code><p>Name this client and its workspace participant.</p></div>
       <div><code>cs session info CLIENT_ID</code><p>Inspect a client's windows, terminals, and connections.</p></div>
       <div><code>cs session detach CLIENT_ID</code><p>Disconnect that client while keeping terminals and saved layouts. It can explicitly reconnect.</p></div>
-      <div><code>cs session handover</code><p>Request workspace leadership. The current leader answers with <code>cs session handover --accept</code> or <code>--reject</code>.</p></div>
+      <div><code>cs session handover</code><p>Request session leadership. The current leader answers with <code>cs session handover --accept</code> or <code>--reject</code>.</p></div>
       <div><code>cs session takeover</code><p>Take leadership when the leader is gone. <code>--force</code> also permits taking over from a live leader.</p></div>
     </div>
-    <p class="guide-note">Client IDs come from <code>cs session list</code>; workspace leadership belongs to windows. If a shell has multiple viewers, <code>self</code> asks you to identify your client. See <a href="/manual/collaboration/">Collaboration &amp; sessions</a> in the manual. For account-based access and devserver sharing, <a href="/gateway/">set up a gateway</a>.</p>
+    <p class="guide-note">Client IDs come from <code>cs session list</code>; session leadership belongs to windows. If a shell has multiple viewers, <code>self</code> asks you to identify your client. See <a href="/manual/collaboration/">Collaboration</a> in the manual. For account-based access and devserver sharing, <a href="/gateway/">set up a gateway</a>.</p>
   </section>
   <footer class="guide-footer"><a href="/#devserver">&#8592; Back to Chan</a><a href="/gateway/">Your own gateway &#8594;</a></footer>
 </article>

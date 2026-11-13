@@ -1,0 +1,133 @@
+<section class="manual-block" id="publish">
+  <h2><a class="heading-anchor" href="#publish">Publish a devserver</a></h2>
+  <p>Publish one devserver to see the whole path work. It runs on a Linux host with chan installed, as in <a href="/manual/devserver/#install-server">Install on the host</a>.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Create its token</h3>
+      <p>In the <strong>Tokens</strong> tab, choose <strong>New token</strong>, label it <code>build-host</code>, pick an expiry, and copy the token: it is shown once. The token is the devserver's identity: a new token makes a new devserver, at a new address.</p>
+    </li>
+    <li>
+      <h3>Start the devserver with it</h3>
+      <p>On the devserver's machine, with the token in the environment:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>export CHAN_TUNNEL_TOKEN=chan_pat_...
+chan devserver start --port 8787 \
+  --tunnel-url https://proxy.example.com/v1/tunnel \
+  --tunnel-devserver-name build-host</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Check the connection</h3>
+      <p>The devserver's log names your username:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>journalctl --user -u chan-devserver -f</b></code>{{copyButton}}</div>
+      <pre class="sample-output"><code>chan devserver: tunnel connected as user alice</code></pre>
+      <p>On the gateway, <code>chan-gateway-admin tunnel ps</code> lists it.</p>
+    </li>
+  </ol>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The systemd service keeps the token and the URL, so a later <code>start</code>, <code>restart</code> or <code>join</code> reuses them.</li>
+      <li>Pass the token in the environment, not as <code>--tunnel-token</code>: a flag is visible to every user in the process list.</li>
+      <li><code>--port 8787</code> keeps the devserver's local listener on its usual port, so Chan Desktop can still <a href="/manual/connect/">connect over ssh</a>. Without it, a tunneled devserver picks a free port.</li>
+      <li>On macOS the launchd service cannot carry a tunnel: use <code>chan devserver run</code> with the same flags, or <code>--service=chan</code>.</li>
+      <li>A dropped tunnel dials again by itself.</li>
+      <li>To publish more machines, such as build hosts, GPU boxes or a VM per person, give each one its own token and run the same command on it.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="dial-wireguard">
+  <h2><a class="heading-anchor" href="#dial-wireguard">Dial in through WireGuard</a></h2>
+  <p>A devserver can reach a gateway that sits behind a WireGuard peer. chan runs the peer inside the devserver's own process: no network interface, no host routes, no root and no VPN client.</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>chan devserver run \
+  --tunnel-url https://proxy.example.com/v1/tunnel \
+  --tunnel-wireguard /absolute/path/to/devserver.conf</b></code>
+    {{copyButton}}
+  </div>
+  <ul>
+    <li>The token still comes from <code>CHAN_TUNNEL_TOKEN</code>. <code>CHAN_TUNNEL_WIREGUARD</code> names the file in place of the flag.</li>
+    <li>The tunnel URL's destination must be inside the peer's <code>AllowedIPs</code>.</li>
+    <li>An <code>http://</code> tunnel URL is accepted inside WireGuard, which pins the peer's key and encrypts the connection.</li>
+    <li>The file is the wg-quick subset that <a href="/manual/gateway/#wireguard">Chan Desktop reads</a>. On Unix it must not be readable by the group or others: <code>chmod 600</code> it.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="browser">
+  <h2><a class="heading-anchor" href="#browser">Open it from a browser</a></h2>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="gateway-publish-devservers-tab" data-shot-kind="still">screenshot to capture<small>Devservers tab: build-host under My devservers, online, with Open, Copy link and Share</small></div>
+    <figcaption>The Devservers tab lists your devservers and the ones shared with you.</figcaption>
+  </figure>
+  <p>Under <strong>My devservers</strong>, <code>build-host</code> is online. Click <strong>Open</strong>: the browser lands on the devserver's own origin, such as <code>https://alice--3f9c2a7b1e04.p1.proxy.example.com/</code>, on the Computers screen of <a href="/manual/browser/#computers">Chan in a browser</a>. The URL holds no token: the gateway sign-in is the key.</p>
+</section>
+
+<section class="manual-block" id="desktop">
+  <h2><a class="heading-anchor" href="#desktop">Connect Chan Desktop</a></h2>
+  <p>Chan Desktop adds the gateway by its URL and signs in through the browser; <a href="/manual/gateway/#add">Connect to a gateway</a> has the steps. The gateway carries the connection, with no connect script or control terminal, and <code>cs tunnel</code> works through it.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A desktop gives back a sign-in token it does not keep, as after a cancelled sign-in. The token's audit reads <code>revoked_via_desktop</code>.</li>
+      <li>A token given back after it was used also disconnects that account's tunnels and gateway sessions.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="share">
+  <h2><a class="heading-anchor" href="#share">Share it</a></h2>
+  <p>A share gives another account the whole devserver: its terminals, processes, files and workspaces. That is a shell account on the machine, so share only with people you would give one.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Let them in</h3>
+      <p>On the gateway, as root, with the admin credentials loaded:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>#</span><b data-copy-value>chan-gateway-admin user create --email friend@example.com
+chan-gateway-admin flag grant oauth_login friend@example.com</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Add the share</h3>
+      <p>In <strong>Devservers</strong>, click <strong>Share</strong> on <code>build-host</code>, enter their email, and click <strong>Add</strong>. The share reads <em>pending sign-in</em> until they sign in with that verified email, then <em>active</em>.</p>
+      <figure class="inline-shot">
+        <div class="shot-placeholder-frame" data-shot="gateway-publish-share-states" data-shot-kind="still">screenshot to capture<small>build-host's Share panel open: the email field and Add, then two grants, one pending sign-in and one active, each with Revoke</small></div>
+      </figure>
+    </li>
+    <li>
+      <h3>Send them to it</h3>
+      <p>In Chan Desktop, your devserver is on their Computers screen once they add the gateway. For a browser, <strong>Copy link</strong> on <code>build-host</code>'s row copies its gateway address, which asks for sign-in and opens only for you and the people it is shared with.</p>
+    </li>
+  </ol>
+  <p>To take access away, click <strong>Revoke</strong> on the share. Their sessions on that devserver end.</p>
+  <p>Shares are the owner's, on the account page; the admin CLI has no share command. As the operator you can:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>You want to</th><th>Run</th></tr></thead>
+      <tbody>
+        <tr><td>List devservers shared with them under <strong>Shared with me</strong></td><td><code>chan-gateway-admin flag grant share_workspaces friend@example.com</code></td></tr>
+        <tr><td>See who is in alice's devservers</td><td><code>chan-gateway-admin session tenant ps --owner alice</code></td></tr>
+        <tr><td>End one person's open devserver sessions</td><td><code>chan-gateway-admin session tenant revoke-subject friend@example.com</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><strong>Copy link</strong> on your own row shows only while the devserver is online.</li>
+      <li>A row under <strong>Shared with me</strong> does not say whether the devserver is online; while it is offline, its link answers not found.</li>
+      <li>The first time they open a shared devserver, Chan Desktop asks them to grant it native access.</li>
+      <li>Revoking a share ends their access through chan. It cannot undo changes they made on the host or recover secrets they copied.</li>
+      <li>Ending someone's sessions leaves their shares in place; they can open the devserver again.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/wireguard/"><strong>WireGuard</strong><span>Optionally, let desktops reach the proxy nodes through WireGuard.</span></a>
+  </div>
+</section>

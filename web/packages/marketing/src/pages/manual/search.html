@@ -1,26 +1,124 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="search-panel" data-shot-kind="clip">clip to capture<small>Cmd+Shift+S in a workspace window, type "retry", move through a tag row, a file name row and a content row with its snippet, Enter on the content row opens the file in the editor</small></div>
+  <figcaption>Search workspace lists content matches, file names, tags and contacts together.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Search a workspace's text, ranked by relevance, with a snippet of each match.</li>
+    <li>Find files, images, contacts, tags and mentions by name in the same list.</li>
+    <li>Type a path to walk the tree, or <code>language:Rust</code> to list a language's files.</li>
+    <li>Go from a tag or a mention to the graph, with it selected.</li>
+    <li>Query, browse and walk the same index from a terminal with <code>cs search</code>, without opening a tab.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="search">
   <h2><a class="heading-anchor" href="#search">Search the workspace</a></h2>
-<p>Open <strong>Search workspace</strong> from the command launcher or the pane's hamburger menu, or use <code>Cmd+Shift+S</code> on macOS and <code>Ctrl+Alt+S</code> on Windows and Linux. Search content, filenames, tags, and other indexed workspace entities from one place.</p>
-<p>Each workspace has its own index. BM25 full-text search ranks content matches; filename, tag, and graph queries help you follow relationships within that workspace.</p>
-<p>Choose a result to open it, and use <strong>Details</strong> for information about the selection. Content matches carry snippets so you can judge the result before opening the file. Search depends on the workspace index; check the <a href="/manual/dashboard/#index">indexing view</a> if newly added content has not appeared yet.</p>
+  <p>Search opens over the window. Each workspace has its own index, so search needs a workspace window.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Open it from</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Keyboard</td><td><kbd>Cmd+Shift+S</kbd></td><td><kbd>Ctrl+Alt+S</kbd></td></tr>
+        <tr><td>Command launcher or pane menu</td><td colspan="2"><strong>Search workspace</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Text you have selected, up to eight words, becomes the query.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You type</th><th>You get</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Words, such as <code>retry backoff</code></td><td>Content matches ranked by relevance, each with its heading and a snippet, and the files, images, contacts, tags and mentions whose names contain the text.</td></tr>
+        <tr><td>A path with a <code>/</code>, such as <code>src/</code></td><td>The entries of that directory that start with what you typed.</td></tr>
+        <tr><td><code>language:Rust</code></td><td>Files in that language, each with its line count. Needs <a href="/manual/files/#code-reports">code reports</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>On a row, <kbd>Enter</kbd> or a double-click</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A content match, a file name or a contact</td><td>Opens the file in the editor.</td></tr>
+        <tr><td>An image</td><td>Shows it in Details.</td></tr>
+        <tr><td>A directory</td><td>Lists its entries, so you can type the next part of the path.</td></tr>
+        <tr><td>A tag or a mention</td><td>Opens <a href="/manual/graph/">the graph</a> with it selected.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><kbd>Up</kbd> and <kbd>Down</kbd> move through the rows, and <kbd>Esc</kbd> closes search. Right-click the list, or use its menu button, for <strong>Details</strong>, which shows the selected row's information and actions, and <strong>Search again</strong>.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="search-details" data-shot-kind="still">screenshot to capture<small>the search panel with Details open beside it, an image row selected and its preview in Details</small></div>
+  </figure>
 </section>
 
 <section class="manual-block" id="terminal-search">
   <h2><a class="heading-anchor" href="#terminal-search">Search from a terminal</a></h2>
-<p><code>cs search</code> queries the current terminal's workspace and prints results without opening a tab. Use it for content search, browsing entities, or following graph connections:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs search retry backoff</b></code>
-    {{copyButton}}
+  <p><code>cs search</code> asks the workspace of the terminal it runs in and prints the result as Markdown. It changes nothing and opens no tab.</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs search retry backoff</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Form</th><th>Does</th><th>Example</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>QUERY</code></td><td>Searches content, and every kind of entity by name.</td><td><code>cs search retry backoff</code></td></tr>
+        <tr><td><code>--domain KIND</code></td><td>Limits the results to one kind. With no query, lists every entity of that kind.</td><td><code>cs search --domain tag</code></td></tr>
+        <tr><td><code>--from TYPE:VALUE</code></td><td>Walks the graph from one exact entity, one hop unless <code>--depth</code> says more.</td><td><code>cs search --from file:notes/design.md --depth 2</code></td></tr>
+        <tr><td><code>--edge-kind KIND</code></td><td>Keeps one kind of relationship: <code>link</code>, <code>tag</code>, <code>mention</code>, <code>language</code> or <code>contains</code>.</td><td><code>cs search --from tag:design --edge-kind tag</code></td></tr>
+        <tr><td><code>--direction</code></td><td><code>out</code>, <code>in</code> or <code>both</code>. By default a walk goes out from a directory and both ways from any other seed.</td><td><code>cs search --from file:a.md --direction in</code></td></tr>
+        <tr><td><code>--json</code>, <code>--pretty</code></td><td>Prints the result as JSON, indented with <code>--pretty</code>.</td><td><code>cs search --from language:Rust --edge-kind language --json --pretty</code></td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs search --domain tag</b></code>
-    {{copyButton}}
+  <p>A selector is <code>TYPE:VALUE</code>. <code>--domain</code> takes the same six types, plus <code>content</code>.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Selector</th><th>Value</th><th>A walk from it counts <code>--depth</code> in</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>file:notes/design.md</code></td><td>A path from the workspace root.</td><td>Hops of links, tags and mentions, in both directions.</td></tr>
+        <tr><td><code>tag:design</code></td><td>The <code>#</code> is optional; case does not matter.</td><td>Hops, in both directions.</td></tr>
+        <tr><td><code>mention:alex</code></td><td>The <code>@@</code> is optional.</td><td>Hops, in both directions.</td></tr>
+        <tr><td><code>contact:contacts/alex.md</code></td><td>A path, file name, title, email or alias.</td><td>Hops, in both directions.</td></tr>
+        <tr><td><code>directory:src</code></td><td>A path; <code>directory:.</code> is the root.</td><td>Levels of the tree below it.</td></tr>
+        <tr><td><code>language:Rust</code></td><td>A language from the code reports.</td><td>Reaches its files in one hop.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs search --from file:notes/design.md --depth 2</b></code>
-    {{copyButton}}
+  <p>Each node a walk reaches comes with its directories up to the root, and each file with its tags, mentions and language: what <a href="/manual/graph/#depth">the graph</a> shows with that entity selected at the same depth.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A file added a moment ago is found once the index reaches it; <a href="/manual/dashboard/#index">the Dashboard</a> shows indexing progress.</li>
+      <li>A search with no matches while the index is being built reads <strong>still indexing - results will fill in</strong>. During a rebuild of the index, content search pauses until it finishes.</li>
+      <li>The search panel shows one content row per file and up to 25 of them, and up to eight name matches of each kind.</li>
+      <li>With <a href="/manual/dashboard/#semantic-search">semantic search</a> on, content is ranked by relevance and meaning together.</li>
+      <li>The graph also joins a symlink to its target and the names of a hardlinked file; a walk follows neither.</li>
+      <li><code>cs search</code> prints sections named Content, Entities, Graph, Warnings and Errors. A request with structured errors prints them and exits nonzero.</li>
+      <li>Defaults and caps: <code>--limit 20</code> (at most 100), <code>--node-limit 100</code> (1000), <code>--edge-limit 250</code> (2500), <code>--depth</code> at most 10. A larger value is clamped, with a warning.</li>
+      <li>A contact or mention selector that matches more than one entity fails; the JSON error lists the candidates.</li>
+      <li>In a standalone terminal <code>cs search</code> refuses: it needs a workspace window.</li>
+      <li>From any shell, <code>chan workspace search</code> takes the same flags, with <code>--workspace</code> naming a workspace or <code>--all-workspaces</code>.</li>
+      <li><code>cs search --help</code> has the full rules.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/graph/"><strong>Graph</strong><span>See the workspace's tree and its links, tags and mentions.</span></a>
+    <a class="next-card" href="/manual/dashboard/#index"><strong>Dashboard and index</strong><span>Follow indexing and turn on semantic search.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>Drive windows, panes and terminals from a shell.</span></a>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs search --from language:Rust --edge-kind language --json --pretty</b></code>
-    {{copyButton}}
-  </div><p>Selectors use <code>type:value</code>, including <code>file</code>, <code>directory</code>, <code>tag</code>, <code>mention</code>, <code>contact</code>, and <code>language</code>. <code>--domain</code> limits the kinds of results, and <code>--from</code> starts traversal from an exact entity. A traversal reaches what <a href="/manual/graph/">the graph</a> shows with that entity selected at the same depth: hops of links, tags and mentions in both directions from a document, a tag, a mention or a contact, and levels of the tree below a directory. The graph also follows a symlink to its target and a hardlinked file to its other names; a traversal follows neither. Language queries need code reports. Run <code>cs search --help</code> for limits and direction controls.</p>
 </section>

@@ -1,140 +1,202 @@
-<section class="manual-block" id="commands">
-  <h2><a class="heading-anchor" href="#commands">The terminal and its commands</a></h2>
-<p>Open <strong>New terminal</strong> from Computers, a pane menu, or the command launcher. A standalone terminal works with the machine's filesystem; a workspace terminal also has project search, graph, export, and team commands. Pane and window controls are covered in <a href="/manual/navigation/">Navigation</a>.</p>
-<p>Every chan terminal is scriptable. <code>chan</code> manages workspaces and devservers. <code>cs</code> (chan shell, also available as <code>chan shell</code>) controls the window and terminal sessions you are working in, from any shell script or program running in them. Run <code>cs --help</code> or add <code>--help</code> to a subcommand for its options.</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan open .</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs open README.md</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs open .</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal new</b></code>
-    {{copyButton}}
-  </div><p><code>chan open .</code> registers and serves the current directory as a workspace; use <code>--here</code> when intentionally opening a subdirectory of a repository. <code>cs open README.md</code> opens a file in the current window, and <code>cs open .</code> opens its file browser. Paths refer to the machine hosting the terminal, including on a devserver.</p>
-<p><code>chan open</code> serves a workspace; <code>chan-files</code> and <code>chan-edit</code> open a path in a window, as <code>cs open</code> does inside chan. In a chan terminal they are <code>cs open</code> by another name. From any other shell, or your desktop's file manager, they open each path in a standalone window of the running Chan Desktop, which Chan Desktop's own <code>chan-files</code> and <code>chan-edit</code> start when it is not running. Both follow <code>cs open</code>'s rule for every path; the two names differ in their help and in the desktop entry that makes Chan Desktop your <a href="/manual/install/#default-file-browser">file browser or Markdown editor on Linux</a>.</p>
-<p><code>chan-term</code> opens a terminal window: your shell, here or in <code>--dir</code>, or the command after <code>-e</code> in a window of its own. It is the command <code>chan-term.desktop</code> runs, which makes Chan Desktop your <a href="/manual/install/#default-terminal">default terminal on Linux</a>; <code>chan-term --help</code> lists its options.</p>
+<figure class="inline-shot" id="terminal-walkthrough">
+  <div class="shot-placeholder-frame" data-shot="terminal-basics" data-shot-kind="clip">clip to capture<small>one terminal tab: right-click it, type build in Name, run ls -l /usr/bin, press Cmd+F and type zip; the find bar reads 1 of 3</small></div>
+  <figcaption>Name a terminal, run a command, and find a word in its output.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Open terminals as tabs, and name them so you and your scripts can find them again.</li>
+    <li>Find text in a terminal's scrollback, newest match first.</li>
+    <li>Copy a long wrapped command as the one line it is.</li>
+    <li>Type into every terminal of a group at once.</li>
+    <li>See what each terminal is running from the pane tree.</li>
+  </ul>
 </section>
 
-<section class="manual-block" id="terminal-walkthrough">
-  <h2><a class="heading-anchor" href="#terminal-walkthrough">Terminal walkthrough</a></h2>
-  <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/terminal-commands.jpg" aria-label="Running commands in a Chan terminal.">
-      <source src="/assets/home/videos/terminal-commands.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/terminal-commands.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Running commands in a Chan terminal.</figcaption>
-  </figure>
-</section>
-
-<section class="manual-block" id="terminal-tabs">
-  <h2><a class="heading-anchor" href="#terminal-tabs">Control terminal tabs</a></h2>
-<div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal new --tab-name build</b></code>
-    {{copyButton}}
+<section class="manual-block" id="tabs">
+  <h2><a class="heading-anchor" href="#tabs">Terminal tabs</a></h2>
+  <p>Choose <strong>New terminal</strong> from a pane menu, the command launcher, or Computers, or press <kbd>Cmd+T</kbd> on the macOS desktop and <kbd>Ctrl+Shift+T</kbd> elsewhere. Moving, splitting and closing tabs is in <a href="/manual/navigation/#panes">Windows, panes and tabs</a>.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>Do this</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Name a terminal</td><td>Right-click its tab and type in <strong>Name</strong>, or run <strong>Rename terminal</strong> from the command launcher. Scripts find it by that name with <code>cs terminal ... --tab-name</code>.</td></tr>
+        <tr><td>Put it in a group</td><td>Type in <strong>Group</strong>, under Name, or run <strong>Set terminal group</strong>. A terminal is in <code>default</code> until you set one.</td></tr>
+        <tr><td>Restart it</td><td><strong>Restart terminal</strong> in the command launcher. It asks first while a shell runs.</td></tr>
+        <tr><td>Read its program status and queued messages</td><td><strong>Details</strong>, in the tab's right-click menu or the command launcher.</td></tr>
+        <tr><td>Mask secrets in its output</td><td><strong>Secret masking (this terminal)</strong>, in the right-click menu inside the terminal.</td></tr>
+        <tr><td>Open one from a script</td><td><code>cs terminal new --tab-name build</code>. See <a href="/manual/cs/#terminal">cs terminal</a>.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal list</b></code>
-    {{copyButton}}
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>The tab shows</th><th>When</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A prompt with a cursor being typed, or a pie that fills</td><td>A program reports that it is working, with its progress. See <a href="/manual/cs/#status">Program status</a>.</td></tr>
+        <tr><td>An amber, green or red mark</td><td>A program reports that it is blocked, done, or failed.</td></tr>
+        <tr><td>A dot</td><td>The terminal printed something since you last looked at it.</td></tr>
+        <tr><td>A number</td><td>Messages wait in its queue, from the Rich Prompt or <code>cs terminal write</code>.</td></tr>
+        <tr><td>A radio icon</td><td>What you type there is broadcast to its group.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal scrollback --tab-name build</b></code>
-    {{copyButton}}
-  </div><p>Give a terminal a name to address it later. <code>cs terminal write</code> sends input, <code>cs terminal restart</code> restarts a session, and <code>cs terminal close</code> ends it. Use <code>--tab-name</code> to select a named session, or <code>--tab-group</code> for a group where supported. <code>scrollback</code> selects one tab by name, not a group. <code>cs terminal list --json</code> provides the session roster for scripts.</p>
-  <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/terminal-write-scrollback.jpg" aria-label="Write into another terminal and read its scrollback with cs.">
-      <source src="/assets/home/videos/terminal-write-scrollback.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/terminal-write-scrollback.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Write into another terminal and read its scrollback with cs.</figcaption>
-  </figure>
-<p id="program-reading">The pane tree (<code>Cmd+Shift+A</code> on macOS, <code>Ctrl+Shift+A</code> on Windows and Linux) shows what runs in each terminal beside its name: the title the program in front last set, which shells and editors set with OSC 0 or OSC 2, else that program's name, such as <code>bash</code> at a prompt, <code>vim</code> or <code>cargo</code>. It never renames the tab: the tab keeps its name, and <code>cs</code> selects the terminal by that name as before. A title lasts while the program that set it stays in front; once that program ends the row reads the command again until a program sets another title, and an earlier title does not come back. Chan reads it once, on the machine the terminal runs on, so every window and browser tab attached to the terminal shows the same text, and an open pane tree follows each change. Chan looks at the program in front twice a second, once a second on macOS and FreeBSD, and credits a title to whatever was in front when it read the title, so a program that sets a title and ends before chan reads it leaves that title on the shell until the next program starts, a program that starts and ends between two looks may never show, and over ssh the row reads <code>ssh</code> or the remote side's last title, which stays until the remote side sets another or ssh ends. On Windows chan cannot see which program is in front, so the row shows titles only. In privacy mode the row reads <em>Hidden</em> instead, and the pane tree's filter matches tab names only, never this text. A tmux window's rows show the command each pane runs instead (see <a href="/manual/tmux/">tmux control mode</a>).</p>
-<p>Clipboard shortcuts in the terminal are <code>Cmd+C</code>/<code>Cmd+V</code> on macOS and <code>Ctrl+Shift+C</code>/<code>Ctrl+Shift+V</code> on Windows and Linux. A copy joins a line the terminal wrapped at its right edge back into one, so a long command pastes as the single command it is, while the line breaks a program printed stay. A double click selects a word and a triple click the whole line, across the wrap when the terminal wrapped one. With the ghostty engine, the default, a paste cannot end the bracket a program asked for: the escape character arrives as a space, and so do NUL, backspace, delete and the control characters the system acts on before a program reads them (<code>Ctrl+C</code>, <code>Ctrl+Z</code>, <code>Ctrl+U</code>, <code>Ctrl+W</code> and the others), while tabs stay; every line break arrives as the carriage return the <code>Enter</code> key sends, as on xterm.js. The <code>cs</code> commands below also transfer images and rich text.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Renaming or regrouping a running terminal applies at once, but its shell keeps the old <code>$CHAN_TAB_NAME</code> and <code>$CHAN_TAB_GROUP</code>: the tab menu reads <em>stale env</em> and offers <strong>Restart terminal</strong>.</li>
+      <li>Two terminals can share a name. A <code>cs</code> command that selects by name reaches both.</li>
+      <li>On Windows, where chan finds several shells (PowerShell, cmd, Git Bash, WSL), the pane menu lists them under <strong>New terminal</strong>, and the command launcher has <strong>New terminal with profile</strong>.</li>
+      <li>Most browsers keep <kbd>Ctrl+Shift+T</kbd> to reopen a closed tab. Use the pane menu, or bind another key in <a href="/manual/shortcuts/#customize">Keyboard shortcuts</a>.</li>
+    </ul>
+  </details>
 </section>
 
 <section class="manual-block" id="find">
   <h2><a class="heading-anchor" href="#find">Find in a terminal</a></h2>
-<p>With a terminal focused, press <code>Cmd+F</code> on macOS or <code>Ctrl+Shift+F</code> on Windows and Linux, on the desktop and in a browser, or choose <strong>Find</strong> from the terminal's right-click menu. Off macOS a plain <code>Ctrl+F</code> stays with the shell. A find bar opens over the terminal and searches its scrollback as you type: the newest match, the one closest to the prompt, is highlighted and scrolled into view.</p>
-<p><code>Enter</code> steps to the next older match and <code>Shift+Enter</code> to the next newer one, and both wrap around. On the desktop, <strong>Find next</strong> and <strong>Find previous</strong> step the same two ways: <code>Cmd+G</code> and <code>Cmd+Shift+G</code> on macOS, and <code>Ctrl+G</code> and <code>Ctrl+Shift+G</code> on Windows and Linux while the keyboard is in the find bar. With the shell focused there, <code>Ctrl+G</code> goes to the shell as its bell character. A browser has <code>Enter</code> and <code>Shift+Enter</code> only.</p>
-<p>The bar counts the matches from the newest: <code>2 of 7</code> is the second newest of seven, and <code>0 of 0</code> is no match. A <code>+</code> after the total, as in <code>2 of 40+</code>, means the scrollback is still being searched and the total can grow. A <code>?</code> in place of the position, as in <code>? of 7</code>, means no match is selected. With the ghostty engine, the default, resizing the terminal keeps the selected match highlighted and on the screen: its position comes back once the scrollback has been searched again, and the next step goes on from it. A resize that removes the match, as narrowing a full-screen program can, leaves no match selected, and the next step starts again from the newest match with <code>Enter</code> or the oldest with <code>Shift+Enter</code>. Heavy output into a long scrollback can do the same for a moment: rather than slow the terminal down, the search starts over, the total shows its <code>+</code> and the position its <code>?</code>, and the selected match stays highlighted until the search has caught up and its position is back. If the search has not caught up after about a second, as when the heavy output goes on, or the output pushes the match out of the scrollback, the match is no longer selected, and the next step starts again from the newest match with <code>Enter</code> or the oldest with <code>Shift+Enter</code>. A terminal on xterm.js, with <strong>Terminal engine (new terminals)</strong> set to <code>xterm</code> in Terminal settings, highlights the matches and counts them up to 1000, where the bar reads <code>? of 1000+</code>.</p>
-<p><code>Esc</code> closes the bar, clears the highlight, and returns the keyboard to the terminal. The query is kept for the next time the bar opens. A restart that replaces the terminal closes the bar the same way.</p>
+  <p>With a terminal focused, press the find key or choose <strong>Find</strong> from its right-click menu. The bar searches the scrollback as you type and selects the newest match, the one nearest the prompt.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Open the find bar</td><td><kbd>Cmd+F</kbd></td><td><kbd>Ctrl+Shift+F</kbd></td></tr>
+        <tr><td>Step to the next older match</td><td><kbd>Enter</kbd></td><td><kbd>Enter</kbd></td></tr>
+        <tr><td>Step to the next newer match</td><td><kbd>Shift+Enter</kbd></td><td><kbd>Shift+Enter</kbd></td></tr>
+        <tr><td>Find next, on the desktop</td><td><kbd>Cmd+G</kbd></td><td><kbd>Ctrl+G</kbd></td></tr>
+        <tr><td>Find previous, on the desktop</td><td><kbd>Cmd+Shift+G</kbd></td><td><kbd>Ctrl+Shift+G</kbd></td></tr>
+        <tr><td>Close the bar and clear the highlight</td><td><kbd>Esc</kbd></td><td><kbd>Esc</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>The bar reads</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>2 of 7</code></td><td>The second newest of seven matches is selected.</td></tr>
+        <tr><td><code>0 of 0</code></td><td>No match.</td></tr>
+        <tr><td><code>2 of 40+</code></td><td>The scrollback is still being searched; the total can grow.</td></tr>
+        <tr><td><code>? of 7</code></td><td>No match is selected. The next step starts from the newest match with <kbd>Enter</kbd>, or the oldest with <kbd>Shift+Enter</kbd>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Off macOS a plain <kbd>Ctrl+F</kbd> stays with the shell.</li>
+      <li>Steps wrap around at both ends.</li>
+      <li>On Windows and Linux, <kbd>Ctrl+G</kbd> steps only while the keyboard is in the find bar. In the shell it is the bell character.</li>
+      <li>A browser steps with <kbd>Enter</kbd> and <kbd>Shift+Enter</kbd> only.</li>
+      <li>The query is kept for the next time the bar opens. A restart that replaces the terminal closes the bar.</li>
+      <li>With the ghostty engine, the default, a resize keeps the selected match. A resize that removes it, as narrowing a full-screen program can, leaves no match selected.</li>
+      <li>Heavy output into a long scrollback restarts the search for a moment, shown as <code>+</code> and <code>?</code>. If it has not caught up after about a second, or the output pushes the match out of the scrollback, no match stays selected.</li>
+      <li>On the xterm engine (<strong>Terminal engine (new terminals)</strong> set to <code>xterm</code> in Terminal settings) the bar counts up to 1000 matches and then reads <code>? of 1000+</code>.</li>
+    </ul>
+  </details>
 </section>
 
-<section class="manual-block" id="composition">
-  <h2><a class="heading-anchor" href="#composition">Compose and transfer</a></h2>
-<h3 id="rich-prompt"><a class="heading-anchor" href="#rich-prompt">Rich Prompt</a></h3>
-  <p>When a terminal needs more than a line, like pasting images into a remote agent or editing a longer prompt, bring up the Rich Prompt bubble over the terminal: press <code>Cmd+Shift+P</code> on macOS (<code>Ctrl+Alt+P</code> on Windows, Linux, and web), or choose <strong>Rich Prompt</strong> from the command launcher or the terminal's right-click menu. The close button at the bubble's top right hides it and keeps the draft for the next time it is shown. Write Markdown, paste images, and submit with <code>Cmd+Enter</code> on macOS or <code>Ctrl+Enter</code> elsewhere; submissions are queued so writes from other terminals (<code>cs terminal write</code>) do not conflict with your typing. While the bubble is shown, <strong>Rich Prompt style toolbar</strong>, in the terminal's right-click menu and the command launcher, floats the editor's formatting toolbar over the text; choose it again to put the toolbar away. The toolbar's source toggle, or <code>Cmd+E</code> on macOS (<code>Ctrl+E</code> on Windows and Linux) in the bubble, switches the draft between rendered Markdown and its source. Terminals spawned with a supported agent automatically select its submit encoding; custom launchers can set <code>CHAN_AGENT</code>. Supported names are <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, and <code>opencode</code>. The command-line equivalent is <code>cs terminal write --submit=&lt;agent&gt;</code>.</p>
+<section class="manual-block" id="copy-paste">
+  <h2><a class="heading-anchor" href="#copy-paste">Copy and paste</a></h2>
+  <p>A line the terminal wrapped at its right edge copies as one line, so a long command pastes as the command it is. Line breaks a program printed stay.</p>
   <figure class="inline-shot">
-    <img src="/assets/manual/rich-prompt.png" alt="The Rich Prompt bubble over a terminal running a coding agent: rendered Markdown with a list, a pasted image, and a submit-with-cmd-enter hint" />
-    <figcaption>The Rich Prompt bubble over a terminal running an agent on a devserver.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="terminal-wrapped-copy" data-shot-kind="clip">clip to capture<small>a long command wrapped over two rows; triple-click it, Cmd+C, paste into a second terminal tab, where it arrives as one line</small></div>
   </figure>
-  <h3 id="copy-paste"><a class="heading-anchor" href="#copy-paste">Copy and paste freely</a></h3>
-  <p>The commands <code>cs copy</code> and <code>cs paste</code> integrate every chan terminal, standalone or workspace, local or on a devserver, with your clipboard: <code>cs copy &lt; photo.png</code> puts stdin on the clipboard (plain text, HTML, or an image), and <code>cs paste &gt; file.png</code> writes it back out as raw bytes. The clipboard belongs to the machine viewing the window, while the command runs wherever the terminal lives: use it locally like <code>pbcopy</code>/<code>pbpaste</code>, copy on a devserver and paste into any app, or move content across devservers by copying on one and pasting on another.</p>
-  <p>On the Linux desktop, selecting terminal text sets the PRIMARY selection, and a middle click pastes PRIMARY on either terminal engine, including text selected in another application. Ghostty keeps its automatic clipboard copy alongside PRIMARY; copy chords and the menu's Copy actions use the regular clipboard. In a browser, selection and middle click follow the browser's behavior.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Copy the selection</td><td><kbd>Cmd+C</kbd></td><td><kbd>Ctrl+Shift+C</kbd></td></tr>
+        <tr><td>Paste</td><td><kbd>Cmd+V</kbd></td><td><kbd>Ctrl+Shift+V</kbd></td></tr>
+        <tr><td>Select a word, or a whole line</td><td colspan="2">Double click, or triple click. A triple click takes a wrapped line whole.</td></tr>
+        <tr><td>Copy all of the output</td><td colspan="2"><strong>Copy scrollback</strong> in the right-click menu. That menu's <strong>Copy</strong> does the same when nothing is selected.</td></tr>
+        <tr><td>Paste the PRIMARY selection</td><td></td><td>Middle click, on the Linux desktop</td></tr>
+        <tr><td>Copy from a script</td><td colspan="2"><code>git log -5 | cs copy</code>. See <a href="/manual/remote-tools/#clipboard">Clipboard</a>.</td></tr>
+        <tr><td>Paste into a file</td><td colspan="2"><code>cs paste &gt; shot.png</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>With the ghostty engine, the default, a mouse selection, a double click and a triple click also copy to the clipboard.</li>
+      <li>On the Linux desktop a selection also sets PRIMARY, and a middle click pastes PRIMARY on either engine, including text selected in another application. Copy keys and the menu's Copy use the regular clipboard.</li>
+      <li>In a browser, selection and middle click follow the browser.</li>
+      <li>With the ghostty engine a paste cannot end the bracketed paste a program asked for: escape, NUL, backspace, delete and the control characters such as <kbd>Ctrl+C</kbd>, <kbd>Ctrl+Z</kbd>, <kbd>Ctrl+U</kbd> and <kbd>Ctrl+W</kbd> arrive as spaces. Tabs stay.</li>
+      <li>On either engine every pasted line break arrives as the carriage return <kbd>Enter</kbd> sends.</li>
+      <li><code>cs copy</code> and <code>cs paste</code> use the clipboard of the machine viewing the window, so they work from a devserver terminal too.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="broadcast">
+  <h2><a class="heading-anchor" href="#broadcast">Group broadcast</a></h2>
+  <p>Group broadcast sends what you type in one terminal to others of its group, to run one command in several shells at once.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Put the terminals in one group</h3>
+      <p>Right-click each tab and type the same name in <strong>Group</strong>, or run <strong>Set terminal group</strong>.</p>
+    </li>
+    <li>
+      <h3>Choose the targets</h3>
+      <p>In a tab's right-click menu, under <strong>Broadcast targets</strong>, turn on <strong>Group broadcast</strong> to check the whole group, or check single terminals. The command launcher has both rows; on the macOS desktop <kbd>Cmd+Shift+I</kbd> toggles the group.</p>
+    </li>
+    <li>
+      <h3>Type</h3>
+      <p>What you type in a checked terminal reaches the other checked ones. A radio icon on the tab says how many tabs it reaches.</p>
+    </li>
+  </ol>
   <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/copy-paste.jpg" aria-label="Copy text from one terminal and paste it into a file in another.">
-      <source src="/assets/home/videos/copy-paste.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/copy-paste.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Copy text from one terminal and paste it into a file in another.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="terminal-broadcast" data-shot-kind="clip">clip to capture<small>three terminals in group web, split side by side; Group broadcast on from a tab menu; typing uptime shows in all three, each tab with the radio icon</small></div>
   </figure>
-  <h3 id="download-upload"><a class="heading-anchor" href="#download-upload">Download and upload freely</a></h3>
-  <p>Similarly, <code>cs download {path}</code> downloads a file or a tarball of the target directory, and <code>cs upload {path}</code> imports files into the target directory through a file picker. Both show the same progress UI as the Inspector, and <code>.</code> means the current directory. This works in local and devserver terminals alike, so files flow between your machine and any chan session.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Broadcast</th><th>Not broadcast</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Typing, pastes, dropped file paths, mouse and wheel input</td><td>Rich Prompt messages, and replies the terminal sends by itself, such as focus reports</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Broadcast never leaves the group, nor the workspace or the standalone terminals it belongs to.</li>
+      <li>The menu lists the group's terminals in other windows under <em>other windows</em>. Each receives only while its own box is checked.</li>
+      <li>Windows, Linux and browsers have no default broadcast key. Bind one in <a href="/manual/shortcuts/#customize">Keyboard shortcuts</a>.</li>
+      <li><code>cs terminal write --tab-group web</code> sends text from a script, queued until each terminal is idle. No <code>cs</code> command turns broadcast on or off.</li>
+    </ul>
+  </details>
 </section>
 
-<section class="manual-block" id="drafts">
-  <h2><a class="heading-anchor" href="#drafts">Drafts and untitled-1/draft.md</a></h2>
-<p>Choose <strong>New draft</strong> from a pane menu or the command launcher. A draft appears as <code>Drafts/untitled/draft.md</code>, then <code>Drafts/untitled-1/draft.md</code> and higher numbered names as needed. It is a Markdown document with a companion directory for attachments. Rich Prompt uses a real draft too, so a longer prompt and its pasted images can be edited together before submission.</p>
-<p><strong>Drafts</strong> in the file browser is a separate area. In a workspace, its files live in chan's workspace metadata, outside the project directory. The displayed <code>Drafts/…</code> path is not a repository-relative shell path. Drafts stay out of project search and the project graph until you save them into the workspace.</p>
-<p>Open a draft from the Drafts group to keep editing. Closing it offers <strong>Save to Workspace</strong> (<strong>Save to Disk</strong> in a standalone window), <strong>Discard Draft</strong>, or <strong>Cancel</strong> to keep editing. Saving a draft with attachments carries the companion files with it. A directory named <code>Drafts</code> that you create inside your repository is ordinary project content.</p>
-</section>
-
-<section class="manual-block" id="program-status">
-  <h2><a class="heading-anchor" href="#program-status">Program status: OSC 7501</a></h2>
-<p>Programs can report whether they are working, done, blocked, or in error using <strong>OSC 7501</strong>, the <a href="https://www.superlogical.com/rex/docs/build/program-status">Program Status Protocol</a> that Superlogical specifies for Rex and any other terminal. Chan shows activity and progress in the terminal tab and an attention marker when a program needs you. To read what was reported, right-click the terminal tab and choose <strong>Details</strong>, or run <strong>Details</strong> from the command launcher. While the feature is on and the session has status, Details lists each record with its source, id, state, and the reported app, title, and message, above the tab's queued messages.</p>
-<p>It is <strong>on by default</strong>; turn it off in <strong>Settings → Terminal → Program status (OSC 7501)</strong>. Programs must emit reports for their state to appear; ordinary terminal output does not supply those records. Shell scripts can use <code>cs terminal status</code>:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status working --id build --app cargo --progress 40 --sleep 10</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status blocked --id build --kind permission --msg "Waiting for approval" --sleep 10</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status done --id build --msg "Tests passed"</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status clear --id build</b></code>
-    {{copyButton}}
-  </div><p>States are <code>idle</code>, <code>working</code>, <code>done</code>, <code>blocked</code>, <code>error</code>, and <code>clear</code>. A blocked report can name <code>permission</code>, <code>question</code>, or <code>auth</code>; progress is an integer from 0 to 100 for working or blocked reports. Each state shows this in the tab and in Details:</p>
-<div class="manual-table-wrap"><table class="manual-table">
-<thead><tr><th scope="col">Report</th><th scope="col">In the tab</th><th scope="col">In Details</th></tr></thead>
-<tbody>
-<tr><th scope="row"><code>working</code></th><td>The terminal icon's prompt with a cursor being typed; with <code>--progress</code>, a pie in a ring that fills to the percentage.</td><td>The record as working, with its progress.</td></tr>
-<tr><th scope="row"><code>blocked</code></th><td>An amber mark after the name: a shield for <code>permission</code>, a question mark in a circle for <code>question</code>, a key for <code>auth</code>, and a pause sign with no kind. It shows even while its tab is in front.</td><td>The record as blocked, with its kind.</td></tr>
-<tr><th scope="row"><code>done</code></th><td>A green check in a circle while unseen.</td><td>The record as done, seen or not.</td></tr>
-<tr><th scope="row"><code>error</code></th><td>A red exclamation mark in a circle while unseen.</td><td>The record as error, seen or not.</td></tr>
-<tr><th scope="row"><code>idle</code></th><td>No mark.</td><td>The record as idle.</td></tr>
-<tr><th scope="row"><code>clear</code></th><td>The cleared records' marks go.</td><td>The cleared records go.</td></tr>
-</tbody></table></div>
-<p>Hover a blocked, done, or error mark to read the report's state, kind, progress, app, title, and message. When several records stand at once, the tab shows one mark: blocked over error, error over done, and the latest report among equals. A done or error report is seen when it arrives while its tab is in front, the selected tab of the focused pane, or as soon as its tab comes to the front; a seen report has no mark and stays in Details. So a done or error report typed at the prompt of the tab in front shows no mark, and switching away after the report does not make it unseen.</p>
-<p>To see those marks, report from the tab under test after a delay, then select another tab within the five seconds. The mark appears on the first tab and clears when you select it again:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>(sleep 5; cs terminal status done --id build --msg "Tests passed") &amp;</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>(sleep 5; cs terminal status error --id build --msg "Tests failed") &amp;</b></code>
-    {{copyButton}}
-  </div><p>The background job reports to the terminal it was started from, since its output still goes to that terminal.</p>
-<p>Each report replaces that record, including its optional fields. Use <code>--id</code> to give a subprocess its own record instead of replacing its parent's root record. <code>clear --id build</code> removes that record and its children. The status also appears in <code>cs terminal list</code>; its JSON form includes the reported text for orchestration.</p>
-<p><code>--sleep 10</code> writes once, then waits ten seconds so you can inspect a transient state from an interactive shell. It accepts whole seconds from 0 to 86400; omitted or 0 returns immediately. Expiry and Ctrl-C write nothing further. Done and error stay until replaced or cleared. Transient states follow the terminal's foreground-job and prompt rules; waiting on the control-socket route keeps only the sender alive.</p>
-<p>Use <code>cs terminal list --json</code> to read retained records even when they have no mark.</p>
+<section class="manual-block" id="program-reading">
+  <h2><a class="heading-anchor" href="#program-reading">What each terminal runs</a></h2>
+  <p>The pane tree, <kbd>Cmd+Shift+A</kbd> on macOS and <kbd>Ctrl+Shift+A</kbd> elsewhere, shows what each terminal runs beside its name: the title the program in front set, else its name, such as <code>vim</code> or <code>cargo</code>. The tab keeps its own name, and <code>cs</code> finds it by that.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="terminal-pane-tree" data-shot-kind="still">screenshot to capture<small>the pane tree over a window with four terminals, reading vim, cargo, bash and an ssh session's remote title beside their tab names</small></div>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A title lasts while the program that set it stays in front. When that program ends, the row reads the command again; an earlier title does not come back.</li>
+      <li>Every window and browser tab attached to the terminal shows the same text.</li>
+      <li>A program that starts and ends within a moment may never show, and a title set just before a program ends can stay on the shell until the next program starts.</li>
+      <li>Over ssh the row reads <code>ssh</code>, or the last title the remote side set.</li>
+      <li>On Windows the row shows titles only.</li>
+      <li>In privacy mode the row reads <em>Hidden</em>, and the pane tree's filter matches tab names only.</li>
+      <li>A tmux window's rows show the command each pane runs instead. See <a href="/manual/tmux/">tmux control mode</a>.</li>
+    </ul>
+  </details>
 </section>
 
 <section class="manual-block" id="tmux-control-mode">
@@ -145,58 +207,25 @@
   </div>
 </section>
 
-<section class="manual-block" id="teams">
-  <h2><a class="heading-anchor" href="#teams">Teams and orchestration</a></h2>
-<p>Open <strong>New team</strong> from the workspace's pane menu or command launcher to configure a team of agents in named terminal tabs. The dialog and <code>cs terminal team</code> use the same saved configuration. Agents run as ordinary terminal programs; their commands must already be installed on the host. Team commands require a workspace terminal.</p>
-  <details class="manual-examples">
-    <summary>See the team setup and running terminals</summary>
-    <figure class="inline-shot">
-      <img src="/assets/home/team-spawn.png" alt="The Spawn agents dialog with a team directory, terminal group, and optional brief" loading="lazy" />
-      <figcaption>Choose a team directory and group, then add a brief for the agents.</figcaption>
-    </figure>
-    <figure class="inline-shot">
-      <img src="/assets/home/team-layout.png" alt="Four named agents assigned to a two-by-two grid of terminal panes" loading="lazy" />
-      <figcaption>Choose the lead and member commands, then arrange agents in tabs or split panes.</figcaption>
-    </figure>
-    <figure class="inline-shot">
-      <img src="/assets/home/team-poke.png" alt="A lead and three worker agents exchanging task-file references in named terminals" loading="lazy" />
-      <figcaption>Named terminals let the lead and workers send messages and share task references through cs.</figcaption>
-    </figure>
-  </details>
-<p>For the CLI, save a configuration such as this to <code>team.toml</code>. A team has one to nine members, with exactly one lead:</p>
-<pre><code>team_name = "review"
-host_name = "You"
-host_handle = "@@Host"
-tab_group = "review"
+<section class="manual-block" id="moved">
+  <h2><a class="heading-anchor" href="#moved">Moved</a></h2>
+  <ul class="moved-list">
+    <li id="commands"><a href="/manual/cs/#verbs">The terminal and its commands</a></li>
+    <li id="terminal-tabs"><a href="/manual/cs/#terminal">Control terminal tabs</a></li>
+    <li id="composition"><a href="/manual/prompt/">Compose and transfer</a></li>
+    <li id="rich-prompt"><a href="/manual/prompt/#rich-prompt">Rich Prompt</a></li>
+    <li id="download-upload"><a href="/manual/remote-tools/#transfers">Download and upload freely</a></li>
+    <li id="drafts"><a href="/manual/prompt/#drafts">Drafts and untitled-1/draft.md</a></li>
+    <li id="program-status"><a href="/manual/cs/#status">Program status: OSC 7501</a></li>
+    <li id="teams"><a href="/manual/teams/">Teams and orchestration</a></li>
+  </ul>
+</section>
 
-[[members]]
-handle = "@@Lead"
-command = "claude"
-is_lead = true
-
-[[members]]
-handle = "@@Reviewer"
-command = "codex"</code></pre>
-<p>Create the team, or load it in a later session:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal team new teams/review --config team.toml</b></code>
-    {{copyButton}}
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/prompt/"><strong>Rich Prompt and drafts</strong><span>Write long prompts with images for the agent in a terminal.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>Open, write to, and read terminals from a shell script.</span></a>
+    <a class="next-card" href="/manual/navigation/#panes"><strong>Windows, panes and tabs</strong><span>Split a window and move tabs between panes.</span></a>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal team load teams/review</b></code>
-    {{copyButton}}
-  </div><p>The first command creates a team from your configuration; the second respawns one already saved in the workspace. Running either command again spawns another live copy in a new group. Close an existing copy first with <code>cs terminal close --tab-group review</code> if you intend to replace it. <code>new</code> overwrites the saved config and regenerates the bootstrap. The team directory contains <code>config.toml</code>, generated <code>bootstrap.md</code>, and <code>tasks/</code>, <code>journals/</code>, and <code>followups/</code>. Put shared instructions in a brief passed with <code>--brief</code>; the generated bootstrap describes the coordination process.</p>
-<p>For a smaller setup, create and address named terminals directly:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal new --tab-name reviewer --tab-group review --command codex</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal write --tab-name reviewer --submit=codex "Review the current diff"</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal list --json</b></code>
-    {{copyButton}}
-  </div><p><code>--submit</code> selects the agent's submit key sequence. Match it to the target agent; a mixed-agent group needs a separate command per agent. Without it, the text is written without an agent submit chord. Writes are queued and delivered when the terminal is idle, with a 4096-byte limit per call.</p>
-<p>Use <code>cs terminal scrollback</code> to inspect output and <code>cs terminal survey --help</code> for a choice prompt delivered to another terminal's window. For the full in-terminal reference, run <code>cs dump-skill --list</code> and select a topic with <code>--topic</code>.</p>
-  <p class="minor">Under the hood: the contracts agents rely on when they drive chan through <code>cs</code> are in <a href="https://github.com/fiorix/chan/blob/main/.agents/orchestration/README.md">.agents/orchestration/README.md</a>, and <a href="https://github.com/fiorix/chan/blob/main/crates/chan-shell/design.md">crates/chan-shell/design.md</a> describes the control socket itself.</p>
 </section>

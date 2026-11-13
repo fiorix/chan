@@ -1,42 +1,148 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="files-browse" data-shot-kind="still">screenshot to capture<small>a Files tab in a workspace: breadcrumbs, back and forward, the filter, Name, Kind, Size and Modified columns, and Details open on a folder with its code report</small></div>
+  <figcaption>A Files tab with Details open on the selected folder.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Browse a workspace, or the whole machine from a standalone terminal's window.</li>
+    <li>Open files in the editor, and images, audio, video, and PDF in a viewer.</li>
+    <li>Copy, move, rename, and delete files from the keyboard, with standard or Vim keys.</li>
+    <li>Upload files from the machine you are at, and download files and folders to it.</li>
+    <li>See how much code a folder holds, by language, with a COCOMO estimate.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="browse">
-  <h2><a class="heading-anchor" href="#browse">Browse the filesystem</a></h2>
-<p>Run <strong>New file browser</strong> from the pane menu or the command launcher, or <code>cs open .</code> from a terminal. Files tabs show the current directory with breadcrumbs, back/forward navigation, a path field, and a filename filter. Sort by Name, Kind, Size, or Modified; directories stay first. Double-click a directory to enter it or a file to open it. Use <strong>Details</strong>, in the toolbar or the file browser's menu, to inspect the selection; selecting another row keeps a closed inspector closed. Docked browsers retain an expandable tree. In a workspace, the browser follows the project; standalone windows browse the host filesystem.</p>
-<p>The separate <strong>Drafts</strong> group holds unfinished documents. See <a href="/manual/terminal/#drafts">Drafts</a> for how to keep, save, or discard them.</p>
+  <h2><a class="heading-anchor" href="#browse">Browse</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Open one</th><th>How</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>In a tab</td><td><strong>New file browser</strong>, from the pane menu or the command launcher, or <code>cs open .</code> in a terminal.</td></tr>
+        <tr><td>Docked beside the panes</td><td><strong>Left file browser dock</strong> or <strong>Right file browser dock</strong>, in a workspace window. A dock shows a tree.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li>A Files tab shows one folder, with breadcrumbs, back and forward, a path field, and a name filter.</li>
+    <li>Sort by Name, Kind, Size, or Modified. Folders stay first.</li>
+    <li>Double-click a folder to enter it, or a file to open it.</li>
+    <li><strong>Details</strong>, in the toolbar or the file browser's menu, shows the selection.</li>
+    <li>Drag rows onto a folder to move them, or drag a file into a pane to open it there.</li>
+    <li><strong>Hidden files</strong> shows names that start with a dot.</li>
+  </ul>
+  <p>In a workspace window the browser shows the workspace, with its unfinished documents in a <strong>Drafts</strong> group above the files; see <a href="/manual/prompt/#drafts">Drafts</a>. In a standalone terminal's window it shows the machine's filesystem.</p>
 </section>
 
 <section class="manual-block" id="keyboard">
-  <h2><a class="heading-anchor" href="#keyboard">Keyboard navigation</a></h2>
-<p>Tab to the file list or tree. Use arrow keys, Home, End, Page Up, and Page Down to move; Enter opens the focused entry. Left goes to the parent directory in a list, or collapses a tree branch. Right enters a directory or expands a tree branch. Alt+Left and Alt+Right step through a Files tab's history; Alt+Up goes to its parent.</p>
-<p>Shift extends a selection. F8 enables independent marks: move with the arrows and press Space to toggle each item. Escape leaves that mode; another Escape clears the selection. Mod+A selects all visible entries. Mod means Command on macOS and Control elsewhere.</p>
-<p>Mod+C, Mod+X, and Mod+V copy, cut, and paste files. F2 renames, Delete asks to delete, Shift+F10 opens the selected entry's action menu, and Mod+Y toggles Details. Use arrows, Home, and End within a menu; Escape returns focus to its opener. Press / or Mod+F to focus the folder filter. Standard navigation also supports typing a filename prefix.</p>
-<p>Enable <strong>Vim navigation</strong> in the file browser's menu, in Settings, or from the command launcher. It adds h/j/k/l, gg/G, y/x/p, and v for selection mode. It applies only while the file list or tree has focus, and the choice is saved in this browser. The <strong>Standard keys</strong> or <strong>Vim keys</strong> button shows the shortcut reference.</p>
+  <h2><a class="heading-anchor" href="#keyboard">Keyboard</a></h2>
+  <p>Click the list, or <kbd>Tab</kbd> to it, then:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>What it does</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Move, and open</td><td><kbd>Up</kbd> <kbd>Down</kbd> <kbd>Enter</kbd></td><td><kbd>Up</kbd> <kbd>Down</kbd> <kbd>Enter</kbd></td></tr>
+        <tr><td>Up a folder or into one; in a tree, collapse or expand</td><td><kbd>Left</kbd> <kbd>Right</kbd></td><td><kbd>Left</kbd> <kbd>Right</kbd></td></tr>
+        <tr><td>Back, forward, and up, in a Files tab</td><td><kbd>Alt+Left</kbd> <kbd>Alt+Right</kbd> <kbd>Alt+Up</kbd></td><td><kbd>Alt+Left</kbd> <kbd>Alt+Right</kbd> <kbd>Alt+Up</kbd></td></tr>
+        <tr><td>Extend the selection</td><td><kbd>Shift+Up</kbd> <kbd>Shift+Down</kbd></td><td><kbd>Shift+Up</kbd> <kbd>Shift+Down</kbd></td></tr>
+        <tr><td>Copy, cut, and paste files</td><td><kbd>Cmd+C</kbd> <kbd>Cmd+X</kbd> <kbd>Cmd+V</kbd></td><td><kbd>Ctrl+C</kbd> <kbd>Ctrl+X</kbd> <kbd>Ctrl+V</kbd></td></tr>
+        <tr><td>Rename</td><td><kbd>F2</kbd></td><td><kbd>F2</kbd></td></tr>
+        <tr><td>Delete, after asking</td><td><kbd>Delete</kbd></td><td><kbd>Delete</kbd></td></tr>
+        <tr><td>Details</td><td><kbd>Cmd+Y</kbd></td><td><kbd>Ctrl+Y</kbd></td></tr>
+        <tr><td>Filter the folder</td><td><kbd>/</kbd> <kbd>Cmd+F</kbd></td><td><kbd>/</kbd> <kbd>Ctrl+F</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>Vim navigation</strong>, in the file browser's menu, Settings, or the command launcher, adds <code>h</code> <code>j</code> <code>k</code> <code>l</code>, <code>gg</code> <code>G</code>, <code>y</code> <code>x</code> <code>p</code>, and <code>v</code>. The <strong>Standard keys</strong> or <strong>Vim keys</strong> button at the bottom lists every key, and <a href="/manual/shortcuts/#files">Keyboard shortcuts</a> has them all.</p>
 </section>
 
 <section class="manual-block" id="transfers">
   <h2><a class="heading-anchor" href="#transfers">Upload and download</a></h2>
-<p>The Details inspector offers <strong>Upload</strong> for a directory and <strong>Download</strong> for the selection, which sends a file as it is and a directory as a tar archive. <strong>Upload</strong> in the file browser's menu or the command launcher uploads into the folder a Files tab shows, or in a docked tree into the selected folder or the selected file's folder, and with nothing selected into the workspace's root, or your home folder in a standalone window; <strong>Upload</strong> in a file's own right-click menu replaces that file. You can also drop files from your machine onto the file browser to upload them. Transfers show progress in the window. In Chan Desktop an upload's row appears while the file picker is open and offers Cancel once you have chosen; closing the picker without choosing leaves no row. A cancelled upload reads "Upload cancelled", and a failed one names what you picked and why, giving a file by its name and never the folder it came from.</p>
-<p>The terminal commands use the same transfer UI:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs upload .</b></code>
-    {{copyButton}}
+  <p>Upload opens a picker on the machine you are at, and download saves there. Progress shows in the window.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="files-upload" data-shot-kind="clip">clip to capture<small>Upload from the file browser's menu: the picker, two files chosen, their progress rows filling, the files in the list</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You choose</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Upload</strong>, from the file browser's menu or the command launcher</td><td>Uploads into the folder a Files tab shows. In a dock: into the selected folder, or the selected file's folder; with nothing selected, the workspace root, or your home folder in a standalone terminal's window.</td></tr>
+        <tr><td><strong>Upload</strong> in a folder's Details</td><td>Uploads into that folder.</td></tr>
+        <tr><td><strong>Upload</strong> on a file, in its right-click menu or its Details</td><td>Replaces that file.</td></tr>
+        <tr><td><strong>Download</strong></td><td>Sends a file as it is, and a folder as a tar archive.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs download README.md</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs download src</b></code>
-    {{copyButton}}
-  </div><p>Upload opens a picker on the viewing machine and writes into the target directory on the terminal's host. Download sends a file, or a tarball for a directory, back to the viewing machine. A devserver path therefore stays remote until downloaded.</p>
+  <p>From a terminal, <code>cs upload</code> and <code>cs download</code> do the same: see <a href="/manual/remote-tools/#transfers">Transfers</a>.</p>
 </section>
 
 <section class="manual-block" id="code-reports">
-  <h2><a class="heading-anchor" href="#code-reports">Code reports and analysis</a></h2>
-<p>Chan's <strong>chan-reports</strong> code analysis appears in <strong>Details</strong>. A source file shows its detected language and counts of code, comments, blank lines, and complexity. A directory shows a rollup for its subtree, with a per-language breakdown. The workspace's total is also available in the <a href="/manual/dashboard/">Dashboard</a>.</p>
-<p>Choose a language in the report to open its graph view. These reports help locate the size and distribution of code across a repository. Counts follow the workspace's included files and update as files change. Manage them in <strong>Settings → This workspace → chan-reports</strong>. Turning the feature off removes generated report data; enabling it again rebuilds the reports.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/crates/chan-report/design.md">crates/chan-report/design.md</a> describes the counting rules and the COCOMO model.</p>
+  <h2><a class="heading-anchor" href="#code-reports">Code reports</a></h2>
+  <p><strong>Details</strong> on a source file shows its language and line counts. On a folder it shows the totals for everything under it, by language. The workspace's totals are on the <a href="/manual/dashboard/">Dashboard</a>.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="files-code-report" data-shot-kind="still">screenshot to capture<small>Details on a source folder: the Code block, its language rows, and the COCOMO block below</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Field</th><th>Means</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>indexed</td><td>The files counted.</td></tr>
+        <tr><td>SLOC</td><td>Lines of code.</td></tr>
+        <tr><td>comments, blanks</td><td>Comment lines and blank lines.</td></tr>
+        <tr><td>complexity</td><td>A count of branching keywords and operators. A heuristic, not cyclomatic complexity or a judgment of quality.</td></tr>
+        <tr><td>A language row</td><td>Its files and lines of code. Choose the language to open it in the graph.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Reports are on for a new workspace. Turn them off or on in <strong>Settings → This workspace → chan-reports</strong>, or with <code>chan workspace reports disable PATH</code> and <code>enable PATH</code>. Off deletes the report data; on builds it again.</p>
 </section>
 
 <section class="manual-block" id="cocomo">
   <h2><a class="heading-anchor" href="#cocomo">COCOMO estimates</a></h2>
-<p>Directory and workspace reports include Basic COCOMO estimates derived from source-line counts: effort in person-months, schedule in months, and team size. They are model estimates for the code being counted, not a record of time spent or a forecast of your team's delivery. The complexity score counts branching keywords and operators. It is a heuristic, not cyclomatic complexity or a judgment of code quality.</p>
+  <p>A folder's report, and the workspace's, end with a Basic COCOMO estimate made from the lines of code. It models what writing that code would take. It is not a record of time spent, nor a forecast for your team.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Field</th><th>Unit</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>effort</td><td>Person-months</td></tr>
+        <tr><td>schedule</td><td>Months</td></tr>
+        <tr><td>developers</td><td>Team size</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Selecting another row keeps a closed Details closed.</li>
+      <li>A dock has no Details; there <kbd>Cmd+Y</kbd> or <kbd>Ctrl+Y</kbd> opens the selection in a tab.</li>
+      <li><kbd>Backspace</kbd> deletes too.</li>
+      <li>Vim keys work while the list or tree has focus, and the choice is saved in this browser.</li>
+      <li>Files dragged in from another application are not uploaded; use <strong>Upload</strong>.</li>
+      <li>On Chan Desktop an upload's row appears while the picker is open, and offers <strong>Cancel</strong> once you have chosen; closing the picker leaves no row.</li>
+      <li>A cancelled upload reads <strong>Upload cancelled</strong>; a failed one names the file and the reason, never the folder it came from.</li>
+      <li>Uploading over a text file refuses bytes that are not UTF-8.</li>
+      <li>Counts follow the workspace's included files and update as files change.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/editor/"><strong>Editor</strong><span>Edit what you open, and keep it saved.</span></a>
+    <a class="next-card" href="/manual/remote-tools/#transfers"><strong>Transfers</strong><span>Move files between a devserver and your machine with <code>cs</code>.</span></a>
+    <a class="next-card" href="/manual/dashboard/"><strong>Dashboard</strong><span>The workspace's code report, index, and metrics.</span></a>
+  </div>
 </section>

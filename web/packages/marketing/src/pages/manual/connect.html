@@ -1,0 +1,186 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="connect-add-devserver" data-shot-kind="clip">clip to capture<small>the Computers screen: the Add devserver card turns over to its form, Name, Address and an ssh connect script are filled in, Add devserver, then <kbd>o</kbd> on the new card; the Control Terminal window runs ssh, hides itself, and the devserver's terminal window opens</small></div>
+  <figcaption>Add a devserver once with its connect script, then connect with one key.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Add a devserver with the script that reaches it: ssh, Eternal Terminal, Lima, WSL, or none.</li>
+    <li>Connect with one key. Chan Desktop reads the devserver's token, so you never copy it.</li>
+    <li>Open the devserver's terminals and workspaces as native windows.</li>
+    <li>Disconnect, sleep, or quit, and find everything still running when you connect again.</li>
+    <li>Script it all with <code>chan devserver</code>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="add">
+  <h2><a class="heading-anchor" href="#add">Add a devserver</a></h2>
+  <p>Install chan on the other machine first: see <a href="/manual/devserver/">Run a devserver</a>.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Open the form</h3>
+      <p>Open the <a href="/manual/computers/">Computers screen</a> with <kbd>Cmd+P</kbd> on macOS or <kbd>Ctrl+Shift+P</kbd> on Windows and Linux, turn to the last card, and click <strong>Add devserver</strong>.</p>
+    </li>
+    <li>
+      <h3>Fill it in</h3>
+      <div class="manual-table-wrap">
+        <table class="manual-table">
+          <thead>
+            <tr><th>Field</th><th>Enter</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Name (optional)</td><td>The card's title, also the name <code>chan devserver</code> commands accept.</td></tr>
+            <tr><td>Address</td><td>Where Chan Desktop dials: <code>localhost:9901</code>, <code>127.0.0.1:8787</code>, or a full URL with its token, <code>http://host:8787/?t=TOKEN</code>.</td></tr>
+            <tr><td>Connect script (optional)</td><td>A command that brings the devserver up and holds the tunnel open. It runs in a <a href="#control-terminal">control terminal</a>. See <a href="#recipes">Recipes</a>.</td></tr>
+            <tr><td>Auto-hide control terminal on success</td><td>Tick it to hide the control terminal once connected.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </li>
+    <li>
+      <h3>Add and connect</h3>
+      <p>Click <strong>Add devserver</strong>. The new card comes to the front: click the connection control in its header, or select the header and press <kbd>o</kbd>.</p>
+    </li>
+  </ol>
+  <figure class="launcher-manual">
+    <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
+    <figcaption>The Add devserver card, turned over to its form. This is a live mock: fill it in, add, and connect.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="recipes">
+  <h2><a class="heading-anchor" href="#recipes">Recipes</a></h2>
+  <p>Copy the Address and Connect script for your route. Replace <code>user@host</code> with your ssh destination.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Route</th><th>Address</th><th>Connect script</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ssh</td><td><code>localhost:9901</code></td><td><code>ssh -L localhost:9901:127.0.0.1:8787 user@host '~/.local/bin/chan devserver join --port 8787'</code></td></tr>
+        <tr><td>Eternal Terminal</td><td><code>localhost:9901</code></td><td><code>et --tunnel 9901:8787 --command '~/.local/bin/chan devserver join --port 8787' user@host</code></td></tr>
+        <tr><td>Lima, from macOS</td><td><code>localhost:8787</code></td><td><code>limactl shell default ~/.local/bin/chan devserver join</code></td></tr>
+        <tr><td>WSL, from Windows</td><td><code>localhost:8787</code></td><td><code>wsl ~/.local/bin/chan devserver join</code></td></tr>
+        <tr><td>Direct: LAN, a VM or container port</td><td><code>http://host:8787/?t=TOKEN</code></td><td>None</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><code>9901</code> is the tunnel's local end and must match the Address; <code>8787</code> is the devserver's port. For a second devserver, pick another free local port and use it in both.</li>
+    <li>Eternal Terminal must be installed on both machines: see its <a href="https://eternalterminal.dev/usermanual/">setup guide</a>.</li>
+    <li>For a direct address, bind the devserver where this machine reaches it, or publish its port, and copy the URL from <code>chan devserver status</code> there.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="control-terminal">
+  <h2><a class="heading-anchor" href="#control-terminal">The control terminal</a></h2>
+  <p>Connecting opens a window titled <code>Control Terminal - NAME</code> that runs the connect script through your login shell. Answer ssh's prompts there. <code>join</code> prints a <code>CHAN_DEVSERVER_TOKEN=</code> line; Chan Desktop reads the token from it and dials the Address.</p>
+  <p>The control terminal is the connection: it stays open while the script runs, as the first row on the devserver's card.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You do</th><th>The connection</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Tick <strong>Auto-hide control terminal on success</strong></td><td>Stays up; the control terminal hides once connected. Show it again from its row.</td></tr>
+        <tr><td>Close the connected control terminal, then choose <strong>Hide</strong></td><td>Stays up.</td></tr>
+        <tr><td>Close the connected control terminal, then choose <strong>Close</strong></td><td>Ends with the script, and the devserver's windows here close. Everything keeps running on the devserver.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="disconnect">
+  <h2><a class="heading-anchor" href="#disconnect">Disconnect and reconnect</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>When</th><th>You see</th><th>Do</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>You press <strong>Disconnect</strong>, <kbd>o</kbd> on the card</td><td>The devserver's windows close here. Terminals, programs, workspaces and layouts keep running there.</td><td>Connect again: every shown window reopens where it was.</td></tr>
+        <tr><td>The tunnel drops while the script still runs</td><td>The windows show <code>reconnecting to the chan server</code> and keep trying.</td><td>Wait, or press <strong>Reconnect</strong> to run the script again, or <strong>Abandon</strong> to disconnect.</td></tr>
+        <tr><td>The script exits with an error, as ssh does when the network goes</td><td>The windows close. The control terminal stays, with the script's last words and <code>process exited (255); press Ctrl+D to close this tab</code>, and its row flashes.</td><td>Read why, close the control terminal, and connect again.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="connect-reconnecting" data-shot-kind="still">screenshot to capture<small>a devserver's terminal window greyed under the "reconnecting to the chan server" overlay, with its timer, Reconnect and Abandon</small></div>
+    <figcaption>A dropped tunnel: the window keeps trying and offers Reconnect and Abandon.</figcaption>
+  </figure>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="connect-script-exited" data-shot-kind="still">screenshot to capture<small>a Control Terminal window after ssh lost the connection: ssh's error, then "process exited (255); press Ctrl+D to close this tab"</small></div>
+    <figcaption>A script that exited: its control terminal stays open to say why.</figcaption>
+  </figure>
+  <p>An ssh tunnel dies when the laptop sleeps or the Wi-Fi changes; Eternal Terminal reconnects across both. Chan Desktop does not connect devservers by itself at start.</p>
+</section>
+
+<section class="manual-block" id="remote-workspaces">
+  <h2><a class="heading-anchor" href="#remote-workspaces">Open remote terminals and workspaces</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>On the devserver's card</th><th>Key</th><th>Opens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>New terminal</strong>, in the header</td><td><kbd>t</kbd></td><td>A terminal window on the devserver.</td></tr>
+        <tr><td><strong>New window</strong>, on a workspace row</td><td><kbd>w</kbd></td><td>A window of that workspace.</td></tr>
+        <tr><td><strong>New terminal window</strong>, on a workspace row</td><td><kbd>t</kbd></td><td>A window of that workspace that starts with a terminal.</td></tr>
+        <tr><td>The power button, on a workspace row</td><td><kbd>o</kbd></td><td>Turns the workspace on or off.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The command launcher's Computers scope does the same from any window on the devserver. To add a workspace, run <code>chan open PATH</code> in a devserver terminal, or this here:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan serve /srv/notes --on lab</b></code>{{copyButton}}</div>
+  <p>Remote windows survive a disconnect and a restart of Chan Desktop: connect again and carry on. On a Linux devserver run by systemd, its terminals also survive a restart or an upgrade of the devserver: see <a href="/manual/systemd/#restart">Restart without losing terminals</a>. To copy, move files and forward ports across the connection, see <a href="/manual/remote-tools/">Tunnels, transfers and clipboard</a>.</p>
+</section>
+
+<section class="manual-block" id="cli">
+  <h2><a class="heading-anchor" href="#cli">From a terminal</a></h2>
+  <p>These need Chan Desktop running. <code>NAME</code> is the name or URL <code>chan devserver ls</code> shows.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan devserver register URL --name NAME --script CMD</code></td><td>Adds a devserver, as the form does, without connecting.</td></tr>
+        <tr><td><code>chan devserver ls</code></td><td>Lists the devservers with their state. <code>--json</code> for scripts.</td></tr>
+        <tr><td><code>chan devserver connect NAME</code></td><td>Connects, as <kbd>o</kbd> does. Prompts appear on the Computers screen.</td></tr>
+        <tr><td><code>chan devserver disconnect NAME</code></td><td>Disconnects. The devserver keeps running.</td></tr>
+        <tr><td><code>chan devserver forget NAME</code></td><td>Removes it and its stored token. A connected one is refused unless you add <code>--force</code>.</td></tr>
+        <tr><td><code>chan serve PATH --on NAME</code></td><td>Serves a directory of the devserver as a workspace.</td></tr>
+        <tr><td><code>chan close PATH --on NAME</code></td><td>Stops serving it. It stays registered there.</td></tr>
+        <tr><td><code>chan workspace forget PATH --on NAME</code></td><td>Unregisters it on the devserver. Its files stay.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Keep connect scripts in the foreground, as the form's tip says (<code>ssh -N</code>). A script that exits cleanly right after connecting, such as one that starts a background tunnel, leaves the connection up; one that exits cleanly later disconnects.</li>
+      <li>A token in the Address is stored and wins over the one the script prints, so a script can be only the tunnel, such as <code>ssh -N -L ...</code>, to a devserver already running as a service. After <code>rotate-token</code>, edit the devserver and paste the new URL.</li>
+      <li>The stored token is never shown again. An edit with a bare <code>host:port</code> keeps it, and a URL with an empty <code>?t=</code> clears it.</li>
+      <li>With no script and no token, Chan Desktop reads the token and port of the devserver that shares its own chan home on this machine.</li>
+      <li>Click a devserver's name on its card to edit it. A connected devserver's settings are read-only: disconnect first.</li>
+      <li>While a dead control terminal is open, Connect stays off and says to close it first.</li>
+      <li>A devserver whose window feed stays silent is marked unreachable on its card; disconnect and connect again.</li>
+      <li>The control terminal's title uses the Name, or <code>host:port</code> when there is none.</li>
+      <li>A devserver's first start opens one terminal window, titled with the remote host's name.</li>
+      <li>In the Lima recipe, <code>default</code> is the name of the Lima instance.</li>
+      <li>Eternal Terminal signs in over ssh, then reconnects on its own port, normally 2022.</li>
+      <li>Chan Desktop and the devserver must speak the same management protocol; on a mismatch, update whichever is older.</li>
+      <li>Devservers that come from a gateway are listed by <code>chan devserver ls</code> and marked, but only the Gateways screen manages them.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/remote-tools/"><strong>Tunnels, transfers and clipboard</strong><span>Forward ports, move files and copy between the two machines.</span></a>
+    <a class="next-card" href="/manual/collaboration/"><strong>Collaboration</strong><span>See who else is connected and hand over leadership.</span></a>
+    <a class="next-card" href="/manual/computers/"><strong>Computers screen</strong><span>Every machine, devserver and window, with its keys.</span></a>
+  </div>
+</section>

@@ -1,0 +1,76 @@
+<section class="manual-block" id="layers">
+  <h2><a class="heading-anchor" href="#layers">Five layers</a></h2>
+  <p>chan is one binary that runs in five layers. Each runs on the one before it and adds to it, so you can stop at any of them.</p>
+    <figure class="doc-diagram">
+    <div class="dg-row">
+      <div class="dg-node"><small>Layer 3, this machine</small><strong>Chan Desktop</strong><span>Native windows and the Computers screen.</span>
+        <div class="dg-inner"><small>Layer 2, a library</small><ul><li>Workspaces (layer 1)</li><li>Standalone terminals</li></ul></div>
+      </div>
+      <div class="dg-links"><span>an address,</span><span>or a connect script</span><span>such as ssh</span></div>
+      <div class="dg-node"><small>Layer 4, another machine</small><strong>A devserver</strong><span>Runs headless and keeps running.</span>
+        <div class="dg-inner"><small>A library</small><ul><li>Workspaces</li><li>Standalone terminals</li></ul></div>
+      </div>
+    </div>
+    <div class="dg-below"><span>&darr; signs in</span><span>dials out &darr;</span></div>
+    <div class="dg-node"><small>Layer 5, hosted by someone</small><strong>A gateway</strong><span>Publishes devservers behind sign-in, for you and the accounts you share with.</span></div>
+    <figcaption>A browser can stand in for Chan Desktop: chan serve opens one workspace in it, and a devserver or a gateway shows it the Computers screen.</figcaption>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Layer</th><th>What runs</th><th>What it adds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1. A workspace</td><td><code>chan serve PATH</code></td><td>One workspace in a browser: terminals, editor, file browser, search, graph and <code>cs</code>.</td></tr>
+        <tr><td>2. A library</td><td>Chan Desktop's built-in server, or <code>chan devserver</code></td><td>Many workspaces, standalone terminals over the whole machine, and the Computers screen.</td></tr>
+        <tr><td>3. Chan Desktop</td><td>The desktop app</td><td>Native windows, the <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code> commands, and default apps.</td></tr>
+        <tr><td>4. A devserver elsewhere</td><td><code>chan devserver</code> on another machine</td><td>The same library, reached by address, by a connect script such as ssh, or from a browser. It keeps running when you disconnect.</td></tr>
+        <tr><td>5. A gateway</td><td>Services you host</td><td>Sign-in, sharing, and an always-on address for each devserver.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="workspace">
+  <h2><a class="heading-anchor" href="#workspace">Workspace</a></h2>
+  <p>A workspace is a directory chan treats as a project, with search, an editor, a graph and agent teams over it. What chan derives from it lives under the chan home, <code>~/.chan</code>, never in the directory. <code>chan serve PATH</code> opens one, in your browser when no Chan Desktop or devserver runs. See <a href="/manual/workspaces/">Workspaces and chan serve</a>.</p>
+</section>
+
+<section class="manual-block" id="windows">
+  <h2><a class="heading-anchor" href="#windows">Windows, panes, tabs and sides</a></h2>
+  <p>A window holds panes; each pane has two sides, A and B, each a strip of tabs. A tab is one app, such as a terminal or the editor. Windows belong to the server, so a window can reload, hide, or show on another computer while its shells keep running. See <a href="/manual/navigation/">Windows, panes and tabs</a>.</p>
+</section>
+
+<section class="manual-block" id="library">
+  <h2><a class="heading-anchor" href="#library">Library</a></h2>
+  <p>A library is everything one chan server holds under a chan home: workspaces, standalone terminals and windows. Chan Desktop runs one on your machine, and each devserver runs one. A standalone terminal is a window with no workspace, whose file browser and editor reach the whole machine. See <a href="/manual/standalone/">Standalone terminal, files and editor</a>.</p>
+</section>
+
+<section class="manual-block" id="computers">
+  <h2><a class="heading-anchor" href="#computers">Computers screen</a></h2>
+  <p>The Computers screen lists this machine, each devserver and each tmux connection, with their workspaces and windows. Chan Desktop slides it in over any window; a browser at a devserver's address shows the same screen. See <a href="/manual/computers/">Computers screen</a>.</p>
+</section>
+
+<section class="manual-block" id="desktop">
+  <h2><a class="heading-anchor" href="#desktop">Chan Desktop</a></h2>
+  <p>Chan Desktop is the app: it runs a library on this machine and shows its windows, and your devservers' windows, as native windows. It installs <code>chan</code>, <code>cs</code> and, outside Windows, <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code>. On Linux it can be your default terminal, file browser and Markdown editor.</p>
+</section>
+
+<section class="manual-block" id="devserver">
+  <h2><a class="heading-anchor" href="#devserver">Devserver</a></h2>
+  <p>A devserver is a library running headless on another machine, as a user service that <code>chan devserver start</code> installs, behind a token. Chan Desktop reaches it by an address and a connect script, such as <code>ssh -L</code>, and a browser by its URL. Disconnecting leaves everything running there. See <a href="/manual/remote/">Remote overview</a> and <a href="/manual/devserver/">Run a devserver</a>.</p>
+</section>
+
+<section class="manual-block" id="gateway">
+  <h2><a class="heading-anchor" href="#gateway">Gateway</a></h2>
+  <p>A gateway is a set of services you run yourself; chan is not an online service. A devserver dials out to it with a personal access token, and the gateway publishes it behind sign-in to you and the accounts you share it with. See <a href="/manual/gateway/">Connect to a gateway</a>, or <a href="/gateway/">Host a gateway</a> to run one.</p>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/install/#first-run"><strong>First run</strong><span>Open Chan Desktop, the Computers screen and a first workspace.</span></a>
+    <a class="next-card" href="/manual/terminal/"><strong>Terminal basics</strong><span>Tabs, find, copy and paste, and what a terminal runs.</span></a>
+    <a class="next-card" href="/manual/remote/"><strong>Remote overview</strong><span>Which route to a devserver fits, and what each one needs.</span></a>
+  </div>
+</section>

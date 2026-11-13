@@ -1,152 +1,77 @@
 <section class="manual-block" id="install">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#install">Install</a></h2>
-  </div>
-  <p><strong>Chan Desktop</strong> is the place to start: a small binary that bundles the terminal emulator and the workspace UI. Grab it for your platform from the <a href="/install/">install page</a>.</p>
-  <p>On a Mac, Chan Desktop requires macOS 14 (Sonoma) or later. The app updates itself; an update whose published minimum macOS version is above the running version is refused, leaving the installed app in place. Update macOS before installing that update.</p>
-  <p>On FreeBSD, Chan Desktop builds from source; there is no package to download. Install the toolkit and the build tools:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>#</span><b data-copy-value>pkg install git rust npm gmake pkgconf webkit2-gtk_41</b></code>
-    {{copyButton}}
-  </div>
-  <p>Then, as your user, build the web bundles and the desktop from a chan checkout:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>git clone https://github.com/fiorix/chan &amp;&amp; cd chan</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>gmake web &amp;&amp; cargo build --release -p chan-desktop</b></code>
-    {{copyButton}}
-  </div>
-  <p>The web bundles' build tools ship native code for FreeBSD on amd64 only. On arm64, run <code>make web</code> in a checkout on a Linux or macOS machine, copy its <code>web/dist</code> and <code>web-launcher/dist</code> into the FreeBSD checkout, and run only the <code>cargo build</code>.</p>
-  <p>Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
-</section>
-
-<section class="manual-block" id="open-from-finder">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#open-from-finder">Open Markdown files from Finder</a></h2>
-  </div>
-  <p>On macOS, Chan Desktop is listed as an editor of Markdown files (<code>.md</code> and <code>.markdown</code>) without becoming the app that opens them by default. To open one in Chan, Control-click it in Finder and choose <strong>Open With &rarr; Chan</strong>.</p>
-  <p>To have a double click open every Markdown file in Chan, select one in Finder, choose <strong>File &rarr; Get Info</strong> (<code>Cmd+I</code>), pick <strong>Chan</strong> under <strong>Open with</strong>, and click <strong>Change All...</strong>. In Terminal, <code>open notes.md</code> then opens the file in Chan too, and <code>open -a Chan notes.md</code> opens it in Chan whatever the default is.</p>
-  <p>However it is opened, the file opens as <code>cs open notes.md</code> opens it inside chan: in the editor of a standalone window, one already open or a new one, brought to the front. A file opened while Chan is not running starts it and opens once Chan has reopened the windows of its last session, in a window of its own beside them. Several files opened at once open in one window.</p>
-  <p>In Terminal, <code>chan-edit notes.md</code> does what Finder's open does, and <code>chan-files ~/notes</code> opens a directory in a standalone window's file browser. Chan Desktop installs both commands beside <code>chan</code> and <code>cs</code>.</p>
-</section>
-
-<section class="manual-block" id="default-terminal">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#default-terminal">Default terminal on Linux</a></h2>
-  </div>
-  <p>Linux desktops that open terminals through <a href="https://github.com/Vladimir-csp/xdg-terminal-exec">xdg-terminal-exec</a>, such as Omarchy, can open them in Chan Desktop: the terminal key binding, TUIs, and installer scripts alike. The Arch, Ubuntu, Fedora, and Nix packages install the desktop entry this needs, <code>chan-term.desktop</code>, and the <code>chan-term</code> command it runs. The entry stays out of the application menu. The AppImage carries the entry only inside the image, where xdg-terminal-exec does not look, so the AppImage cannot be chosen.</p>
-  <p>xdg-terminal-exec runs the first valid entry in <code>~/.config/xdg-terminals.list</code>. Make Chan Desktop's terminal that entry:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>echo chan-term.desktop &gt; ~/.config/xdg-terminals.list</b></code>
-    {{copyButton}}
-  </div>
-  <p class="minor">This replaces the list, as Omarchy's terminal picker does; list other terminals on the lines below it to keep a fallback. A list named for your desktop, such as <code>~/.config/hyprland-xdg-terminals.list</code>, takes precedence when it exists.</p>
-  <p>Check the choice. This prints <code>chan-term.desktop</code>:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-terminal-exec --print-id</b></code>
-    {{copyButton}}
-  </div>
-  <p>Then open a shell in your home directory, and a program in a window of its own:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-terminal-exec --dir="$HOME"</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-terminal-exec --app-id=TUI.float -e top</b></code>
-    {{copyButton}}
-  </div>
-  <p>How <code>chan-term</code> takes each launch:</p>
-  <ul>
-    <li>A launch with no command, like Omarchy's Super+Return, opens your shell in the directory <code>--dir</code> names, or in the current one. The shell opens in a new terminal window of Chan Desktop, one that is not restored at its next launch; when Chan Desktop is not running, the launch starts it, and that terminal is its first window. Over SSH, or with <code>CHAN_NO_DESKTOP_HANDOFF</code> set, such a launch opens nothing and says why.</li>
-    <li>A launch with a command runs it in a window and process of its own, apart from a running Chan Desktop, and exits with the command's exit code when it ends. <code>--hold</code> keeps the window open after the command exits, until you close it. A command that is not on your <code>PATH</code> exits with status 127 and opens no window.</li>
-    <li><code>--app-id</code> sets the window's Wayland app id, or its X11 class, so compositor window rules can match it: Omarchy floats <code>TUI.float</code>. <code>--title</code> sets the window title. Either one also gives the launch a process of its own.</li>
-  </ul>
-  <p class="minor">xdg-terminal-exec maps its options onto <code>chan-term</code>'s, which also work directly: <code>chan-term [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]</code>, and <code>chan-term --help</code> describes them. Chan Desktop installs <code>chan-term</code> beside <code>chan</code> and <code>cs</code>. The <code>chan-term</code> of the <code>chan</code> command-line packages cannot open a window of its own: it opens your shell in the running Chan Desktop, starts none, and refuses a launch with a command, <code>--hold</code>, <code>--app-id</code> or <code>--title</code>.</p>
-</section>
-
-<section class="manual-block" id="default-file-browser">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#default-file-browser">File browser and Markdown editor on Linux</a></h2>
-  </div>
-  <p>Chan Desktop can be the application <code>xdg-open</code> and your file manager's Open With use for a directory or a Markdown file, which then opens in a standalone window of the running app: a directory in its file browser, a Markdown file in its editor. The Arch, Ubuntu, Fedora, and Nix packages install the two desktop entries this needs, <code>chan-files.desktop</code> for directories and <code>chan-edit.desktop</code> for Markdown, and the <code>chan-files</code> and <code>chan-edit</code> commands they run. The entries stay out of the application menu. Installing the entries sets no default of its own, and a desktop that already names an application for the exact type keeps it. Where nothing names one, the first registered application is used, and that can be Chan Desktop: GNOME's text editors declare plain text, which Markdown is a kind of, so on a stock GNOME a <code>.md</code> file opens in Chan Desktop once it is installed; and a window manager whose <code>xdg-open</code> finds no default for directories can pick Chan Desktop as the file browser (xdg-utils 1.1 reads only <code>~/.config/mimeapps.list</code>; 1.2 also reads the system defaults lists). Choose with <code>xdg-mime default</code> either way.</p>
-  <p>Make Chan Desktop the default Markdown editor, the default file browser, or both:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-mime default chan-edit.desktop text/markdown</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-mime default chan-files.desktop inode/directory</b></code>
-    {{copyButton}}
-  </div>
-  <p>Check a choice. This prints <code>chan-edit.desktop</code>:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>xdg-mime query default text/markdown</b></code>
-    {{copyButton}}
-  </div>
-  <p>Then <code>xdg-open notes.md</code> opens the note in Chan Desktop, starting it when it is not running. To go back, run <code>xdg-mime default</code> with the entry you used before, such as your file manager's.</p>
+  <h2><a class="heading-anchor" href="#install">Install</a></h2>
+  <p>Download Chan Desktop for macOS, Windows or Linux from the <a href="/install/">install page</a>, which also lists each platform's packages and the <code>chan</code> command for servers. On a Mac it needs macOS 14 (Sonoma) or later, and it refuses an update that needs a newer macOS, keeping the installed app.</p>
 </section>
 
 <section class="manual-block" id="first-run">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#first-run">First run: a terminal and the Computers screen</a></h2>
-  </div>
-  <p>Chan Desktop opens a standalone terminal window on first launch. Your machines, workspaces, and windows live on the <strong>Computers</strong> screen, which slides in over the window you are in:</p>
-  <ul>
-    <li>On macOS, choose <strong>View → Toggle Launcher</strong> or press <code>Cmd+P</code>.</li>
-    <li>On Windows and Linux, press <code>Ctrl+Shift+P</code>. The menu bar, with the same View item, shows while the Computers screen is open.</li>
-    <li>Press the shortcut again, or <code>Esc</code>, to return to the window.</li>
-  </ul>
-  <p>The Computers screen is a carousel of cards. Turn it with the arrows at its sides or the Left and Right keys:</p>
-  <ul>
-    <li><strong>All windows</strong>, the first card, lists every window on every machine, shown or hidden.</li>
-    <li><strong>This machine</strong> has two buttons: <strong>New terminal</strong> opens a standalone terminal window, and <strong>New workspace</strong> registers a directory as a workspace. Its terminals and workspaces are listed below them.</li>
-    <li>Each devserver you add gets its own card, and <strong>Add devserver</strong> is the last card. See <a href="/manual/devserver/#connect">Connect from the main window</a>.</li>
-  </ul>
-  <p>The screen works from the keyboard too; see <a href="/manual/navigation/#windows">Windows and the Computers screen</a>.</p>
-  <p>Chan Desktop runs once per user: starting it again while it is running opens no second copy. A second start, from the app menu or <code>chan-desktop</code> in a shell, brings the running app forward: its last focused window is raised, out of the taskbar if it was minimized, or a terminal window opens when no window is shown or about to be. On Linux, <code>chan-term</code> opens a new terminal window in the running app instead, one that is not restored at its next launch. On Windows, a start while the running app is still starting waits for it, up to thirty seconds, and then brings it forward. Each Windows account runs a copy of its own: two accounts on one machine never keep each other's Chan Desktop from starting, whatever their user names, and neither one's <code>chan</code> commands reach the other's copy, elevated or not. On macOS, the Dock icon of the running app brings it forward, and opens a terminal window when no window is shown. A start while the running app is quitting waits for it to exit and then starts normally; after twenty seconds of waiting it gives up, opens nothing, and shows a message saying Chan is still shutting down. If the running app does not respond at all, a second start opens nothing either and, within ten seconds (on Windows, forty when the running app never finished starting), shows a message saying Chan is not responding. To start again, quit the running app, or end it if it does not quit (Force Quit on macOS, Task Manager on Windows, the <code>chan-desktop</code> process on Linux), then start Chan Desktop. Started from a terminal, either start prints the reason there instead of showing the message; both exit with status 1.</p>
-  <figure class="launcher-manual">
-    <div class="launcher-demo-wrap">
-      <div id="launcher-demo" class="launcher-demo-mount" data-variant="empty" data-hints="true" aria-label="Interactive Computers screen demo"></div>
-      <div class="launcher-fallback shot-placeholder-frame">interactive demo (enable JavaScript)</div>
-      <div class="manual-callouts" aria-hidden="true">
-        <p class="manual-callout callout-terminal"><strong>New terminal</strong> opens a standalone terminal window.</p>
-        <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a directory into a workspace.</p>
+  <h2><a class="heading-anchor" href="#first-run">First run</a></h2>
+  <ol class="doc-steps">
+    <li>
+      <h3>Open Chan Desktop</h3>
+      <p>It opens a standalone terminal: a window with no workspace behind it, titled <code>Terminal Window 1</code>, with your shell in your home directory.</p>
+    </li>
+    <li>
+      <h3>Show the Computers screen</h3>
+      <p>The screen slides in over the window and lists this machine, your devservers and every window. Press the same key, or <kbd>Esc</kbd>, to go back.</p>
+      <div class="manual-table-wrap">
+        <table class="manual-table">
+          <thead>
+            <tr><th>To</th><th>macOS</th><th>Windows, Linux</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Show or hide the Computers screen</td><td><kbd>Cmd+P</kbd>, or <strong>View → Computers</strong></td><td><kbd>Ctrl+Shift+P</kbd></td></tr>
+          </tbody>
+        </table>
       </div>
-    </div>
-    <figcaption>The Computers screen before any workspace exists. This is a live mock: click the buttons.</figcaption>
-  </figure>
+      <figure class="launcher-manual">
+        <div class="launcher-demo-wrap">
+          <div id="launcher-demo" class="launcher-demo-mount" data-variant="empty" data-hints="true" aria-label="Interactive Computers screen demo"></div>
+          <div class="launcher-fallback shot-placeholder-frame">interactive demo (enable JavaScript)</div>
+          <div class="manual-callouts" aria-hidden="true">
+            <p class="manual-callout callout-terminal"><strong>New terminal</strong> opens a standalone terminal window.</p>
+            <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a directory into a workspace.</p>
+          </div>
+        </div>
+        <figcaption>The Computers screen before any workspace exists. This is a live mock: click the buttons.</figcaption>
+      </figure>
+    </li>
+    <li>
+      <h3>Open another terminal</h3>
+      <p><strong>New terminal</strong> on This machine's card opens another standalone terminal window, listed under <strong>Terminals</strong> on the card.</p>
+    </li>
+    <li>
+      <h3>Make a workspace</h3>
+      <p><strong>New workspace</strong> turns a directory into a workspace, with search, an editor, a file browser and a graph over it. Or run this in a chan terminal at the root of a project, such as a git repository:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan open .</b></code>{{copyButton}}</div>
+      <p>The workspace appears under <strong>Workspaces</strong> on This machine's card. The <strong>New window</strong> button on its row opens a window of it; a pane's menu lists the apps a tab can open.</p>
+    </li>
+  </ol>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>On Windows and Linux the window's menu bar, with the same <strong>View → Computers</strong> item, shows only while the Computers screen is open.</li>
+      <li>Inside a git repository <code>chan open</code> expects the repository's root; add <code>--here</code> to open a subdirectory.</li>
+      <li>Quit and reopen Chan Desktop and your windows and layouts come back. Terminals on this machine keep their layout and start fresh shells.</li>
+      <li>Starting Chan Desktop while it runs opens no second copy: the running one comes forward, and opens a terminal window when none is shown.</li>
+    </ul>
+  </details>
 </section>
 
-<section class="manual-block" id="workspaces">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#workspaces">Workspaces</a></h2>
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/concepts/"><strong>Concepts</strong><span>Workspaces, libraries, windows, devservers and gateways, and how they fit.</span></a>
+    <a class="next-card" href="/manual/computers/"><strong>Computers screen</strong><span>Every machine and window on one screen, from the mouse or the keyboard.</span></a>
+    <a class="next-card" href="/manual/workspaces/"><strong>Workspaces</strong><span>Open a directory as a workspace and turn it on and off.</span></a>
   </div>
-  <p>A workspace is a directory that chan treats as a project:</p>
-  <ul>
-    <li>The content is indexed for search.</li>
-    <li>Markdown files get autocompletion for linking to each other.</li>
-    <li>chan builds a project graph from the links, tags, and mentions in your documents, plus language and size stats for the code.</li>
-    <li>Each workspace keeps its own set of windows, panes, and tabs.</li>
+</section>
+
+<section class="manual-block" id="moved">
+  <h2><a class="heading-anchor" href="#moved">Moved</a></h2>
+  <ul class="moved-list">
+    <li id="open-from-finder"><a href="/manual/standalone/#open-from-finder">Open Markdown files from Finder</a></li>
+    <li id="default-terminal"><a href="/manual/standalone/#default-terminal">Default terminal on Linux</a></li>
+    <li id="default-file-browser"><a href="/manual/standalone/#default-file-browser">File browser and Markdown editor on Linux</a></li>
+    <li id="workspaces"><a href="/manual/workspaces/">Workspaces</a></li>
   </ul>
-  <p>Any directory can become a workspace. For a first try, start from an existing git repo. In a chan terminal:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cd /path/to/your-project</b></code>
-    {{copyButton}}
-  </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan open .</b></code>
-    {{copyButton}}
-  </div>
-  <p class="minor"><code>chan open</code> is the workspace-opening alias of <code>chan serve</code>, the command that registers and serves a workspace. Inside a repository, chan expects its root. To open a subdirectory inside one, add <code>--here</code>.</p>
-  <p><code>chan open {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
-  <p>Back on the Computers screen (<code>Cmd+P</code> on macOS, <code>Ctrl+Shift+P</code> on Windows and Linux), the new workspace appears on This machine's card with its power toggle On: the workspace is alive, indexed, and keeping the state of your windows, panes, and tabs. Click <strong>New window of your-project</strong> and the real power of chan begins:</p>
-  <ul>
-    <li>The pane's hamburger menu lists the built-in apps: dashboard, diagram, draft, file browser, graph, slide deck, team, and terminal.</li>
-    <li>The command launcher (<code>Cmd+K</code> on macOS, <code>Ctrl+Alt+K</code> on Windows and Linux) works here too, with the window's own commands first. Its <strong>Computers</strong> scope reaches everything on the same machine: a new terminal window, a new window of any of its workspaces, and every window to focus, show, hide, or close. See <a href="/manual/navigation/#command-launcher">The command launcher</a>.</li>
-  </ul>
-  <p>You can quit and reopen Chan Desktop and your windows and layouts are restored. Local terminals keep their layout, but their shells are restarted.</p>
-  <p>Everything you can do in Chan Desktop, standalone terminals and workspaces alike, also works on a remote machine through Chan Devserver.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/design.md#the-workspace">design.md</a> describes what a workspace is made of and how it is served, and <a href="https://github.com/fiorix/chan/blob/main/crates/chan-workspace/design.md">crates/chan-workspace/design.md</a> the core behind it.</p>
 </section>

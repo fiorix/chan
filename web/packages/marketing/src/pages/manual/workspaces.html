@@ -1,0 +1,168 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="workspaces-open" data-shot-kind="clip">clip to capture<small>a Chan Desktop terminal in a git repository runs chan open .; a window of the workspace opens; Computers then shows it On under This machine</small></div>
+  <figcaption>One command turns a directory into a workspace and opens a window of it.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Turn any directory into a workspace with <code>chan open .</code> or the <strong>New workspace</strong> button.</li>
+    <li>Search it, browse its graph, and run agent teams in it, beside its terminals.</li>
+    <li>Keep each workspace's windows, panes, and tabs, across restarts of Chan Desktop.</li>
+    <li>Hand a workspace to Chan Desktop or a devserver from any shell, or serve it on its own to a browser.</li>
+    <li>Turn a workspace off to end its terminals, and on again with its index and layout intact.</li>
+    <li>See which workspaces are served, and by what, with <code>chan ps</code>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="what">
+  <h2><a class="heading-anchor" href="#what">What a workspace is</a></h2>
+  <p>A workspace is a directory registered with chan. Its files stay ordinary files. Any directory can be one; a git repository is a good first try.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>In a window of</th><th>Standalone terminal</th><th>Workspace</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Terminals and <code>cs</code></td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>File browser and editor</td><td>The whole machine</td><td>The workspace directory</td></tr>
+        <tr><td><a href="/manual/search/">Search</a> and the <a href="/manual/graph/">graph</a></td><td>No</td><td>Yes: the content is indexed, and links, tags, and mentions make the graph</td></tr>
+        <tr><td><a href="/manual/teams/">Agent teams</a> and <code>cs export</code></td><td>No</td><td>Yes</td></tr>
+        <tr><td><a href="/manual/dashboard/">Dashboard</a></td><td>Metrics and About</td><td>Metrics, Workspace, Search, and About</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A workspace window's pane menu lists its apps: dashboard, diagram, draft, file browser, graph, slide deck, team, and terminal. Each workspace keeps its own windows, panes, and tabs, and Chan Desktop restores them at its next launch.</p>
+</section>
+
+<section class="manual-block" id="open">
+  <h2><a class="heading-anchor" href="#open">Open a workspace</a></h2>
+  <p>In a Chan terminal, from the directory:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan open .</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Way</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan open PATH</code></td><td>Registers PATH and serves it. A missing directory is created first.</td></tr>
+        <tr><td><code>chan open PATH --here</code></td><td>Opens a subdirectory of a repository as a workspace of its own. Without <code>--here</code>, a path inside a Git, Mercurial, or Subversion working tree is refused, and the message names the repository root.</td></tr>
+        <tr><td><strong>New workspace</strong> on a computer's card in Computers</td><td>Asks for a folder path (<strong>Browse...</strong> on the desktop) and an optional display name, then <strong>Create workspace</strong>.</td></tr>
+        <tr><td><code>chan workspace add PATH</code></td><td>Registers PATH without serving it.</td></tr>
+        <tr><td><code>chan open PATH --on NAME</code></td><td>Opens a path on a connected devserver. See <a href="/manual/connect/#remote-workspaces">Remote workspaces</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="serve">
+  <h2><a class="heading-anchor" href="#serve">What chan serve does</a></h2>
+  <p><code>chan open</code> is another name for <code>chan serve</code>. One process serves a workspace at a time, so the command first looks for a Chan Desktop or devserver of yours that can take it.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Run it in</th><th>It</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A Chan Desktop terminal</td><td>Hands the workspace to Chan Desktop, which opens it in a window, and exits.</td></tr>
+        <tr><td>A devserver terminal</td><td>Registers it with that devserver, with a window ready to open from the devserver's Computers screen, and exits.</td></tr>
+        <tr><td>Any other shell, with Chan Desktop or a devserver running</td><td>Hands it to the one that is running, and exits.</td></tr>
+        <tr><td>Any other shell, with neither running</td><td>Serves it itself on <code>127.0.0.1:8787</code> behind a token, opens your browser on the URL, and runs until <kbd>Ctrl+C</kbd>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>--standalone</code> always serves it here, and <code>--desktop</code> or <code>--devserver</code> picks the receiver. The standalone server's flags and its token are on <a href="/manual/browser/#standalone">Chan in a browser</a>.</p>
+</section>
+
+<section class="manual-block" id="state">
+  <h2><a class="heading-anchor" href="#state">Where its state lives</a></h2>
+  <p>chan writes what it derives from a workspace under the chan home, <code>~/.chan</code>, never inside the directory. Set <code>CHAN_HOME</code> to use another directory instead.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>What</th><th>Where, under the chan home</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The registered workspaces</td><td><code>config.toml</code></td></tr>
+        <tr><td>Which workspaces are on</td><td><code>workspaces.json</code>; a devserver's is <code>devserver/workspaces.json</code></td></tr>
+        <tr><td>Search index, graph, code reports, saved layouts, drafts, trash, and the access token</td><td><code>workspaces/KEY/</code>, one directory per workspace. <code>chan workspace ls</code> prints each key.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="on-off">
+  <h2><a class="heading-anchor" href="#on-off">Turn a workspace on or off</a></h2>
+  <p>Each workspace is a row under <strong>Workspaces</strong> on its computer's card in the <a href="/manual/computers/">Computers screen</a>. On means served: indexed, watched, and ready for windows. Off means registered but not served.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="workspaces-row" data-shot-kind="still">screenshot to capture<small>This machine's Workspaces list: one row On with New window, New terminal window and power lit, one row Off</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Row button</th><th>Key, on the selected row</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>New window</strong></td><td><kbd>w</kbd></td><td>Opens a window of the workspace.</td></tr>
+        <tr><td><strong>New terminal window</strong></td><td><kbd>t</kbd></td><td>Opens a window with a terminal in the workspace.</td></tr>
+        <tr><td>Power</td><td><kbd>o</kbd></td><td>Turns the workspace off or on.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Turning a workspace off:</p>
+  <ul>
+    <li>Ends its terminals. When any are running, chan asks first.</li>
+    <li>Keeps its index, its windows, and their layout for when it is on again.</li>
+    <li>Lasts: an off workspace stays off when Chan Desktop or the devserver restarts.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="list">
+  <h2><a class="heading-anchor" href="#list">List, close, and forget</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan ps</code></td><td>Lists every registered workspace and what serves it: <code>standalone</code>, <code>desktop</code>, <code>devserver</code>, or nothing (<code>free</code>). <code>--json</code> prints it for scripts.</td></tr>
+        <tr><td><code>chan workspace ls</code></td><td>Lists the registered workspaces, most recent first, with each one's key. Also takes <code>--json</code>.</td></tr>
+        <tr><td><code>chan close PATH</code></td><td>Stops serving the workspace and keeps it registered, so <code>chan open</code> brings it back.</td></tr>
+        <tr><td><code>chan workspace forget PATH</code></td><td>Stops serving it, unregisters it, and deletes its state under the chan home. Your files stay. <code>chan close --forget PATH</code> is the same.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <pre class="sample-output"><code>STATE    BY                PID  READY       GEN      PASS       ACTION     INDEXER   QUEUE  WORKSPACE
+served   desktop         41873  -           -        -          -          -             -  /home/user/notes
+free     -                   -  -           -        -          -          -             -  /home/user/archive</code></pre>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>From a plain shell with both Chan Desktop and a devserver running, a <code>chan</code> installed on its own picks the devserver, and the <code>chan</code> that Chan Desktop installs picks Chan Desktop.</li>
+      <li>With neither running, the <code>chan</code> that Chan Desktop installs starts Chan Desktop and opens the workspace there, on macOS and Linux, except over ssh.</li>
+      <li>A running Chan Desktop of another release cannot take a workspace, nor, on Windows, one still starting; <code>chan serve</code> says so and serves it itself.</li>
+      <li>With several devservers running, <code>--devserver=PORT</code> names one.</li>
+      <li>When Chan Desktop restarts, windows and layouts come back and local shells start fresh.</li>
+      <li>A row shows both states when they disagree, such as <strong>Off, running</strong> for a workspace something else is serving.</li>
+      <li>A lock in place of the power button means another chan process, such as a <code>chan serve</code> in a terminal, holds the workspace.</li>
+      <li>A workspace on a network filesystem that stops answering reads <code>unavailable</code>; open documents keep their text, and it recovers when the directory comes back.</li>
+      <li>A directory deleted or replaced while its workspace is on stays broken until you turn the workspace off and on.</li>
+      <li>With the Computers screen's checks showing, several workspaces turn on or off together; <strong>Remove</strong> unregisters them and leaves their files alone.</li>
+      <li>Chan Desktop and devservers refuse to close or forget a workspace with live terminals, with no override; close the terminals first.</li>
+      <li>A foreground <code>chan serve</code> has no such guard: <kbd>Ctrl+C</kbd> or <code>chan close</code> ends its terminals, and files, index, and layout stay.</li>
+      <li>The answer <code>workspace is still releasing; retry</code>, with exit status 75, means the workspace is off and its cleanup is still running; run the command again later.</li>
+      <li>Forgetting cannot be undone: the index, graph, trash, and layouts go, and opening the path again starts from empty.</li>
+      <li><code>--on NAME</code> reaches a workspace on a connected devserver for <code>chan close</code> and <code>chan workspace forget</code> as well.</li>
+      <li><code>chan ps</code> fills READY through QUEUE only for workspaces the local devserver serves; other rows show <code>-</code> there.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/browser/"><strong>Chan in a browser</strong><span>Serve a workspace without the desktop, here or on another machine.</span></a>
+    <a class="next-card" href="/manual/computers/"><strong>Computers screen</strong><span>Every computer, workspace, and window, and the keys that reach them.</span></a>
+    <a class="next-card" href="/manual/editor/"><strong>Editor</strong><span>Open, edit, and link the files of a workspace.</span></a>
+  </div>
+</section>

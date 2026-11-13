@@ -276,7 +276,7 @@ Source: `crates/chan-workspace/src/teams.rs`; validation in `crates/chan-server/
 
 The gateway tunnel is configured through CLI flags or environment variables, separately from the persisted files below. `--tunnel-url` (`CHAN_TUNNEL_URL`) names the ingress, `--tunnel-token` (`CHAN_TUNNEL_TOKEN`) enables the tunnel, and `--tunnel-devserver-name` (`CHAN_TUNNEL_DEVSERVER_NAME`) sets the roster label.
 
-`--tunnel-wireguard FILE` (`CHAN_TUNNEL_WIREGUARD`) optionally supplies a wg-quick file for the in-process WireGuard peer that carries the gateway dial. It defaults to unset and requires a tunnel token and URL. On Unix the file must have no group or other permission bits (`chmod 600 FILE`). See the [devserver manual](https://chan.app/manual/devserver/#wireguard) for usage and the accepted keys. Source: `crates/chan/src/cli.rs` and `crates/chan-wireguard/src/config.rs`.
+`--tunnel-wireguard FILE` (`CHAN_TUNNEL_WIREGUARD`) optionally supplies a wg-quick file for the in-process WireGuard peer that carries the gateway dial. It defaults to unset and requires a tunnel token and URL. On Unix the file must have no group or other permission bits (`chmod 600 FILE`). See the [devserver manual](https://chan.app/gateway/publish/#dial-wireguard) for usage and the accepted keys. Source: `crates/chan/src/cli.rs` and `crates/chan-wireguard/src/config.rs`.
 
 ### `~/.chan/devserver/config.json`: `PersistedConfig`
 

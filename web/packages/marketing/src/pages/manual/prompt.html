@@ -1,0 +1,118 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="prompt-rich-prompt" data-shot-kind="clip">clip to capture<small>an agent running in a terminal: Cmd+Shift+P opens the bubble, type a two-item list, paste a screenshot, Cmd+Enter; the agent receives the text and the image's path</small></div>
+  <figcaption>The Rich Prompt over a terminal running an agent: Markdown and a pasted image, sent with one key.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Write a long prompt in Markdown over the terminal it goes to.</li>
+    <li>Paste a screenshot into it. The agent receives the image's path on disk.</li>
+    <li>Take back a message that is still waiting in the queue, and edit it.</li>
+    <li>Keep notes and their attachments as drafts, outside your project, until you save them.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="rich-prompt">
+  <h2><a class="heading-anchor" href="#rich-prompt">Rich Prompt</a></h2>
+  <p>The Rich Prompt is a Markdown editor floating over the bottom of a terminal, one per terminal. What you submit joins the terminal's queue, the one <code>cs terminal write</code> uses, so a message from elsewhere never lands in the middle of yours.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Show it</h3>
+      <p>Press <kbd>Cmd+Shift+P</kbd> on macOS or <kbd>Ctrl+Alt+P</kbd> on Windows and Linux, or choose <strong>Rich Prompt</strong> from the terminal's right-click menu or the command launcher.</p>
+    </li>
+    <li>
+      <h3>Write</h3>
+      <p>Markdown renders as you type. A pasted image shows in place.</p>
+    </li>
+    <li>
+      <h3>Submit</h3>
+      <p>Press <kbd>Cmd+Enter</kbd> on macOS or <kbd>Ctrl+Enter</kbd> elsewhere. The strip reads <code>1 queued</code> until the terminal takes the message, then the bubble clears.</p>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Show or hide the bubble</td><td><kbd>Cmd+Shift+P</kbd></td><td><kbd>Ctrl+Alt+P</kbd></td></tr>
+        <tr><td>Submit</td><td><kbd>Cmd+Enter</kbd></td><td><kbd>Ctrl+Enter</kbd></td></tr>
+        <tr><td>Switch between rendered Markdown and its source</td><td><kbd>Cmd+E</kbd></td><td><kbd>Ctrl+E</kbd></td></tr>
+        <tr><td>Indent or outdent a list item</td><td><kbd>Tab</kbd> <kbd>Shift+Tab</kbd></td><td><kbd>Tab</kbd> <kbd>Shift+Tab</kbd></td></tr>
+        <tr><td>Stop the message the bubble is sending, and edit it again</td><td><kbd>Esc</kbd></td><td><kbd>Esc</kbd></td></tr>
+        <tr><td>Discard what you typed and hide the bubble</td><td><kbd>Esc</kbd>, when not sending</td><td><kbd>Esc</kbd>, when not sending</td></tr>
+        <tr><td>Hide the bubble and keep the text</td><td colspan="2">The close button at its top right, or the show key again</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="prompt-queued" data-shot-kind="still">screenshot to capture<small>the bubble over a busy agent, its strip reading 1 queued and esc cancel, the terminal tab showing a queue count of 1</small></div>
+  </figure>
+  <p><strong>Rich Prompt style toolbar</strong>, in the terminal's right-click menu and the command launcher, shows the formatting toolbar over the text while the bubble is open.</p>
+  <p>Submit sends the key the terminal's agent expects. A terminal started with <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code> or <code>opencode</code> picks it by itself. For a launcher chan does not recognise, set <code>CHAN_AGENT</code> to one of those names; <code>cs terminal write --submit=AGENT</code> does the same from a script.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>An image goes to the terminal as its absolute path on disk, which an agent can open. The bubble keeps showing the picture.</li>
+      <li>The bubble edits a draft of its own, so its text survives hiding the bubble and reloading the window.</li>
+      <li>While a message waits, typing starts the next one. Then <strong>↑ recall</strong> in the strip, or <kbd>Up</kbd> in an empty bubble, takes the waiting message back to edit, and <kbd>Esc</kbd> in an empty bubble drops it from the queue.</li>
+      <li>The strip reads <em>queue full, try again</em> when the terminal's queue is full, and <em>connection lost, message may still be queued</em> when chan cannot confirm the send.</li>
+      <li>Drag the bubble's top edge to resize it. It reopens at that height.</li>
+      <li>For an agent started by hand at a shell prompt, chan picks the submit key from the keyboard mode the agent turns on.</li>
+      <li>Group broadcast does not copy Rich Prompt messages to other terminals.</li>
+      <li>The Rich Prompt needs a window that holds drafts: any workspace window, or a standalone terminal window whose machine serves files. A devserver's control terminal has none.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="drafts">
+  <h2><a class="heading-anchor" href="#drafts">Drafts</a></h2>
+  <p>A draft is a Markdown note with a folder for its attachments, kept outside your project until you save it. The Rich Prompt writes into one too.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Create one</h3>
+      <p>Choose <strong>New draft</strong> from a pane menu or the command launcher. The first is <code>Drafts/untitled/draft.md</code>, the next <code>Drafts/untitled-1/draft.md</code>, and so on.</p>
+    </li>
+    <li>
+      <h3>Write, and come back later</h3>
+      <p>Pasted images go in the draft's folder. The file browser lists drafts in its <strong>Drafts</strong> group; open one from there to keep editing.</p>
+    </li>
+    <li>
+      <h3>Close it</h3>
+      <p>Closing its tab asks what to keep.</p>
+    </li>
+  </ol>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="prompt-draft-close" data-shot-kind="clip">clip to capture<small>New draft from the pane menu, type a heading and paste an image, close the tab; the Close Draft dialog; type notes/idea and Save to Workspace</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Close Draft offers</th><th>Result</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Save to Workspace</strong>, or <strong>Save to Disk</strong> in a standalone terminal window</td><td>Saves to the path you type. A draft with attachments becomes a folder holding them.</td></tr>
+        <tr><td><strong>Discard Draft</strong></td><td>Deletes the draft.</td></tr>
+        <tr><td><strong>Cancel</strong></td><td>Keeps editing.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A workspace keeps its drafts in chan's data for that workspace, outside the project directory. The <code>Drafts/...</code> path shown is not a path in your repository.</li>
+      <li>Drafts stay out of search and the graph until you save them into the workspace.</li>
+      <li>A directory named <code>Drafts</code> that you create in your repository is ordinary project content.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/cs/#terminal"><strong>cs terminal</strong><span>Send prompts to an agent's terminal from a script.</span></a>
+    <a class="next-card" href="/manual/teams/"><strong>Agent teams</strong><span>Run a lead and workers in named terminals.</span></a>
+    <a class="next-card" href="/manual/terminal/"><strong>Terminal basics</strong><span>Tabs, find, copy and paste, and group broadcast.</span></a>
+  </div>
+</section>

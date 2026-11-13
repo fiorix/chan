@@ -1,22 +1,118 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="collaboration-coedit" data-shot-kind="clip">clip to capture<small>two browser windows side by side on one workspace and one Markdown file; typing in one shows the edit and a named caret in the other, and the file tab shows its collaborator count</small></div>
+  <figcaption>Two windows on one workspace: the server merges their edits and shows where each one is.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Work in one workspace from several windows, browsers, or computers at once.</li>
+    <li>Edit a document or a drawing together. Edits merge live, and each peer's caret carries a name.</li>
+    <li>See the clients connected to a server, name yours, and disconnect one with <code>cs session</code>.</li>
+    <li>Hand leadership of a workspace to another window, or take it when the leader is gone.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="shared-workspace">
   <h2><a class="heading-anchor" href="#shared-workspace">Share a workspace session</a></h2>
-  <p>Chan's collaboration protocol coordinates presence, document and drawing updates, and leadership across connected workspace windows. Participants have leader or follower roles, with explicit handover between them. The same protocol works locally and over a remote connection.</p>
-  <p>Each client connects to the machine serving the workspace. For remote access, use <a href="/devserver/">ssh or Eternal Terminal</a>, or a <a href="/gateway/">gateway</a> for account-based access and devserver sharing. The <a href="/devserver/#collaboration">connection diagram</a> shows how clients reach the shared workspace.</p>
+  <p>Every window that opens a workspace connects to the machine serving it, and that server holds the shared state. A window joins the session by reaching that server:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Route</th><th>Who joins</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The workspace's URL, in a <a href="/manual/browser/">browser</a></td><td>Anyone with the URL who can reach the port, on the machine or through an ssh forward.</td></tr>
+        <tr><td>A devserver, from <a href="/manual/connect/">Chan Desktop</a> or a browser</td><td>Whoever can connect to the devserver.</td></tr>
+        <tr><td>A <a href="/manual/gateway/#share">gateway share</a></td><td>The accounts the devserver's owner shares it with.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Shared</th><th>What each window sees</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Terminals</td><td>Every client that shows a window sees the same running shells in it, with their scrollback.</td></tr>
+        <tr><td>Documents</td><td>Edits merge as they are typed. Each peer's selection and caret show with a name flag, and the file's tab shows how many collaborators are in it.</td></tr>
+        <tr><td>Drawings</td><td>Changes to an <code>.excalidraw</code> canvas merge the same way.</td></tr>
+        <tr><td>Presence</td><td>Every participant's name, and which window is the <a href="#leadership">session leader</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="manual-block" id="client-sessions">
   <h2><a class="heading-anchor" href="#client-sessions">Identify and manage clients</a></h2>
-  <p><code>cs session</code> lists clients across the server's terminal and workspace windows. A client can hold several windows; workspace leadership belongs to windows.</p>
-  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session list</b></code>{{copyButton}}</div>
-  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session self --name "laptop"</b></code>{{copyButton}}</div>
-  <p><code>self --name</code> names your client and, in a workspace, its participant. If several clients view the same shell, Chan asks you to identify yours. Scripts can select a client explicitly with <code>--id CLIENT_ID</code>.</p>
-  <p>Use an ID from <code>cs session list</code> with <code>cs session info CLIENT_ID</code> to inspect its windows, terminals, and connections. <code>cs session detach CLIENT_ID</code> disconnects that client while keeping shared terminals, running programs, and saved layouts. The client can explicitly reconnect; detaching does not revoke its access.</p>
+  <p>A client is one connected app, such as Chan Desktop or a browser, and it can hold several windows. Run <code>cs session</code> in any chan terminal, workspace or standalone, to see the clients of the server it runs on.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs session list</code></td><td>Lists the server's clients across its workspace and terminal windows: id, name, status, and how many windows and terminals each holds.</td></tr>
+        <tr><td><code>cs session self</code></td><td>Shows your client and, in a workspace window, your participant: name, role, and status.</td></tr>
+        <tr><td><code>cs session self --name "laptop"</code></td><td>Names your client and your workspace participant at once. <code>--reset</code> restores the defaults.</td></tr>
+        <tr><td><code>cs session info CLIENT_ID</code></td><td>Shows one client's windows, terminals, and connections. The id comes from <code>list</code>.</td></tr>
+        <tr><td><code>cs session detach CLIENT_ID</code></td><td>Disconnects that client. Shared terminals, running programs, and saved layouts stay.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A detached window shows <strong>client session detached</strong> with a <strong>Reconnect</strong> button. Detaching is not signing out and does not revoke access: the client can reconnect when it chooses.</p>
 </section>
 
 <section class="manual-block" id="leadership">
-  <h2><a class="heading-anchor" href="#leadership">Hand over workspace leadership</a></h2>
-  <p>From a workspace terminal, request leadership from the current leader:</p>
-  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session handover</b></code>{{copyButton}}</div>
-  <p>The leader answers with <code>cs session handover --accept</code> or <code>--reject</code>. When the leader is disconnected, use <code>cs session takeover</code>. Adding <code>--force</code> takes leadership even from a live leader, without a confirmation prompt.</p>
-  <p>Agent coordination uses the separate <a href="/manual/terminal/#teams">Team Work</a> tools: named terminals, groups, and the <code>cs</code> command surface. For the client and participant model, read the <a href="https://github.com/fiorix/chan/blob/main/crates/chan-library/design.md#clients-and-participants">session design</a>.</p>
+  <h2><a class="heading-anchor" href="#leadership">Session leader and followers</a></h2>
+  <p>Each served workspace has one session leader window; every other window on it is a follower.</p>
+  <ul>
+    <li>The leader is the first window to connect on the serving machine itself, directly or through an ssh forward. A window that comes in through a gateway leads only while no such window is connected.</li>
+    <li>In a browser, only the leader's Computers page shows, hides, and opens the workspace's windows. On a follower's page those buttons are dimmed.</li>
+    <li>A window the leader hides or closes shows a cover saying so, with a line to reopen it from Computers.</li>
+    <li>When windows on the machine and windows through a gateway share a workspace, each status bar shows <strong>leader</strong> or <strong>follower</strong>, by where the window connects from.</li>
+  </ul>
+  <p>From a workspace terminal, ask for leadership or take it:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs session handover</code></td><td>Asks the leader and waits up to 30 seconds. The leader's window shows a <strong>Handover request</strong> card with <strong>Accept</strong> and <strong>Reject</strong>.</td></tr>
+        <tr><td><code>cs session handover --accept</code>, <code>--reject</code></td><td>The leader answers from its own terminal instead.</td></tr>
+        <tr><td><code>cs session takeover</code></td><td>Takes leadership when the leader is gone. A live leader refuses it.</td></tr>
+        <tr><td><code>cs session takeover --force</code></td><td>Takes leadership even from a live leader, with no prompt.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="collaboration-handover" data-shot-kind="still">screenshot to capture<small>the leader's window with the Handover request card: "laptop wants to become the session leader", Accept and Reject</small></div>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>When several clients share the window a terminal belongs to, <code>cs session self</code> asks you to pick yours: each shows an <strong>Identify this client</strong> card. Scripts pass <code>--id CLIENT_ID</code> instead.</li>
+      <li>A name is 1 to 64 characters, and no two live clients, or participants of one workspace, can share it, whatever the case.</li>
+      <li>A participant's default name is a generated one, or the name and email of the account a gateway signed it in with.</li>
+      <li>A window from a gateway that leads because no local window is connected gives leadership back when one joins.</li>
+      <li><code>--json</code>, with <code>--pretty</code>, prints <code>list</code>, <code>info</code>, and <code>self</code> for scripts.</li>
+      <li><code>handover --to WINDOW</code> asks for leadership on behalf of another window, and <code>--timeout 60</code> waits longer. Only one handover can be pending.</li>
+      <li>A wait that runs out exits with status 124.</li>
+      <li>A disconnected leader cannot answer a handover; use <code>takeover</code>.</li>
+      <li>A page reload keeps a window's place. A leader that stays gone for about 30 seconds is replaced the same way the first leader was chosen.</li>
+      <li><code>handover</code> and <code>takeover</code> need a workspace terminal; the other commands also work in a standalone terminal, which has no participant.</li>
+      <li>The client list and detach records last as long as the server process.</li>
+      <li>Agents coordinate through named terminals and <code>cs terminal</code>, not sessions: see <a href="/manual/teams/">Agent teams</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/browser/#hide"><strong>Hide and show windows</strong><span>Keep a browser window's terminals running after you close its tab.</span></a>
+    <a class="next-card" href="/manual/gateway/#share"><strong>Share a devserver</strong><span>Give another account access through a gateway.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>Every <code>cs</code> command, from any chan terminal.</span></a>
+  </div>
 </section>

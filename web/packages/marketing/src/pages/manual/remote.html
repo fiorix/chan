@@ -1,0 +1,62 @@
+<figure class="doc-diagram">
+  <div class="dg-row">
+    <div class="dg-node"><small>This machine</small><strong>Chan Desktop, or a browser</strong><span>Shows the devserver's windows.</span></div>
+    <div class="dg-links"><span>ssh -L</span><span>Eternal Terminal</span><span>LAN, VM or container port</span><span>Lima or WSL</span></div>
+    <div class="dg-node"><small>Remote machine</small><strong>chan devserver</strong><span>Holds the terminals, windows and workspaces.</span></div>
+  </div>
+  <div class="dg-below"><span>&darr; signs in</span><span>dials out &darr;</span></div>
+  <div class="dg-node"><small>Optional, hosted by someone</small><strong>A gateway</strong><span>Sign-in, sharing, and an address that is always on.</span></div>
+  <figcaption>Every route ends at the same devserver. Only the way this machine reaches it changes.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Keep terminals, agents and workspaces running on another machine while your laptop sleeps or moves.</li>
+    <li>Open them as native windows from Chan Desktop, or as tabs in any browser.</li>
+    <li>Reach the machine over ssh, Eternal Terminal, a LAN address, or a Lima or WSL VM on your own computer.</li>
+    <li>Forward ports, move files and share the clipboard between the two machines.</li>
+    <li>Publish devservers through a gateway, and share them with other accounts.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="routes">
+  <h2><a class="heading-anchor" href="#routes">Which route</a></h2>
+  <p>A remote chan is always a devserver. The route is how this machine reaches it; each route's name links to its setup.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Route</th><th>On the remote machine</th><th>On this machine</th><th>What you get</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><a href="/manual/browser/#devserver">A browser alone</a></td><td>chan, running a devserver</td><td>A browser, and ssh to forward the port</td><td>Windows as browser tabs; a hidden window keeps its terminals running. No native windows, no <code>cs tunnel</code>.</td></tr>
+        <tr><td><a href="/manual/connect/#recipes">A direct address: LAN, a VM or container port</a></td><td>A devserver bound to an address this machine reaches</td><td>Chan Desktop</td><td>Native windows and <code>cs tunnel</code>, no connect script. Plain HTTP with a token: loopback or a network you trust.</td></tr>
+        <tr><td><a href="/manual/connect/#recipes">ssh</a></td><td>chan and sshd</td><td>Chan Desktop and ssh</td><td>Native windows and <code>cs tunnel</code>, encrypted. The tunnel drops with the network; the devserver keeps running until you reconnect.</td></tr>
+        <tr><td><a href="/manual/connect/#recipes">Eternal Terminal</a></td><td>chan and Eternal Terminal</td><td>Chan Desktop and Eternal Terminal</td><td>As ssh, and the tunnel reconnects after sleep or a change of network.</td></tr>
+        <tr><td><a href="/manual/connect/#recipes">Lima or WSL</a></td><td>chan inside the VM</td><td>Chan Desktop, with Lima on macOS or WSL on Windows</td><td>A Linux devserver on your own computer.</td></tr>
+        <tr><td><a href="/manual/gateway/">A gateway</a></td><td>A devserver started with a gateway token</td><td>Chan Desktop or a browser, and an account on the gateway</td><td>Sign-in, access from anywhere, and sharing a devserver with other accounts. Someone hosts the gateway.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>No chan on the remote machine? <code>tmux -CC</code> over ssh opens a tmux server's windows as Chan windows: see <a href="/manual/tmux/">tmux control mode</a>.</p>
+</section>
+
+<section class="manual-block" id="what-you-need">
+  <h2><a class="heading-anchor" href="#what-you-need">What you need</a></h2>
+  <ul>
+    <li><strong>There:</strong> chan, running a devserver. It listens on <code>127.0.0.1:8787</code> until you bind it elsewhere. See <a href="/manual/devserver/">Run a devserver</a>.</li>
+    <li><strong>Here:</strong> <a href="/manual/install/#install">Chan Desktop</a> for native windows, or any browser.</li>
+    <li><strong>Between them:</strong> one route from the table.</li>
+  </ul>
+  <p>"There" can be this computer too: a Lima or WSL VM, a container, or a second devserver with a chan home of its own.</p>
+  <p>Whatever the route, the devserver holds the terminals, windows and workspaces. Disconnecting closes the windows here and leaves everything running there. Several clients can use one devserver at once: see <a href="/manual/collaboration/">Collaboration</a>.</p>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/devserver/"><strong>Run a devserver</strong><span>Install chan on the remote machine and start it as a service.</span></a>
+    <a class="next-card" href="/manual/connect/"><strong>Connect from Chan Desktop</strong><span>Add the devserver with its connect script and open its windows.</span></a>
+    <a class="next-card" href="/manual/remote-tools/"><strong>Tunnels, transfers and clipboard</strong><span>Forward ports, move files and copy between the two machines.</span></a>
+  </div>
+</section>

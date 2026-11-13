@@ -1,0 +1,181 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="previews-present" data-shot-kind="clip">clip to capture<small>a slide deck open in the editor; Cmd+Enter opens the preview, Right steps two slides, Esc closes; Cmd+Shift+Enter presents it fullscreen</small></div>
+  <figcaption>A slide deck is a Markdown file, previewed and presented from the editor.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Write a slide deck as one Markdown file, a page break between slides.</li>
+    <li>Preview the deck beside your work, or present it fullscreen.</li>
+    <li>Draw diagrams from text in <code>mermaid</code> fences, or by hand on an Excalidraw canvas.</li>
+    <li>Browse JSON as a tree, and edit CSV and TSV as a table.</li>
+    <li>Export a document or a deck to PDF, diagrams and images included.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="previews">
+  <h2><a class="heading-anchor" href="#previews">Preview and present</a></h2>
+  <p>Markdown needs no preview: headings, links, images, tables, and diagrams render while you edit. A slide deck adds two views, also offered as buttons above its outline.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>macOS</th><th>Windows, Linux</th><th>Shows</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Preview slide deck</strong></td><td><kbd>Cmd+Enter</kbd></td><td><kbd>Ctrl+Enter</kbd></td><td>The deck over the window, one slide at a time, with arrows and a counter.</td></tr>
+        <tr><td><strong>Present slide deck</strong></td><td><kbd>Cmd+Shift+Enter</kbd></td><td><kbd>Ctrl+Shift+Enter</kbd></td><td>The deck fullscreen, without arrows or counter.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>In either view</th><th>Key</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Next slide</td><td><kbd>Right</kbd> <kbd>Down</kbd> <kbd>Space</kbd></td></tr>
+        <tr><td>Previous slide</td><td><kbd>Left</kbd> <kbd>Up</kbd> <kbd>Backspace</kbd></td></tr>
+        <tr><td>Close</td><td><kbd>Esc</kbd>, or a click outside the slide</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="slides">
+  <h2><a class="heading-anchor" href="#slides">Slide decks</a></h2>
+  <ol class="doc-steps">
+    <li>
+      <h3>Start a deck</h3>
+      <p><strong>New slide deck</strong>, in the pane menu, opens a new deck as a <a href="/manual/prompt/#drafts">draft</a>, ready at <code># Slide 1</code>. Or give any Markdown file this frontmatter:</p>
+      <pre><code>---
+chan:
+  kind: slides
+---</code></pre>
+    </li>
+    <li>
+      <h3>Split it into slides</h3>
+      <p>Type <code>@pagebreak</code>, or <code>@break</code>, and press <kbd>Space</kbd> or <kbd>Enter</kbd>. The line becomes the page break, <code>&lt;hr class="chan-page-break"&gt;</code> alone on a line, which starts the next slide.</p>
+    </li>
+    <li>
+      <h3>Set its shape, if you like</h3>
+      <p>The <code>slides:</code> block is optional, and so is each field:</p>
+      <pre><code>---
+chan:
+  kind: slides
+  slides:
+    aspect_ratio: "16:9"
+    zoom_factor: 2
+---</code></pre>
+      <div class="manual-table-wrap">
+        <table class="manual-table">
+          <thead>
+            <tr><th>Field</th><th>Takes</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>aspect_ratio</code></td><td><code>"16:9"</code> or <code>"4:3"</code></td><td><code>"16:9"</code></td></tr>
+            <tr><td><code>zoom_factor</code></td><td>A number that scales the slide content, or a percentage such as <code>"150%"</code></td><td><code>2</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </li>
+  </ol>
+  <figure class="inline-shot">
+    <img src="/assets/manual/slides-editing.png" alt="A slide deck open in the editor: the outline sidebar with the Preview slide deck and Present slide deck buttons, the slides frontmatter, a mermaid-to-excalidraw fence, and a Page break marker between slides" loading="lazy" />
+    <figcaption>Editing slides is Markdown. The outline lists each slide under the Preview slide deck and Present slide deck buttons.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="diagrams">
+  <h2><a class="heading-anchor" href="#diagrams">Diagrams</a></h2>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="previews-diagrams" data-shot-kind="still">screenshot to capture<small>a note with the same three-step flowchart twice, in a mermaid fence and a mermaid-to-excalidraw fence, both rendered</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Write</th><th>You get</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A code fence tagged <code>mermaid</code></td><td>A Mermaid diagram, rendered in place.</td></tr>
+        <tr><td>A fence tagged <code>mermaid-to-excalidraw</code></td><td>The same Mermaid source, drawn in Excalidraw's hand-drawn style.</td></tr>
+        <tr><td>A <code>.excalidraw</code> file</td><td>A drawing canvas. Open it from the file browser or with <code>cs open</code>.</td></tr>
+        <tr><td><code>![](board.excalidraw)</code> in a note</td><td>The drawing, embedded.</td></tr>
+        <tr><td><strong>New diagram</strong>, in the pane menu</td><td>A new drawing, as a draft.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <pre><code>```mermaid
+flowchart LR
+  spec --&gt; draft --&gt; review
+```</code></pre>
+</section>
+
+<section class="manual-block" id="json-csv">
+  <h2><a class="heading-anchor" href="#json-csv">JSON and CSV</a></h2>
+  <p><a href="/manual/editor/#open-edit">Source mode</a> switches any of these between the view and the text.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>File</th><th>View</th><th>To edit</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>.json</code></td><td>A tree of its objects and arrays, each one expandable</td><td>Switch to Source mode. A file that does not parse still saves, and the tree shows the parse error.</td></tr>
+        <tr><td><code>.csv</code>, <code>.tsv</code></td><td>A table</td><td>Edit a cell in place. For anything else, such as columns or sorting, switch to Source mode.</td></tr>
+        <tr><td>Other text</td><td>None</td><td>The source editor.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="export">
+  <h2><a class="heading-anchor" href="#export">Export to PDF</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>From</th><th>The PDF goes to</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Export to PDF</strong> in the command launcher, on a Markdown file or its file browser row</td><td>The machine you are at: your Downloads in Chan Desktop, a download in a browser.</td></tr>
+        <tr><td><code>cs export FILE</code> in a workspace terminal</td><td>The workspace, beside the source with <code>.pdf</code> in place of its extension. <code>--out PATH</code> picks another path.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs export notes/design.md</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs export decks/kickoff.md --out out/kickoff.pdf</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Source</th><th>PDF layout</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A document</td><td>A4 portrait pages with 0.65 inch margins. A page break forces a new page.</td></tr>
+        <tr><td>A slide deck</td><td>One slide per A4 landscape page, laid out at 1920 by 1080, or 1440 by 1080 for 4:3. A slide that overflows is scaled down whole.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Images, Mermaid diagrams, and Excalidraw embeds render into the PDF as the editor shows them.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>@pagebreak</code> expands only as you type in the rendered editor. Written into a file any other way it stays text, and only the <code>&lt;hr&gt;</code> line splits slides.</li>
+      <li>Any <code>aspect_ratio</code> other than <code>"16:9"</code> or <code>"4:3"</code> makes the file a document, not a deck.</li>
+      <li>In the rendered editor, <kbd>Cmd+Enter</kbd> first opens the calendar of a date pill at the caret, or leaves a fenced block, before it previews the deck.</li>
+      <li>Present slide deck makes Chan Desktop's window fullscreen; a browser may refuse fullscreen and play the deck in the page.</li>
+      <li><code>cs export</code> renders in an open workspace window: the terminal's own, else the one that joined last. With no window open it refuses.</li>
+      <li>A standalone terminal refuses <code>cs export</code>; it needs a workspace window.</li>
+      <li>On a devserver, <code>cs export</code> writes the PDF there; <code>cs download</code> brings it to your machine. See <a href="/manual/remote-tools/#transfers">Transfers</a>.</li>
+      <li><code>cs export</code> replaces an existing file at the output path without asking.</li>
+      <li>It gives up, with exit status 124, after 90 seconds without a finished page or 15 minutes in all.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/editor/"><strong>Editor</strong><span>Links, mentions, dates, and saving.</span></a>
+    <a class="next-card" href="/manual/files/"><strong>File browser</strong><span>Find a file, then upload or download it.</span></a>
+    <a class="next-card" href="/manual/prompt/#drafts"><strong>Drafts</strong><span>Keep, save, or discard a new deck or diagram.</span></a>
+  </div>
+</section>

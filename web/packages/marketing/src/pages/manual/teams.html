@@ -1,0 +1,231 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="teams-bootstrap" data-shot-kind="clip">clip to capture<small>New team from the pane menu, a lead and two workers set in the Spawn agents dialog, Bootstrap, then three named terminals start and the lead reads its prompt</small></div>
+  <figcaption>A lead and two workers, each in a named terminal, started from one dialog.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Start a lead and up to eight workers, each in a named terminal, from one dialog or one command.</li>
+    <li>Lay the team out as tabs in one pane or as a grid of panes.</li>
+    <li>Give every member one brief and a shared process for tasks and journals.</li>
+    <li>Save the team in the workspace and start it again later.</li>
+    <li>Send an agent text by name, submitted the way it expects.</li>
+    <li>Let agents read, search, and edit the workspace over MCP.</li>
+  </ul>
+  <p>Agents are ordinary terminal programs, installed where the terminal runs. Teams need a workspace window: <strong>New team</strong> and <code>cs terminal team</code> refuse in a standalone terminal.</p>
+</section>
+
+<section class="manual-block" id="dialog">
+  <h2><a class="heading-anchor" href="#dialog">The New team dialog</a></h2>
+  <ol class="doc-steps">
+    <li>
+      <h3>Open it</h3>
+      <p>Run <strong>New team</strong> from the pane menu or the command launcher. A terminal for the lead opens under the <strong>Spawn agents</strong> dialog; <strong>Cancel</strong> closes both.</p>
+    </li>
+    <li>
+      <h3>Name yourself and the team</h3>
+      <p>Names get an <code>@@</code> prefix unless you clear <strong>Auto-prefix</strong>. Pick <strong>New</strong> and a team directory, such as <code>teams/review</code>, or <strong>Load</strong> for a saved team. An optional brief reaches every member.</p>
+    </li>
+    <li>
+      <h3>Add the members</h3>
+      <p>Pick 1 to 9 agents. Give each a name and a command such as <code>claude</code>, and mark one <strong>Lead</strong>.</p>
+    </li>
+    <li>
+      <h3>Lay them out</h3>
+      <p><strong>Tabs in current Hybrid</strong> stacks the team in the lead's pane. <strong>Split panes</strong> lays out a grid of up to nine panes: drag members into cells, or let the robot button do it.</p>
+      <figure class="inline-shot">
+        <div class="shot-placeholder-frame" data-shot="teams-dialog" data-shot-kind="still">screenshot to capture<small>the Spawn agents dialog with three members, Split panes selected, and a 1x3 grid with one member in each cell</small></div>
+      </figure>
+    </li>
+    <li>
+      <h3>Bootstrap</h3>
+      <p>chan saves the team, starts the lead, then the workers, and points the lead at the team's <code>bootstrap.md</code>.</p>
+    </li>
+  </ol>
+</section>
+
+<section class="manual-block" id="config">
+  <h2><a class="heading-anchor" href="#config">The team directory and team.toml</a></h2>
+  <p>A team is one directory in the workspace. The dialog and <code>cs terminal team</code> read and write the same files.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>In the team directory</th><th>Holds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>config.toml</code></td><td>The team. You may edit it; it is checked again on every load.</td></tr>
+        <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. chan writes it, and hand edits are lost on the next write.</td></tr>
+        <tr><td><code>tasks/</code></td><td>One file per task, <code>task-{from}-{to}-{n}.md</code>.</td></tr>
+        <tr><td><code>journals/</code></td><td>One journal per member, <code>journal-{member}.md</code>.</td></tr>
+        <tr><td><code>followups/</code></td><td>Follow-ups, <code>followup-{from}-{to}-{n}.md</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>From a terminal, start with a configuration file such as this <code>team.toml</code>:</p>
+  <pre><code>team_name = "review"
+host_name = "You"
+host_handle = "@@Host"
+tab_group = "review"
+
+[[members]]
+handle = "@@Lead"
+command = "claude"
+is_lead = true
+
+[[members]]
+handle = "@@Reviewer"
+command = "codex"</code></pre>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Key</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>team_name</code>, <code>host_name</code>, <code>host_handle</code></td><td>Required: the team's name, yours, and the handle agents use for you.</td></tr>
+        <tr><td><code>tab_group</code></td><td>The group every member's terminal joins. A group already running gets <code>-2</code>, <code>-3</code>, and so on.</td></tr>
+        <tr><td><code>mcp_env</code></td><td><code>true</code> gives members the <a href="#mcp">MCP variables</a>. Off by default.</td></tr>
+        <tr><td><code>[[members]]</code></td><td>One to nine, exactly one with <code>is_lead = true</code>.</td></tr>
+        <tr><td><code>handle</code></td><td>The member's tab name and <code>$CHAN_TAB_NAME</code>.</td></tr>
+        <tr><td><code>command</code></td><td>What the terminal runs. The agent is read from it: <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, or <code>opencode</code>. Anything else is a plain shell member.</td></tr>
+        <tr><td><code>env</code></td><td>Extra environment, such as <code>{ CHAN_AGENT = "gemini" }</code> for a wrapper script whose name says nothing. <code>none</code> or <code>shell</code> forces a shell member.</td></tr>
+        <tr><td><code>position</code></td><td><code>{ row = 0, col = 1 }</code>, the member's cell in a pane grid of at most nine panes. Without positions the team stacks as tabs.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="commands">
+  <h2><a class="heading-anchor" href="#commands">Run a team from a terminal</a></h2>
+  <p>Create the team, or start a saved one again:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal team new teams/review --config team.toml</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal team load teams/review</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command or flag</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>team new DIR --config FILE</code></td><td>Writes <code>DIR/config.toml</code>, regenerates <code>bootstrap.md</code>, creates the folders, then starts the team, lead first. <code>--stdin</code> reads the configuration instead.</td></tr>
+        <tr><td><code>--brief FILE</code></td><td>Puts FILE into <code>bootstrap.md</code> after the roster. The way to give a team its work. <code>new</code> only.</td></tr>
+        <tr><td><code>--mcp-env on</code></td><td>Gives the team's terminals the <a href="#mcp">MCP variables</a>.</td></tr>
+        <tr><td><code>--tabs</code></td><td>Stacks the team as tabs, ignoring positions.</td></tr>
+        <tr><td><code>--window</code>, <code>--pane</code>, <code>--side a|b</code></td><td>Where the tabs go.</td></tr>
+        <tr><td><code>--script</code></td><td>Prints the whole bootstrap as a shell script and changes nothing.</td></tr>
+        <tr><td><code>team load DIR</code></td><td>Starts the saved team again from <code>DIR/config.toml</code>. Writes nothing.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <aside class="doc-note warning">Running <code>new</code> or <code>load</code> again starts another copy of the team in a new group. Close the running one first with <code>cs terminal close --tab-group review</code>.</aside>
+  <h3 id="named-terminals"><a class="heading-anchor" href="#named-terminals">Named terminals without a team</a></h3>
+  <p>Without a team, start and address named terminals directly:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal new --tab-name reviewer --tab-group review --command codex</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal write --tab-name reviewer --submit=codex "Review the current diff"</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal list --json</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs terminal write --submit=AGENT</code></td><td>Writes the text and the submit keys AGENT expects. Without <code>--submit</code> the text waits unsent in the agent's input.</td></tr>
+        <tr><td><code>cs terminal scrollback --tab-name NAME</code></td><td>Prints that terminal's output.</td></tr>
+        <tr><td><code>cs terminal survey</code></td><td>Asks you a question with up to four answers, over the window holding the named tab, and prints your answer.</td></tr>
+        <tr><td><code>cs terminal close --tab-group NAME</code></td><td>Closes every terminal in the group.</td></tr>
+        <tr><td><code>cs dump-skill</code></td><td>Prints the agent manual, offline. <code>--list</code> shows its topics and <code>--topic teams</code> reads one.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="teams-survey" data-shot-kind="still">screenshot to capture<small>a survey from the lead over the host's window: a title, a question, two numbered answers, then [F] and Dismiss</small></div>
+    <figcaption>A lead asks you to decide with <code>cs terminal survey</code>.</figcaption>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Every member's process comes from <code>bootstrap.md</code>: the lead hands out work and reaches you with <code>cs terminal survey</code>, and workers do not contact you directly.</li>
+      <li>Bootstrapping from the dialog turns group broadcast off in every terminal; turn it on yourself when you want it.</li>
+      <li>Each agent gets its first prompt once its terminal is ready. A member not ready within 15 seconds is named and gets no prompt, and the command exits non-zero.</li>
+      <li>A member whose command fails to start is reported, and the rest of the team still starts.</li>
+      <li>A grid layout needs a window with a single pane. Close the other panes, pass <code>--tabs</code>, or name a pane with <code>--pane</code>.</li>
+      <li><code>--submit</code> encodes one agent per command, so a group of mixed agents needs one write per agent.</li>
+      <li>Writes are queued and delivered when the terminal goes quiet, at most 4096 bytes each. Put longer text in a file and send its path.</li>
+      <li>A survey waits 600 seconds by default, then exits 124. <strong>[F]</strong> answers that you will follow up later.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="mcp">
+  <h2><a class="heading-anchor" href="#mcp">Give agents the workspace over MCP</a></h2>
+  <p>Each workspace runs an MCP server, <code>chan</code>, for its files, search, and graph. chan never edits an agent's configuration: a terminal carries the server's descriptor in its environment, and you add it to your agent.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Turn on MCP discovery</h3>
+      <p>Turn on <strong>Settings → Terminal → MCP discovery</strong>, or run the command below; for a team, tick the dialog's MCP box or pass <code>--mcp-env on</code>. It is off by default because a stray descriptor stops codex from starting.</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan config set terminal.mcp_env true</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Read the descriptor in a new terminal</h3>
+      <p>Only terminals opened after the change carry it.</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>echo "$CHAN_MCP_SERVER_JSON"</b></code>{{copyButton}}</div>
+      <pre class="sample-output"><code>{"args":["__mcp-proxy","/run/user/1000/chan-mcp-48213-9f3c0a1e.sock"],"command":"/usr/bin/chan","name":"chan"}</code></pre>
+    </li>
+    <li>
+      <h3>Add it to your agent</h3>
+      <p>Copy the name, command, and arguments into your agent's MCP settings.</p>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Variable</th><th>Holds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>CHAN_MCP_SERVER_NAME</code></td><td><code>chan</code></td></tr>
+        <tr><td><code>CHAN_MCP_SOCKET</code></td><td>The server's socket.</td></tr>
+        <tr><td><code>CHAN_MCP_COMMAND</code></td><td>The command that connects to it, <code>chan __mcp-proxy SOCKET</code>, with the full path of chan or Chan Desktop.</td></tr>
+        <tr><td><code>CHAN_MCP_COMMAND_JSON</code></td><td>The same command as a JSON array.</td></tr>
+        <tr><td><code>CHAN_MCP_SERVER_JSON</code></td><td>The descriptor: <code>name</code>, <code>command</code>, and <code>args</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Tool</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>read_file</code></td><td>Reads a text file, 256 KiB per call.</td></tr>
+        <tr><td><code>write_file</code></td><td>Replaces a text file, at once.</td></tr>
+        <tr><td><code>list_files</code></td><td>Lists paths, up to 2,000.</td></tr>
+        <tr><td><code>resolve_path</code></td><td>Gives the host path of a workspace path.</td></tr>
+        <tr><td><code>workspace_search</code></td><td>Searches content and entities, and walks the graph.</td></tr>
+        <tr><td><code>read_media</code></td><td>Returns an image or a PDF, up to 10 MiB.</td></tr>
+        <tr><td><code>repo_report</code></td><td>Languages, line counts, complexity, and a COCOMO estimate.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>chan asks nothing before an agent writes; writes apply immediately.</li>
+      <li>Every path stays inside the workspace. <code>write_file</code> takes editable text files only, and a new file is capped at 2 MiB.</li>
+      <li>Only your own user account can reach the socket.</li>
+      <li>There are no tools for terminals, panes, or windows. <code>cs</code> does that, and <code>cs search</code>, <code>cs open</code>, and the rest work without MCP.</li>
+      <li>A draft is out of reach until it is saved to the workspace (see <a href="/manual/prompt/#drafts">drafts</a>).</li>
+      <li>A standalone terminal window has no MCP server, so the setting does nothing there.</li>
+      <li>A team's terminals follow the team's own MCP setting, not the Settings switch.</li>
+      <li>The socket changes each time the server starts. Outside Windows, if a terminal's socket is gone, the proxy connects to your newest live chan MCP socket, which may be another workspace's; open a new terminal to be sure.</li>
+      <li><code>cs dump-skill --topic mcp</code> prints this contract for agents.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/cs/#terminal"><strong>Terminal commands</strong><span>Start, list, write to, and read terminals with <code>cs terminal</code>.</span></a>
+    <a class="next-card" href="/manual/terminal/#broadcast"><strong>Broadcast</strong><span>Type into every terminal of a group at once.</span></a>
+    <a class="next-card" href="/manual/navigation/#hybrid-nav"><strong>Hybrid Nav</strong><span>Rearrange the team's panes from the keyboard.</span></a>
+  </div>
+</section>

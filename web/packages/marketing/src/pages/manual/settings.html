@@ -1,33 +1,127 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="settings-overlay" data-shot-kind="still">screenshot to capture<small>Settings open over a workspace window on Global, with the section list on the left from Global to This workspace</small></div>
+  <figcaption>Settings, with one section for each app and one for the workspace.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Set the theme once for every app, and override it in each app's section.</li>
+    <li>Tune the editor, terminal, file browser, graph and search.</li>
+    <li>Choose what this workspace indexes, and lock it when you step away.</li>
+    <li>Hide names, addresses and paths while you record or share your screen.</li>
+    <li>Read and change the same settings from a shell with <code>chan config</code>.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="settings">
   <h2><a class="heading-anchor" href="#settings">Open settings</a></h2>
-<p>Open <strong>Settings</strong> from the command launcher or use <code>Cmd+,</code> on macOS and <code>Ctrl+,</code> on Windows and Linux. The launcher's Settings scope also lists every setting by name: it changes an on/off setting or a choice in place and opens Settings on any other field. Sections cover Global, Editor, Terminal, File browser, Graph, Dashboard, Search, Keyboard Shortcuts, and This workspace.</p>
-<p>Use Global for shared appearance, then individual app sections for their own preferences and theme overrides. <strong>Keyboard Shortcuts</strong> lists commands and lets you customize their bindings. On the Linux and FreeBSD desktop a binding cannot use the Super (Windows) key, which the desktop's web view does not report as a modifier. <strong>This workspace</strong> holds project-specific controls such as indexing, reports, excluded directories, and screen lock.</p>
-<p><strong>Privacy mode</strong>, in Global, is for recording or sharing your screen. It is off by default and does not turn on by itself when a recording starts. While it is on, the Computers and Gateways screens put a placeholder in place of computer and gateway names, addresses, connect scripts, WireGuard files and keys, workspace paths, and connection errors, and list each window by its generated name, such as <code>Terminal Window 2</code>, without the label you gave it. Window titles read <code>Chan (privacy mode)</code>, and with tabs in the title bar the bar names its window by the generated name alone. The Dashboard's Metrics slide hides the host name and the chan home path, and its Workspace slide the workspace's root path. The command launcher's Computers rows name every window <code>Window</code> and every workspace <code>Workspace</code>, without the labels you gave them. An eye button beside a hidden field reveals that one field. The setting belongs to whoever is looking: Chan Desktop applies it to all of its windows, a devserver's included, and browser tabs at the same address share it. <strong>Mask terminal secrets in privacy mode</strong> turns the terminal's secret masking on for as long as privacy mode is on. What a terminal prints and what a file contains are not hidden.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Open it from</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Keyboard</td><td><kbd>Cmd+,</kbd></td><td><kbd>Ctrl+,</kbd></td></tr>
+        <tr><td>Command launcher</td><td colspan="2"><strong>Settings</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The launcher's <a href="/manual/command-launcher/#scopes">Settings scope</a> also lists every field by name, and changes an on/off field or a choice in place.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Section</th><th>Holds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Global</td><td><a href="#privacy">Privacy mode</a>, the theme (System, Light or Dark), watcher bubbles, Dashboard auto-rotate, title bar tabs in Chan Desktop, and pane strip auto-hide.</td></tr>
+        <tr><td>Editor</td><td>Editor theme, line spacing, font size, date format, trailing whitespace, page width.</td></tr>
+        <tr><td>Terminal</td><td>Scrollback, <code>TERM</code>, MCP discovery, mouse capture, the engine, program status, tmux control mode, secret masking, font, opacity and colours.</td></tr>
+        <tr><td>File browser</td><td>The left and right docks, and Vim navigation.</td></tr>
+        <tr><td>Graph</td><td>Custom graph colours.</td></tr>
+        <tr><td>Dashboard</td><td>Its theme.</td></tr>
+        <tr><td>Search</td><td>How hard the indexer works.</td></tr>
+        <tr><td>Keyboard Shortcuts</td><td>Every command and its keys.</td></tr>
+        <tr><td>This workspace</td><td>The index, semantic search, excluded directories, code reports, the metadata archive and the <a href="/manual/screensavers/#screen-lock">screen lock</a>. In a workspace window only.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>To change a key, see <a href="/manual/shortcuts/#customize">Customize shortcuts</a>. <strong>MCP discovery</strong> lets agents in new terminals find the workspace's MCP server; see <a href="/manual/teams/#mcp">Agent teams</a>.</p>
 </section>
 
 <section class="manual-block" id="defaults">
   <h2><a class="heading-anchor" href="#defaults">Defaults to know</a></h2>
-<div class="manual-table-wrap"><table class="manual-table">
-<thead><tr><th scope="col">Setting</th><th scope="col">Default and where to change it</th></tr></thead>
-<tbody>
-<tr><th scope="row">App themes</th><td>Inherit the shared theme; choose an override in each app's settings.</td></tr>
-<tr><th scope="row">Program status (OSC 7501)</th><td>On. Turn off in Terminal settings.</td></tr>
-<tr><th scope="row">tmux control mode (tmux -CC)</th><td>Off. Turn on in Terminal settings.</td></tr>
-<tr><th scope="row">Code reports</th><td>On. Manage in This workspace.</td></tr>
-<tr><th scope="row">Semantic search</th><td>Off. Configure its model and enable in This workspace.</td></tr>
-<tr><th scope="row">Idle screen lock</th><td>Off. Its default timeout is 300 seconds and its theme is Default.</td></tr>
-</tbody></table></div>
-<p>Editor settings include fonts, page width, and save behavior; Terminal settings include fonts, colors, and program status. Use the UI to see the currently applied values on the host you are connected to.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th scope="col">Setting</th><th scope="col">Default and where to change it</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">App themes</th><td>Inherit the Global theme; choose an override in each app's section.</td></tr>
+        <tr><th scope="row">Privacy mode</th><td>Off. Turn on in Global.</td></tr>
+        <tr><th scope="row">MCP discovery</th><td>Off. Turn on in Terminal.</td></tr>
+        <tr><th scope="row">Program status (OSC 7501)</th><td>On. Turn off in Terminal.</td></tr>
+        <tr><th scope="row">tmux control mode (tmux -CC)</th><td>Off. Turn on in Terminal.</td></tr>
+        <tr><th scope="row">Search indexing</th><td>Balanced. Change in Search.</td></tr>
+        <tr><th scope="row">Code reports</th><td>On. Manage in This workspace.</td></tr>
+        <tr><th scope="row">Semantic search</th><td>Off. Choose its model and turn it on in This workspace.</td></tr>
+        <tr><th scope="row">Idle screen lock</th><td>Off. Its timeout is 300 seconds and its theme Default.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Settings shows the values in effect on the machine the window belongs to.</p>
 </section>
 
 <section class="manual-block" id="config">
   <h2><a class="heading-anchor" href="#config">Configuration from the terminal</a></h2>
-<p><code>chan config</code> reads and writes named settings on the machine where it runs. For example:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan config get terminal.program_status</b></code>
-    {{copyButton}}
+  <p><code>chan config</code> reads and writes the same settings on the machine where it runs. It needs no running chan, and open windows pick up a change at once.</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan config get terminal.program_status</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan config set terminal.program_status true</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Form</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan config get</code></td><td>Prints every setting as TOML, or JSON with <code>--json</code>.</td></tr>
+        <tr><td><code>chan config get KEY</code></td><td>Prints one value.</td></tr>
+        <tr><td><code>chan config set KEY VALUE</code></td><td>Checks the value, saves it and prints it back. <code>KEY=VALUE</code> also works.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan config set terminal.program_status true</b></code>
-    {{copyButton}}
-  </div><p>Run <code>chan config --help</code> for the command interface. <code>CHAN_HOME</code> chooses a separate chan state directory, useful when running an isolated devserver alongside your local desktop.</p>
+  <p><code>editor.*</code> keys live in <code>preferences.toml</code> and <code>server.*</code> keys in <code>server.toml</code>, both in <code>~/.chan</code>. <code>CHAN_HOME</code> names another directory for all chan state, such as for an isolated devserver beside your desktop.</p>
+</section>
+
+<section class="manual-block" id="privacy">
+  <h2><a class="heading-anchor" href="#privacy">Privacy mode</a></h2>
+  <p>Turn on <strong>Settings → Global → Privacy mode</strong> before you record or share your screen; a recording does not turn it on. While it is on, chan hides:</p>
+  <ul>
+    <li>On the Computers and Gateways screens: computer and gateway names, addresses, connect scripts and tokens, workspace paths, WireGuard file paths and public keys, connection errors, notices and action details.</li>
+    <li>Window labels. Computers lists each window by its generated name, such as <code>Terminal Window 2</code>, and window titles read <code>Chan (privacy mode)</code>.</li>
+    <li>In the command launcher's Computers rows, names: each window reads <code>Window</code>, each workspace <code>Workspace</code>, each computer <code>Computer</code>.</li>
+    <li>On the Dashboard: the host name, chan home path and storage scan errors on Metrics, and the root path on Workspace.</li>
+    <li>The <a href="/manual/terminal/#program-reading">program each terminal runs</a>, as the pane tree lists it.</li>
+  </ul>
+  <p>An eye button beside a hidden field reveals that one field. What a terminal prints and what a file contains are not hidden; turn on <strong>Mask terminal secrets in privacy mode</strong> to mask secret-looking values in every terminal while privacy mode is on.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="settings-privacy" data-shot-kind="still">screenshot to capture<small>the Computers screen twice, side by side: privacy mode off with devserver names, addresses and window labels, and on with placeholders and eye buttons</small></div>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Privacy mode belongs to whoever is looking: Chan Desktop applies it to all of its windows, a devserver's included, and browser tabs at the same address share it.</li>
+      <li>With tabs in the title bar, the bar names the window by its generated name alone.</li>
+      <li>When privacy mode goes off, each terminal goes back to its own secret masking.</li>
+      <li>This workspace, and the left and right file browser docks, show only in a workspace window. Title bar tabs show only in Chan Desktop.</li>
+      <li>On the Linux and FreeBSD desktop a key binding cannot use the Super (Windows) key, which the desktop's web view does not report as a modifier.</li>
+      <li><code>terminal.*</code> is short for <code>server.terminal.*</code>. An unknown key is an error that lists every key you can set.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/shortcuts/#customize"><strong>Keyboard shortcuts</strong><span>See every binding and change the ones you want.</span></a>
+    <a class="next-card" href="/manual/command-launcher/#scopes"><strong>Command launcher</strong><span>Change any setting by name without opening Settings.</span></a>
+    <a class="next-card" href="/manual/screensavers/#screen-lock"><strong>Screen lock</strong><span>Lock a workspace window when you step away.</span></a>
+  </div>
 </section>

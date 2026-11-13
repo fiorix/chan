@@ -1,31 +1,132 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="graph-open" data-shot-kind="clip">clip to capture<small>cs graph src in a terminal; a graph tab opens with the root at the bottom and src selected and opened; a click on a Markdown file lights its links, tags and mentions, dims the rest and opens Details</small></div>
+  <figcaption>One graph per workspace: the directory tree, with each file's links, tags and mentions drawn over it.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>See a workspace as one tree, its root at the bottom, with the links, tags, mentions and languages of its files drawn over it.</li>
+    <li>Select a file, tag, mention, contact or language to see what refers to it and what it refers to.</li>
+    <li>Open and close directories in place, as in a file browser.</li>
+    <li>Raise the depth to open more levels below a directory or follow more hops of references.</li>
+    <li>Hide kinds of nodes, and copy a link that opens the same view again.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="open-graph">
   <h2><a class="heading-anchor" href="#open-graph">Open a graph</a></h2>
-<p>Run <strong>New graph</strong> from the command launcher to explore the workspace. Use <strong>New graph here</strong> in a file or directory's Details to open the graph with that file or directory selected. The terminal equivalents are:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs graph</b></code>
-    {{copyButton}}
+  <p>A graph tab needs a workspace window. Every graph tab draws the same graph; opening one on a node opens it with that node selected.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>From</th><th>How</th><th>Selected</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Command launcher or pane menu</td><td><strong>New graph</strong>, or <kbd>g</kbd> in <a href="/manual/navigation/#hybrid-nav">Hybrid Nav</a></td><td>The workspace root</td></tr>
+        <tr><td>A file's or directory's Details</td><td><strong>New graph here</strong></td><td>That file, or that directory opened deep enough to show its files</td></tr>
+        <tr><td>A tag's, contact's or language's Details</td><td><strong>Graph from here</strong></td><td>That tag, contact or language</td></tr>
+        <tr><td><a href="/manual/search/#search">Search workspace</a></td><td><kbd>Enter</kbd> on a tag or mention row</td><td>That tag or mention</td></tr>
+        <tr><td>A terminal</td><td><code>cs graph</code>, or <code>cs graph PATH</code></td><td>The root, or that path</td></tr>
+        <tr><td>A graph link</td><td><code>cs open</code> with a link from <strong>Copy graph link</strong></td><td>What the link's tab had selected and opened</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs graph src</b></code>
-    {{copyButton}}
-  </div><p>There is one graph: the workspace's directory structure, growing up from the workspace root, with the relationships from documents drawn over it, including links, tags, and mentions, and languages connecting source files through the code reports. A tag, a mention, a contact, or a document is a selection in that graph, not a graph of its own: selecting one shows what refers to it and what it refers to, each on its directories. Select a node to read its Details and follow the actions there.</p>
-  <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/open-graph.jpg" aria-label="Open the workspace graph from a terminal and explore its depth and relationships.">
-      <source src="/assets/home/videos/open-graph.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/open-graph.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Open the workspace graph from a terminal and explore its depth and relationships.</figcaption>
-  </figure>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs graph src</b></code>{{copyButton}}</div>
+  <p>A tag, mention, contact or language is a selection in the graph, not a graph of its own. Selecting one lights what refers to it and what it refers to, each on its directories, and dims the rest.</p>
 </section>
 
 <section class="manual-block" id="directory-navigation">
   <h2><a class="heading-anchor" href="#directory-navigation">Navigate directories like a browser</a></h2>
-<p>Use the directory graph as a visual file browser: select a directory to inspect it, and double-click a directory node to open or close it. <strong>New graph here</strong> opens a new graph tab with that node selected; a directory arrives opened, deep enough to show its files.</p>
-<p>The breadcrumb in Details shows the path of the selected file or directory. Click an ancestor to select that directory in the same graph tab, or <strong>workspace</strong> to select the root. The directories you opened stay open as the selection moves.</p>
-<p>The tree's own edges are grey. A symlink is joined to its target by a cyan edge, dashed when the target is missing, and the names of a hardlinked file are joined to each other in lime. Select a symlink to read where it points in Details, including a target outside the workspace. The graph finds symlinks and hardlinks by reading the tree from disk: the first six levels below the workspace root, up to 10,000 entries, and each directory that was open when the graph tab loaded. A symlink or hardlink outside both can be drawn without its edge; <strong>Reload graph</strong> in the command launcher reads the directories open now. A file given a second name in another directory is joined to it once its own directory changes. A directory git ignores that the graph still draws, such as an ignored <code>out/</code>, is drawn as the tab last read it, since the workspace reports no change inside it; the tab reads it again at <strong>Reload graph</strong> or whenever it reads its whole tree again, as after a branch switch that rewrites much of it. Directories the workspace excludes, by default <code>node_modules</code>, <code>build</code>, <code>dist</code> and <code>target</code> among others, are not drawn at all.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-dirs.png" alt="The graph showing the first level of a repository as directory nodes" loading="lazy" /><figcaption>Start with a compact view of the repository directories.</figcaption></figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You do</th><th>The graph</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Click a node</td><td>Selects it and shows its Details. A click on empty space clears the selection.</td></tr>
+        <tr><td>Double-click a directory</td><td>Opens or closes it in place.</td></tr>
+        <tr><td>Click a step of the breadcrumb in Details</td><td>Selects that directory in the same tab; <strong>workspace</strong> selects the root.</td></tr>
+        <tr><td><strong>Open</strong> in Details</td><td>Opens a file in the editor, or a directory in a file browser.</td></tr>
+        <tr><td>Drag the background, or scroll</td><td>Pans, or zooms toward the pointer.</td></tr>
+        <tr><td>Drag a node</td><td>Moves it.</td></tr>
+        <tr><td>Right-click</td><td>Opens the graph menu: <strong>Workspace</strong>, <strong>Depth</strong>, a row for each filter with its count, <strong>Flip pane</strong>, <strong>Close tab</strong> and <strong>Command launcher</strong>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The directories you open stay open as the selection moves. They are saved with the window's session and carried in a graph link.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="graph-directories" data-shot-kind="clip">clip to capture<small>the graph on a repository's first level; a double-click opens a directory and its files appear above it, a second double-click closes it</small></div>
+  </figure>
+</section>
+
+<section class="manual-block" id="colours">
+  <h2><a class="heading-anchor" href="#colours">Colours</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Colour</th><th>Nodes</th><th>Edges</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Grey</td><td>Directories</td><td>A directory to what it holds</td></tr>
+        <tr><td>Orange</td><td>Markdown and text files</td><td>A link from a Markdown or text file</td></tr>
+        <tr><td>Blue</td><td>Source files</td><td>A link from a source file</td></tr>
+        <tr><td>Purple</td><td>Images and PDFs</td><td></td></tr>
+        <tr><td>Dark grey</td><td>Other files</td><td></td></tr>
+        <tr><td>Green</td><td>Tags</td><td>A file to a tag it carries</td></tr>
+        <tr><td>Yellow</td><td>Contacts and mentions, and the drafts folder</td><td>A file to a contact it mentions</td></tr>
+        <tr><td>Pink</td><td>Languages</td><td>A source file to its language</td></tr>
+        <tr><td>Cyan</td><td></td><td>A symlink to its target, dashed when the target is missing</td></tr>
+        <tr><td>Lime</td><td></td><td>The names of one hardlinked file, to each other</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The workspace root is a darker node with a drive icon. <strong>Settings → Graph → Custom graph colours</strong> changes the hues.</p>
 </section>
 
 <section class="manual-block" id="depth">
   <h2><a class="heading-anchor" href="#depth">Use depth for a wider view</a></h2>
-<p>Open the graph tab's menu and move <strong>Depth</strong>. The depth belongs to the selected node. With a directory selected it is how many levels are open below that directory: raise it to open more, lower it to close them, down to zero to close the directory itself. For a view of the whole repository, select the workspace root and increase depth. The rest of the tree stays as you left it.</p>
-<p>With a document, a tag, a mention, or a contact selected, depth is how many hops of references to follow from it, in both directions. It starts over at one each time you select another node. What a selection shows this way leaves again when the selection moves, unless its directory is open. A language always shows its files, and the control marks its maximum when there is nothing further to reveal.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-full.png" alt="A wider project graph with a selected node and its connections highlighted" loading="lazy" /><figcaption>Increase depth to see more of the project, then select a node to inspect its connections.</figcaption></figure>
+  <p>Depth belongs to the selected node. Move <strong>Depth</strong> in the graph menu, or run <strong>Increase depth</strong> or <strong>Decrease depth</strong> from the command launcher.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Selected</th><th>Depth is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A directory</td><td>How many levels are open below it. Lower it to close them, down to 0 to close the directory itself. The rest of the tree stays as you left it.</td></tr>
+        <tr><td>The workspace root</td><td>Levels open below the root, from 1. Raise it for a view of the whole repository.</td></tr>
+        <tr><td>A file, tag, mention or contact</td><td>Hops of references followed from it, in both directions, from 1 to 6. It starts again at 1 for each node you select.</td></tr>
+        <tr><td>A language</td><td>Fixed at 1: a language always shows its files.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The control reads <code>[max]</code> when there is nothing further to reveal. What hops reveal leaves again when the selection moves, unless its directory is open.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="graph-depth" data-shot-kind="clip">clip to capture<small>the workspace root selected, right-click, drag Depth from 1 to 3 and the tree opens level by level; then select a Markdown file and raise Depth from 1 to 2 to light a second hop</small></div>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Each filter (tag, contact, language, media, folder, markdown, source) hides or shows one kind of node; all are on in a graph tab you open. The command launcher's <strong>Filters</strong> lists the same.</li>
+      <li>While a graph tab is focused the command launcher also has <strong>Select workspace</strong>, <strong>Copy graph link</strong> and <strong>Reload graph</strong>.</li>
+      <li>The status bar counts the nodes and edges shown out of those loaded, and reads <strong>indexing…</strong> while the index is not ready.</li>
+      <li>Selecting a symlink shows in Details where it points, including a target outside the workspace.</li>
+      <li>A link to a file that does not exist ends at a node whose Details says so.</li>
+      <li>The graph finds symlinks and hardlinks by reading the tree from disk: the first six levels below the root, up to 10,000 entries, and each directory open when the tab loaded. One outside both can be drawn without its edge until <strong>Reload graph</strong>.</li>
+      <li>A file given a second name in another directory is joined to it once its own directory changes.</li>
+      <li>A directory git ignores that the graph still draws, such as an ignored <code>out/</code>, is drawn as the tab last read it, until <strong>Reload graph</strong> or until the tab reads the whole tree again, as after a branch switch.</li>
+      <li>Directories the workspace excludes, by default <code>node_modules</code>, <code>build</code>, <code>dist</code> and <code>target</code> among others, are not drawn, nor are <code>.git</code> and <code>.chan</code>.</li>
+      <li>On a very large tree with hundreds of directories open, reading one level can pass the 10-second request limit. The graph then shows dimmed with the error until the next change or <strong>Reload graph</strong>.</li>
+      <li><a href="/manual/search/#terminal-search"><code>cs search --from</code></a> walks what the graph shows for a node, but follows neither symlinks nor hardlinks.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/search/"><strong>Search</strong><span>Find content and names, and walk the graph from a terminal.</span></a>
+    <a class="next-card" href="/manual/files/"><strong>File browser</strong><span>Browse, open and transfer the workspace's files.</span></a>
+    <a class="next-card" href="/manual/dashboard/#index"><strong>Dashboard and index</strong><span>Follow the index the graph's links, tags and mentions come from.</span></a>
+  </div>
 </section>

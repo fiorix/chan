@@ -1,0 +1,122 @@
+<aside class="doc-note">
+  <strong>For the person who runs a gateway</strong>
+  <p>These pages set up and run a chan gateway. To sign in to one, open its devservers, or share them, see <a href="/manual/gateway/">Connect to a gateway</a>.</p>
+</aside>
+
+<section class="manual-block" id="phases">
+  <h2><a class="heading-anchor" href="#phases">The work, in order</a></h2>
+  <p>The pages set up one gateway on one Ubuntu 24.04 server. <code>example.com</code> stands for your domain throughout.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Phase</th><th>What it answers</th><th>What you finish with</th></tr></thead>
+      <tbody>
+        <tr><td>Plan, this page</td><td>What do I need before I start?</td><td>A server, three DNS records, a wildcard certificate, an OAuth app</td></tr>
+        <tr><td><a href="/gateway/install/">Install</a></td><td>Which packages, and where does the data live?</td><td>Postgres with the gateway database, and the service packages</td></tr>
+        <tr><td><a href="/gateway/configure/">Configure</a></td><td>How do the services find each other and their public names?</td><td>The configuration under <code>/etc/chan-gateway/</code>, and the services running</td></tr>
+        <tr><td><a href="/gateway/edge/">The edge proxy</a></td><td>How does traffic from the internet reach the services?</td><td>nginx terminating TLS for the three names</td></tr>
+        <tr><td><a href="/gateway/accounts/">Accounts and sign-in</a></td><td>Who may sign in?</td><td>Your own account, signed in, with its username set</td></tr>
+        <tr><td><a href="/gateway/publish/">Publish a devserver</a></td><td>Does it work end to end?</td><td>A devserver online, opened in a browser, and shared</td></tr>
+        <tr><td><a href="/gateway/wireguard/">WireGuard</a>, optional</td><td>Can desktops reach the proxy nodes through WireGuard?</td><td>Desktops enrolled at sign-in</td></tr>
+        <tr><td><a href="/gateway/operate/">Operate</a></td><td>How do I run it from day to day?</td><td>The admin CLI, more nodes, upgrades, health checks</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="services">
+  <h2><a class="heading-anchor" href="#services">What you run</a></h2>
+  <p>A gateway is a few small services, a Postgres database and a TLS edge in front. Each service listens on loopback; the edge publishes only what must be public.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Service</th><th>Does</th><th>Reached at</th></tr></thead>
+      <tbody>
+        <tr><td>identity</td><td>Sign-in with GitHub, Google or GitLab, the account page, access tokens, sharing, the desktop's sign-in</td><td><code>gw.example.com</code></td></tr>
+        <tr><td>profile</td><td>Accounts, devservers, shares and policy, in Postgres</td><td>Internal only</td></tr>
+        <tr><td>devserver-control</td><td>Admits devservers and tracks the proxy nodes. No devserver traffic crosses it.</td><td>Internal only</td></tr>
+        <tr><td>devserver-proxy</td><td>Takes the devservers' tunnels and serves each devserver at an origin of its own</td><td><code>proxy.example.com</code>, <code>*.p1.proxy.example.com</code></td></tr>
+        <tr><td>wireguard-agent</td><td>Optional: keeps a proxy node's WireGuard peers in step with the gateway</td><td>No listener</td></tr>
+        <tr><td><code>chan-gateway-admin</code></td><td>The operator's command line</td><td>Run as root on the server</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A devserver's machine needs no inbound port, DNS name or certificate: it dials out to the gateway with an access token. The <a href="/gateway/#access">gateway guide</a> draws the traffic.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>gw.chan.app</code> is the maintainer's own deployment of this code: experimental, with sign-in off by default. It is not a hosted product and takes no sign-ups.</li>
+      <li>To run the services on Kubernetes instead of one server, follow <a href="https://github.com/fiorix/chan/tree/main/packaging/kube#apply-to-a-real-cluster">packaging/kube</a>. The WireGuard agent has no manifest, since it changes the host's own network interface.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="need">
+  <h2><a class="heading-anchor" href="#need">What you need</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>You need</th><th>For</th><th>Who provides it</th></tr></thead>
+      <tbody>
+        <tr><td>A server: Ubuntu 24.04, amd64 or arm64, TCP ports 80 and 443 open</td><td>Every service, Postgres and nginx</td><td>You, with sudo on it</td></tr>
+        <tr><td>A domain whose DNS you control</td><td>The three names below</td><td>Whoever manages the domain's DNS</td></tr>
+        <tr><td>An API credential at your DNS provider</td><td>The DNS challenge a wildcard certificate needs</td><td>The DNS provider's account</td></tr>
+        <tr><td>An OAuth app at GitHub, Google or GitLab</td><td>Sign-in</td><td>An account at that provider, or an admin of its organization</td></tr>
+        <tr><td>UDP port 51820 open, only for WireGuard</td><td>Desktops' WireGuard tunnels</td><td>You, at the server's firewall</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="dns">
+  <h2><a class="heading-anchor" href="#dns">DNS and a certificate</a></h2>
+  <p>Point three records at the server:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Name</th><th>Serves</th></tr></thead>
+      <tbody>
+        <tr><td><code>gw.example.com</code></td><td>Sign-in, accounts, and desktop discovery.</td></tr>
+        <tr><td><code>proxy.example.com</code></td><td>Tunnel ingress, where devservers dial in, and proxy health.</td></tr>
+        <tr><td><code>*.p1.proxy.example.com</code></td><td>One origin per devserver on proxy node <code>p1</code>. A <code>*.example.com</code> record does not cover these names.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The services speak plain HTTP on loopback, and nginx terminates TLS in front of them. The wildcard name needs a certificate from a DNS challenge, so install certbot with the plugin for your DNS provider. With Cloudflare:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo apt install certbot python3-certbot-dns-cloudflare
+sudo certbot certonly --dns-cloudflare \
+  --dns-cloudflare-credentials /root/cloudflare.ini \
+  -d gw.example.com -d proxy.example.com -d '*.p1.proxy.example.com'</b></code>
+    {{copyButton}}
+  </div>
+  <p>The certificate lands in <code>/etc/letsencrypt/live/gw.example.com/</code>, where the edge configuration reads it, and certbot renews it on its own.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>With WireGuard, <code>p1.proxy.example.com</code> needs a record of its own: desktops dial it, and the wildcard record does not cover the name itself.</li>
+      <li>Each further proxy node adds a wildcard of its own, such as <code>*.p2.proxy.example.com</code>. See <a href="/gateway/operate/#nodes">More proxy nodes</a>.</li>
+      <li>A certificate from a CA of your own works for a gateway on an internal network. Install that CA in the system trust store of every machine that runs Chan Desktop, a devserver or the WireGuard agent.</li>
+      <li>On macOS and Windows, chan verifies the gateway through the system, as a browser does. On Linux it reads the system's CA bundle (<code>update-ca-certificates</code> on Debian and Ubuntu, <code>update-ca-trust</code> on Fedora) beside the roots it carries.</li>
+      <li>chan reads the trust store when it starts: restart a running desktop, devserver or agent after installing a CA.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="oauth">
+  <h2><a class="heading-anchor" href="#oauth">A sign-in provider</a></h2>
+  <p>The gateway needs at least one of GitHub, Google and GitLab. For GitHub, open <a href="https://github.com/settings/developers">Developer settings</a>, choose <strong>New OAuth App</strong>, and set:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Field</th><th>Value</th></tr></thead>
+      <tbody>
+        <tr><td>Homepage URL</td><td><code>https://gw.example.com</code></td></tr>
+        <tr><td>Authorization callback URL</td><td><code>https://gw.example.com/auth/github/callback</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Keep the client ID and a client secret for <a href="/gateway/configure/">Configure</a>. For Google or GitLab, the callback ends in <code>/auth/google/callback</code> or <code>/auth/gitlab/callback</code>.</p>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/install/"><strong>Install</strong><span>Create the database and install the service packages.</span></a>
+  </div>
+</section>

@@ -1,0 +1,84 @@
+<section class="manual-block" id="configure">
+  <h2><a class="heading-anchor" href="#configure">Run the setup script</a></h2>
+  <p>The repository's setup script generates every service credential and signing key, prepares the database roles, and writes the configuration under <code>/etc/chan-gateway/</code>. Run it from a checkout of the same release:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>git clone --depth 1 --branch v{{version}} https://github.com/fiorix/chan
+sudo chan/packaging/gateway/scripts/configure.sh</b></code>
+    {{copyButton}}
+  </div>
+  <p>Answer its questions like this:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        <tr><td>Postgres user, password, database</td><td><code>chan</code>, the password you chose, <code>chan_gateway</code></td></tr>
+        <tr><td>Gateway public origin</td><td><code>https://gw.example.com</code></td></tr>
+        <tr><td>Proxy namespace origin</td><td><code>https://proxy.example.com</code></td></tr>
+        <tr><td>Tunnel ingress origin</td><td>Enter, for <code>https://proxy.example.com</code></td></tr>
+        <tr><td>This proxy node id</td><td>Enter, for <code>p1</code></td></tr>
+        <tr><td>This proxy node origin</td><td>Enter, for <code>https://p1.proxy.example.com</code></td></tr>
+        <tr><td>WireGuard ingresses</td><td>Enter, which leaves WireGuard enrollment off. <a href="/gateway/wireguard/">WireGuard</a> turns it on later.</td></tr>
+        <tr><td>GitHub OAuth Client ID and Client Secret</td><td>From the OAuth app. Enter skips Google and GitLab.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>An origin is <code>http://</code> or <code>https://</code>, a host and an optional port, with no path and no trailing slash. An answer the script refuses stops it before it changes anything; run it again.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The gateway public origin and the proxy namespace origin have no default.</li>
+      <li>With the WireGuard agent's package installed, the script also asks <strong>Kernel WireGuard interface for the agent</strong>, <code>wg0</code> by default.</li>
+      <li>It ends by printing each provider's callback URL and the names that need DNS records and certificates, to check against <a href="/gateway/plan/">Plan</a>.</li>
+      <li>Every run asks every question again, generates new credentials and signing keys, and replaces each file whole, keeping the old one beside it as <code>&lt;file&gt;.bak.&lt;date&gt;-&lt;time&gt;</code>, readable by root only. On a running gateway, edit the files instead.</li>
+      <li>The one value a run takes from the files it replaces is the default answer to the WireGuard address pool question.</li>
+      <li>On a rerun, stop <code>chan-gateway-identity</code> and <code>chan-gateway-profile</code> before restarting the schema unit, as the script's closing lines say.</li>
+      <li>An existing env file the script cannot read stops it before the first question.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="files">
+  <h2><a class="heading-anchor" href="#files">What it writes</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>File in <code>/etc/chan-gateway/</code></th><th>Read by</th></tr></thead>
+      <tbody>
+        <tr><td><code>domain.env</code></td><td>identity, devserver-control and devserver-proxy: the public origins</td></tr>
+        <tr><td><code>migrate.env</code></td><td>The schema unit: the database owner's credentials</td></tr>
+        <tr><td><code>profile.env</code>, <code>identity.env</code></td><td>profile and identity, each with a database role of its own</td></tr>
+        <tr><td><code>devserver-control.env</code>, <code>devserver-proxy.env</code></td><td>The controller and this proxy node</td></tr>
+        <tr><td><code>admin.env</code></td><td><code>chan-gateway-admin</code>; readable by root only</td></tr>
+        <tr><td><code>wireguard-agent.env</code></td><td>The WireGuard agent; written only when its package is installed</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="start">
+  <h2><a class="heading-anchor" href="#start">Start the services</a></h2>
+  <p>Apply the database schema, then start the services:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-migrate
+sudo systemctl enable --now chan-gateway-profile chan-gateway-identity \
+  chan-gateway-devserver-control chan-gateway-devserver-proxy</b></code>
+    {{copyButton}}
+  </div>
+  <p>The schema unit runs once and must succeed before identity and profile start. Run it again after each upgrade, even when nothing changed.</p>
+</section>
+
+<section class="manual-block" id="check">
+  <h2><a class="heading-anchor" href="#check">Check them</a></h2>
+  <p>Follow every service's log:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>journalctl -u 'chan-gateway-*' -f</b></code>{{copyButton}}</div>
+  <p>The proxy admits devservers about 30 seconds after the controller comes up. Ask it, with the tunnel ingress name as the host:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: proxy.example.com' http://127.0.0.1:7002/readyz</b></code>{{copyButton}}</div>
+  <pre class="sample-output"><code>200</code></pre>
+  <p>It answers <code>503</code> until it is ready, and <code>404</code> to any other host name.</p>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/edge/"><strong>The edge proxy</strong><span>Put nginx in front, with TLS for the three names.</span></a>
+  </div>
+</section>

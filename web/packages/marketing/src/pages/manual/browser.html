@@ -1,94 +1,210 @@
-<section class="manual-block" id="browser">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#browser">Chan without the desktop</a></h2>
-  </div>
-  <p>The <code>chan</code> binary carries the whole UI: the web apps are built into it, and any browser can show them. Chan Desktop is not needed, which makes this the way to use chan on a server, in a VM, or on a machine where you cannot install an app. There are two ways in:</p>
-  <ul>
-    <li><strong>Serve one workspace</strong> with <code>chan serve --standalone</code>, in the foreground, for as long as the command runs.</li>
-    <li><strong>Run a devserver</strong>, a background service that keeps a library of terminals and workspaces running whether or not anyone is connected, and open its Computers screen in a browser.</li>
-  </ul>
-  <p>Install the CLI on the machine as in <a href="/manual/devserver/#install-server">Install on the host</a>. On FreeBSD, which has <code>fetch</code> instead of <code>curl</code>, run <code>fetch -o - https://chan.app/install.sh | sh</code>. The Linux build is statically linked, so the same binary runs on any distribution. Check it with <code>chan --version</code>.</p>
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="browser-serve" data-shot-kind="clip">clip to capture<small>a terminal runs chan serve --standalone ./notes; the browser opens on the printed URL; a terminal tab opens in the workspace window</small></div>
+  <figcaption>One workspace, served by the chan binary alone, in a browser tab.</figcaption>
+</figure>
 
-  <h3 id="standalone"><a class="heading-anchor" href="#standalone">Serve a workspace</a></h3>
-  <p>Any directory can be a workspace. Start with a new one in your home directory:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cd ~ &amp;&amp; chan serve --standalone ./notes</b></code>
-    {{copyButton}}
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Serve one workspace to any browser with <code>chan serve --standalone</code>, without Chan Desktop.</li>
+    <li>Use chan on a server or a VM through an ssh port forward.</li>
+    <li>Open a devserver's Computers screen in a browser, and its windows in tabs.</li>
+    <li>Hide a window, close its tab, and find its terminals still running later.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="browser">
+  <h2><a class="heading-anchor" href="#browser">Chan without the desktop</a></h2>
+  <p>The <code>chan</code> binary carries the whole UI. <a href="/install/#server">Install the CLI</a> on the machine, then pick a way in:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Way in</th><th>You get</th><th>It lasts</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><a href="#standalone"><code>chan serve --standalone</code></a></td><td>One workspace window.</td><td>While the command runs in the foreground.</td></tr>
+        <tr><td><a href="#devserver">A devserver</a></td><td>The Computers screen: terminal windows and as many workspaces as you add.</td><td>As a background service, whether or not anyone is connected.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <pre class="sample-output"><code>chan: first run on this workspace; the search index builds in the background after the URL below, so the editor and terminal are usable right away even on a large tree.
-chan is ready:
+</section>
+
+<section class="manual-block" id="standalone">
+  <h2><a class="heading-anchor" href="#standalone">Serve a workspace</a></h2>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cd ~ &amp;&amp; chan serve --standalone ./notes</b></code>{{copyButton}}</div>
+  <pre class="sample-output"><code>chan is ready:
 http://127.0.0.1:8787/?t=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
-  <p>The command creates <code>notes</code> if it does not exist, registers it as a workspace, starts the server on <code>127.0.0.1:8787</code>, opens your default browser on the printed URL, and keeps running in the foreground until <code>Ctrl+C</code>. <code>--standalone</code> makes this command the server: without it, <code>chan serve</code> first looks for a running Chan Desktop or devserver of yours and hands the workspace to it, so a workspace is only ever served by one process. On Windows, a Chan Desktop that is still starting cannot take it yet: <code>chan serve</code> says that chan-desktop is starting and serves the workspace itself. A <code>chan</code> installed apart from Chan Desktop may not find a Chan Desktop of another release, and then serves the workspace itself as well; the <code>chan</code> that Chan Desktop installs is always of its release.</p>
+  <p>It creates <code>notes</code> if needed, serves it on <code>127.0.0.1:8787</code>, opens your browser on the URL, and runs until <kbd>Ctrl+C</kbd>. Without <code>--standalone</code>, <code>chan serve</code> hands the workspace to a running Chan Desktop or devserver: see <a href="/manual/workspaces/#serve">Workspaces</a>.</p>
   <aside class="doc-note warning">
     <strong>The URL is the key</strong>
-    <p>The <code>?t=</code> part is the workspace's access token. Anyone who has the URL and can reach the port can use the workspace, terminals included. The token is stored under <code>~/.chan</code> and stays the same across restarts, so a bookmark keeps working.</p>
+    <p>The <code>?t=</code> part is the workspace's token: anyone with the URL who can reach the port can use the workspace, terminals included. It stays the same across restarts, so a bookmark keeps working.</p>
   </aside>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Flag</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>--port 9000</code></td><td>Serves on another port. The default is 8787.</td></tr>
+        <tr><td><code>--no-browser</code></td><td>Prints the URL without opening a browser, for a machine without a desktop.</td></tr>
+        <tr><td><code>--here</code></td><td>Serves a subdirectory of a Git, Mercurial, or Subversion repository. Without it, <code>chan serve</code> refuses one and asks for the repository root, because links, the graph, and search follow the project.</td></tr>
+        <tr><td><code>--host 0.0.0.0</code></td><td>Listens on every interface. See the warning under <a href="#remote">Serve from another machine</a>.</td></tr>
+        <tr><td><code>--timeout 1h</code></td><td>Shuts the server down after this long idle. Takes <code>30s</code>, <code>5m</code>, <code>1h</code>.</td></tr>
+        <tr><td><code>--no-settings</code></td><td>Refuses settings changes, for a shared or demo machine.</td></tr>
+        <tr><td><code>--no-token</code></td><td>Drops the token. Never use it on a shared machine.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="work">
+  <h2><a class="heading-anchor" href="#work">Work in the browser</a></h2>
+  <p>The URL opens a workspace window, with panes and tabs as on the desktop. Open a terminal from the pane menu and try:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>echo '# Hello' &gt; hello.md &amp;&amp; cs open hello.md</b></code>{{copyButton}}</div>
   <ul>
-    <li><code>--port 9000</code> serves on another port.</li>
-    <li><code>--no-browser</code> only prints the URL, for a machine without a desktop.</li>
-    <li>Inside a git repository, <code>chan serve</code> expects the repository root, because links, the graph, and search follow the project boundary. Add <code>--here</code> to serve a subdirectory anyway.</li>
+    <li>The shells live in the server, not in the tab. Reload or reopen the URL and your terminals are still running, with their scrollback.</li>
+    <li>A second browser on the same URL joins one <a href="/manual/collaboration/#shared-workspace">shared session</a>.</li>
   </ul>
-
-  <h3 id="work"><a class="heading-anchor" href="#work">Work in the browser</a></h3>
-  <p>The URL opens a workspace window: tiling panes with tabs, as on the desktop, inside a browser tab. The pane menu lists the built-in apps, and the <a href="/manual/navigation/#command-launcher">command launcher</a> is <code>Ctrl+Alt+K</code> in a browser on every OS. Open a terminal and try:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>echo '# Hello' &gt; hello.md &amp;&amp; cs open hello.md</b></code>
-    {{copyButton}}
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>In a browser</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><a href="/manual/command-launcher/">Command launcher</a></td><td><kbd>Ctrl+Alt+K</kbd></td><td><kbd>Ctrl+Alt+K</kbd></td></tr>
+        <tr><td><a href="/manual/search/">Search</a></td><td><kbd>Cmd+Shift+S</kbd></td><td><kbd>Ctrl+Alt+S</kbd></td></tr>
+      </tbody>
+    </table>
   </div>
-  <p><code>cs open</code> opens the file in the editor, in the same window. Search is <code>Cmd+Shift+S</code> on macOS and <code>Ctrl+Alt+S</code> elsewhere, and <code>chan workspace search hello</code> queries the same index from the terminal.</p>
-  <p>The shells live in the server, not in the browser tab. Reload the page, or close it and open the URL again, and your terminals are still running with their scrollback. Open the same URL in a second browser window and both share the workspace as two participants of one <a href="/manual/collaboration/">session</a>.</p>
+</section>
 
-  <h3 id="remote"><a class="heading-anchor" href="#remote">Serve from another machine</a></h3>
-  <p>The server listens on the loopback address only. To use a workspace on a remote machine, forward a port over ssh from your computer:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>ssh -L 8787:127.0.0.1:8787 user@host</b></code>
-    {{copyButton}}
-  </div>
-  <p>Then run <code>chan serve --standalone --no-browser ./notes</code> in that ssh session and open the printed URL on your computer. If 8787 is taken on your side, forward another local port, such as <code>-L 9901:127.0.0.1:8787</code>, and change the port in the URL to match. The workspace stays up only while ssh and the command run; a devserver, below, keeps it up for good.</p>
+<section class="manual-block" id="remote">
+  <h2><a class="heading-anchor" href="#remote">Serve from another machine</a></h2>
+  <p>The server listens on loopback only. Forward its port over ssh, run <code>chan serve --standalone --no-browser ./notes</code> in that session, and open the printed URL on your computer:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>ssh -L 8787:127.0.0.1:8787 user@host</b></code>{{copyButton}}</div>
+  <p>The workspace stays up while ssh and the command run; a <a href="#devserver">devserver</a> keeps it up for good.</p>
   <aside class="doc-note warning">
     <strong>Listening on the network</strong>
-    <p><code>--host 0.0.0.0</code> makes the server listen on every interface, and <code>chan serve</code> warns when it does. chan has no TLS of its own, so the token and everything you type travel in plaintext. Use it only on a network you trust, and prefer an ssh forward everywhere else.</p>
+    <p><code>--host 0.0.0.0</code> listens on every interface, and <code>chan serve</code> warns when it does. chan has no TLS, so the token and everything you type travel in plaintext. Prefer an ssh forward.</p>
   </aside>
+</section>
 
-  <h3 id="stop"><a class="heading-anchor" href="#stop">Stop and check</a></h3>
-  <p><code>Ctrl+C</code> in the terminal running <code>chan serve</code> stops the server and ends the workspace's terminals. Your files, the index, and the window layout stay, and serving the directory again picks up where you left off, with the same URL. From another shell, <code>chan ps</code> shows which workspaces are served, and by what:</p>
+<section class="manual-block" id="stop">
+  <h2><a class="heading-anchor" href="#stop">Stop and check</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Run</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Ctrl+C</kbd> where <code>chan serve</code> runs, or <code>chan close ~/notes</code> from another shell</td><td>The server stops and the workspace's terminals end. Files, index, and window layout stay; serving the directory again picks up where you left off, at the same URL.</td></tr>
+        <tr><td><code>chan ps</code></td><td>Lists the registered workspaces and what serves each.</td></tr>
+        <tr><td><code>chan workspace ls</code></td><td>Lists every registered workspace, served or not.</td></tr>
+        <tr><td><code>chan workspace forget ~/notes</code></td><td>Stops serving it and removes chan's data about it. Your files are never touched.</td></tr>
+      </tbody>
+    </table>
+  </div>
   <pre class="sample-output"><code>STATE    BY                PID  READY       GEN      PASS       ACTION     INDEXER   QUEUE  WORKSPACE
 served   standalone      41873  -           -        -          -          -             -  /home/user/notes</code></pre>
-  <p><code>chan workspace ls</code> lists every registered workspace, served or not, and <code>chan workspace forget ~/notes</code> removes one along with chan's data about it. Your files are never touched.</p>
-  <p>When the desktop serves a workspace, a local <code>chan close</code> or <code>chan workspace forget</code> allows time for the desktop to release it. If it answers <code>workspace is still releasing; retry</code>, the workspace is off and its cleanup continues; retry the command once that cleanup finishes.</p>
-  <p class="minor">Under the hood: while it runs, the server indexes the workspace for <a href="/manual/search/">search</a> and the graph, watches the directory and pushes changes to every open window, hosts the <a href="/manual/collaboration/">sessions</a> of the browsers attached to it, and runs <a href="/manual/extensions/">extensions</a>. Everything it derives lives under <code>~/.chan</code> (or <code>$CHAN_HOME</code>), never inside your directory. <a href="https://github.com/fiorix/chan/blob/main/design.md#the-workspace">design.md</a> describes the server and the workspace.</p>
 </section>
 
 <section class="manual-block" id="devserver">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#devserver">A devserver in the browser</a></h2>
-  </div>
-  <p>A devserver is the same server run as a background service, hosting a library instead of one workspace: <strong>standalone terminals</strong>, each with a file browser and an editor over the machine's own files, and as many <strong>workspaces</strong> as you register. Start it as in <a href="/manual/devserver/#start-server">Start the devserver</a>, then print its URL:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan devserver status</b></code>
-    {{copyButton}}
-  </div>
-  <p>Like the URL of <code>chan serve</code>, it carries the devserver's token, kept under <code>~/.chan</code> and the same across restarts; <code>chan devserver rotate-token</code> replaces it. On a remote machine, forward a port over ssh as above, for example <code>ssh -L 9901:127.0.0.1:8787 user@host</code>, and open the URL with the port changed to <code>9901</code>.</p>
+  <h2><a class="heading-anchor" href="#devserver">A devserver in the browser</a></h2>
+  <p>A devserver is the same server as a background service, holding terminal windows and many workspaces. <a href="/manual/devserver/#start-server">Start one</a>, then print its URL, which carries its <a href="/manual/devserver/#token">token</a>:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan devserver status</b></code>{{copyButton}}</div>
+  <p>On a remote machine, forward a port as in <a href="#remote">Serve from another machine</a>.</p>
+</section>
 
-  <h3 id="computers"><a class="heading-anchor" href="#computers">The Computers screen</a></h3>
-  <p>The devserver's address opens the Computers screen. In a browser it shows one card, <strong>This machine</strong>, meaning the machine that runs the devserver, with <strong>New terminal</strong> and <strong>New workspace</strong> and two lists: <strong>Terminals</strong>, which holds <code>Terminal Window 1</code> on a new devserver, and <strong>Workspaces</strong>. The desktop's carousel, its All windows and Add devserver cards, and <code>Cmd+P</code> belong to Chan Desktop.</p>
-  <p>Each window row has <strong>Open window</strong>, which opens the window in a new browser tab. If nothing opens, allow pop-ups for the page. A terminal window works on the whole machine: <code>cs open ~</code> shows your home directory in its file browser, and <code>cs upload</code> and <code>cs download</code> move files between the devserver and the browser's computer. Search, the graph, and agent teams belong to a project, so they need a workspace window; a terminal window's Dashboard shows the process metrics and About.</p>
-
-  <h3 id="browser-workspaces"><a class="heading-anchor" href="#browser-workspaces">Add a workspace</a></h3>
-  <p>In a devserver terminal, <code>chan open</code> registers a directory with the devserver instead of starting a server of its own:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan open ~/notes</b></code>
-    {{copyButton}}
+<section class="manual-block" id="computers">
+  <h2><a class="heading-anchor" href="#computers">The Computers screen</a></h2>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="browser-computers" data-shot-kind="still">screenshot to capture<small>a browser on a devserver's URL: the one This machine card, Terminal Window 1 under Terminals and a notes workspace under Workspaces</small></div>
+    <figcaption>In a browser, the Computers screen is one card: the machine that runs the devserver.</figcaption>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>On the card</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>New terminal</strong></td><td>Adds a terminal window under <strong>Terminals</strong>. A new devserver already lists <code>Terminal Window 1</code>.</td></tr>
+        <tr><td><strong>New workspace</strong></td><td>Adds a folder on that machine under <strong>Workspaces</strong>. See <a href="#browser-workspaces">Add a workspace</a>.</td></tr>
+        <tr><td><strong>Open window</strong>, on a window row</td><td>Opens the window in a new browser tab.</td></tr>
+        <tr><td><strong>Hide window</strong>, <strong>Show window</strong> (the eye)</td><td>See <a href="#hide">Hide and show windows</a>.</td></tr>
+      </tbody>
+    </table>
   </div>
+  <ul>
+    <li>A terminal window works on the whole machine: <code>cs open ~</code> browses your home directory, and <code>cs upload</code> and <code>cs download</code> move files to and from your computer.</li>
+    <li>Search, the graph, and agent teams need a workspace window.</li>
+    <li>The carousel and the Gateways screen belong to <a href="/manual/computers/">Chan Desktop</a>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="browser-workspaces">
+  <h2><a class="heading-anchor" href="#browser-workspaces">Add a workspace</a></h2>
+  <p>In a devserver terminal, <code>chan open</code> registers the directory with the devserver:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>chan open ~/notes</b></code>{{copyButton}}</div>
   <pre class="sample-output"><code>chan: opened a window for /home/user/notes with local devserver on port 8787 (library /home/user/.chan, chan {{version}})</code></pre>
-  <p>The workspace appears under <strong>Workspaces</strong> with a window ready to open; <strong>New workspace</strong> on the card does the same from the browser. A workspace row offers <strong>New window</strong>, <strong>New terminal window</strong>, and a power button that turns the workspace off and on. Off unmounts it: its index and windows are kept, its terminals end, and chan asks first when any are running.</p>
+  <p>It appears under <strong>Workspaces</strong>. <strong>New workspace</strong> on the card does the same from the browser.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>On a workspace row</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>New window</strong></td><td>Opens another window of the workspace.</td></tr>
+        <tr><td><strong>New terminal window</strong></td><td>Opens a window of the workspace that starts with a terminal.</td></tr>
+        <tr><td><strong>Turn off</strong>, <strong>Turn on</strong> (the power button)</td><td>Off unmounts the workspace: its index and windows are kept, and its terminals end. chan asks first when any are running.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 
-  <h3 id="hide"><a class="heading-anchor" href="#hide">Hide and show windows</a></h3>
-  <p>Windows outlive the browser tabs that show them. <strong>Hide window</strong> (the eye on a window row) takes a window out of the way while its terminals keep running: its tab shows a cover saying it is hidden, and you can close the tab. <strong>Show window</strong> brings it back, in its old tab or a new one. Start a build or an agent, hide its window, and check on it from the Computers screen later, from this computer or another one.</p>
-  <aside class="doc-note warning">
-    <strong>Close the tab or hide the window</strong>
-    <p>In a browser, closing the tab of a window opened from the Computers screen closes that window and ends its terminals. To keep them running, hide the window first.</p>
-  </aside>
-  <p>When several browser pages show the same Computers screen, one is the session leader: only that page shows and hides windows. See <a href="/manual/collaboration/#leadership">Hand over workspace leadership</a>.</p>
-  <p>To upgrade, run <code>chan upgrade</code> and then <code>chan devserver restart</code>. On Linux under systemd, terminals survive the restart; elsewhere a restart ends them, and workspaces, windows, and layouts come back.</p>
+<section class="manual-block" id="hide">
+  <h2><a class="heading-anchor" href="#hide">Hide and show windows</a></h2>
+  <p>Windows outlive their browser tabs. Start a build or an agent, hide its window, and check on it later from any computer.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You do</th><th>The window and its terminals</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Hide window</strong></td><td>Keep running. The tab shows a cover saying the window is hidden; close the tab.</td></tr>
+        <tr><td><strong>Show window</strong></td><td>Come back, in the old tab or a new one.</td></tr>
+        <tr><td>Close the tab of a shown window</td><td>The window closes and its terminals end. Hide it first to keep them.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="browser-hidden-cover" data-shot-kind="still">screenshot to capture<small>a browser tab covered by "hidden by the session leader", its line about reopening from Computers, and the Close window button</small></div>
+  </figure>
+  <p>When several pages show the same Computers screen, only the <a href="/manual/collaboration/#leadership">session leader</a>'s page shows, hides, and opens a workspace's windows.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>To upgrade a devserver, run <code>chan upgrade</code>, then <code>chan devserver restart</code>. On Linux under systemd, terminals survive the restart; elsewhere they end, and workspaces, windows, and layouts come back.</li>
+      <li>If <strong>Open window</strong> opens nothing, the browser blocked the pop-up: allow pop-ups for the page.</li>
+      <li>If port 8787 is taken on your side of an ssh forward, forward another, such as <code>-L 9901:127.0.0.1:8787</code>, and change the port in the URL to match.</li>
+      <li>A terminal window's Dashboard shows the metrics and About only.</li>
+      <li>In a browser the Computers screen has no All windows or Add devserver card, and no keyboard letters.</li>
+      <li><code>chan devserver rotate-token</code> replaces a devserver's token at once; reopen any tab that used the old URL. The token also rotates on its own at the first cold start after it turns 30 days old.</li>
+      <li>A standalone server's token is kept under <code>~/.chan</code>.</li>
+      <li>On Windows, a Chan Desktop that is still starting cannot take a workspace; <code>chan serve</code> says so and serves it itself.</li>
+      <li>A <code>chan</code> installed apart from Chan Desktop may not find a Chan Desktop of another release, and then serves the workspace itself. The <code>chan</code> that Chan Desktop installs is always of its release.</li>
+      <li>When Chan Desktop serves a workspace, <code>chan close</code> or <code>chan workspace forget</code> may answer <code>workspace is still releasing; retry</code>. The workspace is off and its cleanup continues; run the command again once it finishes.</li>
+      <li>On the first run on a workspace, <code>chan serve</code> says the search index builds in the background; the editor and terminal work at once.</li>
+      <li><code>--prefix /team/alice</code> mounts the server under a URL path, so one host behind a reverse proxy can carry several.</li>
+      <li>The Linux build is statically linked, so the same binary runs on any distribution. Check it with <code>chan --version</code>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/collaboration/"><strong>Collaboration</strong><span>Share a workspace with other windows and hand over leadership.</span></a>
+    <a class="next-card" href="/manual/connect/"><strong>Connect from Chan Desktop</strong><span>Open a devserver's windows as native windows.</span></a>
+    <a class="next-card" href="/manual/gateway/"><strong>Connect to a gateway</strong><span>Reach devservers from any browser through sign-in, without ssh.</span></a>
+  </div>
 </section>
