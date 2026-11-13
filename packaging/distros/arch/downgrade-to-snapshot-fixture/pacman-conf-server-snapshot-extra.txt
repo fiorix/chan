@@ -1,0 +1,1 @@
+https://archive.archlinux.org/repos/2026/10/02/extra/os/x86_64

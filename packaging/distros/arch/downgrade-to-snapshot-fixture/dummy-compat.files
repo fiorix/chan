@@ -1,0 +1,19 @@
+/etc/
+/etc/shared.conf
+/opt/
+/opt/data/
+/opt/data/readme
+/usr/
+/usr/lib/
+/usr/lib/dummy/
+/usr/lib/dummy/libd.so.1
+/usr/share/
+/usr/share/dummy/
+/usr/share/dummy/!bang.txt
+/usr/share/dummy/a b.txt
+/usr/share/dummy/c,d.txt
+/usr/share/dummy/e[1].txt
+/usr/share/dummy/f*g.txt
+/usr/share/dummy/h?i.txt
+/usr/share/dummy/j\k.txt
+/usr/share/dummy/l,!m.txt

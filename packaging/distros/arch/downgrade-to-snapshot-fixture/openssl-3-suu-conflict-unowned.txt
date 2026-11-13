@@ -1,0 +1,4 @@
+error: failed to commit transaction (conflicting files)
+openssl: /usr/lib/libcrypto.so.3 exists in filesystem
+openssl: /usr/lib/libssl.so.3 exists in filesystem
+Errors occurred, no packages were upgraded.

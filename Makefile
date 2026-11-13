@@ -342,6 +342,12 @@ aur-sdme-contract-check: ## Check the AUR sdme driver against a stand-in.
 	$(LINUX_ONLY)
 	packaging/distros/arch/test-build-with-sdme.sh
 
+.PHONY: aur-contract-check
+aur-contract-check: ## Check the AUR CI wrapper and the Arch snapshot downgrade against stand-ins (as a non-root user).
+	$(LINUX_ONLY)
+	packaging/distros/arch/test-build-in-ci.sh
+	packaging/distros/arch/test-downgrade-to-snapshot.sh
+
 .PHONY: copr-sdme-contract-check
 copr-sdme-contract-check: ## Check the COPR sdme driver against a stand-in.
 	$(LINUX_ONLY)
@@ -401,6 +407,7 @@ ifeq ($(UNAME_S),Linux)
 	# needs only desktop-file-validate, which the desktop package step below
 	# needs too. The gateway steps stay below because they ARE compiles.
 	$(MAKE) sdme-contract-check
+	$(MAKE) aur-contract-check
 	$(MAKE) browser-smoke-lib-test
 	$(MAKE) desktop-entries-check
 endif

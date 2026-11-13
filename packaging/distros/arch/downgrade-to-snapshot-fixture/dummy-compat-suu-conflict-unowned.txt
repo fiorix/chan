@@ -1,0 +1,6 @@
+error: failed to commit transaction (conflicting files)
+dummy: /usr/share/dummy/c,d.txt exists in filesystem
+dummy: /usr/share/dummy/e[1].txt exists in filesystem
+dummy: /usr/share/dummy/j\k.txt exists in filesystem
+dummy: /usr/share/dummy/l,!m.txt exists in filesystem
+Errors occurred, no packages were upgraded.
