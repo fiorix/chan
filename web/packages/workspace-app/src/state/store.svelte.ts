@@ -55,7 +55,7 @@ import {
   syncSurveys,
   type SurveyCloseReason,
 } from "./survey.svelte";
-import { applySessionRoster, isFollower, showHandover, type SessionParticipant } from "./session.svelte";
+import { applySessionRoster, isFollower, sessionState, showHandover, type SessionParticipant } from "./session.svelte";
 import { docSyncRosterChanged } from "./docSync.svelte";
 import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
@@ -4118,19 +4118,25 @@ function applySessionSidecars(p: SessionPayload): void {
   }
 }
 
-/// On the web a definite FOLLOWER window must not fire the layout-blob DELETE:
-/// the session's persisted layout belongs to the leader, so a follower emptying
-/// or unloading its view should not remove it. Uses isFollower (a leader exists
-/// and it is not us), NOT !isLeader, so a solo or not-yet-seeded window still
-/// deletes its own blob. Desktop windows always manage their own blob, so this
-/// never suppresses on desktop.
+/// Whether an emptied web window leaves its layout-blob DELETE unsent, at the
+/// debounced save and at the exit flush. That DELETE also drops the window
+/// from the persisted set, which is the leader's to manage, so a gateway window
+/// (its own row's origin role is follower) leaves it while another window
+/// holds the leader slot. A window on the serving machine never suppresses,
+/// leading or not: the blob is its own, and an unsent DELETE would keep its
+/// closed tabs on the server for the next open to restore. A gateway window
+/// that leads deletes too, and so does one that sees the slot vacant: with no
+/// other leader nobody else owns the window, and the unsent DELETE would only
+/// strand it. A window with no row of its own is no follower, and desktop
+/// windows always manage their own blob.
 function followerSuppressesSessionDelete(): boolean {
-  return !isTauriDesktop() && isFollower();
+  if (isTauriDesktop() || !isFollower()) return false;
+  return sessionState.leader !== null && sessionState.leader !== sessionWindowId();
 }
 
 /// Record `snapshot` as sent and as held by the server, where no answer is
 /// due: an apply, a peer's DELETE, a discard, an empty window that saves
-/// nothing, or a follower's empty view, whose DELETE belongs to the leader.
+/// nothing, or a gateway window's empty view while another window leads.
 function seedSessionSnapshot(snapshot: string | null): void {
   lastSessionSnapshot = snapshot;
   savedSessionSnapshot = snapshot;
@@ -4276,8 +4282,8 @@ function commitSessionSave(): Promise<void> | undefined {
   if (!payload) {
     // A no-blob load with no sent or applied layout is silent above: a
     // DELETE could erase a co-viewer's new blob. An emptied saved window
-    // deletes its blob so it leaves the saved-window list. A web follower
-    // skips this because the layout belongs to the leader.
+    // deletes its blob so it leaves the saved-window list. A gateway window
+    // skips this while another window leads (followerSuppressesSessionDelete).
     if (followerSuppressesSessionDelete()) {
       // Seeded, not sent: a page that stops being a follower before it
       // goes must not DELETE the blob at exit either.
@@ -4637,8 +4643,8 @@ function flushSessionSaveOnExit(): void {
     if (payload === null) {
       // A no-blob load with no sent or applied layout is silent above: a
       // DELETE could erase a co-viewer's new blob. An emptied saved window
-      // deletes on exit; keepalive outlives the unload. A web follower
-      // skips this because the layout belongs to the leader.
+      // deletes on exit; keepalive outlives the unload. A gateway window
+      // skips this while another window leads.
       if (!followerSuppressesSessionDelete()) {
         chanFetch(url, { method: "DELETE", keepalive: true }).catch(() => {});
       }

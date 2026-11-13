@@ -1,7 +1,10 @@
 // Session presence (leader / followers) + the handover-request prompt.
 //
-// The server keeps a per-tenant participant registry: the first /ws client
-// leads, and handover/takeover act on those participants. `cs session list`
+// The server keeps a per-tenant participant registry. Each row's `role` is
+// its origin (a /ws from the serving machine reads leader, a gateway /ws
+// follower); the roster's `leader` slot names the one window that leads,
+// elected local-first (the earliest live local window, else the earliest live
+// gateway window), and handover/takeover move it. `cs session list`
 // lists clients across the library; `cs session self --name` names the client
 // and this window's participant together. The server pushes a `session_roster`
 // /ws frame on every participant change. store.svelte.ts routes that frame to
@@ -60,19 +63,20 @@ export function selfParticipant(): SessionParticipant | null {
   return sessionState.participants.find((p) => p.window_id === me) ?? null;
 }
 
-/// Whether this window reads as a session LEADER. Role is ORIGIN-derived on the
-/// server (a local-origin `/ws` reads leader, a tunnel `/ws` follower), so this
-/// reads the self participant's role rather than comparing the single owner
-/// slot. A window with no self participant (untagged / not-yet-seeded) is
-/// NEITHER leader nor follower.
+/// Whether this window's own row has the origin role leader: its `/ws` came
+/// from the serving machine (the loopback bind or an `ssh -L` forward to it).
+/// This is not leadership: `sessionState.leader` names the one window holding
+/// the leader slot, which a local window need not hold. A window with no self
+/// participant (untagged / not-yet-seeded) is NEITHER leader nor follower.
 export function isLeader(): boolean {
   return selfParticipant()?.role === "leader";
 }
 
-/// Whether this window is definitively a FOLLOWER: its own origin-derived role
-/// is follower (a tunnel/gateway session). Distinct from `!isLeader()`, which is
-/// ALSO true for a solo or not-yet-seeded window with no self participant that
-/// must still act as its own owner (e.g. persist/discard its own layout blob).
+/// Whether this window's own row has the origin role follower: a gateway
+/// window, which may still hold the leader slot. Distinct from `!isLeader()`,
+/// which is ALSO true for a solo or not-yet-seeded window with no self
+/// participant that must still act as its own owner (e.g. persist/discard its
+/// own layout blob).
 export function isFollower(): boolean {
   return selfParticipant()?.role === "follower";
 }
