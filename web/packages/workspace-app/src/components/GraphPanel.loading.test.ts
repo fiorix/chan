@@ -764,6 +764,28 @@ describe("watching the directories it shows", () => {
     expect(drawnEdges()).toContain("zz/latest>releases/v2:symlink broken");
   });
 
+  test("a symlink into a closed directory reads broken once its target goes, and the directory is not read", async () => {
+    graphServer.view = { nodes: [], edges: [] };
+    const tree = (target: FsGraphNode) => ({
+      nodes: [fsg.dir(""), fsg.dir("a"), fsg.dir("b"), target, { ...fsg.file("a/l"), kind: "symlink" as const, target: "../b/x.md" }],
+      edges: [
+        fsg.contains("", "a"),
+        fsg.contains("", "b"),
+        fsg.contains("a", "a/l"),
+        ...(target.kind === "ghost" ? [] : [fsg.contains("b", "b/x.md")]),
+        { source: "a/l", target: "b/x.md", kind: "symlink" as const },
+      ],
+    });
+    graphServer.fs = tree(fsg.file("b/x.md"));
+    await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("a") }));
+    expect(drawnEdges()).toContain("a/l>b/x.md:symlink");
+
+    graphServer.fs = tree({ ...fsg.file("b/x.md"), kind: "ghost", broken: true });
+    const { spines } = await change(["b/x.md"]);
+    expect(spines.map((c) => c.path), "the link's directory; b/ is closed").toEqual(["a"]);
+    expect(drawnEdges()).toContain("a/l>b/x.md:symlink broken");
+  });
+
   test("two changes signalled before the tab looks are a change whose paths are not known", async () => {
     await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: openedForPath("notes") }));
     vi.useFakeTimers();

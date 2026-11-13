@@ -1442,6 +1442,19 @@
     return named ? dirs : null;
   }
 
+  /// The directories a change at `paths` named something in, held by the
+  /// spine or not: where a symlink the spine holds may point.
+  function spineParentsTouched(paths: Iterable<string>): Set<string> {
+    const parents = new Set<string>();
+    for (const path of paths) {
+      if (isDraftClientPath(path) || path.split("/").some((segment) => UNDRAWN_SEGMENTS.has(segment))) {
+        continue;
+      }
+      parents.add(parentDir(path));
+    }
+    return parents;
+  }
+
   /// Whether the tree the tab draws shows the children of `dir`.
   function drawsChildren(dir: string): boolean {
     return dir === "" || (expandedDirs[dir] === true && ancestorsExpanded("", dir, expandedDirs));
@@ -1509,22 +1522,28 @@
   /// directories as a whole fetch reads is one, so a change never costs more
   /// than the tree the tab draws. A whole fetch begun since drops it, and a
   /// read that fails for another reason hands the change to one.
-  function patchSpine(dirs: ReadonlySet<string>): Promise<void> {
-    if (dirs.size === 0) return spinePatches;
+  /// `touched` holds every directory the change named something in, which
+  /// is where the symlinks the spine holds are checked against.
+  function patchSpine(dirs: ReadonlySet<string>, touched: ReadonlySet<string> = dirs): Promise<void> {
+    if (dirs.size === 0 && touched.size === 0) return spinePatches;
     const seq = spineSeq;
     const run = async (): Promise<void> => {
       const read = spineRead;
       if (read === null || seq !== spineSeq) return;
-      // A symlink's state is its target's: one into a directory this patch
-      // reads is read again with its own directory.
+      // A symlink's state is its target's: one whose target is in a
+      // directory the change touched, or one this patch reads, is read again
+      // with its own directory, when the spine holds that. The target's
+      // directory itself is not read for it, so a closed one costs nothing.
       const reading = new Set(dirs);
       for (const e of read.edges) {
         if (e.kind !== "symlink") continue;
         const target = read.nodes.get(e.target);
-        if (!dirs.has(parentDir(target?.path || e.target))) continue;
+        const at = parentDir(target?.path || e.target);
+        if (!dirs.has(at) && !touched.has(at)) continue;
         const from = parentDir(e.source);
         if (spineHoldsChildren(from)) reading.add(from);
       }
+      if (reading.size === 0) return;
       if (reading.size >= openedSpineDirs().length) {
         void loadSpine();
         return;
@@ -1854,10 +1873,10 @@
     // A whole fetch since took them.
     if (paths !== null && paths.size === 0) return;
     const dirs = paths === null ? null : spineDirsTouched(paths);
-    if (dirs === null || spineRead === null || spineError !== null) {
+    if (paths === null || dirs === null || spineRead === null || spineError !== null) {
       void loadSpine();
     } else {
-      void patchSpine(dirs);
+      void patchSpine(dirs, spineParentsTouched(paths));
     }
   }
 
