@@ -1,6 +1,8 @@
 # The graph tab draws a different graph for each way it is opened
 
-Status: built on `feat/graph-review` from `8ded1bda9` (the v0.128.0 tag) on 2026-11-12 and taken into the integration branch as `a6c33ae86` the same day; reviewed at intake and fixed in four rounds, merged as `7e1bc29c9` on 2026-11-13 (the sections Built and Reviews and fixes). The integration gate covered the intake at `4b752e94e` and the fix rounds at `997c53be7`. The owner walks it on macOS at the release.
+Status: shipped in [v0.129.0](../../release/release-v0.129.0.md): one graph rooted at the workspace in every graph tab, with a tag, a mention, a contact, a language, a file or a directory a selection over it, one copy of the graph per window, `/api/graph` compressed, and the four fix rounds of its reviews. Not built, by the owner's choice of the compression: the bounded load.
+
+Record before the release: built on `feat/graph-review` from `8ded1bda9` (the v0.128.0 tag) on 2026-11-12 and taken into the integration branch as `a6c33ae86` the same day; reviewed at intake and fixed in four rounds, merged as `7e1bc29c9` on 2026-11-13 (the sections Built and Reviews and fixes). The integration gate covered the intake at `4b752e94e` and the fix rounds at `997c53be7`. The owner walks it on macOS at the release.
 
 Record: raised on 2026-11-12 by a review of the graph tab, which began from a graph tab the owner had moved to another pane and which lost its selection there, and built on a branch of its own as the review went. The owner decided the model below the same day and brought the work into v0.129.0 the same day: "more work finished, ready to integrate in this release".
 

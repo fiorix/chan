@@ -21,27 +21,35 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.129.0
+### v0.130.0
 
-Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]). He brought one more the same day, built on a branch of its own: a graph tab draws one graph rooted at the workspace, and a tag, mention, contact, language, file or directory is a selection in it ([graph]). On 2026-11-13 he brought in the command launcher rebuilt on a branch of its own: scopes that follow where a command acts, typed search over words in any order, one title per action across the launcher, the menus and Settings, and the Computers window's launcher on the same component ([deck]).
-
-Two of the owner's requests of 2026-11-12 were built without a row of their own. A remote window's title leads with an up arrow (U+2191) where it led with an up-right arrow, the opposite of a local window's down arrow (`909f56e13`). A `tmux -CC` window's bar shows its title and the tmux badge without the active pane's name, the server names a tmux pane by its command, never by the title a shell sets, and in every window the pane tree's head of a pane keeps its place and number and drops the title its row already shows (`3d0183ccd`).
+Opened at the v0.129.0 cut on 2026-11-13 with the row that release carried, the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]), and four rows the owner confirmed for it that day: the reading of the AppImage in FUSE mode, which he moved out of v0.129.0 ([fusemode]); a standalone terminal window loading the saved shortcut overrides ([termkeys]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). The owner adds the release's other rows at planning.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | owner |
-| [a raised minimized window may stay behind][minraise] | built | owner |
-| [the default terminal is chan-desktop's flags][chanterm] | built | owner |
-| [a graph tab draws a graph for each way it opens][graph] | built | owner |
-| [the command launcher is one flat list][deck] | built | owner |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
+| [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
+| [a terminal window ignores saved shortcuts][termkeys] | not started | build |
+| [New and Paste choose two folders][newpaste] | not started | decision |
+| [a warm chan-term leaves Chan behind][warmterm] | not started | build |
 
-[ghosttyng]: v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
-[minraise]: v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
-[chanterm]: v0.129.0/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md
-[graph]: v0.129.0/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md
-[deck]: v0.129.0/the-command-launcher-is-one-flat-list-behind-dead-keys.md
+[ghosttyng]: v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[fusemode]: v0.130.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
+[termkeys]: v0.130.0/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md
+[newpaste]: v0.130.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
+[warmterm]: v0.130.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
 
 ## Completed
+
+### v0.129.0
+
+Shipped 2026-11-13; see [release-v0.129.0](../release/release-v0.129.0.md). A no-rc release by the owner's word ("let's go"): twenty-eight `--no-ff` merges from seventeen branches into the integration branch `v0129/int` over `main` at `8ded1bda9` (the v0.128.0 tag), with a merge of `main` for the v0.128.0 record (`8b7a54f18`), documents commits and one fix between them, under five rows; four shipped and are in [`done/`](done/), the raise row with its hidden-app case fixed the day the owner's Mac walk found it. The fifth, the ghostty-web fork, shipped its part 2, re-seating the core, and moves to v0.130.0 for parts 3 to 6. Two of the owner's requests shipped without a row, a remote window's title led by an up arrow and the tmux titles, and so did the Arch snapshot downgrade the v0.128.0 record promised as this release's first merge, which came in near its end.
+
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 2, re-seating the core, shipped; carried to v0.130.0 for parts 3 to 6).
+- [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app.
+- [the-command-launcher-is-one-flat-list-behind-dead-keys](done/the-command-launcher-is-one-flat-list-behind-dead-keys.md) - The command launcher is one flat list behind dead keys, and an action has up to five names across the deck, the menus and Settings.
+- [the-default-terminal-is-chan-desktop-under-flags-of-its-own](done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md) - The default terminal is chan-desktop under flags of its own.
+- [the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened](done/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md) - The graph tab draws a different graph for each way it is opened.
 
 ### v0.128.0
 
@@ -62,8 +70,8 @@ Shipped 2026-11-12; see [release-v0.128.0](../release/release-v0.128.0.md). A no
 - [a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn](done/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md) - A used token's cut is lost when the client hangs up between the commit and the spawn.
 - [basic-flows-break-with-no-end-to-end-check-to-catch-them](done/basic-flows-break-with-no-end-to-end-check-to-catch-them.md) - Basic flows break with no end-to-end check to catch them.
 - [chan-cannot-be-opened-as-a-file-browser-or-markdown-editor](done/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md) - chan cannot be opened as a file browser or Markdown editor.
-- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
-- [coming-forward-to-a-minimized-window-may-not-activate-the-app](v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app (carried to v0.129.0, not started).
+- [chan-drives-ghostty-web-from-outside-through-its-private-internals](v0.130.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md) - chan drives ghostty-web from outside, through its private internals (part 1, the fork, shipped; carried to v0.129.0 for parts 2 to 6).
+- [coming-forward-to-a-minimized-window-may-not-activate-the-app](done/coming-forward-to-a-minimized-window-may-not-activate-the-app.md) - Coming forward to a minimized window may not activate the app (carried to v0.129.0, not started).
 - [copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken](done/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md) - Copying a wrapped command from a ghostty terminal pastes it broken.
 - [ghostty-sends-a-pasted-line-break-as-lf](done/ghostty-sends-a-pasted-line-break-as-lf.md) - ghostty sends a pasted line break as LF where xterm.js sends CR.
 - [make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind](done/make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind.md) - make clean leaves the gateway's node_modules and the build tools behind.
