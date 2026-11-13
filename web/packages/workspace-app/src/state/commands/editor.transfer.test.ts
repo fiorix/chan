@@ -6,8 +6,9 @@
 // where it is not, and hands the file's path to the function the inspector's
 // own row calls. A workspace's draft goes by its draft identity and leaves no
 // record that would store its client path. Both read the server's copy, so
-// a tab with text the server lacks is saved first, and a save that fails
-// refuses the action.
+// a draft with text the server lacks is saved first, and a save that fails
+// refuses the action. A file that is no draft is read as the server holds
+// it, with no save asked.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { draftPath } from "../../__tests__/drafts";
@@ -307,16 +308,41 @@ describe("on a tab with text the server does not hold", () => {
     expect(seen).toEqual([]);
   });
 
-  test("a file that is no draft is saved first too, where no live session holds its edits", async () => {
+  // No live session holds this file's edits, so its server copy trails the
+  // editor as a draft's does; the actions still read that copy as it is.
+  test("a file that is no draft is neither committed nor saved, and both start at once", async () => {
     const seen = traffic();
-    seat(fileTab({ id: "note", path: "notes/a.md", content: "typed", saved: "older" }));
+    const tab = seat(fileTab({ id: "note", path: "notes/a.md", content: "typed", saved: "older" }));
+    const commit = vi.fn(() => setTabContent(tab, "typed more"));
+    const forget = registerPendingEditFlush(tab.id, commit);
 
     command(DOWNLOAD).run();
     command(EXPORT).run();
+    forget();
 
-    await vi.waitFor(() =>
-      expect(seen).toEqual(["write notes/a.md: typed", "download notes/a.md", "export notes/a.md"]),
-    );
+    expect(seen, "both left inside the call, with no write").toEqual(["download notes/a.md", "export notes/a.md"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen, "and no write came after").toEqual(["download notes/a.md", "export notes/a.md"]);
+    expect(commit, "the editor's buffered input was not committed").not.toHaveBeenCalled();
+    expect([tab.content, tab.saved]).toEqual(["typed", "older"]);
+  });
+
+  // A standalone window's draft is a file of the machine, and a draft all the
+  // same: it saves by the autosave alone.
+  test("a standalone window's draft is saved before Download asks for it and before Export reads it", async () => {
+    h.caps.workspace = false;
+    standaloneDrafts.dir = "home/me/.chan/Drafts";
+    const path = "home/me/.chan/Drafts/untitled/draft.md";
+    const seen = traffic();
+    const tab = seat(fileTab({ id: "draft", path, content: "typed", saved: "" }));
+
+    command(DOWNLOAD).run();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${path}: typed`, `download ${path}`]));
+
+    seen.splice(0);
+    setTabContent(tab, "typed more");
+    command(EXPORT).run();
+    await vi.waitFor(() => expect(seen).toEqual([`write ${path}: typed more`, `export ${path}`]));
   });
 
   test("a tab the server is level with asks for no save and starts at once", () => {

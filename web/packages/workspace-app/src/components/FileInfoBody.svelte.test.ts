@@ -521,7 +521,7 @@ describe("the actions section", () => {
   });
 
   // The editor hands its own two for the file it has open, a draft too: they
-  // save the tab before they read the server's copy.
+  // save a draft before they read the server's copy.
   test("a host's own Download and Export to PDF run in place of the path's", async () => {
     h.entries = [file("notes/plan.md"), file(".Drafts/idea/a.md")];
     for (const path of ["notes/plan.md", ".Drafts/idea/a.md"]) {

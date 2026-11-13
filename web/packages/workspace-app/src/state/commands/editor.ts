@@ -115,17 +115,22 @@ export async function duplicateFile(tab: FileTab): Promise<void> {
   await fileOps.duplicateFile(tab.path);
 }
 
-/// Whether the server holds what the tab's editor shows, saving it first
-/// where it does not. A download and an export read the server's copy,
-/// which trails the editor by the autosave's delay and for as long as a save
-/// keeps failing, so each asks this before it reads. The mounted editor
-/// commits the input it buffers, and a tab that then holds unsaved text is
-/// saved. A tab level with the server answers `true` itself, with no
+/// Whether a download or an export of the tab may read the server's copy,
+/// saving a draft first. Both actions read that copy, and every surface that
+/// offers them on an open tab (the commands, the Details panel and a draft's
+/// action pill) runs them through `downloadFile` and `exportFileToPdf`, so
+/// this is the one place their rule lives. A draft saves by the classic
+/// autosave alone, so its server copy trails the editor by the autosave's
+/// delay and for as long as a save keeps failing: its mounted editor commits
+/// the input it buffers, and a draft that then holds unsaved text is saved
+/// and waited for. A save that fails leaves its reason on the status line
+/// (`saveTabEdits`) and so does a commit that throws, and either answers no:
+/// the action is refused rather than run on the older text. A file that is
+/// no draft is read as the server holds it, as a selection in the file
+/// browser is. A tab that needs no save answers `true` itself, with no
 /// promise to wait on, so its action starts inside the gesture that asked.
-/// A save that fails leaves its reason on the status line (`saveTabEdits`)
-/// and so does a commit that throws, and either answers no: the action is
-/// refused rather than run on the older text.
-function serverHoldsEditorText(tab: FileTab): boolean | Promise<boolean> {
+function saveDraftFirst(tab: FileTab): boolean | Promise<boolean> {
+  if (!isDraftPath(tab.path)) return true;
   try {
     flushTabEdits([tab]);
   } catch (err) {
@@ -135,15 +140,15 @@ function serverHoldsEditorText(tab: FileTab): boolean | Promise<boolean> {
   return isDirty(tab) ? saveTabEdits(tab) : true;
 }
 
-/// Download the tab's file as the editor shows it, a draft's too: the
-/// desktop's Downloads folder with the transfer bubble's progress, the
-/// browser's own download elsewhere. A standalone window's draft is a file
-/// of the machine and downloads as one. A workspace's is asked for by its
-/// draft identity.
+/// Download the tab's file, a draft's too, as the server holds it once a
+/// draft is saved (`saveDraftFirst`): the desktop's Downloads folder with the
+/// transfer bubble's progress, the browser's own download elsewhere. A
+/// standalone window's draft is a file of the machine and downloads as one.
+/// A workspace's is asked for by its draft identity.
 export async function downloadFile(tab: FileTab): Promise<void> {
   const path = tab.path;
-  const held = serverHoldsEditorText(tab);
-  if (held !== true && !(await held)) return;
+  const ready = saveDraftFirst(tab);
+  if (ready !== true && !(await ready)) return;
   if (!isDraftClientPath(path)) {
     fileOps.downloadPathWithProgress(path, false);
     return;
@@ -160,13 +165,14 @@ export async function downloadFile(tab: FileTab): Promise<void> {
   fileOps.downloadPath(path, false);
 }
 
-/// Render the tab's Markdown file to PDF as the editor shows it, a draft's
-/// too; exportPathToPdf reports progress and failure on the status line.
+/// Render the tab's Markdown file to PDF, a draft's too, as the server holds
+/// it once a draft is saved (`saveDraftFirst`); exportPathToPdf reports
+/// progress and failure on the status line.
 export async function exportFileToPdf(tab: FileTab): Promise<void> {
   const path = tab.path;
   if (!isMarkdown(path)) return;
-  const held = serverHoldsEditorText(tab);
-  if (held !== true && !(await held)) return;
+  const ready = saveDraftFirst(tab);
+  if (ready !== true && !(await ready)) return;
   await exportPathToPdf(path);
 }
 
