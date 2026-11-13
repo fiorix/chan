@@ -620,7 +620,7 @@ carries only the samples newer than the last one sent.
 
 --varlink makes the devserver a systemd-report source: it serves the
 readings as systemd's metrics interface, io.systemd.Metrics, on stdin
-and stdout, for a socket unit named io.chan.Devserver in the directory
+and stdout, for a socket named io.chan.Devserver in the directory
 systemd-report reads. Each family is io.chan.Devserver.<Name>.
 ";
 

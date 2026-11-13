@@ -1,6 +1,6 @@
 # chan-metrics design
 
-chan-metrics holds the counters behind chan's process metrics: a fixed set of process-wide statics that the serving and transport code feed, and a stream wrapper that counts bytes as they pass. It samples nothing and serves nothing. `chan-server` snapshots the statics once a second, turns the totals into rates and answers `/api/metrics` with them, which the Dashboard, `chan metrics` and the Varlink adapter read. What each reading means to a user is in [docs/metrics.md](../../docs/metrics.md); this note is what a contributor needs before adding a counter or wrapping a stream.
+chan-metrics holds the counters behind chan's process metrics: a fixed set of process-wide statics that the serving and transport code feed, and a stream wrapper that counts bytes as they pass. It samples nothing and serves nothing. `chan-server` snapshots the statics once a second, turns the totals into rates and answers `/api/metrics` with them, which the Dashboard, `chan metrics` and its systemd-report source read. What each reading means to a user is in [docs/metrics.md](../../docs/metrics.md); this note is what a contributor needs before adding a counter or wrapping a stream.
 
 ## Where it sits
 
