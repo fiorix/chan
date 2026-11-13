@@ -1,0 +1,2 @@
+warning: /etc/dummy-old.conf saved as /etc/dummy-old.conf.pacsave
+warning: /etc/shared.conf installed as /etc/shared.conf.pacnew

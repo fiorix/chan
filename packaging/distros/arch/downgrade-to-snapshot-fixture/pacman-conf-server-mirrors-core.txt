@@ -1,0 +1,2 @@
+https://fastly.mirror.pkgbuild.com/core/os/x86_64
+https://geo.mirror.pkgbuild.com/core/os/x86_64

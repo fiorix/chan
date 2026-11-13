@@ -1,0 +1,12 @@
+error: failed to commit transaction (conflicting files)
+dummy: /etc/shared.conf exists in filesystem (owned by dummy-compat)
+dummy: /usr/lib/dummy/libd.so.1 exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/!bang.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/a b.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/c,d.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/e[1].txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/f*g.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/h?i.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/j\k.txt exists in filesystem (owned by dummy-compat)
+dummy: /usr/share/dummy/l,!m.txt exists in filesystem (owned by dummy-compat)
+Errors occurred, no packages were upgraded.
