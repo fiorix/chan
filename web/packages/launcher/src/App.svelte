@@ -104,8 +104,11 @@
   onMount(() => {
     applyTheme();
     // Reconcile the first-paint localStorage theme with the authoritative
-    // desktop-config value, so a cleared WebView store or a second writer can
-    // never leave the launcher and the local terminals on different themes.
+    // desktop-config value, so a cleared WebView store or a second writer
+    // leaves the launcher and the local terminals on the same theme. They
+    // differ while a pin an older launcher stored waits to be carried to the
+    // store: until its write lands, or for as long as the store refuses it,
+    // the launcher shows the pin and the terminals follow the store.
     void reconcileLocalTheme();
     // Follow the desktop theme feed so a switch made in another desktop
     // window updates this Computers window immediately.

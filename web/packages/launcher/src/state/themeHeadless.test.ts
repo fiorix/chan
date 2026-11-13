@@ -52,7 +52,7 @@ function putStub() {
   return { fetchMock, written };
 }
 
-const STORED = "chan-launcher-theme";
+const STORED = "chan-launcher-theme-choice";
 const shown = (): string | null => document.documentElement.getAttribute("data-theme");
 
 beforeEach(() => {
@@ -85,7 +85,7 @@ describe("launcher initial theme headless fallback", () => {
   });
 
   test("a stored choice wins over the system fallback", async () => {
-    localStorage.setItem("chan-launcher-theme", "light");
+    localStorage.setItem(STORED, "light");
     vi.stubGlobal("matchMedia", undefined);
     const { themeState } = await import("./theme.svelte");
     expect(themeState.theme).toBe("light");
