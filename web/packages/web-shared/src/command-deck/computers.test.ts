@@ -925,12 +925,12 @@ describe("a row that cannot run", () => {
 
   it("lists a window its host may not act on, disabled, with the reason", () => {
     const model = devserverModel({
-      machines: [local({ windows: [win("held", { actions: [], blocked: "Only the tenant leader can show or hide this window" })] })],
+      machines: [local({ windows: [win("held", { actions: [], blocked: "Only the session leader can show or hide this window" })] })],
     });
     const held = row(build(model), "held");
     expect([held.disabled, held.subtitle, held.run, held.next, held.page]).toEqual([
       true,
-      "Only the tenant leader can show or hide this window",
+      "Only the session leader can show or hide this window",
       undefined,
       undefined,
       undefined,
