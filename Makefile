@@ -560,9 +560,10 @@ casefold-test-verdict: ## Report whether the casefold tests asserted or skipped.
 ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
 	$(MAKE) build-matrix-check
 	$(MAKE) e2e-check
-	# The Rust test run covers chan-library and chan-desktop, plus the named
-	# chan-server tests that exercise Windows named-pipe paths. The chan-library
-	# tests include the Windows ConPTY child-reaping paths, chan-desktop includes
+	# The Rust test run covers chan-library, chan-winpipe and chan-desktop,
+	# plus the named chan-server tests that exercise Windows named-pipe
+	# paths. The chan-library tests include the Windows ConPTY child-reaping
+	# paths, chan-desktop includes
 	# the registry-backed user-PATH assertion when CHAN_TEST_REAL_USER_PATH arms
 	# it, and chan-server covers the tenant builder's named-pipe control socket,
 	# the handoff named-pipe path and upgrade cases, and the devserver named-pipe
