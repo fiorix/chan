@@ -260,6 +260,29 @@ describe("the header row and Select workspace", () => {
     expect(visibleIds()).not.toContain("notes/a.md");
   });
 
+  test("a selection still waiting on the graph does not take it back when it lands", async () => {
+    let release = (): void => {};
+    graphServer.streamGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    graphServer.view.nodes.push(g.tag("t"));
+    graphServer.view.edges.push(g.edge("notes/a.md", "#t", "tag"));
+    // A tag is known only to the index, whose answer is held back.
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "#t" }));
+    expect(canvas.props?.selectedId).toBeNull();
+    expect(tab.pendingSelectId).toBe("#t");
+
+    command("app.graph.scopeDetails").run();
+    await settle(2);
+    expect(canvas.props?.selectedId).toBe("");
+
+    release();
+    await settle();
+    expect(canvas.props?.nodes.some((node) => node.id === "#t"), "the tag has arrived").toBe(true);
+    expect(canvas.props?.selectedId).toBe("");
+    expect(tab.pendingSelectId).toBeNull();
+  });
+
   test("only the graph the launcher is aimed at answers", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     // Another tab takes the pane: the graph stays mounted, as a pane keeps

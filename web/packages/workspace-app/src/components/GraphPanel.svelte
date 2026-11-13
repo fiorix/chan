@@ -1181,6 +1181,9 @@
   function openScopeHeaderInspector(): void {
     depthFollowsSelection("");
     selectedId = "";
+    // As a tap does: a selection still waiting on the graph must not take
+    // this one's place when it lands.
+    graphState.pendingSelectId = null;
     graphState.inspectorOpen = true;
     closeTabMenu();
   }
