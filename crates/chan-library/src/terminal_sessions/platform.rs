@@ -584,6 +584,7 @@ fn scrub_var(mount: &Mount, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
         return None;
     }
     if APPIMAGE_RUNTIME_KEYS.contains(&key)
+        || GUI_STACK_REEXEC_MARKERS.contains(&key)
         || APPIMAGE_GTK_KEYS.contains(&key)
         || key == APPIMAGE_GTK_THEME_KEY
         || entry_in_bundle(mount, value)
@@ -1266,6 +1267,11 @@ mod appimage_env_tests {
             "OWD",
             "GTK_THEME",
             "PYTHONDONTWRITEBYTECODE",
+            // The GUI-stack re-exec's marker, under both of its names: it
+            // describes one process, and the `1` an older release left
+            // would skip a child's re-exec.
+            "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID",
+            "CHAN_LINUX_SYSTEM_GUI_APPLIED",
         ] {
             let value = OsString::from("value");
             for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
