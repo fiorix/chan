@@ -205,6 +205,11 @@ const at = (y: number) => (r: Rig) => {
   (r.painter.term as unknown as { viewportY: number }).viewportY = y;
 };
 
+/// DECTCEM hides and shows the cursor where it stands (`tput civis` at an
+/// idle prompt); the core marks no row dirty for it.
+const HIDE = "\x1b[?25l";
+const SHOW = "\x1b[?25h";
+
 const TYPING: Step[] = [
   "e", "c", "h", "o", " hi", "\b", "\b \b", "i", "\r\n", "hi\r\n", "$ ", "ls -l", "\x1b[D", "\x1b[D", "X", "\x1b[C", "\r\n",
 ];
@@ -293,7 +298,8 @@ describe("the ghostty renderer's partial redraws", () => {
   // chan's macOS pixel scroll moves the view by fractions of a row
   // (ghosttyViewport.ts). Every reader of the offset floors it (the hover,
   // the selection, the masker), so the view shows the rows of the floor:
-  // at 2.5 and just below 3 those of 2, at 0.5 the screen and its cursor.
+  // at 2.5 and just below 3 those of 2, at 0.5 the screen and its cursor,
+  // which a hide takes away there as at the bottom.
   const JUST_BELOW_3 = 3 - 1e-9;
   const floored = (y: number) => (r: Rig) => {
     expect(r.picture(y), `the picture at ${y}`).toEqual(r.picture(Math.floor(y)));
@@ -304,7 +310,7 @@ describe("the ghostty renderer's partial redraws", () => {
     [0, 0.5],
     [3, JUST_BELOW_3],
   ])("scrolled back from %s rows to %s, a fraction of a row", async (from, to) => {
-    await run(lines(ROWS + 12), [at(from), at(to), floored(to), "x", at(from), at(to), "\r\ny", at(0)]);
+    await run(lines(ROWS + 12), [at(from), at(to), floored(to), HIDE, floored(to), SHOW, "x", at(from), at(to), "\r\ny", at(0)]);
   });
 
   test("a masked value in the history scrolled back by a fraction of a row", async () => {
@@ -386,11 +392,8 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(lines(ROWS - 2), ["\x1b[2;2H", "\x1b[2;8H", "\x1b[7;1H", "\x1b[1;20H", "\x1b[A", "\x1b[3B"]);
   });
 
-  // DECTCEM hides and shows the cursor where it stands (`tput civis` at an
-  // idle prompt); the core marks no row dirty for it. The prompt is on row
-  // 4, two rows below the nearest row the status write repaints.
-  const HIDE = "\x1b[?25l";
-  const SHOW = "\x1b[?25h";
+  // Hidden and shown where it stands (HIDE, SHOW). The prompt is on row 4,
+  // two rows below the nearest row the status write repaints.
   const PROMPT = "$ ls\r\na\r\nb\r\nc\r\n$ ";
   const ELSEWHERE = "\x1b7\x1b[1;1Hstatus\x1b8";
 
