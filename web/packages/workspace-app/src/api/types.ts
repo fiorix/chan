@@ -435,7 +435,7 @@ export type Preferences = {
   /// Watcher bubbles display mode: show all inline, or collapse
   /// to a count tray until expanded.
   bubble_overlay_mode: BubbleOverlayMode;
-  /// Auto-rotate the Dashboard tab's carousel: the "Dashboard carousel"
+  /// Auto-rotate the Dashboard tab's carousel: the "Dashboard auto-rotate"
   /// row in Settings -> Global. Optional on the wire so older servers
   /// that don't ship the field don't trip the type contract; the UI
   /// treats `undefined` as the default-true.

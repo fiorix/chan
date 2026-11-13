@@ -26,6 +26,7 @@
   import {
     Check,
     ClipboardPaste,
+    Command as CommandIcon,
     Copy,
     ExternalLink,
     Eye,
@@ -37,10 +38,23 @@
     Save,
     Scissors,
     Search as SearchIcon,
+    Settings2,
     Trash,
     X,
   } from "@lucide/svelte";
-  import { chordFor, currentOS } from "../state/shortcuts";
+  import { chordFor, currentOS, shortcutLabel } from "../state/shortcuts";
+  import { commandState, commandTitle } from "../state/commands";
+  import "../state/commands/install";
+  import {
+    copyFilePath,
+    deleteFile,
+    downloadFile,
+    duplicateFile,
+    exportFileToPdf,
+    searchSelection,
+    showInFileBrowser,
+  } from "../state/commands/editor";
+  import { settingEntry } from "./settings/settingsIndex";
   import { windowCaps } from "../state/windowCaps";
   import { formatSize, parentDir } from "../state/format";
   import { builtInChordSuperseded } from "../state/keymapOverrides.svelte";
@@ -49,6 +63,7 @@
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
+  import InspectorActionPill, { type InspectorAction } from "./InspectorActionPill.svelte";
   import { displayPath, isDraftClientPath } from "../api/fileIdentity";
   import StyleToolbar from "./StyleToolbar.svelte";
   import { clampMenu } from "./menuClamp";
@@ -63,12 +78,14 @@
     closeTab,
     chooseFirstAttachForTab,
     dismissExternalChange,
+    flipHybrid,
     forceReloadFromDisk,
     isDocAttached,
     isClassicSaveRunning,
     isDirty,
     openFind,
     overwriteDiskConflict,
+    panesHaveSides,
     reloadTabFromDisk,
     setMode,
     clearTabCaretCommand,
@@ -100,6 +117,7 @@
     effectiveHybridSurfaceTheme,
     fileOps,
     isDraftPath,
+    openCommandLauncherFromMenu,
     openFsGraphForFile,
     openGraphForMention,
     openGraphForTag,
@@ -119,7 +137,7 @@
     saveDraftTabToWorkspace,
     tabFocusPulse,
   } from "../state/tabs.svelte";
-  import { csvDelimiter, isCsv, isExcalidraw, isJson } from "../state/fileTypes";
+  import { csvDelimiter, isCsv, isExcalidraw, isJson, isMarkdown } from "../state/fileTypes";
   import {
     acquireDocSession,
     isDocSyncEligible,
@@ -155,9 +173,16 @@
   } from "../state/tabMenu.svelte";
   // The Editor right-click menu carries no Open Inspector entry (the
   // pane chrome context menu has it) and no window-reload entry
-  // (Cmd+R). "Reload from disk" below is different: it force-adopts
-  // the on-disk content over the buffer/authority, the escape hatch
-  // for external writers.
+  // (Cmd+R). Its reload row is different: it force-adopts the on-disk
+  // content over the buffer/authority, the escape hatch for external
+  // writers.
+  //
+  // A menu row that performs a catalog command takes its words from the
+  // registry by the command's id and runs the function the command runs,
+  // on this tab. A row drawn with a check takes the check from the state
+  // the command reports, which is the active file tab's. That is this tab
+  // while its menu is open: the tab strip selects a tab before it opens
+  // the menu, and a press in the body focuses its pane.
 
   // Keep-alive: Pane.svelte keeps every file tab mounted (terminal
   // precedent) and flips `active` -- true only when this tab is the
@@ -700,7 +725,7 @@
   /// post-create/move "land next to the thing you just produced"
   /// flow in `revealAndSelect`.
   function revealInBrowser(): void {
-    revealPathInBrowser(tab.path, { inspectorOpen: true });
+    showInFileBrowser(tab);
     closeTabMenu();
   }
 
@@ -763,6 +788,12 @@
     if (paneId) void closeTab(paneId, tab.id);
   }
 
+  function doFlipPane(): void {
+    closeTabMenu();
+    const paneId = paneIdForTab();
+    if (paneId) flipHybrid(paneId);
+  }
+
   /// In-menu inline rename (an editable Name input in the
   /// right-click menu). Commits on Enter + blur, NOT every keystroke
   /// (file rename is destructive + cross-tree, can't fire on each
@@ -774,6 +805,17 @@
   /// A workspace's draft is no file of the workspace: it is not deleted or
   /// duplicated as one, and leaves by its discard or its save.
   const isWorkspaceDraftTab = $derived(isDraftClientPath(tab.path));
+  /// What the Details panel offers on a workspace's draft. A draft has no
+  /// entry in the tree for the file inspector to act on, so the panel names
+  /// the draft and offers the two actions the editor's commands have for
+  /// it, each through the command's own function: Download, and Export to
+  /// PDF on Markdown.
+  const draftActions = $derived<{ main: InspectorAction; secondary: InspectorAction[] }>({
+    main: { command: "app.editor.download", onClick: () => void downloadFile(tab) },
+    secondary: isMarkdown(tab.path)
+      ? [{ command: "app.editor.exportPdf", onClick: () => void exportFileToPdf(tab) }]
+      : [],
+  });
   $effect(() => {
     // Sync the draft to the tab path when the underlying file
     // changes (e.g. external rename, or another menu surface).
@@ -965,24 +1007,17 @@
 
   async function doCopyPathToFile(): Promise<void> {
     closeTabMenu();
-    // A draft's path is copied as a person reads it.
-    await copyTextToClipboard(displayPath(tab.path), {
-      onSuccess: () => setTransientStatus("Copied file path"),
-      onError: (msg) => {
-        ui.status = `copy failed: ${msg}`;
-        ui.statusKind = "persistent";
-      },
-    });
+    await copyFilePath(tab);
   }
 
   async function doDeleteFile(): Promise<void> {
     closeTabMenu();
-    await fileOps.remove(tab.path, false);
+    await deleteFile(tab);
   }
 
   async function doDuplicateFile(): Promise<void> {
     closeTabMenu();
-    await fileOps.duplicateFile(tab.path);
+    await duplicateFile(tab);
   }
 
   /// Open the read-only markdown preview for the internal wiki link
@@ -1018,12 +1053,15 @@
 
   function doOpenSearch(): void {
     closeTabMenu();
-    // SearchPanel's open-effect calls extractSearchSeed() on the
-    // open transition, which reads window.getSelection() and pre-
-    // fills `searchPanel.query` when the user had text highlighted.
-    // Same flow as the Mod+Shift+F chord - no extra wiring needed
-    // beyond setting the open bit here.
-    searchPanel.open = true;
+    searchSelection(tab);
+  }
+
+  // The launcher opens from this editor, as its chord does from a focused
+  // editor, so it hands the keyboard back here when it closes.
+  function doOpenCommands(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    closeTabMenu();
+    openCommandLauncherFromMenu(row, focusActiveEditor);
   }
 
   // Among editor teardowns, only the armed editor may clear the pick request
@@ -1084,6 +1122,20 @@
   const sourceChord = $derived(chordLabel("app.editor.toggleMode"));
 
   const showPageWidthMenuRow = $derived(tab.mode !== "canvas");
+
+  /// The view rows' checks, as their commands report them.
+  const outlineChecked = $derived(commandState("app.editor.outline") === true);
+  const detailsChecked = $derived(commandState("app.editor.details") === true);
+  const styleToolbarChecked = $derived(commandState("app.editor.styleToolbar") === true);
+
+  /// The page width slider is the Settings field, so it carries that
+  /// field's label.
+  const PAGE_WIDTH = settingEntry("editor.pageWidth");
+
+  /// The launcher's own toggle is a chord with no catalog row, so its words
+  /// are the shortcut table's.
+  const LAUNCHER = "app.launcher.toggle";
+  const launcherLabel = shortcutLabel(LAUNCHER);
 
   function closeTabMenuChordLabel(): string {
     // The canvas surface keeps Ctrl+D for Excalidraw's duplicate gesture, so
@@ -1200,7 +1252,7 @@
         class="recovery-banner-btn recovery-banner-restore"
         onclick={() => void forceReloadFromDisk(tab.id)}
       >
-        Reload from disk
+        {commandTitle("app.editor.reloadFromDisk")}
       </button>
       <button
         type="button"
@@ -1215,12 +1267,15 @@
     <!-- Tab menu bubble. Anchored to the tab title in the pane's
          tab strip; rendered here so it has direct access to the
          live Wysiwyg ref + selVer signal that drives the
-         formatting buttons' "on" states. -->
+         formatting buttons' "on" states. The body menu holds action
+         rows alone and is a menu. The tab menu also holds the Name
+         field and the page width slider, which a menu cannot, so it is
+         a dialog with its action rows in menus inside. -->
     <div
       class="tab-menu-bubble"
-      role="menu"
+      role={tabMenu.source === "body" ? "menu" : "dialog"}
       tabindex="-1"
-      aria-label="tab menu"
+      aria-label={tabMenu.source === "body" ? "editor menu" : "tab menu"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
@@ -1233,11 +1288,16 @@
              tight, selection-aware set. Cut/Copy gate on a selection;
              Paste is plain text (rich paste stays on Cmd+V). Find is
              always present; Search appears only with a selection
-             (doOpenSearch auto-seeds from the highlighted text). Link
-             actions appear only when the click landed on a link. -->
+             (doOpenSearch seeds from the highlighted text). Link
+             actions appear only when the click landed on a link. The
+             text clipboard rows and the link rows keep their own words:
+             they act on the selection and on the link under the pointer,
+             which no command reaches. The window's launcher row closes
+             the menu, after this editor's own. -->
         <div class="action-list">
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCutSelection}
             disabled={!bodyHasSelection}
           >
@@ -1249,6 +1309,7 @@
           </button>
           <button
             class="mbtn"
+            role="menuitem"
             onclick={doCopySelection}
             disabled={!bodyCanCopy}
           >
@@ -1258,7 +1319,7 @@
             <span class="mbtn-label">Copy</span>
             <span class="mbtn-chord"></span>
           </button>
-          <button class="mbtn" onclick={doPasteClipboard}>
+          <button class="mbtn" role="menuitem" onclick={doPasteClipboard}>
             <span class="mbtn-icon">
               <ClipboardPaste size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
@@ -1268,14 +1329,14 @@
           {#if bodyLinkUrl || bodyPreviewHit}
             <div class="msep" role="separator"></div>
             {#if bodyLinkUrl}
-              <button class="mbtn" onclick={doOpenLink}>
+              <button class="mbtn" role="menuitem" onclick={doOpenLink}>
                 <span class="mbtn-icon">
                   <ExternalLink size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
                 <span class="mbtn-label">Open link</span>
                 <span class="mbtn-chord"></span>
               </button>
-              <button class="mbtn" onclick={doCopyLink}>
+              <button class="mbtn" role="menuitem" onclick={doCopyLink}>
                 <span class="mbtn-icon">
                   <LinkIcon size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1284,7 +1345,7 @@
               </button>
             {/if}
             {#if bodyPreviewHit}
-              <button class="mbtn" onclick={doPreviewLink}>
+              <button class="mbtn" role="menuitem" onclick={doPreviewLink}>
                 <span class="mbtn-icon">
                   <Eye size={16} strokeWidth={1.75} aria-hidden="true" />
                 </span>
@@ -1294,42 +1355,50 @@
             {/if}
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={doFind}>
+          <button class="mbtn" role="menuitem" onclick={doFind}>
             <span class="mbtn-icon">
               <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Find</span>
+            <span class="mbtn-label">{commandTitle("app.find.open")}</span>
             <span class="mbtn-chord">{chordLabel("app.find.open")}</span>
           </button>
           {#if bodyHasSelection}
-            <button class="mbtn" onclick={doOpenSearch}>
+            <button class="mbtn" role="menuitem" onclick={doOpenSearch}>
               <span class="mbtn-icon">
                 <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
               </span>
-              <span class="mbtn-label">Search selection</span>
+              <span class="mbtn-label">{commandTitle("app.editor.searchSelection")}</span>
               <span class="mbtn-chord">{chordLabel("app.search.toggle")}</span>
             </button>
           {/if}
           <div class="msep" role="separator"></div>
-          <button class="mbtn" onclick={() => void doForceReload()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
             <span class="mbtn-icon">
               <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Reload from disk</span>
+            <span class="mbtn-label">{commandTitle("app.editor.reloadFromDisk")}</span>
             <span class="mbtn-chord"></span>
+          </button>
+          <div class="msep" role="separator"></div>
+          <button class="mbtn" role="menuitem" onclick={doOpenCommands}>
+            <span class="mbtn-icon">
+              <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">{launcherLabel}</span>
+            <span class="mbtn-chord">{chordLabel(LAUNCHER)}</span>
           </button>
         </div>
       {:else}
       <div class="action-list">
         {#if isDraftEditorTab}
-          <button class="mbtn" type="button" onclick={doSaveDraftToWorkspace}>
-            <span class="mbtn-icon">
-              <Save size={18} strokeWidth={1.75} aria-hidden="true" />
-            </span>
-            <span class="mbtn-label"
-              >{windowCaps.workspace ? "Save to Workspace" : "Save to Disk"}</span
-            >
-          </button>
+          <div class="menu-rows" role="menu" aria-label="draft actions">
+            <button class="mbtn" role="menuitem" type="button" onclick={doSaveDraftToWorkspace}>
+              <span class="mbtn-icon">
+                <Save size={18} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+              <span class="mbtn-label">{commandTitle("app.draft.save")}</span>
+            </button>
+          </div>
         {:else}
           <!-- Editable Name input, like the Terminal tab's. Commits
                on Enter/blur via fileOps.renameInPlace which handles
@@ -1360,7 +1429,7 @@
                Stored as a ratio so window resize and browser zoom both
                keep the cap proportional to the viewport. -->
           <div class="page-width-row">
-            <span class="page-width-label">Page width</span>
+            <span class="page-width-label">{PAGE_WIDTH.label}</span>
             <input
               class="page-width-slider"
               type="range"
@@ -1370,17 +1439,18 @@
               value={Math.round(pageWidth.ratio * 100)}
               oninput={onPageWidthSlider}
               onmousedown={(e) => e.stopPropagation()}
-              aria-label="page width"
+              aria-label={PAGE_WIDTH.label}
             />
             <span class="page-width-value">{Math.round(pageWidth.ratio * 100)}%</span>
           </div>
         {/if}
         <div class="msep" role="separator"></div>
+        <div class="menu-rows" role="menu" aria-label="tab actions">
         {#if tabHasOutline(tab)}
           <button
             class="mbtn"
             role="menuitemcheckbox"
-            aria-checked={tab.outlineOpen}
+            aria-checked={outlineChecked}
             onclick={() => {
               setTabOutlineOpen(tab, !tab.outlineOpen);
               closeTabMenu();
@@ -1388,16 +1458,16 @@
             }}
           >
             <span class="mbtn-icon">
-              {#if tab.outlineOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+              {#if outlineChecked}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
             </span>
-            <span class="mbtn-label">Toggle outline</span>
+            <span class="mbtn-label">{commandTitle("app.editor.outline")}</span>
             <span class="mbtn-chord">{chordLabel("app.editor.outline")}</span>
           </button>
         {/if}
         <button
           class="mbtn"
           role="menuitemcheckbox"
-          aria-checked={tab.inspectorOpen}
+          aria-checked={detailsChecked}
           onclick={() => {
             setTabInspectorOpen(tab, !tab.inspectorOpen);
             closeTabMenu();
@@ -1405,16 +1475,16 @@
           }}
         >
           <span class="mbtn-icon">
-            {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+            {#if detailsChecked}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
           </span>
-          <span class="mbtn-label">Toggle details</span>
+          <span class="mbtn-label">{commandTitle("app.editor.details")}</span>
           <span class="mbtn-chord">{chordLabel("app.editor.details")}</span>
         </button>
         {#if tabHasStyleToolbar(tab)}
           <button
             class="mbtn"
             role="menuitemcheckbox"
-            aria-checked={tab.styleToolbarOpen}
+            aria-checked={styleToolbarChecked}
             onclick={() => {
               setTabStyleToolbarOpen(tab, !tab.styleToolbarOpen);
               closeTabMenu();
@@ -1422,52 +1492,64 @@
             }}
           >
             <span class="mbtn-icon">
-              {#if tab.styleToolbarOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+              {#if styleToolbarChecked}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
             </span>
-            <span class="mbtn-label">Toggle style toolbar</span>
+            <span class="mbtn-label">{commandTitle("app.editor.styleToolbar")}</span>
             <span class="mbtn-chord">{chordLabel("app.editor.styleToolbar")}</span>
           </button>
         {/if}
         <div class="msep" role="separator"></div>
-        <button class="mbtn" onclick={() => void doCopyPathToFile()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doCopyPathToFile()}>
           <span class="mbtn-icon">
             <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
-          <span class="mbtn-label">Copy path to file</span>
+          <span class="mbtn-label">{commandTitle("app.editor.copyPath")}</span>
           <span class="mbtn-chord">{chordLabel("app.editor.copyPath")}</span>
         </button>
         {#if !isWorkspaceDraftTab}
           <!-- No chord hint: `app.files.delete` (Backspace) only binds in
                FileTree's rows; nothing in the editor tab dispatches it. -->
-          <button class="mbtn" onclick={() => void doDeleteFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDeleteFile()}>
             <span class="mbtn-icon">
               <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Delete</span>
+            <span class="mbtn-label">{commandTitle("app.file.delete")}</span>
           </button>
-          <button class="mbtn" onclick={() => void doDuplicateFile()}>
+          <button class="mbtn" role="menuitem" onclick={() => void doDuplicateFile()}>
             <span class="mbtn-icon">
               <Files size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
-            <span class="mbtn-label">Duplicate</span>
+            <span class="mbtn-label">{commandTitle("app.file.duplicate")}</span>
             <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
           </button>
         {/if}
-        <button class="mbtn" onclick={() => void doForceReload()}>
+        <button class="mbtn" role="menuitem" onclick={() => void doForceReload()}>
           <span class="mbtn-icon">
             <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
-          <span class="mbtn-label">Reload from disk</span>
+          <span class="mbtn-label">{commandTitle("app.editor.reloadFromDisk")}</span>
           <span class="mbtn-chord"></span>
         </button>
+        <!-- The tail every tab menu ends with: the pane's flip, where this
+             window's panes have two sides, then the tab's close. -->
         <div class="msep" role="separator"></div>
-        <button class="mbtn" onclick={doCloseTab}>
+        {#if panesHaveSides()}
+          <button class="mbtn" role="menuitem" onclick={doFlipPane}>
+            <span class="mbtn-icon">
+              <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
+            <span class="mbtn-chord">{chordLabel("app.pane.flip")}</span>
+          </button>
+        {/if}
+        <button class="mbtn" role="menuitem" onclick={doCloseTab}>
           <span class="mbtn-icon">
             <X size={16} strokeWidth={1.75} aria-hidden="true" />
           </span>
-          <span class="mbtn-label">Close</span>
+          <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
           <span class="mbtn-chord">{closeTabMenuChordLabel()}</span>
         </button>
+        </div>
       </div>
       {/if}
     </div>
@@ -1560,7 +1642,7 @@
     <!-- Keep the board away from a refused buffer until it is written or
          undone; its first change could replace that buffer. -->
     <div class="placeholder refused-placeholder">
-      This drawing has not been saved. Use Show source code ({sourceChord}) to review it.
+      This drawing has not been saved. Use {commandTitle("app.editor.toggleMode")} ({sourceChord}) to review it.
     </div>
   {:else}
     <div class="editor-inspector-row">
@@ -1773,15 +1855,21 @@
       >
         {#if isWorkspaceDraftTab}
           <DraftInfoBody path={tab.path} />
+          <div class="draft-actions">
+            <InspectorActionPill main={draftActions.main} secondary={draftActions.secondary} />
+          </div>
         {:else}
           <FileInfoBody
             path={tab.path}
+            surface="file"
             showRefs
             onNavigate={(p) => void openInActivePane(p)}
             onReveal={revealInBrowser}
             onSetAsScope={windowCaps.workspace
               ? () => openFsGraphForFile(tab.path)
               : undefined}
+            onDownload={() => void downloadFile(tab)}
+            onExportPdf={() => void exportFileToPdf(tab)}
           />
         {/if}
       </Inspector>
@@ -1930,6 +2018,7 @@
     color: var(--text-secondary);
     font-size: 12px;
     min-width: 64px;
+    white-space: nowrap;
   }
   .page-width-slider {
     flex: 1;
@@ -1947,6 +2036,12 @@
     display: flex;
     flex-direction: column;
     padding-top: 4px;
+  }
+  /* A run of action rows inside the tab menu's dialog: a menu of its own
+     that lays its rows out as the list around it does. */
+  .menu-rows {
+    display: flex;
+    flex-direction: column;
   }
   .mbtn {
     display: flex;
@@ -2081,6 +2176,12 @@
     color: var(--danger-text, #d33);
     padding: 1rem;
     text-align: center;
+  }
+  /* A draft's actions sit under the draft body, in its gutter and at its
+     text size. */
+  .draft-actions {
+    padding: 0 0.7rem 0.8rem;
+    font-size: 12.5px;
   }
   .missing-file-state {
     flex: 1;

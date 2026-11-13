@@ -63,13 +63,13 @@ describe("the scrollback cap", () => {
 });
 
 describe("the copy actions", () => {
-  test("Copy Scrollback serializes the configured cap", async () => {
+  test("Copy scrollback serializes the configured cap", async () => {
     serveScrollbackMb(30);
     xterm.serialized = "line one\nline two";
     const [tab] = seatTerminals([terminalTab()]);
     const { target } = await mountTerminal(TerminalTab, tab!);
     await openBodyMenu(target);
-    menuRow("Copy Scrollback").click();
+    menuRow("Copy scrollback").click();
     await tick();
 
     expect(xterm.serializeCalls).toEqual([{ scrollback: scrollbackLinesFromMb(30) }]);

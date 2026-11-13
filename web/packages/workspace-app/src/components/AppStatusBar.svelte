@@ -37,6 +37,9 @@
     workspaceWarningKey,
     workspaceWarningsDialog,
   } from "../state/store.svelte";
+  import { commandTitle } from "../state/commands";
+  // The buttons that run a command are named by it, which this registers.
+  import "../state/commands/install";
   import { showMarked } from "../api/fileIdentity";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
   import { uploadRequestCount, uploadRequestState } from "../state/uploadRequest.svelte";
@@ -281,8 +284,8 @@
             <button
               type="button"
               class="section status-action"
-              aria-label="show file transfers"
-              title="Show file transfers"
+              aria-label={commandTitle("app.transfers.show")}
+              title={commandTitle("app.transfers.show")}
               onclick={toggleTransfers}
             >
               {#if activeXfers > 0}<span class="dot working"></span>{/if}
@@ -300,7 +303,7 @@
               <button
                 type="button"
                 class="section status-msg status-action"
-                aria-label="open workspace warnings"
+                aria-label={commandTitle("app.workspace.showWarnings")}
                 onclick={activateStatus}
               >{shownStatus}</button>
               {@render closeButton("warnings", "hide workspace warnings", "Hide until the warnings change")}

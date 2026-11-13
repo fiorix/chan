@@ -3,7 +3,8 @@
 // Privacy mode in the Computers scope. The deck names a window `Window` and
 // its workspace `Workspace`, as the launcher's own deck does, so the labels
 // the user gave windows and workspaces and the roots' folder names are
-// nowhere in the deck's markup. The scoped library route is mocked.
+// nowhere in the deck's markup, while a typed query still matches them. The
+// scoped library route is mocked.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -25,7 +26,7 @@ import { resetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
 
-const PRIVATE = ["release checks", "Project A", "private-tree", "hidden-root"];
+const PRIVATE = ["release checks", "Project A", "private-tree", "hidden-root", "secret-root"];
 
 function workspaceWindow(window_id: string, ordinal: number, label: string, workspace_path: string) {
   return {
@@ -68,6 +69,12 @@ const snapshot = {
   workspaces: [
     workspaceRow("project-a", "/work/project-a", "Project A"),
     workspaceRow("project-b", "/work/hidden-root", ""),
+    // A mount that cannot read its root: the server's reason names the path.
+    {
+      ...workspaceRow("project-c", "/work/secret-root", ""),
+      status: "unavailable" as const,
+      error: "workspace root does not exist: /work/secret-root",
+    },
   ],
 };
 
@@ -84,8 +91,27 @@ function titles(): string[] {
   return [...target.querySelectorAll(".deck-result-title")].map((node) => node.textContent ?? "");
 }
 
-function paths(): string[] {
-  return [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent ?? "");
+/// The second line of each row that has one: a window's workspace.
+function subtitles(): string[] {
+  return [...target.querySelectorAll(".deck-result-subtitle")].map((node) => node.textContent ?? "");
+}
+
+function crumbs(): string[] {
+  return [...target.querySelectorAll(".deck-crumb")].map((node) => node.textContent ?? "");
+}
+
+async function key(value: string): Promise<void> {
+  (target.querySelector('[role="dialog"]') as HTMLElement).dispatchEvent(
+    new KeyboardEvent("keydown", { key: value, bubbles: true }),
+  );
+  await tick();
+}
+
+async function type(query: string): Promise<void> {
+  const field = target.querySelector(".deck-input") as HTMLInputElement;
+  field.value = query;
+  field.dispatchEvent(new InputEvent("input", { bubbles: true, data: query }));
+  await tick();
 }
 
 function row(title: string, index = 0): HTMLButtonElement {
@@ -133,24 +159,28 @@ afterEach(async () => {
 test("privacy mode names windows and their workspaces as the launcher's deck does, live", async () => {
   await setPrivacy({ enabled: true });
   await openComputers();
-  row("Windows").click();
-  await tick();
-  expect.soft(titles(), "the window rows").toEqual(["Window", "Window"]);
-  expect.soft(paths(), "the window rows' breadcrumbs").toEqual([
-    "Computers › Windows › Open › Workspace",
-    "Computers › Windows › Open › Workspace",
+  // The mount that needs attention, the two workspaces that serve, the
+  // window no row lists, the captioned window, then the one action of the
+  // machine.
+  expect.soft(titles(), "the scope's rows").toEqual([
+    "Workspace", "Workspace", "Workspace", "Window", "Window", "New terminal window",
   ]);
-  expectNothingPrivate("the Windows branch");
+  expect.soft(subtitles(), "the mount's reason, then the workspace each window row names").toEqual([
+    "Workspace unavailable", "Workspace", "Workspace",
+  ]);
+  expectNothingPrivate("the Computers scope");
 
-  row("Window").click();
-  await tick();
-  expect(launcherDraft.path).toEqual(["windows", "w-captioned"]);
-  expect(paths().every((path) => path === "Computers › Windows › Window"), paths().join(" | ")).toBe(true);
-  expectNothingPrivate("a window's actions");
+  // Right on the fifth row: the page of the captioned window.
+  for (let row = 0; row < 4; row += 1) await key("ArrowDown");
+  await key("ArrowRight");
+  expect(launcherDraft.path).toEqual(["window:w-captioned"]);
+  expect.soft(crumbs(), "where the deck says it stands").toEqual(["Computers", "Window"]);
+  expect.soft(titles(), "the window's actions").toEqual(["Focus window", "Hide window", "Close window"]);
+  expectNothingPrivate("a window's page");
 
   // The Close card's title is a private field of the deck; revealed, it names
   // the window by its masked name.
-  row("Close").click();
+  row("Close window").click();
   await flush();
   expect(target.querySelector('[aria-label="action details hidden"]')?.textContent).toBe("Hidden");
   (target.querySelector('[aria-label="Reveal action details"]') as HTMLButtonElement).click();
@@ -160,19 +190,34 @@ test("privacy mode names windows and their workspaces as the launcher's deck doe
 
   (target.querySelector(".deck-decisions button") as HTMLButtonElement).click();
   await tick();
-  launcherDraft.path = ["new-window"];
-  await tick();
-  expect(titles(), "the New window rows").toEqual(["Workspace", "Workspace"]);
-  expectNothingPrivate("the New window branch");
+  await key("ArrowLeft");
+  expect(launcherDraft.path).toEqual([]);
 
+  // A typed query still matches the names the rows conceal: the user's
+  // caption, a workspace's label and a root's folder name.
+  await type("release checks");
+  expect.soft([...titles()].sort(), "the captioned window and its actions").toEqual([
+    "Close Window", "Focus Window", "Hide Window", "Window",
+  ]);
+  expectNothingPrivate("a query on a window's caption");
+  await type("hidden-root");
+  expect.soft([...titles()].sort(), "a workspace found by its root's folder name").toEqual([
+    "New window of Workspace", "Workspace",
+  ]);
+  expectNothingPrivate("a query on a root's folder name");
+  await type("private-tree");
+  expect.soft([...titles()].sort(), "a window found by the root of a workspace no row lists").toEqual([
+    "Close Window", "Focus Window", "Hide Window", "Window",
+  ]);
+  expectNothingPrivate("a query on the root of a workspace no row lists");
+
+  await type("");
   await setPrivacy({ enabled: false });
   await tick();
-  expect(titles(), "the New window rows with privacy mode off").toEqual(["Project A", "hidden-root"]);
-  launcherDraft.path = ["windows"];
-  await tick();
-  expect(titles(), "the window rows with privacy mode off").toEqual(["Window 2 [release checks]", "Window 3"]);
-  expect(paths()).toEqual([
-    "Computers › Windows › Open › Project A",
-    "Computers › Windows › Open › private-tree",
+  expect(titles(), "the scope's rows with privacy mode off").toEqual([
+    "secret-root", "Project A", "hidden-root", "Window 3", "Window 2 [release checks]", "New terminal window",
+  ]);
+  expect(subtitles()).toEqual([
+    "workspace root does not exist: /work/secret-root", "private-tree", "Project A",
   ]);
 });

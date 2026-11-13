@@ -235,11 +235,11 @@ describe("Pane terminal tab activity marker", () => {
   });
 });
 
-// Every hamburger row in menu order: Commands / Hybrid Nav, the eight
-// Apps spawn rows (alphabetical by title), the focus colours, then
+// Every hamburger row in menu order: Command launcher / Hybrid Nav, the
+// eight Apps spawn rows (alphabetical by title), the focus colours, then
 // Close pane last (launcher parity).
 const HAMBURGER_LABELS = [
-  "Commands",
+  "Command launcher",
   "Hybrid Nav",
   "Search workspace",
   "New dashboard",
@@ -259,7 +259,7 @@ const HAMBURGER_LABELS = [
 ];
 
 describe("Pane right-click menus", () => {
-  test("hamburger exposes Commands, Apps rows, and focus colour order", async () => {
+  test("hamburger exposes the launcher, Apps rows, and focus colour order", async () => {
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-menu",
@@ -340,7 +340,7 @@ describe("Pane right-click menus", () => {
 
       // Keep the workspace menu's order for the available apps.
       expect(menuLabels()).toEqual([
-        "Commands",
+        "Command launcher",
         "Hybrid Nav",
         "New dashboard",
         "New terminal",
@@ -380,7 +380,7 @@ describe("Pane right-click menus", () => {
     target.querySelector<HTMLButtonElement>(".hamburger-trigger")?.click();
     await tick();
 
-    // Menu structure: Commands / Hybrid Nav, separator, the eight Apps
+    // Menu structure: Command launcher / Hybrid Nav, separator, the eight Apps
     // rows, separator, the Focus border colour section, separator, then
     // the Close pane row last.
     const items = [...document.body.querySelectorAll(".hamburger-menu li")];
@@ -469,7 +469,7 @@ describe("Pane right-click menus", () => {
     await tick();
 
     const chords = menuRowChords();
-    expect(chords["Commands"]).toBe("Ctrl+Alt+K");
+    expect(chords["Command launcher"]).toBe("Ctrl+Alt+K");
   });
 
   test("Ctrl+Alt+Shift+T reopens the tab the focused pane closed last", async () => {
@@ -498,7 +498,8 @@ describe("Pane right-click menus", () => {
 
   test("empty pane right-click opens the pane menu in place of the browser's", async () => {
     // Spawn actions stay in the hamburger and the launcher; the right-click
-    // menu offers Commands and Reload (Open Inspector on the desktop).
+    // menu offers the launcher and Reload window (Open Inspector on the
+    // desktop).
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-empty",
@@ -518,7 +519,7 @@ describe("Pane right-click menus", () => {
     await tick();
 
     expect(event.defaultPrevented).toBe(true);
-    expect(menuLabels()).toEqual(["Commands", "Reload"]);
+    expect(menuLabels()).toEqual(["Command launcher", "Reload window"]);
   });
 
   test("empty pane left-click leaves the welcome menu closed", async () => {
@@ -549,7 +550,7 @@ describe("Pane right-click menus", () => {
     expect(document.body.querySelector(".hamburger-menu")).toBeNull();
   });
 
-  test("loaded pane right-click on the strip lists Commands and Reload", async () => {
+  test("loaded pane right-click on the strip lists the launcher and Reload window", async () => {
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-loaded",
@@ -570,7 +571,7 @@ describe("Pane right-click menus", () => {
 
     // A plain browser opens its own inspector, so Open Inspector is the
     // desktop's row only.
-    expect(menuLabels()).toEqual(["Commands", "Reload"]);
+    expect(menuLabels()).toEqual(["Command launcher", "Reload window"]);
   });
 
   // Side B is a normal tab side, so activity belongs to its own tab strip.
@@ -587,9 +588,9 @@ describe("Pane side flip", () => {
     };
     const target = await renderPane(pane, { paneMode: false });
     const sideButton = target.querySelector<HTMLButtonElement>(".side-toggle");
-    expect(sideButton?.title).toBe("Flip to side B (Ctrl+`)");
+    expect(sideButton?.title).toBe("Flip pane to side B (Ctrl+`)");
     expect(sideButton?.getAttribute("aria-label")).toBe(
-      "Flip to side B (Ctrl+`)",
+      "Flip pane to side B (Ctrl+`)",
     );
 
     target.querySelector<HTMLButtonElement>(".hamburger-trigger")?.click();
@@ -614,7 +615,7 @@ describe("Pane side flip", () => {
     expect(target.querySelector(".welcome")).toBeNull();
     const button = target.querySelector<HTMLButtonElement>(".side-toggle");
     expect(button?.textContent?.trim()).toBe("A");
-    expect(button?.title).toBe("Flip to side B (Ctrl+`)");
+    expect(button?.title).toBe("Flip pane to side B (Ctrl+`)");
 
     button?.click();
     await tick();
@@ -623,7 +624,7 @@ describe("Pane side flip", () => {
     if (live?.kind !== "leaf") throw new Error("expected leaf");
     expect(paneSide(live)).toBe("b");
     expect(button?.textContent?.trim()).toBe("B");
-    expect(button?.title).toBe("Flip to side A (Ctrl+`)");
+    expect(button?.title).toBe("Flip pane to side A (Ctrl+`)");
     const labels = [...target.querySelectorAll('[role="tab"] .path')].map(
       (el) => el.textContent?.trim(),
     );

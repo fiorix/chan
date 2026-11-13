@@ -1,17 +1,20 @@
 // A launcher command that moves focus nowhere hands the keyboard back to the
 // terminal the launcher opened from, and a prompt a command opens returns it
-// there when the prompt closes. Toggle group broadcast flips a flag and opens
-// no surface: after it, typed keys must reach the PTY again with no click.
-// Set terminal name opens a prompt that outlives the launcher: after Escape
-// the keyboard must be back in the terminal. One arm per engine the terminal
-// preference can store; each arm types a marker before and after and reads
-// the PTY's scrollback for the shell's answer, which is the only proof that
-// keys reach the program.
+// there when the prompt closes. Next pane, in a window of one pane, moves
+// nothing and opens no surface: the launcher closes as it runs, and typed
+// keys must reach the PTY again with no click. Group broadcast is a toggle:
+// it flips a flag in place and leaves the launcher open on its row, which
+// then reads on, and Escape hands the keyboard back. Rename terminal opens a
+// prompt that outlives the launcher: after Escape the keyboard must be back
+// in the terminal. One arm per engine the terminal preference can store; each
+// arm types a marker before the launcher and after each command and reads the
+// PTY's scrollback for the shell's answer, which is the only proof that keys
+// reach the program.
 //
-// Toggle group broadcast spans the group across every window of the tenant,
-// and the suite's server keeps other checks' terminals, so a toggle in the
-// default group would also reach terminals this check does not own. Each
-// arm's terminal is the only member of a group of its own, read back from the
+// Group broadcast spans the group across every window of the tenant, and the
+// suite's server keeps other checks' terminals, so a toggle in the default
+// group would also reach terminals this check does not own. Each arm's
+// terminal is the only member of a group of its own, read back from the
 // server's roster before the toggle.
 
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
@@ -20,6 +23,7 @@ import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
 const SELECTED_TITLE = `${LAUNCHER} [role="option"][aria-selected="true"] .deck-result-title`;
+const SELECTED_VALUE = `${LAUNCHER} [role="option"][aria-selected="true"] .deck-result-value`;
 const PROMPT = '[role="dialog"][aria-modal="true"][aria-labelledby="prompt-title"]';
 const BROADCAST_MARKER = ".tab.active .broadcast-marker";
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,10 +87,15 @@ async function openLauncher(page, label) {
   }
 }
 
-/// Type a command's exact title, prove it is the selected row, and run it
-/// with Enter; the launcher closes before the command runs.
-async function runLauncherCommand(page, title, label) {
+/// Open the launcher and type a command's exact title until it is the
+/// selected row. The launcher opens holding the keyboard, with the query it
+/// was last dismissed on selected, so the typing replaces that query.
+async function selectLauncherCommand(page, title, label) {
   await openLauncher(page, label);
+  await page.waitForFunction((selector) => {
+    const input = document.querySelector(selector);
+    return input === document.activeElement && input.selectionStart === 0 && input.selectionEnd === input.value.length;
+  }, { timeout: 5_000 }, LAUNCHER_INPUT);
   await page.type(LAUNCHER_INPUT, title);
   await page.waitForFunction(
     (selector, wanted) => document.querySelector(selector)?.textContent?.trim() === wanted,
@@ -94,7 +103,34 @@ async function runLauncherCommand(page, title, label) {
     SELECTED_TITLE,
     title,
   );
+}
+
+/// Type an action's exact title, prove it is the selected row, and run it
+/// with Enter; the launcher closes before the command runs.
+async function runLauncherCommand(page, title, label) {
+  await selectLauncherCommand(page, title, label);
   await page.keyboard.press("Enter");
+  await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 });
+}
+
+/// Type a toggle's exact title, prove it is the selected row, and flip it
+/// with Enter. A toggle changes in place: the launcher stays open on the row,
+/// which must then read `state`, and Escape closes it.
+async function flipLauncherToggle(page, title, state, label) {
+  await selectLauncherCommand(page, title, label);
+  await page.keyboard.press("Enter");
+  try {
+    await page.waitForFunction(
+      (selector, wanted) => document.querySelector(selector)?.textContent?.trim() === wanted,
+      { timeout: 10_000 },
+      SELECTED_VALUE,
+      state,
+    );
+  } catch (cause) {
+    const owner = await keyboardOwner(page);
+    throw new Error(`${label}: the launcher's ${title} row did not read ${state} after Enter: ${JSON.stringify(owner)}`, { cause });
+  }
+  await page.keyboard.press("Escape");
   await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 });
 }
 
@@ -141,7 +177,7 @@ async function broadcastOff(page, token, group) {
     await page.waitForSelector(BROADCAST_MARKER, { hidden: true, timeout: 10_000 });
   } catch (cause) {
     const members = await groupSessions(page, token, group).catch((error) => error.message);
-    throw new Error(`the broadcast marker stayed on after Toggle group broadcast; group ${group} lists ${JSON.stringify(members)}`, { cause });
+    throw new Error(`the broadcast marker stayed on after the group broadcast toggle; group ${group} lists ${JSON.stringify(members)}`, { cause });
   }
 }
 
@@ -180,7 +216,7 @@ export default {
         await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
         await openAttachedTerminal(ctx, page, cs, windowId, name, engine, ["--tab-group", name]);
         opened.push(name);
-        await waitSoleMember(page, token, name, name, `${engine}: before Toggle group broadcast`);
+        await waitSoleMember(page, token, name, name, `${engine}: before Group broadcast`);
         // The keyboard starts in the terminal the way a user's does: by a click.
         await page.click(engine === "ghostty"
           ? ".terminal-tab.active .terminal-host canvas"
@@ -190,18 +226,30 @@ export default {
         await waitForScrollback(cs, name, `BEFORE_${engine}_OK`, `${engine}: typed before the launcher`);
         const arm = { engine };
 
-        // A command that opens no surface: the keyboard comes back by itself.
-        await runLauncherCommand(page, "Toggle group broadcast", `${engine}: broadcast`);
-        await page.waitForSelector(BROADCAST_MARKER, { timeout: 10_000 });
-        await waitForTerminalKeyboard(page, `${engine}: after Toggle group broadcast`);
-        arm.afterBroadcast = await keyboardOwner(page);
+        // A command that opens no surface and moves nothing: the launcher
+        // closes as it runs and the keyboard comes back by itself.
+        const panes = await page.$$eval(".pane", (all) => all.length);
+        check(panes === 1, `${engine}: Next pane moves nothing only in a window of one pane; this one has ${panes}`);
+        await runLauncherCommand(page, "Next pane", `${engine}: next pane`);
+        await waitForTerminalKeyboard(page, `${engine}: after Next pane`);
+        arm.afterAction = await keyboardOwner(page);
         await typeLine(page, `printf 'FOCUS_%s_OK\\n' ${engine}`);
         await waitForScrollback(cs, name, `FOCUS_${engine}_OK`, `${engine}: typed after the launcher closed`);
+        await ctx.shot(`203-${engine}-after-action`);
+
+        // A toggle flips in place: the launcher stays open on its row, and
+        // Escape hands the keyboard back.
+        await flipLauncherToggle(page, "Group broadcast", "on", `${engine}: broadcast`);
+        await page.waitForSelector(BROADCAST_MARKER, { timeout: 10_000 });
+        await waitForTerminalKeyboard(page, `${engine}: after Group broadcast`);
+        arm.afterBroadcast = await keyboardOwner(page);
+        await typeLine(page, `printf 'TOGGLE_%s_OK\\n' ${engine}`);
+        await waitForScrollback(cs, name, `TOGGLE_${engine}_OK`, `${engine}: typed after the toggle`);
         await ctx.shot(`203-${engine}-after-broadcast`);
 
         // A command that opens a prompt: the prompt keeps the keyboard while
         // it shows, and the terminal gets it back when the prompt closes.
-        await runLauncherCommand(page, "Set terminal name", `${engine}: set name`);
+        await runLauncherCommand(page, "Rename terminal", `${engine}: rename`);
         await page.waitForSelector(`${PROMPT} input`, { timeout: 10_000 });
         await page.waitForFunction(
           (selector) => document.activeElement === document.querySelector(selector),

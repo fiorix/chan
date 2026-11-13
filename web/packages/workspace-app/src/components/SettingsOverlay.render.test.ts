@@ -10,7 +10,9 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import SettingsOverlay from "./SettingsOverlay.svelte";
-import { settingsPanel } from "../state/store.svelte";
+import type { Preferences } from "../api/types";
+import { demoWorkspaceInfo } from "../demo/data";
+import { settingsPanel, workspace } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { DATE_FORMATS } from "../editor/dateFormats";
 import {
@@ -91,12 +93,32 @@ function openSurface(): HTMLElement {
   return target;
 }
 
+/// Put a workspace behind this window, holding the served preferences as
+/// part of its record. The docks are offered only there.
+function overWorkspace(): void {
+  workspace.info = demoWorkspaceInfo(
+    {
+      metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    },
+    server.preferences as unknown as Preferences,
+  );
+}
+
 function clickTab(target: HTMLElement, label: string): void {
   const tab = [...target.querySelectorAll(".section-tab")].find(
     (e) => e.textContent?.trim() === label,
   ) as HTMLElement;
   expect(tab, `section tab ${label}`).not.toBeNull();
   tab.click();
+}
+
+/// The toggle of the File browser field headed `heading`.
+function dockPill(target: HTMLElement, heading: string): HTMLLabelElement | null {
+  const field = [...target.querySelectorAll<HTMLElement>(".field")].find(
+    (e) => e.querySelector("h3")?.textContent?.trim() === heading,
+  );
+  return field?.querySelector<HTMLLabelElement>("label.pill") ?? null;
 }
 
 /// Mirror of `PreferencesPatch::owner`
@@ -156,6 +178,7 @@ afterEach(() => {
   document.documentElement.style.removeProperty("--chan-editor-body-size");
   document.documentElement.style.removeProperty("--chan-editor-source-size");
   settingsPanel.open = false;
+  workspace.info = null;
   vi.restoreAllMocks();
 });
 
@@ -511,22 +534,21 @@ describe("settings surface render", () => {
     await flush();
 
     // An image lands beside its document or in its draft: there is no
-    // folder to configure. The side panes show that the section rendered.
-    expect(target.textContent).toContain("Side panes");
+    // folder to configure. The Vim field shows that the section rendered.
+    expect(target.textContent).toContain("Vim navigation");
     expect.soft(target.textContent).not.toContain("Attachments folder");
     expect.soft(target.querySelector('[aria-label="Attachments folder"]')).toBeNull();
   });
 
-  test("the File browser section toggles one side pane at a time", async () => {
+  test("the File browser section toggles one dock at a time", async () => {
+    overWorkspace();
     const target = openSurface();
     await flush();
     clickTab(target, "File browser");
     await flush();
-    const pill = [...target.querySelectorAll("label.pill")].find(
-      (e) => e.textContent?.trim() === "Left pane",
-    ) as HTMLLabelElement;
-    expect(pill, "Left pane pill").not.toBeNull();
-    (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    const pill = dockPill(target, "Left file browser dock");
+    expect(pill, "left dock pill").not.toBeNull();
+    (pill!.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
     await flush();
     expect(patchBodies[patchBodies.length - 1]!.browser_side_panes).toEqual({
       left: true,
@@ -541,15 +563,13 @@ describe("settings surface render", () => {
     await flush();
     // The row states that masking applies on both backends.
     expect(target.textContent).toContain("xterm.js and ghostty backends alike");
-    const pill = [...target.querySelectorAll("label.pill")].find((e) =>
-      e.textContent?.includes("Mask secrets in new terminals"),
-    ) as HTMLLabelElement;
-    expect(pill, "secret masking pill").not.toBeNull();
-    const checkbox = pill.querySelector(
-      'input[type="checkbox"]',
-    ) as HTMLInputElement;
-    expect(checkbox.checked).toBe(false);
-    checkbox.click();
+    const pill = [
+      ...target.querySelectorAll('[role="radiogroup"][aria-label="Secret masking"] label.pill'),
+    ].find((e) => e.textContent?.trim() === "On") as HTMLLabelElement;
+    expect(pill, "secret masking's On pill").toBeDefined();
+    const on = pill.querySelector('input[type="radio"]') as HTMLInputElement;
+    expect(on.checked).toBe(false);
+    on.click();
     await flush();
     const body = patchBodies[patchBodies.length - 1]!;
     expect(Object.keys(body)).toEqual(["terminal"]);
@@ -648,6 +668,8 @@ describe("settings surface render", () => {
   });
 
   test("one control per section writes a body falling on exactly one owner", async () => {
+    // Over a workspace, where the File browser section offers its docks.
+    overWorkspace();
     const target = openSurface();
     await flush();
 
@@ -709,10 +731,8 @@ describe("settings surface render", () => {
     expect(
       Object.keys(
         await drive("File browser", () => {
-          const pill = [...target.querySelectorAll("label.pill")].find(
-            (e) => e.textContent?.trim() === "Right pane",
-          ) as HTMLLabelElement;
-          (pill.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+          const pill = dockPill(target, "Right file browser dock");
+          (pill!.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
         }),
       ),
     ).toEqual(["browser_side_panes"]);

@@ -142,9 +142,9 @@ function menu(): HTMLElement | null {
 
 function commandsRow(): HTMLButtonElement {
   const row = [...document.body.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
-    (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Commands",
+    (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Command launcher",
   );
-  if (!row) throw new Error("the pane menu has no Commands row");
+  if (!row) throw new Error("the pane menu has no launcher row");
   return row;
 }
 
@@ -184,7 +184,7 @@ describe("pane menu focus", () => {
     expect(document.activeElement).toBe(surface);
   });
 
-  test("Commands opens the launcher from the terminal surface", async () => {
+  test("Command launcher opens the launcher from the terminal surface", async () => {
     const { target, surface } = await mountPane();
     const seen = recordCommands();
     rightClick(target.querySelector<HTMLElement>(".tabs .dead-zone")!);
@@ -195,7 +195,7 @@ describe("pane menu focus", () => {
     row.click();
     await settle();
     expect(seen.map((entry) => entry.name)).toEqual(["app.launcher.toggle"]);
-    expect(seen[0]?.focus, "Commands hands the launcher the terminal opener").toBe(surface);
+    expect(seen[0]?.focus, "the row hands the launcher the terminal opener").toBe(surface);
     expect(menu()).toBeNull();
   });
 

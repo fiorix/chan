@@ -160,7 +160,7 @@ export default {
 
       await showFiles(B);
       await showFiles(A);
-      await rowMenu(A, kept, "Rename / Move");
+      await rowMenu(A, kept, "Rename or move");
       await submitPath(A, moved);
       await waitListedRow(A, moved, true, "A's own directory listing never showed its move");
       await wait(B, "B's directory listing never showed the note at the path A moved it to", 20_000,
@@ -215,7 +215,7 @@ export default {
       await openNote(A, moved);
       await showFiles(A);
       await showFiles(B);
-      await rowMenu(A, moved, "Rename / Move");
+      await rowMenu(A, moved, "Rename or move");
       await submitPath(A, kept);
       await wait(A, "A's tab did not follow the note moved back", 20_000, (wanted) =>
         [...document.querySelectorAll(".tabs .tab .path")]

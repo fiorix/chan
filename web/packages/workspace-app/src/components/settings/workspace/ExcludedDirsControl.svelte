@@ -36,6 +36,9 @@
   import SettingField from "../SettingField.svelte";
   import ChipList from "../ChipList.svelte";
   import type { SaveStatus } from "../commit";
+  import { settingEntry } from "../settingsIndex";
+
+  const EXCLUDED = settingEntry("workspace.excludedDirs");
 
   let view = $state<ExcludedDirsView | null>(null);
   let additions = $state<string[]>([]);
@@ -248,7 +251,7 @@
 </script>
 
 <SettingField
-  label="Excluded directories"
+  setting={EXCLUDED}
   hint="Directory names to skip when indexing and building the graph. Matched by exact name at any depth, case-insensitive. Names only, not paths."
 >
   <div class="stack">

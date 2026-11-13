@@ -1,5 +1,5 @@
 // Video inspector + HTTP range serving: the inspector renders an inline
-// <video> preview with a "View Video" main action, and /api/fs
+// <video> preview with a "View" main action, and /api/fs
 // answers range requests on media paths with byte-exact 206 slices.
 //
 // Two stages. The range assertions use a deterministic byte pattern
@@ -65,8 +65,8 @@ export default {
     await ctx.shot("video-inspector");
 
     const mainLabel = await page.$eval(".pill-main", (b) => b.textContent?.trim());
-    if (mainLabel !== "View Video") {
-      throw new Error(`main action for an mp4 must be "View Video", got "${mainLabel}"`);
+    if (mainLabel !== "View") {
+      throw new Error(`main action for an mp4 must be "View", got "${mainLabel}"`);
     }
 
     // Range semantics, asserted from the page so the requests ride the

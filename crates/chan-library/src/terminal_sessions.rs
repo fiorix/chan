@@ -1294,7 +1294,7 @@ pub struct RosterEntry {
     /// desktop window its Hide put away or a saved window nothing has opened.
     /// Only a page flips a session's `broadcast`, so a `terminal_broadcast`
     /// command routed to such a window changes nothing, and the SPA leaves
-    /// these members out of a group Select All until their window is live.
+    /// these members out of `Group broadcast` until their window is live.
     pub window_live: bool,
     /// The session's own broadcast toggle, synced from the SPA via the
     /// `set-broadcast` WS frame. Cross-window input is only fanned to

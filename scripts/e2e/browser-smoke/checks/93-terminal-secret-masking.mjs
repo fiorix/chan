@@ -16,13 +16,13 @@
 //               terminal's own copy chord then proves the clipboard
 //               receives the REAL value: copy of a masked region yields
 //               cleartext, which is a requirement, not a leak.
-//   TOGGLE   -- the ephemeral per-tab toggle (chan:command
-//               app.terminal.secretMasking.toggle, the launcher's path)
+//   TOGGLE   -- the ephemeral per-tab toggle (the launcher's Secret
+//               masking (this terminal) row, which changes in place)
 //               clears the decorations in place and surfaces the
-//               transient status; a second dispatch re-masks in place.
-//   SETTINGS -- the Terminal row shows the stored-on toggle and read-only
-//               suffixes; Use default clears the choice and the workspace
-//               default leaves the toggle off.
+//               transient status; a second run re-masks in place.
+//   SETTINGS -- the Terminal row shows the stored choice as On among
+//               On, Off and Default, and read-only suffixes; Default
+//               clears the choice and the row then reads Default.
 //   CONFIG   -- PATCH terminal.secret_masking=false through the
 //               revisioned /api/config contract (the settings UI's own
 //               chain), prove it persisted into the SANDBOXED
@@ -35,7 +35,7 @@
 //               values), while no decoration element exists; a drag over
 //               the rows and the copy chord yield the cleartext; the
 //               per-tab toggle clears the rectangles in place and a
-//               second dispatch paints them again.
+//               second run paints them again.
 //
 // Output progress is polled through `cs terminal scrollback`
 // (server-side, renderer-independent; headless Chrome runs xterm's
@@ -58,6 +58,10 @@ const CLIPBOARD_SENTINEL = "SMOKE93_CLIPBOARD_SENTINEL";
 // "a b c" with its quotes, 7. Under ghostty the mask rectangles on the
 // canvas are these many cells wide, one cell high.
 const MASK_CELLS = [13, 7];
+const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
+const LAUNCHER_SELECTED_TITLE = `${LAUNCHER} [role="option"][aria-selected="true"] .deck-result-title`;
+const TOGGLE_ROW = "Secret masking (this terminal)";
 
 // The printf args split every positive secret NAME across two quoted
 // words, so the echoed command line contains no NAME= match and only
@@ -177,17 +181,6 @@ export default {
       return want;
     }
 
-    /// Fire the launcher toggle exactly the way the catalog routes it.
-    async function dispatchToggle() {
-      await page.evaluate(() => {
-        window.dispatchEvent(
-          new CustomEvent("chan:command", {
-            detail: { name: "app.terminal.secretMasking.toggle" },
-          }),
-        );
-      });
-    }
-
     /// The transient status pill auto-dismisses after 3s; poll for its
     /// text immediately after the action that sets it.
     async function awaitStatus(text) {
@@ -196,6 +189,34 @@ export default {
         { timeout: 5_000, polling: 100 },
         text,
       );
+    }
+
+    /// Run the per-tab toggle from its launcher row and wait for `status`.
+    /// The row changes in place and leaves the launcher open, so the status
+    /// is read before Escape closes it; a closed launcher keeps its query,
+    /// which the next run clears before typing.
+    async function toggleFromLauncher(status) {
+      await page.evaluate(() => {
+        window.dispatchEvent(
+          new CustomEvent("chan:command", { detail: { name: "app.launcher.toggle" } }),
+        );
+      });
+      await page.waitForSelector(LAUNCHER_INPUT, { timeout: 10_000 });
+      await page.$eval(LAUNCHER_INPUT, (input) => {
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await page.type(LAUNCHER_INPUT, TOGGLE_ROW);
+      await page.waitForFunction(
+        (selector, title) => document.querySelector(selector)?.textContent?.trim() === title,
+        { timeout: 10_000 },
+        LAUNCHER_SELECTED_TITLE,
+        TOGGLE_ROW,
+      );
+      await page.keyboard.press("Enter");
+      await awaitStatus(status);
+      await page.keyboard.press("Escape");
+      await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 });
     }
 
     /// Renderer-independent selection probe via the terminal's own copy
@@ -397,18 +418,16 @@ export default {
       details.maskedLeg.copyYieldsCleartext = true;
 
       // ---- Leg 2: TOGGLE (ephemeral, in place) ----
-      await dispatchToggle();
-      await awaitStatus("Secret masking disabled for this terminal");
+      await toggleFromLauncher("Secret masking disabled for this terminal");
       if ((await awaitMaskCount(0)) !== 0) {
         throw new Error("toggle off left mask decorations in place");
       }
       await ctx.shot("toggle-off-revealed");
-      await dispatchToggle();
-      await awaitStatus("Secret masking enabled for this terminal");
+      await toggleFromLauncher("Secret masking enabled for this terminal");
       await awaitMaskCount(2);
       details.toggleLeg = { offCleared: true, onRemasked: true };
 
-      // ---- Leg 3: SETTINGS (stored choice and Use default) ----
+      // ---- Leg 3: SETTINGS (stored choice and Default) ----
       await page.keyboard.down("Control");
       await page.keyboard.press("Comma");
       await page.keyboard.up("Control");
@@ -431,18 +450,22 @@ export default {
         if (!h3) throw new Error("Terminal settings lack the Secret masking row");
         const field = h3.closest("section");
         if (!field) throw new Error("Secret masking row is not in a field section");
+        const group = field.querySelector('[role="radiogroup"][aria-label="Secret masking"]');
+        if (!group) throw new Error("Secret masking row has no radio group");
         return {
-          label: field.querySelector("label.pill")?.textContent.trim(),
-          checked: field.querySelector('label.pill input[type="checkbox"]')?.checked,
-          useDefault: [...field.querySelectorAll("button")].some(
-            (button) => button.textContent.trim() === "Use default",
-          ),
+          // Each pill by its word, chosen when its radio is checked and the
+          // row's own value lights it.
+          pills: [...group.querySelectorAll("label.pill")].map((pill) => [
+            pill.textContent.trim(),
+            pill.querySelector('input[type="radio"]')?.checked === true &&
+              pill.classList.contains("on"),
+          ]),
           summary: field.querySelector("details summary")?.textContent.trim(),
           chipCount: field.querySelectorAll(".chips.readonly .chip").length,
         };
       });
-      if (settings.label !== "Mask secrets in new terminals" ||
-          settings.checked !== true || settings.useDefault !== true) {
+      if (JSON.stringify(settings.pills) !==
+          JSON.stringify([["On", true], ["Off", false], ["Default", false]])) {
         throw new Error(`stored masking choice not shown in settings: ${JSON.stringify(settings)}`);
       }
       if (settings.summary !== "Suffixes (12)" || settings.chipCount !== 12) {
@@ -459,11 +482,12 @@ export default {
         const field = [...document.querySelectorAll("h3")].find(
           (h3) => h3.textContent.trim() === "Secret masking",
         )?.closest("section");
-        const button = [...(field?.querySelectorAll("button") ?? [])].find(
-          (candidate) => candidate.textContent.trim() === "Use default",
+        const pill = [...(field?.querySelectorAll('[role="radiogroup"] label.pill') ?? [])].find(
+          (candidate) => candidate.textContent.trim() === "Default",
         );
-        if (!button) throw new Error("Use default button missing");
-        button.click();
+        const radio = pill?.querySelector('input[type="radio"]');
+        if (!(radio instanceof HTMLInputElement)) throw new Error("Default pill missing");
+        radio.click();
       });
       await patch;
       await assertToml({ secret_masking: null });
@@ -471,10 +495,11 @@ export default {
         const field = [...document.querySelectorAll("h3")].find(
           (h3) => h3.textContent.trim() === "Secret masking",
         )?.closest("section");
-        return field?.querySelector('label.pill input[type="checkbox"]')?.checked === false &&
-          ![...(field?.querySelectorAll("button") ?? [])].some(
-            (button) => button.textContent.trim() === "Use default",
-          );
+        const pills = [...(field?.querySelectorAll('[role="radiogroup"] label.pill') ?? [])];
+        const words = (chosen) => pills.filter(chosen).map((pill) => pill.textContent.trim()).join();
+        // The radio the click checked and the pill the row's value lights.
+        return words((pill) => pill.querySelector('input[type="radio"]')?.checked === true) === "Default" &&
+          words((pill) => pill.classList.contains("on")) === "Default";
       }, { timeout: 15_000 });
       await page.keyboard.press("Escape");
       await page.waitForFunction(
@@ -543,12 +568,10 @@ export default {
       details.ghosttyLeg.copyYieldsCleartext = true;
 
       // The per-tab toggle clears the canvas in place and paints again.
-      await dispatchToggle();
-      await awaitStatus("Secret masking disabled for this terminal");
+      await toggleFromLauncher("Secret masking disabled for this terminal");
       await awaitCanvasMasks(0);
       await ctx.shot("ghostty-toggle-off-revealed");
-      await dispatchToggle();
-      await awaitStatus("Secret masking enabled for this terminal");
+      await toggleFromLauncher("Secret masking enabled for this terminal");
       const again = await awaitCanvasMasks(2);
       details.ghosttyLeg.toggle = { offCleared: true, onRemasked: again.length === 2 };
       await closeTerminal(TAB_G);

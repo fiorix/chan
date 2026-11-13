@@ -1,28 +1,32 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
-  import { ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Folder, FolderOpen, HardDrive, ListFilter, PanelLeftOpen, PanelRightOpen, Plus, Search, X } from "@lucide/svelte";
+  import { ArrowLeft, ArrowRight, ArrowUp, Check, ChevronRight, Folder, FolderOpen, HardDrive, ListFilter, PanelLeftOpen, PanelRightOpen, Plus, Search, X } from "@lucide/svelte";
   import FileTree from "./FileTree.svelte";
   import Inspector from "./Inspector.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import DraftsGroup from "./DraftsGroup.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
+  import { settingEntry } from "./settings/settingsIndex";
   import { tabMenu } from "../state/tabMenu.svelte";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
+  import { commandState, commandTitle } from "../state/commands";
+  import "../state/commands/install";
+  import { browserView, dropBrowserView, setBrowserView, toggleBrowserDetails, toggleBrowserView } from "../state/browserView.svelte";
   import { basename, parentDir } from "../state/format";
   import { browserDirectoryInput, type BrowserSort } from "../state/browserEntries";
-  import { browserKeys, setBrowserVim } from "../state/browserKeys.svelte";
+  import { browserKeys } from "../state/browserKeys.svelte";
   import { browserBindings, browserCommandChord, type BrowserCommand } from "../state/browserKeymap";
   import { openMediaViewer } from "../state/mediaOpen";
   import { windowCaps } from "../state/windowCaps";
   import {
-    browserSelection, browserSidePanes, ensureFbTreeInstance, fbActivateInstance,
+    browserSelection, ensureFbTreeInstance, fbActivateInstance,
     fbTreeInstance, fbSelectSet, fbSelectSingle, clearTreeDirError, loadTreeDir,
-    openFsGraphForDirectory, openFsGraphForFile, openGraphForContact, openGraphForLanguage,
-    paneWidths, persistPaneWidths, schedulePersistStateToHash, scheduleSessionSave,
+    openCommandLauncherFromMenu, openFsGraphForDirectory, openFsGraphForFile, openGraphForContact, openGraphForLanguage,
+    paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
     seedFbTreeInstanceFromReloadSnapshot, surfaceThemeOverride, toggleBrowserSidePane, tree, workspace,
   } from "../state/store.svelte";
-  import { openBrowserInActivePane, openInActivePane, openTerminalInActivePane } from "../state/tabs.svelte";
+  import { activeBrowserTab, defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane } from "../state/tabs.svelte";
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
@@ -44,10 +48,10 @@
   let filter = $state("");
   let sort = $state<BrowserSort>("name");
   let descending = $state(false);
-  let showHidden = $state(true);
-  let selectionMode = $state(false);
+  // Hidden files, marking and the key list are switches the command catalog
+  // flips too, so they live in the view registry under this surface's id.
+  const viewState = $derived(browserView(instanceId));
   let itemCount = $state(0);
-  let helpOpen = $state(false);
   let pathEditing = $state(false);
   let pathInput = $state("");
   let findOpen = $state(false);
@@ -63,11 +67,73 @@
   let menuOpen = $state(false);
 
   const crumbs = $derived(directory.split("/").filter(Boolean).map((name, index, parts) => ({ name, path: parts.slice(0, index + 1).join("/") })));
-  const rootFolders = $derived(tree.entries.filter((entry) => entry.is_dir && parentDir(entry.path) === "" && (showHidden || !basename(entry.path).startsWith("."))).sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true })));
+  const rootFolders = $derived(tree.entries.filter((entry) => entry.is_dir && parentDir(entry.path) === "" && (viewState.showHidden || !basename(entry.path).startsWith("."))).sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true })));
   const previewPath = $derived(selection.path ?? directory);
+
+  const DETAILS = "app.browser.details";
+  /// The catalog command a file browser key runs, where the catalog has one.
+  /// The key list words those keys by the command's title; the other keys
+  /// move the cursor or the selection and keep their own words. The key that
+  /// previews the selection shows a tab's Details; a dock has none, and opens
+  /// the selection in a tab instead.
+  const keyCommands = $derived<Partial<Record<BrowserCommand, string>>>({
+    open: "app.browser.open",
+    rename: "app.browser.renameSelection",
+    copy: "app.browser.copySelection",
+    cut: "app.browser.cutSelection",
+    paste: "app.browser.pasteSelection",
+    delete: "app.browser.deleteSelection",
+    selectMode: "app.browser.selectMultiple",
+    preview: isTab ? DETAILS : "app.browser.openInBrowser",
+  });
+  /// The row that opens the tree's row menu on the selection. Every row of
+  /// that menu is a catalog command, so this one is none: its words are
+  /// written here, once, for the menu and the key list.
+  const SELECTION_ACTIONS = "Selection actions";
+  const DOCKS = [
+    { side: "left", command: "app.browser.toggleLeftDock", icon: PanelLeftOpen },
+    { side: "right", command: "app.browser.toggleRightDock", icon: PanelRightOpen },
+  ] as const;
+  const HELP_KEYS = Object.keys(browserBindings) as BrowserCommand[];
+  const VIM = settingEntry("browser.vim");
+  // The launcher's own toggle is a chord with no catalog row, so its menu row
+  // takes the shortcut table's words.
+  const LAUNCHER = "app.launcher.toggle";
+  const launcherLabel = shortcutLabel(LAUNCHER);
+
+  function keyLabel(command: BrowserCommand): string {
+    const id = keyCommands[command];
+    if (id) return commandTitle(id);
+    if (command === "menu") return SELECTION_ACTIONS;
+    const words = command.replace(/([A-Z])/g, " $1").toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
 
   function activate(): void { fbActivateInstance(instanceId); }
   function persist(): void { schedulePersistStateToHash(); scheduleSessionSave(); }
+
+  // A dock's switches go with the dock, which is shown for as long as this
+  // surface is mounted. A tab's outlast the surface, which a pane draws for
+  // its active tab alone: the registry forgets them when the tab closes.
+  $effect(() => {
+    if (isTab) return;
+    const id = instanceId;
+    return () => untrack(() => dropBrowserView(id));
+  });
+
+  // The launcher's Open reaches this surface as a chan:command, because
+  // entering a directory moves the surface's own location. Only the tab the
+  // launcher targeted answers, with what Enter runs on its selection.
+  $effect(() => {
+    if (!isTab || !tab) return;
+    const id = tab.id;
+    const onCommand = (e: Event): void => {
+      if ((e as CustomEvent).detail?.name !== "app.browser.open") return;
+      if (activeBrowserTab()?.id === id) run("open");
+    };
+    window.addEventListener("chan:command", onCommand);
+    return () => window.removeEventListener("chan:command", onCommand);
+  });
 
   $effect(() => {
     const id = instanceId;
@@ -177,7 +243,7 @@
     directory = path;
     filter = "";
     pathEditing = false;
-    selectionMode = false;
+    if (viewState.selectionMode) setBrowserView(instanceId, { selectionMode: false });
     selection.showWorkspace = false;
     const visit = visits.get(path);
     const cursor = selected ?? visit?.path ?? (parentDir(previous) === path ? previous : null);
@@ -196,11 +262,17 @@
     historyIndex = index;
   }
 
+  function closeHelp(): void { setBrowserView(instanceId, { helpOpen: false }); treeRef?.focusTree(); }
+  function openCommandsFromMenu(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    menu?.close();
+    openCommandLauncherFromMenu(row, () => treeRef?.focusTree());
+  }
   function openFind(): void { findOpen = true; void tick().then(() => findInputEl?.focus()); }
   function closeFind(): void { findOpen = false; filter = ""; treeRef?.clearFind(); treeRef?.focusTree(); }
   function editPath(): void { pathInput = directory ? `${workspace.info?.root?.replace(/\/$/, "") ?? ""}/${directory}` : workspace.info?.root ?? "/"; pathEditing = true; void tick().then(() => { pathInputEl?.focus(); pathInputEl?.select(); }); }
   function changeSort(column: BrowserSort): void { if (sort === column) descending = !descending; else { sort = column; descending = false; } }
-  function toggleDetails(): void { browserState.inspectorOpen = !browserState.inspectorOpen; persist(); }
+  function toggleDetails(): void { toggleBrowserDetails(browserState); }
   function closeDetails(): void { browserState.inspectorOpen = false; persist(); treeRef?.focusTree(); }
   function run(command: BrowserCommand): void { treeRef?.runCommand(command); menu?.close(); }
   function onScroll(): void { if (tab && treeWrapEl) tab.scroll = Math.round(treeWrapEl.scrollTop); }
@@ -214,7 +286,7 @@
       else historyStep(e.key === "ArrowLeft" ? -1 : 1);
     }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f" && !e.altKey && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); openFind(); }
-    else if (e.key === "Escape" && helpOpen) { e.preventDefault(); e.stopPropagation(); helpOpen = false; treeRef?.focusTree(); }
+    else if (e.key === "Escape" && viewState.helpOpen) { e.preventDefault(); e.stopPropagation(); closeHelp(); }
   }
   function onBrowserContextMenu(e: MouseEvent): void {
     if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [contenteditable=true]")) return;
@@ -239,11 +311,18 @@
     }
     persist();
   }
+  /// The dock's Open in new file browser: the selection in a tab of its own,
+  /// inside a directory or in a file's folder with the file selected. The
+  /// tab's Details follows the screen's width, as any new file browser's
+  /// does, and with nothing selected the row opens one on the workspace root.
   function openCurrentInFileBrowser(): void {
     menu?.close();
     const path = selection.path;
-    const target = openBrowserInActivePane(path ? { select: path } : {});
-    target.directory = path && tree.entries.find((entry) => entry.path === path)?.is_dir ? path : parentDir(path ?? "");
+    if (!path) { openBrowserInActivePane(); return; }
+    revealPathInBrowser(path, {
+      enter: tree.entries.find((entry) => entry.path === path)?.is_dir === true,
+      inspectorOpen: defaultBrowserInspectorOpen(),
+    });
   }
 </script>
 
@@ -269,31 +348,36 @@
       <div class="filter-field"><Search size={14} /><input bind:this={findInputEl} bind:value={filter} placeholder={isTab ? "Filter this folder" : "Find visible files"} aria-label={isTab ? "Filter this folder" : "Find visible files"} onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeFind(); } else if (e.key === "Enter") { e.preventDefault(); if (isTab) treeRef?.focusTree(); else treeRef?.findStep(e.shiftKey ? -1 : 1); } }} />{#if filter}<button aria-label="Clear filter" onclick={() => { filter = ""; findInputEl?.focus(); }}><X size={12} /></button>{/if}</div>
     {:else}<button title="Find visible files" aria-label="Find visible files" onclick={openFind}><ListFilter size={16} /></button>{/if}
     {#if isTab}
-      <button class="new-button" onclick={() => run("new")}><Plus size={15} /><span>New</span></button>
-      <button aria-label="Toggle details" title="Details (Mod+Y)" aria-pressed={browserState.inspectorOpen} onclick={toggleDetails}><PanelRightOpen size={16} /></button>
+      <button class="new-button" title={commandTitle("app.browser.newFsEntry")} aria-label={commandTitle("app.browser.newFsEntry")} onclick={() => run("new")}><Plus size={15} /><span>New</span></button>
+      <button aria-label={commandTitle(DETAILS)} title={`${commandTitle(DETAILS)} (${browserCommandChord("preview", browserKeys.vim)})`} aria-pressed={browserState.inspectorOpen} onclick={toggleDetails}><PanelRightOpen size={16} /></button>
     {/if}
-    <HamburgerMenu keyboardNavigation bind:this={menu} bind:open={menuOpen} width={260} height={520}>
-      <li><button role="menuitem" onclick={() => run("new")}>New file or directory</button></li>
-      <li><button role="menuitem" onclick={() => run("upload")}>Upload files</button></li>
-      <li><button role="menuitem" disabled={!selection.path} onclick={() => run("menu")}>Selection actions <span class="chord">Shift+F10</span></button></li>
-      <li><button role="menuitemcheckbox" aria-checked={selectionMode} onclick={() => { selectionMode = !selectionMode; menu?.close(); treeRef?.focusTree(); }}>Select multiple <span class="chord">{browserKeys.vim ? "v" : "F8"}</span></button></li>
+    <HamburgerMenu keyboardNavigation bind:this={menu} bind:open={menuOpen} width={260} height={600}>
+      <li><button role="menuitem" onclick={() => run("new")}><span class="menu-row-label">{commandTitle("app.browser.newFsEntry")}</span></button></li>
+      <li><button role="menuitem" onclick={() => run("upload")}><span class="menu-row-label">{commandTitle("app.browser.uploadSelection")}</span></button></li>
+      <li><button role="menuitem" disabled={!selection.path} onclick={() => run("menu")}><span class="menu-row-label">{SELECTION_ACTIONS}</span><span class="chord">Shift+F10</span></button></li>
+      {@render checkRow(commandTitle("app.browser.selectMultiple"), viewState.selectionMode, () => { toggleBrowserView(instanceId, "selectionMode"); menu?.close(); treeRef?.focusTree(); }, browserKeys.vim ? "v" : "F8")}
       <li class="sep" role="separator"></li>
-      {#if isTab}<li><button role="menuitemcheckbox" aria-checked={showHidden} onclick={() => { showHidden = !showHidden; menu?.close(); }}>Show hidden files</button></li>{/if}
-      <li><button role="menuitemcheckbox" aria-checked={browserKeys.vim} onclick={() => { setBrowserVim(!browserKeys.vim); menu?.close(); }}>Vim keyboard navigation</button></li>
-      <li><button role="menuitem" onclick={() => { helpOpen = !helpOpen; menu?.close(); }}>Keyboard shortcuts</button></li>
+      {#if isTab}{@render checkRow(commandTitle("app.browser.hiddenFiles"), viewState.showHidden, () => { toggleBrowserView(instanceId, "showHidden"); menu?.close(); })}{/if}
+      {@render checkRow(VIM.label, VIM.read() === true, () => { void VIM.write?.(VIM.read() !== true); menu?.close(); })}
+      {@render checkRow(commandTitle("app.browser.keyboardHelp"), viewState.helpOpen, () => { toggleBrowserView(instanceId, "helpOpen"); menu?.close(); })}
       <li class="sep" role="separator"></li>
-      {#if !isTab}<li><button role="menuitem" onclick={openCurrentInFileBrowser}>Open in File Browser</button></li>{/if}
-      <li><button role="menuitem" onclick={showWorkspaceInfo}>Workspace details</button></li>
-      <li><button role="menuitem" onclick={() => { toggleBrowserSidePane("left"); menu?.close(); }}><PanelLeftOpen size={15} />{browserSidePanes.left ? "Unstick left" : "Stick to left"}</button></li>
-      <li><button role="menuitem" onclick={() => { toggleBrowserSidePane("right"); menu?.close(); }}><PanelRightOpen size={15} />{browserSidePanes.right ? "Unstick right" : "Stick to right"}</button></li>
-      {#if isTab}<li><button role="menuitem" onclick={() => { menu?.close(); onClose?.(); }}>Close <span class="chord">{chordFor("app.tab.close") ?? ""}</span></button></li>{/if}
+      {#if !isTab}<li><button role="menuitem" onclick={openCurrentInFileBrowser}><span class="menu-row-label">{commandTitle("app.browser.openInBrowser")}</span></button></li>{/if}
+      <li><button role="menuitem" onclick={showWorkspaceInfo}><span class="menu-row-label">{commandTitle("app.browser.showWorkspaceInfo")}</span></button></li>
+      {#each DOCKS as dock (dock.side)}
+        {@const docked = commandState(dock.command) === true}
+        <li><button role="menuitemcheckbox" aria-checked={docked} onclick={() => { toggleBrowserSidePane(dock.side); menu?.close(); }}><dock.icon size={15} /><span class="menu-row-label">{commandTitle(dock.command)}</span>{#if docked}<Check size={14} strokeWidth={2} aria-hidden="true" />{/if}</button></li>
+      {/each}
+      {#if isTab && onFlip}<li><button role="menuitem" onclick={() => { menu?.close(); onFlip?.(); }}><span class="menu-row-label">{commandTitle("app.pane.flip")}</span><span class="chord">{chordFor("app.pane.flip") ?? ""}</span></button></li>{/if}
+      {#if isTab}<li><button role="menuitem" onclick={() => { menu?.close(); onClose?.(); }}><span class="menu-row-label">{commandTitle("app.tab.close")}</span><span class="chord">{chordFor("app.tab.close") ?? ""}</span></button></li>{/if}
+      <li class="sep" role="separator"></li>
+      <li><button role="menuitem" onclick={openCommandsFromMenu}><span class="menu-row-label">{launcherLabel}</span><span class="chord">{chordFor(LAUNCHER) ?? ""}</span></button></li>
     </HamburgerMenu>
   </div>
-  {#if helpOpen}
+  {#if viewState.helpOpen}
     <section class="keyboard-help" aria-label="File browser keyboard shortcuts">
-      <div><strong>{browserKeys.vim ? "Vim" : "Standard"} navigation</strong><button aria-label="Close keyboard shortcuts" onclick={() => { helpOpen = false; treeRef?.focusTree(); }}><X size={14} /></button></div>
+      <div><strong>{browserKeys.vim ? "Vim" : "Standard"} navigation</strong><button aria-label="Close keyboard shortcuts" onclick={closeHelp}><X size={14} /></button></div>
       <p>Mod is Command on macOS, Control elsewhere. Shift extends selection. F8 enables independent marks; Space toggles a mark. Tab leaves the file list.</p>
-      <dl>{#each Object.keys(browserBindings) as command}<div><dt>{command.replace(/([A-Z])/g, " $1")}</dt><dd><kbd>{browserCommandChord(command as BrowserCommand, browserKeys.vim)}</kbd></dd></div>{/each}</dl>
+      <dl>{#each HELP_KEYS as command (command)}<div><dt>{keyLabel(command)}</dt><dd><kbd>{browserCommandChord(command, browserKeys.vim)}</kbd></dd></div>{/each}</dl>
     </section>
   {/if}
   <div class="body">
@@ -313,7 +397,7 @@
         </div>
       {/if}
       <div class="tree-wrap" bind:this={treeWrapEl} onscroll={onScroll}>
-        <FileTree bind:this={treeRef} {instanceId} view={isTab ? "list" : "tree"} {directory} {filter} {sort} {descending} {showHidden} bind:selectionMode dockSide={isTab ? undefined : side} onFlip={isTab ? onFlip : undefined} onNavigate={navigate} onPreview={isTab ? toggleDetails : openCurrentInFileBrowser} onFind={openFind} onCount={(count) => (itemCount = count)} />
+        <FileTree bind:this={treeRef} {instanceId} view={isTab ? "list" : "tree"} {directory} {filter} {sort} {descending} showHidden={viewState.showHidden} bind:selectionMode={() => viewState.selectionMode, (on) => setBrowserView(instanceId, { selectionMode: on })} dockSide={isTab ? undefined : side} onFlip={isTab ? onFlip : undefined} onNavigate={navigate} onPreview={isTab ? toggleDetails : openCurrentInFileBrowser} onFind={openFind} onCount={(count) => (itemCount = count)} />
         {#if isTab && tree.dirErrors[directory]}<button class="retry" onclick={() => { clearTreeDirError(directory); void loadTreeDir(directory).catch(() => {}); }}>Retry loading this folder</button>{/if}
       </div>
     </div>
@@ -329,11 +413,15 @@
   </div>
   <footer class="browser-status">
     <span aria-live="polite">{itemCount} {itemCount === 1 ? "item" : "items"}{filter ? " shown" : ""} / {selection.paths.length} selected</span>
-    {#if selectionMode}<button class="selection-mode" onclick={() => { selectionMode = false; treeRef?.focusTree(); }}>Selection mode <X size={12} /></button>{/if}
+    {#if viewState.selectionMode}<button class="selection-mode" onclick={() => { setBrowserView(instanceId, { selectionMode: false }); treeRef?.focusTree(); }}>Selection mode <X size={12} /></button>{/if}
     {#if !isTab && findOpen && filter}<span>{findCount.current + 1} of {findCount.total}</span>{/if}
-    <button class="keyboard-status" onclick={() => (helpOpen = !helpOpen)}>{browserKeys.vim ? "Vim" : "Standard"} keys</button>
+    <button class="keyboard-status" onclick={() => toggleBrowserView(instanceId, "helpOpen")}>{browserKeys.vim ? "Vim" : "Standard"} keys</button>
   </footer>
 </div>
+
+{#snippet checkRow(label: string, on: boolean, toggle: () => void, chord = "")}
+  <li><button role="menuitemcheckbox" aria-checked={on} onclick={toggle}><span class="menu-row-label">{label}</span>{#if on}<Check size={14} strokeWidth={2} aria-hidden="true" />{/if}{#if chord}<span class="chord">{chord}</span>{/if}</button></li>
+{/snippet}
 
 <style>
   .browser { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: var(--bg); color: var(--text); container-type: inline-size; }
@@ -379,7 +467,6 @@
   .keyboard-help p { color: var(--text-secondary); line-height: 1.5; }
   .keyboard-help dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 5px 20px; }
   .keyboard-help dl > div { display: flex; justify-content: space-between; }
-  .keyboard-help dt { text-transform: capitalize; }
   .keyboard-help dd { margin: 0; }
   .chord { margin-left: auto; color: var(--text-secondary); font-size: 11px; }
   .sep { border-top: 1px solid var(--border); margin: 4px 0; }

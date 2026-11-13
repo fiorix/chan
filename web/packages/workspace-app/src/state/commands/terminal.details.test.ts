@@ -28,7 +28,7 @@ describe("terminal Details command", () => {
   test("is offered over a terminal and hidden over the control terminal", () => {
     resetLayout([terminalTab({ id: "term-2" })]);
     const command = allCommands().find((entry) => entry.id === COMMAND_ID);
-    expect(command?.title).toBe("Toggle details");
+    expect(command?.title).toBe("Details");
     expect(command?.category).toBe("Terminal");
     expect(availableCommands(context()).some((entry) => entry.id === COMMAND_ID)).toBe(true);
     expect(availableCommands(context(true)).some((entry) => entry.id === COMMAND_ID)).toBe(false);

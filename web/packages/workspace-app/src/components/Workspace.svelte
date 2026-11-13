@@ -16,6 +16,7 @@
   import { api } from "../api/client";
   import {
     activeLayout,
+    moveDivider,
     noteTmuxResize,
     paneMode,
     paneModeMayResize,
@@ -63,10 +64,7 @@
       const delta = coord - startCoord;
       // Plain panes keep a grab area. tmux owns its pane minimum, so a
       // drag may request the edge and settle at the cell bound it reports.
-      const minimum = tmuxTree ? 0 : 0.05;
-      const maximum = tmuxTree ? 1 : 0.95;
-      const next = Math.max(minimum, Math.min(maximum, startRatio + delta / total));
-      split.ratio = next;
+      moveDivider(split, startRatio + delta / total, tmuxTree !== null);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);

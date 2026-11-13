@@ -1,97 +1,132 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { privateText } from "@chan/web-shared/privacy";
   import { shortcutLetter } from "@chan/web-shared/keyboard";
-  // Computers provider for the shared command deck. The shared component owns
-  // interaction and motion; this adapter owns only live library targets and the
-  // approved actions that operate on them.
+  // The Computers screen's host of the shared command deck. The shared
+  // component owns interaction and motion and the shared Computers tree owns
+  // the rows, their words and their confirmations; this adapter states the
+  // library as that tree's model, says what this surface may do, and carries
+  // each action out through the wrappers the cards call.
   import CommandDeck from "@chan/web-shared/CommandDeck.svelte";
   import {
     rankDeckItems,
     type DeckConfirm,
     type DeckItem,
-    type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
   import {
+    computersConfirmBridge,
+    computersDeck,
+    computersFilter,
+    computersScopes,
+    createComputersConfirmations,
+    type ComputersBridge,
+    type ComputersCommand,
+    type ComputersContext,
+    type ComputersGateway,
+    type ComputersMachine,
+    type ComputersModel,
+    type ComputersWindow,
+    type ComputersWorkspace,
+    type WindowActionId,
+  } from "@chan/web-shared/computers-deck";
+  import {
     AppWindow,
+    ArrowRightLeft,
+    Columns3,
+    Copy,
+    ExternalLink,
     Eye,
     EyeOff,
     Focus,
+    Folder,
     Layers,
     LogOut,
     Monitor,
     MonitorCog,
     Moon,
+    PanelsTopLeft,
+    Pencil,
     Plug,
     Plus,
     Power,
     Server,
+    ShieldOff,
+    SquareCheckBig,
     SquareTerminal,
     Sun,
     Unplug,
     X,
   } from "@lucide/svelte";
-  import { unactionable, workspaceCondition } from "../api/library";
-  import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
-  import { requestDesktopQuit } from "../api/desktop";
+  import { workspaceCondition } from "../api/library";
+  import type {
+    DevserverEntry,
+    GatewayEntry,
+    TmuxWindowEntry,
+    WindowRecord,
+    WorkspaceEntry,
+  } from "../api/library";
+  import { isLauncherHost, requestDesktopQuit } from "../api/desktop";
   import { LOCAL_LIBRARY_ID, rootName, windowRowLabel } from "../lib/windowLabel";
-  import { buildMachineTree, devserverForLibrary, tmuxHost, tmuxWindowMachine } from "../lib/machineTree";
-  import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
+  import {
+    buildMachineTree,
+    devserverForLibrary,
+    tmuxWindowMachine,
+    type MachineNode,
+  } from "../lib/machineTree";
+  import {
+    library,
+    clearError,
+    reportError,
+    connectGateway,
+    disconnectDevserver,
+    disconnectGateway,
+    revokeDevserverNativeTrust,
+  } from "../state/library.svelte";
   import {
     canManageWindow,
     canOpenWorkspaceWindow,
     closeComputerWindow,
+    connectAndOpenTerminal,
     connectComputer,
+    copyGatewayPublicKey,
+    detachTmux,
     focusComputerWindow,
     liveTerminalCountForWindow,
+    liveTerminalCountForWorkspace,
     newTerminal,
+    newTmuxWindow,
+    newWorkspaceTerminalWindow,
     newWorkspaceWindow,
     openComputerWindow,
+    openTmuxWindow,
     setWindowShown,
     setWorkspacePower,
+    showComputerCard,
+    turnOffWorkspace,
+    turnOnAndOpenWorkspace,
   } from "../state/computerActions";
   import {
     activeCommandLauncherDraft,
     clearCommandLauncherDraft,
     closeCommandLauncher,
     commandLauncher,
+    noteRecentWindow,
     persistCommandLauncherDraft,
+    recentWindows,
     toggleCommandLauncher,
   } from "../state/commandLauncher.svelte";
-  import { openNewDialog } from "../state/dialog.svelte";
+  import { clearControlAttention, hasControlAttention } from "../state/controlAttention.svelte";
+  import { demoState } from "../state/demo.svelte";
+  import { openEditDevserver, openEditGateway, openNewDialog } from "../state/dialog.svelte";
   import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
-  import { screen } from "../state/screen.svelte";
-  import { themeState, toggleTheme } from "../state/theme.svelte";
-
-  type CommandId =
-    | "new-terminal"
-    | "new-window"
-    | "windows"
-    | "connect"
-    | "disconnect"
-    | "turn-on"
-    | "turn-off";
-  type WindowActionId = "focus" | "hide" | "show" | "open" | "close";
-
-  interface Entry extends DeckItem {
-    /// The deck path this branch navigates to, absolute rather than a single
-    /// step: the tree is three levels deep at `windows > <library>:<window>`.
-    next?: string[];
-    run?: () => void | DeckConfirm | Promise<void | DeckConfirm>;
-  }
+  import { selection, toggleSelectMode } from "../state/selection.svelte";
+  import { setThemeChoice, themeState } from "../state/theme.svelte";
+  import { hasWindowAttention } from "../state/windowAttention.svelte";
 
   let direction: "forward" | "back" | "still" = $state("still");
   const draft = $derived(activeCommandLauncherDraft());
-  const mode = $derived((draft.path[0] as CommandId | undefined) ?? null);
-  // A window key is library-qualified: window ids are unique only within the
-  // library that minted them, and this deck aggregates several.
-  const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
-  // The count a Close card was painted with, and the reading that owns that
-  // card, both keyed by (library, window). A reading that a later one has
-  // overtaken keeps its hands off both.
-  const confirmedCloseCounts = new Map<string, unknown>();
-  const closePreparationVersions = new Map<string, number>();
   const machineTree = $derived(buildMachineTree(
     library.devservers,
     library.workspaces,
@@ -100,11 +135,15 @@
   ));
   const localLibraryId = $derived(machineTree.machines[0]?.libraryId ?? LOCAL_LIBRARY_ID);
 
+  // A window key is library-qualified: window ids are unique only within the
+  // library that minted them, and this deck aggregates several.
   function windowKey(window: WindowRecord): string {
     return `${window.library_id}:${window.window_id}`;
   }
 
-  const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
+  function workspaceKey(workspace: WorkspaceEntry): string {
+    return `${workspace.devserver_id ?? "local"}:${workspace.workspace_id}`;
+  }
 
   function workspaceName(workspace: WorkspaceEntry): string {
     return privateText(workspace.label || rootName(workspace.path) || workspace.path, "Workspace");
@@ -114,21 +153,32 @@
     return privateText(devserver.label || `${devserver.host}:${devserver.port}`, "Computer");
   }
 
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  }
+
+  function gatewayName(gateway: GatewayEntry): string {
+    return gateway.label || hostOf(gateway.url);
+  }
+
+  // A roster row's own gateway URL stands in while its gateway is between
+  // registry refreshes.
+  function owningGatewayName(devserver: DevserverEntry): string {
+    const gateway = library.gateways.find((row) => row.id === devserver.gateway_id);
+    return gateway ? gatewayName(gateway) : hostOf(devserver.gateway_url);
+  }
+
   function machineNameForLibrary(libraryId: string): string {
     const devserver = devserverForLibrary(libraryId, library.devservers, localLibraryId);
     return devserver ? devserverName(devserver) : "This machine";
   }
 
-  // A tmux window's machine is its connection's card, whatever library runs
-  // the terminal, as the Library screen files it, with the tmux session so
-  // two connections on one machine read apart.
-  function machineNameForWindow(window: WindowRecord): string {
-    if (!window.tmux) return machineNameForLibrary(window.library_id);
-    const connection = window.tmux.connection;
-    const entry = library.tmuxConnections.find((row) => row.connection === connection) ?? null;
-    return privateText(tmuxWindowMachine(entry, tmuxHost(entry, library.devservers, localLibraryId)), "tmux computer");
-  }
-
+  // A workspace is named by the card that holds its library's windows, so a
+  // box registered twice names one machine on the workspace and its windows.
   function machineNameForWorkspace(workspace: WorkspaceEntry): string {
     if (!workspace.devserver_id) return "This machine";
     const devserver = library.devservers.find((row) => row.id === workspace.devserver_id);
@@ -147,12 +197,10 @@
     );
   }
 
-  function windowContext(window: WindowRecord): string {
+  function workspaceNameForWindow(window: WindowRecord): string {
     const workspace = workspaceForWindow(window);
-    if (window.kind === "workspace") {
-      return workspace ? workspaceName(workspace) : privateText(rootName(window.workspace_path ?? ""), "Workspace") || "Workspace";
-    }
-    return window.control ? "Control terminal" : "Terminal";
+    if (workspace) return workspaceName(workspace);
+    return privateText(rootName(window.workspace_path ?? ""), "Workspace") || "Workspace";
   }
 
   /// Only a browser-origin row has a browser popup that Focus may address.
@@ -165,474 +213,423 @@
     return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];
   }
 
-  function closeMessage(count: unknown): string {
-    if (typeof count !== "number") return "Open sessions in this window may stop.";
-    if (count === 0) return "This window will close.";
-    return `${count} terminal session${count === 1 ? "" : "s"} in this window will stop.`;
+  function windowAttention(window: WindowRecord): string | undefined {
+    if (window.control && hasControlAttention(window.library_id)) return "Control terminal needs attention";
+    if (hasWindowAttention(window.window_id)) return "Not open here";
+    return undefined;
   }
 
-  function informedCloseConfirmation(window: WindowRecord, count: unknown): DeckConfirm {
-    return {
-      title: `Close ${privateText(windowRowLabel(window), "Window")}?`,
-      message: closeMessage(count),
-      actionLabel: "Close",
-      danger: true,
+  // The records behind the model's keys. The tree hands a key back with each
+  // action, and the wrappers take the record.
+  interface Records {
+    windows: Map<string, WindowRecord>;
+    /** A tmux window with no chan window yet: its row's one action asks the
+     * connection to open it. */
+    unopened: Map<string, { connection: string; window: TmuxWindowEntry }>;
+    workspaces: Map<string, { workspace: WorkspaceEntry; windows: WindowRecord[] }>;
+    devservers: Map<string, DevserverEntry>;
+    tmux: Map<string, string>;
+    gateways: Map<string, GatewayEntry>;
+  }
+
+  const current = $derived.by<{ model: ComputersModel; records: Records }>(() => {
+    const records: Records = {
+      windows: new Map(),
+      unopened: new Map(),
+      workspaces: new Map(),
+      devservers: new Map(),
+      tmux: new Map(),
+      gateways: new Map(),
     };
-  }
 
-  /// Claim the next reading slot for a window's Close card. Every count read
-  /// takes one before it asks, so the reading that answers last is the only one
-  /// still entitled to describe the card.
-  function nextCloseReading(key: string): number {
-    const version = (closePreparationVersions.get(key) ?? 0) + 1;
-    closePreparationVersions.set(key, version);
-    return version;
-  }
-
-  function closeReadingIsCurrent(key: string, version: number): boolean {
-    return closePreparationVersions.get(key) === version;
-  }
-
-  async function readCloseCount(window: WindowRecord): Promise<unknown> {
-    try {
-      return await liveTerminalCountForWindow(window);
-    } catch {
-      return null;
-    }
-  }
-
-  function closeConfirmation(
-    window: WindowRecord,
-  ): DeckConfirm | (() => Promise<DeckConfirm>) {
-    if (window.control) {
+    function windowModel(window: WindowRecord): ComputersWindow {
+      const key = windowKey(window);
+      records.windows.set(key, window);
       return {
-        ...informedCloseConfirmation(window, null),
-        message: "This stops the control terminal and its connection script.",
+        key,
+        name: privateText(windowRowLabel(window), "Window"),
+        kind: window.kind,
+        context: window.kind === "workspace" ? workspaceNameForWindow(window) : undefined,
+        search: [window.label ?? "", window.title, window.workspace_path ?? "", window.kind].join(" "),
+        hidden: !!window.hidden,
+        control: window.control === true,
+        current: isLauncherHost(window),
+        attention: windowAttention(window),
+        actions: windowActions(window),
+        blocked: canManageWindow(window)
+          ? undefined
+          : "Only the tenant leader can show or hide this window",
       };
     }
-    return async () => {
-      const key = windowKey(window);
-      const version = nextCloseReading(key);
-      const count = await readCloseCount(window);
-      if (closeReadingIsCurrent(key, version)) {
-        confirmedCloseCounts.set(key, count);
-      }
-      return informedCloseConfirmation(window, count);
-    };
-  }
 
-  /// Close reads the count again and stops to confirm a second time when it
-  /// moved, so the window goes only on a number the user has just seen. The
-  /// reading is slotted like the preparation's: one overtaken by a newer read
-  /// describes a card that is no longer on screen, so it asks again rather than
-  /// closing on what it found.
-  async function closeAfterFreshConfirmation(window: WindowRecord): Promise<void | DeckConfirm> {
-    const key = windowKey(window);
-    const version = nextCloseReading(key);
-    const recorded = confirmedCloseCounts.get(key);
-    const hadRecorded = confirmedCloseCounts.has(key);
-    const fresh = await readCloseCount(window);
-    if (!closeReadingIsCurrent(key, version)) {
-      return informedCloseConfirmation(window, fresh);
+    function unopenedModel(connection: string, window: TmuxWindowEntry): ComputersWindow {
+      const key = `tmux:${connection}:${window.id}`;
+      records.unopened.set(key, { connection, window });
+      return {
+        key,
+        name: privateText(window.name || window.id, "Window"),
+        kind: "terminal",
+        context: `${window.id}, ${window.panes} pane${window.panes === 1 ? "" : "s"}`,
+        search: `${window.name} tmux`,
+        hidden: true,
+        actions: ["show"],
+      };
     }
-    if (!hadRecorded || fresh !== recorded) {
-      confirmedCloseCounts.set(key, fresh);
-      return informedCloseConfirmation(window, fresh);
+
+    function workspaceModel(workspace: WorkspaceEntry, windows: WindowRecord[], machine: string): ComputersWorkspace {
+      const key = workspaceKey(workspace);
+      records.workspaces.set(key, { workspace, windows });
+      const named = machineNameForWorkspace(workspace);
+      return {
+        key,
+        name: workspaceName(workspace),
+        search: `${workspace.label} ${workspace.path}`,
+        on: workspace.on,
+        condition: workspaceCondition(workspace.status),
+        busy: isPending(
+          workspace.devserver_id
+            ? servedKey(workspace.devserver_id, workspace.prefix)
+            : wsKey(workspace.workspace_id),
+        ),
+        leaderHeld: !canOpenWorkspaceWindow(workspace),
+        reason: workspace.error ? privateText(workspace.error, "Workspace unavailable") : undefined,
+        machine: named === machine ? undefined : named,
+        windows: windows.map(windowModel),
+      };
     }
-    confirmedCloseCounts.delete(key);
-    await closeComputerWindow(window);
-  }
 
-  /// One row per window, each a branch into that window's own actions. The
-  /// machine and open-versus-hidden ride the breadcrumb: the deck is a flat
-  /// listbox with no section headers.
-  function windowBranch(window: WindowRecord): Entry {
-    const machine = machineNameForWindow(window);
-    const context = windowContext(window);
-    const state = window.hidden ? "Hidden" : "Open";
-    return {
-      id: `computers:window:${windowKey(window)}`,
-      title: privateText(windowRowLabel(window), "Window"),
-      breadcrumb: `Computers › Windows › ${machine} › ${state}`,
-      searchText: [privateText(windowRowLabel(window), "Window"), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind, state, "window"].join(" "),
-      scope: "computers",
-      icon: window.kind === "terminal" ? SquareTerminal : AppWindow,
-      kind: "branch",
-      next: ["windows", windowKey(window)],
-    };
-  }
-
-  function windowEntry(command: WindowActionId, window: WindowRecord): Entry {
-    const machine = machineNameForWindow(window);
-    const context = windowContext(window);
-    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : command === "open" ? "Open in this browser" : "Close";
-    return {
-      id: `computers:${command}:${window.library_id}:${window.window_id}`,
-      title: verb,
-      breadcrumb: `Computers › Windows › ${privateText(windowRowLabel(window), "Window")} › ${machine}`,
-      searchText: [verb, privateText(windowRowLabel(window), "Window"), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind].join(" "),
-      scope: "computers",
-      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : command === "open" ? AppWindow : X,
-      awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "focus" || command === "open",
-      confirm:
-        command === "close"
-          ? closeConfirmation(window)
-          : undefined,
-      run:
-        command === "focus"
-          ? () => focusComputerWindow(window)
-          : command === "open"
-            ? () => openComputerWindow(window)
-            : command === "hide"
-              ? () => setWindowShown(window, false)
-              : command === "show"
-                ? () => setWindowShown(window, true)
-                : window.control
-                  ? () => closeComputerWindow(window)
-                  : () => closeAfterFreshConfirmation(window),
-    };
-  }
-
-  /// Every manageable window, in the order the Library screen shows them:
-  /// local machine first, devservers by name, and within each the control
-  /// terminal, then terminals, then workspace windows by ordinal.
-  const orderedWindows = $derived.by<WindowRecord[]>(() => {
-    const ordered = machineTree.machines.flatMap((machine) => [
-      ...machine.control,
-      ...machine.terminals,
-      ...machine.workspaces.flatMap((workspace) => workspace.windows),
-      ...machine.looseWindows,
-    ]);
-    return [...ordered, ...machineTree.orphans].filter(canManageWindow);
-  });
-
-  function workspacePending(workspace: WorkspaceEntry): boolean {
-    return isPending(
-      workspace.devserver_id
-        ? servedKey(workspace.devserver_id, workspace.prefix)
-        : wsKey(workspace.workspace_id),
-    );
-  }
-
-  function workspaceTarget(
-    command: "new-window" | "turn-on" | "turn-off",
-    workspace: WorkspaceEntry,
-  ): Entry {
-    const name = workspaceName(workspace);
-    const machine = machineNameForWorkspace(workspace);
-    const verb = command === "new-window" ? "New window" : command === "turn-on" ? "Turn on" : "Turn off";
-    return {
-      id: `computers:${command}:${workspace.devserver_id ?? "local"}:${workspace.workspace_id}`,
-      title: name,
-      breadcrumb: `Computers › ${verb} › ${machine}`,
-      searchText: `${name} ${workspace.label} ${workspace.path} ${machine} ${verb}`,
-      scope: "computers",
-      icon: command === "new-window" ? AppWindow : Power,
-      awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "new-window",
-      confirm:
-        command === "turn-off"
-          ? {
-              title: `Turn off ${name}?`,
-              message: "Running terminal sessions will require confirmation before they are stopped.",
-              actionLabel: "Turn off",
-              danger: true,
-            }
-          : undefined,
-      run:
-        command === "new-window"
-          ? () => newWorkspaceWindow(workspace)
-          : () => setWorkspacePower(workspace, command === "turn-on"),
-    };
-  }
-
-  function targetEntries(path: readonly string[]): Entry[] {
-    const [command, key] = path;
-    switch (command) {
-      case "new-terminal": {
-        const local: Entry = {
-          id: "computers:new-terminal:local",
-          title: "This machine",
-          breadcrumb: "Computers › New terminal › Local",
-          searchText: `local this machine ${hostOs} shell terminal`,
-          scope: "computers",
-          icon: Monitor,
-          awaitResult: true,
-          dismissImmediatelyOnSuccess: true,
-          run: () => newTerminal(),
+    function machineModel(node: MachineNode): ComputersMachine {
+      const loose = [...node.control, ...node.terminals, ...node.looseWindows];
+      if (node.kind === "tmux") {
+        const connection = node.connection!;
+        const key = `tmux:${connection}`;
+        records.tmux.set(key, connection);
+        return {
+          key,
+          kind: "tmux",
+          name: privateText(tmuxWindowMachine(node.tmux, node.tmuxHost), "tmux computer"),
+          detail: node.tmux ? `tmux ${node.tmux.version}` : undefined,
+          search: "tmux",
+          attached: node.tmux !== null,
+          workspaces: [],
+          windows: [
+            ...loose.map(windowModel),
+            ...node.unopened.map((window) => unopenedModel(connection, window)),
+          ],
         };
-        const remote = hasDesktopBridge
-          ? library.devservers
-              .filter((devserver) => devserver.status === "connected")
-              .map(
-                (devserver): Entry => ({
-                  id: `computers:new-terminal:${devserver.id}`,
-                  title: devserverName(devserver),
-                  breadcrumb: "Computers › New terminal › Remote",
-                  searchText: `${devserverName(devserver)} ${devserver.host} ${devserver.port} ${devserver.os} terminal`,
-                  scope: "computers",
-                  icon: Server,
-                  awaitResult: true,
-                  dismissImmediatelyOnSuccess: true,
-                  run: () => newTerminal(devserver),
-                }),
-              )
-          : [];
-        return [local, ...remote];
       }
-      case "new-window":
-        return library.workspaces
-          .filter(
-            (workspace) =>
-              workspaceCondition(workspace.status) === "ready" &&
-              !workspacePending(workspace) &&
-              canOpenWorkspaceWindow(workspace),
-          )
-          .map((workspace) => workspaceTarget(command, workspace));
-      case "windows": {
-        if (key === undefined) return orderedWindows.map(windowBranch);
-        const window = orderedWindows.find((candidate) => windowKey(candidate) === key);
-        if (!window) return [];
-        return windowActions(window).map((action) => windowEntry(action, window));
+      const devserver = node.devserver;
+      if (!devserver) {
+        return {
+          key: "local",
+          kind: "local",
+          name: "This machine",
+          search: `local ${hostOs}`,
+          workspaces: node.workspaces.map((row) => workspaceModel(row.ws, row.windows, "This machine")),
+          windows: loose.map(windowModel),
+        };
       }
-      case "connect":
-        return library.devservers
-          .filter((devserver) => {
-            const controlOpen =
-              !!devserver.library_id &&
-              library.windows.some(
-                (window) => window.control && window.library_id === devserver.library_id,
-              );
-            return devserver.status === "disconnected" && !controlOpen && !isPending(dsKey(devserver.id));
+      records.devservers.set(devserver.id, devserver);
+      const name = devserverName(devserver);
+      const address = devserver.gateway_id
+        ? `via ${owningGatewayName(devserver)}`
+        : devserver.url || `${devserver.host}:${devserver.port}`;
+      return {
+        key: devserver.id,
+        kind: "devserver",
+        name,
+        detail: privateText(address, "") || undefined,
+        search: `${devserver.label} ${devserver.host} ${devserver.port} ${devserver.os}`,
+        connection: devserver.status,
+        lost:
+          devserver.status === "unreachable" ||
+          (!!devserver.library_id && hasControlAttention(devserver.library_id)),
+        busy: devserver.status === "connecting" || isPending(dsKey(devserver.id)),
+        // The connect refuses until the control terminal its dead script left
+        // behind is closed.
+        controlOpen:
+          !!devserver.library_id &&
+          library.windows.some((window) => window.control && window.library_id === devserver.library_id),
+        signIn: devserver.pending_signin,
+        trustRequired: devserver.native_trust_required,
+        // A gateway's roster row is managed on the Gateways screen.
+        editable: !devserver.gateway_id,
+        revocable: hasDesktopBridge && !!devserver.gateway_id && devserver.shared && !devserver.native_trust_required,
+        workspaces: node.workspaces.map((row) => workspaceModel(row.ws, row.windows, name)),
+        windows: loose.map(windowModel),
+      };
+    }
+
+    const gateways = hasDesktopBridge
+      ? [...library.gateways]
+          .sort((a, b) => gatewayName(a).localeCompare(gatewayName(b)))
+          .map((gateway): ComputersGateway => {
+            records.gateways.set(gateway.id, gateway);
+            return {
+              key: gateway.id,
+              name: privateText(gatewayName(gateway), "Gateway"),
+              detail: privateText(gateway.url, "") || undefined,
+              search: `${gateway.label} ${gateway.url}`,
+              connection: gateway.status,
+              publicKey: !!gateway.wireguard_public_key,
+            };
           })
-          .map(
-            (devserver): Entry => ({
-              id: `computers:connect:${devserver.id}`,
-              title: devserverName(devserver),
-              breadcrumb: "Computers › Connect",
-              searchText: `${devserverName(devserver)} ${devserver.host} ${devserver.port} connect reconnect`,
-              scope: "computers",
-              icon: Plug,
-              awaitResult: true,
-              dismissImmediatelyOnSuccess: true,
-              run: () => connectComputer(devserver),
-            }),
-          );
-      case "disconnect":
-        return library.devservers
-          .filter(
-            (devserver) =>
-              (devserver.status === "connected" || devserver.status === "unreachable") &&
-              !isPending(dsKey(devserver.id)),
-          )
-          .map(
-            (devserver): Entry => ({
-              id: `computers:disconnect:${devserver.id}`,
-              title: devserverName(devserver),
-              breadcrumb: "Computers › Disconnect",
-              searchText: `${devserverName(devserver)} ${devserver.host} ${devserver.port} disconnect`,
-              scope: "computers",
-              icon: Unplug,
-              awaitResult: true,
-              confirm: {
-                title: `Disconnect ${devserverName(devserver)}?`,
-                message: "Its Chan windows will close locally. The remote computer keeps running.",
-                actionLabel: "Disconnect",
-                danger: true,
-              },
-              run: () => disconnectDevserver(devserver.id),
-            }),
-          );
-      case "turn-on":
-        return library.workspaces
-          .filter(
-            (workspace) =>
-              !workspace.on &&
-              !unactionable(workspace.status) &&
-              !workspacePending(workspace),
-          )
-          .map((workspace) => workspaceTarget(command, workspace));
-      // A degraded mount is on, so it lands here and nowhere else: turning it
-      // off is the one action that clears the state.
-      case "turn-off":
-        return library.workspaces
-          .filter(
-            (workspace) =>
-              workspace.on &&
-              !unactionable(workspace.status) &&
-              !workspacePending(workspace),
-          )
-          .map((workspace) => workspaceTarget(command, workspace));
-      default:
-        return [];
-    }
-  }
+      : [];
 
-  function commandEntry(
-    id: CommandId,
-    title: string,
-    description: string,
-    icon: Entry["icon"],
-    keywords = "",
-  ): Entry {
-    return {
-      id: `computers:${id}`,
-      title,
-      breadcrumb: `Computers › ${description}`,
-      searchText: `${title} ${description} ${keywords}`,
-      scope: "computers",
-      icon,
-      kind: "branch",
-      next: [id],
+    const model: ComputersModel = {
+      machines: machineTree.machines.map(machineModel),
+      unplaced: machineTree.orphans.map(windowModel),
+      gateways,
+      recent: recentWindows.keys,
+      // What this surface offers. The devserver page has no bridge to dial a
+      // devserver or a gateway through, and the demo's hero keeps its New
+      // workspace button for resetting the demo.
+      may: {
+        terminal: true,
+        remoteTerminal: hasDesktopBridge,
+        window: true,
+        terminalWindow: true,
+        power: true,
+        connect: hasDesktopBridge,
+        tmux: true,
+        newWorkspace: !demoState.reset,
+        addDevserver: hasDesktopBridge,
+        gateways: hasDesktopBridge,
+        addGateway: hasDesktopBridge,
+        renameGateway: hasDesktopBridge,
+        showCard: hasDesktopBridge,
+      },
+      // Select mode is the screen's own, offered wherever its top bar
+      // offers the button.
+      selecting: readOnly ? undefined : selection.selectMode,
+      desktop: hasDesktopBridge ? { theme: themeState.choice } : undefined,
     };
+    return { model, records };
+  });
+
+  function gone(what: string): Error {
+    return new Error(`That ${what} is no longer available`);
   }
 
-  const rootEntries = $derived.by<Entry[]>(() => {
-    const entries: Entry[] = [
-      commandEntry("new-terminal", "New terminal", "Choose a computer", SquareTerminal, "shell"),
-      commandEntry("new-window", "New window", "Choose a workspace", AppWindow, "workspace"),
-      // One target-first branch instead of a Focus/Hide/Show/Close quartet
-      // that listed the same roster four times over.
-      commandEntry(
-        "windows",
-        "Windows",
-        "Choose a window",
-        Layers,
-        "focus show hide close activate foreground open bury unhide remove quit control terminal",
-      ),
-    ];
-    if (hasDesktopBridge) {
-      const degraded = library.devservers.some(
-        (devserver) => devserver.status === "unreachable" || devserver.status === "disconnected",
-      );
-      const connection = [
-        commandEntry("connect", "Reconnect", "Choose a devserver", Plug, "connect connection"),
-        commandEntry("disconnect", "Disconnect", "Choose a devserver", Unplug),
-      ];
-      // A degraded connection leads; otherwise the pair sits after the spawn
-      // and window branches at index 3.
-      entries.splice(degraded ? 0 : 3, 0, ...connection);
-    }
-    entries.push(
-      commandEntry("turn-on", "Turn on", "Choose a workspace", Power, "start"),
-      commandEntry("turn-off", "Turn off", "Choose a workspace", Power, "stop"),
-    );
-    if (hasDesktopBridge) {
-      entries.push(
-        {
-          id: "computers:theme",
-          title: themeState.theme === "dark" ? "Switch to light theme" : "Switch to dark theme",
-          breadcrumb: "Computers › Chan Desktop",
-          searchText: "theme appearance light dark switch toggle",
-          scope: "computers",
-          icon: themeState.theme === "dark" ? Sun : Moon,
-          run: toggleTheme,
-        },
-        {
-          id: "computers:quit",
-          title: "Quit",
-          breadcrumb: "Computers › Chan Desktop",
-          searchText: "quit exit app desktop",
-          scope: "computers",
-          icon: LogOut,
-          awaitResult: false,
-          confirm: {
-            title: "Quit Chan Desktop?",
-            message: "Local workspaces and terminal sessions will stop.",
-            actionLabel: "Quit",
-            danger: true,
-          },
-          run: requestDesktopQuit,
-        },
-        {
-          id: "computers:new-devserver",
-          title: "New devserver",
-          breadcrumb: "Computers › Add a computer",
-          searchText: "new add devserver computer server",
-          scope: "computers",
-          icon: Plus,
-          run: () => openNewDialog("devserver"),
-        },
-      );
-    }
-    return entries;
-  });
+  // A window this deck asked for arrives through the feed. One that does so
+  // inside this bound is the deck's own and joins its recent windows.
+  const ARRIVAL_MS = 10_000;
+  let awaitingWindowUntil = 0;
+  function expectWindow(): void {
+    awaitingWindowUntil = Date.now() + ARRIVAL_MS;
+  }
 
-  const deepEntries = $derived.by<Entry[]>(() => {
-    const leaves = ([
-      "new-terminal",
-      "new-window",
-      "windows",
-      "connect",
-      "disconnect",
-      "turn-on",
-      "turn-off",
-    ] as const).flatMap((command) => targetEntries([command]));
-    // Keep the branches in typed search as well as their leaves. This lets a
-    // terse verb such as `close` jump into that submenu, while a compound
-    // query such as `close release checks` can address the final target. The
-    // window actions are also flattened so a verb query can reach a target.
-    const windowLeaves = orderedWindows.flatMap((window) =>
-      windowActions(window).map((action) => windowEntry(action, window)),
-    );
-    return [...rootEntries, ...leaves, ...windowLeaves];
-  });
-
-  const computerEntries = $derived(
-    draft.path.length ? targetEntries(draft.path) : draft.query.trim() ? deepEntries : rootEntries,
-  );
-  // This deck is always inside the Computers scope, so it never shows the
-  // teaser form: truncating the root to five rows hid `Close`, the sixth
-  // owner entry. The deck body scrolls and follows the selection.
-  const visibleEntries = $derived(rankDeckItems(computerEntries, draft.query) as Entry[]);
-  const modeTitle = $derived.by(() => {
-    if (!mode) return "Computers";
-    if (windowMode) {
-      const window = orderedWindows.find((candidate) => windowKey(candidate) === windowMode);
-      if (window) return privateText(windowRowLabel(window), "Window");
+  async function runWindow(key: string, action: WindowActionId): Promise<void> {
+    const unopened = current.records.unopened.get(key);
+    if (unopened) {
+      expectWindow();
+      await openTmuxWindow(unopened.connection, unopened.window);
+      return;
     }
-    return rootEntries.find((entry) => entry.next?.[0] === mode)?.title ?? "Computers";
-  });
-  const placeholder = $derived(
-    draft.scope ? scopes.find((scope) => scope.id === draft.scope)?.label ?? modeTitle : modeTitle,
+    const window = current.records.windows.get(key);
+    if (!window) throw gone("window");
+    if (action === "close") {
+      await closeComputerWindow(window);
+      return;
+    }
+    if (action === "focus") await focusComputerWindow(window);
+    else if (action === "open") await openComputerWindow(window);
+    else await setWindowShown(window, action === "show");
+    // Acting on a control terminal acknowledges its attention, as its row's
+    // buttons do.
+    if (window.control) clearControlAttention(window.library_id);
+    if (action !== "hide") noteRecentWindow(key);
+  }
+
+  async function runCommand(command: ComputersCommand): Promise<void> {
+    const { records } = current;
+    switch (command.target) {
+      case "window":
+        return runWindow(command.key, command.action);
+      case "workspace": {
+        const workspace = records.workspaces.get(command.key)?.workspace;
+        if (!workspace) throw gone("workspace");
+        if (command.action === "turn-on") return setWorkspacePower(workspace, true);
+        expectWindow();
+        if (command.action === "new-window") return newWorkspaceWindow(workspace);
+        if (command.action === "new-terminal-window") return newWorkspaceTerminalWindow(workspace);
+        return turnOnAndOpenWorkspace(workspace);
+      }
+      case "machine": {
+        if (command.action === "show-card") return showComputerCard(command.key);
+        const connection = records.tmux.get(command.key);
+        if (connection !== undefined) {
+          if (command.action === "detach") return detachTmux(connection);
+          expectWindow();
+          return newTmuxWindow(connection);
+        }
+        if (command.key === "local") {
+          expectWindow();
+          return newTerminal();
+        }
+        const devserver = records.devservers.get(command.key);
+        if (!devserver) throw gone("computer");
+        switch (command.action) {
+          case "new-terminal":
+            expectWindow();
+            return newTerminal(devserver);
+          case "connect":
+            return connectComputer(devserver);
+          case "connect-and-open":
+            expectWindow();
+            return connectAndOpenTerminal(devserver);
+          case "disconnect":
+            return disconnectDevserver(devserver.id);
+          case "edit-config":
+            return openEditDevserver(devserver);
+          case "revoke-native-access":
+            return revokeDevserverNativeTrust(devserver.id);
+          default:
+            throw gone("command");
+        }
+      }
+      case "gateway": {
+        const gateway = records.gateways.get(command.key);
+        if (!gateway) throw gone("gateway");
+        if (command.action === "connect") return connectGateway(gateway.id);
+        if (command.action === "disconnect") return disconnectGateway(gateway.id);
+        if (command.action === "rename") return openEditGateway(gateway);
+        return copyGatewayPublicKey(gateway);
+      }
+      case "app":
+        switch (command.action) {
+          case "new-workspace":
+            return openNewDialog("local");
+          case "add-devserver":
+            return openNewDialog("devserver");
+          case "add-gateway":
+            return openNewDialog("gateway");
+          case "theme":
+            return setThemeChoice(command.theme);
+          case "select":
+            return toggleSelectMode();
+          case "quit":
+            return requestDesktopQuit();
+        }
+    }
+  }
+
+  const bridge: ComputersBridge = {
+    run: runCommand,
+    async liveTerminals(target, key) {
+      if (target === "window") {
+        const window = current.records.windows.get(key);
+        return window ? liveTerminalCountForWindow(window) : null;
+      }
+      const row = current.records.workspaces.get(key);
+      return row ? liveTerminalCountForWorkspace(row.workspace, row.windows) : null;
+    },
+    async turnOff(key, force) {
+      const row = current.records.workspaces.get(key);
+      if (!row) throw gone("workspace");
+      return turnOffWorkspace(row.workspace, force);
+    },
+  };
+
+  const context: ComputersContext = {
+    bridge,
+    // The counts a Close or a Turn off card was painted with live here, for
+    // as long as this deck stays mounted.
+    confirmations: createComputersConfirmations(computersConfirmBridge(bridge)),
+    icons: {
+      windows: Layers,
+      window: AppWindow,
+      terminal: SquareTerminal,
+      workspace: Folder,
+      computers: MonitorCog,
+      local: Monitor,
+      devserver: Server,
+      tmux: Columns3,
+      gateway: ArrowRightLeft,
+      focus: Focus,
+      show: Eye,
+      hide: EyeOff,
+      open: ExternalLink,
+      close: X,
+      power: Power,
+      connect: Plug,
+      disconnect: Unplug,
+      edit: Pencil,
+      revoke: ShieldOff,
+      card: PanelsTopLeft,
+      copy: Copy,
+      add: Plus,
+      // The glyph a theme picker gives the system's own preference.
+      system: Monitor,
+      light: Sun,
+      dark: Moon,
+      select: SquareCheckBig,
+      quit: LogOut,
+    },
+  };
+
+  // The rail is the type filter: this deck lists Computers and nothing else.
+  const scopes = $derived(computersScopes(current.model, context.icons));
+  const filter = $derived(computersFilter(draft.scope));
+  const deck = $derived(
+    computersDeck(current.model, { path: draft.path, filter, query: draft.query }, context),
   );
+  const visibleEntries = $derived(
+    draft.query.trim() ? rankDeckItems(deck.entries, draft.query) : deck.entries,
+  );
+  const crumbs = $derived.by(() => {
+    if (!deck.crumbs.length) return undefined;
+    const scope = scopes.find((candidate) => candidate.id === draft.scope);
+    return scope ? [scope.label, ...deck.crumbs] : deck.crumbs;
+  });
 
   $effect(() => {
     JSON.stringify(draft);
     persistCommandLauncherDraft();
   });
 
-  // The window feed is pushed, so a window can close from anywhere while its
-  // own actions are on screen. Fall back to the list rather than leaving an
-  // empty body behind.
+  // The feed is pushed, so an object can leave from anywhere while its page
+  // is on screen. Fall back to the nearest page that still names one rather
+  // than leaving an empty body behind. A draft restored by a reload names
+  // its page before anything has read the library, so the fallback waits
+  // until the registries and the window feed have both answered.
   $effect(() => {
-    if (!draft.visible || !windowMode) return;
-    if (orderedWindows.some((window) => windowKey(window) === windowMode)) return;
+    if (!draft.visible || !library.loaded) return;
+    if (deck.path.length === draft.path.length) return;
     direction = "back";
-    draft.path = ["windows"];
+    draft.path = deck.path;
     draft.selectedId = null;
     draft.operation = null;
   });
 
-  // Close records are per window and this deck stays mounted for the life of
-  // the app, so a window that leaves the roster takes its records with it.
+  // The cards' counts are per object and this deck stays mounted for the life
+  // of the app, so an object that leaves the roster takes its records with it.
   $effect(() => {
-    const live = new Set(orderedWindows.map(windowKey));
-    const gone = (key: string): boolean => !live.has(key.slice(key.indexOf(":") + 1));
-    for (const key of [...confirmedCloseCounts.keys()]) {
-      if (gone(key)) confirmedCloseCounts.delete(key);
-    }
-    for (const key of [...closePreparationVersions.keys()]) {
-      if (gone(key)) closePreparationVersions.delete(key);
-    }
+    context.confirmations.retain(
+      new Set(current.records.windows.keys()),
+      new Set(current.records.workspaces.keys()),
+    );
+  });
+
+  let knownWindows = new Set<string>();
+  $effect(() => {
+    const keys = library.windows.map(windowKey);
+    const arrived = keys.find((key) => !knownWindows.has(key));
+    knownWindows = new Set(keys);
+    if (arrived === undefined || Date.now() >= awaitingWindowUntil) return;
+    awaitingWindowUntil = 0;
+    untrack(() => noteRecentWindow(arrived));
   });
 
   function closeDeck(): void {
     closeCommandLauncher();
   }
 
-  function clearDeck(): void {
+  /// A command that ran leaves the deck closed on a fresh draft, so the next
+  /// opening starts on an empty query. A deck that was dismissed keeps what
+  /// was typed.
+  function finish(): void {
+    closeDeck();
     clearCommandLauncherDraft();
   }
 
@@ -649,32 +646,37 @@
     }
   }
 
+  /// A page is a list of its own, so the query that found its object does not
+  /// follow into it.
+  function enter(path: string[]): void {
+    direction = "forward";
+    draft.path = path;
+    draft.query = "";
+    draft.selectedId = null;
+  }
+
   async function choose(item: DeckItem): Promise<void | DeckConfirm> {
     const entry = visibleEntries.find((candidate) => candidate.id === item.id);
     if (!entry) throw new Error("That command is no longer available");
     if (entry.next) {
-      direction = "forward";
-      draft.path = entry.next;
-      draft.selectedId = null;
+      enter(entry.next);
       return;
     }
     clearError();
     const result = await entry.run?.();
-    if (!entry.awaitResult) {
-      closeDeck();
-      clearDeck();
-    }
+    // A row that changes what its own list shows leaves the deck open on it.
+    if (!entry.awaitResult && !entry.stays) finish();
     return result;
+  }
+
+  function expand(item: DeckItem): void {
+    const page = visibleEntries.find((candidate) => candidate.id === item.id)?.page;
+    if (page) enter(page);
   }
 
   function commandFailed(item: DeckItem, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     reportError(new Error(`${item.title}: ${message}`));
-  }
-
-  function succeeded(): void {
-    closeDeck();
-    clearDeck();
   }
 
   function onScope(scope: DeckScopeId): void {
@@ -691,14 +693,21 @@
     draft.selectedId = null;
   }
 
-  function onWindowKey(event: KeyboardEvent): void {
+  /// Whether a key is the deck's chord on this surface. The open deck reads
+  /// it too: it takes every key ahead of the listener below, and closes on
+  /// this one.
+  function isDeckChord(event: KeyboardEvent): boolean {
     const macDesktop = hasDesktopBridge && hostOs === "macos";
-    const contextual =
+    return (
       shortcutLetter(event) === "K" &&
       (macDesktop
         ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
-        : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey);
-    if (contextual && !readOnly && screen.current === "computers") {
+        : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey)
+    );
+  }
+
+  function onWindowKey(event: KeyboardEvent): void {
+    if (isDeckChord(event) && !readOnly) {
       event.preventDefault();
       event.stopImmediatePropagation();
       toggleCommandLauncher();
@@ -722,16 +731,19 @@
     bind:draft={commandLauncher.draft}
     items={visibleEntries}
     {scopes}
-    {placeholder}
+    placeholder={deck.title}
     bodyKey={`${draft.path.join("/")}:${draft.scope ?? "all"}`}
     {direction}
+    {crumbs}
     onClose={closeDeck}
     onChoose={choose}
+    onExpand={expand}
     onError={commandFailed}
     onBack={back}
     {onScope}
     onClearScope={clearScope}
-    onSuccess={succeeded}
+    onSuccess={finish}
+    toggleChord={isDeckChord}
   />
 
   {#snippet failed(error, reset)}

@@ -19,6 +19,7 @@
 
   let {
     id,
+    setting,
     label,
     value,
     defaultHex,
@@ -26,6 +27,9 @@
     oncommit,
   }: {
     id: string;
+    /// The row's settings index id, as the anchor a link from the launcher
+    /// lands on.
+    setting?: string;
     label: string;
     value: string;
     defaultHex?: string;
@@ -88,7 +92,7 @@
   }
 </script>
 
-<div class="colour-row">
+<div class="colour-row" data-setting={setting}>
   <label for={id}>{label}</label>
   <input
     type="color"

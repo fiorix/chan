@@ -16,7 +16,7 @@ export default {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const command = async (name) => {
-      const label = { "app.editor.outline": "Toggle outline", "app.editor.details": "Toggle details", "app.editor.styleToolbar": "Toggle style toolbar" }[name];
+      const label = { "app.editor.outline": "Outline", "app.editor.details": "Details", "app.editor.styleToolbar": "Style toolbar" }[name];
       if (!label) {
         await page.evaluate((name) => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name } })), name);
         return;
@@ -70,7 +70,7 @@ export default {
       await page.click('.tab.active', { button: 'right' });
       await page.waitForSelector('.tab-menu-bubble', { visible: true });
       assert.deepEqual(await page.$$eval('.tab-menu-bubble [role="menuitemcheckbox"]', nodes => nodes.map(el => [el.querySelector('.mbtn-label').textContent, el.getAttribute('aria-checked')])), [
-        ['Toggle outline', 'true'], ['Toggle details', 'false'], ['Toggle style toolbar', 'true'],
+        ['Outline', 'true'], ['Details', 'false'], ['Style toolbar', 'true'],
       ]);
       await page.$eval('.tab-menu-bubble', async el => { await Promise.all(el.getAnimations().map(animation => animation.finished)); });
       await page.screenshot({ path: join(ctx.outDir, '173-editor-tab-menu.png') });
@@ -128,7 +128,7 @@ export default {
       await waitForSelected(1);
 
       await select(5);
-      await page.click('.slide-action[title^="Preview slides"]');
+      await page.click('.slide-action[title^="Preview slide deck"]');
       await page.waitForFunction(() => document.querySelector('.md-slide-preview .md-slide-preview-counter')?.textContent.includes('5 / 10'));
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.md-slide-preview'));

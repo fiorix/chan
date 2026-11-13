@@ -26,7 +26,7 @@ stateDiagram-v2
 
 *Marks render when the caret is away and reveal their source when it enters; atoms render as a widget the caret skips and reveal source on entry. Both collapse back on exit.*
 
-A whole-document source view is also available: Show Source Code (Mod+E, or the tab menu) flips to the raw text in a plain CodeMirror editor. The toggle exists only for files with a rendered surface: Markdown to WYSIWYG, JSON to the pretty tree, CSV and TSV to the table, Excalidraw to the board. A plain source file has only the source view, so the toggle does nothing there and never forces a Markdown render on non-Markdown text.
+A whole-document source view is also available: `Source mode` (Mod+E, the command launcher, or the style toolbar's source toggle) flips to the raw text in a plain CodeMirror editor. The toggle exists only for files with a rendered surface: Markdown to WYSIWYG, JSON to the pretty tree, CSV and TSV to the table, Excalidraw to the board. A plain source file has only the source view, so the toggle does nothing there and never forces a Markdown render on non-Markdown text.
 
 ## Per-element behavior
 

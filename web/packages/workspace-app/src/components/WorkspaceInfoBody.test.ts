@@ -21,6 +21,13 @@ import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import { ApiError } from "../api/errors";
 import { terminalFromHereTarget } from "../terminal/fromHere";
+import {
+  allCommands,
+  commandById,
+  registerCommands,
+  unregisterCommands,
+  type Command,
+} from "../state/commands";
 
 const h = vi.hoisted(() => ({
   caps: { workspace: true, files: true, drafts: true, terminal: true },
@@ -28,7 +35,10 @@ const h = vi.hoisted(() => ({
   reportFails404: false,
 }));
 
-vi.mock("../state/windowCaps", () => ({ windowCaps: h.caps }));
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: h.caps,
+}));
 
 vi.mock("../api/client", () => ({
   api: {
@@ -45,11 +55,15 @@ vi.mock("../api/client", () => ({
   withTokenQuery: (u: string) => u,
 }));
 
-vi.mock("../state/store.svelte", () => ({
+// The store and the tab state are the real modules with the members this
+// body reads replaced: the action pill loads the command catalog, whose
+// modules import the rest of both.
+vi.mock("../state/store.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/store.svelte")>()),
   fileOps: {
-    uploadFilesTo: vi.fn(async () => {}),
     downloadPathWithProgress: vi.fn(),
   },
+  raiseUploadPicker: vi.fn(),
   openGraphAtNode: vi.fn(),
   openGraphForContact: vi.fn(),
   openGraphForLanguage: vi.fn(),
@@ -58,7 +72,10 @@ vi.mock("../state/store.svelte", () => ({
   workspace: { info: { root: "/home/me/ws", label: "ws" } },
 }));
 
-vi.mock("../state/tabs.svelte", () => ({ openTerminalInActivePane: vi.fn() }));
+vi.mock("../state/tabs.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/tabs.svelte")>()),
+  openTerminalInActivePane: vi.fn(),
+}));
 
 import { api } from "../api/client";
 import {
@@ -66,6 +83,7 @@ import {
   openGraphAtNode,
   openGraphForContact,
   openGraphForLanguage,
+  raiseUploadPicker,
   revealPathInBrowser,
   workspace,
 } from "../state/store.svelte";
@@ -125,6 +143,37 @@ const prefix: ReportPrefix = {
   },
 };
 
+/// The root's actions in the order the pill shows them, each the file
+/// browser's command: the root is a directory like any other.
+const ROOT_ACTIONS = [
+  "app.browser.open",
+  "app.browser.uploadSelection",
+  "app.browser.downloadSelection",
+  "app.browser.newTerminal",
+  "app.browser.newGraph",
+];
+
+let catalog: Command[] | null = null;
+
+/// Registers every command again under a title that spells its id, so a row
+/// shows which command it was given.
+function retitleCatalog(): void {
+  catalog = allCommands();
+  unregisterCommands(() => true);
+  registerCommands(catalog.map((command) => ({ ...command, title: `<${command.id}>` })));
+}
+
+function title(id: string): string {
+  const command = commandById(id);
+  if (!command) throw new Error(`no command ${id}`);
+  return command.title;
+}
+
+/// The pill's words, the primary action first.
+function actions(target: HTMLElement): string[] {
+  return [target.querySelector(".pill-main")?.textContent?.trim() ?? "", ...menu(target)];
+}
+
 beforeEach(() => {
   // A loaded graph, so the body's ensureGraphLoaded has nothing to fetch.
   graphData.view = { nodes: [], edges: [] };
@@ -132,6 +181,23 @@ beforeEach(() => {
   h.caps.workspace = true;
   h.report = null;
   h.reportFails404 = false;
+  // The file browser's Open may not be registered in the catalog this test
+  // loads. A missing one is registered here under its catalog title, so the
+  // pill's words resolve.
+  if (!commandById("app.browser.open")) {
+    registerCommands([
+      {
+        id: "app.browser.open",
+        title: "Open",
+        category: "File Browser",
+        scope: "app",
+        surface: "browser",
+        requirement: "files",
+        available: () => true,
+        run: () => {},
+      },
+    ]);
+  }
 });
 
 afterEach(() => {
@@ -139,6 +205,11 @@ afterEach(() => {
   document.body.innerHTML = "";
   graphData.view = null;
   graphData.partial = false;
+  if (catalog) {
+    unregisterCommands(() => true);
+    registerCommands(catalog);
+    catalog = null;
+  }
   vi.clearAllMocks();
 });
 
@@ -146,15 +217,26 @@ describe("the workspace root's actions", () => {
   test("lead with Open, and offer upload, download and a terminal behind the caret", async () => {
     const target = await render();
     expect(target.querySelector(".pill-main")?.textContent?.trim()).toBe("Open");
-    expect(menu(target)).toEqual(["Upload file here", "Download tarball", "New terminal here"]);
+    expect(menu(target)).toEqual(["Upload", "Download", "New terminal here"]);
   });
 
-  test("add Graph from here only when the host can scope a graph", async () => {
+  test("add New graph here only when the host can scope a graph", async () => {
     const onSetAsScope = vi.fn();
     const target = await render({ onSetAsScope });
-    expect(menu(target)).toContain("Graph from here");
-    menuItem(target, "Graph from here").click();
+    expect(menu(target)).toContain("New graph here");
+    menuItem(target, "New graph here").click();
     expect(onSetAsScope).toHaveBeenCalledTimes(1);
+  });
+
+  test("every action is worded by the title of a registered file browser command", async () => {
+    const target = await render({ onSetAsScope() {} });
+    expect(actions(target)).toEqual(ROOT_ACTIONS.map(title));
+  });
+
+  test("each action is the file browser's command for it", async () => {
+    retitleCatalog();
+    const target = await render({ onSetAsScope() {} });
+    expect(actions(target)).toEqual(ROOT_ACTIONS.map((id) => `<${id}>`));
   });
 
   test("Open hands off to the host, or reveals the root in a new File Browser tab", async () => {
@@ -171,20 +253,17 @@ describe("the workspace root's actions", () => {
 
   test("upload, download and the terminal all act on the root", async () => {
     const target = await render();
-    const picker = target.querySelector<HTMLInputElement>("input[type='file']")!;
-    const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
+
+    // Upload raises the picker the file browser's Upload raises for a
+    // directory, the desktop's own where there is one, and the body keeps no
+    // file input of its own.
+    menu(target);
+    menuItem(target, "Upload").click();
+    expect(raiseUploadPicker).toHaveBeenCalledExactlyOnceWith("");
+    expect(target.querySelector("input[type='file']")).toBeNull();
 
     menu(target);
-    menuItem(target, "Upload file here").click();
-    expect(pick).toHaveBeenCalledTimes(1);
-    const files = [new File(["x"], "x.txt")];
-    Object.defineProperty(picker, "files", { configurable: true, value: files });
-    picker.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("", files);
-
-    menu(target);
-    menuItem(target, "Download tarball").click();
+    menuItem(target, "Download").click();
     expect(fileOps.downloadPathWithProgress).toHaveBeenCalledWith("", true);
 
     menu(target);

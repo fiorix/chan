@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
 // The graph tab's inspector and the scope row of its menu: what selecting a
-// node shows, and where its Open, Graph from here and chip actions lead.
+// node shows, and where its Open, New graph here (Graph from here on a tag,
+// a mention or a language) and chip actions lead.
 // GraphPanel is mounted over a fixed graph while the rest of the api runs on
 // the in-memory demo workspace, so the inspector finds real tree entries and
 // the actions open real tabs.
@@ -180,11 +181,11 @@ describe("a file node", () => {
     expect(opened?.path).toBe("notes/a.md");
   });
 
-  test("Graph from here opens the same graph in a new tab, with the file selected", async () => {
+  test("New graph here opens the same graph in a new tab, with the file selected", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab());
     await select(A);
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     const [spawned] = newGraphTabs(tab.id);
     expect(spawned).toMatchObject({
@@ -195,11 +196,11 @@ describe("a file node", () => {
     expect(canvas.props!.selectedId, "the tab it came from keeps its selection").toBe(A);
   });
 
-  test("Graph from here on a root-level file opens the workspace", async () => {
+  test("New graph here on a root-level file opens the workspace", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab());
     await select(README);
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ pendingSelectId: README });
   });
@@ -212,7 +213,7 @@ describe("a file the editor cannot open", () => {
     const { target } = await mountGraphPanel(GraphPanel, layout, graphTab());
     await select("notes/bundle.zip");
 
-    const main = await inspectorButton(target, "Download file");
+    const main = await inspectorButton(target, "Download");
     expect(main.classList.contains("pill-main")).toBe(true);
     await expect(inspectorButton(target, "Open")).rejects.toThrow("no inspector action Open");
     expect(paneTabs().some((t) => t.kind === "file"), "no editor tab").toBe(false);
@@ -274,15 +275,16 @@ describe("a directory node", () => {
     const files = paneTabs().find((t): t is BrowserTab => t.kind === "browser");
     expect(files).toBeDefined();
     expect(files!.inspectorOpen).toBe(true);
+    expect(files!.directory, "the tab lists the directory itself").toBe("notes/deep");
     expect(files!.expanded, "the directory itself and its ancestors").toEqual(["notes", "notes/deep"]);
     expect(browserSelection.path).toBe("notes/deep");
   });
 
-  test("Graph from here opens the same graph in a new tab, the directory selected and opened", async () => {
+  test("New graph here opens the same graph in a new tab, the directory selected and opened", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab());
     await select("directory:notes/deep");
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({
       depth: 1,
@@ -355,12 +357,12 @@ describe("the menu's scope row", () => {
 });
 
 describe("the workspace root", () => {
-  test("shows the workspace inspector; Open reveals the workspace, Graph from here re-roots there", async () => {
+  test("shows the workspace inspector; Open reveals the workspace, New graph here re-roots there", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
     await select("");
     expect(target.querySelector(".inspector .kind-chip.workspace")).not.toBeNull();
 
-    (await inspectorButton(target, "Graph from here")).click();
+    (await inspectorButton(target, "New graph here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({ pendingSelectId: "" });
 

@@ -5,7 +5,7 @@
 // In a window of its own, once the server's graph holds the fixture, a graph
 // tab opens on a directory, selected and opened. The check waits for the
 // window's saved session to hold that selection, then raises the selected
-// directory's depth with the "Graph depth: increase" command, which opens the
+// directory's depth with the "Increase depth" command, which opens the
 // directories below it and selects nothing new, and reads the saved session
 // again until it holds them. That read comes before the page closes on
 // purpose: the desktop hides a window, and quits, with no page code running,

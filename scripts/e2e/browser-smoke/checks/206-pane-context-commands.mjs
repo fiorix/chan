@@ -2,16 +2,16 @@
 // launcher, in real Chrome with the browser's own right-click.
 //
 // An empty pane opens chan's menu in place of the browser's (the page takes
-// the trusted contextmenu): Commands with the launcher's chord, then Reload
-// with its chord, and no Open Inspector, which is the desktop's row only. The
-// labels are this platform's, read once as Linux Chrome and once with a
-// macOS user agent. The strip's empty stretch opens the same menu. With
-// pane_strip_auto_hide on, a lone terminal on side A draws no strip; flipped
-// to the empty side B, which draws none either, the body still opens the
-// menu. Back on A, the terminal's own menu ends with Commands after a
-// separator. Every Commands opens the launcher; Escape closes it and hands
-// focus back to what was right-clicked when that takes focus: the empty
-// pane's welcome, and the terminal.
+// the trusted contextmenu): Command launcher with the launcher's chord, then
+// Reload window with its chord, and no Open Inspector, which is the desktop's
+// row only. The labels are this platform's, read once as Linux Chrome and
+// once with a macOS user agent. The strip's empty stretch opens the same
+// menu. With pane_strip_auto_hide on, a lone terminal on side A draws no
+// strip; flipped to the empty side B, which draws none either, the body still
+// opens the menu. Back on A, the terminal's own menu ends with Command
+// launcher after a separator. Every Command launcher row opens the launcher;
+// Escape closes it and hands focus back to what was right-clicked when that
+// takes focus: the empty pane's welcome, and the terminal.
 //
 // Each arm opens its own window. The preference is restored to what the
 // check found, and the terminal it opened is closed.
@@ -72,9 +72,11 @@ async function paneMenuRows(page) {
   ]));
 }
 
-/// Click a menu row by its label with the pointer, open the launcher, then
-/// close it with Escape; returns what holds focus after the close.
-async function runCommands(page, rowSelector, labelSelector, label, arm) {
+/// Click the menu's Command launcher row with the pointer, which opens the
+/// launcher, then close it with Escape; returns what holds focus after the
+/// close.
+async function runLauncherRow(page, rowSelector, labelSelector, arm) {
+  const label = "Command launcher";
   const point = await page.evaluate(({ rowSelector, labelSelector, label }) => {
     const row = [...document.querySelectorAll(rowSelector)].find((b) => b.querySelector(labelSelector)?.textContent?.trim() === label);
     if (!row) return null;
@@ -89,10 +91,10 @@ async function runCommands(page, rowSelector, labelSelector, label, arm) {
       dialogs: [...document.querySelectorAll('[role="dialog"]')].map((d) => d.getAttribute("aria-label")),
       active: document.activeElement?.tagName + "." + document.activeElement?.className,
     }));
-    throw new Error(`${arm}: the launcher did not open after Commands at ${JSON.stringify(point)}: ${JSON.stringify(state)}`, { cause });
+    throw new Error(`${arm}: the launcher did not open after ${label} at ${JSON.stringify(point)}: ${JSON.stringify(state)}`, { cause });
   });
   const menuGone = await page.evaluate(() => !document.querySelector(".hamburger-menu, .terminal-tab-menu-bubble"));
-  assert.ok(menuGone, "the menu closed when Commands ran");
+  assert.ok(menuGone, `the menu closed when ${label} ran`);
   const opened = await page.evaluate(() => document.activeElement?.tagName + "." + document.activeElement?.className);
   await page.keyboard.press("Escape");
   await page.waitForSelector(LAUNCHER, { hidden: true, timeout: 10_000 }).catch(async (cause) => {
@@ -133,9 +135,9 @@ export default {
       details.emptyBody = await rightClick(page, await centreOf(page, ".pane .editor-wrap"));
       details.emptyRows = await paneMenuRows(page);
       assert.deepEqual(details.emptyBody, { trusted: true, prevented: true }, `the page takes the right-click: ${JSON.stringify(details.emptyBody)}`);
-      assert.deepEqual(details.emptyRows, [["Commands", "Ctrl+Alt+K"], ["Reload", "Ctrl+Shift+R"]], `Linux Chrome rows: ${JSON.stringify(details.emptyRows)}`);
+      assert.deepEqual(details.emptyRows, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Ctrl+Shift+R"]], `Linux Chrome rows: ${JSON.stringify(details.emptyRows)}`);
       await ctx.shot("206-empty-menu", page);
-      details.emptyFocus = await runCommands(page, ".hamburger-menu button", ".menu-row-label", "Commands", "empty pane");
+      details.emptyFocus = await runLauncherRow(page, ".hamburger-menu button", ".menu-row-label", "empty pane");
       assert.ok(details.emptyFocus.welcome, `focus returned to the welcome: ${JSON.stringify(details.emptyFocus)}`);
 
       details.stripStretch = await rightClick(page, await centreOf(page, ".pane .tabs .dead-zone"));
@@ -146,13 +148,13 @@ export default {
       await page.waitForSelector(".hamburger-menu", { hidden: true, timeout: 10_000 });
 
       // The same menu as macOS Chrome labels it: the launcher keeps the web
-      // chord, Reload takes Cmd.
+      // chord, Reload window takes Cmd.
       await openWindow(ctx, macPage, "mac");
       details.macRows = await (async () => {
         await rightClick(macPage, await centreOf(macPage, ".pane .editor-wrap"));
         return paneMenuRows(macPage);
       })();
-      assert.deepEqual(details.macRows, [["Commands", "Ctrl+Alt+K"], ["Reload", "Cmd+R"]], `macOS Chrome rows: ${JSON.stringify(details.macRows)}`);
+      assert.deepEqual(details.macRows, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Cmd+R"]], `macOS Chrome rows: ${JSON.stringify(details.macRows)}`);
       await macPage.keyboard.press("Escape");
 
       // Auto-hide on: a lone terminal on A, then the empty side B, neither
@@ -175,9 +177,9 @@ export default {
       assert.ok(details.sideBBody.prevented, `side B's body takes the right-click: ${JSON.stringify(details.sideBBody)}`);
       assert.deepEqual(details.sideBRows, details.emptyRows, `side B's rows: ${JSON.stringify(details.sideBRows)}`);
       await ctx.shot("206-side-b-menu", page);
-      await runCommands(page, ".hamburger-menu button", ".menu-row-label", "Commands", "side B");
+      await runLauncherRow(page, ".hamburger-menu button", ".menu-row-label", "side B");
 
-      // Back on A, the terminal's own menu ends with Commands.
+      // Back on A, the terminal's own menu ends with Command launcher.
       const toA = await armFlip(page, paneFlip(paneId));
       await dispatchCommand(page, "app.pane.flip");
       await toA.settled("flip to A");
@@ -191,9 +193,9 @@ export default {
           row.querySelector(".mbtn-chord")?.textContent?.trim() ?? "",
         ]));
       assert.ok(details.terminalBody.prevented, `the terminal takes its right-click: ${JSON.stringify(details.terminalBody)}`);
-      assert.deepEqual(details.terminalRows.slice(-2), [["---", ""], ["Commands", "Ctrl+Alt+K"]], `the terminal menu ends with Commands: ${JSON.stringify(details.terminalRows)}`);
+      assert.deepEqual(details.terminalRows.slice(-2), [["---", ""], ["Command launcher", "Ctrl+Alt+K"]], `the terminal menu ends with Command launcher: ${JSON.stringify(details.terminalRows)}`);
       await ctx.shot("206-terminal-menu", page);
-      details.terminalFocus = await runCommands(page, '.terminal-tab-menu-bubble button.mbtn', ".mbtn-label", "Commands", "terminal");
+      details.terminalFocus = await runLauncherRow(page, '.terminal-tab-menu-bubble button.mbtn', ".mbtn-label", "terminal");
       assert.ok(details.terminalFocus.terminal, `focus returned to the terminal: ${JSON.stringify(details.terminalFocus)}`);
 
       console.log(`[smoke]   ${JSON.stringify(details)}`);

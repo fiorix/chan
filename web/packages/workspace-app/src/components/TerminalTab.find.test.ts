@@ -52,6 +52,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
+import { allCommands } from "../state/commands";
 import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
@@ -485,6 +486,19 @@ describe("terminal find command routing", () => {
     expect(findInput()).toBeNull();
 
     fireCommand("app.find.open");
+    await tick();
+    await tick();
+
+    expect(findInput()).not.toBeNull();
+  });
+
+  test("the catalog's Find command opens the bar on the focused terminal, under the terminal's own find id", async () => {
+    await renderTerminal(terminalTab(), true);
+    expect(findInput()).toBeNull();
+
+    const command = allCommands().find((c) => c.id === "terminal.find");
+    expect(command, "the terminal's find is a catalog command").toBeDefined();
+    command!.run();
     await tick();
     await tick();
 

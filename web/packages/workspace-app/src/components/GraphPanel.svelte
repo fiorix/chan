@@ -31,31 +31,33 @@
   } from "../api/types";
   import {
     activeGraphTab,
-    openBrowserInActivePane,
+    allPaneTabs,
+    flipHybrid,
+    layout,
     openGraphInActivePane,
     openInActivePane,
+    panesHaveSides,
+    registerGraphDepthReader,
     setGraphPendingSelect,
     setGraphSelection,
     type GraphTab,
   } from "../state/tabs.svelte";
   import {
-    browserSelection,
     effectiveHybridSurfaceTheme,
-    fbSelectSingle,
     graphReloadSignal,
     indexStatus,
+    openCommandLauncherFromMenu,
     openGraphForContact,
     openGraphForLanguage,
     openGraphForMention,
     openGraphForTag,
     paneWidths,
     persistPaneWidths,
-    persistTreeExpanded,
+    revealPathInBrowser,
     schedulePersistStateToHash,
     scheduleSessionSave,
     surfaceThemeOverride,
     tree,
-    treeExpanded,
   } from "../state/store.svelte";
   import { drafts, refreshDrafts } from "../state/drafts.svelte";
   import { ensureGraphLoaded, graphData, refreshGraph } from "../state/graphData.svelte";
@@ -72,7 +74,7 @@
   import { menuEscape } from "./menuEscape";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
-  import { HardDrive, X } from "@lucide/svelte";
+  import { Command as CommandIcon, HardDrive, Settings2, X } from "@lucide/svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import Inspector from "./Inspector.svelte";
@@ -86,7 +88,14 @@
     isOpenableTextKind,
     type FileKind,
   } from "../state/kinds";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, shortcutLabel } from "../state/shortcuts";
+  import { commandTitle } from "../state/commands";
+  import {
+    GRAPH_FILTER_ROWS,
+    toggleGraphFilter,
+    type GraphFilterKind,
+  } from "../state/commands/graph";
+  import "../state/commands/install";
   import { FS_GRAPH_DEPTH_MAX, shallowestFileDepth } from "../graph/depth";
   import {
     directoryNodeId,
@@ -262,6 +271,15 @@
     if (next !== selectedId) graphState.depth = 1;
   }
 
+  // The launcher's depth steps show the depth as their value, and read it
+  // through this while one of them is listed. Nothing here reads the depth
+  // itself, so it is worked out only while the tab menu or a listed step
+  // shows it. A hidden tab answers none and works nothing out either.
+  $effect(() => {
+    const id = tab.id;
+    return untrack(() => registerGraphDepthReader(id, () => (visible ? depthValue : null)));
+  });
+
   /// Whether this panel's tab came from an opener and has not yet shown a
   /// selection, as opposed to one restored or moved here with its own.
   const openedFresh = untrack(() => tab.selectedNodeId == null && tab.pendingSelectId !== null);
@@ -402,14 +420,7 @@
   /// `GraphNodeView::File` doesn't carry the `bucket` field
   /// (`ReportFileStats` does), so classification happens here
   /// rather than in a chan-server emit.
-  type FilterKind =
-    | "tag"
-    | "mention"
-    | "language"
-    | "img"
-    | "folder"
-    | "markdown"
-    | "source";
+  type FilterKind = GraphFilterKind;
 
   // ---- state -------------------------------------------------------------
 
@@ -635,15 +646,17 @@
     void refreshGraph();
   }
 
-  // The launcher's `Reload graph` reaches the fetch through the chan:command
-  // bridge, since the tab's spine is fetched here. Only the
+  // The launcher's `Reload graph`, `Select workspace` and depth steps reach
+  // this panel through the chan:command bridge, since the tab's spine is
+  // fetched here and the loaded nodes and the selection live here. Only the
   // graph the launcher itself targeted responds, so the command's
-  // active-surface gate and the reloading graph agree.
+  // active-surface gate and the acting graph agree.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
       const name = (e as CustomEvent).detail?.name;
       if (activeGraphTab()?.id !== tab.id) return;
       if (name === "app.graph.reload") reloadGraph();
+      else if (name === "app.graph.scopeDetails") openScopeHeaderInspector();
       // The depth is the selected node's, which only the panel knows.
       else if (name === "app.graph.depth.increase") setDepth(Math.min(depthValue + 1, depthCap));
       else if (name === "app.graph.depth.decrease") setDepth(Math.max(depthValue - 1, depthMin));
@@ -655,6 +668,28 @@
   function closeFromMenu(): void {
     closeTabMenu();
     close();
+  }
+
+  /// Flip the pane that holds this graph, whichever pane has the focus.
+  function flipFromMenu(): void {
+    closeTabMenu();
+    const pane = Object.values(layout.nodes).find(
+      (node) => node.kind === "leaf" && allPaneTabs(node).some((t) => t.id === tab.id),
+    );
+    if (pane) flipHybrid(pane.id);
+  }
+
+  // The launcher's own toggle is a chord with no catalog row, so its menu row
+  // takes the shortcut table's words.
+  const LAUNCHER = "app.launcher.toggle";
+  const launcherLabel = shortcutLabel(LAUNCHER);
+
+  /// Open the launcher from the menu. A graph holds no keyboard caret to
+  /// hand back, so the launcher records the page as its opener.
+  function openCommandsFromMenu(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    closeTabMenu();
+    openCommandLauncherFromMenu(row);
   }
 
   function onGraphContextMenu(e: MouseEvent): void {
@@ -1108,37 +1143,6 @@
       : null,
   );
 
-  /// Tab-world reveal: open a File Browser TAB at `path`, select it, and
-  /// expand its ancestor chain; for a directory expand the directory
-  /// ITSELF too so the browser opens AT it ("enter the directory").
-  /// Mirrors FileTree's `openSelectionInFileBrowser`.
-  ///
-  /// The File Browser opens as a sibling tab (`openBrowserInActivePane`)
-  /// and the graph tab stays open.
-  function revealPathInBrowserTab(path: string, isDir: boolean): void {
-    const parts = path.split("/").filter(Boolean);
-    // Directory: expand itself + ancestors. File: ancestors only (select
-    // the file inside its already-expanded parent).
-    const upto = isDir ? parts.length : parts.length - 1;
-    const expanded: string[] = [];
-    let acc = "";
-    for (let i = 0; i < upto; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      if (acc) expanded.push(acc);
-    }
-    const isRoot = path === "";
-    const tab = openBrowserInActivePane(isRoot ? {} : { select: path });
-    tab.inspectorOpen = true;
-    tab.showWorkspace = isRoot;
-    tab.expanded = expanded.length > 0 ? expanded : undefined;
-    fbSelectSingle(isRoot ? null : path);
-    browserSelection.showWorkspace = isRoot;
-    const map = treeExpanded.map;
-    map[""] = true;
-    for (const e of expanded) map[e] = true;
-    persistTreeExpanded();
-  }
-
   /// Graph "Open" for a node that resolves to a real workspace path.
   /// Mirrors the File Browser's open-selection: an editable text file
   /// (markdown note, contact, plain source / config) opens in the active
@@ -1150,14 +1154,16 @@
   /// the editable verdict comes from the tree entry's server kind (with
   /// a path-based fallback when the entry isn't in the current listing).
   /// Directory nodes never reach here: a directory "Open" routes through
-  /// `onReveal` -> `revealPathInBrowserTab(path, true)`.
+  /// `onReveal`, which reveals it in a File Browser tab that enters it.
+  /// Either reveal opens the File Browser as a sibling tab and the graph
+  /// tab stays open.
   function openFileOrReveal(path: string): void {
     const entry = tree.entries.find((e) => e.path === path);
     const kind = entry ? classifyEntry(entry) : classifyFileKind(path);
     if (isOpenableTextKind(kind)) {
       void openInActivePane(path);
     } else {
-      revealPathInBrowserTab(path, false);
+      revealPathInBrowser(path);
     }
   }
 
@@ -1170,11 +1176,15 @@
     graphState.inspectorOpen = true;
   }
 
-  /// The tab menu's header row names the workspace the graph is of; a click
-  /// selects the workspace's own node, which opens its inspector.
+  /// The tab menu's header row names the workspace the graph is of; a click,
+  /// or the launcher's `Select workspace`, selects the workspace's own node,
+  /// which opens its inspector.
   function openScopeHeaderInspector(): void {
     depthFollowsSelection("");
     selectedId = "";
+    // As a tap does: a selection still waiting on the graph must not take
+    // this one's place when it lands.
+    graphState.pendingSelectId = null;
     graphState.inspectorOpen = true;
     closeTabMenu();
   }
@@ -2010,19 +2020,17 @@
       use:clampMenu={tabMenuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      <!-- Header row showing the
-           current scope path + a kind-appropriate icon. Mirrors
-           the path-row pattern of the
-           Terminal / File Browser / Editor right-click
-           menus. Click on the row routes through the existing
-           inspector-open path so the user can hop from the menu
-           to the scope's inspector view. -->
+      <!-- Header row naming what the graph is of: the workspace, under
+           its icon. Mirrors the path-row pattern of the Terminal / File
+           Browser / Editor right-click menus. A click selects the
+           workspace's own node, which opens its inspector; the tooltip
+           is the title of the command that does the same. -->
       <button
         type="button"
         class="mbtn graph-scope-row"
         role="menuitem"
         tabindex="-1"
-        title="Workspace"
+        title={commandTitle("app.graph.scopeDetails")}
         onclick={openScopeHeaderInspector}
       >
         <span class="mbtn-icon" aria-hidden="true">
@@ -2062,12 +2070,16 @@
         </span>
       </div>
       <div class="msep graph-filter-sep" role="separator"></div>
-      {#each ["tag", "mention", "language", "img", "folder", "markdown", "source"] as const as kind (kind)}
+      <!-- One row per filter, in the words the launcher's Filters
+           command lists as its options: the rows and the options come
+           from one list. -->
+      {#each GRAPH_FILTER_ROWS as filter (filter.kind)}
+        {@const kind = filter.kind}
         <button
           type="button"
           class="mbtn filter-row"
           class:on={show[kind]}
-          onclick={() => (show[kind] = !show[kind])}
+          onclick={() => toggleGraphFilter(graphState, kind)}
           role="menuitemcheckbox"
           aria-checked={show[kind]}
         >
@@ -2077,19 +2089,35 @@
             style="background:{show[kind] ? FILTER_COLORS[kind] : 'transparent'};border-color:{FILTER_COLORS[kind]}"
             aria-hidden="true"
           ></span>
-          <span class="mbtn-label">
-            {kind === "mention" ? "contact" : kind === "img" ? "media" : kind}
-          </span>
+          <span class="mbtn-label">{filter.label}</span>
           <span class="filter-count">{counts[kind]}</span>
         </button>
       {/each}
       <div class="msep" role="separator"></div>
-      <button class="mbtn" onclick={closeFromMenu}>
+      {#if panesHaveSides()}
+        <button class="mbtn" role="menuitem" onclick={flipFromMenu}>
+          <span class="mbtn-icon">
+            <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          </span>
+          <span class="mbtn-label">{commandTitle("app.pane.flip")}</span>
+          <span class="mbtn-chord">{chordFor("app.pane.flip") ?? ""}</span>
+        </button>
+      {/if}
+      <button class="mbtn" role="menuitem" onclick={closeFromMenu}>
         <span class="mbtn-icon">
           <X size={16} strokeWidth={1.75} aria-hidden="true" />
         </span>
-        <span class="mbtn-label">Close</span>
+        <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
         <span class="mbtn-chord">{chordFor("app.tab.close") ?? ""}</span>
+      </button>
+      <!-- The window's commands, after this graph's own. -->
+      <div class="msep" role="separator"></div>
+      <button class="mbtn" role="menuitem" onclick={openCommandsFromMenu}>
+        <span class="mbtn-icon">
+          <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+        </span>
+        <span class="mbtn-label">{launcherLabel}</span>
+        <span class="mbtn-chord">{chordFor(LAUNCHER) ?? ""}</span>
       </button>
     </div>
   {/if}
@@ -2185,12 +2213,13 @@
              "workspace" sub-kind in a darker fill with the HardDrive
              glyph.
              The workspace root is a regular directory inspector
-             with both directory actions wired:
-             "Show in File Browser" (revealPathInBrowserTab) and
-             "Graph from here" (graphFromHere opens a new graph tab at
-             the workspace root). variant defaults to inspector. -->
+             with both directory actions wired: `Open` (onReveal:
+             revealPathInBrowser, a File Browser tab on the root) and
+             `New graph here` (onSetAsScope: graphFromHere opens a new
+             graph tab with the workspace's node selected). variant
+             defaults to inspector. -->
         <WorkspaceInfoBody
-          onReveal={() => revealPathInBrowserTab("", true)}
+          onReveal={() => revealPathInBrowser("", { enter: true })}
           onSetAsScope={() => graphFromHere("", true)}
           onLanguageClick={openGraphForLanguage}
           onContactNavigate={openGraphForContact}
@@ -2240,7 +2269,7 @@
                 // "Open" button through openDirInBrowser → onReveal, so a
                 // dir reveals into a new File Browser tab here (the file
                 // case uses onOpen above).
-                () => revealPathInBrowserTab(inspectorSelection.path, true)
+                () => revealPathInBrowser(inspectorSelection.path, { enter: true })
               : undefined
           }
           onNavigate={selectByPath}

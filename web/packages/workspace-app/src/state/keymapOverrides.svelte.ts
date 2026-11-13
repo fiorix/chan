@@ -11,7 +11,13 @@
 // owns the reverse dispatch lookup and the resolved-keymap builder that
 // conflict detection consumes. shortcuts.ts stays free of this module so
 // the shortcuts-table generator can compile it standalone.
+//
+// A saved table outlives the catalog it was assigned against. A chord
+// saved for a command the catalog has since removed is left out when the
+// table loads, and the saved table is written back without it.
 
+import { updateGlobalConfigSerial } from "./configWrite";
+import { notify } from "./notify.svelte";
 import {
   chordsEqual,
   currentOS,
@@ -238,6 +244,110 @@ export function clearOverride(
   persist();
 }
 
+// ---- retired commands ----------------------------------------------------
+
+/// Command ids the catalog once held and no longer does: a row that named
+/// one value of a setting, one option of what is now a single choice, or a
+/// second id for another command's action. A chord saved for one of them
+/// runs nothing, a focused terminal still gives the keystroke up for it,
+/// and the shortcut grid lists no row to clear it from.
+///
+/// Only an id listed here is ever dropped. An id the catalog does not hold
+/// is no evidence: an extension registers its commands after the table
+/// loads, and some chorded ids live in the shortcut table alone.
+export const RETIRED_COMMAND_IDS: ReadonlySet<string> = new Set([
+  "app.theme.system",
+  "app.theme.light",
+  "app.theme.dark",
+  "app.editor.surfaceTheme.light",
+  "app.editor.surfaceTheme.dark",
+  "app.browser.surfaceTheme.light",
+  "app.browser.surfaceTheme.dark",
+  "app.terminal.surfaceTheme.light",
+  "app.terminal.surfaceTheme.dark",
+  "app.graph.surfaceTheme.light",
+  "app.graph.surfaceTheme.dark",
+  "app.dashboard.surfaceTheme.light",
+  "app.dashboard.surfaceTheme.dark",
+  "app.screensaver.enable",
+  "app.screensaver.disable",
+  "app.screensaver.theme.plain",
+  "app.screensaver.theme.matrix",
+  "app.reports.enable",
+  "app.reports.disable",
+  "app.semantic.enable",
+  "app.semantic.model.bgeSmall",
+  "app.semantic.model.bgeBase",
+  "app.semantic.model.bgeLarge",
+  "app.semantic.model.bgeM3",
+  "app.terminal.backend.toggle",
+  "app.browser.settings",
+  "app.browser.closeTab",
+  "app.browser.reopenClosed",
+  "app.pane.focusColor.blue",
+  "app.pane.focusColor.orange",
+  "app.pane.focusColor.green",
+  "app.pane.focusColor.pink",
+  "app.pane.focusColor.grey",
+  "app.graph.filter.tag",
+  "app.graph.filter.contact",
+  "app.graph.filter.language",
+  "app.graph.filter.media",
+  "app.graph.filter.markdown",
+  "app.graph.filter.source",
+  "app.dashboard.slide.metrics",
+  "app.dashboard.slide.workspace",
+  "app.dashboard.slide.indexing",
+  "app.dashboard.slide.about",
+]);
+
+/// Whether this window may write the machine preferences. A serve started
+/// with settings disabled says so in the shell it serves, and refuses every
+/// config write.
+function preferencesWritable(): boolean {
+  try {
+    return document.querySelector('meta[name="chan-settings-disabled"]') === null;
+  } catch {
+    return false;
+  }
+}
+
+/// A write-back that has not been answered yet. A table that loads again
+/// meanwhile, on any `config_changed`, starts no second one.
+let retiring = false;
+
+/// Write the saved table back without its retired rows, and say how many
+/// went once the write has landed.
+///
+/// Every window of a server loads the same saved table, so the rows are
+/// taken out of the table the server holds when the write runs, not out of
+/// this window's copy: the first window's write removes them, and every
+/// other window then finds none, sends nothing and says nothing. A chord
+/// another window assigned in between is kept for the same reason.
+function dropRetiredFromSavedTable(): void {
+  if (retiring || !preferencesWritable()) return;
+  retiring = true;
+  let dropped = 0;
+  updateGlobalConfigSerial((preferences) => {
+    const saved = preferences.shortcuts ?? {};
+    const kept = Object.entries(saved).filter(([id]) => !RETIRED_COMMAND_IDS.has(id));
+    // Counted on each run: a conflict replays this over the newer table.
+    dropped = Object.keys(saved).length - kept.length;
+    return dropped > 0 ? { shortcuts: Object.fromEntries(kept) } : null;
+  })
+    .then(() => {
+      if (dropped === 0) return;
+      const commands = dropped === 1 ? "1 removed command" : `${dropped} removed commands`;
+      notify(`Dropped saved shortcuts for ${commands}`);
+    })
+    // A refused write leaves the rows saved. This window ignores them
+    // either way, and the next load tries again.
+    .catch(() => {})
+    .finally(() => {
+      retiring = false;
+    });
+}
+
 // ---- wire round-trip ---------------------------------------------------
 
 /// Snapshot the override table in wire shape for persistence.
@@ -251,7 +361,8 @@ export function serializeOverrides(): KeymapOverridesWire {
 
 /// Replace the in-memory table from a config payload. Unknown slots are
 /// dropped and empty commands skipped so a malformed or older config can't
-/// seed junk into the resolver.
+/// seed junk into the resolver. A retired command's row is left out, and
+/// the saved table is then written back without it.
 export function hydrateOverrides(
   wire: KeymapOverridesWire | undefined | null,
 ): void {
@@ -260,7 +371,12 @@ export function hydrateOverrides(
   }
   if (!wire) return;
   const slots: OverrideSlot[] = ["web", "macos", "linux", "windows"];
+  let retired = false;
   for (const [id, override] of Object.entries(wire)) {
+    if (RETIRED_COMMAND_IDS.has(id)) {
+      retired = true;
+      continue;
+    }
     const clean: CommandOverride = {};
     for (const slot of slots) {
       const chord = override?.[slot];
@@ -268,4 +384,5 @@ export function hydrateOverrides(
     }
     if (Object.keys(clean).length > 0) keymapOverrides.byId[id] = clean;
   }
+  if (retired) dropRetiredFromSavedTable();
 }

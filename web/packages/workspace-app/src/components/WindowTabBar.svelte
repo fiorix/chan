@@ -23,6 +23,9 @@
     titlebarWindowControl,
     type TitlebarWindowAction,
   } from "../api/desktop";
+  import { commandTitle } from "../state/commands";
+  // The tree button is named by its command, which this registers.
+  import "../state/commands/install";
   import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard";
   import {
     closePaneTree,
@@ -67,9 +70,10 @@
   const status = $derived(hiddenTabStatus());
   const chrome = $derived(windowTabBar.chrome);
   const centerPad = $derived(windowTabBarCenterPad(chrome, windowTabBar.height));
-  const label = $derived(
-    status ? `Panes and tabs: a tab out of view is ${status}` : "Panes and tabs",
-  );
+  // The tree button's words are its command's, with what a tab out of view
+  // is waiting on after them.
+  const treeTitle = commandTitle(PANE_TREE_COMMAND_ID);
+  const label = $derived(status ? `${treeTitle}: a tab out of view is ${status}` : treeTitle);
   const chord = $derived(chordFor(PANE_TREE_COMMAND_ID) ?? "");
   // The overlay hangs its dropdown under the element carrying this.
   const anchor = { [PANE_TREE_ANCHOR_ATTR]: "" };

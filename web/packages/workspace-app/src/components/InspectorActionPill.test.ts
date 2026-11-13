@@ -4,8 +4,19 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 
 import InspectorActionPill from "./InspectorActionPill.svelte";
+import {
+  allCommands,
+  commandById,
+  registerCommands,
+  unregisterCommands,
+  type Command,
+} from "../state/commands";
+
+const MAIN = "app.editor.showInBrowser";
+const SECONDARY = ["app.editor.download", "app.editor.exportPdf"];
 
 const mounted: Array<Record<string, unknown>> = [];
+let catalog: Command[] | null = null;
 
 async function render(): Promise<HTMLElement> {
   const target = document.createElement("div");
@@ -13,10 +24,10 @@ async function render(): Promise<HTMLElement> {
   mounted.push(mount(InspectorActionPill, {
     target,
     props: {
-      main: { label: "Open", onClick: vi.fn() },
+      main: { command: MAIN, onClick: vi.fn() },
       secondary: [
-        { label: "Reveal", onClick: vi.fn() },
-        { label: "Download", onClick: vi.fn(), disabled: true, title: "Unavailable" },
+        { command: SECONDARY[0]!, onClick: vi.fn() },
+        { command: SECONDARY[1]!, onClick: vi.fn(), disabled: true, title: "Unavailable" },
       ],
     },
   }));
@@ -31,9 +42,51 @@ async function openMenu(target: HTMLElement): Promise<void> {
   expect(target.querySelector(".action-menu")).not.toBeNull();
 }
 
+/// The pill's words, the primary action first.
+function labels(target: HTMLElement): string[] {
+  return [
+    target.querySelector(".pill-main")?.textContent?.trim() ?? "",
+    ...[...target.querySelectorAll(".action-menu-item")].map((el) => el.textContent?.trim() ?? ""),
+  ];
+}
+
+function title(id: string): string {
+  const command = commandById(id);
+  if (!command) throw new Error(`no command ${id}`);
+  return command.title;
+}
+
+/// Registers every command again under a title that spells its id, so an
+/// action worded by the registry shows the id and typed words do not.
+function retitleCatalog(): void {
+  catalog = allCommands();
+  unregisterCommands(() => true);
+  registerCommands(catalog.map((command) => ({ ...command, title: `<${command.id}>` })));
+}
+
 afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
+  if (catalog) {
+    unregisterCommands(() => true);
+    registerCommands(catalog);
+    catalog = null;
+  }
+});
+
+test("words each action by the title of its command", async () => {
+  const target = await render();
+  await openMenu(target);
+
+  expect(labels(target)).toEqual([MAIN, ...SECONDARY].map(title));
+});
+
+test("follows the registry when a command's title changes", async () => {
+  retitleCatalog();
+  const target = await render();
+  await openMenu(target);
+
+  expect(labels(target)).toEqual([MAIN, ...SECONDARY].map((id) => `<${id}>`));
 });
 
 test("takes Escape before the focused surface can stop it", async () => {

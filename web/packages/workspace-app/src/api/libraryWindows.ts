@@ -41,6 +41,9 @@ export type CreateLibraryWindowAction =
   | { action: "new_terminal" }
   | { action: "new_workspace_window"; workspace_id: string };
 
+/// What the deck can do to a library window that exists.
+export type LibraryWindowAction = "focus" | "show" | "hide" | "open" | "close";
+
 /// What these functions need from the surface that hosts them. Injected rather
 /// than imported so the deck keeps ownership of its capability lifecycle and
 /// its snapshot state, and so the branch is testable without mounting the deck.
@@ -157,6 +160,56 @@ function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Win
   const popup = globalThis.window.open("", window.window_id);
   if (!popup) throw new Error(blockedWindowMessage("The browser blocked the Chan window"));
   return popup;
+}
+
+/// The actions this surface can carry out on a library window, in the order
+/// the deck offers them. The first is what choosing the window itself does.
+///
+/// A browser can focus its own popup. A native or unknown-origin record has
+/// only a visibility action and an explicit browser Open from this surface.
+/// A hidden window shows rather than focuses: Show unhides and raises in one
+/// step wherever Focus could run, so offering both would be the same action
+/// twice. A control terminal is neither hidden nor closed from here, since
+/// the capability route refuses both.
+///
+/// A window this host's registry does not hold (`managed: false`) is offered
+/// only what can be carried out on it. Hide, Close and the un-hide behind
+/// Show act on that registry, so it is offered none of them. A visible one
+/// keeps Focus in chan-desktop, where the window watcher opens it under the
+/// label the native focus command targets. A browser is offered nothing: the
+/// launch route redirects to the record's own page, which this host may not
+/// serve.
+export function libraryWindowActions(window: ScopedLibraryWindow): LibraryWindowAction[] {
+  if (window.managed === false) return !window.hidden && isTauriDesktop() ? ["focus"] : [];
+  const manageable = !window.control;
+  const browserOnly = !isTauriDesktop() && window.origin !== "browser";
+  const actions: LibraryWindowAction[] = browserOnly
+    ? window.hidden ? ["show", "open"] : ["open"]
+    : [window.hidden ? "show" : "focus"];
+  if (manageable && !window.hidden) actions.push("hide");
+  if (manageable) actions.push("close");
+  return actions;
+}
+
+/// Carry one of those actions out. The call reaches `window.open` before its
+/// first await, so a keyboard activation keeps the browser's popup grant.
+export function runLibraryWindowAction(
+  bridge: LibraryWindowBridge,
+  window: ScopedLibraryWindow,
+  action: LibraryWindowAction,
+): Promise<void> {
+  switch (action) {
+    case "focus":
+      return focusLibraryWindow(bridge, window);
+    case "show":
+      return showLibraryWindow(bridge, window);
+    case "open":
+      return openLibraryWindow(bridge, window);
+    case "hide":
+      return buryLibraryWindow(bridge, window, false);
+    case "close":
+      return buryLibraryWindow(bridge, window, true);
+  }
 }
 
 /// Create a terminal or workspace window in this window's library.
@@ -292,7 +345,7 @@ export async function focusLibraryWindow(
     return;
   }
   if (window.origin !== "browser") {
-    throw new Error("Native focus is unavailable in this browser. Use Open in this browser.");
+    throw new Error("Native focus is unavailable in this browser. Use Open window.");
   }
   await openBrowserLibraryWindow(bridge, window, true);
 }

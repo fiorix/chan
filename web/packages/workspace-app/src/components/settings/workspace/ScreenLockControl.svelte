@@ -3,7 +3,9 @@
   // workspace view after inactivity with an optional local PIN (salted by the
   // workspace root, so it is per-workspace). It owns enable/timeout/theme
   // patches, the PIN set/confirm/clear dialog, a Test action, and the theme
-  // preview.
+  // preview. What it shows is the running lock's own state, which takes the
+  // answer of every write here and which the settings index reads and writes
+  // too.
 
   import { onMount } from "svelte";
   import {
@@ -13,6 +15,7 @@
     type ScreensaverTheme,
   } from "../../../state/screensaver";
   import {
+    applyScreensaverState,
     loadScreensaverState,
     lockNow,
     screensaver,
@@ -22,43 +25,30 @@
   import SettingField from "../SettingField.svelte";
   import PillToggle from "../PillToggle.svelte";
   import NumberField from "../NumberField.svelte";
+  import { optionsOf, settingEntry } from "../settingsIndex";
+  import { patchScreenLock } from "./workspaceState.svelte";
   import MatrixRainPreview from "../../screensaver/MatrixRainPreview.svelte";
   import PlainScreensaverPreview from "../../screensaver/PlainScreensaverPreview.svelte";
 
-  let screensaverEnabled = $state<boolean | null>(null);
-  let screensaverTimeoutSecs = $state<number>(300);
-  let screensaverTheme = $state<ScreensaverTheme>("plain");
-  let screensaverPinSet = $state(false);
+  const LOCK = settingEntry("workspace.screenLock");
+  const TIMEOUT = settingEntry("workspace.screenLock.timeout");
+  const PIN = settingEntry("workspace.screenLock.pin");
+  const THEME = settingEntry("workspace.screenLock.theme");
+
+  /// Null until the lock's state has loaded.
+  const screensaverEnabled = $derived(screensaver.loaded ? screensaver.enabled : null);
   let screensaverBusy = $state(false);
   let screensaverError = $state<string | null>(null);
   /// PIN edit buffer. `null` when not showing the dialog; otherwise carries
   /// the pin1/pin2 confirm pair.
   let pinDialog = $state<{ pin1: string; pin2: string } | null>(null);
 
-  async function loadScreenLockState(): Promise<void> {
-    try {
-      const s = await api.screensaverState();
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
-    } catch (err) {
-      screensaverError = `screensaver: ${(err as Error).message ?? err}`;
-    }
-  }
-
   async function toggleScreensaverEnabled(): Promise<void> {
     if (screensaverEnabled === null || screensaverBusy) return;
     screensaverBusy = true;
     screensaverError = null;
     try {
-      const target = !screensaverEnabled;
-      const s = await api.screensaverPatch({ enabled: target });
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
-      await loadScreensaverState();
+      await patchScreenLock({ enabled: !screensaverEnabled });
     } catch (err) {
       screensaverError = `toggle failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -83,17 +73,12 @@
           : null;
     // The clamp message above still stands when the entry lands on the
     // stored value; an unchanged timeout has nothing to patch.
-    if (next === screensaverTimeoutSecs) return;
+    if (next === screensaver.timeout_secs) return;
     screensaverBusy = true;
     const validationMessage = screensaverError;
     try {
-      const s = await api.screensaverPatch({ timeout_secs: next });
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
+      await patchScreenLock({ timeout_secs: next });
       screensaverError = validationMessage;
-      await loadScreensaverState();
     } catch (err) {
       screensaverError = `timeout save failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -101,18 +86,12 @@
     }
   }
 
-  async function commitScreensaverTheme(e: Event): Promise<void> {
+  async function commitScreensaverTheme(theme: ScreensaverTheme): Promise<void> {
     if (screensaverBusy) return;
-    const theme = (e.currentTarget as HTMLSelectElement).value as ScreensaverTheme;
     screensaverBusy = true;
     screensaverError = null;
     try {
-      const s = await api.screensaverPatch({ theme });
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
-      await loadScreensaverState();
+      await patchScreenLock({ theme });
     } catch (err) {
       screensaverError = `theme save failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -144,13 +123,8 @@
     try {
       const salt = workspace.info?.root ?? "";
       const hash = await hashPin(pin1, salt);
-      const s = await api.screensaverSetPin(hash);
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
+      applyScreensaverState(await api.screensaverSetPin(hash));
       pinDialog = null;
-      await loadScreensaverState();
     } catch (err) {
       screensaverError = `PIN save failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -163,12 +137,7 @@
     screensaverBusy = true;
     screensaverError = null;
     try {
-      const s = await api.screensaverClearPin();
-      screensaverEnabled = s.enabled;
-      screensaverTimeoutSecs = s.timeout_secs;
-      screensaverTheme = s.theme;
-      screensaverPinSet = s.pin_set;
-      await loadScreensaverState();
+      applyScreensaverState(await api.screensaverClearPin());
     } catch (err) {
       screensaverError = `PIN clear failed: ${(err as Error).message ?? err}`;
     } finally {
@@ -179,21 +148,36 @@
   async function testScreenLock(): Promise<void> {
     if (screensaverBusy) return;
     screensaverError = null;
-    await loadScreensaverState();
-    if (!screensaver.loaded) {
+    // A test locks on the settings the server holds now, or not at all.
+    if (!(await loadScreensaverState())) {
       screensaverError = "screen lock state unavailable";
       return;
     }
     lockNow();
   }
 
-  onMount(() => {
-    void loadScreenLockState();
+  // The lock's state was loaded when the window booted, and another window
+  // may have changed the settings since. A read that fails is reported here
+  // and leaves the running lock as it was; one that differs from the lock's
+  // state is loaded into it.
+  onMount(async () => {
+    try {
+      const served = await api.screensaverState();
+      const differs =
+        !screensaver.loaded ||
+        screensaver.enabled !== served.enabled ||
+        screensaver.timeout_secs !== served.timeout_secs ||
+        screensaver.theme !== served.theme ||
+        screensaver.pin_set !== served.pin_set;
+      if (differs) applyScreensaverState(served);
+    } catch (err) {
+      screensaverError = `screensaver: ${(err as Error).message ?? err}`;
+    }
   });
 </script>
 
 <SettingField
-  label="Screen lock"
+  setting={LOCK}
   hint="Auto-lock this window after inactivity; Mod+L locks now. The lock blocks input to this window only; other windows and clients with the bearer token can still reach this workspace's sessions."
 >
   <div class="stack">
@@ -214,10 +198,10 @@
     {/if}
     {#if screensaverEnabled === true}
       <div class="screensaver-config">
-        <label class="screensaver-timeout">
-          <span>Inactivity timeout (seconds):</span>
+        <label class="screensaver-timeout" data-setting={TIMEOUT.id}>
+          <span>{TIMEOUT.caption}</span>
           <NumberField
-            value={screensaverTimeoutSecs}
+            value={screensaver.timeout_secs}
             min={SCREENSAVER_MIN_TIMEOUT_SECS}
             max={SCREENSAVER_MAX_TIMEOUT_SECS}
             step={30}
@@ -231,51 +215,53 @@
             <button type="button" onclick={testScreenLock} disabled={screensaverBusy}>
               Test
             </button>
-            {#if screensaverPinSet}
+            <span class="screensaver-pin" data-setting={PIN.id}>
               <button type="button" onclick={openPinDialog} disabled={screensaverBusy}>
-                Change PIN
+                {PIN.caption}
               </button>
-              <button type="button" onclick={clearPin} disabled={screensaverBusy}>
-                Clear PIN
-              </button>
-            {:else}
-              <button type="button" onclick={openPinDialog} disabled={screensaverBusy}>
-                Set PIN
-              </button>
-              <span class="muted">No PIN set; lockout informational only.</span>
-            {/if}
+              {#if screensaver.pin_set}
+                <button type="button" onclick={clearPin} disabled={screensaverBusy}>
+                  Clear PIN
+                </button>
+              {:else}
+                <span class="muted">No PIN set; lockout informational only.</span>
+              {/if}
+            </span>
           {:else}
-            <input
-              type="password"
-              bind:value={pinDialog.pin1}
-              placeholder="PIN"
-              autocomplete="off"
-              disabled={screensaverBusy}
-            />
-            <input
-              type="password"
-              bind:value={pinDialog.pin2}
-              placeholder="Confirm"
-              autocomplete="off"
-              disabled={screensaverBusy}
-            />
-            <button type="button" onclick={commitPin} disabled={screensaverBusy}>
-              Save
-            </button>
-            <button type="button" onclick={cancelPinDialog} disabled={screensaverBusy}>
-              Cancel
-            </button>
+            <span class="screensaver-pin" data-setting={PIN.id}>
+              <input
+                type="password"
+                bind:value={pinDialog.pin1}
+                placeholder="PIN"
+                autocomplete="off"
+                disabled={screensaverBusy}
+              />
+              <input
+                type="password"
+                bind:value={pinDialog.pin2}
+                placeholder="Confirm"
+                autocomplete="off"
+                disabled={screensaverBusy}
+              />
+              <button type="button" onclick={commitPin} disabled={screensaverBusy}>
+                Save
+              </button>
+              <button type="button" onclick={cancelPinDialog} disabled={screensaverBusy}>
+                Cancel
+              </button>
+            </span>
           {/if}
         </div>
-        <label class="screensaver-theme">
-          <span>Theme:</span>
+        <label class="screensaver-theme" data-setting={THEME.id}>
+          <span>{THEME.caption}</span>
           <select
-            bind:value={screensaverTheme}
-            onchange={commitScreensaverTheme}
+            value={screensaver.theme}
+            onchange={(e) => void commitScreensaverTheme(e.currentTarget.value as ScreensaverTheme)}
             disabled={screensaverBusy}
           >
-            <option value="plain">Default</option>
-            <option value="matrix">Matrix</option>
+            {#each optionsOf(THEME) as theme (theme.value)}
+              <option value={theme.value}>{theme.label}</option>
+            {/each}
           </select>
         </label>
         <p class="hint">
@@ -286,14 +272,14 @@
       <div class="screensaver-preview">
         <div class="preview-title">Screensaver preview</div>
         <div class="preview-box">
-          {#if screensaverTheme === "matrix"}
+          {#if screensaver.theme === "matrix"}
             <MatrixRainPreview width={320} height={180} />
           {:else}
             <PlainScreensaverPreview width={320} height={180} />
           {/if}
         </div>
         <p class="hint">
-          Preview of the {screensaverTheme === "matrix" ? "Matrix" : "Default"} lock
+          Preview of the {screensaver.theme === "matrix" ? "Matrix" : "Default"} lock
           theme.
         </p>
       </div>
@@ -327,7 +313,8 @@
     padding: 5px 7px;
     font: inherit;
   }
-  .screensaver-pin-controls {
+  .screensaver-pin-controls,
+  .screensaver-pin {
     display: flex;
     align-items: center;
     gap: 0.5rem;

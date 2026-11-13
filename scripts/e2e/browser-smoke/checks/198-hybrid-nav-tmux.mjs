@@ -273,7 +273,7 @@ export default {
       await page.waitForSelector(".pane-mode-help", { timeout: 5_000 });
       state = await pageState(page);
       check(state.sides.every((side) => side === "A"), `Hybrid Nav Tab flipped a side: ${JSON.stringify(state.sides)}`);
-      for (const missing of ["Flip side", "Swap tile", "Stage Terminal"]) {
+      for (const missing of ["Flip pane", "Swap tile", "Stage terminal"]) {
         check(!state.help.some((label) => label.includes(missing)), `the cheatsheet lists ${missing}: ${JSON.stringify(state.help)}`);
       }
       check(state.help.some((label) => label.includes("Split right")), `the cheatsheet lacks Split right: ${JSON.stringify(state.help)}`);

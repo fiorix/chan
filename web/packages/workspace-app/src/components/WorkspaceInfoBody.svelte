@@ -34,6 +34,7 @@
     workspace,
   } from "../state/store.svelte";
   import { ensureGraphLoaded, graphData } from "../state/graphData.svelte";
+  import { uploadToEntry } from "../state/commands/browser";
   import { openTerminalInActivePane } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import InspectorActionPill, {
@@ -41,9 +42,9 @@
   } from "./InspectorActionPill.svelte";
   import CodeReportSection from "./CodeReportSection.svelte";
 
-  /// Optional "Graph from here" callback. Consumers that host this
+  /// Optional graph callback. Consumers that host this
   /// body alongside an existing inspector convention pass it;
-  /// surfaces that don't leave it unset and the button doesn't
+  /// surfaces that don't leave it unset and the action doesn't
   /// render. The action's semantic differs per consumer
   /// (FileBrowserSurface SPAWNS a new Graph tab while GraphPanel's own
   /// inspector RE-SCOPES the current tab), so the consumer wires the
@@ -52,13 +53,12 @@
   /// The workspace root behaves like any other directory inspector.
   /// `variant` selects between the two surfaces:
   ///   - "inspector" (default): render the standard directory ACTION
-  ///     ROW (Upload / Download / Show in File Browser / Graph from
-  ///     here).
+  ///     ROW (open, upload, download, terminal, graph).
   ///   - "dashboard": the Dashboard's Workspace slide, where the action
   ///     row does not render.
   /// The aggregate stats grid, File Kinds, and Code/COCOMO sections
-  /// render in both variants. `onReveal` wires the "Show in File
-  /// Browser" button (inspector variant only).
+  /// render in both variants. `onReveal` takes over the open action
+  /// (inspector variant only).
   /// The workspace inspector matches FileInfoBody's clickable
   /// Languages + Contacts:
   ///   - `onLanguageClick`: fired when a language row is clicked;
@@ -86,21 +86,13 @@
     onContactNavigate?: (path: string) => void;
   } = $props();
 
-  /// Action-row plumbing (inspector variant). Mirrors FileInfoBody's
-  /// directory branch but pinned to the workspace ROOT, i.e. the
-  /// relative path is the empty string "".
-  let uploadInput = $state<HTMLInputElement | null>(null);
-
-  function triggerUpload(): void {
-    uploadInput?.click();
-  }
-
-  async function onUploadPicked(e: Event): Promise<void> {
-    const input = e.currentTarget as HTMLInputElement;
-    const files = input.files;
-    if (!files || files.length === 0) return;
-    await fileOps.uploadFilesTo("", files);
-    input.value = "";
+  /// Action-row plumbing (inspector variant): the directory inspector's
+  /// actions on the workspace root, whose relative path is the empty
+  /// string. Upload raises the picker the file browser's Upload raises for
+  /// a directory (`uploadToEntry`), which is the desktop's own picker where
+  /// there is one.
+  function uploadToRoot(): void {
+    uploadToEntry("", true);
   }
 
   function downloadSelection(): void {
@@ -115,7 +107,7 @@
   const downloadTitle =
     "Download this directory as a tar archive. You can also drag rows out of the File Browser where supported.";
 
-  /// "Open" primary action for the workspace root. Mirrors
+  /// The open primary action for the workspace root. Mirrors
   /// FileInfoBody's openDirInBrowser: prefer the host's onReveal (the graph
   /// switches to a File Browser tab at the root) and otherwise reveal the
   /// root in the current browser (the File Browser tab leaves onReveal unset
@@ -128,33 +120,33 @@
     revealPathInBrowser("", { enter: true, inspectorOpen: true });
   }
 
-  /// "New terminal here": a terminal rooted at the workspace root.
+  /// The terminal action: a terminal rooted at the workspace root.
   function newTerminalHere(): void {
     openTerminalInActivePane(terminalFromHereTarget("", true));
   }
 
-  /// Split-action model for the inspector variant: an "Open" primary
-  /// plus the Upload / Download / Terminal / Graph dropdown. The labels
-  /// match the directory inspector (FileInfoBody's is_dir branch) so the
-  /// root and a directory read identically.
+  /// Split-action model for the inspector variant: an open primary plus
+  /// the upload / download / terminal / graph dropdown. Each action is the
+  /// file browser's command, as on the directory inspector (FileInfoBody's
+  /// is_dir branch), so the root and a directory read identically.
   const actionModel = $derived.by<{
     main: InspectorAction;
     secondary: InspectorAction[];
   }>(() => {
     const secondary: InspectorAction[] = [
-      { label: "Upload file here", onClick: triggerUpload, title: uploadTitle },
+      { command: "app.browser.uploadSelection", onClick: uploadToRoot, title: uploadTitle },
       {
-        label: "Download tarball",
+        command: "app.browser.downloadSelection",
         onClick: downloadSelection,
         title: downloadTitle,
       },
-      { label: "New terminal here", onClick: newTerminalHere },
+      { command: "app.browser.newTerminal", onClick: newTerminalHere },
     ];
     if (onSetAsScope) {
-      secondary.push({ label: "Graph from here", onClick: onSetAsScope });
+      secondary.push({ command: "app.browser.newGraph", onClick: onSetAsScope });
     }
     return {
-      main: { label: "Open", onClick: openRootInBrowser },
+      main: { command: "app.browser.open", onClick: openRootInBrowser },
       secondary,
     };
   });
@@ -335,24 +327,15 @@
 
   {#if variant === "inspector"}
     <!-- Workspace-root action row, mirroring FileInfoBody's is_dir branch on
-         the workspace ROOT (relative path ""). An "Open" primary action plus
-         a dropdown: Upload file here / Download tarball / New terminal here /
-         Graph from here. "Graph from here" is gated on the host callback. -->
+         the workspace ROOT (relative path ""). An open primary action plus
+         a dropdown: upload, download, terminal and graph, the last gated on
+         the host callback. -->
     <div class="actions-section">
       <InspectorActionPill
         main={actionModel.main}
         secondary={actionModel.secondary}
       />
     </div>
-    <input
-      bind:this={uploadInput}
-      class="file-picker"
-      type="file"
-      multiple
-      onchange={onUploadPicked}
-      aria-hidden="true"
-      tabindex="-1"
-    />
   {/if}
 
   <!-- Folder-mode parity with FileInfoBody: same aggregate stats grid,
@@ -502,13 +485,6 @@
      owns the pill + dropdown styling itself. */
   .actions-section {
     margin: 0.6rem 0 0.2rem 0;
-  }
-  .file-picker {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
   }
   .refs,
   .info > :global(.code-report) { margin: 0.8rem 0 0 0; }

@@ -77,19 +77,19 @@ describe("Settings > Global > Title bar tabs", () => {
   test("a window that cannot put its tabs in the title bar offers no row and keeps auto-hide", async () => {
     const { target } = await openSettings("Global");
     expect(field(target, "Title bar tabs")).toBeNull();
-    expect(field(target, "Pane strip")).not.toBeNull();
+    expect(field(target, "Pane strip auto-hide")).not.toBeNull();
   });
 
   test("on Windows the row is offered once the app can take the bar's window controls", async () => {
     const target = await bootOnWindows([TITLEBAR_TABS_COMMAND, TITLEBAR_WINDOW_CONTROL_COMMAND]);
     expect(field(target, "Title bar tabs")).not.toBeNull();
-    expect(field(target, "Pane strip"), "the tabs are still in the panes").not.toBeNull();
+    expect(field(target, "Pane strip auto-hide"), "the tabs are still in the panes").not.toBeNull();
   });
 
   test("on Windows an app without the window control command offers no row", async () => {
     const target = await bootOnWindows([TITLEBAR_TABS_COMMAND]);
     expect(field(target, "Title bar tabs")).toBeNull();
-    expect(field(target, "Pane strip")).not.toBeNull();
+    expect(field(target, "Pane strip auto-hide")).not.toBeNull();
   });
 
   test("the row shows the desktop's preference and writes it through the desktop", async () => {
@@ -129,10 +129,10 @@ describe("Settings > Global > Title bar tabs", () => {
     windowTabBar.preferred = true;
     windowTabBar.on = true;
     const { target } = await openSettings("Global");
-    expect(field(target, "Pane strip")).toBeNull();
+    expect(field(target, "Pane strip auto-hide")).toBeNull();
 
     windowTabBar.on = false;
     await settleSettings();
-    expect(field(target, "Pane strip")).not.toBeNull();
+    expect(field(target, "Pane strip auto-hide")).not.toBeNull();
   });
 });

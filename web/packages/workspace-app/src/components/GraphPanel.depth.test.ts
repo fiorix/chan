@@ -317,7 +317,7 @@ describe("a graph opened on a directory", () => {
 });
 
 describe("the tab menu", () => {
-  test("is the scope row, the depth slider, the filters and Close, each group behind a separator", async () => {
+  test("is the scope row, the depth slider, the filters, the tab's own rows and the launcher, each group behind a separator", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     openTabMenu(tab.id, { left: 10, top: 10, right: 10, bottom: 10 });
     await settle(2);
@@ -331,7 +331,9 @@ describe("the tab menu", () => {
       return el.querySelector(".mbtn-label")?.textContent?.trim() ?? "";
     });
     const collapsed = shape.filter((row, i) => !(row === "filter" && shape[i - 1] === "filter"));
-    expect(collapsed).toEqual(["scope", "---", "depth", "---", "filter", "---", "Close"]);
+    expect(collapsed).toEqual([
+      "scope", "---", "depth", "---", "filter", "---", "Flip pane", "Close tab", "---", "Command launcher",
+    ]);
     closeTabMenu();
   });
 });

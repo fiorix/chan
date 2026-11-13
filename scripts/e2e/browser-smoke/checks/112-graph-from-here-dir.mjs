@@ -1,4 +1,4 @@
-// "Graph from here" on a directory opens the graph with that directory
+// "New graph here" on a directory opens the graph with that directory
 // selected and opened, so its files show. There is one graph, rooted at the
 // workspace, and it draws the root's own level whatever is selected; a count
 // of what is on screen says nothing by itself about the directory. Each leg
@@ -7,7 +7,7 @@
 //
 //   1. a directory with files among its immediate children, which must
 //      bring them;
-//   2. the same state reached another way: "Graph from here" on its nested
+//   2. the same state reached another way: "New graph here" on its nested
 //      directory, a click on the parent's breadcrumb, which selects the
 //      parent and changes nothing drawn, then the depth lowered to one
 //      level. One selection at one depth over one tree is one set however
@@ -17,7 +17,7 @@
 //      that tab had already fetched carried them.
 //
 // The depth is the selected directory's: the levels opened below it, 0 when
-// it is closed. The check lowers it with the "Graph depth: decrease" command.
+// it is closed. The check lowers it with the "Decrease depth" command.
 //
 // Two legs agreeing on a graph with no files in it would be a green check
 // over the bug, so the floors are absolute as well as differential, and they
@@ -212,13 +212,13 @@ async function graphFromRow(page, scope, relPath) {
   await page.waitForSelector('[role="menu"][aria-label="File actions"]', { visible: true, timeout: 15_000 });
   const clicked = await page.evaluate(() => {
     const button = [...document.querySelectorAll('[role="menu"][aria-label="File actions"] [role="menuitem"]')].find(
-      (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "New Graph",
+      (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "New graph here",
     );
     if (!(button instanceof HTMLElement)) return false;
     button.click();
     return true;
   });
-  if (!clicked) throw new Error(`row menu "New Graph" vanished: ${relPath}`);
+  if (!clicked) throw new Error(`row menu "New graph here" vanished: ${relPath}`);
 }
 
 export default {
@@ -362,7 +362,7 @@ export default {
     const deepMinBrought = deepShape.childDirs + deepShape.filesAtShallowest;
     if (deepBrought < deepMinBrought) {
       throw new Error(
-        `"Graph from here" on ${DEEP} came up without its files: ` +
+        `"New graph here" on ${DEEP} came up without its files: ` +
           `${JSON.stringify(evidence)} (expected >= ${deepMinBrought} nodes more than closed)`,
       );
     }
@@ -375,7 +375,7 @@ export default {
     const broughtEdges = fromHere.visibleEdges - closed.visibleEdges;
     if (broughtNodes < spine.directFiles || broughtEdges < spine.directFiles) {
       throw new Error(
-        `"Graph from here" on ${DIR} came up without its files: ` +
+        `"New graph here" on ${DIR} came up without its files: ` +
           `${JSON.stringify(evidence)} (expected >= ${spine.directFiles} nodes and edges more than closed)`,
       );
     }

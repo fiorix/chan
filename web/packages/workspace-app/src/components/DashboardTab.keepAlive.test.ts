@@ -89,7 +89,7 @@ describe("a dashboard that is not active", () => {
   function show(tab: Dashboard, active: boolean): void {
     const target = document.createElement("div");
     document.body.append(target);
-    view = mount(DashboardTab, { target, props: { tab, active } });
+    view = mount(DashboardTab, { target, props: { tab, paneId: "pane-test", active } });
     flushSync();
   }
 

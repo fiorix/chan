@@ -112,7 +112,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     id: "app.search.toggle",
-    label: "Search",
+    label: "Search workspace",
     web: "Mod+Shift+S",
     native: "Mod+Shift+S",
     group: "App",
@@ -164,7 +164,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     id: "app.pane.flip",
-    label: "Flip pane side",
+    label: "Flip pane",
     web: "Ctrl+`",
     native: "Ctrl+`",
     group: "Panes",
@@ -232,7 +232,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     id: "app.pane.splitDown",
-    label: "Split bottom",
+    label: "Split down",
     web: "Ctrl+Alt+?",
     native: "Mod+Shift+/",
     group: "Panes",
@@ -348,7 +348,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // Find on page - browser owns Cmd+F/G/Shift+G in the web build.
   {
     id: "app.find.open",
-    label: "Find on page",
+    label: "Find",
     native: "Mod+F",
     group: "Find",
     note: "browser's own find dialog on web",
@@ -372,7 +372,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // Mod+E.
   {
     id: "app.editor.toggleMode",
-    label: "Show Source Code (toggle rendered/source)",
+    label: "Source mode",
     native: "Mod+E",
     web: "Mod+E",
     group: "Editor",
@@ -423,7 +423,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   },
   {
     id: "app.slides.present",
-    label: "Present slide deck fullscreen",
+    label: "Present slide deck",
     native: "Mod+Shift+Enter",
     web: "Mod+Shift+Enter",
     group: "Editor",
@@ -439,7 +439,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // Windows divergence the handler implements.
   {
     id: "terminal.copy",
-    label: "Copy selection",
+    label: "Copy",
     web: "Cmd+C",
     native: "Cmd+C",
     group: "Terminal",
@@ -463,7 +463,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // The registry stores the macOS form.
   {
     id: "terminal.richPrompt",
-    label: "Show/Hide Rich Prompt",
+    label: "Rich Prompt",
     web: "Cmd+Shift+P",
     native: "Cmd+Shift+P",
     group: "Terminal",
@@ -479,7 +479,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // bind through user overrides instead.
   {
     id: "app.terminal.broadcastToggle",
-    label: "Toggle group broadcast",
+    label: "Group broadcast",
     native: "Cmd+Shift+I",
     group: "Terminal",
     note: "macOS desktop only",
@@ -492,7 +492,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // the shell.
   {
     id: "terminal.find",
-    label: "Find in terminal",
+    label: "Find",
     web: "Mod+F",
     native: "Mod+F",
     group: "Terminal",
@@ -702,6 +702,15 @@ export function chordFor(id: string): string | null {
   const chord = osChord(s, platform, os);
   if (!chord) return null;
   return formatChord(chord, os);
+}
+
+/// The table's label for `id`: the words of an action the command catalog
+/// holds no row for, as the launcher's own toggle is. A menu that offers
+/// such an action words its row through this, so the words are written
+/// once. An id the table does not hold reads as itself, which a test over
+/// a menu's rows catches before a reader does.
+export function shortcutLabel(id: string): string {
+  return SHORTCUTS.find((s) => s.id === id)?.label ?? id;
 }
 
 /// The desktop's inspector chord: Cmd+Alt+I on macOS, Ctrl+Alt+I on Linux

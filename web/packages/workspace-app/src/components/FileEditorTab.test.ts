@@ -22,19 +22,27 @@ import { resetSceneSyncForTests } from "../state/sceneSync.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { bufferKey, flushPendingBufferWrites, readEditorBuffer, SESSION_ID } from "../state/editorBuffer";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
-import { chordFor } from "../state/shortcuts";
-import { allCommands } from "../state/commands";
+import { chordFor, SHORTCUTS } from "../state/shortcuts";
+import {
+  allCommands,
+  commandById,
+  registerCommands,
+  unregisterCommands,
+  type Command,
+} from "../state/commands";
 import "../state/commands/install";
+import { settingEntry } from "./settings/settingsIndex";
 import type { MockWorkspaceStore } from "../demo/store";
 import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
 import { ownershipWarnings } from "../__tests__/svelteWarnings";
-import { fileTab as harnessFileTab } from "../__tests__/tabs";
+import { fileTab as harnessFileTab, terminalTab } from "../__tests__/tabs";
 import {
   fileOps,
   hybridSurfaceThemes,
   paneWidths,
   refreshTree,
   refreshWorkspace,
+  searchPanel,
   ui,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
@@ -132,8 +140,14 @@ vi.mock("../state/tabs.svelte", async (importOriginal) => {
   return { ...actual, saveDraftTabToWorkspace: vi.fn(async () => false) };
 });
 
+vi.mock("../state/fileActionExecutors", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/fileActionExecutors")>()),
+  exportPathToPdf: vi.fn(async () => {}),
+}));
+
 import { openExternalUrl } from "../editor/external_links";
 import { openLinkPreview } from "../editor/link_preview";
+import { exportPathToPdf } from "../state/fileActionExecutors";
 import { saveDraftTabToWorkspace } from "../state/tabs.svelte";
 import { draftPath } from "../__tests__/drafts";
 
@@ -245,12 +259,16 @@ function bubble(): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(".tab-menu-bubble");
 }
 
+/// The open menu's separators, fields and action rows in the order they
+/// show, whichever of them sit inside one of the tab menu's own menus.
+function menuParts(): Element[] {
+  return [...(bubble()?.querySelectorAll(".action-list :is(.msep, .name-row, .page-width-row, .mbtn)") ?? [])];
+}
+
 /// The menu's rows in order: "---" for a separator, "Name" for the name row,
 /// "Page width" for the slider row, else the button's label.
 function menuRows(): string[] {
-  const list = bubble()?.querySelector(".action-list");
-  if (!list) return [];
-  return [...list.children].map((el) => {
+  return menuParts().map((el) => {
     if (el.getAttribute("role") === "separator") return "---";
     if (el.classList.contains("name-row")) return "Name";
     if (el.classList.contains("page-width-row")) return "Page width";
@@ -317,26 +335,28 @@ describe("the tab menu", () => {
       "---",
       "Page width",
       "---",
-      "Toggle outline",
-      "Toggle details",
-      "Toggle style toolbar",
+      "Outline",
+      "Details",
+      "Style toolbar",
       "---",
-      "Copy path to file",
-      "Delete",
-      "Duplicate",
+      "Copy file path",
+      "Delete file",
+      "Duplicate file",
       "Reload from disk",
       "---",
-      "Close",
+      "Flip pane",
+      "Close tab",
     ]);
     expect(bubble()!.parentElement, "portaled to the page body").toBe(document.body);
     expect(bubble()!.querySelector<HTMLInputElement>(".name-input")!.value).toBe("notes/plan.md");
-    expect(row("Close").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.tab.close") ?? "");
+    expect(row("Close tab").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.tab.close") ?? "");
+    expect(row("Flip pane").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.pane.flip") ?? "");
   });
 
   test.each([
-    ["Toggle outline", "outlineOpen", "aside.inspector.left"],
-    ["Toggle details", "inspectorOpen", "aside.inspector.right"],
-    ["Toggle style toolbar", "styleToolbarOpen", ".style-toolbar"],
+    ["Outline", "outlineOpen", "aside.inspector.left"],
+    ["Details", "inspectorOpen", "aside.inspector.right"],
+    ["Style toolbar", "styleToolbarOpen", ".style-toolbar"],
   ] as const)("%s changes the clicked tab and returns focus to its editor", async (label, field, selector) => {
     const tab = seat(fileTab());
     const pane = layout.nodes[PANE] as LeafNode;
@@ -366,14 +386,15 @@ describe("the tab menu", () => {
     expect(menuRows()).not.toContain("Page width");
     expect(menuRows().slice(1)).toEqual([
       "---",
-      "Toggle details",
+      "Details",
       "---",
-      "Copy path to file",
-      "Delete",
-      "Duplicate",
+      "Copy file path",
+      "Delete file",
+      "Duplicate file",
       "Reload from disk",
       "---",
-      "Close",
+      "Flip pane",
+      "Close tab",
     ]);
   });
 
@@ -382,8 +403,9 @@ describe("the tab menu", () => {
     const { target } = await render(tab);
     await openMenu(tab);
 
-    expect(menuRows()).not.toContain("Toggle outline");
-    expect(menuRows()).not.toContain("Toggle style toolbar");
+    expect(menuRows()).toContain("Details");
+    expect(menuRows()).not.toContain("Outline");
+    expect(menuRows()).not.toContain("Style toolbar");
     expect(target.querySelector("aside.inspector.left")).toBeNull();
     expect(target.querySelector(".style-toolbar")).toBeNull();
   });
@@ -393,7 +415,7 @@ describe("the tab menu", () => {
     const tab = seat(fileTab());
     await render(tab);
     await openMenu(tab);
-    expect(menuRows()).toContain("Toggle details");
+    expect(menuRows()).toContain("Details");
   });
 
   test("on macOS a canvas tab's Close advertises Cmd+W", async () => {
@@ -408,21 +430,21 @@ describe("the tab menu", () => {
       const tab = seat(fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content: "{}", saved: "{}" }));
       await render(tab);
       await openMenu(tab);
-      expect(row("Close").querySelector(".mbtn-chord")?.textContent).toBe("Cmd+W");
+      expect(row("Close tab").querySelector(".mbtn-chord")?.textContent).toBe("Cmd+W");
     } finally {
       if (ua) Object.defineProperty(window.navigator, "userAgent", ua);
       else delete (window.navigator as { userAgent?: string }).userAgent;
     }
   });
 
-  test("a draft tab offers Save to Workspace in place of the Name row", async () => {
+  test("a draft tab offers Save draft in place of the Name row", async () => {
     const tab = seat(fileTab({ path: draftPath("untitled-1") }));
     await render(tab);
     await openMenu(tab);
 
-    expect(menuRows()[0]).toBe("Save to Workspace");
+    expect(menuRows()[0]).toBe("Save draft");
     expect(bubble()!.querySelector(".name-row")).toBeNull();
-    row("Save to Workspace").click();
+    row("Save draft").click();
     await settle(2);
     expect(saveDraftTabToWorkspace).toHaveBeenCalledWith(tab);
     expect(bubble(), "the menu closes").toBeNull();
@@ -435,9 +457,9 @@ describe("the tab menu", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
     await openMenu(tab);
-    expect.soft(menuRows()).not.toContain("Delete");
-    expect.soft(menuRows()).not.toContain("Duplicate");
-    row("Copy path to file").click();
+    expect.soft(menuRows()).not.toContain("Delete file");
+    expect.soft(menuRows()).not.toContain("Duplicate file");
+    row("Copy file path").click();
     await settle(2);
 
     expect.soft(writeText).toHaveBeenCalledWith("Drafts/untitled-1/draft.md");
@@ -452,18 +474,18 @@ describe("the tab menu", () => {
     const duplicate = vi.spyOn(fileOps, "duplicateFile").mockResolvedValue(undefined);
 
     await openMenu(tab);
-    row("Copy path to file").click();
+    row("Copy file path").click();
     await settle(2);
     expect(writeText).toHaveBeenCalledWith("notes/plan.md");
     expect(bubble(), "each action closes the menu").toBeNull();
 
     await openMenu(tab);
-    row("Delete").click();
+    row("Delete file").click();
     await settle(2);
     expect(remove).toHaveBeenCalledWith("notes/plan.md", false);
 
     await openMenu(tab);
-    row("Duplicate").click();
+    row("Duplicate file").click();
     await settle(2);
     expect(duplicate).toHaveBeenCalledWith("notes/plan.md");
   });
@@ -595,7 +617,17 @@ describe("the body menu", () => {
     await rightClickBody(target);
 
     expect(tabMenu.source).toBe("body");
-    expect(menuRows()).toEqual(["Cut", "Copy", "Paste", "---", "Find", "---", "Reload from disk"]);
+    expect(menuRows()).toEqual([
+      "Cut",
+      "Copy",
+      "Paste",
+      "---",
+      "Find",
+      "---",
+      "Reload from disk",
+      "---",
+      "Command launcher",
+    ]);
     expect(row("Cut").disabled, "nothing to cut without a selection").toBe(true);
     expect(row("Copy").disabled).toBe(true);
     expect(row("Paste").disabled).toBe(false);
@@ -666,6 +698,8 @@ describe("the body menu", () => {
       "Find",
       "---",
       "Reload from disk",
+      "---",
+      "Command launcher",
     ]);
     row("Open link").click();
     expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/doc");
@@ -691,6 +725,686 @@ describe("the body menu", () => {
     const [opts] = vi.mocked(openLinkPreview).mock.calls[0]!;
     expect(opts.hit).toEqual({ target: "notes/other.md", anchorEl });
     expect(opts.fromPath).toBe("notes/plan.md");
+  });
+});
+
+describe("the rows every menu ends with", () => {
+  test("the tab menu's Flip pane flips the tab's own pane to its other side", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+
+    row("Flip pane").click();
+    await settle(2);
+
+    expect((layout.nodes[PANE] as LeafNode).side).toBe("b");
+    expect(bubble(), "the menu closes").toBeNull();
+  });
+
+  test("a window whose panes have no second side offers no Flip pane", async () => {
+    const tab = seat(fileTab());
+    (layout.nodes[PANE] as LeafNode).tabs.push(
+      terminalTab({ id: "tmux", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } }),
+    );
+    await render(tab);
+    await openMenu(tab);
+
+    expect(menuRows().slice(-3)).toEqual(["Reload from disk", "---", "Close tab"]);
+  });
+
+  test("the tab menu's Close tab closes this tab", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+
+    row("Close tab").click();
+    await settle(2);
+
+    expect((layout.nodes[PANE] as LeafNode).tabs.map((t) => t.id)).toEqual([]);
+  });
+
+  test("the body menu's launcher row asks the window for the launcher, from the editor", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab, { focused: true });
+    const asked: Array<{ name: string; focus: Element | null }> = [];
+    const onCommand = (event: Event): void => {
+      asked.push({ name: (event as CustomEvent<{ name: string }>).detail.name, focus: document.activeElement });
+    };
+    window.addEventListener("chan:command", onCommand);
+    try {
+      await rightClickBody(target);
+      row("Command launcher").focus();
+      row("Command launcher").click();
+      await settle(2);
+    } finally {
+      window.removeEventListener("chan:command", onCommand);
+    }
+
+    // The launcher hands focus back to what held it as it opened, so the
+    // editor holds it by then and not the row, which goes with its menu.
+    expect(asked).toEqual([{ name: "app.launcher.toggle", focus: editorView(target).contentDOM }]);
+    expect(bubble(), "the menu closes").toBeNull();
+  });
+
+  test("the launcher row shows the launcher's chord", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    await rightClickBody(target);
+
+    expect(row("Command launcher").querySelector(".mbtn-chord")?.textContent).toBe(
+      chordFor("app.launcher.toggle") ?? "",
+    );
+  });
+});
+
+// A row that performs a catalog command is worded by the registry, a row
+// that is a Settings field by the settings index, and the launcher's row by
+// the shortcut table. A row with words of its own is named here with the
+// reason no table holds them.
+describe("where a menu row's words come from", () => {
+  type Worded =
+    | { command: string }
+    | { setting: string }
+    | { shortcut: string }
+    | { own: string; because: string };
+
+  const TAB_MENU: Worded[] = [
+    { own: "Name", because: "a field label over the rename input" },
+    { setting: "editor.pageWidth" },
+    { command: "app.editor.outline" },
+    { command: "app.editor.details" },
+    { command: "app.editor.styleToolbar" },
+    { command: "app.editor.copyPath" },
+    { command: "app.file.delete" },
+    { command: "app.file.duplicate" },
+    { command: "app.editor.reloadFromDisk" },
+    { command: "app.pane.flip" },
+    { command: "app.tab.close" },
+  ];
+
+  const DRAFT_TAB_MENU: Worded[] = [
+    { command: "app.draft.save" },
+    { setting: "editor.pageWidth" },
+    { command: "app.editor.outline" },
+    { command: "app.editor.details" },
+    { command: "app.editor.styleToolbar" },
+    { command: "app.editor.copyPath" },
+    { command: "app.editor.reloadFromDisk" },
+    { command: "app.pane.flip" },
+    { command: "app.tab.close" },
+  ];
+
+  const CLIPBOARD = "the editor's own text clipboard, on its selection";
+  const LINK = "acts on the link under the pointer, which no command reaches";
+  const BODY_MENU: Worded[] = [
+    { own: "Cut", because: CLIPBOARD },
+    { own: "Copy", because: CLIPBOARD },
+    { own: "Paste", because: CLIPBOARD },
+    { own: "Open link", because: LINK },
+    { own: "Copy link", because: LINK },
+    { own: "Preview", because: LINK },
+    { command: "app.find.open" },
+    { command: "app.editor.searchSelection" },
+    { command: "app.editor.reloadFromDisk" },
+    { shortcut: "app.launcher.toggle" },
+  ];
+
+  const pageWidth = settingEntry("editor.pageWidth") as { label: string };
+  const launcher = SHORTCUTS.find((shortcut) => shortcut.id === "app.launcher.toggle") as { label: string };
+  const tables = { pageWidth: pageWidth.label, launcher: launcher.label };
+  let catalog: Command[] | null = null;
+
+  /// Gives every command, the page width field and the launcher's shortcut
+  /// words that spell their ids, so a row that reads its table shows the id
+  /// and a row that types its words does not.
+  function respellTables(): void {
+    catalog = allCommands();
+    unregisterCommands(() => true);
+    registerCommands(catalog.map((command) => ({ ...command, title: `<${command.id}>` })));
+    pageWidth.label = "<editor.pageWidth>";
+    launcher.label = "<app.launcher.toggle>";
+  }
+
+  afterEach(() => {
+    if (catalog) {
+      unregisterCommands(() => true);
+      registerCommands(catalog);
+      catalog = null;
+    }
+    pageWidth.label = tables.pageWidth;
+    launcher.label = tables.launcher;
+  });
+
+  /// The words the row's table holds for it now.
+  function words(row: Worded): string {
+    if ("command" in row) {
+      const command = commandById(row.command);
+      if (!command) throw new Error(`no command ${row.command}`);
+      return command.title;
+    }
+    if ("setting" in row) return settingEntry(row.setting).label;
+    if ("shortcut" in row) {
+      const shortcut = SHORTCUTS.find((candidate) => candidate.id === row.shortcut);
+      if (!shortcut) throw new Error(`no shortcut ${row.shortcut}`);
+      return shortcut.label;
+    }
+    return row.own;
+  }
+
+  /// What a respelled table makes of the row: its id, or its own words.
+  function respelled(row: Worded): string {
+    if ("command" in row) return `<${row.command}>`;
+    if ("setting" in row) return `<${row.setting}>`;
+    if ("shortcut" in row) return `<${row.shortcut}>`;
+    return row.own;
+  }
+
+  /// The visible words of every row of the open menu, in order.
+  function menuLabels(): string[] {
+    return menuParts()
+      .filter((el) => el.getAttribute("role") !== "separator")
+      .map((el) =>
+        (el.querySelector(".mbtn-label, .name-label, .page-width-label")?.textContent ?? "").trim(),
+      );
+  }
+
+  async function openTabMenuOn(path?: string): Promise<void> {
+    const tab = seat(fileTab(path ? { path } : {}));
+    await render(tab);
+    await openMenu(tab);
+  }
+
+  /// The body menu with every row it can show: a selection, and a pointer
+  /// over both an external and an internal link.
+  async function openFullBodyMenu(): Promise<void> {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first");
+    view.dispatch({ selection: { anchor: at, head: at + "first".length } });
+    h.urlUnderCursor = "https://example.com/doc";
+    h.wikiUnderCursor = { target: "notes/other.md", anchorEl: document.createElement("span") };
+    await rightClickBody(target);
+  }
+
+  const MENUS = [
+    ["the tab menu", TAB_MENU, () => openTabMenuOn()],
+    ["a draft's tab menu", DRAFT_TAB_MENU, () => openTabMenuOn(draftPath("untitled-1"))],
+    ["the body menu", BODY_MENU, openFullBodyMenu],
+  ] as const;
+
+  test.each(MENUS)(
+    "every row of %s carries the words of its table, or its own for a named reason",
+    async (_menu, rows, open) => {
+      await open();
+
+      expect(menuLabels()).toEqual(rows.map(words));
+      for (const row of rows) {
+        if ("own" in row) expect(row.because, row.own).not.toBe("");
+      }
+    },
+  );
+
+  test.each(MENUS)("every row of %s follows its table when the words there change", async (_menu, rows, open) => {
+    respellTables();
+    await open();
+
+    expect(menuLabels()).toEqual(rows.map(respelled));
+  });
+
+  test("the conflict banner's reload and the refused drawing's hint name their commands", async () => {
+    respellTables();
+    const conflicted = await render(seat(fileTab({ diskConflicted: true })));
+    expect(conflicted.target.querySelector(".recovery-banner-restore")?.textContent?.trim()).toBe(
+      "<app.editor.reloadFromDisk>",
+    );
+
+    const refused = await render(
+      seat(fileTab({ id: "board", path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content: "{", saved: "{}", refusedUnwritten: true })),
+    );
+    expect(refused.target.querySelector(".refused-placeholder")?.textContent?.trim()).toBe(
+      `This drawing has not been saved. Use <app.editor.toggleMode> (${chordFor("app.editor.toggleMode")}) to review it.`,
+    );
+  });
+
+  test("a view row's check is the state its command reports", async () => {
+    const tab = seat(fileTab({ outlineOpen: true }));
+    await render(tab);
+    await openMenu(tab);
+
+    const checks = (["app.editor.outline", "app.editor.details", "app.editor.styleToolbar"] as const).map((id) => {
+      const command = commandById(id)!;
+      const button = row(command.title);
+      return {
+        id,
+        role: button.getAttribute("role"),
+        checked: button.getAttribute("aria-checked"),
+        mark: button.querySelector(".mbtn-icon svg") !== null,
+      };
+    });
+    expect(checks).toEqual([
+      { id: "app.editor.outline", role: "menuitemcheckbox", checked: "true", mark: true },
+      { id: "app.editor.details", role: "menuitemcheckbox", checked: "false", mark: false },
+      { id: "app.editor.styleToolbar", role: "menuitemcheckbox", checked: "false", mark: false },
+    ]);
+  });
+
+  test("a view row's check follows its command when the command reports another state", async () => {
+    const tab = seat(fileTab({ outlineOpen: true }));
+    await render(tab);
+    // The registry's Details now reports on while the tab's panel is closed.
+    catalog = allCommands();
+    unregisterCommands(() => true);
+    registerCommands(
+      catalog.map((command) => (command.id === "app.editor.details" ? { ...command, state: () => true } : command)),
+    );
+    await openMenu(tab);
+
+    expect(tab.inspectorOpen).toBe(false);
+    expect(row("Details").getAttribute("aria-checked")).toBe("true");
+    expect(row("Details").querySelector(".mbtn-icon svg")).not.toBeNull();
+  });
+});
+
+// A menu row and the command of the same name run one function, so they
+// cannot come to do different things.
+describe("a menu row and its command", () => {
+  function run(id: string): void {
+    const command = commandById(id);
+    if (!command) throw new Error(`no command ${id}`);
+    command.run();
+  }
+
+  afterEach(() => {
+    searchPanel.open = false;
+    searchPanel.query = "";
+  });
+
+  test("Search selection seeds workspace search with the editor's selection from either", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first paragraph");
+    view.dispatch({ selection: { anchor: at, head: at + "first paragraph".length } });
+
+    await rightClickBody(target);
+    row("Search selection").click();
+    await settle(2);
+    expect([searchPanel.open, searchPanel.query]).toEqual([true, "first paragraph"]);
+    expect(bubble(), "the menu closes").toBeNull();
+
+    searchPanel.open = false;
+    searchPanel.query = "";
+    run("app.editor.searchSelection");
+    expect([searchPanel.open, searchPanel.query]).toEqual([true, "first paragraph"]);
+  });
+
+  test("Delete file and Duplicate file reach the file through one function each", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    const remove = vi.spyOn(fileOps, "remove").mockResolvedValue(true);
+    const duplicate = vi.spyOn(fileOps, "duplicateFile").mockResolvedValue(undefined);
+
+    await openMenu(tab);
+    row("Delete file").click();
+    run("app.file.delete");
+    await openMenu(tab);
+    row("Duplicate file").click();
+    run("app.file.duplicate");
+    await settle(2);
+
+    expect(remove.mock.calls).toEqual([
+      ["notes/plan.md", false],
+      ["notes/plan.md", false],
+    ]);
+    expect(duplicate.mock.calls).toEqual([["notes/plan.md"], ["notes/plan.md"]]);
+  });
+
+  test("the Details panel's actions are the editor's commands and run what they run", async () => {
+    await refreshTree();
+    const tab = seat(fileTab({ inspectorOpen: true }));
+    const { target } = await render(tab);
+    await settle();
+    const download = vi.spyOn(fileOps, "downloadPathWithProgress").mockImplementation(() => {});
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const titled = (id: string): string => commandById(id)!.title;
+    /// Opens the caret menu and returns its items.
+    const items = (): HTMLButtonElement[] => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      return [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")];
+    };
+    const item = (id: string): HTMLButtonElement => {
+      const found = items().find((el) => el.textContent?.trim() === titled(id));
+      if (!found) throw new Error(`no Details action ${titled(id)}`);
+      return found;
+    };
+
+    expect(details.querySelector(".pill-main")?.textContent?.trim()).toBe(titled("app.editor.showInBrowser"));
+    expect(items().map((el) => el.textContent?.trim())).toEqual(
+      ["app.editor.download", "app.editor.terminalFromHere", "app.editor.exportPdf", "app.editor.graphFromHere"].map(titled),
+    );
+    // The caret toggles: close the menu the read above left open.
+    details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+    flushSync();
+
+    item("app.editor.download").click();
+    run("app.editor.download");
+    expect(download.mock.calls).toEqual([
+      ["notes/plan.md", false],
+      ["notes/plan.md", false],
+    ]);
+
+    item("app.editor.exportPdf").click();
+    run("app.editor.exportPdf");
+    await settle(2);
+    expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([["notes/plan.md"], ["notes/plan.md"]]);
+  });
+
+  // A workspace's draft has no entry for the file inspector to act on. Its
+  // Details panel names the draft and offers the editor's two commands for
+  // it, each through the command's own function.
+  test("a workspace draft's Details panel offers Download and Export to PDF, and runs what their commands run", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const download = vi.spyOn(fileOps, "downloadPath").mockImplementation(() => {});
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const titled = (id: string): string => commandById(id)!.title;
+    const main = details.querySelector<HTMLButtonElement>(".pill-main")!;
+    const items = (): HTMLButtonElement[] => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      return [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")];
+    };
+
+    expect(details.querySelector(".drafts-chip"), "the draft's own body").not.toBeNull();
+    expect(main.textContent?.trim()).toBe(titled("app.editor.download"));
+    main.click();
+    run("app.editor.download");
+    expect(download.mock.calls).toEqual([
+      [path, false],
+      [path, false],
+    ]);
+
+    const [exportItem, ...rest] = items();
+    expect([exportItem?.textContent?.trim(), rest.length]).toEqual([titled("app.editor.exportPdf"), 0]);
+    exportItem!.click();
+    run("app.editor.exportPdf");
+    await settle(2);
+    expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[path], [path]]);
+  });
+
+  // The two actions read the server's copy, which trails the editor by the
+  // autosave's delay and for as long as a save keeps failing.
+  test("a draft's Details actions save what was typed before they send the draft, and send nothing when the save fails", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const seen: string[] = [];
+    let refusal: Error | null = null;
+    vi.spyOn(api, "write").mockImplementation(async (_path, content) => {
+      seen.push(`write ${content.split("\n")[0]}`);
+      if (refusal) throw refusal;
+      return { mtime: 200, mtime_ns: "200" };
+    });
+    vi.spyOn(fileOps, "downloadPath").mockImplementation(() => void seen.push("download"));
+    vi.mocked(exportPathToPdf).mockImplementation(async () => void seen.push("export"));
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const type = async (text: string): Promise<void> => {
+      editorView(target).dispatch({ changes: { from: 0, insert: text } });
+      await settle(1);
+    };
+
+    await type("one ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write one # Plan", "download"]));
+
+    seen.splice(0);
+    await type("two ");
+    details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+    flushSync();
+    details.querySelector<HTMLButtonElement>(".action-menu-item")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write two one # Plan", "export"]));
+
+    seen.splice(0);
+    refusal = new Error("no space left on device");
+    await type("three ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() =>
+      expect(ui.status).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+    );
+    expect(seen, "the save was tried and nothing was sent").toEqual(["write three two one # Plan"]);
+  });
+
+  // The file inspector draws the panel of a file that is no workspace draft,
+  // and its Download and Export to PDF are the editor's two functions there.
+  // A live document session takes a workspace file's edits as they are
+  // typed, so the sessions are off here: the file saves by the classic
+  // autosave alone, as a file of a standalone window does.
+  test("a file's Details actions save what was typed before they send the file, and send nothing when the save fails", async () => {
+    localStorage.setItem("chan.docsync", "0");
+    await refreshTree();
+    const tab = seat(fileTab({ inspectorOpen: true }));
+    const { target } = await render(tab);
+    await settle();
+    const seen: string[] = [];
+    let refusal: Error | null = null;
+    vi.spyOn(api, "write").mockImplementation(async (_path, content) => {
+      seen.push(`write ${content.split("\n")[0]}`);
+      if (refusal) throw refusal;
+      return { mtime: 200, mtime_ns: "200" };
+    });
+    vi.spyOn(fileOps, "downloadPathWithProgress").mockImplementation(() => void seen.push("download"));
+    vi.mocked(exportPathToPdf).mockImplementation(async () => void seen.push("export"));
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    /// Opens the caret menu and presses the action of the command `id`.
+    const press = (id: string): void => {
+      details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+      flushSync();
+      const found = [...details.querySelectorAll<HTMLButtonElement>(".action-menu-item")].find(
+        (el) => el.textContent?.trim() === commandById(id)!.title,
+      );
+      if (!found) throw new Error(`no Details action ${id}`);
+      found.click();
+    };
+    const type = async (text: string): Promise<void> => {
+      editorView(target).dispatch({ changes: { from: 0, insert: text } });
+      await settle(1);
+    };
+
+    expect(details.querySelector(".drafts-chip"), "the file inspector's body").toBeNull();
+    await type("one ");
+    press("app.editor.download");
+    await vi.waitFor(() => expect(seen).toEqual(["write one # Plan", "download"]));
+
+    seen.splice(0);
+    await type("two ");
+    press("app.editor.exportPdf");
+    await vi.waitFor(() => expect(seen).toEqual(["write two one # Plan", "export"]));
+
+    seen.splice(0);
+    refusal = new Error("no space left on device");
+    await type("three ");
+    for (const id of ["app.editor.download", "app.editor.exportPdf"]) {
+      ui.status = null;
+      press(id);
+      await vi.waitFor(() =>
+        expect(ui.status, id).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+      );
+    }
+    // The autosave may try the save once more while the tab stays unsaved.
+    expect(seen.slice(0, 2), "each press tried the save").toEqual([
+      "write three two one # Plan",
+      "write three two one # Plan",
+    ]);
+    expect(seen.filter((entry) => !entry.startsWith("write ")), "nothing was sent").toEqual([]);
+  });
+
+  test("a workspace draft that is not Markdown offers Download alone", async () => {
+    const tab = seat(
+      fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
+    );
+    const { target } = await render(tab);
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+
+    expect(details.querySelector(".pill-main")?.textContent?.trim()).toBe(commandById("app.editor.download")!.title);
+    expect(details.querySelector(".pill-caret")).toBeNull();
+  });
+});
+
+// A menu role is true inside a menu, and a menu holds items alone. The body
+// menu is a menu of action rows. The tab menu also holds the Name field and
+// the page width slider, so it is a dialog, and its action rows sit in menus
+// inside it. Every action row of either is a menu item, and a row with a
+// check a menu item checkbox.
+describe("the menus' roles", () => {
+  /// The menus inside the open tab menu, each as its name and the roles of
+  /// what it holds.
+  function innerMenus(): Array<[string | null, Array<string | null>]> {
+    return [...bubble()!.querySelectorAll<HTMLElement>('[role="menu"]')].map((menu) => [
+      menu.getAttribute("aria-label"),
+      [...menu.children].map((child) => child.getAttribute("role")),
+    ]);
+  }
+
+  /// The labels of the open menu's items that no menu holds.
+  function itemsOutsideAMenu(): string[] {
+    const root = bubble()!;
+    return [...root.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')]
+      .filter((item) => item.closest('[role="menu"]') === null)
+      .map((item) => item.querySelector(".mbtn-label")?.textContent?.trim() ?? "");
+  }
+
+  /// Every button of the open menu, as its label and its role.
+  function buttonRoles(): Array<[string, string | null]> {
+    return [...bubble()!.querySelectorAll<HTMLButtonElement>("button")].map((button) => [
+      button.querySelector(".mbtn-label")?.textContent?.trim() ?? "",
+      button.getAttribute("role"),
+    ]);
+  }
+
+  /// Opens the body menu with every row it can show: a selection, and a
+  /// pointer over both an external and an internal link.
+  async function openFullBodyMenu(): Promise<void> {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first");
+    view.dispatch({ selection: { anchor: at, head: at + "first".length } });
+    h.urlUnderCursor = "https://example.com/doc";
+    h.wikiUnderCursor = { target: "notes/other.md", anchorEl: document.createElement("span") };
+    await rightClickBody(target);
+  }
+
+  test("every row of the body menu is a menu item", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.getAttribute("role")).toBe("menu");
+    expect(buttonRoles()).toEqual(
+      [
+        "Cut",
+        "Copy",
+        "Paste",
+        "Open link",
+        "Copy link",
+        "Preview",
+        "Find",
+        "Search selection",
+        "Reload from disk",
+        "Command launcher",
+      ].map((label) => [label, "menuitem"]),
+    );
+  });
+
+  test("the body menu holds no field, and every item of it is the menu's own", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.querySelectorAll("input")).toHaveLength(0);
+    expect(itemsOutsideAMenu()).toEqual([]);
+  });
+
+  test("the tab menu is a dialog that holds its two fields, with its action rows in a menu of items alone", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+    const dialog = bubble()!;
+
+    expect([dialog.getAttribute("role"), dialog.getAttribute("aria-label")]).toEqual(["dialog", "tab menu"]);
+    expect(innerMenus()).toEqual([
+      [
+        "tab actions",
+        [
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "separator",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "separator",
+          "menuitem",
+          "menuitem",
+        ],
+      ],
+    ]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    // The Name field and the page width slider, neither inside a menu.
+    const fields = [...dialog.querySelectorAll("input")];
+    expect(fields.map((field) => field.getAttribute("aria-label"))).toEqual([
+      "file path",
+      settingEntry("editor.pageWidth").label,
+    ]);
+    expect(fields.filter((field) => field.closest('[role="menu"]') !== null)).toEqual([]);
+  });
+
+  test("a draft's tab menu holds Save draft in a menu of its own, before the slider", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(bubble()!.getAttribute("role")).toBe("dialog");
+    expect(innerMenus().map(([name]) => name)).toEqual(["draft actions", "tab actions"]);
+    expect(innerMenus()[0]![1]).toEqual(["menuitem"]);
+    const held = innerMenus().flatMap(([, roles]) => roles);
+    expect(held.filter((role) => !["menuitem", "menuitemcheckbox", "separator"].includes(role ?? ""))).toEqual([]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    expect(menuRows().slice(0, 3)).toEqual([commandById("app.draft.save")!.title, "---", "Page width"]);
+  });
+
+  test("every action row of the tab menu is a menu item, a view row a checkbox", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+
+    expect(buttonRoles()).toEqual([
+      ["Outline", "menuitemcheckbox"],
+      ["Details", "menuitemcheckbox"],
+      ["Style toolbar", "menuitemcheckbox"],
+      ["Copy file path", "menuitem"],
+      ["Delete file", "menuitem"],
+      ["Duplicate file", "menuitem"],
+      ["Reload from disk", "menuitem"],
+      ["Flip pane", "menuitem"],
+      ["Close tab", "menuitem"],
+    ]);
+  });
+
+  test("a draft's Save draft row is a menu item too", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(buttonRoles()[0]).toEqual(["Save draft", "menuitem"]);
+  });
+
+  test("a disabled row stays a disabled menu item", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    await rightClickBody(target);
+
+    expect([row("Cut").getAttribute("role"), row("Cut").disabled]).toEqual(["menuitem", true]);
   });
 });
 
@@ -1561,12 +2275,12 @@ describe("the status line after a file action", () => {
     ui.statusKind = null;
   });
 
-  test("Copy path to file says so briefly, and a refused clipboard leaves a dismissable error", async () => {
+  test("Copy file path says so briefly, and a refused clipboard leaves a dismissable error", async () => {
     const tab = seat(fileTab());
     await render(tab);
     setClipboard(async () => {});
     await openMenu(tab);
-    row("Copy path to file").click();
+    row("Copy file path").click();
     await settle(2);
     expect([ui.status, ui.statusKind]).toEqual(["Copied file path", "transient"]);
 
@@ -1574,19 +2288,27 @@ describe("the status line after a file action", () => {
       throw new Error("denied");
     });
     await openMenu(tab);
-    row("Copy path to file").click();
+    row("Copy file path").click();
     await settle(2);
     expect(ui.status).toMatch(/^copy failed: /);
     expect(ui.statusKind).toBe("persistent");
   });
 
-  test("the launcher's Copy path to file notifies briefly", async () => {
+  test("the launcher's Copy file path reports as the menu row does", async () => {
     const tab = seat(fileTab());
     await render(tab, { focused: true });
     setClipboard(async () => {});
     await allCommands().find((c) => c.id === "app.editor.copyPath")!.run();
     await settle(2);
     expect([ui.status, ui.statusKind]).toEqual(["Copied file path", "transient"]);
+
+    setClipboard(async () => {
+      throw new Error("denied");
+    });
+    await allCommands().find((c) => c.id === "app.editor.copyPath")!.run();
+    await settle(2);
+    expect(ui.status).toMatch(/^copy failed: /);
+    expect(ui.statusKind).toBe("persistent");
   });
 
   test("re-opening a moved file asks the user to pick it in Files, until the tab goes", async () => {
@@ -1989,7 +2711,7 @@ describe("a drawing whose save is refused", () => {
     }).toEqual({
       line: `Not saved: the drawing does not parse (${reason()})`,
       board: false,
-      body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+      body: `This drawing has not been saved. Use Source mode (${chordFor("app.editor.toggleMode")}) to review it.`,
     });
     setTabContent(tab, SAVED);
     await settle();
@@ -2125,7 +2847,7 @@ describe("a drawing whose save is refused", () => {
         pending: {
           held: true,
           placeholder: true,
-          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          body: `This drawing has not been saved. Use Source mode (${chordFor("app.editor.toggleMode")}) to review it.`,
           board: false,
         },
         inFlight: 0, scene: 1, disk: FIXED, placeholder: false, board: true,
@@ -2177,7 +2899,7 @@ describe("a drawing whose save is refused", () => {
           conflict: true,
           held: true,
           reason: undefined,
-          body: `This drawing has not been saved. Use Show source code (${chordFor("app.editor.toggleMode")}) to review it.`,
+          body: `This drawing has not been saved. Use Source mode (${chordFor("app.editor.toggleMode")}) to review it.`,
           board: false,
           disk: SAVED,
         });

@@ -323,13 +323,15 @@ Navigating the tab: drag the background to pan, wheel to zoom toward the
 cursor, drag a node to move it. A click selects a node and opens the
 inspector; a selected file, tag or mention also shows what refers to it
 and what it refers to, each on its directories. A double-click on a
-directory node opens or closes it in place. The inspector's "Graph from
-here" opens a NEW graph tab with that node selected; the breadcrumb
-selects a directory of the selected node's path in the current tab.
-Right-click opens the tab menu, which carries the Depth slider and the
-node-type filter chips (tag, contact, language, media, folder, markdown,
-source), each with its count. The depth is the selected node's: levels
-opened below a directory, hops of references from any other node.
+directory node opens or closes it in place. The inspector's "New graph
+here" on a file or a directory, and its "Graph from here" on a tag, a
+contact or a language, opens a NEW graph tab with that node selected;
+the breadcrumb selects a directory of the selected node's path in the
+current tab. Right-click opens the tab menu, which carries the Depth
+slider and the node-type filter chips (tag, contact, language, media,
+folder, markdown, source), each with its count. The depth is the
+selected node's: levels opened below a directory, hops of references
+from any other node.
 "#;
 
 /// `cs graph` examples, side effects, and caveats.
@@ -344,7 +346,7 @@ pub(crate) const CS_GRAPH_AFTER: &str = r#"EXAMPLES:
   cs graph --window win-2 --pane pane-4 --side b
     workspace graph in pane-4 side B of win-2
   cs open 'chan://graph?s=workspace&m=s'
-    reopens a serialized view; the "Copy link to graph" command puts
+    reopens a serialized view; the "Copy graph link" command puts
     such a link on the clipboard
 
 SIDE EFFECTS:
@@ -397,9 +399,8 @@ markdown editor, .excalidraw in the drawing canvas, .json in the
 collapsible tree, .csv / .tsv in the table, and every other text format
 in source mode. A path that does not exist yet is created as an empty
 file and opened, as long as its name is a text-class name. An argument
-starting with chan://graph? (the string a graph tab's "Copy link to
-graph" produces) reopens that graph view instead of touching the
-filesystem.
+starting with chan://graph? (the string a graph tab's "Copy graph link"
+produces) reopens that graph view instead of touching the filesystem.
 
 A path inside the workspace opens in the target window, which defaults
 to $CHAN_WINDOW_ID; `--window`, `--pane`, and `--side a|b` select its
@@ -408,9 +409,9 @@ window, reusing a live one or opening one, and the reply names that window.
 A host that serves no filesystem refuses with 'chan serve PATH' guidance.
 A standalone window with a filesystem opens paths in that window.
 
-The command launcher's "Open" shares these routing rules. Relative paths
-resolve against the terminal's current directory for `cs open`, and
-against the workspace root for the launcher's Open.
+The command launcher's "Open..." shares these routing rules. Relative
+paths resolve against the terminal's current directory for `cs open`,
+and against the workspace root for the launcher's row.
 "#;
 
 /// `cs open` examples, side effects, and caveats.
@@ -822,7 +823,7 @@ THE RICH PROMPT (typing INTO an agent by hand):
 agent. The Rich Prompt is the human one: a floating markdown composer
 over the bottom of a terminal, for input too long or too rich to type
 at a raw prompt. Toggle it with Cmd+Shift+P (Ctrl+Alt+P on Linux and
-Windows), or "Show/Hide Rich Prompt" in the command launcher.
+Windows), or "Rich Prompt" in the command launcher.
 
 It edits a real per-terminal draft with the same editor file tabs use,
 so PASTING AN IMAGE works: the image lands as a markdown embed and

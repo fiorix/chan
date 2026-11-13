@@ -60,10 +60,11 @@ afterEach(() => {
 
 async function chooseColor(color: "blue" | "orange" | "green" | "pink" | "grey"): Promise<void> {
   await import("./commands/panes");
-  const { allCommands } = await import("./commands");
-  const command = allCommands().find((entry) => entry.id === `app.pane.focusColor.${color}`);
-  expect(command).toBeDefined();
-  command!.run();
+  const { allCommands, commandContext } = await import("./commands");
+  const command = allCommands().find((entry) => entry.id === "app.pane.focusColor");
+  const option = command?.options?.(commandContext()).find((entry) => entry.id === color);
+  expect(option).toBeDefined();
+  await option!.run();
 }
 
 async function chooseOrange(): Promise<void> {

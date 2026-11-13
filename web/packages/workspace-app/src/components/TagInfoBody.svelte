@@ -128,7 +128,9 @@
     </div>
   {/if}
   <!-- "Graph from here" lives in the inspector, not duplicated at
-       the menu level. -->
+       the menu level. The words are this body's own: the catalog's two
+       New graph here commands act on a file or a directory, and none
+       opens a graph from a tag or a mention. -->
 
   {#if readsShared && graphData.loading && graphData.partial}
     <div class="muted">loading references...</div>

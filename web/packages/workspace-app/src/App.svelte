@@ -173,7 +173,7 @@
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
-  import { isTauriDesktop, reloadWindow } from "./api/desktop";
+  import { isTauriDesktop, reloadWindow, toggleLauncherPanel } from "./api/desktop";
   import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
   import {
@@ -810,6 +810,26 @@
     openGraphWithContext(ctx);
   }
 
+  const LAUNCHER_TOGGLE = "app.launcher.toggle";
+
+  /// Whether a key is the command launcher's chord: one the user assigned to
+  /// it, or the built-in one where no assigned command that can run claims
+  /// the key first, the order `onWindowKey` applies. The open launcher reads
+  /// it too: it takes every key ahead of that listener, and closes on this
+  /// one.
+  function isLauncherChord(e: KeyboardEvent): boolean {
+    const assigned = resolveEventChord(e);
+    const commands = allCommands();
+    const assignedId = assigned ? commandIdForChord(assigned, commands) : undefined;
+    if (assignedId === LAUNCHER_TOGGLE) return true;
+    if (assignedId && commands.find((c) => c.id === assignedId)?.available(commandContext())) {
+      return false;
+    }
+    return isTauriDesktop() && currentOS() === "mac"
+      ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "K"
+      : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "K";
+  }
+
   /// App-level keyboard shortcuts. Layout follows VS Code where possible.
   ///
   /// Context-aware spawn chords (each resolves focused surface context):
@@ -891,26 +911,27 @@
     // branch and this path never double-fire), and cmd.available re-applies
     // the same window-mode + surface gate the launcher shows. The chord is
     // the one the keystroke resolves to, the same winner the terminal escape
-    // registry reads.
+    // registry reads. The command is told a chord ran it, for the one whose
+    // chord does less than its row.
     {
       const overrideChord = resolveEventChord(e);
       const commands = allCommands();
       const overrideId = overrideChord
         ? commandIdForChord(overrideChord, commands)
         : undefined;
-      if (overrideId) {
-        if (overrideId === "app.launcher.toggle") {
-          e.preventDefault();
-          toggleCommandLauncher();
-          return;
-        }
+      if (overrideId && overrideId !== LAUNCHER_TOGGLE) {
         const cmd = commands.find((c) => c.id === overrideId);
         if (cmd && cmd.available(commandContext())) {
           e.preventDefault();
-          cmd.run();
+          cmd.run(undefined, "chord");
           return;
         }
       }
+    }
+    if (isLauncherChord(e)) {
+      e.preventDefault();
+      toggleCommandLauncher();
+      return;
     }
     // The key and Shift the matcher resolved: the layout's symbol, with a
     // Shift that only typed a punctuation symbol consumed when the unshifted
@@ -921,15 +942,6 @@
     const pressedKey = pressed?.key;
     const pressedShift = pressed?.shiftKey ?? e.shiftKey;
     const os = currentOS();
-    const commandLauncherChord =
-      isTauriDesktop() && os === "mac"
-        ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && shortcutLetter(e) === "K"
-        : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "K";
-    if (commandLauncherChord) {
-      e.preventDefault();
-      toggleCommandLauncher();
-      return;
-    }
     const settingsChord =
       os === "mac"
         ? e.metaKey &&
@@ -1916,7 +1928,10 @@
 <DraftCloseModal />
 <WorkspaceWarningsModal />
 <SearchPanel />
-<CommandLauncher />
+<CommandLauncher
+  allComputers={isTauriDesktop() ? () => toggleLauncherPanel() : undefined}
+  toggleChord={isLauncherChord}
+/>
 <!-- Every pane of this window, its sides and their tabs. -->
 <PaneTreeOverlay />
 <SettingsOverlay />

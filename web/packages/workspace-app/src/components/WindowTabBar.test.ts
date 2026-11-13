@@ -30,6 +30,7 @@ vi.mock("../state/paneTree.svelte", async (importOriginal) => ({
 vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
 
 import WindowTabBar from "./WindowTabBar.svelte";
+import { expectWords } from "../__tests__/menuWords";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
 import {
   closePaneTree,
@@ -153,6 +154,13 @@ describe("the tree button", () => {
     expect(paneTree.open).toBe(false);
   });
 
+  test("is named by its command, with the command's chord in its tooltip", async () => {
+    const bar = await renderBar();
+    const button = bar.querySelector<HTMLButtonElement>(".tree-button")!;
+    expectWords([button.getAttribute("aria-label")!], [{ command: "app.pane.tree" }]);
+    expect(button.title).toBe("Show panes and tabs (Ctrl+Shift+A)");
+  });
+
   test("badges a program status on a tab the bar does not show", async () => {
     let bar = await renderBar();
     expect(bar.querySelector(".badge")).toBeNull();
@@ -162,7 +170,9 @@ describe("the tree button", () => {
     tree.status = "blocked";
     bar = await renderBar();
     expect(bar.querySelector(".badge")?.getAttribute("data-status")).toBe("blocked");
-    expect(bar.querySelector(".tree-button")?.getAttribute("aria-label")).toContain("blocked");
+    expect(bar.querySelector(".tree-button")?.getAttribute("aria-label")).toBe(
+      "Show panes and tabs: a tab out of view is blocked",
+    );
   });
 });
 

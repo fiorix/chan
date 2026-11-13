@@ -1,17 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WindowRecord } from "../api/library";
+import { ApiError } from "../api/library";
+import type { DevserverEntry, GatewayEntry, WindowRecord, WorkspaceEntry } from "../api/library";
 import { backend } from "../api/backend";
 import {
+  connectAndOpenTerminal,
+  copyGatewayPublicKey,
   detachTmux,
   focusComputerWindow,
+  liveTerminalCountForWorkspace,
   newWorkspaceTerminalWindow,
   newWorkspaceWindow,
   newTmuxWindow,
   openComputerWindow,
   openTmuxWindow,
   setWindowShown,
+  showComputerCard,
+  turnOffWorkspace,
+  turnOnAndOpenWorkspace,
 } from "./computerActions";
 import { cancelConfirm, confirm } from "./confirm.svelte";
+import { decks, resetDeck } from "./deck.svelte";
+import { screen } from "./screen.svelte";
 import { resetWindowManager } from "./windowManager.svelte";
 
 vi.mock("./capabilities", () => ({ hasDesktopBridge: false, selfManagedWindows: true }));
@@ -143,7 +152,8 @@ describe("browser action visibility", () => {
     const check = vi.spyOn(backend, "checkWindowPage");
     for (const hidden of [true, false]) {
       await expect(focusComputerWindow({ ...record, window_id: `focus ${origin} ${hidden}`, hidden, origin: origin === "native" ? "native" : undefined }))
-        .rejects.toThrow(/native focus.*unavailable/i);
+        // The row a browser offers on such a record, by the name it carries.
+        .rejects.toThrow("Native focus is unavailable in this browser. Use Open window.");
     }
     expect(open).not.toHaveBeenCalled();
     expect(check).not.toHaveBeenCalled();
@@ -231,4 +241,142 @@ describe("tmux connection requests", () => {
     expect(confirm.open).toBe(false);
   });
 
+});
+
+describe("the command deck's wrappers", () => {
+  const local: WorkspaceEntry = {
+    workspace_id: "ws-deck",
+    path: "/work/deck",
+    label: "Deck",
+    on: true,
+    status: "running",
+    library_id: "local",
+    devserver_id: null,
+    prefix: "ws-deck",
+  };
+  const served: WorkspaceEntry = { ...local, devserver_id: "ds-deck", prefix: "w/deck", library_id: "lib-deck" };
+  const devserver = { id: "ds-deck" } as DevserverEntry;
+
+  function liveTerminals(count: number): ApiError {
+    return new ApiError(
+      409,
+      JSON.stringify({ error: "workspace has live terminal sessions", code: "live_terminals", active_terminals: count }),
+    );
+  }
+
+  afterEach(() => {
+    cancelConfirm();
+    resetDeck();
+    screen.current = "computers";
+    screen.flips = 0;
+  });
+
+  it("turnOffWorkspace answers the count the server refused over and raises no dialog", async () => {
+    const off = vi.spyOn(backend, "setWorkspaceOn").mockRejectedValueOnce(liveTerminals(2)).mockResolvedValue(undefined);
+    expect(await turnOffWorkspace(local)).toBe(2);
+    expect(confirm.open, "the caller asks on a surface of its own").toBe(false);
+    expect(await turnOffWorkspace(local, true)).toBeNull();
+    expect(off.mock.calls).toEqual([
+      ["ws-deck", false, false],
+      ["ws-deck", false, true],
+    ]);
+  });
+
+  it("turnOffWorkspace passes every other refusal on, and a forced one whole", async () => {
+    const off = vi.spyOn(backend, "setWorkspaceOn").mockRejectedValue(new ApiError(409, '{"error":"workspace is locked"}'));
+    await expect(turnOffWorkspace(local)).rejects.toThrow("workspace is locked");
+    off.mockRejectedValue(liveTerminals(1));
+    await expect(turnOffWorkspace(local, true)).rejects.toThrow("workspace has live terminal sessions");
+  });
+
+  it("turnOffWorkspace turns a served workspace off on its devserver", async () => {
+    const off = vi.spyOn(backend, "setDevserverWorkspaceOn").mockRejectedValueOnce(liveTerminals(4)).mockResolvedValue(undefined);
+    expect(await turnOffWorkspace(served)).toBe(4);
+    expect(await turnOffWorkspace(served, true)).toBeNull();
+    expect(off.mock.calls).toEqual([
+      ["ds-deck", "w/deck", false, false],
+      ["ds-deck", "w/deck", false, true],
+    ]);
+  });
+
+  it("turnOnAndOpenWorkspace turns the workspace on before it opens the window", async () => {
+    const order: string[] = [];
+    vi.spyOn(backend, "setDevserverWorkspaceOn").mockImplementation(async (_id, _prefix, on) => {
+      order.push(`on:${on}`);
+      return undefined;
+    });
+    vi.spyOn(backend, "openDevserverWorkspace").mockImplementation(async (_id, path, startTerminal) => {
+      order.push(`open:${path}:${startTerminal}`);
+    });
+    await turnOnAndOpenWorkspace(served);
+    expect(order).toEqual(["on:true", "open:/work/deck:false"]);
+  });
+
+  it("turnOnAndOpenWorkspace opens nothing when the turn-on is refused", async () => {
+    vi.spyOn(backend, "setDevserverWorkspaceOn").mockRejectedValue(new Error("mount failed"));
+    const open = vi.spyOn(backend, "openDevserverWorkspace").mockResolvedValue(undefined);
+    await expect(turnOnAndOpenWorkspace(served)).rejects.toThrow("mount failed");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["opens the terminal once the devserver is connected", false, 1],
+    ["waits for a later gesture while a sign-in is pending", true, 0],
+  ])("connectAndOpenTerminal %s", async (_name, pending_signin, opened) => {
+    const connect = vi.spyOn(backend, "connectDevserver").mockResolvedValue(undefined);
+    vi.spyOn(backend, "listDevservers").mockResolvedValue([
+      { ...devserver, status: pending_signin ? "disconnected" : "connected", pending_signin } as DevserverEntry,
+    ]);
+    const terminal = vi.spyOn(backend, "openDevserverTerminal").mockResolvedValue(undefined);
+    await connectAndOpenTerminal(devserver);
+    expect(connect).toHaveBeenCalledExactlyOnceWith("ds-deck");
+    expect(terminal).toHaveBeenCalledTimes(opened);
+  });
+
+  it("connectAndOpenTerminal opens nothing when the connect is refused", async () => {
+    vi.spyOn(backend, "connectDevserver").mockRejectedValue(new Error("no route to host"));
+    const terminal = vi.spyOn(backend, "openDevserverTerminal").mockResolvedValue(undefined);
+    await expect(connectAndOpenTerminal(devserver)).rejects.toThrow("no route to host");
+    expect(terminal).not.toHaveBeenCalled();
+  });
+
+  it("liveTerminalCountForWorkspace sums its windows' counts", async () => {
+    const count = vi.spyOn(backend, "liveTerminalCount").mockResolvedValueOnce(2).mockResolvedValueOnce(1);
+    const windows = [{ ...record, window_id: "a" }, { ...record, window_id: "b" }];
+    expect(await liveTerminalCountForWorkspace(local, windows)).toBe(3);
+    expect(count.mock.calls).toEqual([["a"], ["b"]]);
+    expect(await liveTerminalCountForWorkspace(local, [])).toBe(0);
+  });
+
+  it("liveTerminalCountForWorkspace names no figure it cannot stand behind", async () => {
+    const count = vi.spyOn(backend, "liveTerminalCount").mockResolvedValueOnce(2).mockResolvedValueOnce(null);
+    const windows = [{ ...record, window_id: "a" }, { ...record, window_id: "b" }];
+    expect(await liveTerminalCountForWorkspace(local, windows)).toBeNull();
+    count.mockClear();
+    expect(await liveTerminalCountForWorkspace(served, windows), "a devserver's feed carries no count").toBeNull();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it("showComputerCard turns the Computers screen to the card and asks focus onto it", () => {
+    screen.current = "gateways";
+    const asked = decks.computers.focusSeq;
+    showComputerCard("ds-deck");
+    expect(screen.current).toBe("computers");
+    expect(decks.computers.activeKey).toBe("ds-deck");
+    expect(decks.computers.focusSeq).toBe(asked + 1);
+  });
+
+  it("copyGatewayPublicKey writes the whole key to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    try {
+      await copyGatewayPublicKey({ id: "gw", wireguard_public_key: "cHVibGljLWtleQ==" } as GatewayEntry);
+      expect(writeText).toHaveBeenCalledExactlyOnceWith("cHVibGljLWtleQ==");
+      await expect(copyGatewayPublicKey({ id: "gw", wireguard_public_key: null } as GatewayEntry)).rejects.toThrow(
+        "This gateway has no WireGuard key",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

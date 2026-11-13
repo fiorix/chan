@@ -2,14 +2,10 @@
   // Terminal settings: the server-config `terminal` slice. Program status
   // changes every session at once; the other terminal controls here apply
   // to newly spawned terminals. The scrollback slider and the free-text
-  // TERM field debounce their writes.
+  // TERM field debounce their writes. Each field takes its words, and a
+  // toggle or a choice its change, from the settings index.
 
-  import type {
-    Preferences,
-    TerminalContrast,
-    TerminalCustomColors,
-    TerminalFontChoice,
-  } from "../../api/types";
+  import type { Preferences } from "../../api/types";
   import { DEFAULT_SECRET_MASK_SUFFIXES } from "../../terminal/secretMasking";
   import {
     SCROLLBACK_MB_MIN,
@@ -30,10 +26,17 @@
     setDesktopTerminalOpacity,
   } from "../../terminal/desktopTerminalOpacity.svelte";
   import { isTauriDesktop } from "../../api/desktop";
-  import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
-  import { ui } from "../../state/store.svelte";
-  import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
-  import type { CommitFn, CommitOptions, SaveStatus } from "./commit";
+  import { commitSetting, type CommitFn, type SaveStatus } from "./commit";
+  import {
+    TERMINAL_COLOR_FIELDS,
+    backgroundOpacityLabel,
+    chosenIn,
+    optionsOf,
+    settingEntry,
+    toggledIn,
+    type TerminalColorField,
+  } from "./settingsIndex";
+  import { customTerminalColorsUpdate, resetTerminalColorsChange } from "./terminalColors";
   import SettingField from "./SettingField.svelte";
   import PillToggle from "./PillToggle.svelte";
   import PillRadio from "./PillRadio.svelte";
@@ -46,6 +49,24 @@
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
+  const SCROLLBACK = settingEntry("terminal.scrollback");
+  const TERM = settingEntry("terminal.term");
+  const MCP_ENV = settingEntry("terminal.mcpEnv");
+  const MOUSE_CAPTURE = settingEntry("terminal.mouseCapture");
+  const ENGINE = settingEntry("terminal.engine");
+  const PROGRAM_STATUS = settingEntry("terminal.programStatus");
+  const TMUX = settingEntry("terminal.tmux");
+  const SECRET_MASKING = settingEntry("terminal.secretMasking");
+  const FONT = settingEntry("terminal.font");
+  const FONT_SIZE = settingEntry("terminal.fontSize");
+  const BACKGROUND_OPACITY = settingEntry("terminal.backgroundOpacity");
+  const CUSTOM_COLORS = settingEntry("terminal.customColors");
+  const ANSI_CONTRAST = settingEntry("terminal.ansiContrast");
+  const COLOR_ROWS = TERMINAL_COLOR_FIELDS.map((key) => ({
+    key,
+    entry: settingEntry(`terminal.colors.${key}`),
+  }));
+
   // Secret masking is editable here and applies on both backends. The
   // suffix list stays display-only
   // (normalize_terminal_secret_mask_suffixes drops, dedupes and
@@ -55,34 +76,14 @@
   // already-open terminals keep the flag and suffixes they started
   // with.
   //
-  // The row reads what a new terminal of this window starts with: the
-  // stored choice, or with none stored the window's default, by the rule
-  // the terminal itself is seeded with. "Use default" is offered only
-  // while a choice is stored, and removes it with a write of `null`,
-  // which the config route takes as "clear"; a key left out of the
-  // terminal object keeps the stored choice. A cleared choice sits in the
-  // edit buffer as `null` until the server's view replaces it.
-  const secretMaskingStored = $derived(prefs.terminal.secret_masking ?? null);
-  const secretMaskingOn = $derived(
-    windowModeSecretMaskingEnabled(secretMaskingStored, { terminalControl: ui.terminalControl }),
-  );
+  // The row reads the stored choice: On, Off, or Default while none is
+  // stored, when a new terminal takes its window's default by the rule
+  // the terminal itself is seeded with. Default removes a stored choice,
+  // which then sits in the edit buffer as `null` until the server's view
+  // replaces it.
   const secretMaskSuffixes = $derived(
     prefs.terminal.secret_mask_suffixes ?? DEFAULT_SECRET_MASK_SUFFIXES,
   );
-
-  function toggleSecretMasking(on: boolean): void {
-    commit((p) => ({
-      ...p,
-      terminal: { ...p.terminal, secret_masking: on },
-    }));
-  }
-
-  function useDefaultSecretMasking(): void {
-    commit((p) => ({
-      ...p,
-      terminal: { ...p.terminal, secret_masking: null },
-    }));
-  }
 
   const SCROLLBACK_STEP = 10;
 
@@ -114,118 +115,19 @@
   // Terminal font. The Source Code Pro face ships inside the SPA bundle,
   // so picking it is a plain preference write with nothing to fetch and
   // no state where the config claims a font the browser cannot load.
-  const currentFont = $derived(
-    (prefs.terminal.font ?? "os-default") as TerminalFontChoice,
-  );
+  const currentFont = $derived(chosenIn(FONT, prefs));
 
-  function selectFont(next: TerminalFontChoice): void {
+  function selectFont(next: string): void {
     if (next === currentFont) return;
-    commit((p) => ({ ...p, terminal: { ...p.terminal, font: next } }));
+    commitSetting(commit, FONT, next);
   }
 
   // ---- custom terminal colours ------------------------------------------
   // The colour block is atomic: the toggle swaps the whole
   // `terminal_colors` composite, and each colour commit replaces the
-  // payload with one field changed.
-  const TERMINAL_CONTRAST = [
-    { value: "auto", label: "Auto" },
-    { value: "dark", label: "Dark" },
-    { value: "light", label: "Light" },
-  ] as const;
-  const TERMINAL_COLOR_ROWS = [
-    { key: "background", label: "Background" },
-    { key: "foreground", label: "Foreground" },
-    { key: "cursor", label: "Cursor" },
-  ] as const;
-  type TerminalColorField = (typeof TERMINAL_COLOR_ROWS)[number]["key"];
-
-  const customTerminalColorsOn = $derived(prefs.terminal_colors?.mode === "custom");
+  // payload with one field changed (see terminalColors.ts).
+  const customTerminalColorsOn = $derived(toggledIn(CUSTOM_COLORS, prefs));
   const customTerminalColors = $derived(prefs.terminal_colors?.custom);
-
-  function standardTerminalTheme(current: Preferences): "dark" | "light" {
-    const surface = current.hybrid_surface_themes?.terminal;
-    if (surface) return surface;
-    if (current.theme === "dark" || current.theme === "light") return current.theme;
-    return document.documentElement.dataset.theme === "light" ? "light" : "dark";
-  }
-
-  function snapshotStandardTerminalColors(current: Preferences): TerminalCustomColors {
-    const theme = standardTerminalTheme(current);
-    const root = document.documentElement;
-    let source: Element = root;
-    let probe: HTMLDivElement | null = null;
-    if (root.dataset.theme !== theme) {
-      probe = document.createElement("div");
-      probe.dataset.theme = theme;
-      probe.style.cssText =
-        "position:fixed;visibility:hidden;pointer-events:none;width:0;height:0;";
-      document.body.appendChild(probe);
-      source = probe;
-    }
-    const colors = readStandardTerminalColors(source);
-    probe?.remove();
-    return { ...colors, contrast: "auto" };
-  }
-
-  /// The stored palette in the form the config route accepts. The route
-  /// refuses the whole palette for one hex it cannot parse (it wants the
-  /// leading `#`), and a hand edit of the file can leave such a hex, so a
-  /// write that copied the palette as stored would fail. Each hex goes in
-  /// its normalized form, and one that does not parse takes the standard
-  /// colour in its place.
-  function acceptedCustomColors(
-    custom: TerminalCustomColors,
-    current: Preferences,
-  ): TerminalCustomColors {
-    const background = normalizeHexColor(custom.background);
-    const foreground = normalizeHexColor(custom.foreground);
-    const cursor = normalizeHexColor(custom.cursor);
-    if (background && foreground && cursor) return { ...custom, background, foreground, cursor };
-    const standard = snapshotStandardTerminalColors(current);
-    return {
-      ...custom,
-      background: background ?? standard.background,
-      foreground: foreground ?? standard.foreground,
-      cursor: cursor ?? standard.cursor,
-    };
-  }
-
-  function toggleCustomTerminalColors(on: boolean): void {
-    // The page's standard colours are read once, outside the change: the
-    // write runs the change twice, so a read inside it would run twice too.
-    const standard = on && !prefs.terminal_colors?.custom ? snapshotStandardTerminalColors(prefs) : null;
-    commit((p) => {
-      const stored = p.terminal_colors?.custom;
-      return {
-        ...p,
-        terminal_colors: on
-          ? {
-              mode: "custom",
-              custom: stored
-                ? acceptedCustomColors(stored, p)
-                : (standard ?? snapshotStandardTerminalColors(p)),
-            }
-          : {
-              mode: "standard",
-              ...(stored ? { custom: acceptedCustomColors(stored, p) } : {}),
-            },
-      };
-    });
-  }
-
-  function commitCustomTerminalColors(
-    update: (custom: TerminalCustomColors) => TerminalCustomColors,
-    options?: CommitOptions,
-  ): Promise<SaveStatus> {
-    return commit((p) => {
-      const current = p.terminal_colors?.custom;
-      if (!current) return p;
-      return {
-        ...p,
-        terminal_colors: { mode: "custom", custom: update(acceptedCustomColors(current, p)) },
-      };
-    }, undefined, options);
-  }
 
   /// Write one normalized hex (from ColorField) into the custom payload.
   /// The row reports for itself: the three of them write one preference,
@@ -234,31 +136,20 @@
     field: TerminalColorField,
     hex: string,
   ): Promise<SaveStatus> {
-    return commitCustomTerminalColors((custom) => ({ ...custom, [field]: hex }), {
-      ownStatus: true,
-    });
-  }
-
-  function setTerminalContrast(contrast: string): void {
-    commitCustomTerminalColors((custom) => ({
-      ...custom,
-      contrast: contrast as TerminalContrast,
-    }));
+    return commit(
+      customTerminalColorsUpdate((custom) => ({ ...custom, [field]: hex })),
+      undefined,
+      { ownStatus: true },
+    );
   }
 
   function resetTerminalColors(): void {
-    commit((p) => ({
-      ...p,
-      terminal_colors: {
-        mode: "custom",
-        custom: snapshotStandardTerminalColors(p),
-      },
-    }));
+    commit(resetTerminalColorsChange());
   }
 </script>
 
 <SettingField
-  label="Scrollback"
+  setting={SCROLLBACK}
   pref="terminal.scrollback_mb"
   hint="Per-terminal scrollback budget. New terminals only; existing ones keep their scrollback until they restart."
 >
@@ -275,7 +166,7 @@
 </SettingField>
 
 <SettingField
-  label="TERM"
+  setting={TERM}
   pref="terminal.default_term"
   hint="TERM environment variable for new terminals. Blank falls back to xterm-256color."
 >
@@ -289,88 +180,79 @@
 </SettingField>
 
 <SettingField
-  label="MCP discovery"
+  setting={MCP_ENV}
   pref="terminal.mcp_env"
   hint="Expose the chan MCP env vars (CHAN_MCP_*) to new terminals so agent CLIs can find the MCP server."
 >
   <PillToggle
-    label="Enable in new terminals"
-    checked={prefs.terminal.mcp_env ?? false}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, terminal: { ...p.terminal, mcp_env: on } }))}
+    label={MCP_ENV.caption}
+    checked={toggledIn(MCP_ENV, prefs)}
+    ontoggle={(on) => commitSetting(commit, MCP_ENV, on)}
   />
 </SettingField>
 
 <SettingField
-  label="Mouse capture"
+  setting={MOUSE_CAPTURE}
   pref="terminal.mouse_capture"
   hint="Let full-screen terminal apps capture the mouse. Turn off to keep click-drag text selection over them. New terminals only."
 >
   <PillToggle
-    label="Allow in new terminals"
-    checked={prefs.terminal.mouse_capture ?? true}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, terminal: { ...p.terminal, mouse_capture: on } }))}
+    label={MOUSE_CAPTURE.caption}
+    checked={toggledIn(MOUSE_CAPTURE, prefs)}
+    ontoggle={(on) => commitSetting(commit, MOUSE_CAPTURE, on)}
   />
 </SettingField>
 
 <SettingField
-  label="Ghostty backend"
+  setting={ENGINE}
   pref="terminal.ghostty"
-  hint="Parse and render terminals with Ghostty's WASM engine instead of xterm.js. On by default on every platform; turn it off to use xterm.js. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
+  hint="What parses and renders new terminals: Ghostty's WASM engine, the default on every platform, or xterm.js. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
 >
-  <PillToggle
-    label="Use ghostty-web in new terminals"
-    checked={prefs.terminal.ghostty ?? false}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, terminal: { ...p.terminal, ghostty: on } }))}
+  <PillRadio
+    name="settings-terminal-engine"
+    ariaLabel="Terminal engine"
+    value={chosenIn(ENGINE, prefs)}
+    options={optionsOf(ENGINE)}
+    onselect={(engine) => commitSetting(commit, ENGINE, engine)}
   />
 </SettingField>
 
 <SettingField
-  label="Program status"
+  setting={PROGRAM_STATUS}
   pref="terminal.program_status"
   hint="Show what programs report through OSC 7501 and mark chan's own waits."
 >
   <PillToggle
-    label="Program status (OSC 7501)"
-    checked={prefs.terminal.program_status ?? true}
-    ontoggle={(on) =>
-      commit((p) => ({ ...p, terminal: { ...p.terminal, program_status: on } }))}
+    label={PROGRAM_STATUS.caption}
+    checked={toggledIn(PROGRAM_STATUS, prefs)}
+    ontoggle={(on) => commitSetting(commit, PROGRAM_STATUS, on)}
   />
 </SettingField>
 
 <SettingField
-  label="tmux control mode"
+  setting={TMUX}
   pref="terminal.tmux"
   hint="Honor the marker tmux -CC prints. A local tmux enters at once; any other foreground program asks first. Applies to new markers in every terminal; a connection already running is left alone."
 >
   <PillToggle
-    label="tmux control mode (tmux -CC)"
-    checked={prefs.terminal.tmux?.enabled ?? false}
-    ontoggle={(on) =>
-      commit((p) => ({
-        ...p,
-        terminal: { ...p.terminal, tmux: { ...(p.terminal.tmux ?? {}), enabled: on } },
-      }))}
+    label={TMUX.caption}
+    checked={toggledIn(TMUX, prefs)}
+    ontoggle={(on) => commitSetting(commit, TMUX, on)}
   />
 </SettingField>
 
 <SettingField
-  label="Secret masking"
+  setting={SECRET_MASKING}
   pref="terminal.secret_masking"
-  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. Default stores no choice: masking is then on in a control terminal and off in every other window. The terminal menu has an ephemeral per-tab toggle."
 >
-  <PillToggle
-    label="Mask secrets in new terminals"
-    checked={secretMaskingOn}
-    ontoggle={toggleSecretMasking}
+  <PillRadio
+    name="settings-terminal-secret-masking"
+    ariaLabel="Secret masking"
+    value={chosenIn(SECRET_MASKING, prefs)}
+    options={optionsOf(SECRET_MASKING)}
+    onselect={(choice) => commitSetting(commit, SECRET_MASKING, choice)}
   />
-  {#if secretMaskingStored !== null}
-    <button type="button" class="plain-button" onclick={useDefaultSecretMasking}>
-      Use default
-    </button>
-  {/if}
   <details class="suffixes">
     <summary>Suffixes ({secretMaskSuffixes.length})</summary>
     <ChipList names={secretMaskSuffixes} readonly ariaLabel="Secret mask suffixes" />
@@ -378,23 +260,23 @@
 </SettingField>
 
 <SettingField
-  label="Terminal font"
+  setting={FONT}
   pref="terminal.font"
   hint="Font for new terminals. Source Code Pro ships with chan and renders identically on every OS; existing terminals keep their font until they restart."
 >
   <select
     value={currentFont}
-    onchange={(e) =>
-      selectFont(e.currentTarget.value as TerminalFontChoice)}
+    onchange={(e) => selectFont(e.currentTarget.value)}
     aria-label="Terminal font"
   >
-    <option value="os-default">OS default (mono)</option>
-    <option value="source-code-pro">Source Code Pro</option>
+    {#each optionsOf(FONT) as font (font.value)}
+      <option value={font.value}>{font.label}</option>
+    {/each}
   </select>
 </SettingField>
 
 <SettingField
-  label="Terminal font size"
+  setting={FONT_SIZE}
   pref="terminal.font_size"
   hint="Font size for newly constructed terminal surfaces. Mounted renderers and their PTY geometry stay unchanged."
 >
@@ -413,7 +295,7 @@
 </SettingField>
 
 <SettingField
-  label="Background opacity"
+  setting={BACKGROUND_OPACITY}
   pref="terminal.background_opacity"
   hint={BACKGROUND_OPACITY_HINT}
 >
@@ -422,39 +304,40 @@
     min={TERMINAL_BACKGROUND_OPACITY_MIN}
     max={TERMINAL_BACKGROUND_OPACITY_MAX}
     step={1}
-    format={(v) => (v >= TERMINAL_BACKGROUND_OPACITY_MAX ? "100% (off)" : `${v}%`)}
+    format={backgroundOpacityLabel}
     ariaLabel="Terminal background opacity percent"
     oncommit={commitBackgroundOpacity}
   />
 </SettingField>
 
 <SettingField
-  label="Custom terminal colours"
+  setting={CUSTOM_COLORS}
   pref="terminal_colors"
   hint="Override terminal background, foreground, and cursor colours. The terminal's standard Inherit, Light, or Dark choice remains underneath."
 >
   <PillToggle
-    label="Custom terminal colours"
+    label={CUSTOM_COLORS.caption}
     checked={customTerminalColorsOn}
-    ontoggle={toggleCustomTerminalColors}
+    ontoggle={(on) => commitSetting(commit, CUSTOM_COLORS, on)}
   />
 </SettingField>
 
 {#if customTerminalColorsOn && customTerminalColors}
-  <SettingField label="ANSI contrast" pref="terminal_colors.custom">
+  <SettingField setting={ANSI_CONTRAST} pref="terminal_colors.custom">
     <PillRadio
       name="settings-terminal-contrast"
       ariaLabel="Terminal ANSI contrast"
-      value={customTerminalColors.contrast}
-      options={TERMINAL_CONTRAST}
-      onselect={setTerminalContrast}
+      value={chosenIn(ANSI_CONTRAST, prefs)}
+      options={optionsOf(ANSI_CONTRAST)}
+      onselect={(contrast) => commitSetting(commit, ANSI_CONTRAST, contrast)}
     />
   </SettingField>
   <div class="terminal-colours">
-    {#each TERMINAL_COLOR_ROWS as row (row.key)}
+    {#each COLOR_ROWS as row (row.key)}
       <ColorField
         id={`terminal-colour-${row.key}`}
-        label={row.label}
+        setting={row.entry.id}
+        label={row.entry.caption}
         value={customTerminalColors[row.key]}
         oncommit={(hex) => (hex === null ? undefined : commitTerminalColor(row.key, hex))}
       />

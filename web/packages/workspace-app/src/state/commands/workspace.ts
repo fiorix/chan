@@ -1,9 +1,10 @@
-// Workspace-settings commands: chan-reports indexing toggle and metadata
-// archive import / export. Workspace-only (a standalone terminal window
-// has no workspace surface). Register with registerCommands. See
+// Workspace commands over the metadata archive: export and import.
+// Workspace-only (a standalone terminal window has no workspace surface).
+// chan-reports indexing is a field of the Settings overlay and reaches the
+// launcher through the settings index. Register with registerCommands. See
 // state/commands.ts for the Command shape and helpers.
 
-import { registerCommands, withStatus, workspaceOnly } from "../commands";
+import { registerCommands, workspaceOnly } from "../commands";
 import { setTransientStatus } from "../store.svelte";
 import { uiConfirm } from "../confirm.svelte";
 import { api } from "../../api/client";
@@ -66,48 +67,25 @@ function pickFile(accept: string): Promise<File | null> {
 
 registerCommands([
   {
-    id: "app.reports.enable",
-    title: "Enable chan-reports indexing",
-    category: "Workspace",
-    requirement: "workspace",
-    keywords: ["reports", "index", "chan-reports"],
-    available: (ctx) => workspaceOnly(ctx),
-    run: () =>
-      void withStatus(
-        () => api.reportsEnable(),
-        "chan-reports indexing enabled",
-        "chan-reports update failed",
-      ),
-  },
-  {
-    id: "app.reports.disable",
-    title: "Disable chan-reports indexing",
-    category: "Workspace",
-    requirement: "workspace",
-    keywords: ["reports", "index", "chan-reports"],
-    available: (ctx) => workspaceOnly(ctx),
-    run: () =>
-      void withStatus(
-        () => api.reportsDisable(),
-        "chan-reports indexing disabled",
-        "chan-reports update failed",
-      ),
-  },
-  {
     id: "app.metadata.export",
-    title: "Metadata archive: export",
+    title: "Export metadata archive",
     category: "Workspace",
+    scope: "workspace",
+    order: 2,
     requirement: "workspace",
-    keywords: ["metadata", "archive", "backup", "download"],
+    keywords: ["Metadata archive: export", "metadata", "archive", "backup", "download"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => void exportMetadataArchive(),
   },
   {
     id: "app.metadata.import",
-    title: "Metadata archive: import",
+    title: "Import metadata archive",
     category: "Workspace",
+    scope: "workspace",
+    order: 3,
+    kind: "open",
     requirement: "workspace",
-    keywords: ["metadata", "archive", "restore", "upload"],
+    keywords: ["Metadata archive: import", "metadata", "archive", "restore", "upload"],
     available: (ctx) => workspaceOnly(ctx),
     run: () => void importMetadataArchive(),
   },

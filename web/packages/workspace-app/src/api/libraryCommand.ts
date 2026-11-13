@@ -9,8 +9,6 @@ import { ApiError, readApiError } from "./errors";
 import { chanFetch, requestRoot, rootPath } from "./transport";
 import type { ScopedWorkspaceStatus } from "./workspaceStatus";
 
-export type { ScopedWorkspaceStatus } from "./workspaceStatus";
-
 export type ScopedWindowKind = "terminal" | "workspace";
 
 export interface ScopedLibraryWindow {

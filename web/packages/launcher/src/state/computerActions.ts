@@ -4,6 +4,7 @@
 
 import type {
   DevserverEntry,
+  GatewayEntry,
   TmuxWindowEntry,
   WindowRecord,
   WorkspaceEntry,
@@ -14,6 +15,7 @@ import {
   connectDevserver,
   focusWindow,
   grantNativeTrustAndConnect,
+  library,
   openDevserverTerminal,
   openDevserverWorkspace,
   openTerminal,
@@ -27,7 +29,9 @@ import {
 } from "./library.svelte";
 import { requestConfirm } from "./confirm.svelte";
 import { hasDesktopBridge, selfManagedWindows } from "./capabilities";
+import { showCard } from "./deck.svelte";
 import { actingFor, canActOnTenant } from "./leadership.svelte";
+import { showScreen } from "./screen.svelte";
 import {
   mintWindow,
   openWindowRecord,
@@ -56,6 +60,18 @@ export async function connectComputer(devserver: DevserverEntry): Promise<void> 
     confirmLabel: "Grant native access",
     onConfirm: () => runAndReport(grantNativeTrustAndConnect(devserver.id)),
   });
+}
+
+/** Connect a devserver and open a terminal on it, for a caller that asked for
+ * the terminal while the devserver was disconnected. A connect that handed
+ * off to a browser sign-in resolves before the devserver is connected, and
+ * its terminal waits for a later gesture. A devserver that asks for native
+ * access first goes through `connectComputer`, whose dialog cannot be
+ * chained. */
+export async function connectAndOpenTerminal(devserver: DevserverEntry): Promise<void> {
+  await connectDevserver(devserver.id);
+  if (library.devservers.find((row) => row.id === devserver.id)?.pending_signin) return;
+  await openDevserverTerminal(devserver.id);
 }
 
 export async function newTerminal(devserver?: DevserverEntry): Promise<void> {
@@ -127,6 +143,30 @@ export async function setWorkspacePower(workspace: WorkspaceEntry, on: boolean):
   }
 }
 
+/** Turn a workspace off for a caller that asks about live terminal sessions
+ * on a surface of its own, where `setWorkspacePower` raises the dialog.
+ * Unforced, it resolves null once the workspace is off, or with the count of
+ * live terminal sessions the server refused over; forced, it stops them. */
+export async function turnOffWorkspace(workspace: WorkspaceEntry, force = false): Promise<number | null> {
+  try {
+    await setWorkspaceOn(workspace, false, force);
+    return null;
+  } catch (error) {
+    const count = liveTerminalsCount(error);
+    if (force || count === null) throw error;
+    return count;
+  }
+}
+
+/** Turn a workspace on and open a window of it, for a caller that asked for
+ * the window while the workspace was off. A browser opens the window after
+ * the turn-on answers, outside the gesture's own task: one it blocks leaves
+ * the minted record waiting for an Open. */
+export async function turnOnAndOpenWorkspace(workspace: WorkspaceEntry): Promise<void> {
+  await setWorkspaceOn(workspace, true);
+  await mintWorkspaceWindow(workspace, false);
+}
+
 export function canManageWindow(window: WindowRecord): boolean {
   return hasDesktopBridge || (selfManagedWindows && canActOnTenant(window.prefix));
 }
@@ -140,7 +180,7 @@ export async function focusComputerWindow(window: WindowRecord): Promise<void> {
     return;
   }
   if (window.origin !== "browser") {
-    throw new Error("Native focus is unavailable in this browser. Use Open in this browser.");
+    throw new Error("Native focus is unavailable in this browser. Use Open window.");
   }
   if (!(await openWindowRecord(window))) return;
   if (window.hidden) {
@@ -177,6 +217,38 @@ export async function closeComputerWindow(window: WindowRecord): Promise<void> {
 
 export async function liveTerminalCountForWindow(window: WindowRecord): Promise<number | null> {
   return windowLiveTerminalCount(window);
+}
+
+/** The live terminal sessions a workspace's windows own, read ahead of a turn
+ * off. Null where a window's count is unknown: a devserver's feed carries
+ * none, so a served workspace is not asked. Sessions no listed window owns
+ * are not in the figure; the server's own count, which an unforced turn off
+ * answers with, is the one that decides. */
+export async function liveTerminalCountForWorkspace(
+  workspace: WorkspaceEntry,
+  windows: WindowRecord[],
+): Promise<number | null> {
+  if (workspace.devserver_id) return null;
+  let total = 0;
+  for (const count of await Promise.all(windows.map(liveTerminalCountForWindow))) {
+    if (typeof count !== "number") return null;
+    total += count;
+  }
+  return total;
+}
+
+/** Bring a machine's card to the front of the Computers screen and put the
+ * keyboard on it. `key` is the card's key in the Computers deck. */
+export function showComputerCard(key: string): void {
+  showScreen("computers");
+  showCard("computers", key, { focus: true });
+}
+
+/** Copy a gateway's WireGuard public key, the key its badge shows the first
+ * characters of. */
+export async function copyGatewayPublicKey(gateway: GatewayEntry): Promise<void> {
+  if (!gateway.wireguard_public_key) throw new Error("This gateway has no WireGuard key");
+  await navigator.clipboard.writeText(gateway.wireguard_public_key);
 }
 
 // The tmux connection card's actions. Each is one request to the connection

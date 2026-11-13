@@ -9,6 +9,9 @@
   import { errorText } from "../../../api/errors";
   import { formatSize } from "../../../state/format";
   import SettingField from "../SettingField.svelte";
+  import { settingEntry } from "../settingsIndex";
+
+  const METADATA = settingEntry("workspace.metadata");
 
   let metadataBusy = $state(false);
   let metadataStatus = $state<string | null>(null);
@@ -88,7 +91,7 @@
 </script>
 
 <SettingField
-  label="Metadata archive"
+  setting={METADATA}
   hint="Export or restore this workspace's index, graph, report, and sessions metadata as a single archive."
 >
   <div class="stack">

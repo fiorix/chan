@@ -63,7 +63,11 @@ vi.mock("../api/download", () => ({ downloadBytes: vi.fn() }));
 // loudly instead of hitting fetch.
 vi.mock("../api/transport", () => ({}));
 
-vi.mock("../state/store.svelte", () => ({
+// The store and the tab state are the real modules with the members this
+// body reads replaced: the action pill loads the command catalog, whose
+// modules import the rest of both.
+vi.mock("../state/store.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/store.svelte")>()),
   copyTextToClipboard: vi.fn(async () => {}),
   draftsDir: () => ".Drafts",
   isDraftPath: (p: string) => p.startsWith(".Drafts"),
@@ -81,7 +85,10 @@ vi.mock("../state/store.svelte", () => ({
   tree: { entries, loadingDirs: {}, loadedDirs: {}, dirErrors: {} },
 }));
 
-vi.mock("../state/tabs.svelte", () => ({ openTerminalInActivePane: vi.fn() }));
+vi.mock("../state/tabs.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/tabs.svelte")>()),
+  openTerminalInActivePane: vi.fn(),
+}));
 
 function fileNode(path: string) {
   return { kind: "file" as const, id: `f:${path}`, label: path, path };

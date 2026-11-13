@@ -31,6 +31,6 @@ test("a separator stands between the transfers launcher and the Hybrid Nav pill"
   flushSync();
 
   const pill = target.querySelector(".pane-mode-pill");
-  expect(target.querySelector('[aria-label="show file transfers"]') && pill, "both show").toBeTruthy();
+  expect(target.querySelector('[aria-label="Show transfers"]') && pill, "both show").toBeTruthy();
   expect(pill!.previousElementSibling?.classList.contains("sep"), "the separator before Hybrid Nav").toBe(true);
 });

@@ -36,13 +36,13 @@ async function runLauncherCommand(page, title) {
   const opened = await page.evaluate(() => {
     const button = [...document.querySelectorAll(".hamburger-menu button")].find(
       (candidate) =>
-        candidate.querySelector(".menu-row-label")?.textContent?.trim() === "Commands",
+        candidate.querySelector(".menu-row-label")?.textContent?.trim() === "Command launcher",
     );
     if (!(button instanceof HTMLElement)) return false;
     button.click();
     return true;
   });
-  if (!opened) throw new Error("pane menu has no Commands row");
+  if (!opened) throw new Error("pane menu has no Command launcher row");
   const input = await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { visible: true });
   await input.click({ count: 3 });
   await page.keyboard.type(title);

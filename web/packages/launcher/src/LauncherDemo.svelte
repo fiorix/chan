@@ -27,9 +27,8 @@
   } = $props();
 
   // The marketing mock always demos the dark theme to match the desktop
-  // screenshots and the dark widget frame, regardless of the visitor's
-  // prefers-color-scheme (which would otherwise start it light and render the
-  // theme toggle as a moon instead of the desktop's sun).
+  // screenshots and the dark widget frame: pinning it here keeps the mock
+  // from following a visitor's prefers-color-scheme into the light theme.
   themeState.theme = "dark";
 
   // Initial-value capture is deliberate: the embed wires the handler, variant,

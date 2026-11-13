@@ -22,6 +22,8 @@
   // outline). Cheap; no debounce needed.
 
   import { tick } from "svelte";
+  import { commandTitle } from "../state/commands";
+  import "../state/commands/install";
   import { slidePreviewCss } from "../editor/slide_dom";
   import SlideThumbnail from "./SlideThumbnail.svelte";
   import { Eye, Play } from "@lucide/svelte";
@@ -178,23 +180,25 @@
 
 {#if slidesSpec}
   <div class="slide-actions" aria-label="Slide actions">
+    <!-- Each button is its command, so it carries the command's title; the
+         tooltip adds the deck's aspect ratio and the command's chord. -->
     <button
       type="button"
       class="slide-action"
-      title={`Preview slides (${slidesSpec.aspectRatio}${previewChord ? `, ${previewChord}` : ""})`}
+      title={`${commandTitle("app.slides.preview")} (${slidesSpec.aspectRatio}${previewChord ? `, ${previewChord}` : ""})`}
       onclick={() => onPreview?.()}
     >
       <Eye size={14} strokeWidth={1.8} aria-hidden="true" />
-      <span>Preview</span>
+      <span>{commandTitle("app.slides.preview")}</span>
     </button>
     <button
       type="button"
       class="slide-action"
-      title={`Present slides (${slidesSpec.aspectRatio}${playChord ? `, ${playChord}` : ""})`}
+      title={`${commandTitle("app.slides.present")} (${slidesSpec.aspectRatio}${playChord ? `, ${playChord}` : ""})`}
       onclick={() => onPlay?.()}
     >
       <Play size={14} strokeWidth={1.8} aria-hidden="true" />
-      <span>Present</span>
+      <span>{commandTitle("app.slides.present")}</span>
     </button>
   </div>
 {/if}
@@ -233,9 +237,11 @@
     color: var(--text-secondary);
     font-style: italic;
   }
+  /* The two buttons share a row where each has room for its command's
+     title, and stack where the pane is narrower than that. */
   .slide-actions {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
     gap: 0.35rem;
     padding: 0.45rem 0.5rem 0.2rem;
   }

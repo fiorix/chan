@@ -12,8 +12,14 @@
 // capabilities depend on its host: without a filesystem surface it is the
 // narrow terminals-only window, with one it also browses and edits, and
 // with a draft store behind that it creates drafts too.
+//
+// What a choice lists is not a requirement: the Dashboard's slide choices
+// read the capabilities of the window that booted, which are fixed as the
+// modules load. So the slides each window shape lists are read in a module
+// graph booted as that window.
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { serveMeta } from "../../__tests__/standalone";
 import { allCommands, availableCommands, dispatchAllowsCommand, requirementAllows } from "../commands";
 import { capsForMode, type WindowMode } from "../windowCaps";
 import { TERMINAL_ONLY_COMMANDS, windowModeAllowsCommand } from "../windowMode";
@@ -80,11 +86,11 @@ describe("command requirement table", () => {
     expect(availableCommands(context).some((c) => c.id === "app.dashboard.open")).toBe(strip);
     expect(windowModeAllowsCommand("app.dashboard.open", mode)).toBe(strip);
     expect(dispatchAllowsCommand("app.dashboard.open", caps)).toBe(true);
+    // Go to slide and Shown slides are offered wherever a Dashboard is. The
+    // slides they list differ by window, which the next group reads.
     const dashboard = availableCommands({ ...context, activeSurface: "dashboard" });
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.metrics")).toBe(true);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.about")).toBe(true);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.workspace")).toBe(caps.workspace);
-    expect(dashboard.some((c) => c.id === "app.dashboard.slide.indexing")).toBe(caps.workspace);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide")).toBe(true);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slides")).toBe(true);
   });
 
   it("declares one of the five requirement values on every command", () => {
@@ -114,8 +120,8 @@ describe("command requirement table", () => {
     // TERMINAL_ONLY_COMMANDS is the set of ids that need no workspace. Some of
     // them are dispatch-only: they are fired by chords and by the desktop's
     // `chan:command` bridge and have no launcher row, so they are NOT catalog
-    // entries -- `app.window.confirmClose` (the OS close button), the find
-    // family, `app.tab.jump`, `app.launcher.toggle`. The dispatch gate runs for
+    // entries -- `app.window.confirmClose` (the OS close button),
+    // `app.tab.jump`, `app.launcher.toggle`. The dispatch gate runs for
     // any window that is more than terminals, so it has to allow them there
     // too; dropping one leaves the desktop holding a close the SPA never
     // answers.
@@ -172,5 +178,44 @@ describe("command requirement table", () => {
       expect(workspace.has(id), id).toBe(true);
     }
     expect(workspace.size).toBeGreaterThan(drafts.size);
+  });
+});
+
+describe("the Dashboard's slide choices, by window", () => {
+  const href = window.location.href;
+
+  afterEach(() => {
+    serveMeta("chan-files", false);
+    serveMeta("chan-drafts", false);
+    window.history.replaceState({}, "", href);
+    vi.resetModules();
+  });
+
+  it.each(SHAPES)("list the slides a $name window can show", async (shape) => {
+    // Boot a module graph as this window: its `?kind=` marker and the
+    // tenant's capability metas, in place before the state modules load.
+    vi.resetModules();
+    window.history.replaceState({}, "", shape.mode === "workspace" ? "/" : `/?kind=${shape.mode}`);
+    serveMeta("chan-files", shape.tenantFiles);
+    serveMeta("chan-drafts", shape.tenantDrafts);
+    const { windowCaps } = await import("../windowCaps");
+    expect(windowCaps).toEqual(capsForMode(shape.mode, shape.tenantFiles, shape.tenantDrafts));
+    const { commandById, commandContext } = await import("../commands");
+    await import("./dashboard");
+    const { resetLayout } = await import("../../__tests__/tabs");
+    resetLayout([{ kind: "dashboard", id: "dashboard-1", title: "Dashboard" }]);
+    const ctx = commandContext();
+    expect(ctx.activeSurface).toBe("dashboard");
+
+    // Metrics and About anywhere, Workspace and Search only over a
+    // workspace, in the dashboard menu's order.
+    const slides = windowCaps.workspace
+      ? ["Metrics", "Workspace", "Search", "About"]
+      : ["Metrics", "About"];
+    for (const id of ["app.dashboard.slide", "app.dashboard.slides"]) {
+      const command = commandById(id)!;
+      expect(command.available(ctx), id).toBe(true);
+      expect(command.options!(ctx).map((option) => option.label), id).toEqual(slides);
+    }
   });
 });

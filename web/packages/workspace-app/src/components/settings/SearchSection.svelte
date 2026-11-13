@@ -1,32 +1,29 @@
 <script lang="ts">
   // Search settings: the server-config `search_aggression` resource
-  // profile for the indexer.
+  // profile for the indexer, worded and written by its entry in the
+  // settings index.
 
-  import type { Preferences, SearchAggression } from "../../api/types";
-  import type { CommitFn } from "./commit";
+  import type { Preferences } from "../../api/types";
+  import { commitSetting, type CommitFn } from "./commit";
+  import { chosenIn, optionsOf, settingEntry } from "./settingsIndex";
   import SettingField from "./SettingField.svelte";
   import PillRadio from "./PillRadio.svelte";
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
-  const AGGRESSION = [
-    { value: "conservative", label: "Conservative" },
-    { value: "balanced", label: "Balanced" },
-    { value: "aggressive", label: "Aggressive" },
-  ] as const;
+  const INDEXING = settingEntry("search.indexing");
 </script>
 
 <SettingField
-  label="Search indexing"
+  setting={INDEXING}
   pref="search_aggression"
   hint="Resource profile for the search indexer. Aggressive indexes more eagerly at a higher cost."
 >
   <PillRadio
     name="settings-search"
     ariaLabel="Search indexing profile"
-    value={prefs.search_aggression}
-    options={AGGRESSION}
-    onselect={(v) =>
-      commit((p) => ({ ...p, search_aggression: v as SearchAggression }))}
+    value={chosenIn(INDEXING, prefs)}
+    options={optionsOf(INDEXING)}
+    onselect={(profile) => commitSetting(commit, INDEXING, profile)}
   />
 </SettingField>

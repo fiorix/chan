@@ -14,6 +14,7 @@
     "./api": "./src/api.ts",
     "./initial": "./src/initial.ts",
     "./command-deck": "./src/command-deck/model.ts",
+    "./computers-deck": "./src/command-deck/computers.ts",
     "./CommandDeck.svelte": "./src/components/CommandDeck.svelte",
     "./theme.css": "./src/styles/theme.css",
     "./Topbar.svelte": "./src/components/Topbar.svelte",

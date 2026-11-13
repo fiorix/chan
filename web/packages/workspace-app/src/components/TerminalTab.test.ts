@@ -709,7 +709,7 @@ describe("TerminalTab menu", () => {
       );
       // Sanity check: the menu actually rendered.
       expect(labels.length).toBeGreaterThan(0);
-      expect(labels).toContain("Close");
+      expect(labels).toContain("Close tab");
       for (const label of [
         "New File",
         "New Terminal",
@@ -744,7 +744,7 @@ describe("TerminalTab menu", () => {
     const bodyMenu = labels();
 
     expect(tabMenu.length).toBeGreaterThan(0);
-    expect(bodyMenu).toContain("Copy Scrollback");
+    expect(bodyMenu).toContain("Copy scrollback");
     for (const label of ["Reload", "Open Inspector"]) {
       expect(tabMenu).not.toContain(label);
       expect(bodyMenu).not.toContain(label);

@@ -5,8 +5,11 @@
 // off. A session saves its slide, its switched-off slides and a paused
 // rotation, each only when it differs from the default, and a restore moves
 // off a switched-off slide. Its right-click menu, also reached from the tab
-// title, switches each of Workspace, Search and About on or off (never the
-// last one), then offers Flip and Reload. Its carousel shows the workspace,
+// title, switches each slide on or off (never the last one) through the
+// options of the launcher's Shown slides, then offers Reload window, the tail
+// every tab menu ends with (Flip pane, Close tab) and the launcher row, each
+// worded by the catalog; Flip pane turns the pane the dashboard is in,
+// whichever pane holds the focus. Its carousel shows the workspace,
 // the index graph and an About slide with the version, the build, the links,
 // the donation QR and the free-software line; its dots and rotation skip a
 // switched-off slide, and its index graph draws only while the carousel is
@@ -39,9 +42,11 @@ vi.mock("./GraphCanvas.svelte", async (importOriginal) => {
 import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { boardLoaded } from "../__tests__/excalidraw";
+import { expectWords } from "../__tests__/menuWords";
 import { fileTab, resetLayout } from "../__tests__/tabs";
+import { commandById, commandContext } from "../state/commands";
 import { indexingCache } from "../state/indexingStatus.svelte";
-import { tree } from "../state/store.svelte";
+import { launcherPanel, tree } from "../state/store.svelte";
 import { openTabMenu } from "../state/tabMenu.svelte";
 import {
   DASHBOARD_SLOT_COUNT,
@@ -165,7 +170,15 @@ describe("the dashboard's menu", () => {
     await settle();
   }
 
-  test("switches each slide on or off, then offers Flip and Reload", async () => {
+  function row(label: string): HTMLButtonElement {
+    const found = [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
+      (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === label,
+    );
+    if (!found) throw new Error(`no menu row ${label}: ${JSON.stringify(rows())}`);
+    return found;
+  }
+
+  test("switches each slide on or off, then offers Reload window, the tab tail and the launcher", async () => {
     await rightClick();
 
     expect(rows()).toEqual([
@@ -173,9 +186,80 @@ describe("the dashboard's menu", () => {
       ["Workspace", "true"],
       ["Search", "true"],
       ["About", "true"],
-      ["Flip", null],
-      ["Reload", null],
+      ["Reload window", null],
+      ["Flip pane", null],
+      ["Close tab", null],
+      ["Command launcher", null],
     ]);
+  });
+
+  test("words every row by the catalog: the slides are the options of Shown slides", async () => {
+    await rightClick();
+
+    expectWords(rows().map(([label]) => label), [
+      { choice: "app.dashboard.slides", option: "3" },
+      { choice: "app.dashboard.slides", option: "0" },
+      { choice: "app.dashboard.slides", option: "1" },
+      { choice: "app.dashboard.slides", option: "2" },
+      { command: "app.window.reload" },
+      { command: "app.pane.flip" },
+      { command: "app.tab.close" },
+      { shortcut: "app.launcher.toggle" },
+    ]);
+  });
+
+  test("a slide row and the launcher's option are one switch", async () => {
+    const options = () => commandById("app.dashboard.slides")!.options!(commandContext());
+    await rightClick();
+    row("Search").click();
+    await settle();
+
+    expect(options().find((option) => option.label === "Search")?.checked).toBe(false);
+
+    // The launcher's option switches the row's check back on.
+    await options().find((option) => option.label === "Search")!.run();
+    await settle();
+    expect(row("Search").getAttribute("aria-checked")).toBe("true");
+  });
+
+  test("Close tab closes the dashboard", async () => {
+    await rightClick();
+    row("Close tab").click();
+    await settle();
+
+    expect(pane().tabs).toEqual([]);
+  });
+
+  test("Flip pane turns the pane to its other side", async () => {
+    await rightClick();
+    row("Flip pane").click();
+    await settle();
+
+    expect(pane().side).toBe("b");
+    expect(document.querySelector(".hamburger-menu")).toBeNull();
+  });
+
+  test("Flip pane turns the dashboard's own pane while another pane holds the focus", async () => {
+    const other = splitPane("pane-test", "row")!;
+    await settle();
+    await rightClick();
+    expect(layout.activePaneId, "the focus stays in the other pane").toBe(other);
+
+    row("Flip pane").click();
+    await settle();
+
+    expect((layout.nodes["pane-test"] as LeafNode).side, "the dashboard's pane").toBe("b");
+    expect((layout.nodes[other] as LeafNode).side ?? "a", "the focused pane").toBe("a");
+  });
+
+  test("Command launcher opens the launcher and closes the menu", async () => {
+    await rightClick();
+    row("Command launcher").click();
+    await settle();
+
+    expect(launcherPanel.open).toBe(true);
+    expect(document.querySelector(".hamburger-menu")).toBeNull();
+    launcherPanel.open = false;
   });
 
   test("switching a slide off drops its dot", async () => {
@@ -197,7 +281,7 @@ describe("the dashboard's menu", () => {
     openTabMenu("dash", { left: 10, top: 10, right: 10, bottom: 10 });
     await settle();
 
-    expect(rows().map(([label]) => label)).toContain("Reload");
+    expect(rows().map(([label]) => label)).toContain("Reload window");
   });
 });
 
@@ -346,8 +430,8 @@ describe("the carousel's slides", () => {
         ...[...inspector.querySelectorAll(".action-menu-item")].map((item) => item.textContent!.trim()),
       ];
 
-      expect(actions).toContain("Download tarball");
-      expect(actions).not.toContain("Upload file here");
+      expect(actions).toContain("Download");
+      expect(actions).not.toContain("Upload");
     } finally {
       tree.entries = [];
       indexingCache.last = null;

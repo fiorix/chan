@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { renderTable } from "./shortcuts";
+import { renderTable, shortcutLabel, SHORTCUTS } from "./shortcuts";
 
 describe("shortcut table", () => {
   test("advertises Command launcher as Ctrl+Alt+K on web and Cmd+K on native mac", () => {
@@ -14,13 +14,13 @@ describe("shortcut table", () => {
     expect(renderTable("native", "windows")).toMatch(/^Settings\s+Ctrl\+,/m);
   });
 
-  test("advertises Search as Cmd+Shift+S on macOS and Ctrl+Alt+S elsewhere", () => {
+  test("advertises Search workspace as Cmd+Shift+S on macOS and Ctrl+Alt+S elsewhere", () => {
     expect(renderTable("web", "mac")).toMatch(
-      /^Search\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux \/ Windows\)/m,
+      /^Search workspace\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux \/ Windows\)/m,
     );
-    expect(renderTable("native", "mac")).toMatch(/^Search\s+Cmd\+Shift\+S/m);
-    expect(renderTable("web", "linux")).toMatch(/^Search\s+Ctrl\+Alt\+S/m);
-    expect(renderTable("native", "windows")).toMatch(/^Search\s+Ctrl\+Alt\+S/m);
+    expect(renderTable("native", "mac")).toMatch(/^Search workspace\s+Cmd\+Shift\+S/m);
+    expect(renderTable("web", "linux")).toMatch(/^Search workspace\s+Ctrl\+Alt\+S/m);
+    expect(renderTable("native", "windows")).toMatch(/^Search workspace\s+Ctrl\+Alt\+S/m);
   });
 
   // "New terminal" is a direct chord so power users can spawn a terminal
@@ -63,8 +63,8 @@ describe("shortcut table", () => {
   });
 
   test("advertises pane side flip on Ctrl+`", () => {
-    expect(renderTable("web", "mac")).toMatch(/^Flip pane side\s+Ctrl\+`/m);
-    expect(renderTable("native", "mac")).toMatch(/^Flip pane side\s+Ctrl\+`/m);
+    expect(renderTable("web", "mac")).toMatch(/^Flip pane\s+Ctrl\+`/m);
+    expect(renderTable("native", "mac")).toMatch(/^Flip pane\s+Ctrl\+`/m);
   });
 
   // No-defaults rebind: Cmd+W is the macOS primary, Ctrl+Shift+W the
@@ -158,15 +158,15 @@ describe("shortcut table", () => {
     const web = renderTable("web", "mac");
     const native = renderTable("native", "mac");
     expect(web).toMatch(/^Split right\s+Ctrl\+Alt\+\//m);
-    expect(web).toMatch(/^Split bottom\s+Ctrl\+Alt\+\?/m);
+    expect(web).toMatch(/^Split down\s+Ctrl\+Alt\+\?/m);
     expect(native).toMatch(/^Split right\s+Cmd\+\//m);
-    expect(native).toMatch(/^Split bottom\s+Cmd\+Shift\+\//m);
+    expect(native).toMatch(/^Split down\s+Cmd\+Shift\+\//m);
     // The Linux / Windows desktop takes the web pair: Ctrl+/ is US to a
     // focused shell.
     for (const os of ["linux", "windows"] as const) {
       const offMac = renderTable("native", os);
       expect(offMac).toMatch(/^Split right\s+Ctrl\+Alt\+\//m);
-      expect(offMac).toMatch(/^Split bottom\s+Ctrl\+Alt\+\?/m);
+      expect(offMac).toMatch(/^Split down\s+Ctrl\+Alt\+\?/m);
     }
   });
 
@@ -178,13 +178,29 @@ describe("shortcut table", () => {
       expect(line.length).toBeLessThanOrEqual(74);
     }
     // The note survives the move; it is not truncated away.
-    expect(capped).toMatch(/^Search\s+Cmd\+Shift\+S$/m);
-    expect(capped).toMatch(/^\s+\(Ctrl\+Alt\+S on Linux \/ Windows\)$/m);
+    expect(capped).toMatch(/^New terminal\s+Ctrl\+Shift\+T$/m);
+    expect(capped).toMatch(/^\s+\(Cmd\+T on macOS desktop; or Mod\+\. t \(Hybrid Nav\)\)$/m);
   });
 
   test("without maxWidth every note stays inline", () => {
     const plain = renderTable("web", "mac");
-    expect(plain).toMatch(/^Search\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux/m);
+    expect(plain).toMatch(/^Search workspace\s+Cmd\+Shift\+S\s+\(Ctrl\+Alt\+S on Linux/m);
   });
 
+});
+
+// A menu words an action the command catalog holds no row for, the
+// launcher's own toggle, from the table.
+describe("shortcutLabel", () => {
+  test("is the table's label for an id the table holds", () => {
+    const launcher = SHORTCUTS.find((shortcut) => shortcut.id === "app.launcher.toggle")!;
+
+    expect(shortcutLabel("app.launcher.toggle")).toBe("Command launcher");
+    expect(shortcutLabel("app.launcher.toggle")).toBe(launcher.label);
+    expect(shortcutLabel("app.settings.open")).toBe("Settings");
+  });
+
+  test("reads an id the table does not hold as itself", () => {
+    expect(shortcutLabel("app.no.such.action")).toBe("app.no.such.action");
+  });
 });

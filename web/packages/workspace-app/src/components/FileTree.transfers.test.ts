@@ -8,6 +8,11 @@
 // entry's download link. Upload on a folder uploads into it, and on a file
 // replaces it in place and reloads any tab showing it. The inspector's
 // Upload and Download do the same for the entry it shows.
+//
+// A transfer row runs for its entry what the launcher's command of the same
+// title runs for the selection: the store's download, which the desktop
+// streams itself, and the picker that takes many files into a folder or one
+// file over a file.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -20,7 +25,8 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
-import { browserSelection, ui } from "../state/store.svelte";
+import { commandById } from "../state/commands";
+import { browserSelection, fbSelectSingle, fileOps, ui } from "../state/store.svelte";
 import { openBrowserInActivePane, splitPane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -72,6 +78,21 @@ async function menuRow(path: string, label: string): Promise<HTMLButtonElement> 
 function pick(input: HTMLInputElement, file: File): void {
   Object.defineProperty(input, "files", { value: [file], configurable: true });
   input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/// The picker an Upload raised: the file input last added to the page.
+function picker(): HTMLInputElement {
+  const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')];
+  expect(inputs.length, "a picker was raised").toBeGreaterThan(0);
+  return inputs[inputs.length - 1]!;
+}
+
+/// Run the launcher's command `id` with `path` as the file browser's selection.
+function runOnSelection(id: string, path: string): void {
+  fbSelectSingle(path);
+  const command = commandById(id);
+  expect(command, id).toBeDefined();
+  command!.run();
 }
 
 function drag(path: string): { types: string[]; effectAllowed: string } {
@@ -156,7 +177,8 @@ describe("the tree's transfer rows", () => {
     await vi.waitFor(() => expect(row("a.md")).toBeDefined());
 
     (await menuRow("a.md", "Upload")).click();
-    pick(document.querySelector<HTMLInputElement>("input.file-picker")!, new File(["new body"], "other.md"));
+    expect(picker().multiple, "one file replaces a file").toBe(false);
+    pick(picker(), new File(["new body"], "other.md"));
 
     await vi.waitFor(() => expect(ui.status).toBe("Replaced 'a.md'"));
     await expect(api.read("a.md")).resolves.toMatchObject({ content: "new body" });
@@ -168,9 +190,63 @@ describe("the tree's transfer rows", () => {
     await openFilesTab();
 
     (await menuRow("docs", "Upload")).click();
-    pick(document.querySelector<HTMLInputElement>("input.file-picker")!, new File(["fresh"], "c.md"));
+    expect(picker().multiple, "many files go into a folder").toBe(true);
+    pick(picker(), new File(["fresh"], "c.md"));
 
     await vi.waitFor(() => expect(api.read("docs/c.md")).resolves.toMatchObject({ content: "fresh" }));
+  });
+});
+
+describe("a transfer row and the command of its title", () => {
+  test("Download: both run the store's download for the entry", async () => {
+    await openFilesTab();
+    const download = vi.spyOn(fileOps, "downloadPathWithProgress");
+
+    (await menuRow("docs", "Download")).click();
+    runOnSelection("app.browser.downloadSelection", "docs");
+    (await menuRow("a.md", "Download")).click();
+    runOnSelection("app.browser.downloadSelection", "a.md");
+
+    expect(download.mock.calls).toEqual([["docs", true], ["docs", true], ["a.md", false], ["a.md", false]]);
+    expect(clicked.map((link) => link.getAttribute("href"))).toEqual([
+      api.downloadUrl("docs"), api.downloadUrl("docs"), api.downloadUrl("a.md"), api.downloadUrl("a.md"),
+    ]);
+    await settle();
+    expect(document.querySelector(".ctx"), "the row closes its menu").toBeNull();
+  });
+
+  test("Upload: both raise the picker that replaces a file with one file", async () => {
+    await openFilesTab();
+
+    runOnSelection("app.browser.uploadSelection", "a.md");
+    const forCommand = picker();
+    expect(forCommand.multiple).toBe(false);
+    pick(forCommand, new File(["from the launcher"], "x.md"));
+    await vi.waitFor(() => expect(api.read("a.md")).resolves.toMatchObject({ content: "from the launcher" }));
+
+    (await menuRow("a.md", "Upload")).click();
+    const forRow = picker();
+    expect(forRow).not.toBe(forCommand);
+    expect(forRow.multiple).toBe(false);
+    pick(forRow, new File(["from the row"], "y.md"));
+    await vi.waitFor(() => expect(api.read("a.md")).resolves.toMatchObject({ content: "from the row" }));
+    expect(document.querySelector(".ctx"), "the row closes its menu").toBeNull();
+  });
+
+  test("Upload: both raise the picker that takes many files into a folder", async () => {
+    await openFilesTab();
+
+    // The row first: an upload shows what landed, which takes the list into
+    // the folder and its row out of view.
+    (await menuRow("docs", "Upload")).click();
+    expect(picker().multiple).toBe(true);
+    pick(picker(), new File(["one"], "e.md"));
+    await vi.waitFor(() => expect(api.read("docs/e.md")).resolves.toMatchObject({ content: "one" }));
+
+    runOnSelection("app.browser.uploadSelection", "docs");
+    expect(picker().multiple).toBe(true);
+    pick(picker(), new File(["two"], "f.md"));
+    await vi.waitFor(() => expect(api.read("docs/f.md")).resolves.toMatchObject({ content: "two" }));
   });
 });
 
@@ -198,7 +274,7 @@ describe("the inspector's transfer actions", () => {
   test("Download hands the browser the entry's download link", async () => {
     await inspect("a.md");
 
-    (await action("Download file")).click();
+    (await action("Download")).click();
     await settle();
 
     expect(clicked.map((link) => link.getAttribute("href"))).toEqual([api.downloadUrl("a.md")]);
@@ -207,9 +283,8 @@ describe("the inspector's transfer actions", () => {
   test("Upload on a folder uploads into it", async () => {
     await inspect("docs");
 
-    (await action("Upload file here")).click();
-    const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')];
-    pick(inputs[inputs.length - 1], new File(["fresh"], "d.md"));
+    (await action("Upload")).click();
+    pick(picker(), new File(["fresh"], "d.md"));
 
     await vi.waitFor(() => expect(api.read("docs/d.md")).resolves.toMatchObject({ content: "fresh" }));
   });

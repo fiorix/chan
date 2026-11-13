@@ -3260,12 +3260,6 @@ export function clearTreeDirError(path: string): void {
   tree.dirErrors = rest;
 }
 
-export function clearTreeLoadingForPath(path: string): void {
-  const { [path]: _done, ...rest } = tree.loadingDirs;
-  tree.loadingDirs = rest;
-  if (Object.keys(rest).length === 0) tree.loading = false;
-}
-
 /// Take a save's or a live session's disk state into the saved file's tree
 /// entry, so the Details card follows the session's saves without a listing:
 /// a save through a session sends no watch frame, and only a listing writes
@@ -4819,7 +4813,9 @@ export const searchPanel = $state<{
 // accessors preserve the long-standing `.open` / `.query` API used by the
 // overlay stack while the shared deck receives the complete serializable draft.
 // A reload recreates this module and restores visibility, query, scope, path,
-// selection, and recoverable operation state. Closing the browser tab drops it.
+// selection, and recoverable operation state, so a launcher that was open
+// comes back as it stood. Opening it from closed starts over at the root and
+// keeps only the query. Closing the browser tab drops the draft.
 const LAUNCHER_DRAFT_KEY = SESSION_DECK_DRAFT_KEY;
 export const launcherDraft = $state<DeckDraft>(
   loadSessionDeckDraft(LAUNCHER_DRAFT_KEY),
@@ -4853,8 +4849,22 @@ export function clearLauncherDraft(): void {
   persistLauncherDraft();
 }
 
-/// Open or resume this window's launcher draft. Idempotent when already open.
-export function openCommandLauncher(): void {
+/// Open this window's launcher. From closed it starts at the root with no
+/// scope, the first row selected and the last query kept, so the chord never
+/// lands in the branch or scope of an earlier visit. With `path` it opens
+/// inside that branch instead, on an empty query, whether or not it was
+/// already open. Idempotent when already open with no `path`.
+export function openCommandLauncher(path: readonly string[] = []): void {
+  if (!launcherDraft.visible || path.length > 0) {
+    launcherDraft.path = [...path];
+    launcherDraft.selectedId = null;
+    launcherDraft.operation = null;
+  }
+  if (!launcherDraft.visible) {
+    launcherDraft.scope = null;
+    launcherDraft.contextChanged = false;
+  }
+  if (path.length > 0) launcherDraft.query = "";
   launcherPanel.open = true;
 }
 
@@ -4897,12 +4907,20 @@ export function openCommandLauncherFromMenu(row: Element, refocus?: () => void):
 // so a change in one window reflects in every other.
 export const settingsPanel = $state<{
   open: boolean;
+  /// Where an open should land: a rail section id and, inside it, a field id
+  /// from the settings index. The overlay shows it and clears it.
+  target: SettingsTarget | null;
 }>({
   open: false,
+  target: null,
 });
 
-/// Open the settings surface. Idempotent when already open.
-export function openSettings(): void {
+export type SettingsTarget = { section: string; field?: string };
+
+/// Open the settings surface, on `target` when one is given. Idempotent when
+/// already open; a target then moves the open overlay to it.
+export function openSettings(target?: SettingsTarget): void {
+  if (target) settingsPanel.target = target;
   settingsPanel.open = true;
 }
 

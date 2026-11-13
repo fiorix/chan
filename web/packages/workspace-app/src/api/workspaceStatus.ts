@@ -3,6 +3,8 @@
 // client so the answer carries no transport dependency: it is a pure function
 // of the wire string, usable anywhere the deck renders.
 
+import type { ComputersWorkspaceCondition } from "@chan/web-shared/computers-deck";
+
 /** Live mount lifecycle of a workspace in this window's library, as the library
  * serializes it. `unavailable` is a mount that is up while the directory under
  * its root cannot be read; `error` is a lifecycle operation that failed. Both
@@ -17,24 +19,23 @@ export type ScopedWorkspaceStatus =
   | "error"
   | "unavailable";
 
-/** Whether a new window may be opened over this workspace. Only a mount that
- * serves can: the library refuses the mint for every other status, `unavailable`
- * included, since that tenant is up but cannot read its root. Total over the
- * union, so a new status has to decide this rather than inherit an answer.
- *
- * This SPA's deck neither shows workspace state nor turns a workspace on or
- * off, so this is the only question it asks about a status. */
-export function scopedWorkspaceOpenable(status: ScopedWorkspaceStatus): boolean {
+/** How a workspace's mount reads in the Computers tree. Total over the union,
+ * so a new status has to decide this rather than inherit an answer. */
+export function workspaceCondition(status: ScopedWorkspaceStatus): ComputersWorkspaceCondition {
   switch (status) {
-    case "running":
-      return true;
     case "stopped":
+      return "idle";
     case "starting":
-    case "locked":
     case "closing":
     case "removing":
-    case "error":
+      return "busy";
+    case "running":
+      return "ready";
+    case "locked":
+      return "foreign";
     case "unavailable":
-      return false;
+      return "degraded";
+    case "error":
+      return "failed";
   }
 }

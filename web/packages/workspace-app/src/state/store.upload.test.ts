@@ -556,7 +556,7 @@ describe("the status bar", () => {
     const view = mount(AppStatusBar, { target });
     try {
       flushSync();
-      const launcher = target.querySelector<HTMLButtonElement>('[aria-label="show file transfers"]')!;
+      const launcher = target.querySelector<HTMLButtonElement>('[aria-label="Show transfers"]')!;
       expect(launcher.textContent?.replace(/\s+/g, " ").trim()).toBe("⇅ Transfers (1)");
       expect(target.textContent).not.toContain("uploading");
 

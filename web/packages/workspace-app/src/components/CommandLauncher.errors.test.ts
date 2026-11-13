@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { loadSessionDeckDraft } from "@chan/web-shared/command-deck";
 
 const scoped = vi.hoisted(() => ({ snapshot: null as unknown, run: vi.fn() }));
+const settings = vi.hoisted(() => ({ specs: [] as unknown[] }));
 vi.mock("../state/commands/install", () => ({}));
+vi.mock("./settings/settingsIndex", () => ({ settingsIndex: () => settings.specs }));
 vi.mock("../api/libraryCommand", () => ({
   loadScopedLibrarySnapshot: vi.fn(async () => scoped.snapshot),
   loadScopedWindowLiveTerminals: vi.fn(),
@@ -15,20 +17,14 @@ vi.mock("../api/libraryCommand", () => ({
 
 import CommandLauncher from "./CommandLauncher.svelte";
 import AppStatusBar from "./AppStatusBar.svelte";
-import { allCommands } from "../state/commands";
-import "../state/commands/global";
-import "../state/commands/editor";
-import "../state/commands/browser";
-import "../state/commands/terminal";
-import "../state/commands/dashboard";
-import "../state/commands/graph";
+import type { SettingSpec } from "./settings/settingsIndex";
 import * as statusBus from "../state/notify.svelte";
 import {
   clearLauncherDraft, closeCommandLauncher, dismissStatus, hybridSurfaceThemes,
-  launcherDraft, openCommandLauncher, persistLauncherDraft, ui,
+  launcherDraft, openCommandLauncher, persistLauncherDraft, setHybridSurfaceTheme,
+  setThemeChoice, ui,
 } from "../state/store.svelte";
-import { fileTab, resetLayout, terminalTab } from "../__tests__/tabs";
-import type { Tab } from "../state/tabs.svelte";
+import { resetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -80,6 +76,7 @@ beforeEach(() => {
   sessionStorage.clear();
   scoped.snapshot = null;
   scoped.run.mockReset();
+  settings.specs = [];
   closeCommandLauncher();
   clearLauncherDraft();
   dismissStatus();
@@ -122,7 +119,7 @@ describe("scoped command rejection destinations", () => {
     await vi.advanceTimersByTimeAsync(0);
     await flush();
     await search("hide notes");
-    row("Hide").click();
+    row("Hide Window 2 [Notes]").click();
     await flush();
     expect(scoped.run).toHaveBeenCalledExactlyOnceWith({ action: "set_window_visibility", window_id: "w-other", hidden: true });
     expect(launcherDraft.operation?.kind).toBe("pending");
@@ -138,7 +135,7 @@ describe("scoped command rejection destinations", () => {
       expect(notified).not.toHaveBeenCalled();
       expect(ui.status).toBeNull();
     } else {
-      const sentence = `Hide: Hide ${surface} refused`;
+      const sentence = `Hide Window 2 [Notes]: Hide ${surface} refused`;
       expect(notified).toHaveBeenCalledExactlyOnceWith(sentence);
       expect(ui.status).toBe(sentence);
       expect(statusTarget.querySelector('[aria-label="status message"]')?.textContent).toContain(sentence);
@@ -149,47 +146,58 @@ describe("scoped command rejection destinations", () => {
   });
 });
 
+// The theme fields as the settings index lists them, over the store's own
+// writers: a refused write rolls the choice back and rejects.
 const themes = [
-  ["app.theme.system", null, "system"],
-  ["app.theme.light", null, "light"],
-  ["app.theme.dark", null, "dark"],
-  ["app.editor.surfaceTheme.light", "editor", "light"],
-  ["app.editor.surfaceTheme.dark", "editor", "dark"],
-  ["app.browser.surfaceTheme.light", "browser", "light"],
-  ["app.browser.surfaceTheme.dark", "browser", "dark"],
-  ["app.terminal.surfaceTheme.light", "terminal", "light"],
-  ["app.terminal.surfaceTheme.dark", "terminal", "dark"],
-  ["app.dashboard.surfaceTheme.light", "dashboard", "light"],
-  ["app.dashboard.surfaceTheme.dark", "dashboard", "dark"],
-  ["app.graph.surfaceTheme.light", "graph", "light"],
-  ["app.graph.surfaceTheme.dark", "graph", "dark"],
+  ["Theme", null, "system"],
+  ["Theme", null, "light"],
+  ["Theme", null, "dark"],
+  ["Editor body theme", "editor", "light"],
+  ["Editor body theme", "editor", "dark"],
+  ["File browser body theme", "browser", "light"],
+  ["File browser body theme", "browser", "dark"],
+  ["Terminal body theme", "terminal", "light"],
+  ["Terminal body theme", "terminal", "dark"],
+  ["Dashboard body theme", "dashboard", "light"],
+  ["Dashboard body theme", "dashboard", "dark"],
+  ["Graph body theme", "graph", "light"],
+  ["Graph body theme", "graph", "dark"],
 ] as const;
 
-function surfaceTab(surface: typeof themes[number][1]): Tab | null {
-  switch (surface) {
-    case "editor": return fileTab();
-    case "terminal": return terminalTab();
-    case "browser": return { kind: "browser", id: "browser", title: "Files", inspectorOpen: false };
-    case "dashboard": return { kind: "dashboard", id: "dashboard", title: "Dashboard" };
-    case "graph": return {
-      kind: "graph", id: "graph", title: "Graph", depth: 1,
-      expanded: {}, inspectorOpen: false, pendingSelectId: null,
-      filters: { link: true, tag: true, mention: true, language: true, img: true, folder: true, markdown: true, source: true },
-    };
-    default: return null;
-  }
+type ThemeSurface = Exclude<typeof themes[number][1], null>;
+
+const OPTION_WORDS = { system: "System", light: "Light", dark: "Dark" } as const;
+
+function themeSpecs(): SettingSpec[] {
+  const surfaces: [string, ThemeSurface][] = [
+    ["Editor body theme", "editor"],
+    ["File browser body theme", "browser"],
+    ["Terminal body theme", "terminal"],
+    ["Dashboard body theme", "dashboard"],
+    ["Graph body theme", "graph"],
+  ];
+  return [
+    {
+      id: "global.theme", section: "global", label: "Theme", kind: "choice",
+      options: (["system", "light", "dark"] as const).map((value) => ({ value, label: OPTION_WORDS[value] })),
+      read: () => ui.themeChoice,
+      write: (value) => setThemeChoice(value as "system" | "light" | "dark"),
+      available: () => true,
+    },
+    ...surfaces.map(([label, surface]): SettingSpec => ({
+      id: `${surface}.body_theme`, section: "global", label, kind: "choice",
+      options: (["light", "dark"] as const).map((value) => ({ value, label: OPTION_WORDS[value] })),
+      read: () => hybridSurfaceThemes[surface] ?? null,
+      write: (value) => setHybridSurfaceTheme(surface, value as "light" | "dark"),
+      available: () => true,
+    })),
+  ];
 }
 
-describe("preference command rejection destinations", () => {
-  it.each(themes)("%s rolls back and reports once after closing its deck", async (id, surface, choice) => {
-    const command = allCommands().find((entry) => entry.id === id)!;
-    expect(command).toBeDefined();
-    const tab = surfaceTab(surface);
-    resetLayout(tab ? [tab] : []);
-    const previous = choice === "dark" ? "light" : "dark";
-    ui.themeChoice = previous;
-    ui.theme = previous;
-    if (surface) hybridSurfaceThemes[surface] = previous;
+describe("setting rejection destinations", () => {
+  /// Choose `title` among the typed results and leave its config write
+  /// unanswered: the returned handle answers it.
+  async function chooseWithPendingWrite(title: string, previous: "light" | "dark") {
     const patch = deferred<Response>();
     const writes: unknown[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -202,25 +210,53 @@ describe("preference command rejection destinations", () => {
     });
     openCommandLauncher();
     await flush();
-    await search(command.title);
-    row(command.title).click();
+    await search(title);
+    row(title).click();
     await flush();
-    expect(launcherDraft.visible).toBe(false);
+    return { patch, writes };
+  }
+
+  it.each(themes)("%s (%s, %s) rolls back and reports once after its deck closes", async (label, surface, choice) => {
+    settings.specs = themeSpecs();
+    const previous = choice === "dark" ? "light" : "dark";
+    ui.themeChoice = previous;
+    ui.theme = previous;
+    if (surface) hybridSurfaceThemes[surface] = previous;
+    const title = `${label}: ${OPTION_WORDS[choice]}`;
+    const { patch, writes } = await chooseWithPendingWrite(title, previous);
+    // The choice applies in place: the deck stays up over the new theme.
+    expect(launcherDraft.visible).toBe(true);
     expect(surface ? hybridSurfaceThemes[surface] : ui.themeChoice).toBe(choice);
     expect(writes).toEqual([{
       expected_revision: 1,
       preferences: surface ? { hybrid_surface_themes: expect.objectContaining({ [surface]: choice }) } : { theme: choice },
     }]);
-    const reason = `${id} write refused`;
+    closeCommandLauncher();
+    await flush();
+    const reason = `${label} write refused`;
     patch.resolve(new Response(JSON.stringify({ error: reason }), { status: 403 }));
     await flush();
     expect(surface ? hybridSurfaceThemes[surface] : ui.themeChoice).toBe(previous);
-    const sentence = `${command.title}: ${reason}`;
+    const sentence = `${title}: ${reason}`;
     expect(notified).toHaveBeenCalledExactlyOnceWith(sentence);
     expect(ui.status).toBe(sentence);
     expect(statusTarget.querySelector('[aria-label="status message"]')?.textContent).toContain(sentence);
     expect(launcherDraft.operation).toBeNull();
     await reopenAndReload();
     expect(notified).toHaveBeenCalledTimes(1);
+  });
+
+  it("a write refused while the deck is still up shows on the deck's card", async () => {
+    settings.specs = themeSpecs();
+    ui.themeChoice = "light";
+    ui.theme = "light";
+    const { patch } = await chooseWithPendingWrite("Theme: Dark", "light");
+    patch.resolve(new Response(JSON.stringify({ error: "theme write refused" }), { status: 403 }));
+    await flush();
+    expect(ui.themeChoice).toBe("light");
+    expect(target.querySelector(".deck-operation")?.textContent).toContain("theme write refused");
+    expect(target.querySelectorAll(".deck-operation-icon.error")).toHaveLength(1);
+    expect(notified).not.toHaveBeenCalled();
+    expect(ui.status).toBeNull();
   });
 });

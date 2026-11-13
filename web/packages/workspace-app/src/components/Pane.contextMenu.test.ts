@@ -2,13 +2,13 @@
 //
 // The pane's right-click menu. It opens over the strip's empty stretch and
 // over the body of a side with no tab, with the strip drawn or auto-hidden,
-// in place of the browser's own menu. It lists Commands, Reload and, on the
-// desktop only, Open Inspector, each with the chord this platform binds:
-// Commands and Reload read the shortcut registry, overrides included, and
-// Open Inspector the desktop key bridge's chord. A tab's body keeps its own
-// menu, and Hybrid Nav's preview is left alone. Commands opens the launcher
-// through the window's command bus, with focus handed back first to what held
-// it as the menu opened.
+// in place of the browser's own menu. It lists Command launcher, Reload
+// window and, on the desktop only, Open Inspector, each with the chord this
+// platform binds: the first two read the shortcut registry, overrides
+// included, and Open Inspector the desktop key bridge's chord. A tab's body
+// keeps its own menu, and Hybrid Nav's preview is left alone. Command
+// launcher opens the launcher through the window's command bus, with focus
+// handed back first to what held it as the menu opened.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -19,6 +19,7 @@ import { persistStateToHash } from "../state/store.svelte";
 import { workspace } from "../state/workspace.svelte";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { demoWorkspaceInfo } from "../demo/data";
+import { expectWords } from "../__tests__/menuWords";
 import { preferences } from "../__tests__/standalone";
 import { terminalTab } from "../__tests__/tabs";
 
@@ -129,11 +130,11 @@ function stripHidden(target: HTMLElement): boolean {
 
 describe("the pane menu's rows and chords", () => {
   test.each([
-    ["mac", true, [["Commands", "Cmd+K"], ["Reload", "Cmd+R"], ["Open Inspector", "Cmd+Alt+I"]]],
-    ["linux", true, [["Commands", "Ctrl+Alt+K"], ["Reload", "Ctrl+Shift+R"], ["Open Inspector", "Ctrl+Alt+I"]]],
-    ["windows", true, [["Commands", "Ctrl+Alt+K"], ["Reload", "Ctrl+Shift+R"], ["Open Inspector", "Ctrl+Alt+I"]]],
-    ["mac", false, [["Commands", "Ctrl+Alt+K"], ["Reload", "Cmd+R"]]],
-    ["linux", false, [["Commands", "Ctrl+Alt+K"], ["Reload", "Ctrl+Shift+R"]]],
+    ["mac", true, [["Command launcher", "Cmd+K"], ["Reload window", "Cmd+R"], ["Open Inspector", "Cmd+Alt+I"]]],
+    ["linux", true, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Ctrl+Shift+R"], ["Open Inspector", "Ctrl+Alt+I"]]],
+    ["windows", true, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Ctrl+Shift+R"], ["Open Inspector", "Ctrl+Alt+I"]]],
+    ["mac", false, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Cmd+R"]]],
+    ["linux", false, [["Command launcher", "Ctrl+Alt+K"], ["Reload window", "Ctrl+Shift+R"]]],
   ] as const)("on %s, desktop %s, an empty pane's body lists %j", async (os, desktop, expected) => {
     onPlatform(os, desktop);
     const target = await renderPane(emptyPane());
@@ -143,13 +144,25 @@ describe("the pane menu's rows and chords", () => {
     expect(rows()).toEqual(expected);
   });
 
-  test("Commands follows an override of the launcher's chord", async () => {
+  test("each row is worded by its command, and the launcher's by the shortcut table", async () => {
+    onPlatform("linux", true);
+    const target = await renderPane(emptyPane());
+    rightClick(target.querySelector(".placeholder")!);
+    await tick();
+    expectWords(rows().map(([label]) => label), [
+      { shortcut: "app.launcher.toggle" },
+      { command: "app.window.reload" },
+      { command: "app.window.devtools" },
+    ]);
+  });
+
+  test("Command launcher follows an override of the launcher's chord", async () => {
     onPlatform("mac", true);
     assignOverride("app.launcher.toggle", "Mod+Shift+K");
     const target = await renderPane(emptyPane());
     rightClick(target.querySelector(".placeholder")!);
     await tick();
-    expect(rows()[0]).toEqual(["Commands", "Cmd+Shift+K"]);
+    expect(rows()[0]).toEqual(["Command launcher", "Cmd+Shift+K"]);
   });
 
   test("Open Inspector asks the desktop to open its inspector", async () => {
@@ -170,7 +183,7 @@ describe("where the pane menu opens", () => {
     expect(stripHidden(target)).toBe(autoHide);
     expect(rightClick(target.querySelector(".editor-wrap")!).defaultPrevented).toBe(true);
     await tick();
-    expect(rows().map(([label]) => label)).toEqual(["Commands", "Reload"]);
+    expect(rows().map(([label]) => label)).toEqual(["Command launcher", "Reload window"]);
   });
 
   test("over the empty side B of a pane whose side A holds a terminal, with the strip hidden", async () => {
@@ -183,7 +196,7 @@ describe("where the pane menu opens", () => {
     expect(stripHidden(target), "an empty side B draws no strip").toBe(true);
     expect(rightClick(target.querySelector(".placeholder")!).defaultPrevented).toBe(true);
     await tick();
-    expect(rows().map(([label]) => label)).toEqual(["Commands", "Reload"]);
+    expect(rows().map(([label]) => label)).toEqual(["Command launcher", "Reload window"]);
   });
 
   test.each([
@@ -194,7 +207,7 @@ describe("where the pane menu opens", () => {
     const target = await renderPane(pane);
     expect(rightClick(target.querySelector(".tabs .dead-zone")!).defaultPrevented).toBe(true);
     await tick();
-    expect(rows().map(([label]) => label)).toEqual(["Commands", "Reload"]);
+    expect(rows().map(([label]) => label)).toEqual(["Command launcher", "Reload window"]);
   });
 
   test("not over a tab's body, which keeps its own menu or the browser's", async () => {
@@ -217,7 +230,7 @@ describe("where the pane menu opens", () => {
   });
 });
 
-describe("Commands", () => {
+describe("Command launcher", () => {
   /// Record each command the window's bus carries and what held focus then.
   function recordCommands(): Array<{ name: string; focus: Element | null }> {
     const seen: Array<{ name: string; focus: Element | null }> = [];
@@ -238,7 +251,7 @@ describe("Commands", () => {
     rightClick(target.querySelector(".placeholder")!);
     await tick();
     // A pointer press on the row moves focus there before its click.
-    const commands = row("Commands");
+    const commands = row("Command launcher");
     commands.focus();
     commands.click();
     await tick();
@@ -256,7 +269,7 @@ describe("Commands", () => {
     const seen = recordCommands();
     rightClick(welcome!);
     await tick();
-    const commands = row("Commands");
+    const commands = row("Command launcher");
     commands.focus();
     commands.click();
     await tick();
@@ -277,7 +290,7 @@ describe("Commands", () => {
     const seen = recordCommands();
     rightClick(target.querySelector(".placeholder")!);
     await tick();
-    const commands = row("Commands");
+    const commands = row("Command launcher");
     commands.focus();
     commands.click();
     await tick();

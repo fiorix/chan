@@ -5,6 +5,7 @@
 // nested arbitrarily.
 
 import { flushSync } from "svelte";
+import { privacy } from "@chan/web-shared/privacy";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
 import type { TmuxPaneRef } from "./tmux";
@@ -522,6 +523,18 @@ export type TerminalTab = {
   /// and folded with the others over tmux's layout into the window size the
   /// page asks tmux for. Local to this window and never serialized.
   tmuxHostGrid?: { cols: number; rows: number };
+  /// This terminal's own secret-masking choice: seeded from the preference
+  /// and the window kind each time its shell spawns, then flipped by its
+  /// toggle. Local to this window and never serialized, so a new terminal
+  /// reads the rule again.
+  secretMasking?: boolean;
+  /// Set when this terminal's masker stopped working. Masking then stays off
+  /// whatever asks for it, Privacy mode included, until its toggle is used
+  /// again. The mark is that masker's: the component is drawn once however
+  /// its tab moves, so a clone carries the mark to the same masker, and a
+  /// terminal built again seeds it away with the masker it replaces. Local
+  /// to this window and never serialized.
+  secretMaskingFailed?: boolean;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1602,6 +1615,8 @@ function tabForReopen(src: Tab): Tab {
     tab.tmuxConsent = undefined;
     tab.tmuxPane = undefined;
     tab.tmuxHostGrid = undefined;
+    tab.secretMasking = undefined;
+    tab.secretMaskingFailed = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -1720,9 +1735,9 @@ export function activeDashboardTab(): DashboardTab | null {
   return t;
 }
 
-/// Toggle broadcast SELECT-ALL / DESELECT-ALL for the active terminal.
-/// Chord-driven (Cmd+Shift+I) equivalent of the per-tab "Select All" /
-/// "Deselect All" button. No-op when the active tab isn't a terminal.
+/// Flip `Group broadcast` for the active terminal: what the command and its
+/// chord run, as the tab menu's row does on its own tab. No-op when the
+/// active tab isn't a terminal.
 export function toggleActiveTerminalBroadcastSelectAll(): void {
   const tab = activeTerminalTab();
   if (tab) toggleTerminalGroupBroadcast(tab);
@@ -1763,10 +1778,10 @@ export function toggleTerminalGroupBroadcast(tab: TerminalTab): void {
 }
 
 /// Set a local terminal's broadcast toggle by its live session id. This is
-/// the `terminal_broadcast` window-command entry point: another window's Select All /
-/// per-row toggle reaches the owning window here, which flips the matching
-/// tab so the normal `set-broadcast` sync + sign + fan run unchanged. No-op
-/// when no local tab hosts that session.
+/// the `terminal_broadcast` window-command entry point: another window's
+/// `Group broadcast` or per-row toggle reaches the owning window here, which
+/// flips the matching tab so the normal `set-broadcast` sync + sign + fan run
+/// unchanged. No-op when no local tab hosts that session.
 export function setTerminalBroadcastBySession(sessionId: string, on: boolean): void {
   const tab = allTerminalTabs().find((t) => t.terminalSessionId === sessionId);
   if (tab) setTerminalBroadcastEnabled(tab, on);
@@ -2498,9 +2513,9 @@ function reconcileLocalMetadataFromRoster(entries: TerminalRosterEntry[]): void 
 }
 
 /// Same-group sessions in OTHER windows of this tenant that a page holds. The
-/// broadcast menu lists these under other windows, the group toggle and its
-/// Select All label count them, and the indicator counts the ones that have
-/// opted in. Sessions with no `window_id` are skipped: they cannot be
+/// broadcast menu lists these under other windows, the `Group broadcast`
+/// toggle and its check count them, and the indicator counts the ones that
+/// have opted in. Sessions with no `window_id` are skipped: they cannot be
 /// attributed to a window, and this window's own sessions are excluded
 /// (already shown as local tabs). So is a session whose window no page holds
 /// (`window_live` false): only its window's page flips its broadcast flag, so
@@ -2534,6 +2549,66 @@ export function terminalBroadcastReachCount(tab: TerminalTab): number {
   const local = tab.broadcastTargetIds.filter((id) => inGroup.has(id)).length;
   const cross = crossWindowBroadcastMembers(tab).filter((e) => e.broadcast).length;
   return local + cross;
+}
+
+/// One terminal a terminal's broadcast list offers: the terminal itself, a
+/// terminal of its group in this window, or a member of the group in another
+/// window that a page holds.
+export type TerminalBroadcastTarget = {
+  /// The tab id of a terminal in this window, the session id of a member in
+  /// another.
+  id: string;
+  name: string;
+  /// The terminal itself, whose entry turns its own broadcast on or off.
+  self: boolean;
+  /// A member in another window, which flips through the server.
+  otherWindow: boolean;
+  on: boolean;
+  /// Turn the target on or off. For a member in another window the promise
+  /// settles when the server has taken the request; the roster then carries
+  /// the member's new state.
+  set: (on: boolean) => void | Promise<void>;
+};
+
+/// A terminal's broadcast list in the order it is shown: the terminal
+/// itself, the other terminals of its group in this window, then the group's
+/// members in other windows. The terminal's menu and the launcher's choice
+/// both list these, so they offer the same terminals with the same state.
+export function terminalBroadcastTargets(tab: TerminalTab): TerminalBroadcastTarget[] {
+  const group = terminalTabGroup(tab);
+  const selected = new Set(terminalBroadcastMemberIds(tab));
+  const local = allTerminalTabs()
+    .filter((t) => terminalTabGroup(t) === group)
+    .sort((a, b) => {
+      if (a.id === tab.id) return -1;
+      if (b.id === tab.id) return 1;
+      return 0;
+    })
+    .map((target): TerminalBroadcastTarget => {
+      const self = target.id === tab.id;
+      return {
+        id: target.id,
+        name: terminalTabName(target),
+        self,
+        otherWindow: false,
+        on: self ? tab.broadcastEnabled : selected.has(target.id),
+        set: (on) =>
+          self
+            ? setTerminalBroadcastEnabled(tab, on)
+            : setTerminalBroadcastTarget(tab, target.id, on),
+      };
+    });
+  const cross = crossWindowBroadcastMembers(tab).map(
+    (member): TerminalBroadcastTarget => ({
+      id: member.id,
+      name: member.tab_name ?? "terminal",
+      self: false,
+      otherWindow: true,
+      on: member.broadcast,
+      set: (on) => api.setTerminalSessionBroadcast(member.id, on),
+    }),
+  );
+  return [...local, ...cross];
 }
 
 export function setTerminalSession(tab: TerminalTab, sessionId: string): void {
@@ -2588,6 +2663,49 @@ export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus
 /// no reading.
 export function setTerminalProgram(tab: TerminalTab, program: TerminalProgram | undefined): void {
   tab.terminalProgram = program;
+}
+
+/// Set a terminal's own secret-masking choice as its renderer is built,
+/// and drop the mark an earlier masker left when it failed: the terminal
+/// builds a new masker with each renderer, and a failure is the masker's
+/// that had it.
+export function seedTerminalSecretMasking(tab: TerminalTab, enabled: boolean): void {
+  tab.secretMasking = enabled;
+  tab.secretMaskingFailed = undefined;
+}
+
+/// Record that a terminal's masker stopped working. Its own choice goes off
+/// with it, so the toggle reads what the screen shows.
+export function failTerminalSecretMasking(tab: TerminalTab): void {
+  tab.secretMasking = false;
+  tab.secretMaskingFailed = true;
+}
+
+/// Whether Privacy mode masks secrets in every terminal, over each one's own
+/// choice.
+function privacyMasksTerminalSecrets(): boolean {
+  return privacy.enabled && privacy.mask_terminal_secrets;
+}
+
+/// Whether secret masking is in effect on a terminal: by its own choice or by
+/// Privacy mode, and by neither once its masker has failed.
+export function terminalSecretMaskingOn(tab: TerminalTab): boolean {
+  return !tab.secretMaskingFailed && (tab.secretMasking === true || privacyMasksTerminalSecrets());
+}
+
+/// Flip a terminal's own secret-masking choice and say so on the status
+/// line. Privacy mode holds masking on, so under it the choice stays as it is
+/// and the status says why; a masker that failed is tried again. Returns
+/// whether the choice changed.
+export function toggleTerminalSecretMasking(tab: TerminalTab): boolean {
+  if (privacyMasksTerminalSecrets() && !tab.secretMaskingFailed) {
+    notify("Secret masking is enabled by Privacy mode");
+    return false;
+  }
+  tab.secretMaskingFailed = false;
+  tab.secretMasking = !tab.secretMasking;
+  notify(`Secret masking ${tab.secretMasking ? "enabled" : "disabled"} for this terminal`);
+  return true;
 }
 
 /// The server's tmux consent state for the attached page, applied for the
@@ -4187,7 +4305,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     const unsavable =
       unsaved && isExcalidraw(tab.path) ? validateJsonBuffer(tab.content) : null;
     if (unsaved && unsavable === null) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     if ((contentIsEmpty || isPristineSeed) && !info.has_attachments) {
@@ -4210,7 +4328,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       return true;
     }
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const promoted = await decidingStale(tab.path, () =>
       api.promoteDraft(tab.path, decision.target),
@@ -4241,11 +4359,14 @@ function refreshAfterDraftChange(): Promise<unknown> {
   return Promise.all([refreshDrafts(), import("./store.svelte").then((m) => m.refreshTree())]);
 }
 
-/// A draft has its own close and promotion flows, so an unsaved buffer stays
-/// open with one notice instead of joining the ordinary close dialog. The
-/// notice gives the reason on the tab's save line where there is one, and
-/// otherwise what held the save.
-async function saveDraftEdits(tab: FileTab): Promise<boolean> {
+/// Save the tab's unsaved text, wait for the save and answer whether the tab
+/// is saved. For a caller that must not go on with text the server lacks: a
+/// draft's close and its promotion, which keep an unsaved draft open instead
+/// of joining the ordinary close dialog, and a download or an export of an
+/// open file, which read the server's copy. A tab left unsaved gets one
+/// notice: the reason on its save line where there is one, and otherwise
+/// what held the save.
+export async function saveTabEdits(tab: FileTab): Promise<boolean> {
   let held: SaveHold = null;
   try {
     held = await performSave(tab);
@@ -4318,7 +4439,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // module). Resolved at user-action time, never at module-eval.
     const { uiPathPrompt } = await import("./store.svelte");
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     // The draft Save reuses PathPromptModal (autocomplete, live status
@@ -4369,7 +4490,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     // file case, trailing-slash folder for the dir case). `promoteDraft`
     // takes it verbatim.
     if (isDirty(tab)) {
-      if (!(await saveDraftEdits(tab))) return false;
+      if (!(await saveTabEdits(tab))) return false;
     }
     const promoted = await decidingStale(tab.path, () => api.promoteDraft(tab.path, target));
     notifyDraftPromoted(promoted.path);
@@ -4532,6 +4653,8 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   tmuxConsent: "carry",
   tmuxPane: "carry",
   tmuxHostGrid: "carry",
+  secretMasking: "carry",
+  secretMaskingFailed: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -5083,7 +5206,10 @@ function swapPaneContentsIn(
   return true;
 }
 
-function nearestAncestorSplit(
+/// The split whose divider a step moves for the pane `leafId` along `axis`:
+/// the nearest one that holds the pane and is laid out on that axis. `state`
+/// is the live layout or Hybrid Nav's draft.
+export function dividerSplit(
   state: LayoutState,
   leafId: string,
   axis: SplitNode["direction"],
@@ -5098,25 +5224,38 @@ function nearestAncestorSplit(
   return null;
 }
 
-/// The share of a split one Hybrid Nav resize key moves its divider by.
-const PANE_MODE_RESIZE_STEP = 0.02;
+/// The share of a split one step moves its divider by.
+const DIVIDER_STEP = 0.02;
+/// The share a pane keeps at either end of its split, so its divider stays
+/// within reach of a pointer.
+const DIVIDER_MARGIN = 0.05;
 
-/// Hybrid Nav resize. `positive=true` shifts the divider toward the
-/// right (row axis) or the bottom (column axis); `positive=false`
-/// shifts it toward the left / top. Bracket-direction equals
-/// divider-direction, independent of which side of the split the
-/// active pane sits on. `ratio` is A's share of the split (A is the
-/// left / top child), so `positive` maps directly to the delta sign.
+/// Move `split`'s divider to `ratio`, the share of the split its left or top
+/// child takes, held within the share a pane keeps. A drag, a Hybrid Nav
+/// resize key and a divider command all move a divider through here, so they
+/// stop at one bound. `tmuxOwned` lifts the bound for a split of a tmux
+/// window: tmux holds a pane to its own minimum, and its next layout shows
+/// where the divider landed.
+export function moveDivider(split: SplitNode, ratio: number, tmuxOwned = false): void {
+  const margin = tmuxOwned ? 0 : DIVIDER_MARGIN;
+  split.ratio = Math.max(margin, Math.min(1 - margin, ratio));
+}
+
+/// Move `split`'s divider one step: toward the right or the bottom when
+/// `forward`, toward the left or the top otherwise, whichever side of the
+/// split the focused pane sits on.
+export function stepDivider(split: SplitNode, forward: boolean, tmuxOwned = false): void {
+  moveDivider(split, split.ratio + (forward ? DIVIDER_STEP : -DIVIDER_STEP), tmuxOwned);
+}
+
+/// Hybrid Nav resize: one step of the focused pane's divider along `axis`,
+/// staged in the mode's draft. A bracket moves the divider the way it points.
 export function paneModeResize(axis: SplitNode["direction"], positive: boolean): void {
   const draft = draftLayout();
   if (!draft) return;
-  const split = nearestAncestorSplit(draft, draft.activePaneId, axis);
+  const split = dividerSplit(draft, draft.activePaneId, axis);
   if (!split || !noteTmuxResize(split)) return;
-  const delta = positive ? PANE_MODE_RESIZE_STEP : -PANE_MODE_RESIZE_STEP;
-  // tmux holds a pane to its own minimum, and its next layout shows where
-  // the divider landed.
-  const [min, max] = paneMode.tmux ? [0, 1] : [0.05, 0.95];
-  split.ratio = Math.max(min, Math.min(max, split.ratio + delta));
+  stepDivider(split, positive, paneMode.tmux !== null);
 }
 
 export function paneModeEqualize(): void {
@@ -5931,6 +6070,35 @@ export function setGraphSelection(tab: GraphTab, id: string | null, label: strin
 export function setGraphPendingSelect(tab: GraphTab, id: string | null): void {
   tab.pendingSelectId = id;
 }
+
+/// Reads the depth a graph tab's panel shows for the selected node, or null
+/// while the panel shows no tab.
+type GraphDepthReader = () => number | null;
+
+/// The readers of the mounted graph panels, by tab id. The depth is the
+/// selected node's (levels opened below a directory, hops from any other
+/// node) and only the panel can work it out, from the graph it has loaded.
+/// The launcher's depth steps read through here while one of them is listed,
+/// so the panel works nothing out for them the rest of the time. The record
+/// is reactive: a row listed before its panel registered reads again once it
+/// has, and a row whose panel is gone reads none.
+const graphDepthReaders = $state<{ byTab: Record<string, GraphDepthReader> }>({ byTab: {} });
+
+/// Registers the reader of the panel mounted on the graph tab `tabId`.
+/// Returns the call that removes it, for the panel's teardown.
+export function registerGraphDepthReader(tabId: string, read: GraphDepthReader): () => void {
+  graphDepthReaders.byTab[tabId] = read;
+  return () => {
+    if (graphDepthReaders.byTab[tabId] === read) delete graphDepthReaders.byTab[tabId];
+  };
+}
+
+/// The depth the panel of the graph tab `tab` shows now, or null for a tab
+/// no panel shows. Read inside a derived or an effect, it follows the depth.
+export function graphShownDepth(tab: GraphTab): number | null {
+  return graphDepthReaders.byTab[tab.id]?.() ?? null;
+}
+
 /// The tab's buffer, as its editor or its board reports an edit.
 export function setTabContent(tab: FileTab, content: string): void {
   tab.content = content;
@@ -7954,6 +8122,11 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   seedInput: "drop",
   spawnCommand: "drop",
   spawnEnv: "drop",
+  // This window's masking of this terminal: the terminal seeds its own choice
+  // from the preference as it starts in the target window, where no masker
+  // of its has failed.
+  secretMasking: "drop",
+  secretMaskingFailed: "drop",
 };
 
 /// Rebuild a tab from another window's snapshot and append it to `paneId`.

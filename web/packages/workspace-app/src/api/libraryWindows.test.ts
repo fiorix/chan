@@ -5,7 +5,9 @@ import {
   buryLibraryWindow,
   createLibraryWindow,
   focusLibraryWindow,
+  libraryWindowActions,
   openLibraryWindow,
+  runLibraryWindowAction,
   showLibraryWindow,
   type LibraryWindowBridge,
 } from "./libraryWindows";
@@ -143,6 +145,59 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   resetHostVocabularyForTests();
+});
+
+describe("the actions a surface offers on a library window", () => {
+  test.each([
+    ["a browser's own visible window", false, { origin: "browser" }, ["focus", "hide", "close"]],
+    ["a browser's own hidden window", false, { origin: "browser", hidden: true }, ["show", "close"]],
+    ["a visible native record in a browser", false, { origin: "native" }, ["open", "hide", "close"]],
+    ["a hidden native record in a browser", false, { origin: "native", hidden: true }, ["show", "open", "close"]],
+    ["a visible record of unknown origin in a browser", false, { origin: undefined }, ["open", "hide", "close"]],
+    ["a visible native record in the desktop", true, { origin: "native" }, ["focus", "hide", "close"]],
+    ["a hidden native record in the desktop", true, { origin: "native", hidden: true }, ["show", "close"]],
+    ["a control terminal", false, { origin: "browser", control: true }, ["focus"]],
+    ["a hidden control terminal", false, { origin: "browser", control: true, hidden: true }, ["show"]],
+    ["a visible window another registry holds, in the desktop", true, { managed: false }, ["focus"]],
+    ["a hidden window another registry holds, in the desktop", true, { managed: false, hidden: true }, []],
+    ["a visible window another registry holds, in a browser", false, { managed: false }, []],
+    ["a hidden window another registry holds, in a browser", false, { managed: false, hidden: true }, []],
+  ] as const)("%s", (_what, desktop, record, actions) => {
+    if (desktop) asDesktop(vi.fn().mockResolvedValue(null));
+    expect(libraryWindowActions(scopedWindow(record))).toEqual(actions);
+  });
+
+  test("each action is carried out by its own function", async () => {
+    const invoke = vi.fn().mockResolvedValue(null);
+    asDesktop(invoke);
+    const host = bridge();
+    const record = scopedWindow({ origin: "native" });
+
+    await runLibraryWindowAction(host, record, "focus");
+    await runLibraryWindowAction(host, { ...record, hidden: true }, "show");
+    await runLibraryWindowAction(host, record, "open");
+    expect(invoke.mock.calls.filter(([command]) => command === "focus_library_window")).toEqual([
+      ["focus_library_window", { windowId: "w-other" }],
+      ["focus_library_window", { windowId: "w-other" }],
+      ["focus_library_window", { windowId: "w-other" }],
+    ]);
+    expect(host.runAction).not.toHaveBeenCalled();
+
+    await runLibraryWindowAction(host, record, "hide");
+    await runLibraryWindowAction(host, record, "close");
+    expect(host.runAction).toHaveBeenNthCalledWith(1, {
+      action: "set_window_visibility",
+      window_id: "w-other",
+      hidden: true,
+    });
+    expect(host.runAction).toHaveBeenNthCalledWith(2, { action: "close_window", window_id: "w-other" });
+  });
+
+  test("an action reaches window.open before its first await, inside the user's gesture", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(fakePopup() as unknown as Window);
+    void runLibraryWindowAction(bridge(), scopedWindow(), "hide");
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w-other");
+  });
 });
 
 describe("browser native and unknown window commands", () => {

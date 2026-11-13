@@ -160,7 +160,7 @@ export default {
       await layout("three request cards", 3);
       await ctx.shot("three-requests");
 
-      await read("(document.querySelector('[aria-label=\"show file transfers\"]').click(), true)");
+      await read("(document.querySelector('[aria-label=\"Show transfers\"]').click(), true)");
       await wait("Boolean(document.querySelector('.transfer-bubble'))", "request-only Transfers panel");
       assert.equal(await read(`document.querySelectorAll(${JSON.stringify(request)}).length`), 1);
       await layout("panel beside paste and handover", 3);

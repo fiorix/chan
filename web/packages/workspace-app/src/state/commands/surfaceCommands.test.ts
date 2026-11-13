@@ -6,7 +6,6 @@
 
 import { describe, it, expect } from "vitest";
 import { availableCommands, type CommandContext } from "../commands";
-import { workspace } from "../workspace.svelte";
 import { fileTab, readTab, resetLayout } from "../../__tests__/tabs";
 
 import "./editor";
@@ -42,7 +41,6 @@ describe("editor surface commands", () => {
       resetLayout([fileTab()]);
       const onFile = idsIn(ctx({ activeSurface: "file" }));
       for (const id of [
-        "app.editor.surfaceTheme.dark",
         "app.editor.toggleMode",
         "app.editor.outline",
         "app.editor.copyPath",
@@ -75,11 +73,9 @@ describe("graph surface commands", () => {
   it("appear only on a graph surface", () => {
     const onGraph = idsIn(ctx({ activeSurface: "graph" }));
     for (const id of [
-      "app.graph.surfaceTheme.light",
       "app.graph.copyLink",
       "app.graph.depth.increase",
-      "app.graph.filter.contact",
-      "app.graph.filter.media",
+      "app.graph.filters",
       "app.graph.reload",
     ]) {
       expect(onGraph.has(id)).toBe(true);
@@ -93,7 +89,6 @@ describe("file browser surface commands", () => {
   it("appear only on a file browser surface", () => {
     const onBrowser = idsIn(ctx({ activeSurface: "browser" }));
     for (const id of [
-      "app.browser.surfaceTheme.dark",
       "app.browser.expandAll",
       "app.browser.importContacts",
       "app.browser.newGraph",
@@ -130,7 +125,6 @@ describe("terminal surface commands", () => {
       "app.terminal.broadcastToggle",
       "app.terminal.copyCwd",
       "app.terminal.newFsEntry",
-      "app.terminal.backend.toggle",
       "app.terminal.secretMasking.toggle",
       "terminal.richPrompt",
     ]) {
@@ -140,16 +134,14 @@ describe("terminal surface commands", () => {
       false,
     );
     // newFsEntry writes through the workspace file API and Rich Prompt drafts
-    // into the workspace drafts dir; the global backend toggle needs the
-    // workspace tenant's /api/config route. A standalone terminal tenant
-    // deliberately serves none of those.
+    // into the workspace drafts dir. A standalone terminal tenant
+    // deliberately serves neither.
     const inStandalone = idsIn(
       ctx({ terminalOnly: true, activeSurface: "terminal" }),
     );
     for (const id of [
       "terminal.richPrompt",
       "app.terminal.newFsEntry",
-      "app.terminal.backend.toggle",
     ]) {
       expect(inStandalone.has(id)).toBe(false);
     }
@@ -169,47 +161,22 @@ describe("terminal surface commands", () => {
     // running shell would be a lie.
     expect(restart?.confirm).toBeUndefined();
   });
-
-  it("names the current engine and the new-terminal-only contract", () => {
-    const original = workspace.info;
-    try {
-      workspace.info = {
-        preferences: { terminal: { ghostty: false } },
-      } as NonNullable<typeof workspace.info>;
-      const command = availableCommands(ctx({ activeSurface: "terminal" })).find(
-        (candidate) => candidate.id === "app.terminal.backend.toggle",
-      );
-      expect(command?.category).toBe("Terminal");
-      expect(command?.keywords).toEqual(
-        expect.arrayContaining(["ghostty", "xterm"]),
-      );
-      expect(command?.title).toContain("xterm");
-      expect(command?.title).toContain("newly opened terminals only");
-
-      workspace.info.preferences.terminal.ghostty = true;
-      expect(command?.title).toContain("ghostty");
-    } finally {
-      workspace.info = original;
-    }
-  });
 });
 
 describe("dashboard surface commands", () => {
   it("appear only on a dashboard surface", () => {
     const onDash = idsIn(ctx({ activeSurface: "dashboard" }));
     for (const id of [
-      "app.dashboard.surfaceTheme.dark",
       "app.dashboard.nextSlide",
       "app.dashboard.prevSlide",
-      "app.dashboard.slide.workspace",
-      "app.dashboard.slide.indexing",
-      "app.dashboard.slide.about",
+      "app.dashboard.slide",
+      "app.dashboard.slides",
     ]) {
       expect(onDash.has(id)).toBe(true);
     }
     expect(idsIn(ctx({ activeSurface: "file" })).has("app.dashboard.nextSlide")).toBe(false);
     expect(
-      idsIn(ctx({ activeSurface: "file" })).has("app.dashboard.slide.about"),
+      idsIn(ctx({ activeSurface: "file" })).has("app.dashboard.slide"),
     ).toBe(false);
   });
 });
@@ -242,7 +209,7 @@ describe("surface commands in a standalone terminal window", () => {
       "app.browser.newGraph",
       "app.graph.copyLink",
       "app.dashboard.nextSlide",
-      "app.dashboard.slide.about",
+      "app.dashboard.slide",
       "terminal.richPrompt",
     ]) {
       expect(inTerminal.has(id)).toBe(false);

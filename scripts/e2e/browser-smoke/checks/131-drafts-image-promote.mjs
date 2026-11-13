@@ -172,7 +172,7 @@ export default {
       page.on("response", onResponse);
       mkdirSync(join(ctx.workspaceDir, dir));
       await saveDraftToWorkspace(page, chosen, () =>
-        assertNothingMarkedShown(page, [a.id, b.id], "with Save to Workspace open"),
+        assertNothingMarkedShown(page, [a.id, b.id], "with Save draft open"),
       );
       const leaf = b.path.split("/").pop();
       const promotedDir = join(ctx.workspaceDir, dir, "report");

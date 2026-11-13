@@ -1252,7 +1252,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/terminals/{session}/restart",
             post(api_restart_terminal),
         )
-        // Cross-window broadcast toggle (Select All / per-row, other windows).
+        // Cross-window broadcast toggle (Group broadcast / per-row, other windows).
         .route(
             "/api/terminals/{session}/broadcast",
             post(api_set_terminal_broadcast),

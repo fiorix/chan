@@ -2,8 +2,10 @@
 //
 // The editor's commands that go by the active file's place in the workspace
 // (its parent directory, a terminal there, a graph opened on it, its row in
-// the file browser) are not offered on a workspace's draft, which has none.
-// Copy path copies the draft's path as a person reads it.
+// the file browser) are not offered on a workspace's draft, which has none,
+// and neither are Delete file and Duplicate file: a draft is no file of the
+// workspace, and is discarded from its own flow. Save draft is offered on a
+// draft alone. Copy path copies the draft's path as a person reads it.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { draftPath } from "../../__tests__/drafts";
@@ -17,6 +19,8 @@ const BY_PLACE = [
   "app.editor.terminalFromHere",
   "app.editor.graphFromHere",
   "app.editor.showInBrowser",
+  "app.file.delete",
+  "app.file.duplicate",
 ];
 
 function onFileSurface(): CommandContext {
@@ -46,12 +50,14 @@ describe("the editor's commands on a workspace draft", () => {
 
     for (const id of BY_PLACE) expect.soft(offered().has(id), id).toBe(false);
     expect(offered().has("app.editor.copyPath")).toBe(true);
+    expect(offered().has("app.draft.save")).toBe(true);
   });
 
   test("offer all of them on a file of the workspace", () => {
     resetLayout([fileTab({ id: "note-tab", path: "notes/a.md" })]);
 
     for (const id of BY_PLACE) expect(offered().has(id), id).toBe(true);
+    expect(offered().has("app.draft.save")).toBe(false);
   });
 
   test("Copy path copies the draft's path as a person reads it", async () => {
