@@ -1,0 +1,32 @@
+# The launcher's file commands act on the file browser focused last, not the tab just made active
+
+Status: accepted for v0.131.0 by the owner on 2026-11-13; not started.
+
+Record: reported on 2026-11-13 by the independent review of v0.129.0's file-action changes (`dev/v0129/reviews/review-deckfiles-1.md`, finding 2, confirmed by its run `dev/v0129/evidence/deckfiles/review-1/run-1/`). Put to the owner as a candidate for the next version, he answered "3. launcher: correct" (`dev/v0129/status.md`, 2026-11-13T12:42Z); the integrator read it as the candidate being right rather than the behaviour, and said so back to him (the v0.129.0 [release record](../../release/release-v0.129.0.md)). At v0.130.0's planning he placed the later group of rows, this one among them, in v0.131.0: "yes v0.131" (`dev/v0130/status.md`).
+
+## What is there now
+
+Read at `342dbe791`. The review ran at `8d7f321d3`; the two commits since that touch these files change a comment and the pane's edges.
+
+- The launcher's file browser commands read the selection through `browserSelection` (`web/packages/workspace-app/src/state/store.svelte.ts`), which is the selection of the surface `browserFocus` names: a file browser tab or a docked file browser, by instance id. `fbActivateInstance` sets it. Its callers are a focus or a pointer press inside a surface (`onfocusin` and `onpointerdown` on `.browser`, `FileBrowserSurface.svelte`), the tree's own actions (`activate` in `FileTree.svelte`, which `runCommand` runs first), and a reveal that opens a file browser tab (`store.svelte.ts`). A file browser tab focuses its tree when it mounts, which activates it.
+- A press on a tab's label runs `selectTabInPane` and the pane's `setActivePane` (`Pane.svelte`, `state/tabs.svelte.ts`); Next pane and Previous pane (`selectNextPane`, `selectPrevPane`) and Hybrid Nav's commit set `activePaneId`. None activates a surface that is already mounted, and `FileBrowserSurface` reads no focus pulse. A pane draws its active tab alone, so the surface left behind is a file browser tab in another pane, or a dock pressed before the press on the tab.
+- The commands do not agree on the surface they act on (`web/packages/workspace-app/src/state/commands/browser.ts`). They are offered while the focused pane's active tab is a file browser (`onBrowser`). Download, Rename or move, Delete, Copy, Cut, Copy path, View, Export to PDF, New terminal here, New graph here, Clear selection, Import contacts and Open in new file browser read `browserSelection`, and take the active tab's saved selection when that surface has none (`selectedPath`, `selectedPaths`). New file or directory, offered in any tab of a workspace window, and Paste take their folder from it (`targetDirFromSelection`). Upload is answered by the surface `commandSurfaceId` names, the one focused last. Open is offered by the focused surface's selection (`selectionOffers`) and answered by the active tab, which opens its own selection. Details, Select multiple, Hidden files, Keyboard shortcuts, Expand all and Collapse all act on the active tab.
+- The review's run, a jsdom test (`dev/v0129/evidence/deckfiles/review-1/scripts/review-block.ts`): a file browser tab in each of two panes, the left listing `docs` and the right `notes`; a focus in the left, then the right pane made active as a press does. The launcher's `Upload` went into `docs`, the right tab's menu `Upload` into `notes`, and `Details` read the right tab. Not run in a browser engine or on chan-desktop.
+
+## Desired contract
+
+1. A file browser tab that becomes the focused pane's active tab, by any path (a press on its label, its strip or its pane, Next pane and Previous pane, Hybrid Nav's commit, a command that opens or selects it), becomes the surface the launcher's file browser commands act on, as a press inside it does today. A press or a focus inside a docked file browser makes the dock that surface, as today.
+2. A command reads one surface for whether it is offered and for what it does: `Open` is offered for the selection it opens, and no command acts on another surface's selection when the one it reads has none.
+3. Nothing else moves that surface: a file browser tab drawn in a background pane, on a hidden side or by a session restore leaves it where it is.
+
+## Boundaries
+
+- The workspace app's record of the surface the commands act on (`browserFocus`, `fbActivateInstance` and `browserSelection` in `store.svelte.ts`), the commands' reading of it (`state/commands/browser.ts`), and the surface's activation (`FileBrowserSurface.svelte`, `Pane.svelte`).
+- [The pane-focus row](../v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) has a file browser tab take the keyboard when its pane becomes the focused one. A tree that takes focus runs `onfocusin`, so that change moves the surface for the paths of contract 1 too, by reading; it leaves contract 2, and its tests pin the keyboard, not the surface. This row's tests pin the surface whichever change lands first.
+- Not here: the folder `New` and `Paste` choose on a surface, and a selected directory under a collapsed parent counting as a file there ([the New and Paste row](the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md)); whether the view commands (Details, Select multiple, Hidden files, Keyboard shortcuts, Expand all, Collapse all) follow a focused dock; offering the commands while a dock is focused and the focused pane holds no file browser.
+
+## Acceptance
+
+1. Workspace app tests over two panes with a file browser tab in each, and over a dock beside a file browser tab: after a press in one and each path of contract 1 to the other, `Copy path`, `Download`, `Upload` and `New file or directory` act on the other's selection or folder; red on today's code for the label press, Next pane and Hybrid Nav's commit. A press in the dock then makes the dock the surface. The cases of contract 3 leave the surface where it was.
+2. Tests of contract 2, with a dock focused beside a file browser tab whose selections differ: what `Open` opens is the selection it was offered for, and with nothing selected in the dock no command acts on the tab's selection; red on today's code.
+3. In an sdme guest, on chan-desktop and in a browser against the guest's devserver: two panes with a file browser tab each, a press in the left list, then a press on the right tab's label; the launcher's `Copy path` copies, and its `Rename or move` prompts for, the right tab's selection.
