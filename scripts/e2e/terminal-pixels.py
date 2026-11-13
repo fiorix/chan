@@ -27,7 +27,10 @@ measured on them beyond a liveness and a blank region; they are byte-level
 references, and --compare holds a run's PNGs to an earlier run's, which is
 how a renderer change is accepted. A PNG of the earlier run that names no
 scenario this driver has fails too, so a scenario cannot drop out between
-the two runs unseen.
+the two runs unseen. Some arms have a twin that paints the same picture by
+another road (a view at a fractional offset and the view at its floor, a
+cursor hidden where it stands and one never shown, a selection moved and
+the last one made alone), and each pair must paint the same PNG in one run.
 
 Usage:
     python3 scripts/e2e/terminal-pixels.py [--out DIR] [--include-renderers]
@@ -539,6 +542,7 @@ class Scenario:
         new_tab: bool = False,
         pattern: str = "",
         cursor_style: str = "",
+        twin: str = "",
     ):
         self.backend = backend
         self.font = font
@@ -549,6 +553,9 @@ class Scenario:
         self.pattern = pattern
         # The widget's cursorStyle option, for the cursor patterns.
         self.cursor_style = cursor_style
+        # Another pattern that paints the same picture by another road: this
+        # scenario's PNG must be byte-identical to that one's in the same run.
+        self.twin = twin
 
     @property
     def name(self) -> str:
@@ -616,12 +623,19 @@ PATTERN_SCENARIOS = [
     Scenario("ghostty", "os-default", pattern="alt-screen"),
     Scenario("ghostty", "os-default", pattern="resize"),
     Scenario("ghostty", "os-default", pattern="theme"),
-    Scenario("ghostty", "os-default", pattern="select-move"),
+    Scenario("ghostty", "os-default", pattern="select-move", twin="select-once"),
     Scenario("ghostty", "os-default", pattern="scrollbar"),
 ] + [
     Scenario("ghostty", "os-default", pattern=f"cursor-{where}", cursor_style=style)
     for style in ("block", "underline", "bar")
     for where in ("blank", "glyph")
+] + [
+    # Twins: each pair paints one picture by two roads, one of which a
+    # renderer that repaints too little gets wrong.
+    Scenario("ghostty", "os-default", pattern="fraction-scroll", twin="partial-scroll"),
+    Scenario("ghostty", "os-default", pattern="cursor-never", cursor_style="block"),
+    Scenario("ghostty", "os-default", pattern="cursor-hide", cursor_style="block", twin="cursor-never"),
+    Scenario("ghostty", "os-default", pattern="select-once"),
 ]
 
 # Explicit accelerated-path reference, run only under --include-renderers.
@@ -723,6 +737,38 @@ def compare_png(scenario: Scenario, png: pathlib.Path, reference: pathlib.Path):
     return [f"{scenario.name}: PNG differs from {earlier}"]
 
 
+def unequal_twins(scenarios: list[Scenario], out: pathlib.Path) -> list[str]:
+    """Hold each scenario that has a twin to its twin's PNG of this run;
+    return the assertions that failed.
+
+    Bytes, as compare_png holds them: one cairo build writes both. A twin
+    that --only left out of this run is not compared, and the line says so.
+    """
+    painted = {s.slug for s in scenarios}
+    failures = []
+    for scenario in scenarios:
+        if not scenario.twin:
+            continue
+        twin = Scenario(
+            scenario.backend,
+            scenario.font,
+            renderer=scenario.renderer,
+            new_tab=scenario.new_tab,
+            pattern=scenario.twin,
+            cursor_style=scenario.cursor_style,
+        )
+        png, other = out / f"{scenario.slug}.png", out / f"{twin.slug}.png"
+        label = f"{png.name} is byte-identical to its twin {other.name}"
+        if twin.slug not in painted:
+            print(f"  skip  {label}: this run does not paint the twin")
+        elif png.read_bytes() != other.read_bytes():
+            print(f"  FAIL  {label}: the bytes differ")
+            failures.append(f"{scenario.name}: PNG differs from its twin {other.name}")
+        else:
+            print(f"  ok  {label}")
+    return failures
+
+
 def unwritten_references(
     reference: pathlib.Path, written: list[str], skipped: set[str], only: str
 ):
@@ -815,6 +861,9 @@ def main() -> int:
         # is still a directory and still holds the page it was built with.
         if (root / "harness.mjs").is_symlink():
             shutil.rmtree(root)
+
+    print("\ntwins")
+    failures.extend(unequal_twins(scenarios, out))
 
     if reference is not None:
         print(f"\nreference run {reference}")
