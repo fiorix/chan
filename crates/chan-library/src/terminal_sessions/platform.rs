@@ -445,6 +445,11 @@ pub const GUI_STACK_REEXEC_MARKER: &str = "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID";
 pub const GUI_STACK_REEXEC_MARKERS: &[&str] =
     &[GUI_STACK_REEXEC_MARKER, "CHAN_LINUX_SYSTEM_GUI_APPLIED"];
 
+/// The library the desktop's GUI-stack re-exec looks up in the host's linker
+/// cache to choose the directory it puts first in `LD_LIBRARY_PATH`; every
+/// release's re-exec has chosen it by this one, so that directory holds it.
+pub const GUI_STACK_REEXEC_LIBRARY: &str = "libwebkit2gtk-4.1.so.0";
+
 /// Keys linuxdeploy's GTK hook reads whose value holds no mount path. A
 /// terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK children
 /// to X11, which drops every GTK app launched from a terminal onto XWayland.
@@ -604,9 +609,13 @@ fn scrub_var(mount: &Mount, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
 /// ([`apprun_block_at`]), with only the re-exec's directory between them in
 /// the sibling shape, are that process's and go too. That directory is the
 /// entry ahead of this mount's block once this process has re-exec'd, or
-/// `reexec_dir`, the one the re-exec is about to prepend, before it has; for
-/// `XDG_DATA_DIRS`
-/// the GTK hook's [`GTK_HOOK_XDG_DATA_DIR`] after each block is the hook's.
+/// `reexec_dir`, the one the re-exec is about to prepend, before it has. A
+/// process that has made no re-exec (a CLI personality, a desktop whose
+/// re-exec was not made) knows no such directory: there the one entry
+/// between two blocks is an older parent's re-exec directory when it holds
+/// the library that re-exec chose its directory by
+/// ([`holds_gui_stack_library`]). For `XDG_DATA_DIRS` the GTK hook's
+/// [`GTK_HOOK_XDG_DATA_DIR`] after each block is the hook's.
 /// What follows is the user's value as they wrote it, an empty entry of
 /// theirs included, minus any whole AppRun block another AppImage leaked into
 /// it, which goes by its own entries so the user's entries around it stay.
@@ -618,6 +627,18 @@ fn host_value(
     key: &str,
     entries: &[PathBuf],
     reexec_dir: Option<&Path>,
+) -> Option<Vec<PathBuf>> {
+    host_value_given(mount, key, entries, reexec_dir, &holds_gui_stack_library)
+}
+
+/// [`host_value`], with the test of whether an entry is an older parent's
+/// re-exec directory passed in.
+fn host_value_given(
+    mount: &Mount,
+    key: &str,
+    entries: &[PathBuf],
+    reexec_dir: Option<&Path>,
+    older_reexec_dir: &dyn Fn(&Path) -> bool,
 ) -> Option<Vec<PathBuf>> {
     let tail = chained_block_key(key);
     let start = match entries.iter().rposition(|entry| mount.holds(entry)) {
@@ -636,6 +657,12 @@ fn host_value(
             loop {
                 let next = match reexec {
                     Some(dir) if entries.get(at).map(PathBuf::as_path) == Some(dir) => at + 1,
+                    None if key == "LD_LIBRARY_PATH"
+                        && apprun_block_at(tail, entries, at + 1).is_some()
+                        && entries.get(at).is_some_and(|entry| older_reexec_dir(entry)) =>
+                    {
+                        at + 1
+                    }
                     _ => at,
                 };
                 match apprun_block_at(tail, entries, next) {
@@ -650,6 +677,15 @@ fn host_value(
     let rest = &entries[start..];
     let user = without_whole_blocks(tail, rest);
     (start > 0 || user.len() < rest.len()).then_some(user)
+}
+
+/// Whether `dir` is one a GUI-stack re-exec could have put ahead of its
+/// block in `LD_LIBRARY_PATH`: an absolute directory holding
+/// [`GUI_STACK_REEXEC_LIBRARY`], which the re-exec found there in the host's
+/// linker cache. A directory of the user's holds it only if they keep a
+/// WebKitGTK of their own there.
+fn holds_gui_stack_library(dir: &Path) -> bool {
+    dir.is_absolute() && dir.join(GUI_STACK_REEXEC_LIBRARY).exists()
 }
 
 /// The key whose AppRun blocks follow this mount's block in `key`: AppRun
@@ -1287,8 +1323,9 @@ mod appimage_env_tests {
     #[cfg(unix)]
     mod apprun_shapes {
         use super::super::{
-            appimage_host_env, appimage_host_var, hand_appimage_host_env, own_apprun_value,
-            without_apprun_blocks, without_foreign_apprun_blocks,
+            appimage_host_env, appimage_host_var, hand_appimage_host_env, holds_gui_stack_library,
+            host_value_given, own_apprun_value, without_apprun_blocks,
+            without_foreign_apprun_blocks, Mount, GUI_STACK_REEXEC_LIBRARY,
         };
         use super::{scrub, HostEnvFor, Scrub, APPDIR};
         use std::ffi::{OsStr, OsString};
@@ -2150,6 +2187,153 @@ mod appimage_env_tests {
                 ),
                 None,
                 "no AppImage"
+            );
+        }
+
+        /// The CLI hop's `LD_LIBRARY_PATH` in an AppImage run that started
+        /// this release's file from an older desktop, read from
+        /// `/proc/<pid>/environ` of the process with `args=[--dir=...]` on
+        /// the bundle's stack: this mount's block, the older parent's re-exec
+        /// directory, that parent's block, then the user's value, AppRun's
+        /// lone empty entry when there was none. Each case is (the run, this
+        /// file's extraction id, the older file's, the user's value, what the
+        /// user had).
+        const HOP_SHAPES: [(&str, &str, &str, &str, &str); 3] = [
+            (
+                "/work/rr/a3-235141-ut-plain-o-none-2",
+                "f7aeb5072790ef22cac1c1be945a57fe",
+                "d63a3e62f26085396d1def1f0d7eea13",
+                "",
+                "",
+            ),
+            (
+                "/work/rr/a3-000849-ut-plain-o-users",
+                "f7aeb5072790ef22cac1c1be945a57fe",
+                "d63a3e62f26085396d1def1f0d7eea13",
+                "/opt/a:/opt/b",
+                "/opt/a:/opt/b",
+            ),
+            (
+                "/work/rr/a3-002227-ut-plain-o4-o-handed",
+                "f7aeb5072790ef22cac1c1be945a57fe",
+                "38926a38520088cecedb6eb78691a136",
+                "",
+                "",
+            ),
+        ];
+
+        /// A process that has made no re-exec of its own (the CLI hop a
+        /// `chan-term` sibling or cold start passes through) knows no re-exec
+        /// directory, so the older parent's, between this mount's block and
+        /// that parent's, is told by the library the re-exec chose it by: it
+        /// goes with the block, and the user gets their own value, or none.
+        #[test]
+        fn a_process_without_a_reexec_drops_an_older_parents_reexec_directory() {
+            for (run, own, old, user, had) in HOP_SHAPES {
+                let own = format!("{run}/tmp/appimage_extracted_{own}");
+                let old = format!("{run}/tmp/appimage_extracted_{old}");
+                let value = format!(
+                    "{}:{HOST_LIB}:{}:{user}",
+                    block_under(&own, &LD_BLOCK),
+                    block_under(&old, &LD_BLOCK)
+                );
+                let entries: Vec<_> = std::env::split_paths(&value).collect();
+                let user_entries = host_value_given(
+                    &Mount::new(own.as_ref()),
+                    "LD_LIBRARY_PATH",
+                    &entries,
+                    None,
+                    &|dir| dir == std::path::Path::new(HOST_LIB),
+                )
+                .expect("this mount's block is there");
+                assert_eq!(
+                    std::env::join_paths(user_entries).unwrap(),
+                    OsString::from(had),
+                    "{run}"
+                );
+            }
+        }
+
+        /// A host directory holding the library the GUI-stack re-exec looks
+        /// up, as the re-exec found it: a tempdir, so the test does not
+        /// depend on the host's WebKitGTK.
+        fn reexec_library_dir() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join(GUI_STACK_REEXEC_LIBRARY), b"").expect("library");
+            dir
+        }
+
+        /// What the hop hands a desktop it starts, and a terminal's scrub,
+        /// for the measured shapes, plainly and with `$APPDIR` through a
+        /// link: no `LD_LIBRARY_PATH` when the user had none (not the host
+        /// directory and an empty entry), the user's value when they had one.
+        #[test]
+        fn the_hop_hands_down_the_users_library_path() {
+            let host = reexec_library_dir();
+            let host = host.path().to_str().expect("utf-8").to_string();
+            let (_tmp, link, resolved) = linked_extraction();
+            let old_resolved = format!("{}/appimage_extracted_0456", resolved_parent(&resolved));
+            let mut arms = vec![(APPDIR.to_string(), APPDIR.to_string())];
+            arms.extend(names_through(&link).map(|named| (named, resolved.clone())));
+            for (named, under) in arms {
+                for (user, want) in [
+                    ("", Scrub::Remove),
+                    ("/opt/a:/opt/b", Scrub::Rewrite("/opt/a:/opt/b".into())),
+                ] {
+                    let ld = format!(
+                        "{}:{host}:{}:{user}",
+                        block_under(&under, &LD_BLOCK),
+                        block_under(&old_resolved, &LD_BLOCK)
+                    );
+                    let vars = vec![
+                        (OsString::from("APPDIR"), OsString::from(&named)),
+                        (
+                            OsString::from("APPIMAGE"),
+                            OsString::from("/home/u/Chan.AppImage"),
+                        ),
+                        (OsString::from("LD_LIBRARY_PATH"), OsString::from(ld)),
+                    ];
+                    for to in [HostEnvFor::AppImage, HostEnvFor::Terminal] {
+                        let got = appimage_host_env(vars.clone(), to)
+                            .into_iter()
+                            .find(|(key, _)| key == "LD_LIBRARY_PATH")
+                            .map(|(_, scrub)| scrub);
+                        assert_eq!(got, Some(want.clone()), "{named} {user:?} {to:?}");
+                    }
+                }
+            }
+        }
+
+        /// The entry counts as an older parent's re-exec directory only when
+        /// it holds the re-exec's library and a whole block follows it: a
+        /// user's own entry ahead of a block another AppImage leaked keeps
+        /// its place, and so does the host directory when the user wrote it
+        /// with no block after it.
+        #[test]
+        fn a_users_entry_ahead_of_a_leaked_block_stays() {
+            let host = reexec_library_dir();
+            let host = host.path().to_str().expect("utf-8").to_string();
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let leaked = block_under("/tmp/.mount_TermAB", &LD_BLOCK);
+            for (value, want) in [
+                (
+                    format!("{own}:/opt/mylib:{leaked}:/opt/b"),
+                    "/opt/mylib:/opt/b".to_string(),
+                ),
+                (format!("{own}:{host}:/opt/a"), format!("{host}:/opt/a")),
+                (format!("{own}:{host}"), host.clone()),
+            ] {
+                assert_eq!(
+                    scrub("LD_LIBRARY_PATH", &value.clone().into()),
+                    Some(Scrub::Rewrite(want.into())),
+                    "{value}"
+                );
+            }
+            assert!(holds_gui_stack_library(std::path::Path::new(&host)));
+            assert!(!holds_gui_stack_library(std::path::Path::new("/opt/mylib")));
+            assert!(
+                !holds_gui_stack_library(std::path::Path::new("")),
+                "an empty entry is the current directory, never a re-exec's"
             );
         }
     }

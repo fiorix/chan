@@ -204,7 +204,9 @@ mod linux {
     // we shadow the bundle: a partial shadow (host libgtk against a bundled
     // libwebkit, or the reverse) is worse than either stack on its own.
     const GTK_SONAME: &str = "libgtk-3.so.0";
-    const WEBKIT_SONAME: &str = "libwebkit2gtk-4.1.so.0";
+    // Also the library by which a process the re-exec did not start tells an
+    // older parent's re-exec directory in its loader path.
+    const WEBKIT_SONAME: &str = chan_server::GUI_STACK_REEXEC_LIBRARY;
 
     pub fn prefer_system_gui_stack() {
         // The re-exec's marker describes this one process: read and dropped
