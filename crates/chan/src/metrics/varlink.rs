@@ -723,8 +723,60 @@ mod tests {
             .collect()
     }
 
-    /// What `List` sends for [`super::super::full_view`], family by family.
-    fn full_view_metrics() -> Vec<(String, Value, Value)> {
+    /// Each traffic layer's readings in [`distinct_view`], by its wire name:
+    /// received and sent bytes, opened, active.
+    const LAYERS: [(&str, [u64; 4]); 5] = [
+        ("network", [10_001, 10_002, 10_003, 10_004]),
+        ("http2", [20_001, 20_002, 20_003, 20_004]),
+        ("yamux", [30_001, 30_002, 30_003, 30_004]),
+        ("reverseConnections", [40_001, 40_002, 40_003, 40_004]),
+        ("transferPayload", [50_001, 50_002, 50_003, 50_004]),
+    ];
+
+    /// [`super::super::full_view`] with a value of its own in every number a
+    /// family reads, so a family that reads another field, or a layer that
+    /// reads another layer, sends a value [`distinct_view_metrics`] does not
+    /// expect there.
+    fn distinct_view() -> View {
+        let mut view = super::super::full_view();
+        let sample = view.latest.as_mut().unwrap();
+        let layers = [
+            &mut sample.network,
+            &mut sample.http2,
+            &mut sample.yamux,
+            &mut sample.reverse_connections,
+            &mut sample.transfer_payload,
+        ];
+        for (traffic, (_, [received, sent, opened, active])) in layers.into_iter().zip(LAYERS) {
+            traffic.totals.received_bytes = received;
+            traffic.totals.sent_bytes = sent;
+            traffic.totals.opened = opened;
+            traffic.totals.active = active;
+        }
+        sample.transfers.queued = 1;
+        sample.transfers.running = 2;
+        sample.transfers.worker_capacity = 4;
+        sample.transfers.queue_capacity = 16;
+        sample.transfers.finished = 9;
+        sample.transfers.cancelled = 3;
+        sample.transfers.stalled = 5;
+        sample.transfers.panicked = 6;
+        sample.transfers.refused = 8;
+        sample.gateway_tunnels = 7;
+        sample.reverse_listeners = 10;
+        sample.yamux_waiting = 12;
+        sample.yamux_serving = 13;
+        sample.yamux_service_capacity = 14;
+        sample.yamux_stream_limit = 256;
+        sample.tunnel_dial_failures = 11;
+        view.storage.logical_bytes = Some(1536);
+        view.storage.allocated_bytes = Some(4096);
+        view.storage.files = Some(17);
+        view
+    }
+
+    /// What `List` sends for [`distinct_view`], family by family.
+    fn distinct_view_metrics() -> Vec<(String, Value, Value)> {
         let layer = |name| json!({ "layer": name });
         let mut expected = vec![
             ("Version", Value::Null, json!("0.127.0")),
@@ -745,24 +797,14 @@ mod tests {
                 json!(3 * 1024 * 1024),
             ),
         ];
-        // The canned layers: network 512 in and 2048 out, file payload 1023
-        // and 1024, the rest none; one active and two opened each.
-        let traffic = [
-            ("network", 512, 2048),
-            ("http2", 0, 0),
-            ("yamux", 0, 0),
-            ("reverseConnections", 0, 0),
-            ("transferPayload", 1023, 1024),
-        ];
         for (family, pick) in [
             ("TrafficReceivedBytes", 0),
             ("TrafficSentBytes", 1),
             ("TrafficOpened", 2),
             ("TrafficActive", 3),
         ] {
-            for (name, received, sent) in traffic {
-                let value = [received, sent, 2, 1][pick];
-                expected.push((family, layer(name), json!(value)));
+            for (name, readings) in LAYERS {
+                expected.push((family, layer(name), json!(readings[pick])));
             }
         }
         expected.extend([
@@ -781,16 +823,16 @@ mod tests {
             expected.push(("TransferJobs", json!({ "outcome": outcome }), json!(jobs)));
         }
         expected.extend([
-            ("GatewayTunnels", Value::Null, json!(1)),
-            ("ReverseListeners", Value::Null, json!(2)),
-            ("YamuxWaiting", Value::Null, json!(0)),
-            ("YamuxServing", Value::Null, json!(3)),
-            ("YamuxServiceCapacity", Value::Null, json!(8)),
+            ("GatewayTunnels", Value::Null, json!(7)),
+            ("ReverseListeners", Value::Null, json!(10)),
+            ("YamuxWaiting", Value::Null, json!(12)),
+            ("YamuxServing", Value::Null, json!(13)),
+            ("YamuxServiceCapacity", Value::Null, json!(14)),
             ("YamuxStreamLimit", Value::Null, json!(256)),
             ("TunnelDialFailures", Value::Null, json!(11)),
             ("HomeLogicalBytes", Value::Null, json!(1536)),
             ("HomeAllocatedBytes", Value::Null, json!(4096)),
-            ("HomeFiles", Value::Null, json!(3)),
+            ("HomeFiles", Value::Null, json!(17)),
         ]);
         expected
             .into_iter()
@@ -798,11 +840,27 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn every_canned_number_is_its_own() {
+        // Two families expecting one number would let a family that reads
+        // the other's field pass.
+        let expected = distinct_view_metrics();
+        let numbers: Vec<u64> = expected
+            .iter()
+            .filter(|(_, _, value)| !value.is_string())
+            .map(|(_, _, value)| value.as_u64().unwrap())
+            .collect();
+        let mut unique = numbers.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), numbers.len(), "{numbers:?}");
+    }
+
     #[tokio::test]
     async fn list_sends_every_family_with_its_fields_and_values() {
-        let source = Canned::view(super::super::full_view());
+        let source = Canned::view(distinct_view());
         let (replies, journal) = exchange(&source, &[list_call()]).await;
-        assert_eq!(metrics(&replies), full_view_metrics());
+        assert_eq!(metrics(&replies), distinct_view_metrics());
         // A stream: every reply but the last continues, and each carries
         // only the List outputs, all of them whole numbers or strings.
         let (last, rest) = replies.split_last().unwrap();
@@ -1278,7 +1336,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_connection_carries_several_calls_and_a_read_each() {
-        let source = Canned::view(super::super::full_view());
+        let source = Canned::view(distinct_view());
         let calls = [
             json!({"method": "org.varlink.service.GetInfo"}),
             json!({"method": "io.systemd.Metrics.Describe", "more": true, "parameters": {}}),
@@ -1289,7 +1347,7 @@ mod tests {
             list_call(),
         ];
         let (replies, _) = exchange(&source, &calls).await;
-        let count = full_view_metrics().len();
+        let count = distinct_view_metrics().len();
         assert_eq!(replies.len(), 1 + FAMILIES.len() + count + 1 + count);
         assert!(replies[0]["parameters"]["interfaces"].is_array());
         let expected_more = &replies[1 + FAMILIES.len() + count];
