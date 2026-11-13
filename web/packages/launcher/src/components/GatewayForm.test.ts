@@ -359,11 +359,12 @@ describe("GatewayForm WireGuard key", () => {
     );
   });
 
-  it("the file field's hint says a generated key fills it at sign-in", () => {
+  it("the file field's hint says a generated key does not use it", () => {
     const { el } = render();
     const hint = fileField(el).closest("label")!.querySelector(".field-hint")!;
     expect(hint.textContent!.replace(/\s+/g, " ")).toContain(
-      "A generated WireGuard key fills this field at sign-in.",
+      "A generated WireGuard key does not use this field: the sign-in that enrolls the key " +
+        "clears it, and setting a file here replaces the enrollment.",
     );
   });
 });

@@ -178,7 +178,7 @@
 
 <SettingField
   setting={LOCK}
-  hint="Auto-lock this window after inactivity; Mod+L locks now. The lock blocks input to this window only; other windows and clients with the bearer token can still reach this workspace's sessions."
+  hint="Auto-lock this window after inactivity; the Lock screen now command locks it at once. The lock blocks input to this window only; other windows and clients with the bearer token can still reach this workspace's sessions."
 >
   <div class="stack">
     <PillToggle
