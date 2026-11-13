@@ -1,9 +1,10 @@
 <script lang="ts">
-  // The launcher row's chord cell as an assign affordance. Shows the
-  // command's resolved chord (user override or the SHORTCUTS baseline) or an
-  // "Assign" prompt when it has none, and on click captures a new chord for
-  // the current client's OS slot, checks it against the resolved keymap, and
-  // either assigns it or reports the conflict. A conflict names the holding
+  // A chord cell of the Settings shortcut grid (KeymapSettings), one command
+  // in one OS slot, as an assign affordance. Shows the command's resolved
+  // chord (user override or the SHORTCUTS baseline) or an "Assign" prompt
+  // when it has none, and on click captures a new chord for its slot, checks
+  // it against that slot's resolved keymap, and either assigns it or reports
+  // the conflict. A conflict names the holding
   // command and, when the exchange would leave both commands chorded,
   // dispatchable, and collision-free (the conditions live at the offer
   // site), offers a swap that exchanges the two - never a take, because an
@@ -13,8 +14,8 @@
   // as Close pane inheriting the close-tab/window chords.
   //
   // Capture runs on a dedicated focusable element that swallows its keydowns,
-  // so it never reaches the launcher's arrow/enter navigation or types into
-  // the search input. Escape or a click away cancels.
+  // so a captured key never bubbles to the Settings surface around it or
+  // types into the grid's filter input. Escape or a click away cancels.
 
   import { tick } from "svelte";
   import { X } from "@lucide/svelte";
@@ -37,8 +38,8 @@
     onCaptureEnd,
   }: {
     cmd: Command;
-    // Which OS slot to assign. Defaults to the current client's slot (the
-    // launcher's quick-assign); the per-OS grid passes an explicit slot.
+    // Which OS slot to assign. The per-OS grid passes each column's slot;
+    // without one the cell assigns the current client's slot.
     slot?: OverrideSlot;
     // Called after capture commits or is cancelled by Escape, so the caller
     // can return focus. Not called on a click-away blur.

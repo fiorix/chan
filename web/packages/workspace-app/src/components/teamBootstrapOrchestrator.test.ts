@@ -24,7 +24,7 @@ import { workspace } from "../state/workspace.svelte";
 workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
 // Lead-first bootstrap chain. The Team Work Lead terminal already
-// exists (created at Cmd+P); the orchestrator runs against it.
+// exists (created by the New team command); the orchestrator runs against it.
 // These tests pin: config written, lead launched FIRST into the
 // existing tab (restart, no respawn/close), workers spawned into
 // new tabs, identity prompt primed in the lead's embedded editor,
@@ -70,7 +70,7 @@ function tabFromLayout(id: string): TerminalTab {
 }
 
 // After the consolidate the lead is a freshly-spawned terminal (the
-// Cmd+P "lead-tab" placeholder is closed), renamed to the lead's handle
+// New team "lead-tab" placeholder is closed), renamed to the lead's handle
 // (@@Lead). The Team Work bubble is gone, so we identify it by title.
 function leadFromLayout(): TerminalTab {
   const tab = allTerminalTabs().find((t) => t.title === "@@Lead");
@@ -169,7 +169,7 @@ describe("runTeamBootstrap: lead-first flow", () => {
     // the worker path - never restart-in-place (the broken reattach).
     expect(restart).not.toHaveBeenCalled();
     expect(spawn.mock.calls[0][0]).toMatchObject({ name: "@@Lead", command: "claude" });
-    // The Cmd+P placeholder is dropped; the fresh lead tab is named the
+    // The New team placeholder is dropped; the fresh lead tab is named the
     // lead handle.
     expect(allTerminalTabs().some((t) => t.id === "lead-tab")).toBe(false);
     expect(leadFromLayout().title).toBe("@@Lead");
@@ -187,7 +187,7 @@ describe("runTeamBootstrap: lead-first flow", () => {
     expect(spawn.mock.calls[0][0]).toMatchObject({ name: "@@Lead" });
     expect(spawn.mock.calls[1][0]).toMatchObject({ name: "@@Worker1" });
     expect(spawn.mock.calls[2][0]).toMatchObject({ name: "@@Worker2" });
-    // Fresh lead tab + two worker tabs in the active pane (the Cmd+P
+    // Fresh lead tab + two worker tabs in the active pane (the New team
     // placeholder is dropped), so still three terminals.
     expect(allTerminalTabs()).toHaveLength(3);
   });

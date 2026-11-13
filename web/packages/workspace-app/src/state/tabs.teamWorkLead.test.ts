@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The Team Work entry (Cmd+P) opens a fresh lead terminal in the active pane
+// The Team Work entry (New team) opens a fresh lead terminal in the active pane
 // and marks it as the pending lead the setup dialog edits. Every press is a
 // new terminal; nothing toggles an existing one.
 

@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 //
-// Team Work starts from its command (the launcher's "New team", Cmd+P on the
-// desktop, Mod+. p in Hybrid Nav), which opens a lead terminal and the team
-// dialog over it. Alt+Space starts nothing: it belongs to the program in the
+// Team Work starts from its command (the launcher's "New team" or the pane
+// menu's Apps row), which opens a lead terminal and the team dialog over it. Alt+Space starts nothing: it belongs to the program in the
 // terminal. The App is mounted over the demo workspace with a terminal tab
 // focused; the assertions read the layout and the team dialog.
 

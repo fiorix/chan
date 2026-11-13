@@ -14,7 +14,7 @@ import { workspace } from "./workspace.svelte";
 workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 
 // The lead launches FIRST by SPAWNING a fresh agent session into the
-// lead's pane and dropping the Cmd+P placeholder shell - the SAME
+// lead's pane and dropping the New team placeholder shell - the SAME
 // spawn+mount path the workers use (TEAM-CONSOLIDATE). Restart-in-place
 // was broken: the orchestrator's external api.restartTerminal closed the
 // session but the lead TerminalTab never reattached, so the agent never
@@ -47,7 +47,7 @@ function setLayout(lead: TerminalTab): void {
   layout.focusColor = "blue";
 }
 
-// After the consolidate the Cmd+P placeholder ("lead-tab") is closed and
+// After the consolidate the New team placeholder ("lead-tab") is closed and
 // the lead is a freshly-spawned terminal; read the surviving terminal tab
 // back from the layout proxy.
 function leadFromLayout(): TerminalTab {
@@ -110,7 +110,7 @@ describe("lead launch (spawn-fresh, lead-first)", () => {
     expect(body.env?.DEBUG).toBe("1");
   });
 
-  test("drops the Cmd+P placeholder and mounts a fresh lead tab", async () => {
+  test("drops the New team placeholder and mounts a fresh lead tab", async () => {
     setLayout(placeholder());
     mockApi();
     await runTeamBootstrap(config(), {

@@ -2953,7 +2953,7 @@
     return () => window.removeEventListener("chan:command", onLauncherCommand);
   });
 
-  // The Team Work bubble composer is gone. Team Work is the Cmd+P dialog +
+  // Team Work has no composer of its own. It is the New team dialog +
   // orchestrator spawn/load; the lead is a NORMAL terminal whose identity
   // prompt the orchestrator auto-delivers through the write queue (the same
   // prompt-frame path every terminal uses). Per-terminal text input is the

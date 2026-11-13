@@ -257,8 +257,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // macOS, Ctrl+Alt+W on Linux / Windows (via `osChord`; Ctrl+Shift+W is
   // tab close there). There is no in-page web chord:
   // on the web a browser tab close IS the discard. chan-desktop binds the
-  // native chord and maps the OS close button here when a devserver is NOT
-  // connected (when connected the button buries the window instead, serve.rs).
+  // native chord. The OS close button does not map here: on a live window it
+  // prompts Hide / Close / Cancel (`app.window.confirmClose`, serve.rs).
   // Drives the window-discard path (an explicit DELETE of the saved window
   // blob), distinct from the tab-close chords (Cmd+W on macOS, Ctrl+Shift+W
   // on the Linux / Windows desktop via `osChord`, Ctrl+D everywhere).
@@ -267,7 +267,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     label: "Close window",
     native: "Mod+Shift+W",
     group: "App",
-    note: "discard an empty / terminal window; buries when devserver-connected",
+    note: "discard this window and its terminal sessions",
     escapeTerminal: true,
   },
   // The explicit "hide this window" action: the close-confirm overlay's Hide

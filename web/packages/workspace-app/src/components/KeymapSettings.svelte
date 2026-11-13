@@ -3,10 +3,9 @@
   // each with a chord cell per client slot (Web / macOS / Linux / Windows).
   // The current client's slot is marked, but all four are editable from any
   // machine so a user can prepare another OS's chords (the metadata travels
-  // with the desktop config). Each cell reuses CommandChordAssign bound to
-  // its slot, so capture, conflict detection, and clear match the launcher's
-  // quick-assign. This is body content: the caller (a settings section)
-  // provides the surrounding chrome.
+  // with the desktop config). Each cell is a CommandChordAssign bound to its
+  // slot, which owns capture, conflict detection and clear. This is body
+  // content: the caller (a settings section) provides the surrounding chrome.
 
   import { allCommands, type Command } from "../state/commands";
   // Populate the catalog before the first read.
