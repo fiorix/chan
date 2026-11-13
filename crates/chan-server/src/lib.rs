@@ -99,6 +99,7 @@ pub use chan_library::terminal_sessions::TerminalExit;
 pub use chan_library::terminal_sessions::{
     appimage_host_var, hand_appimage_host_env, own_appimage, own_apprun_value,
     without_apprun_blocks, without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
+    GUI_STACK_REEXEC_LIBRARY, GUI_STACK_REEXEC_MARKER, GUI_STACK_REEXEC_MARKERS,
 };
 pub use chan_library::terminal_sessions::{
     TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,
