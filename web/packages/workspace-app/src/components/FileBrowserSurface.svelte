@@ -12,6 +12,7 @@
   import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { commandState, commandTitle } from "../state/commands";
   import "../state/commands/install";
+  import { commandSurfaceId } from "../state/commands/browser";
   import { browserView, dropBrowserView, setBrowserView, toggleBrowserDetails, toggleBrowserView } from "../state/browserView.svelte";
   import { basename, parentDir } from "../state/format";
   import { browserDirectoryInput, type BrowserSort } from "../state/browserEntries";
@@ -134,6 +135,20 @@
     const onCommand = (e: Event): void => {
       if ((e as CustomEvent).detail?.name !== "app.browser.open") return;
       if (activeBrowserTab()?.id === id) run("open");
+    };
+    window.addEventListener("chan:command", onCommand);
+    return () => window.removeEventListener("chan:command", onCommand);
+  });
+
+  // The launcher's Upload reaches this surface as a chan:command too, since
+  // the directory it uploads into is the surface's own. The surface the
+  // selection commands act on answers, a dock's included, with what its
+  // menu's Upload row runs.
+  $effect(() => {
+    const id = instanceId;
+    const onCommand = (e: Event): void => {
+      if ((e as CustomEvent).detail?.name !== "app.browser.uploadSelection") return;
+      if (commandSurfaceId() === id) run("upload");
     };
     window.addEventListener("chan:command", onCommand);
     return () => window.removeEventListener("chan:command", onCommand);

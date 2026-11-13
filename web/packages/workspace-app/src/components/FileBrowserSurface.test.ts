@@ -48,10 +48,13 @@ import {
 } from "../state/commands";
 import { chordFor, SHORTCUTS } from "../state/shortcuts";
 import { exportPathToPdf } from "../state/fileActionExecutors";
+import { filesContext } from "../state/fileContext.svelte";
 import {
   browserSelection,
+  fbSelectSingle,
   fbTreeInstance,
   fileOps,
+  loadTreeDir,
   fbClipboard,
   fbClipboardClear,
   browserSidePanes,
@@ -932,6 +935,119 @@ describe("the launcher's Open", () => {
     open();
     await settle();
     expect(tab.directory).toBe("");
+  });
+});
+
+// The menu's Upload and the launcher's Upload pick one directory: the one the
+// surface is in, which its New and Paste choose too. Neither replaces a
+// file; that is the Upload of the file's own row menu.
+describe("Upload from the menu and from the launcher", () => {
+  const UPLOAD = "app.browser.uploadSelection";
+  const HOME = "notes/sub";
+
+  beforeEach(async () => {
+    uninstallDemoWorkspace();
+    installDemoWorkspace({
+      metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 3, textCount: 3 },
+      files: [
+        { path: "notes/a.md", kind: "document", size: 5, mtime: 100, content: "hello" },
+        { path: "notes/sub/b.md", kind: "document", size: 5, mtime: 100, content: "deep" },
+        { path: "README.md", kind: "document", size: 5, mtime: 100, content: "hi" },
+      ],
+    });
+    await refreshWorkspace();
+    await refreshTree();
+    await loadTreeDir("notes");
+    vi.spyOn(fileOps, "uploadFilesTo").mockResolvedValue(undefined);
+    vi.spyOn(fileOps, "replaceFileAt").mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    filesContext.current = null;
+  });
+
+  /// Where the upload `act` asks for goes: the directory its picker
+  /// uploads into, the file it replaces, or no picker at all, and how many
+  /// pickers it raised where that is more than one.
+  async function target(act: () => void | Promise<void>): Promise<string> {
+    const into = vi.mocked(fileOps.uploadFilesTo);
+    const over = vi.mocked(fileOps.replaceFileAt);
+    into.mockClear();
+    over.mockClear();
+    const before = document.querySelectorAll('input[type="file"]').length;
+    await act();
+    const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')];
+    const raised = inputs.length - before;
+    if (raised === 0) return "no picker";
+    const input = inputs[inputs.length - 1]!;
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["x"], "x.txt")] });
+    input.dispatchEvent(new Event("change"));
+    const extra = raised > 1 ? ` (${raised} pickers)` : "";
+    if (over.mock.calls.length > 0) return `replace ${over.mock.calls[0]![0]}${extra}`;
+    return `${input.multiple ? "many" : "one"} into ${into.mock.calls[0]?.[0]}${extra}`;
+  }
+
+  type Case = {
+    name: string;
+    variant: "tab" | "dock";
+    standalone?: boolean;
+    selected: string | null;
+    expected: string;
+  };
+  const CASES: Case[] = [
+    { name: "a list with a file selected", variant: "tab", selected: "notes/a.md", expected: "notes" },
+    { name: "a list with a directory selected", variant: "tab", selected: "notes/sub", expected: "notes" },
+    { name: "a list with nothing selected", variant: "tab", selected: null, expected: "notes" },
+    { name: "a tree with a directory selected", variant: "dock", selected: "notes", expected: "notes" },
+    { name: "a tree with a file selected", variant: "dock", selected: "notes/a.md", expected: "notes" },
+    { name: "a tree with nothing selected", variant: "dock", selected: null, expected: "" },
+    { name: "a standalone window's list with nothing selected", variant: "tab", standalone: true, selected: null, expected: "notes" },
+    { name: "a standalone window's tree with a directory selected", variant: "dock", standalone: true, selected: "notes", expected: "notes" },
+    // The tree's root is the filesystem's: nothing selected starts at home.
+    { name: "a standalone window's tree with nothing selected", variant: "dock", standalone: true, selected: null, expected: HOME },
+  ];
+
+  test.each(CASES)("$name: the row and the command upload many files into one directory", async (c) => {
+    if (c.standalone) {
+      caps.workspace = false;
+      filesContext.current = { rootDisplay: "/", rootWire: "", homeWire: HOME, identity: "files" };
+    }
+    // The command is offered on a file browser tab; a dock's selection is
+    // the one it acts on while the dock holds the keyboard.
+    const tab = seat(browserTab({ directory: "notes" }));
+    const surface = c.variant === "tab" ? await render({ variant: "tab", tab }) : await render({ variant: "dock", side: "left" });
+    const id = c.variant === "tab" ? `fb-tab-${tab.id}` : "fb-dock-left";
+    surface.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    fbSelectSingle(c.selected, fbTreeInstance(id)!.selection);
+    await settle();
+    const command = commandById(UPLOAD)!;
+    expect(command.available(commandContext()), "the command is offered").toBe(true);
+
+    const fromRow = await target(async () => {
+      if (c.variant === "tab") await openFromTabStrip(tab);
+      else {
+        surface.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+        await settle();
+      }
+      menuButton(title(UPLOAD)).click();
+    });
+    const fromCommand = await target(() => command.run());
+
+    expect({ fromRow, fromCommand }).toEqual({ fromRow: `many into ${c.expected}`, fromCommand: `many into ${c.expected}` });
+  });
+
+  test("the command is answered by the surface the selection commands act on, and by it alone", async () => {
+    const tab = seat(browserTab({ directory: "notes/sub" }));
+    const list = await render({ variant: "tab", tab });
+    const dock = await render({ variant: "dock", side: "left" });
+    fbSelectSingle("notes", fbTreeInstance("fb-dock-left")!.selection);
+    const command = commandById(UPLOAD)!;
+
+    dock.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(await target(() => command.run()), "the dock holds the keyboard").toBe("many into notes");
+
+    list.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(await target(() => command.run()), "the tab holds the keyboard").toBe("many into notes/sub");
   });
 });
 

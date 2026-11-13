@@ -9,10 +9,11 @@
 // replaces it in place and reloads any tab showing it. The inspector's
 // Upload and Download do the same for the entry it shows.
 //
-// A transfer row runs for its entry what the launcher's command of the same
-// title runs for the selection: the store's download, which the desktop
-// streams itself, and the picker that takes many files into a folder or one
-// file over a file.
+// The Download row runs for its entry what the launcher's Download runs for
+// the selection: the store's download, which the desktop streams itself. The
+// launcher's Upload is the file browser menu's, not a row's: it takes many
+// files into the folder a Files tab lists, whatever is selected there, and
+// never one file over a file.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -26,7 +27,7 @@ import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { commandById } from "../state/commands";
-import { browserSelection, fbSelectSingle, fileOps, ui } from "../state/store.svelte";
+import { browserSelection, fbSelectSingle, fileOps, revealPathInBrowser, ui } from "../state/store.svelte";
 import { openBrowserInActivePane, splitPane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -214,39 +215,22 @@ describe("a transfer row and the command of its title", () => {
     await settle();
     expect(document.querySelector(".ctx"), "the row closes its menu").toBeNull();
   });
+});
 
-  test("Upload: both raise the picker that replaces a file with one file", async () => {
-    await openFilesTab();
+describe("the launcher's Upload", () => {
+  test("takes many files into the folder the Files tab lists, and replaces no selected file", async () => {
+    resetLayout([]);
+    revealPathInBrowser("docs/b.md", { inspectorOpen: false });
+    await settle();
+    await vi.waitFor(() => expect(row("docs/b.md")).toBeDefined());
+    expect(browserSelection.path).toBe("docs/b.md");
 
-    runOnSelection("app.browser.uploadSelection", "a.md");
-    const forCommand = picker();
-    expect(forCommand.multiple).toBe(false);
-    pick(forCommand, new File(["from the launcher"], "x.md"));
-    await vi.waitFor(() => expect(api.read("a.md")).resolves.toMatchObject({ content: "from the launcher" }));
+    commandById("app.browser.uploadSelection")!.run();
+    expect(picker().multiple, "many files go into a folder").toBe(true);
+    pick(picker(), new File(["fresh"], "c.md"));
 
-    (await menuRow("a.md", "Upload")).click();
-    const forRow = picker();
-    expect(forRow).not.toBe(forCommand);
-    expect(forRow.multiple).toBe(false);
-    pick(forRow, new File(["from the row"], "y.md"));
-    await vi.waitFor(() => expect(api.read("a.md")).resolves.toMatchObject({ content: "from the row" }));
-    expect(document.querySelector(".ctx"), "the row closes its menu").toBeNull();
-  });
-
-  test("Upload: both raise the picker that takes many files into a folder", async () => {
-    await openFilesTab();
-
-    // The row first: an upload shows what landed, which takes the list into
-    // the folder and its row out of view.
-    (await menuRow("docs", "Upload")).click();
-    expect(picker().multiple).toBe(true);
-    pick(picker(), new File(["one"], "e.md"));
-    await vi.waitFor(() => expect(api.read("docs/e.md")).resolves.toMatchObject({ content: "one" }));
-
-    runOnSelection("app.browser.uploadSelection", "docs");
-    expect(picker().multiple).toBe(true);
-    pick(picker(), new File(["two"], "f.md"));
-    await vi.waitFor(() => expect(api.read("docs/f.md")).resolves.toMatchObject({ content: "two" }));
+    await vi.waitFor(() => expect(api.read("docs/c.md")).resolves.toMatchObject({ content: "fresh" }));
+    await expect(api.read("docs/b.md")).resolves.toMatchObject({ content: "hello" });
   });
 });
 

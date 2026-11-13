@@ -11,8 +11,11 @@
 //
 // A row of the tree's menu acts on its entry and the command of its title on
 // the selection, through one function: Download through the store's
-// download, Open in new file browser through the store's reveal, and Upload
-// and Copy path through uploadToEntry and copyEntryPath here.
+// download, Open in new file browser through the store's reveal, and Copy
+// path through copyEntryPath here. Upload is the file browser's own menu
+// row instead: both upload into the directory the surface is in, the one
+// its New and Paste choose, and never replace a file. Replacing a file is
+// the Upload of that file's own row menu alone.
 
 import {
   dispatchChanCommand,
@@ -36,6 +39,7 @@ import {
   collapseAllFoldersForInstance,
   copyTextToClipboard,
   expandAllFoldersForInstance,
+  fbActiveInstanceId,
   fbClearSelection,
   fbClipboard,
   fbClipboardClear,
@@ -127,8 +131,9 @@ export function copyEntryPath(path: string): Promise<void> {
 }
 
 /// Raise the picker that uploads into a directory, or the one that replaces
-/// a file with the file picked. An Upload row and the command both raise it
-/// here, so each is the desktop's own picker where there is one.
+/// a file with the file picked. Every Upload, a row's, a Details panel's and
+/// the command's, raises it here, so each is the desktop's own picker where
+/// there is one.
 export function uploadToEntry(path: string, isDir: boolean): void {
   if (isDir) raiseUploadPicker(path);
   else raiseReplacePicker(path);
@@ -188,10 +193,11 @@ function newGraphFromSelection(): void {
   else openFsGraphForFile(sel.path);
 }
 
-function uploadToSelection(): void {
-  const sel = activeSelection();
-  if (sel) uploadToEntry(sel.path, sel.isDir);
-  else uploadToEntry(defaultCreateDirectory(), true);
+/// The instance id of the file browser surface the selection commands act
+/// on: the last focused one, whose selection `browserSelection` reads, or
+/// the active file browser tab's while none is.
+export function commandSurfaceId(): string | null {
+  return fbActiveInstanceId() ?? activeBrowserInstanceId();
 }
 
 function downloadSelection(): void {
@@ -346,9 +352,12 @@ registerCommands([
     order: 4,
     kind: "open",
     requirement: "files",
-    keywords: ["import", "replace", "file"],
+    keywords: ["import", "file", "directory", "folder"],
     available: onBrowser,
-    run: uploadToSelection,
+    // The directory an upload goes into is the surface's own, the folder a
+    // list shows, so the upload reaches the surface the selection commands
+    // act on as a chan:command and runs there what its menu's Upload runs.
+    run: () => dispatchChanCommand("app.browser.uploadSelection"),
   },
   {
     id: "app.browser.downloadSelection",
