@@ -26,7 +26,7 @@ import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const RUN = Date.now().toString(36);
-const DIR = `pane-focus-225-${RUN}`;
+const DIR = `pane-focus-226-${RUN}`;
 const FILES = 60;
 const TERMINAL = ".pane .terminal-tab.active";
 const ENGINE = { xterm: ".terminal.xterm .xterm-screen", ghostty: ".terminal-host canvas" };
@@ -105,7 +105,7 @@ async function suiteWindow(ctx, name) {
   await page.setViewport({ width: 1280, height: 900 });
   await page.bringToFront();
   const url = new URL(ctx.serverUrl);
-  url.searchParams.set("w", `pane-focus-225-${name}-${RUN}`);
+  url.searchParams.set("w", `pane-focus-226-${name}-${RUN}`);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
   return page;
@@ -386,11 +386,11 @@ async function engineWindow(ctx, dir, engine, failures) {
     results.push(restore);
     if (!restore.focusedPane) failures.push(`${restore.arm}: the restored window focused another pane than the saved one`);
     if (!restore.focus.startsWith("browser-")) failures.push(`${restore.arm}: the restored window left the keyboard on ${restore.focus}`);
-    await ctx.shot(`225-${engine}`, page);
+    await ctx.shot(`226-${engine}`, page);
     return results;
   } catch (error) {
     primary = error;
-    await ctx.shot(`225-${engine}-failure`, page).catch(() => {});
+    await ctx.shot(`226-${engine}-failure`, page).catch(() => {});
     throw error;
   } finally {
     console.log(`[smoke]   pane focus ${JSON.stringify(results)}`);
@@ -425,7 +425,7 @@ async function engineWindow(ctx, dir, engine, failures) {
 export default {
   name: "pane-focus-browser-keys",
   async run(ctx) {
-    const dir = mkdtempSync(join(tmpdir(), "chan-pane-focus-225-"));
+    const dir = mkdtempSync(join(tmpdir(), "chan-pane-focus-226-"));
     const folder = seedFolder(ctx);
     const failures = [];
     try {
