@@ -1241,7 +1241,7 @@ describe("a host that holds one machine's snapshot", () => {
     const deck = computersDeck(
       model,
       { path: [], filter: null, query: "" },
-      { ...ctx, scopes, terminalTitle: "New terminal window" },
+      { ...ctx, scopes, terminalTitle: "New standalone terminal" },
     );
     return { deck, commands };
   }
@@ -1251,7 +1251,7 @@ describe("a host that holds one machine's snapshot", () => {
     expect(outline(deck)).toEqual([
       "Workspaces: chan",
       "Windows: Terminal Window 2",
-      "New: New terminal window",
+      "New: New standalone terminal",
     ]);
     expect(deck.entries.every((entry) => entry.scope === "computers")).toBe(true);
   });
@@ -1267,7 +1267,7 @@ describe("a host that holds one machine's snapshot", () => {
 
   it("opens the terminal window as a leaf", async () => {
     const { deck, commands } = scoped();
-    const terminal = row(deck, "New terminal window");
+    const terminal = row(deck, "New standalone terminal");
     expect(terminal.next).toBeUndefined();
     await terminal.run?.();
     expect(commands).toEqual([{ target: "machine", key: "local", action: "new-terminal" }]);
@@ -1284,7 +1284,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
     may: ComputersMay = { terminal: true, window: true },
   ): { rows: ComputersEntry[]; commands: ComputersCommand[]; model: ComputersModel; ctx: ComputersContext } {
     const { ctx: bare, commands } = harness();
-    const ctx = { ...bare, scopes, terminalTitle: "New terminal window" };
+    const ctx = { ...bare, scopes, terminalTitle: "New standalone terminal" };
     const model: ComputersModel = { machines: [local(machine)], may };
     return { rows: computersEntryPoints(model, ctx), commands, model, ctx };
   }
@@ -1297,7 +1297,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
   it("are a new terminal window, Workspaces and Windows, under one heading", () => {
     const { rows } = points(full);
     expect(rows.map((entry) => `${entry.section}: ${entry.title}`)).toEqual([
-      "Computers: New terminal window",
+      "Computers: New standalone terminal",
       "Computers: Workspaces",
       "Computers: Windows",
     ]);
@@ -1331,11 +1331,11 @@ describe("the ways into the tree, for a list that holds other things", () => {
 
   it("leave out a type the model holds none of, and the terminal the host may not open", () => {
     expect(points({ windows: full.windows }).rows.map((entry) => entry.title)).toEqual([
-      "New terminal window",
+      "New standalone terminal",
       "Windows",
     ]);
     expect(points({ workspaces: [space("ws-1")] }).rows.map((entry) => entry.title)).toEqual([
-      "New terminal window",
+      "New standalone terminal",
       "Workspaces",
     ]);
     expect(points(full, { window: true }).rows.map((entry) => entry.title)).toEqual(["Workspaces", "Windows"]);
@@ -1344,7 +1344,7 @@ describe("the ways into the tree, for a list that holds other things", () => {
   it("end with the way to every computer where the host has that screen, and only there", async () => {
     const { rows, commands, model, ctx } = points(full, { terminal: true, window: true, allComputers: true });
     expect(rows.map((entry) => `${entry.section}: ${entry.title}`)).toEqual([
-      "Computers: New terminal window",
+      "Computers: New standalone terminal",
       "Computers: Workspaces",
       "Computers: Windows",
       "Computers: All computers...",
@@ -1378,7 +1378,7 @@ describe("a host beside a screen that lists every computer", () => {
       ],
       may: { terminal: true, window: true, allComputers: true },
     };
-    return { deck: build(model, view, { ...ctx, scopes, terminalTitle: "New terminal window" }), commands };
+    return { deck: build(model, view, { ...ctx, scopes, terminalTitle: "New standalone terminal" }), commands };
   }
 
   it("ends its root with the way there", async () => {
@@ -1386,7 +1386,7 @@ describe("a host beside a screen that lists every computer", () => {
     expect(outline(deck)).toEqual([
       "Workspaces: chan",
       "Windows: Terminal Window 2",
-      "New: New terminal window",
+      "New: New standalone terminal",
       "Chan Desktop: All computers...",
     ]);
     const all = row(deck, "All computers...");

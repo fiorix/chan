@@ -163,7 +163,7 @@ test("privacy mode names windows and their workspaces as the launcher's deck doe
   // window no row lists, the captioned window, then the one action of the
   // machine.
   expect.soft(titles(), "the scope's rows").toEqual([
-    "Workspace", "Workspace", "Workspace", "Window", "Window", "New terminal window",
+    "Workspace", "Workspace", "Workspace", "Window", "Window", "New standalone terminal",
   ]);
   expect.soft(subtitles(), "the mount's reason, then the workspace each window row names").toEqual([
     "Workspace unavailable", "Workspace", "Workspace",
@@ -215,7 +215,7 @@ test("privacy mode names windows and their workspaces as the launcher's deck doe
   await setPrivacy({ enabled: false });
   await tick();
   expect(titles(), "the scope's rows with privacy mode off").toEqual([
-    "secret-root", "Project A", "hidden-root", "Window 3", "Window 2 [release checks]", "New terminal window",
+    "secret-root", "Project A", "hidden-root", "Window 3", "Window 2 [release checks]", "New standalone terminal",
   ]);
   expect(subtitles()).toEqual([
     "workspace root does not exist: /work/secret-root", "private-tree", "Project A",
