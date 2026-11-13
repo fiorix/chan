@@ -11,8 +11,12 @@
 /// The CSS custom property carrying the backdrop mask.
 export const SEE_THROUGH_MASK_VAR = "--see-through-mask";
 
+/// The corner radii of a hole, clockwise from the top-left corner. A pane
+/// squares the corners it has on the window's edge, so they differ.
+export type CornerRadii = [topLeft: number, topRight: number, bottomRight: number, bottomLeft: number];
+
 /// A hole in the backdrop, in px relative to the backdrop's top-left corner.
-export type BackdropHole = { x: number; y: number; width: number; height: number; radius: number };
+export type BackdropHole = { x: number; y: number; width: number; height: number; radii: CornerRadii };
 
 /// Rounded to a tenth of a pixel: enough for a crisp edge at any zoom, and a
 /// stable string so an unchanged layout yields an identical mask.
@@ -20,17 +24,24 @@ function px(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
 
-function holePath({ x, y, width, height, radius }: BackdropHole): string {
-  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+function holePath({ x, y, width, height, radii }: BackdropHole): string {
+  const clamp = (radius: number): number => Math.max(0, Math.min(radius, width / 2, height / 2));
+  const tl = clamp(radii[0]);
+  const tr = clamp(radii[1]);
+  const br = clamp(radii[2]);
+  const bl = clamp(radii[3]);
   const right = x + width;
   const bottom = y + height;
-  if (r === 0) return `M${px(x)} ${px(y)}H${px(right)}V${px(bottom)}H${px(x)}Z`;
-  const arc = `A${px(r)} ${px(r)} 0 0 1`;
+  // A square corner is the point the two sides meet at, with no arc.
+  const arc = (r: number, toX: number, toY: number): string =>
+    r === 0 ? "" : `A${px(r)} ${px(r)} 0 0 1 ${px(toX)} ${px(toY)}`;
   return (
-    `M${px(x + r)} ${px(y)}H${px(right - r)}${arc} ${px(right)} ${px(y + r)}` +
-    `V${px(bottom - r)}${arc} ${px(right - r)} ${px(bottom)}` +
-    `H${px(x + r)}${arc} ${px(x)} ${px(bottom - r)}` +
-    `V${px(y + r)}${arc} ${px(x + r)} ${px(y)}Z`
+    `M${px(x + tl)} ${px(y)}H${px(right - tr)}${arc(tr, right, y + tr)}` +
+    `V${px(bottom - br)}${arc(br, right - br, bottom)}` +
+    `H${px(x + bl)}${arc(bl, x, bottom - bl)}` +
+    // The path's close draws the left side of a square top-left corner.
+    (tl === 0 ? "" : `V${px(y + tl)}${arc(tl, x + tl, y)}`) +
+    "Z"
   );
 }
 
@@ -47,7 +58,7 @@ export function backdropMask(width: number, height: number, holes: BackdropHole[
 }
 
 /// The holes for `backdrop`: one per pane card face showing a terminal, with
-/// the face's own corner radius. A pane mid side flip gets no hole: the card
+/// the face's own corner radii. A pane mid side flip gets no hole: the card
 /// turns under a transform the rect does not follow, so a hole cut for its
 /// resting rect would show the desktop around the turning card; the flip's
 /// end drops the class, and that mutation rebuilds the mask with the hole.
@@ -59,12 +70,18 @@ export function terminalHoles(backdrop: HTMLElement): BackdropHole[] {
     if (face.closest(".pane.sideFlipActive")) continue;
     const rect = face.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
+    const style = getComputedStyle(face);
     holes.push({
       x: rect.left - origin.left,
       y: rect.top - origin.top,
       width: rect.width,
       height: rect.height,
-      radius: Number.parseFloat(getComputedStyle(face).borderTopLeftRadius) || 0,
+      radii: [
+        Number.parseFloat(style.borderTopLeftRadius) || 0,
+        Number.parseFloat(style.borderTopRightRadius) || 0,
+        Number.parseFloat(style.borderBottomRightRadius) || 0,
+        Number.parseFloat(style.borderBottomLeftRadius) || 0,
+      ],
     });
   }
   return holes;

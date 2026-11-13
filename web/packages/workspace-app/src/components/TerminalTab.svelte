@@ -3548,7 +3548,7 @@
        div is xterm's mount, not an interactive control -- xterm
        manages its own accessibility tree inside. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="terminal-main">
+  <div class="terminal-main" class:inspector-open={tab.inspectorOpen}>
     <div
       class="terminal-host"
       data-file-drop-zone
@@ -3737,6 +3737,10 @@
   .terminal-host {
     flex: 1;
     min-height: 0;
+    /* What the cell grid keeps clear on a side that is the window's edge:
+       enough that a glyph does not touch the window's frame, and no more,
+       so the window's width and height go to columns and rows. */
+    --terminal-edge-inset: 2px;
     padding: 8px;
     background: var(--terminal-background, var(--bg));
     overflow: hidden;
@@ -3745,6 +3749,21 @@
        of the host sits under the renderer's canvas, showing wherever the
        canvas is see-through, as in a transparent window. */
     caret-color: transparent;
+  }
+  /* The pane marks its sides on the window's edge. The host reaches the
+     pane's top only under no strip, and its right only beside no inspector;
+     next to either it keeps the full inset. */
+  :global(.pane.edge-top:not(.has-strip)) .terminal-host {
+    padding-top: var(--terminal-edge-inset);
+  }
+  :global(.pane.edge-right) .terminal-main:not(.inspector-open) .terminal-host {
+    padding-right: var(--terminal-edge-inset);
+  }
+  :global(.pane.edge-bottom) .terminal-host {
+    padding-bottom: var(--terminal-edge-inset);
+  }
+  :global(.pane.edge-left) .terminal-host {
+    padding-left: var(--terminal-edge-inset);
   }
   .cli-reload-notice {
     display: flex;

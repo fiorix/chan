@@ -100,6 +100,7 @@
   import GraphPanel from "./GraphPanel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
+    browserSidePanes,
     currentPreferences,
     modalDialogOpen,
     openCommandLauncherFromMenu,
@@ -107,6 +108,7 @@
     workspaceDisplayName,
     tree,
   } from "../state/store.svelte";
+  import { windowEdges } from "../state/paneEdges";
   import { workspace } from "../state/workspace.svelte";
   import { isExcalidraw } from "../state/fileTypes";
   import {
@@ -638,6 +640,21 @@
   // focus move staged in Hybrid Nav moves the strip with it.
   const barSlot = $derived(windowTabBar.on ? windowTabBar.slot : null);
   const stripInBar = $derived(barSlot !== null && viewLayout.activePaneId === pane.id);
+  // The sides of this pane on the window's edge, where it draws flush: no
+  // margin, square corners, and the terminal's inset down to a hairline. A
+  // docked file browser is a surface of its own, so the side it holds keeps
+  // the gap a pane keeps from its neighbours.
+  const edges = $derived(
+    windowEdges(viewLayout, pane.id, {
+      left: windowCaps.files && browserSidePanes.left,
+      right: windowCaps.files && browserSidePanes.right,
+    }),
+  );
+  // Whether the strip takes the top of the pane, so the body under it does
+  // not reach the pane's top side.
+  const stripInPlace = $derived(
+    !windowTabBar.on && !stripAutoHidden && !(ui.terminalControl || tmuxPaneHere),
+  );
   // In the desktop's title bar the strip's empty stretch drags the window;
   // Tauri's drag script reads the attribute on a direct press.
   const barDragRegion = $derived(stripInBar && isTauriDesktop() ? "" : undefined);
@@ -1468,6 +1485,12 @@
 <div
   class="pane"
   class:focused={isFocused}
+  class:sole={!multiPane}
+  class:has-strip={stripInPlace}
+  class:edge-top={edges.top}
+  class:edge-right={edges.right}
+  class:edge-bottom={edges.bottom}
+  class:edge-left={edges.left}
   class:wobble={wobbleActive}
   class:sideFlipActive={sideFlipActive}
   class:sideFlipHorizontal={sideFlipAxis === "horizontal"}
@@ -2215,8 +2238,8 @@
     border: 1px solid transparent;
     background: transparent;
     color: var(--text);
-    /* Pane chrome - floating shade. Margin keeps panes off the
-       workspace edge and off each other (the split divider is
+    /* Pane chrome - floating shade. Margin keeps panes off each
+       other and off a docked file browser (the split divider is
        4px; with 4px margin on each side the inter-pane gap reads
        as one clean 12px channel). The card face clips the tabs
        strip + editor body; the drop shadow paints inside the
@@ -2231,6 +2254,36 @@
       border-color 100ms ease,
       box-shadow 120ms ease;
   }
+  /* A side on the window's edge draws flush, so the content takes the room
+     a gap there would only hand to the backdrop. Its corners are square: a
+     rounded one against the window's straight edge shows the backdrop in a
+     wedge. */
+  .pane.edge-top {
+    margin-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+  .pane.edge-right {
+    margin-right: 0;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .pane.edge-bottom {
+    margin-bottom: 0;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .pane.edge-left {
+    margin-left: 0;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+  /* The border is the focus ring's reserved line, and a window's only pane
+     never draws the ring, so on the window's edge it has no line to keep. */
+  .pane.sole.edge-top { border-top-width: 0; }
+  .pane.sole.edge-right { border-right-width: 0; }
+  .pane.sole.edge-bottom { border-bottom-width: 0; }
+  .pane.sole.edge-left { border-left-width: 0; }
   .pane[data-focus-color="blue"] { --pane-active-focus: var(--pane-focus); }
   .pane[data-focus-color="orange"] { --pane-active-focus: #f97316; }
   .pane[data-focus-color="green"] { --pane-active-focus: #22c55e; }
