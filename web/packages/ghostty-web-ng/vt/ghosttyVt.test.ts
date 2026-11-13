@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
-import { Ghostty, Key, KeyEncoderOption, Mods, type GhosttyCell, type GhosttyTerminal } from "@chan/ghostty-web-ng";
+import { Key, KeyEncoderOption, type GhosttyCell, type GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
+import {
+  ORACLE_FIXTURE,
+  fixtureRow,
+  keyText,
+  type Attr,
+  type FixtureKeyEvent,
+  type OracleFixture,
+} from "./__tests__/oracleFixture";
 import {
   ABI,
   CELL_BITS,
@@ -10,6 +18,8 @@ import {
   LAYOUT,
   SCRATCH,
   STYLE_FLAG_BITS,
+  VtCells,
+  VtFlag,
   upstreamKey,
   upstreamKeyEncoderOption,
   type VtTerminal,
@@ -18,24 +28,21 @@ import {
 /// Ghostty's release wasm, vendored in this package (vitest runs in the
 /// package directory).
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
-/// ghostty-web's own build, the behavior this binding has to keep: this
-/// package's own wasm, from the npm build at its pinned commit.
-const GHOSTTY_WEB = "ghostty-vt.wasm";
+
+/// The behavior this binding has to keep: what ghostty-web's own binding
+/// over its own build read back for the differential corpus, recorded once
+/// (`__tests__/oracleFixture.ts` describes the form; its header names the
+/// commit, the command and the wasm it was recorded from).
+const oracle = JSON.parse(readFileSync(ORACLE_FIXTURE, "utf8")) as OracleFixture;
 
 let vendored: WebAssembly.Module;
-let legacy: WebAssembly.Module;
 
 beforeAll(async () => {
   vendored = await WebAssembly.compile(readFileSync(VENDORED));
-  legacy = await WebAssembly.compile(readFileSync(GHOSTTY_WEB));
 });
 
 async function upstream(): Promise<GhosttyVt> {
   return new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-}
-
-async function ghosttyWeb(): Promise<Ghostty> {
-  return new Ghostty(await WebAssembly.instantiate(legacy, { env: { log: () => {} } }));
 }
 
 type TypeJson = {
@@ -167,80 +174,106 @@ describe("the binding's ABI tables", () => {
   });
 });
 
-/// Byte streams a shell and its programs send, each read back through
-/// both bindings.
-const CORPUS: Record<string, string> = {
-  "plain lines": "hello\r\nworld\r\n$ ",
-  "SGR palette, bright, 256 and truecolor":
-    "\x1b[31mred\x1b[0m \x1b[1;92mbold green\x1b[0m \x1b[38;5;208morange\x1b[0m \x1b[38;2;10;20;30mrgb\x1b[0m",
-  "background colors and erase with a background":
-    "\x1b[44mblue bg\x1b[0m \x1b[48;2;200;100;50mrgb bg\x1b[0m\r\n\x1b[41m\x1b[K\x1b[0m",
-  "attributes": "\x1b[1mb\x1b[22;3mi\x1b[23;4mu\x1b[24;9ms\x1b[29;7mr\x1b[27;8mh\x1b[28;5mk\x1b[25;2mf\x1b[0m",
-  "cursor movement and erase": "abcdef\x1b[3D\x1b[K\r\n\x1b[5;10Hx\x1b[2;2Hy\x1b[1J",
-  "wide characters": "日本語 ｗｉｄｅ\r\n한국어",
-  "line wrapping": "x".repeat(130),
-  "scroll region and insert/delete lines": "1\r\n2\r\n3\r\n4\r\n5\x1b[2;4r\x1b[2;1H\x1b[L\x1b[3M\x1b[r",
-  "alternate screen with content": "main\x1b[?1049h\x1b[2J\x1b[Halt screen\x1b[3;3Htext",
-  "back from the alternate screen": "main\x1b[?1049halt\x1b[?1049l",
-  "tabs and backspace": "a\tb\tc\x08\x08X",
-  "a screen and a half of output": Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\r\n"),
-};
+const VT_ATTRS: [number, Attr][] = [
+  [VtFlag.BOLD, "bold"],
+  [VtFlag.ITALIC, "italic"],
+  [VtFlag.FAINT, "faint"],
+  [VtFlag.BLINK, "blink"],
+  [VtFlag.INVERSE, "inverse"],
+  [VtFlag.INVISIBLE, "invisible"],
+  [VtFlag.STRIKETHROUGH, "strikethrough"],
+  [VtFlag.UNDERLINE, "underline"],
+  [VtFlag.OVERLINE, "overline"],
+];
 
-describe("differential: the same bytes through ghostty-web's build and upstream's", () => {
-  test.each(Object.entries(CORPUS))("%s", async (_name, input) => {
-    const a = (await ghosttyWeb()).createTerminal(80, 24, { scrollbackLimit: 10_000 });
-    const b = (await upstream()).createTerminal(80, 24, { scrollbackLimit: 10_000 });
-    a.write(input);
-    b.write(input);
-    expect(b.beginFrame()).not.toBe(0);
-    for (let y = 0; y < 24; y++) {
-      expect(b.getLine(y), `row ${y}`).toEqual(a.getLine(y));
-    }
-    // ghostty-web's build hands `visible` over as the wasm's integer;
-    // its callers only test it for truth.
-    const cursor = (t: GhosttyTerminal | VtTerminal) => {
-      const c = t.getCursor();
-      return { x: c.x, y: c.y, visible: Boolean(c.visible) };
+/// The row a view holds, as the recorded oracle describes rows.
+function bindingRow(cells: VtCells, wrapped?: boolean) {
+  const out = Array.from({ length: cells.length }, (_, x) => {
+    const c = cells.at(x)!;
+    return {
+      codepoint: c.codepoint,
+      width: c.width,
+      fg: c.fg,
+      bg: c.bg,
+      attrs: VT_ATTRS.flatMap(([flag, name]) => (c.flags & flag ? [name] : [])),
+      link: c.hyperlink,
+      grapheme: c.cluster,
     };
-    expect(cursor(b)).toEqual(cursor(a));
-    expect(b.isAlternateScreen()).toBe(a.isAlternateScreen());
-    expect(b.getScrollbackLength()).toBe(a.getScrollbackLength());
-    for (let i = 0; i < a.getScrollbackLength(); i++) {
-      expect(b.getScrollbackLine(i), `history ${i}`).toEqual(a.getScrollbackLine(i));
-    }
-    for (let y = 0; y < 24; y++) expect(b.isRowWrapped(y), `wrap ${y}`).toBe(a.isRowWrapped(y));
+  });
+  return fixtureRow(out, wrapped);
+}
+
+function keyEvent(e: FixtureKeyEvent) {
+  return { action: 1, key: Key[e.key as keyof typeof Key], mods: e.mods ?? 0, utf8: e.utf8 };
+}
+
+function modes(t: VtTerminal): Record<string, boolean> {
+  return {
+    bracketedPaste: t.hasBracketedPaste(),
+    focusEvents: t.hasFocusEvents(),
+    mouseTracking: t.hasMouseTracking(),
+    "DEC 1": t.getMode(1),
+    "ANSI 4": t.getMode(4, true),
+    "DEC 25": t.getMode(25),
+  };
+}
+
+/// ghostty-web's build leaves the tertiary device attributes query
+/// unanswered; upstream answers it from the same callback, with a zero unit
+/// id.
+const TERTIARY_DA = "\x1b[=c";
+
+describe("differential: the binding against ghostty-web's recorded build", () => {
+  test("the oracle was recorded from ghostty-web's own wasm, over the whole corpus", () => {
+    expect(oracle.recorded.wasmSha256).toBe("794191ccd9f469ed0d49ebcb3e6b326d64279b91752b71ad80a3d89ff1f26416");
+    expect(Object.keys(oracle.screens)).toHaveLength(12);
+    expect(Object.keys(oracle.keyOptions).sort(), "a probe for every option ghostty-web numbers").toEqual(Object.keys(KEY_ENCODER_OPTIONS).sort());
   });
 
-  test("modes read the same after a program sets them", async () => {
-    const a = (await ghosttyWeb()).createTerminal(80, 24);
-    const b = (await upstream()).createTerminal(80, 24);
-    for (const t of [a, b]) {
-      expect(t.hasBracketedPaste()).toBe(false);
-      t.write("\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1h\x1b[4h");
+  test.each(Object.keys(oracle.screens))("%s", async (name) => {
+    const want = oracle.screens[name];
+    const [cols, rows] = want.size;
+    const t = (await upstream()).createTerminal(cols, rows, { scrollbackLimit: want.scrollbackLimit });
+    t.write(want.input);
+    expect(t.beginFrame()).not.toBe(0);
+    const cells = new VtCells();
+    for (let y = 0; y < rows; y++) {
+      expect(t.readRow(y, cells), `row ${y} reads`).toBe(true);
+      expect(bindingRow(cells, t.isRowWrapped(y)), `row ${y}`).toEqual(want.rows[y]);
     }
-    for (const t of [a, b]) {
-      expect(t.hasBracketedPaste()).toBe(true);
-      expect(t.hasFocusEvents()).toBe(true);
-      expect(t.hasMouseTracking()).toBe(true);
-      expect(t.getMode(1)).toBe(true);
-      expect(t.getMode(4, true)).toBe(true);
-      expect(t.getMode(25)).toBe(true);
+    // ghostty-web's build hands `visible` over as the wasm's integer, which
+    // its callers only test for truth and the oracle records as a boolean.
+    const cursor = t.getCursor();
+    expect({ x: cursor.x, y: cursor.y, visible: cursor.visible }).toEqual(want.cursor);
+    expect(t.isAlternateScreen()).toBe(want.alternateScreen);
+    expect(t.getScrollbackLength()).toBe(want.history.length);
+    for (let i = 0; i < want.history.length; i++) {
+      expect(t.readHistoryRow(i, cells), `history ${i} reads`).toBe(true);
+      expect(bindingRow(cells), `history ${i}`).toEqual(want.history[i]);
     }
+    t.free();
   });
 
-  test("replies to status and attribute queries are ghostty-web's", async () => {
-    const a = (await ghosttyWeb()).createTerminal(80, 24);
-    const b = (await upstream()).createTerminal(80, 24);
-    for (const query of ["\x1b[3;7H\x1b[6n", "\x1b[5n", "\x1b[c", "\x1b[>c"]) {
-      a.write(query);
-      b.write(query);
-      expect(b.readResponse(), JSON.stringify(query)).toBe(a.readResponse());
+  test("modes read as the oracle's before and after a program sets them", async () => {
+    const t = (await upstream()).createTerminal(80, 24);
+    expect(modes(t)).toEqual(oracle.modes.before);
+    t.write(oracle.modes.set);
+    expect(modes(t)).toEqual(oracle.modes.after);
+  });
+
+  test("replies to status and attribute queries are the oracle's, but for the tertiary attributes", async () => {
+    const t = (await upstream()).createTerminal(80, 24);
+    for (const { query, reply } of oracle.replies) {
+      t.write(query);
+      if (query === TERTIARY_DA) {
+        expect(reply, "the oracle leaves the tertiary query unanswered").toBeNull();
+        expect(t.readResponse(), "upstream answers it with a zero unit id").toBe("\x1bP!|00000000\x1b\\");
+      } else {
+        expect(t.readResponse(), JSON.stringify(query)).toBe(reply);
+      }
     }
-    expect(b.readResponse()).toBeNull();
-    // ghostty-web's build leaves the tertiary query unanswered; upstream
-    // answers it from the same callback, with a zero unit id.
-    b.write("\x1b[=c");
-    expect(b.readResponse()).toBe("\x1bP!|00000000\x1b\\");
+    expect(oracle.replies.map((r) => r.query)).toContain(TERTIARY_DA);
+    expect(t.readResponse()).toBeNull();
   });
 
   test("XTVERSION gets no reply while device status and attributes still pass", async () => {
@@ -256,85 +289,37 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
   });
 
   test("color queries get no reply, as from ghostty-web's build", async () => {
-    const a = (await ghosttyWeb()).createTerminal(80, 24);
-    const b = (await upstream()).createTerminal(80, 24, { fgColor: 0x24292f, bgColor: 0xffffff });
-    for (const query of [
-      "\x1b]10;?\x07",
-      "\x1b]11;?\x07",
-      "\x1b]11;?\x1b\\",
-      "\x1b]12;?\x07",
-      "\x1b]4;1;?\x07",
-      "\x1b]4;1;?;2;?\x07",
-      "\x1b]11;#ffffff\x07\x1b]11;?\x07",
-      "\x1b]21;foreground=?\x1b\\",
-      "\x1b]21;background=?;cursor=?\x07",
-    ]) {
-      a.write(query);
-      b.write(query);
-      expect(a.readResponse(), `ghostty-web: ${JSON.stringify(query)}`).toBeNull();
-      expect(b.readResponse(), `upstream: ${JSON.stringify(query)}`).toBeNull();
+    const t = (await upstream()).createTerminal(80, 24, { fgColor: 0x24292f, bgColor: 0xffffff });
+    for (const { query, reply } of oracle.colorQueries) {
+      expect(reply, `ghostty-web: ${JSON.stringify(query)}`).toBeNull();
+      t.write(query);
+      expect(t.readResponse(), `upstream: ${JSON.stringify(query)}`).toBe(reply);
     }
     // A status query in the same write as a color query still answers.
-    b.write("\x1b]11;?\x07\x1b[2;3H\x1b[6n\x1b]10;?\x07");
-    expect(b.readResponse()).toBe("\x1b[2;3R");
+    t.write("\x1b]11;?\x07\x1b[2;3H\x1b[6n\x1b]10;?\x07");
+    expect(t.readResponse()).toBe("\x1b[2;3R");
   });
 
-  test("keys encode the same, including keys past upstream's renumbering", async () => {
-    const a = (await ghosttyWeb()).createKeyEncoder();
-    const b = (await upstream()).createKeyEncoder();
-    const events = [
-      { key: Key.ENTER },
-      { key: Key.A, utf8: "a" },
-      { key: Key.C, mods: 2 },
-      { key: Key.UP },
-      { key: Key.F5 },
-      { key: Key.DELETE },
-      { key: Key.KP_5, utf8: "5" },
-      { key: Key.PRINT_SCREEN },
-      { key: Key.PAUSE },
-    ];
-    for (const e of events) {
-      const event = { action: 1, key: e.key, mods: e.mods ?? 0, utf8: e.utf8 };
-      expect([...b.encode(event)], Key[e.key]).toEqual([...a.encode(event)]);
+  test("keys encode as the oracle's, including keys past upstream's renumbering", async () => {
+    const enc = (await upstream()).createKeyEncoder();
+    for (const { event, bytes } of oracle.keys) {
+      expect(keyText(enc.encode(keyEvent(event))), event.key).toBe(bytes);
     }
-    for (const enc of [a, b]) enc.setOption(0, true);
-    expect([...b.encode({ action: 1, key: Key.UP, mods: 0 })]).toEqual([...a.encode({ action: 1, key: Key.UP, mods: 0 })]);
+    enc.setOption(0, true);
+    const { event, bytes } = oracle.cursorKeyApplication;
+    expect(keyText(enc.encode(keyEvent(event)))).toBe(bytes);
   });
 
-  /// A key each option changes the encoding of, so a mistranslated option
-  /// shows as different bytes; `given` is an option the probe needs on
-  /// first (ignoring the keypad with NumLock only matters in keypad
-  /// application mode).
-  const OPTION_PROBES: Record<
-    keyof typeof KEY_ENCODER_OPTIONS,
-    { key: number; mods?: number; utf8?: string; given?: KeyEncoderOption }
-  > = {
-    CURSOR_KEY_APPLICATION: { key: Key.UP },
-    KEYPAD_KEY_APPLICATION: { key: Key.KP_5, utf8: "5" },
-    IGNORE_KEYPAD_WITH_NUMLOCK: { key: Key.KP_5, mods: Mods.NUMLOCK, utf8: "5", given: KeyEncoderOption.KEYPAD_KEY_APPLICATION },
-    ALT_ESC_PREFIX: { key: Key.A, mods: Mods.ALT, utf8: "a" },
-    MODIFY_OTHER_KEYS_STATE_2: { key: Key.TAB, mods: Mods.SHIFT },
-    KITTY_KEYBOARD_FLAGS: { key: Key.ESCAPE },
-  };
-
-  test.each(Object.keys(OPTION_PROBES) as (keyof typeof OPTION_PROBES)[])(
-    "the %s option set through ghostty-web's numbering encodes as in its build",
-    async (name) => {
-      const probe = OPTION_PROBES[name];
-      const event = { action: 1, key: probe.key, mods: probe.mods ?? 0, utf8: probe.utf8 };
-      const a = (await ghosttyWeb()).createKeyEncoder();
-      const b = (await upstream()).createKeyEncoder();
-      if (probe.given !== undefined) for (const enc of [a, b]) enc.setOption(probe.given, true);
-      const before = [...a.encode(event)];
-      for (const enc of [a, b]) {
-        if (name === "KITTY_KEYBOARD_FLAGS") enc.setKittyFlags(1);
-        else enc.setOption(KeyEncoderOption[name], true);
-      }
-      const expected = [...a.encode(event)];
-      expect(expected, "the probe is sensitive to the option").not.toEqual(before);
-      expect([...b.encode(event)]).toEqual(expected);
-    },
-  );
+  test.each(Object.keys(oracle.keyOptions))("the %s option set through ghostty-web's numbering encodes as in its build", async (name) => {
+    const probe = oracle.keyOptions[name];
+    expect(probe.after, "the probe is sensitive to the option").not.toBe(probe.before);
+    const enc = (await upstream()).createKeyEncoder();
+    if (probe.given !== undefined) enc.setOption(KeyEncoderOption[probe.given as keyof typeof KeyEncoderOption], true);
+    expect(keyText(enc.encode(keyEvent(probe.event))), "before").toBe(probe.before);
+    if (name === "KITTY_KEYBOARD_FLAGS") enc.setKittyFlags(1);
+    else enc.setOption(KeyEncoderOption[name as keyof typeof KeyEncoderOption], true);
+    expect(keyText(enc.encode(keyEvent(probe.event))), "after").toBe(probe.after);
+  });
 });
 
 describe("the core the binding accepts", () => {
