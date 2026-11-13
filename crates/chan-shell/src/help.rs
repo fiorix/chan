@@ -278,10 +278,10 @@ The output path goes to stdout; the selected window and errors go to stderr.
 CAUTIONS:
 Blocks until the renderer replies. The server gives up after 90s
 without a completed page or after 15 minutes overall; either timeout
-exits 124 and names the renderer window. Inside the renderer each page
-has its own 30s render ceiling. Any failure exits nonzero with the
-renderer's own message. An existing output file is replaced without
-asking.
+is an ordinary error, exits 1 and names the renderer window. Inside the
+renderer each page has its own 30s render ceiling. Any failure exits
+nonzero with the renderer's own message. An existing output file is
+replaced without asking.
 
 CAVEATS:
 Workspace windows only: a terminal-only session refuses with "cs
@@ -751,9 +751,9 @@ SIDE EFFECTS:
 
 CAUTIONS:
   Identification and handover wait 30 seconds by default; --timeout changes
-  the bound. A timeout exits 124. The caller's EOF dismisses its pending
-  identification or handover request. Scripts must use self --id when
-  several clients hold the calling window.
+  the bound. A timeout is an ordinary error and exits 1. The caller's EOF
+  dismisses its pending identification or handover request. Scripts must
+  use self --id when several clients hold the calling window.
   Only one handover may be in flight. takeover --force seizes leadership
   without a prompt or confirmation. self --name conflicts with --reset.
 

@@ -1493,7 +1493,8 @@ async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
 
 /// `cs session <detach|handover|takeover>`: send a session command and print the
 /// server's reply. A `handover` request BLOCKS here until the leader accepts /
-/// rejects or the timeout elapses (the CLI exits 124 on timeout).
+/// rejects or the timeout elapses. The timeout reaches the caller as an
+/// ordinary error (exit 1): nothing here downcasts it to the 124 exit.
 async fn cmd_session_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
     let held = matches!(

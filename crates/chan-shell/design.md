@@ -119,7 +119,7 @@ The response side is narrow: `Ok`, `Error`, `Timeout`, `QueueFull`, `Export` and
 
 ## Exit status
 
-`cs` tells three outcomes apart by exit status because scripts and agents branch on them: a delivered answer, a failure, and no answer in time. The timeout status matches GNU `timeout(1)`, so a caller already knows it. A fourth, accepted into the queue but not submitted, exists only for an older devserver that derived the chord itself and could refuse; a current server always encodes the agent the sender named. Each of these is a typed error that the transport produces from the response variant and the dispatch edge downcasts, so no code parses prose to decide an exit status. Everything else is the ordinary failure status.
+`cs` tells three outcomes apart by exit status because scripts and agents branch on them: a delivered answer, a failure, and no answer in time. The timeout status, 124, matches GNU `timeout(1)`, so a caller already knows it. `cs terminal survey`, `cs copy`, `cs paste` and `cs tunnel` exit with it; `cs export`, `cs session self` and `cs session handover` receive the same typed timeout but pass it up as an ordinary error, so their timeout takes the failure status. A fourth, accepted into the queue but not submitted, exists only for an older devserver that derived the chord itself and could refuse; a current server always encodes the agent the sender named. Each of these is a typed error that the transport produces from the response variant and the dispatch edge downcasts, so no code parses prose to decide an exit status. Everything else is the ordinary failure status.
 
 ## The transport and discovery
 
