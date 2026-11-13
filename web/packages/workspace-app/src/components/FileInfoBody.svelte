@@ -585,9 +585,11 @@
     openTerminalInActivePane(terminalFromHereTarget(entry.path, false));
   }
 
-  /// The file browser's command for each classifier action. An inspector
-  /// over a selection (the file browser's, a graph node, a search hit) acts
-  /// on that selection as the file browser does, so it takes these words.
+  /// The file browser's command for each classifier action, whose words the
+  /// action takes. An inspector over a selection (the file browser's, a
+  /// graph node, a search hit) acts on that selection. Upload, offered for a
+  /// directory alone, uploads into the directory shown, where the command of
+  /// that title uploads into the directory the file browser is in.
   const BROWSER_COMMANDS: Record<FileActionId, string> = {
     open: "app.browser.open",
     showFile: "app.browser.openInBrowser",

@@ -12,10 +12,15 @@
 // A row of the tree's menu acts on its entry and the command of its title on
 // the selection, through one function: Download through the store's
 // download, Open in new file browser through the store's reveal, and Copy
-// path through copyEntryPath here. Upload is the file browser's own menu
-// row instead: both upload into the directory the surface is in, the one
-// its New and Paste choose, and never replace a file. Replacing a file is
-// the Upload of that file's own row menu alone.
+// path through copyEntryPath here. Upload is the one title with two
+// meanings. The launcher's command and the file browser menu's own row run
+// one function and upload into the directory the surface is in: the one its
+// New and Paste rows choose, except that a tree with nothing selected takes
+// the directory a create starts in (FileTree's uploadDir), which in a
+// standalone window is the home directory, not the filesystem root. The
+// rows on an entry share the title and act on that entry: a directory's row
+// and its Details upload into it, Workspace details into the workspace
+// root, and a file's row replaces the file.
 
 import {
   dispatchChanCommand,

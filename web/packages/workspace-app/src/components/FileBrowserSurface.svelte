@@ -92,8 +92,8 @@
     preview: isTab ? DETAILS : "app.browser.openInBrowser",
   });
   /// The row that opens the tree's row menu on the selection. Every row of
-  /// that menu is a catalog command, so this one is none: its words are
-  /// written here, once, for the menu and the key list.
+  /// that menu takes its words from a catalog command, so this one, which
+  /// has none, writes its words here, once, for the menu and the key list.
   const SELECTION_ACTIONS = "Selection actions";
   const DOCKS = [
     { side: "left", command: "app.browser.toggleLeftDock", icon: PanelLeftOpen },
