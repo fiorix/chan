@@ -432,6 +432,19 @@ pub(super) fn mcp_env(socket_path: &std::path::Path) -> Option<[(&'static str, S
 /// AppImage process gets each of them again from its own runtime.
 const APPIMAGE_RUNTIME_KEYS: &[&str] = &["APPIMAGE", "ARGV0", "OWD", "PYTHONDONTWRITEBYTECODE"];
 
+/// The variable the desktop's GUI-stack re-exec sets for the one process it
+/// replaces: that process's pid, which `execve` keeps, so only the image the
+/// re-exec started finds its own pid there. Nothing an older release wrote
+/// can match it: their marker had another name ([`GUI_STACK_REEXEC_MARKERS`]).
+pub const GUI_STACK_REEXEC_MARKER: &str = "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID";
+
+/// Every name the GUI-stack re-exec's marker has had: this release's
+/// [`GUI_STACK_REEXEC_MARKER`], and `CHAN_LINUX_SYSTEM_GUI_APPLIED`, which
+/// releases up to 0.128.0 set to `1` and never removed, so every process they
+/// start carries it. No child is handed either: each describes one process.
+pub const GUI_STACK_REEXEC_MARKERS: &[&str] =
+    &[GUI_STACK_REEXEC_MARKER, "CHAN_LINUX_SYSTEM_GUI_APPLIED"];
+
 /// Keys linuxdeploy's GTK hook reads whose value holds no mount path. A
 /// terminal's GTK apps must not inherit them: `GDK_BACKEND` pins GTK children
 /// to X11, which drops every GTK app launched from a terminal onto XWayland.

@@ -189,9 +189,10 @@ mod linux {
     /// `bundled` (keep today's bundle-first behavior).
     const POLICY_ENV: &str = "CHAN_LINUX_SYSTEM_GUI";
 
-    /// Loop guard, set across the re-exec so the re-exec'd process does not
-    /// re-exec again, and consumed there ([`reexec_done`]).
-    const APPLIED_ENV: &str = "CHAN_LINUX_SYSTEM_GUI_APPLIED";
+    /// Loop guard, set across the re-exec to this process's pid so the
+    /// re-exec'd image, which keeps the pid, does not re-exec again, and
+    /// consumed there ([`reexec_done`]).
+    const REEXEC_ENV: &str = chan_server::GUI_STACK_REEXEC_MARKER;
 
     /// dma-buf policy knob: `auto` (default, disable only for the NVIDIA
     /// proprietary driver), `on` (never disable), `off` (always disable).
@@ -206,6 +207,11 @@ mod linux {
     const WEBKIT_SONAME: &str = "libwebkit2gtk-4.1.so.0";
 
     pub fn prefer_system_gui_stack() {
+        // The re-exec's marker describes this one process: read and dropped
+        // first, every name it has had, AppImage or not, so no child inherits
+        // it, an older release's that never removed it included.
+        let reexeced = reexec_done();
+
         // Bundle-first loader order only exists inside an AppImage.
         if cs_install::appimage_path().is_none() {
             return;
@@ -215,8 +221,8 @@ mod linux {
         // blocks after its own in each search path AppRun prepends to,
         // directories under /tmp that go when that process exits and that
         // every child of this one would search (WebKit's processes, Qt and
-        // Python helpers). Dropped here, single-threaded, where the marker is
-        // consumed too; LD_LIBRARY_PATH once no re-exec has taken it.
+        // Python helpers). Dropped here, single-threaded, as the marker is;
+        // LD_LIBRARY_PATH once no re-exec has taken it.
         drop_foreign_apprun_blocks(|key| key != "LD_LIBRARY_PATH");
 
         // Independent, cheap layer: keep WebKit off the dma-buf renderer path
@@ -227,8 +233,8 @@ mod linux {
 
         match std::env::var(POLICY_ENV).unwrap_or_default().trim() {
             "bundled" => {}
-            "system" => apply(true),
-            _ => apply(false), // auto (default)
+            "system" => apply(true, reexeced),
+            _ => apply(false, reexeced), // auto (default)
         }
 
         // Here when no re-exec was made, or in the image a re-exec started,
@@ -254,9 +260,10 @@ mod linux {
     }
 
     /// Prefer the host stack, re-exec'ing once. `force` reflects
-    /// `CHAN_LINUX_SYSTEM_GUI=system`.
-    fn apply(force: bool) {
-        if reexec_done() {
+    /// `CHAN_LINUX_SYSTEM_GUI=system`; `reexeced`, that this process is the
+    /// image the re-exec started ([`reexec_done`]).
+    fn apply(force: bool, reexeced: bool) {
+        if reexeced {
             return;
         }
 
@@ -285,7 +292,7 @@ mod linux {
 
         let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
         // execv replaces the image on success and returns only on failure.
-        let err = reexec_command(&exe, &argv, &ld_path).exec();
+        let err = reexec_command(&exe, &argv, &ld_path, std::process::id()).exec();
         // Re-exec failed. Under `system` that is fatal; under `auto` fall
         // through to a normal bundle-first launch rather than aborting.
         if force {
@@ -328,32 +335,46 @@ mod linux {
         ld_path
     }
 
-    /// Whether this process is the re-exec [`reexec_command`] started: the
-    /// marker is set. Reading it also removes it, since it describes this
-    /// process alone: a New Window sibling, a desktop a `chan-term` starts
-    /// and a `chan-term -e` typed in one of this desktop's shells are
-    /// AppImage launches of their own, which AppRun starts bundle-first
-    /// again, so each must make its own re-exec, and an inherited marker
-    /// would skip it. The environment changes while the process is still
-    /// single-threaded: `main` gets here before the tracing setup and before
-    /// any thread starts, where it also sets the WebKit default and then
-    /// drops `$ARGV0`.
+    /// Whether this process is the image [`reexec_command`] started: the
+    /// marker holds this process's own pid ([`reexec_marked`]). Every name the
+    /// marker has had is removed here, since it describes this process alone:
+    /// a New Window sibling, a desktop a `chan-term` starts and a `chan-term
+    /// -e` typed in one of this desktop's shells are AppImage launches of
+    /// their own, which AppRun starts bundle-first again, so each must make
+    /// its own re-exec, and an inherited marker would skip it. Releases up to
+    /// 0.128.0 set theirs to `1` and never removed it, so a desktop such a
+    /// release starts (the first one after an update) carries it: it is
+    /// removed and never read. The environment changes while the process is
+    /// still single-threaded: `main` gets here before the tracing setup and
+    /// before any thread starts, where it also sets the WebKit default and
+    /// then drops `$ARGV0`.
     fn reexec_done() -> bool {
-        if std::env::var_os(APPLIED_ENV).is_none() {
-            return false;
+        let marker = std::env::var_os(REEXEC_ENV);
+        for name in chan_server::GUI_STACK_REEXEC_MARKERS {
+            std::env::remove_var(name);
         }
-        std::env::remove_var(APPLIED_ENV);
-        true
+        reexec_marked(marker.as_deref(), std::process::id())
+    }
+
+    /// Whether `marker`, the value of [`REEXEC_ENV`], says that the process
+    /// `pid` is the image the re-exec started: it is that pid, written as
+    /// [`reexec_command`] writes it. `execve` keeps the pid, so only that image
+    /// finds it there; any other process, a child that inherited it included,
+    /// has another pid, and so re-execs once on its own. No value an older
+    /// release wrote can match: it wrote `1` under another name.
+    fn reexec_marked(marker: Option<&OsStr>, pid: u32) -> bool {
+        marker == Some(OsStr::new(&pid.to_string()))
     }
 
     /// The re-exec of this process with `ld_path` as its loader path,
-    /// marked so the new image knows it has had its re-exec.
-    fn reexec_command(exe: &Path, args: &[OsString], ld_path: &OsStr) -> Command {
+    /// marked with `pid`, this process's, so the new image, which keeps it,
+    /// knows it has had its re-exec.
+    fn reexec_command(exe: &Path, args: &[OsString], ld_path: &OsStr, pid: u32) -> Command {
         let mut command = Command::new(exe);
         command
             .args(args)
             .env("LD_LIBRARY_PATH", ld_path)
-            .env(APPLIED_ENV, "1");
+            .env(REEXEC_ENV, pid.to_string());
         command
     }
 
@@ -505,7 +526,8 @@ mod linux {
     mod tests {
         use super::{
             dma_buf_disabled, ldconfig_cache_with, nvidia_proprietary_driver, reexec_command,
-            reexec_done, reexec_ld_path, renderer_signal, APPLIED_ENV, NVIDIA_DRIVER_MARKERS,
+            reexec_done, reexec_ld_path, reexec_marked, renderer_signal, NVIDIA_DRIVER_MARKERS,
+            REEXEC_ENV,
         };
         use std::ffi::{OsStr, OsString};
         use std::fs;
@@ -583,28 +605,67 @@ mod linux {
             }
         }
 
-        /// The re-exec'd process reads the marker and removes it, so no child
-        /// it starts inherits it and each AppImage child makes its own
-        /// re-exec; a process without the marker has had none. It mutates
-        /// the environment, so it runs in a test process of its own.
+        /// Only the marker naming this process's own pid marks its re-exec:
+        /// the `1` releases up to 0.128.0 left (under another name, and so
+        /// never read here) and another process's pid do not, and the pid is
+        /// compared as the re-exec writes it.
         #[test]
-        fn the_reexec_marker_is_consumed_where_it_is_read() {
+        fn only_this_processs_own_pid_marks_its_reexec() {
+            let marked = |value: &str, pid| reexec_marked(Some(OsStr::new(value)), pid);
+            assert!(!reexec_marked(None, 4242), "no marker, no re-exec");
+            assert!(marked("4242", 4242), "the re-exec'd image");
+            assert!(!marked("4243", 4242), "another process's re-exec");
+            assert!(!marked("1", 4242), "an older release's value");
+            for odd in ["", " 4242", "4242 ", "+4242", "04242", "0x1092"] {
+                assert!(!marked(odd, 4242), "{odd:?}");
+            }
+        }
+
+        /// The boot reads the marker and removes every name it has had, so
+        /// no child inherits one and each AppImage child makes its own
+        /// re-exec: a marker an older release left (`1`, under the name it
+        /// never removed) is not this process's re-exec, nor is another
+        /// process's pid; this process's own pid is, once. It mutates the
+        /// environment, so it runs in a test process of its own.
+        #[test]
+        fn the_reexec_marker_is_this_processs_and_is_consumed_where_it_is_read() {
             if !crate::embedded::in_own_chan_home(
-                "linux_gui_stack::linux::tests::the_reexec_marker_is_consumed_where_it_is_read",
+                "linux_gui_stack::linux::tests::the_reexec_marker_is_this_processs_and_is_consumed_where_it_is_read",
             ) {
                 return;
             }
-            std::env::remove_var(APPLIED_ENV);
+            const OLD: &str = "CHAN_LINUX_SYSTEM_GUI_APPLIED";
+            let none_left = || {
+                chan_server::GUI_STACK_REEXEC_MARKERS
+                    .iter()
+                    .all(|name| std::env::var_os(name).is_none())
+            };
+            for name in chan_server::GUI_STACK_REEXEC_MARKERS {
+                std::env::remove_var(name);
+            }
             assert!(!reexec_done(), "without the marker there was no re-exec");
-            std::env::set_var(APPLIED_ENV, "1");
-            assert!(reexec_done(), "the re-exec'd process finds the marker");
-            assert_eq!(std::env::var_os(APPLIED_ENV), None, "and drops it");
+            std::env::set_var(OLD, "1");
+            assert!(
+                !reexec_done(),
+                "an older release's marker is not this re-exec"
+            );
+            assert!(none_left(), "and is dropped");
+            std::env::set_var(REEXEC_ENV, (std::process::id() + 1).to_string());
+            assert!(!reexec_done(), "another process's re-exec");
+            assert!(none_left(), "and is dropped");
+            std::env::set_var(OLD, "1");
+            std::env::set_var(REEXEC_ENV, std::process::id().to_string());
+            assert!(reexec_done(), "the re-exec'd image finds its own pid");
+            assert!(none_left(), "and drops every name");
             assert!(!reexec_done(), "it is read once");
             let child = Command::new("/bin/sh")
-                .args(["-c", "printf %s \"${CHAN_LINUX_SYSTEM_GUI_APPLIED-unset}\""])
+                .args([
+                    "-c",
+                    "printf %s \"${CHAN_LINUX_SYSTEM_GUI_APPLIED-unset} ${CHAN_LINUX_SYSTEM_GUI_REEXEC_PID-unset}\"",
+                ])
                 .output()
                 .expect("run a child shell");
-            assert_eq!(child.stdout, b"unset", "a child inherits no marker");
+            assert_eq!(child.stdout, b"unset unset", "a child inherits no marker");
         }
 
         /// The re-exec's loader path puts the host directory first, then this
@@ -682,10 +743,12 @@ mod linux {
                 .expect("the boot")
                 .1;
             let boot = boot
-                .split_once("\n    fn apply(force: bool) {")
+                .split_once("\n    fn apply(force: bool, reexeced: bool) {")
                 .expect("apply follows the boot")
                 .0;
             let order = [
+                "let reexeced = reexec_done();",
+                "if cs_install::appimage_path().is_none() {",
                 "drop_foreign_apprun_blocks(|key| key != \"LD_LIBRARY_PATH\");",
                 "set_webkit_env_defaults();",
                 "match std::env::var(POLICY_ENV)",
@@ -716,12 +779,13 @@ mod linux {
         }
 
         /// A process without the marker re-execs itself with its own
-        /// arguments, the host-first loader path, and the marker set.
+        /// arguments, the host-first loader path, and the marker set to its
+        /// pid, which `apply` passes as `std::process::id()`.
         #[test]
         fn the_reexec_carries_the_marker_and_the_loader_path() {
             let args = [OsString::from("--dir=/w x"), OsString::from("notes.md")];
             let ld_path = OsStr::new("/usr/lib:/tmp/.mount_chan/usr/lib");
-            let command = reexec_command(Path::new("/opt/chan/chan-desktop"), &args, ld_path);
+            let command = reexec_command(Path::new("/opt/chan/chan-desktop"), &args, ld_path, 4242);
             assert_eq!(command.get_program(), "/opt/chan/chan-desktop");
             assert_eq!(
                 command.get_args().collect::<Vec<_>>(),
@@ -733,8 +797,22 @@ mod linux {
                     .find(|(name, _)| *name == key)
                     .and_then(|(_, value)| value.map(OsStr::to_os_string))
             };
-            assert_eq!(env(APPLIED_ENV), Some(OsString::from("1")));
+            assert_eq!(env(REEXEC_ENV), Some(OsString::from("4242")));
+            assert!(reexec_marked(env(REEXEC_ENV).as_deref(), 4242));
+            assert_eq!(env("CHAN_LINUX_SYSTEM_GUI_APPLIED"), None);
             assert_eq!(env("LD_LIBRARY_PATH"), Some(ld_path.to_os_string()));
+            const SELF: &str = include_str!("linux_gui_stack.rs");
+            let apply = SELF
+                .split_once("\n    fn apply(force: bool, reexeced: bool) {")
+                .expect("apply")
+                .1
+                .split_once("\n    }\n")
+                .expect("its end")
+                .0;
+            assert!(
+                apply.contains("reexec_command(&exe, &argv, &ld_path, std::process::id()).exec()"),
+                "the re-exec marks this process's own pid"
+            );
         }
 
         fn ran(code: i32, stdout: &str) -> std::io::Result<Output> {
