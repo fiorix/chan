@@ -105,7 +105,7 @@
             {
               "slug": "devserver",
               "title": "Devserver",
-              "description": "Set up a devserver and connect to its terminals and workspaces from the Computers window."
+              "description": "Set up a devserver and connect to its terminals and workspaces from the Computers screen."
             },
             {
               "slug": "systemd",

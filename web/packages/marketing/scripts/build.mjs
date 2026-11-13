@@ -179,7 +179,7 @@ async function main() {
   await writePage(
     "demo/computers/index.html",
     fillTemplate(demoEmbedTemplate, {
-      title: "Computers window preview",
+      title: "Computers screen preview",
       variant: "populated",
     }),
   );
