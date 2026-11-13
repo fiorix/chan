@@ -373,15 +373,14 @@ fn resolve_scope(
     let rel = normalize_rel(path);
     // A path the walk never enters is not there to this route either, so a
     // caller cannot read `.git`, `.chan` or an excluded directory by naming
-    // it: it answers as a path that does not exist.
+    // it: it answers as a path that does not exist. The text is checked
+    // here, and the place it resolves to once it is known to exist.
+    let skipped = || FsGraphError::new(StatusCode::NOT_FOUND, format!("no such path: {rel}"));
     if rel
         .split('/')
         .any(|segment| walk_skips(segment, workspace.walk_filter()))
     {
-        return Err(FsGraphError::new(
-            StatusCode::NOT_FOUND,
-            format!("no such path: {rel}"),
-        ));
+        return Err(skipped());
     }
     let abs = if rel.is_empty() {
         root.clone()
@@ -420,6 +419,13 @@ fn resolve_scope(
             ));
         }
     };
+
+    // A symlink on the way (`gitlink -> .git`, then `gitlink/refs`), or a
+    // spelling the filesystem folds onto a skipped name (`.CHAN` where
+    // names ignore case), reaches what the text check let through.
+    if resolves_into_skipped(&root, &abs, &meta, workspace.walk_filter()) {
+        return Err(skipped());
+    }
 
     // Reject scope=directory against a non-directory up front so the
     // walker stays infallible; the wire error shape matches the
@@ -533,7 +539,13 @@ pub fn build_fs_graph_paged(
                     "graph cursor does not match the requested scope/depth",
                 ));
             }
-            Some(validated_frames(&r.root, &r.rel, r.depth, parsed.s)?)
+            Some(validated_frames(
+                &r.root,
+                &r.rel,
+                r.depth,
+                workspace.walk_filter(),
+                parsed.s,
+            )?)
         }
         None => None,
     };
@@ -597,6 +609,8 @@ pub fn build_fs_graph_paged(
 ///     symlink that points outside is refused too: `resolve_safe` is lexical
 ///     and would let that through, and the honest walk never produces such a
 ///     frame because it refuses to descend into a symlink;
+///   - `r` is no place the walk skips, by its text or by where it
+///     resolves, since the walk never descends into one;
 ///   - `r` is the scope directory or a descendant of it;
 ///   - frames nest, each exactly one segment below the one before it, which
 ///     is what a DFS stack is;
@@ -605,6 +619,7 @@ fn validated_frames(
     root: &Path,
     scope_rel: &str,
     depth: usize,
+    filter: &chan_workspace::fs_ops::WalkFilter,
     frames: Vec<CursorFrame>,
 ) -> Result<Vec<CursorFrame>, FsGraphError> {
     let reject = |rel: &str| {
@@ -630,9 +645,20 @@ fn validated_frames(
             // A frame that vanished between pages canonicalizes nowhere;
             // let the walk open it and end that branch on the empty read.
             if let Ok(canon) = abs.canonicalize() {
-                if !canon.starts_with(&root_canon) {
+                if !canon.starts_with(&root_canon) || canonical_skips(&root_canon, &canon, filter) {
                     return Err(reject(&frame.r));
                 }
+            }
+            // The walk reads a frame as a directory, following a link, and
+            // never descends into a link, nor into a place it skips.
+            let is_link = std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_symlink());
+            if is_link
+                || frame
+                    .r
+                    .split('/')
+                    .any(|segment| walk_skips(segment, filter))
+            {
+                return Err(reject(&frame.r));
             }
         }
         if !rel_is_within(scope_rel, &frame.r) {
@@ -742,15 +768,63 @@ fn ensure_parent_inside_workspace(root: &Path, abs: &Path, rel: &str) -> Result<
     Ok(())
 }
 
+/// Whether the walk leaves out an entry named `name`: chan's own `.chan`,
+/// the repository's `.git`, and the workspace's excluded directory names.
+/// `.chan` and `.git` match whatever their case, as a filesystem that
+/// ignores case opens `.GIT` as `.git`; the excluded names ignore case too.
+fn walk_skips(name: &str, filter: &chan_workspace::fs_ops::WalkFilter) -> bool {
+    name.eq_ignore_ascii_case(".chan")
+        || name.eq_ignore_ascii_case(".git")
+        || filter.is_excluded(name)
+}
+
+/// Whether the existing path `abs` resolves into a place the walk skips:
+/// some component of it, as the filesystem resolves it and relative to the
+/// canonical workspace root, is a name `walk_skips` leaves out. The parent
+/// is resolved whole (every symlink on the way, a chain of them, a case
+/// variant, a short name); the leaf is resolved too, unless it is a
+/// symlink, which the walk classifies without following. A path outside
+/// the workspace is the escape guard's to refuse, and one that does not
+/// resolve is judged by its text alone.
+fn resolves_into_skipped(
+    root: &Path,
+    abs: &Path,
+    meta: &Metadata,
+    filter: &chan_workspace::fs_ops::WalkFilter,
+) -> bool {
+    let Ok(root_canon) = root.canonicalize() else {
+        return false;
+    };
+    let resolved = if meta.file_type().is_symlink() {
+        match (abs.parent().map(Path::canonicalize), abs.file_name()) {
+            (Some(Ok(parent)), Some(name)) => Some(parent.join(name)),
+            _ => None,
+        }
+    } else {
+        abs.canonicalize().ok()
+    };
+    resolved.is_some_and(|resolved| canonical_skips(&root_canon, &resolved, filter))
+}
+
+/// Whether the resolved path `resolved` names, below the canonical workspace
+/// root, a component the walk skips. A path outside the root names none.
+fn canonical_skips(
+    root_canon: &Path,
+    resolved: &Path,
+    filter: &chan_workspace::fs_ops::WalkFilter,
+) -> bool {
+    let Ok(inside) = resolved.strip_prefix(root_canon) else {
+        return false;
+    };
+    inside.components().any(|component| match component {
+        Component::Normal(name) => walk_skips(&name.to_string_lossy(), filter),
+        _ => false,
+    })
+}
+
 /// Trim a leading slash and collapse `.` segments. Pure-`..` requests
 /// pass through unchanged; `resolve_safe` will reject them with the
 /// standard error wire shape so this helper does not have to.
-/// Whether the walk leaves out an entry named `name`: chan's own `.chan`,
-/// the repository's `.git`, and the workspace's excluded directory names.
-fn walk_skips(name: &str, filter: &chan_workspace::fs_ops::WalkFilter) -> bool {
-    name == ".chan" || name == ".git" || filter.is_excluded(name)
-}
-
 fn normalize_rel(requested: &str) -> String {
     let trimmed = requested.trim_start_matches('/');
     if trimmed.is_empty() || trimmed == "." {
@@ -1412,6 +1486,16 @@ impl FsGraphWalker {
             }
         };
 
+        // A target in a place the walk skips (`gitlink -> .git`, a link into
+        // an excluded directory) is not drawn, as the place is not: the
+        // symlink keeps the target it names, and no node or edge stands
+        // for it.
+        if target_rel
+            .split('/')
+            .any(|segment| walk_skips(segment, &self.filter))
+        {
+            return;
+        }
         let target_abs_in_root = self.root.join(&target_rel);
         match std::fs::symlink_metadata(&target_abs_in_root) {
             Ok(target_meta) => {
@@ -2096,6 +2180,150 @@ mod tests {
         );
     }
 
+    // The refusal follows where a path resolves, not only its text: a link
+    // into `.git` or an excluded directory, a chain of links, and a scope
+    // whose leaf is such a link answer as missing or list nothing of the
+    // place; a link the walk enters still answers, and a level lists a link
+    // into a skipped place without drawing the place it names.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_route_answers_a_path_through_a_link_into_a_skipped_place_as_missing() {
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = super::super::tests::served_state();
+        for dir in [".git/refs/heads", "node_modules/pkg", "docs/sub"] {
+            fs::create_dir_all(root.path().join(dir)).unwrap();
+        }
+        fs::write(root.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(root.path().join(".git/refs/heads/main"), b"0\n").unwrap();
+        fs::write(root.path().join("node_modules/pkg/index.js"), b"x\n").unwrap();
+        fs::write(root.path().join("docs/sub/x.md"), b"# x\n").unwrap();
+        for (link, target) in [
+            ("gitlink", ".git"),
+            ("nmlink", "node_modules"),
+            ("chain1", ".git"),
+            ("chain2", "chain1"),
+            ("refslink", ".git/refs"),
+            ("docslink", "docs"),
+        ] {
+            symlink(target, root.path().join(link)).unwrap();
+        }
+
+        let get = |query: String| {
+            let state = Arc::clone(&state);
+            async move {
+                crate::router(state)
+                    .oneshot(
+                        axum::http::Request::get(format!("/api/fs-graph?{query}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let graph = |response: Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let ids = |graph: &serde_json::Value| -> Vec<String> {
+            graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| node["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        for path in [
+            "gitlink/refs",
+            "gitlink/refs/heads",
+            "nmlink/pkg",
+            "chain2/refs",
+        ] {
+            for query in [
+                format!("scope=directory&path={path}&depth=1"),
+                format!("scope=directory&path={path}&depth=1&limit=128"),
+            ] {
+                super::super::refusal_tests::assert_refusal(
+                    get(query).await,
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": format!("no such path: {path}") }),
+                )
+                .await;
+            }
+        }
+        super::super::refusal_tests::assert_refusal(
+            get("scope=file&path=gitlink/HEAD".into()).await,
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no such path: gitlink/HEAD" }),
+        )
+        .await;
+
+        // A link as the leaf is classified, never followed: nothing of the
+        // place it names comes back.
+        let leaf = graph(get("scope=file&path=refslink".into()).await).await;
+        assert!(
+            !ids(&leaf).iter().any(|id| id.starts_with(".git")),
+            "the leaf link drew what it names: {:?}",
+            ids(&leaf)
+        );
+
+        let level = graph(get("scope=directory&path=&depth=1&limit=128".into()).await).await;
+        let listed = ids(&level);
+        assert!(listed.contains(&"gitlink".to_owned()), "{listed:?}");
+        assert!(
+            !listed
+                .iter()
+                .any(|id| id.starts_with(".git") || id.starts_with("node_modules")),
+            "a level drew a skipped place a link names: {listed:?}"
+        );
+        let edges: Vec<(String, String)> = level["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                (
+                    edge["source"].as_str().unwrap().to_owned(),
+                    edge["target"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            edges.contains(&("docslink".to_owned(), "docs".to_owned())),
+            "{edges:?}"
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|(_, target)| target == ".git" || target == "node_modules"),
+            "{edges:?}"
+        );
+
+        let through = graph(get("scope=directory&path=docslink/sub&depth=1".into()).await).await;
+        assert!(
+            ids(&through).contains(&"docslink/sub/x.md".to_owned()),
+            "a link the walk enters still answers: {:?}",
+            ids(&through)
+        );
+    }
+
+    #[test]
+    fn walk_skips_names_git_and_chan_whatever_their_case() {
+        let none = chan_workspace::fs_ops::WalkFilter::new(Vec::<String>::new());
+        for name in [".git", ".GIT", ".Git", ".chan", ".CHAN", ".Chan"] {
+            assert!(walk_skips(name, &none), "{name}");
+        }
+        for name in ["git", ".gitignore", ".github", "chan", "node_modules"] {
+            assert!(!walk_skips(name, &none), "{name}");
+        }
+        let excluded = chan_workspace::fs_ops::WalkFilter::new(["node_modules"]);
+        assert!(walk_skips("Node_Modules", &excluded));
+    }
+
     #[test]
     fn build_fs_graph_rejects_missing_path() {
         let (_cfg, _root, workspace) = open_workspace();
@@ -2611,6 +2839,37 @@ mod tests {
             panic!("a symlink frame was accepted");
         };
         assert_eq!(error.status, StatusCode::BAD_REQUEST, "{}", error.message);
+    }
+
+    /// The walk never descends into `.git` or an excluded directory, nor
+    /// through a link into one, so a frame naming such a place, by its name
+    /// or by a link, is no resume position it issued.
+    #[cfg(unix)]
+    #[test]
+    fn a_forged_cursor_frame_cannot_walk_into_a_skipped_place() {
+        let (_cfg, _base, ws) = seed_escape_workspace();
+        fs::create_dir_all(ws.root().join(".git/refs")).unwrap();
+        fs::write(ws.root().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(ws.root().join("node_modules/pkg")).unwrap();
+        symlink(".git", ws.root().join("gitlink")).unwrap();
+        symlink("node_modules", ws.root().join("nmlink")).unwrap();
+        for frame_rel in [".git", ".GIT", "node_modules", "gitlink", "nmlink"] {
+            let outcome = build_fs_graph_paged(&ws, &forged_page(frame_rel));
+            let listed: Vec<String> = match &outcome {
+                Ok(resp) => resp.nodes.iter().map(|n| n.id.clone()).collect(),
+                Err(_) => Vec::new(),
+            };
+            assert!(
+                !listed
+                    .iter()
+                    .any(|id| id.ends_with("HEAD") || id.ends_with("refs") || id.ends_with("pkg")),
+                "frame {frame_rel:?} listed a skipped place: {listed:?}"
+            );
+            let Err(error) = outcome else {
+                panic!("frame {frame_rel:?} was accepted");
+            };
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{}", error.message);
+        }
     }
 
     /// The stack a DFS hands back is one nested path. A frame that jumps to
