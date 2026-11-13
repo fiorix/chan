@@ -28,7 +28,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | Item | State | Next |
 | --- | --- | --- |
 | [a pane keeps a margin on the window's edge][flushedges] | merged | gate |
-| [systemd-report cannot read the metrics][sdreport] | built, unmerged | build |
+| [systemd-report cannot read the metrics][sdreport] | merged | gate |
 | [a focused browser pane gets no keys][panekeys] | building | build |
 | [a terminal window ignores saved shortcuts][termkeys] | not started | build |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
