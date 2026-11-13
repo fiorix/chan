@@ -17,7 +17,10 @@ import { describe, expect, test } from "vitest";
 const FORBIDDEN: [string, RegExp][] = [
   ["ghostty-web's binding module", /lib\/ghostty["'`]|from\s+["']\.{1,2}\/ghostty["']/],
   ["its loader", /\bGhostty\.load\b|\bgetGhostty\b|\basGhostty\b/],
-  ["the wasm at the package root", /["'](?:\.{1,2}\/)+ghostty-vt\.wasm["']|["']\.\/ghostty-vt\.wasm["']|@chan\/ghostty-web-ng\/ghostty-vt\.wasm/],
+  // Its bare name as a path, how the deleted tests and the recorder read it
+  // from the package directory; the vendored core's path has a directory
+  // before the name, so it does not match.
+  ["the wasm at the package root", /["'`]ghostty-vt\.wasm["'`]|["'](?:\.{1,2}\/)+ghostty-vt\.wasm["']|@chan\/ghostty-web-ng\/ghostty-vt\.wasm/],
   ["ghostty-web's GhosttyCell", /import[^;]*\bGhosttyCell\b[^;]*from\s+["'](?:@chan\/ghostty-web-ng|[^"']*\/types)["']|\binterface\s+GhosttyCell\b/],
   // As code, read or written: upstream's comments speak of a hyperlink id.
   ["its fields", /\.(?:(?:fg|bg)_[rgb]|hyperlink_id|grapheme_len)\b|\b(?:(?:fg|bg)_[rgb]|hyperlink_id|grapheme_len)\s*:/],
