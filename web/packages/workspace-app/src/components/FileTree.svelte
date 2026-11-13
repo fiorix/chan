@@ -839,8 +839,9 @@
     await fileOps.rename(path, isDir);
     menu = null;
   }
-  /// Download and Upload for the row's entry: what the launcher's commands
-  /// of those titles run for the selection.
+  /// Download for the row's entry, what the launcher's Download runs for the
+  /// selection, and Upload for the row's entry: into a directory, or over a
+  /// file. The launcher's Upload is the file browser menu's (uploadDir).
   function downloadEntry(path: string, isDir: boolean): void {
     menu = null;
     fileOps.downloadPathWithProgress(path, isDir);
@@ -974,7 +975,7 @@
         else { const cursor = selection.path; fbClearSelection(); selection.path = cursor; }
         break;
       case "new": void newFileOrDir(view === "list" ? directory : pasteTargetDir()); break;
-      case "upload": uploadEntry(view === "list" ? directory : pasteTargetDir(), true); break;
+      case "upload": uploadEntry(uploadDir(), true); break;
       case "download": if (selected) downloadEntry(selected.path, selected.isDir); break;
       case "copyPath": if (selected) void copyEntryPath(selected.path); break;
       case "terminal": terminalFromHere(selected?.path ?? directory, selected?.isDir ?? true); break;
@@ -1059,10 +1060,10 @@
     });
   });
 
-  /// Resolve the directory a paste should land in: the active selection
-  /// if it is a directory; otherwise the parent directory of the active
-  /// selection; otherwise the workspace root. Mirrors how a desktop file
-  /// browser pastes "into the current folder".
+  /// The directory New and Paste choose: the directory a list shows; in a
+  /// tree the selected directory, the selected file's directory, or the
+  /// tree's root with nothing selected. Mirrors how a desktop file browser
+  /// pastes "into the current folder".
   function pasteTargetDir(): string {
     if (view === "list") return directory;
     const cur = selection.path;
@@ -1070,6 +1071,17 @@
     const row = visibleRows.find((r) => r.path === cur);
     if (row?.isDir) return cur;
     return parentDir(cur);
+  }
+
+  /// The directory an upload goes into from this surface, for the file
+  /// browser menu's Upload and the launcher's alike: the one New and Paste
+  /// choose, except that a tree with nothing selected takes the directory a
+  /// create starts in when nothing names one. That is the tree's root in a
+  /// workspace window and the home directory in a standalone window, whose
+  /// tree's root is the filesystem's.
+  function uploadDir(): string {
+    if (view === "tree" && !selection.path) return defaultCreateDirectory();
+    return pasteTargetDir();
   }
 
   /// Paste the clipboard into the resolved target dir, then select the

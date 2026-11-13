@@ -86,25 +86,6 @@ describe("file browser command defaults", () => {
     expect(pathPromptState.defaultValue).toBe("notes/");
     resolvePathPrompt(null);
   });
-
-  test("Upload targets the standalone home, or the selected directory", async () => {
-    filesContext.current = { rootDisplay: "/", rootWire: "", homeWire: "home/u", identity: "files" };
-    const upload = vi.spyOn(fileOps, "uploadFilesTo").mockResolvedValue(undefined);
-    const pick = (name: string) => {
-      runBrowserCommand("app.browser.uploadSelection");
-      const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
-      Object.defineProperty(input, "files", { configurable: true, value: [new File(["x"], name)] });
-      input.dispatchEvent(new Event("change"));
-    };
-
-    pick("home.txt");
-    expect(upload).toHaveBeenLastCalledWith("home/u", expect.anything(), undefined);
-
-    tree.entries.push({ path: "notes", is_dir: true, mtime: null, size: 0 });
-    browserSelection.path = "notes";
-    pick("selected.txt");
-    expect(upload).toHaveBeenLastCalledWith("notes", expect.anything(), undefined);
-  });
 });
 
 /// Run a create flow and answer its path prompt with `answer`.

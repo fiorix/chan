@@ -14,7 +14,7 @@
   //   - FileEditorTab: shown beside the currently edited file. Filesystem
   //     facts work in every file window; references need a workspace.
   //     Download and Export to PDF are the editor's own there (onDownload,
-  //     onExportPdf), which save the tab before they read the server's copy.
+  //     onExportPdf), which save a draft before they read the server's copy.
   //
   // Directory mode walks the flat tree to compute aggregate counts +
   // size + most-recent mtime. The walk is O(N) in tree size and only
@@ -151,10 +151,11 @@
     /// with the directory as cwd. Absent = the shared from-here terminal.
     onNewTerminal?: () => void;
     /// The host's own Download and Export to PDF for the entry. Both of this
-    /// body's ask the server for the path, and the editor holds text the
-    /// server may not have yet, so it binds the two that save its tab first.
-    /// Absent = the path's, which is right wherever the entry is a selection
-    /// and no editor of the host's holds it.
+    /// body's ask the server for the path. The editor binds its commands'
+    /// two, which save a draft first and read any other file as the server
+    /// holds it, so its panel and its commands follow one rule. Absent = the
+    /// path's, which is right wherever the entry is a selection and no
+    /// editor of the host's holds it.
     onDownload?: () => void;
     onExportPdf?: () => void;
     /// Whether the Upload button renders. Default true so the File
@@ -584,9 +585,11 @@
     openTerminalInActivePane(terminalFromHereTarget(entry.path, false));
   }
 
-  /// The file browser's command for each classifier action. An inspector
-  /// over a selection (the file browser's, a graph node, a search hit) acts
-  /// on that selection as the file browser does, so it takes these words.
+  /// The file browser's command for each classifier action, whose words the
+  /// action takes. An inspector over a selection (the file browser's, a
+  /// graph node, a search hit) acts on that selection. Upload, offered for a
+  /// directory alone, uploads into the directory shown, where the command of
+  /// that title uploads into the directory the file browser is in.
   const BROWSER_COMMANDS: Record<FileActionId, string> = {
     open: "app.browser.open",
     showFile: "app.browser.openInBrowser",

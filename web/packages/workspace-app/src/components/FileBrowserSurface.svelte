@@ -12,6 +12,7 @@
   import { chordFor, shortcutLabel } from "../state/shortcuts";
   import { commandState, commandTitle } from "../state/commands";
   import "../state/commands/install";
+  import { commandSurfaceId } from "../state/commands/browser";
   import { browserView, dropBrowserView, setBrowserView, toggleBrowserDetails, toggleBrowserView } from "../state/browserView.svelte";
   import { basename, parentDir } from "../state/format";
   import { browserDirectoryInput, type BrowserSort } from "../state/browserEntries";
@@ -70,6 +71,10 @@
   const rootFolders = $derived(tree.entries.filter((entry) => entry.is_dir && parentDir(entry.path) === "" && (viewState.showHidden || !basename(entry.path).startsWith("."))).sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true })));
   const previewPath = $derived(selection.path ?? directory);
 
+  /// A tab's Details panel. The toolbar button, the menu's row, the key that
+  /// previews the selection and the catalog command all flip it. A dock draws
+  /// no panel, and the command acts on the active tab, which a dock is not,
+  /// so a dock has neither the button nor the row.
   const DETAILS = "app.browser.details";
   /// The catalog command a file browser key runs, where the catalog has one.
   /// The key list words those keys by the command's title; the other keys
@@ -87,8 +92,8 @@
     preview: isTab ? DETAILS : "app.browser.openInBrowser",
   });
   /// The row that opens the tree's row menu on the selection. Every row of
-  /// that menu is a catalog command, so this one is none: its words are
-  /// written here, once, for the menu and the key list.
+  /// that menu takes its words from a catalog command, so this one, which
+  /// has none, writes its words here, once, for the menu and the key list.
   const SELECTION_ACTIONS = "Selection actions";
   const DOCKS = [
     { side: "left", command: "app.browser.toggleLeftDock", icon: PanelLeftOpen },
@@ -130,6 +135,20 @@
     const onCommand = (e: Event): void => {
       if ((e as CustomEvent).detail?.name !== "app.browser.open") return;
       if (activeBrowserTab()?.id === id) run("open");
+    };
+    window.addEventListener("chan:command", onCommand);
+    return () => window.removeEventListener("chan:command", onCommand);
+  });
+
+  // The launcher's Upload reaches this surface as a chan:command too, since
+  // the directory it uploads into is the surface's own. The surface the
+  // selection commands act on answers, a dock's included, with what its
+  // menu's Upload row runs.
+  $effect(() => {
+    const id = instanceId;
+    const onCommand = (e: Event): void => {
+      if ((e as CustomEvent).detail?.name !== "app.browser.uploadSelection") return;
+      if (commandSurfaceId() === id) run("upload");
     };
     window.addEventListener("chan:command", onCommand);
     return () => window.removeEventListener("chan:command", onCommand);
@@ -360,6 +379,7 @@
       {#if isTab}{@render checkRow(commandTitle("app.browser.hiddenFiles"), viewState.showHidden, () => { toggleBrowserView(instanceId, "showHidden"); menu?.close(); })}{/if}
       {@render checkRow(VIM.label, VIM.read() === true, () => { void VIM.write?.(VIM.read() !== true); menu?.close(); })}
       {@render checkRow(commandTitle("app.browser.keyboardHelp"), viewState.helpOpen, () => { toggleBrowserView(instanceId, "helpOpen"); menu?.close(); })}
+      {#if isTab}{@render checkRow(commandTitle(DETAILS), browserState.inspectorOpen, () => { toggleDetails(); menu?.close(); }, browserCommandChord("preview", browserKeys.vim))}{/if}
       <li class="sep" role="separator"></li>
       {#if !isTab}<li><button role="menuitem" onclick={openCurrentInFileBrowser}><span class="menu-row-label">{commandTitle("app.browser.openInBrowser")}</span></button></li>{/if}
       <li><button role="menuitem" onclick={showWorkspaceInfo}><span class="menu-row-label">{commandTitle("app.browser.showWorkspaceInfo")}</span></button></li>

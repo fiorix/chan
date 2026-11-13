@@ -48,10 +48,13 @@ import {
 } from "../state/commands";
 import { chordFor, SHORTCUTS } from "../state/shortcuts";
 import { exportPathToPdf } from "../state/fileActionExecutors";
+import { filesContext } from "../state/fileContext.svelte";
 import {
   browserSelection,
+  fbSelectSingle,
   fbTreeInstance,
   fileOps,
+  loadTreeDir,
   fbClipboard,
   fbClipboardClear,
   browserSidePanes,
@@ -272,12 +275,13 @@ describe("the tab variant", () => {
     await openFromTabStrip(tab);
     expect(menuRows()).toEqual([
       "New file or directory", "Upload", "Selection actions", "Select multiple", "---",
-      "Hidden files", settingEntry("browser.vim").label, "Keyboard shortcuts (file browser)", "---",
+      "Hidden files", settingEntry("browser.vim").label, "Keyboard shortcuts (file browser)", "Details", "---",
       "Workspace details", "Left file browser dock", "Right file browser dock", "Close tab", "---",
       "Command launcher",
     ]);
     expect(menuChord("Selection actions")).toBe("Shift+F10");
     expect(menuChord("Select multiple")).toBe("F8");
+    expect(menuChord("Details")).toBe("Mod+Y");
     expect(menuChord("Close tab")).toBe(chordFor("app.tab.close") ?? "");
     expect(menuChord("Command launcher")).toBe(chordFor("app.launcher.toggle") ?? "");
   });
@@ -380,10 +384,9 @@ describe("the menu's words", () => {
     { command: "app.browser.selectMultiple" },
     "---",
   ];
-  const KEYS: (Words | "---")[] = [
+  const KEYS: Words[] = [
     { setting: "browser.vim" },
     { command: "app.browser.keyboardHelp" },
-    "---",
   ];
   const DOCKS: Words[] = [
     { command: "app.browser.showWorkspaceInfo" },
@@ -391,6 +394,7 @@ describe("the menu's words", () => {
     { command: "app.browser.toggleRightDock" },
   ];
   const LAUNCHER: (Words | "---")[] = ["---", { shortcut: "app.launcher.toggle" }];
+  const SEP: "---" = "---";
 
   test("every row of a tab's menu is a command's title, a setting's label, the launcher's shortcut label or a named exemption", async () => {
     const tab = seat(browserTab());
@@ -402,6 +406,8 @@ describe("the menu's words", () => {
         ...HEAD,
         { command: "app.browser.hiddenFiles" },
         ...KEYS,
+        { command: DETAILS },
+        SEP,
         ...DOCKS,
         { command: "app.pane.flip" },
         { command: "app.tab.close" },
@@ -416,7 +422,7 @@ describe("the menu's words", () => {
     await settle();
 
     expect(menuRows()).toEqual(
-      [...HEAD, ...KEYS, { command: "app.browser.openInBrowser" }, ...DOCKS, ...LAUNCHER].map(wordsOf),
+      [...HEAD, ...KEYS, SEP, { command: "app.browser.openInBrowser" }, ...DOCKS, ...LAUNCHER].map(wordsOf),
     );
   });
 
@@ -548,6 +554,86 @@ describe("Details", () => {
     expect(command.available(commandContext())).toBe(false);
     expect(commandUnavailableReason(command, commandContext())).toBe("Needs a file browser tab");
     expect(commandState(DETAILS)).toBeNull();
+  });
+
+  /// The menu's Details row, which a tab's menu draws with a check.
+  function detailsRow(): HTMLButtonElement {
+    const row = menuButton(title(DETAILS));
+    expect(row.getAttribute("role")).toBe("menuitemcheckbox");
+    expect(row.querySelector(".lucide-check") !== null, "the row draws its check only while on").toBe(
+      row.getAttribute("aria-checked") === "true",
+    );
+    return row;
+  }
+
+  test("the menu's row is the command's title with the button's key, and shows and hides the panel", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const button = detailsButton(target);
+    await openFromTabStrip(tab);
+
+    expect(rowLabel(detailsRow())).toBe(title(DETAILS));
+    expect(button.title).toBe(`${title(DETAILS)} (${menuChord(title(DETAILS))})`);
+    expect(detailsRow().getAttribute("aria-checked")).toBe("false");
+
+    detailsRow().click();
+    await settle();
+    expect(menu(), "the row closes the menu").toBeNull();
+    expect([tab.inspectorOpen, commandState(DETAILS), button.getAttribute("aria-pressed"), shown(target)]).toEqual([
+      true, true, "true", true,
+    ]);
+
+    closeTabMenu();
+    await openFromTabStrip(tab);
+    detailsRow().click();
+    await settle();
+    expect([tab.inspectorOpen, commandState(DETAILS), button.getAttribute("aria-pressed"), shown(target)]).toEqual([
+      false, false, "false", false,
+    ]);
+  });
+
+  test("the menu's row is checked while the panel is shown, whoever showed it", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const command = commandById(DETAILS)!;
+    const checkedNow = async (): Promise<string | null> => {
+      closeTabMenu();
+      await openFromTabStrip(tab);
+      return detailsRow().getAttribute("aria-checked");
+    };
+
+    detailsButton(target).click();
+    await settle();
+    expect(await checkedNow(), "after the button").toBe("true");
+
+    command.run();
+    await settle();
+    expect(await checkedNow(), "after the command").toBe("false");
+
+    target.querySelector<HTMLElement>('[role="listbox"]')!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "y", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    await settle();
+    expect(await checkedNow(), "after the key").toBe("true");
+
+    target.querySelector<HTMLButtonElement>(".inspector button.close")!.click();
+    await settle();
+    expect(shown(target), "the panel's own close hid it").toBe(false);
+    expect(await checkedNow(), "after the panel's close").toBe("false");
+  });
+
+  // A dock draws no panel, and the command acts on the active tab, which a
+  // dock is not: a row there would flip another tab's panel or nothing.
+  test("a dock's menu has no Details row, even while the command is offered for the active tab", async () => {
+    seat(browserTab());
+    const target = await render({ variant: "dock", side: "left" });
+    expect(commandById(DETAILS)!.available(commandContext()), "the active tab is a file browser").toBe(true);
+
+    target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await settle();
+    expect(menu(), "the dock's menu is open").not.toBeNull();
+    expect(menuRows()).not.toContain(title(DETAILS));
+    expect(target.querySelector(".inspector")).toBeNull();
   });
 
   // The panel acts on the selection by its path, the server's copy. Saving
@@ -849,6 +935,119 @@ describe("the launcher's Open", () => {
     open();
     await settle();
     expect(tab.directory).toBe("");
+  });
+});
+
+// The menu's Upload and the launcher's Upload pick one directory: the one the
+// surface is in, which its New and Paste choose too. Neither replaces a
+// file; that is the Upload of the file's own row menu.
+describe("Upload from the menu and from the launcher", () => {
+  const UPLOAD = "app.browser.uploadSelection";
+  const HOME = "notes/sub";
+
+  beforeEach(async () => {
+    uninstallDemoWorkspace();
+    installDemoWorkspace({
+      metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 3, textCount: 3 },
+      files: [
+        { path: "notes/a.md", kind: "document", size: 5, mtime: 100, content: "hello" },
+        { path: "notes/sub/b.md", kind: "document", size: 5, mtime: 100, content: "deep" },
+        { path: "README.md", kind: "document", size: 5, mtime: 100, content: "hi" },
+      ],
+    });
+    await refreshWorkspace();
+    await refreshTree();
+    await loadTreeDir("notes");
+    vi.spyOn(fileOps, "uploadFilesTo").mockResolvedValue(undefined);
+    vi.spyOn(fileOps, "replaceFileAt").mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    filesContext.current = null;
+  });
+
+  /// Where the upload `act` asks for goes: the directory its picker
+  /// uploads into, the file it replaces, or no picker at all, and how many
+  /// pickers it raised where that is more than one.
+  async function target(act: () => void | Promise<void>): Promise<string> {
+    const into = vi.mocked(fileOps.uploadFilesTo);
+    const over = vi.mocked(fileOps.replaceFileAt);
+    into.mockClear();
+    over.mockClear();
+    const before = document.querySelectorAll('input[type="file"]').length;
+    await act();
+    const inputs = [...document.querySelectorAll<HTMLInputElement>('input[type="file"]')];
+    const raised = inputs.length - before;
+    if (raised === 0) return "no picker";
+    const input = inputs[inputs.length - 1]!;
+    Object.defineProperty(input, "files", { configurable: true, value: [new File(["x"], "x.txt")] });
+    input.dispatchEvent(new Event("change"));
+    const extra = raised > 1 ? ` (${raised} pickers)` : "";
+    if (over.mock.calls.length > 0) return `replace ${over.mock.calls[0]![0]}${extra}`;
+    return `${input.multiple ? "many" : "one"} into ${into.mock.calls[0]?.[0]}${extra}`;
+  }
+
+  type Case = {
+    name: string;
+    variant: "tab" | "dock";
+    standalone?: boolean;
+    selected: string | null;
+    expected: string;
+  };
+  const CASES: Case[] = [
+    { name: "a list with a file selected", variant: "tab", selected: "notes/a.md", expected: "notes" },
+    { name: "a list with a directory selected", variant: "tab", selected: "notes/sub", expected: "notes" },
+    { name: "a list with nothing selected", variant: "tab", selected: null, expected: "notes" },
+    { name: "a tree with a directory selected", variant: "dock", selected: "notes", expected: "notes" },
+    { name: "a tree with a file selected", variant: "dock", selected: "notes/a.md", expected: "notes" },
+    { name: "a tree with nothing selected", variant: "dock", selected: null, expected: "" },
+    { name: "a standalone window's list with nothing selected", variant: "tab", standalone: true, selected: null, expected: "notes" },
+    { name: "a standalone window's tree with a directory selected", variant: "dock", standalone: true, selected: "notes", expected: "notes" },
+    // The tree's root is the filesystem's: nothing selected starts at home.
+    { name: "a standalone window's tree with nothing selected", variant: "dock", standalone: true, selected: null, expected: HOME },
+  ];
+
+  test.each(CASES)("$name: the row and the command upload many files into one directory", async (c) => {
+    if (c.standalone) {
+      caps.workspace = false;
+      filesContext.current = { rootDisplay: "/", rootWire: "", homeWire: HOME, identity: "files" };
+    }
+    // The command is offered on a file browser tab; a dock's selection is
+    // the one it acts on while the dock holds the keyboard.
+    const tab = seat(browserTab({ directory: "notes" }));
+    const surface = c.variant === "tab" ? await render({ variant: "tab", tab }) : await render({ variant: "dock", side: "left" });
+    const id = c.variant === "tab" ? `fb-tab-${tab.id}` : "fb-dock-left";
+    surface.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    fbSelectSingle(c.selected, fbTreeInstance(id)!.selection);
+    await settle();
+    const command = commandById(UPLOAD)!;
+    expect(command.available(commandContext()), "the command is offered").toBe(true);
+
+    const fromRow = await target(async () => {
+      if (c.variant === "tab") await openFromTabStrip(tab);
+      else {
+        surface.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+        await settle();
+      }
+      menuButton(title(UPLOAD)).click();
+    });
+    const fromCommand = await target(() => command.run());
+
+    expect({ fromRow, fromCommand }).toEqual({ fromRow: `many into ${c.expected}`, fromCommand: `many into ${c.expected}` });
+  });
+
+  test("the command is answered by the surface the selection commands act on, and by it alone", async () => {
+    const tab = seat(browserTab({ directory: "notes/sub" }));
+    const list = await render({ variant: "tab", tab });
+    const dock = await render({ variant: "dock", side: "left" });
+    fbSelectSingle("notes", fbTreeInstance("fb-dock-left")!.selection);
+    const command = commandById(UPLOAD)!;
+
+    dock.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(await target(() => command.run()), "the dock holds the keyboard").toBe("many into notes");
+
+    list.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    expect(await target(() => command.run()), "the tab holds the keyboard").toBe("many into notes/sub");
   });
 });
 

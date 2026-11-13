@@ -4363,7 +4363,7 @@ function refreshAfterDraftChange(): Promise<unknown> {
 /// is saved. For a caller that must not go on with text the server lacks: a
 /// draft's close and its promotion, which keep an unsaved draft open instead
 /// of joining the ordinary close dialog, and a download or an export of an
-/// open file, which read the server's copy. A tab left unsaved gets one
+/// open draft, which read the server's copy. A tab left unsaved gets one
 /// notice: the reason on its save line where there is one, and otherwise
 /// what held the save.
 export async function saveTabEdits(tab: FileTab): Promise<boolean> {
