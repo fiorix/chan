@@ -89,6 +89,39 @@ describe("GhosttyViewportController writes", () => {
     expect(state.viewportY).toBe(10);
   });
 
+  // A pixel scroll leaves the offset a fraction of a row back. Less than a
+  // row back the view shows no history row: the bottom view, its prompt and
+  // cursor, and output follows it, ghostty-web's write snapping the offset
+  // to the bottom. A whole row or more back the view is anchored.
+  test.each([0, 0.3, 0.999])("a view %s rows back shows no history row and follows output to the bottom", (offset) => {
+    const { state, term } = fakeGhostty(offset, 20);
+    term.appendedByWrite.push(3, 1);
+    const controller = new GhosttyViewportController(term, context());
+
+    controller.write("line\r\n");
+    expect(state.viewportY).toBe(0);
+    controller.write("more\r\n");
+
+    expect(term.scrollToLine).not.toHaveBeenCalled();
+    expect(state.viewportY).toBe(0);
+    expect(state.scrollback).toBe(24);
+  });
+
+  test.each([
+    [1, 5],
+    [1.5, 5.5],
+  ])("a view %s rows back stays anchored on its rows under output", (offset, anchored) => {
+    const { state, term } = fakeGhostty(offset, 20);
+    term.appendedByWrite.push(3, 1);
+    const controller = new GhosttyViewportController(term, context());
+
+    controller.write("line\r\n");
+    controller.write("more\r\n");
+
+    expect(term.scrollToLine.mock.calls.flat()).toEqual([offset + 3, anchored]);
+    expect(state.viewportY).toBe(anchored);
+  });
+
   test("in-place redraw chunks that add no lines do not move the viewport", () => {
     const { state, term } = fakeGhostty(7, 20);
     term.appendedByWrite.push(0, 0, 0);
