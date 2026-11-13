@@ -4,8 +4,8 @@
 // itself: each row is held to the title of the catalog command it runs, to an
 // option of the Filters command, to the shortcut table's label for the
 // launcher, or to a named exemption. Its filter rows and the options the
-// launcher's Filters command lists are one list, in every graph mode, and a
-// row and its option flip the same filter.
+// launcher's Filters command lists are one list, and a row and its option
+// flip the same filter.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -33,6 +33,7 @@ import {
   unmountGraphPanels,
 } from "../__tests__/graphPanel";
 import { trackTimers, type TimerTrack } from "../demo/timers";
+import { invalidateGraph } from "../state/graphData.svelte";
 import {
   commandById,
   commandContext,
@@ -50,13 +51,24 @@ let timers: TimerTrack;
 beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
+  invalidateGraph();
   graphServer.view = {
-    nodes: [g.dir(""), g.dir("notes"), g.file("notes/a.md")],
-    edges: [g.edge("", "directory:notes", "contains"), g.edge("directory:notes", "notes/a.md", "contains")],
+    nodes: [g.dir(""), g.dir("notes"), g.dir("notes/deep"), g.file("notes/a.md"), g.file("notes/deep/d.md")],
+    edges: [
+      g.edge("", "directory:notes", "contains"),
+      g.edge("directory:notes", "directory:notes/deep", "contains"),
+      g.edge("directory:notes", "notes/a.md", "contains"),
+      g.edge("directory:notes/deep", "notes/deep/d.md", "contains"),
+    ],
   };
   graphServer.fs = {
-    nodes: [fsg.dir(""), fsg.dir("notes"), fsg.file("notes/a.md")],
-    edges: [fsg.contains("", "notes"), fsg.contains("notes", "notes/a.md")],
+    nodes: [fsg.dir(""), fsg.dir("notes"), fsg.dir("notes/deep"), fsg.file("notes/a.md"), fsg.file("notes/deep/d.md")],
+    edges: [
+      fsg.contains("", "notes"),
+      fsg.contains("notes", "notes/deep"),
+      fsg.contains("notes", "notes/a.md"),
+      fsg.contains("notes/deep", "notes/deep/d.md"),
+    ],
   };
 });
 
@@ -132,13 +144,13 @@ function wordsOf(source: Words | "---"): string {
 
 describe("the menu's words", () => {
   test("every row is a command's title, a Filters option, the launcher's shortcut label or a named exemption", async () => {
-    const { bubble } = await openMenu({ scopeId: "file:notes/a.md" });
+    const { bubble } = await openMenu();
 
     expect(lines(bubble)).toEqual([
       ...[
         {
-          own: "notes/a.md",
-          because: "names the scope the graph shows; its tooltip names the command it runs, Scope details",
+          own: "Workspace",
+          because: "names what the graph is of; its tooltip names the command it runs, Scope details",
         },
         "---" as const,
         { own: "Depth", because: "a slider's caption, not an action" },
@@ -156,11 +168,11 @@ describe("the menu's words", () => {
     expect(filterOptions().length).toBeGreaterThan(0);
   });
 
-  test("the scope row's tooltip names the command it runs and the scope", async () => {
-    const { bubble } = await openMenu({ scopeId: "file:notes/a.md" });
+  test("the scope row's tooltip names the command it runs and what the graph is of", async () => {
+    const { bubble } = await openMenu();
 
     expect(bubble.querySelector<HTMLElement>(".graph-scope-row")!.title).toBe(
-      `${command("app.graph.scopeDetails").title}: notes/a.md`,
+      `${command("app.graph.scopeDetails").title}: Workspace`,
     );
   });
 
@@ -175,84 +187,62 @@ describe("the menu's words", () => {
 });
 
 describe("the filter rows and the Filters command's options", () => {
-  const MODES: { name: string; tab: Partial<GraphTab>; words: string[] }[] = [
-    {
-      name: "a semantic graph of the workspace",
-      tab: { scopeId: "workspace" },
-      words: ["tag", "contact", "language", "media", "folder", "markdown", "source"],
-    },
-    {
-      name: "a semantic graph of a file, which has no folder filter",
-      tab: { scopeId: "file:notes/a.md" },
-      words: ["tag", "contact", "language", "media", "markdown", "source"],
-    },
-    {
-      name: "a filesystem graph, in the filesystem's words",
-      tab: { mode: "filesystem", scopeId: "dir:notes" },
-      words: ["symlink", "hardlink", "directory", "markdown", "source"],
-    },
-    {
-      name: "a language graph, which filters languages alone",
-      tab: { mode: "language", scopeId: "workspace" },
-      words: ["language"],
-    },
-  ];
-
-  test.each(MODES)("are one list for $name", async ({ tab, words }) => {
-    const { bubble } = await openMenu({
-      ...tab,
-      filters: { ...graphTab().filters, markdown: false },
-    });
+  test("are one list, every graph tab offering all seven", async () => {
+    const { bubble } = await openMenu({ filters: { ...graphTab().filters, markdown: false } });
 
     const rows = filterRows(bubble);
-    expect(rows.map((filter) => filter.label)).toEqual(words);
+    expect(rows.map((filter) => filter.label)).toEqual([
+      "tag", "contact", "language", "media", "folder", "markdown", "source",
+    ]);
     expect(rows).toEqual(filterOptions().map(({ label, checked }) => ({ label, checked })));
+    expect(rows.filter((filter) => !filter.checked).map((filter) => filter.label)).toEqual(["markdown"]);
   });
 
   test("a row and its option flip the same filter, and each shows the other's change", async () => {
-    const { tab, bubble } = await openMenu({ mode: "filesystem", scopeId: "dir:notes" });
-    const option = (): CommandOption => filterOptions().find((candidate) => candidate.label === "directory")!;
+    const { tab, bubble } = await openMenu();
+    const option = (): CommandOption => filterOptions().find((candidate) => candidate.label === "folder")!;
     expect(option().checked).toBe(true);
 
-    row(bubble, "directory").click();
+    row(bubble, "folder").click();
     await settle(2);
     expect(tab.filters.folder).toBe(false);
     expect(option().checked).toBe(false);
-    expect(command("app.graph.filters").state!(commandContext())).toBe("4 of 5");
+    expect(command("app.graph.filters").state!(commandContext())).toBe("6 of 7");
 
     await option().run();
     await settle(2);
     expect(tab.filters.folder).toBe(true);
-    expect(row(bubble, "directory").getAttribute("aria-checked")).toBe("true");
+    expect(row(bubble, "folder").getAttribute("aria-checked")).toBe("true");
   });
 });
 
 describe("the scope row and Scope details", () => {
-  test("the row shows the scope's details and closes the menu", async () => {
-    const { tab, bubble } = await openMenu({ scopeId: "file:notes/a.md" });
+  test("the row selects the workspace's node, shows its details and closes the menu", async () => {
+    const { tab, bubble } = await openMenu();
     expect(tab.inspectorOpen).toBe(false);
+    expect(canvas.props?.selectedId).toBeNull();
 
     bubble.querySelector<HTMLButtonElement>(".graph-scope-row")!.click();
     await settle(2);
 
     expect(tab.inspectorOpen).toBe(true);
-    expect(canvas.props?.selectedId).toBe("notes/a.md");
+    expect(canvas.props?.selectedId).toBe("");
     expect(tabMenu.openForTabId).toBeNull();
   });
 
   test("the command shows the same details", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "file:notes/a.md" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     expect(tab.inspectorOpen).toBe(false);
 
     command("app.graph.scopeDetails").run();
     await settle(2);
 
     expect(tab.inspectorOpen).toBe(true);
-    expect(canvas.props?.selectedId).toBe("notes/a.md");
+    expect(canvas.props?.selectedId).toBe("");
   });
 
   test("only the graph the launcher is aimed at answers", async () => {
-    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "file:notes/a.md" }));
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
     // Another tab takes the pane: the graph stays mounted, as a pane keeps
     // it, and the launcher is no longer aimed at it.
     const pane = layout.nodes[GRAPH_PANE] as LeafNode;
