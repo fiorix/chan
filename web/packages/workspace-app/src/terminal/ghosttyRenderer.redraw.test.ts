@@ -313,6 +313,21 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(lines(ROWS + 12), [at(from), at(to), floored(to), HIDE, floored(to), SHOW, "x", at(from), at(to), "\r\ny", at(0)]);
   });
 
+  // ghostty-web clamps its own offset at 0, but an offset below it handed
+  // to the renderer shows the bottom view, masked values masked, as the
+  // hover, the selection and the masker read it.
+  const bottom = (y: number) => (r: Rig) => {
+    expect(r.picture(y), `the picture at ${y}`).toEqual(r.picture(0));
+  };
+
+  test("an offset below zero shows the bottom view", async () => {
+    await run(lines(ROWS + 12), [at(-0.5), bottom(-0.5), at(-2), bottom(-2), "x", at(0)]);
+  });
+
+  test("an offset below zero masks a value on the screen where it shows", async () => {
+    await run(`${lines(ROWS + 3)}\r\nexport TOKEN=abcdef`, [at(-0.5), bottom(-0.5), at(-1), bottom(-1)], { masking: true });
+  });
+
   test("a masked value in the history scrolled back by a fraction of a row", async () => {
     // The value's row is history row 3 of 7: at an offset of 5 it shows on
     // view row 1, where the masker's floored offset finds it too.

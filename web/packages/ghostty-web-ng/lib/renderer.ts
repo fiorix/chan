@@ -238,10 +238,10 @@ export class CanvasRenderer {
     const dims = term.getDimensions();
     const scrollbackLength = term.getScrollbackLength();
     // The history rows the view shows above the screen. A fractional offset
-    // (chan's pixel scroll) shows the rows of its floor, as the hover, the
-    // selection and the masker map them; only the scrollbar reads the
-    // fraction.
-    const historyRows = Math.floor(viewportY);
+    // (chan's pixel scroll) shows the rows of its floor, and one below 0 the
+    // bottom view, as the hover, the selection and the masker map them; only
+    // the scrollbar reads the fraction.
+    const historyRows = Math.max(0, Math.floor(viewportY));
 
     // A resize, a screen switch, new colours or output that scrolled change
     // every row.
