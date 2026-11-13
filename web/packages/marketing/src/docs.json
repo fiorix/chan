@@ -1,0 +1,135 @@
+{
+  "sets": [
+    {
+      "id": "manual",
+      "label": "Manual",
+      "title": "Chan manual",
+      "base": "/manual/",
+      "index": "pages/manual.html",
+      "source": "pages/manual",
+      "groups": [
+        {
+          "title": "Start",
+          "pages": [
+            {
+              "slug": "",
+              "title": "Overview",
+              "description": "A guide to chan: from your first terminal to remote devservers, gateways, and agent teams."
+            },
+            {
+              "slug": "install",
+              "title": "Install & first run",
+              "description": "Install chan, make it your default terminal, file browser or Markdown editor on Linux, open the Computers screen, and turn a directory into a workspace.",
+              "head": "launcher-demo"
+            }
+          ]
+        },
+        {
+          "title": "Terminal",
+          "pages": [
+            {
+              "slug": "terminal",
+              "title": "Terminal & teams",
+              "description": "Use terminal commands, rich prompts, drafts, program status, and agent teams."
+            },
+            {
+              "slug": "navigation",
+              "title": "Navigation",
+              "description": "Arrange windows, panes, and tabs, and find actions with the command launcher."
+            },
+            {
+              "slug": "command-launcher",
+              "title": "Command launcher",
+              "description": "Run any command, change a setting, or reach any window from one searchable list."
+            },
+            {
+              "slug": "tmux",
+              "title": "tmux control mode",
+              "description": "Run tmux -CC in a chan terminal, locally or over ssh, and work with its windows and panes as Chan windows and panes."
+            }
+          ]
+        },
+        {
+          "title": "Workspace",
+          "pages": [
+            {
+              "slug": "editor",
+              "title": "Editor & previews",
+              "description": "Edit text, preview Markdown, slide decks, and JSON, and export documents to PDF."
+            },
+            {
+              "slug": "files",
+              "title": "File browser & reports",
+              "description": "Browse files, transfer them between machines, and inspect code reports and COCOMO estimates."
+            },
+            {
+              "slug": "search",
+              "title": "Workspace search",
+              "description": "Find content, files, tags, and relationships through the search UI and terminal."
+            },
+            {
+              "slug": "graph",
+              "title": "Graph",
+              "description": "Navigate directories and relationships, and use depth to see more of a repository."
+            },
+            {
+              "slug": "dashboard",
+              "title": "Dashboard & index",
+              "description": "Read workspace information, follow indexing progress, and manage what gets indexed."
+            },
+            {
+              "slug": "extensions",
+              "title": "Extensions",
+              "description": "Add your own applications as sandboxed tabs and integrate them through the host bridge and cs."
+            }
+          ]
+        },
+        {
+          "title": "Desktop",
+          "pages": [
+            {
+              "slug": "settings",
+              "title": "Settings & defaults",
+              "description": "Configure appearance, editing, terminals, shortcuts, and workspace preferences."
+            },
+            {
+              "slug": "screensavers",
+              "title": "Screensavers",
+              "description": "Configure idle locking and explore the animations shown in an empty workspace."
+            }
+          ]
+        },
+        {
+          "title": "Remote",
+          "pages": [
+            {
+              "slug": "devserver",
+              "title": "Devserver",
+              "description": "Set up a devserver and connect to its terminals and workspaces from the Computers window."
+            },
+            {
+              "slug": "systemd",
+              "title": "systemd integration",
+              "description": "Run the devserver as a systemd user service, restart and upgrade it without losing terminals, and report its metrics to systemd-report."
+            },
+            {
+              "slug": "browser",
+              "title": "Chan in a browser",
+              "description": "Serve a workspace or a devserver from the chan binary alone and use it from any browser, no desktop needed."
+            },
+            {
+              "slug": "collaboration",
+              "title": "Collaboration & sessions",
+              "description": "Share workspace sessions, identify clients, and hand over leadership locally or remotely."
+            },
+            {
+              "slug": "gateway",
+              "title": "Host a gateway",
+              "description": "Run your own gateway on one server and publish devservers behind sign-in, for you and the people you share them with."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
