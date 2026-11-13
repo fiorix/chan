@@ -2336,5 +2336,67 @@ mod appimage_env_tests {
                 "an empty entry is the current directory, never a re-exec's"
             );
         }
+
+        /// The desktop's own search paths at boot: this mount's block, the
+        /// GTK hook's `/usr/share` after it in `XDG_DATA_DIRS`, and the
+        /// user's value, but not the empty entry AppRun's separator leaves
+        /// when the user had none, which would put the current directory on
+        /// Python's path, GLib's data directories and the plugin scanners'
+        /// of everything the desktop starts with its own environment. The
+        /// shapes are AppRun's, read in a throwaway AppDir with the 0.128.0
+        /// AppImage's AppRun; an older parent's block chained after this
+        /// mount's goes too.
+        #[test]
+        fn the_desktops_own_paths_keep_no_empty_entry_the_user_did_not_write() {
+            let old = "/tmp/.mount_chanZZ";
+            let perl = |dir: &str| format!("{dir}/usr/share/perl5/:{dir}/usr/lib/perl5/");
+            let xdg = |dir: &str| format!("{dir}/usr/share/:{dir}/usr/share:/usr/share");
+            let cases = [
+                (
+                    "PYTHONPATH",
+                    format!("{APPDIR}/usr/share/pyshared/"),
+                    format!("{old}/usr/share/pyshared/"),
+                ),
+                ("PERLLIB", perl(APPDIR), perl(old)),
+                ("QT_PLUGIN_PATH", qt_block(APPDIR), qt_block(old)),
+                (
+                    "GST_PLUGIN_SYSTEM_PATH",
+                    format!("{APPDIR}/usr/lib/gstreamer"),
+                    qt_block(old),
+                ),
+                (
+                    "GST_PLUGIN_SYSTEM_PATH_1_0",
+                    format!("{APPDIR}/usr/lib/gstreamer-1.0"),
+                    qt_block(old),
+                ),
+                ("XDG_DATA_DIRS", xdg(APPDIR), xdg(old)),
+            ];
+            for (key, own, older) in cases {
+                let vars = |value: String| {
+                    vec![
+                        (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                        (OsString::from(key), OsString::from(value)),
+                    ]
+                };
+                let value = |value: String| own_apprun_value(key, vars(value), None);
+                assert_eq!(
+                    value(format!("{own}:")),
+                    Some(OsString::from(&own)),
+                    "{key}"
+                );
+                assert_eq!(
+                    value(format!("{own}:{older}:")),
+                    Some(OsString::from(&own)),
+                    "{key} after an older parent"
+                );
+                for user in ["/opt/u", ":/opt/u", "/opt/u:"] {
+                    assert_eq!(
+                        value(format!("{own}:{user}")),
+                        Some(OsString::from(format!("{own}:{user}"))),
+                        "{key} {user:?}"
+                    );
+                }
+            }
+        }
     }
 }

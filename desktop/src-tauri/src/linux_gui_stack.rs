@@ -223,9 +223,11 @@ mod linux {
         // blocks after its own in each search path AppRun prepends to,
         // directories under /tmp that go when that process exits and that
         // every child of this one would search (WebKit's processes, Qt and
-        // Python helpers). Dropped here, single-threaded, as the marker is;
-        // LD_LIBRARY_PATH once no re-exec has taken it.
-        drop_foreign_apprun_blocks(|key| key != "LD_LIBRARY_PATH");
+        // Python helpers), and AppRun ends each with an empty entry, the
+        // current directory, when the user had no value. Both dropped here,
+        // single-threaded, as the marker is; LD_LIBRARY_PATH once no re-exec
+        // has taken it.
+        clean_apprun_search_paths(|key| key != "LD_LIBRARY_PATH");
 
         // Independent, cheap layer: keep WebKit off the dma-buf renderer path
         // that aborts with EGL_BAD_PARAMETER on the affected GPUs. WebKit reads
@@ -241,20 +243,22 @@ mod linux {
 
         // Here when no re-exec was made, or in the image a re-exec started,
         // whose loader path the re-exec already wrote without them.
-        drop_foreign_apprun_blocks(|key| key == "LD_LIBRARY_PATH");
+        clean_apprun_search_paths(|key| key == "LD_LIBRARY_PATH");
     }
 
     /// Put in place of each of the [`chan_server::APPRUN_SEARCH_PATHS`] that
-    /// `keys` takes the value without an older parent's blocks
-    /// ([`chan_server::without_foreign_apprun_blocks`]), where it holds any.
-    /// Only while the process is single-threaded.
-    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {
+    /// `keys` takes this process's own entries and the user's value, without
+    /// an older parent's blocks and without the empty entry AppRun's
+    /// separator leaves when the user had none
+    /// ([`chan_server::own_apprun_value`]), where that differs from the value
+    /// as it stands. Only while the process is single-threaded.
+    fn clean_apprun_search_paths(keys: impl Fn(&str) -> bool) {
         for key in chan_server::APPRUN_SEARCH_PATHS {
             if !keys(key) {
                 continue;
             }
-            if let Some(value) =
-                chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)
+            let value = chan_server::own_apprun_value(key, std::env::vars_os(), None);
+            if let Some(value) = value.filter(|value| std::env::var_os(key).as_ref() != Some(value))
             {
                 std::env::set_var(key, value);
             }
@@ -751,10 +755,10 @@ mod linux {
             let order = [
                 "let reexeced = reexec_done();",
                 "if cs_install::appimage_path().is_none() {",
-                "drop_foreign_apprun_blocks(|key| key != \"LD_LIBRARY_PATH\");",
+                "clean_apprun_search_paths(|key| key != \"LD_LIBRARY_PATH\");",
                 "set_webkit_env_defaults();",
                 "match std::env::var(POLICY_ENV)",
-                "drop_foreign_apprun_blocks(|key| key == \"LD_LIBRARY_PATH\");",
+                "clean_apprun_search_paths(|key| key == \"LD_LIBRARY_PATH\");",
             ];
             let at: Vec<usize> = order
                 .iter()
@@ -768,12 +772,12 @@ mod linux {
                 "{order:?} in order"
             );
             let helper = boot
-                .split_once("    fn drop_foreign_apprun_blocks(keys: impl Fn(&str) -> bool) {")
+                .split_once("    fn clean_apprun_search_paths(keys: impl Fn(&str) -> bool) {")
                 .expect("the helper")
                 .1;
             for step in [
                 "for key in chan_server::APPRUN_SEARCH_PATHS {",
-                "chan_server::without_foreign_apprun_blocks(key, std::env::vars_os(), None)",
+                "chan_server::own_apprun_value(key, std::env::vars_os(), None)",
                 "std::env::set_var(key, value);",
             ] {
                 assert!(helper.contains(step), "the helper runs {step}");
