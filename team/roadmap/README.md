@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.129.0
 
-Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]). He brought one more the same day, built on a branch of its own: a graph tab draws one graph rooted at the workspace, and a tag, mention, contact, language, file or directory is a selection in it ([graph]).
+Opened at the v0.128.0 cut on 2026-11-12 with the two rows that release carried: the ghostty-web fork continues with parts 2 to 6 ([ghosttyng]), and the minimized-window raise, which was to wait on the owner's Mac reading, was built on the owner's word the same day and waits on his Mac walk ([minraise]). The owner adds the release's other rows at planning. The owner added `chan-term` the same day ([chanterm]). He brought one more the same day, built on a branch of its own: a graph tab draws one graph rooted at the workspace, and a tag, mention, contact, language, file or directory is a selection in it ([graph]). On 2026-11-13 he brought in the command launcher rebuilt on a branch of its own: scopes that follow where a command acts, typed search over words in any order, one title per action across the launcher, the menus and Settings, and the Computers window's launcher on the same component ([deck]).
 
 Two of the owner's requests of 2026-11-12 were built without a row of their own. A remote window's title leads with an up arrow (U+2191) where it led with an up-right arrow, the opposite of a local window's down arrow (`909f56e13`). A `tmux -CC` window's bar shows its title and the tmux badge without the active pane's name, the server names a tmux pane by its command, never by the title a shell sets, and in every window the pane tree's head of a pane keeps its place and number and drops the title its row already shows (`3d0183ccd`).
 
@@ -33,11 +33,13 @@ Two of the owner's requests of 2026-11-12 were built without a row of their own.
 | [a raised minimized window may stay behind][minraise] | built | owner |
 | [the default terminal is chan-desktop's flags][chanterm] | built | owner |
 | [a graph tab draws a graph for each way it opens][graph] | built | owner |
+| [the command launcher is one flat list][deck] | built | owner |
 
 [ghosttyng]: v0.129.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [minraise]: v0.129.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
 [chanterm]: v0.129.0/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md
 [graph]: v0.129.0/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md
+[deck]: v0.129.0/the-command-launcher-is-one-flat-list-behind-dead-keys.md
 
 ## Completed
 
