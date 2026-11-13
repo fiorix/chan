@@ -187,6 +187,23 @@ describe("on chan-desktop, a theme pinned in the page's storage before System wa
     });
   }
 
+  for (const first of ["feed", "reconcile"] as const) {
+    test(`is settled beside a store holding the same theme, with nothing written (the ${first} answers first)`, async () => {
+      // The usual arrival: v0.128.0 mirrored the pin to the store.
+      localStorage.setItem(PRIOR, "dark");
+      const routes = localThemeRoutes({ theme: "dark" });
+
+      const page = await load(routes);
+      if (first === "feed") routes.connect();
+      await page.reconciled;
+      routes.connect();
+
+      expect([page.themeState.choice, shown()]).toEqual(["dark", "dark"]);
+      expect([routes.theme, routes.written]).toEqual(["dark", []]);
+      expect(stored(), "kept as the page's own choice, the old key gone").toEqual(["dark", null]);
+    });
+  }
+
   test("gives way to the other theme the desktop's store holds, as v0.128.0 did", async () => {
     // v0.128.0 painted the page's pin, then adopted the store's theme at
     // load and from the feed: the store is what its terminal windows showed.
@@ -230,7 +247,10 @@ describe("on chan-desktop, a theme pinned in the page's storage before System wa
     expect([last.themeState.theme, shown()]).toEqual(["light", "light"]);
   });
 
-  test("a choice made while the carry-over's write is in flight stands", async () => {
+  test("a choice made while the carry-over's write is in flight stands when the writes land in the order sent", async () => {
+    // The fake applies the carry-over's write before the choice's. The module
+    // orders nothing itself: a store that applied the choice's write first
+    // would end on the carried pin.
     localStorage.setItem(PRIOR, "dark");
     const routes = localThemeRoutes({ theme: null }, { duringWrite: () => current?.setThemeChoice("system") });
 
