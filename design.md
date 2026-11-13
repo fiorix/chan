@@ -173,7 +173,7 @@ chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devser
 
 ## Process metrics
 
-The outer server router owns a metrics runtime shared by its launcher and all tenants. One worker samples process and subsystem counters every second into a bounded ten-minute memory history; a separate worker scans chan-home storage while someone reads it. Dashboard, `chan metrics`, and an optional socket-activated Linux Varlink adapter read the same cache. The adapter queries the running devserver and never owns collection or starts that devserver. Measurement scopes, the HTTP contract, and example user units are in [docs/metrics.md](docs/metrics.md).
+The outer server router owns a metrics runtime shared by its launcher and all tenants. One worker samples process and subsystem counters every second into a bounded ten-minute memory history; a separate worker scans chan-home storage while someone reads it. Dashboard, `chan metrics`, and an optional socket-activated source for Linux `systemd-report` read the same cache. The source queries the running devserver and never owns collection or starts that devserver. Measurement scopes, the HTTP contract, and example user units are in [docs/metrics.md](docs/metrics.md).
 
 ## State and ownership
 

@@ -1,10 +1,10 @@
 [Unit]
-Description=chan metrics Varlink socket
+Description=chan devserver metrics for systemd-report
 
 [Socket]
-ListenStream=%t/chan-metrics/io.chan.Metrics
+ListenStream=%t/systemd/report/io.chan.Devserver
+FileDescriptorName=varlink
 SocketMode=0600
-DirectoryMode=0700
 Accept=yes
 MaxConnections=16
 RemoveOnStop=yes

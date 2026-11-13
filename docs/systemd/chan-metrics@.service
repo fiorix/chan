@@ -1,5 +1,5 @@
 [Unit]
-Description=chan metrics Varlink connection
+Description=chan devserver metrics for systemd-report
 
 [Service]
 Type=exec

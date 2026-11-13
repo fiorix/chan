@@ -1,0 +1,55 @@
+# General Varlink service interface
+interface org.varlink.service
+
+# Get service meta information
+method GetInfo() -> (
+	# String identifying the vendor of this service
+	vendor: string,
+	# String identifying the product implementing this service
+	product: string,
+	# Version string of this product
+	version: string,
+	# Web URL pointing to additional information about this service
+	url: string,
+	# List of interfaces implemented by this service
+	interfaces: []string
+)
+
+# Get description of an implemented interface in Varlink IDL format
+method GetInterfaceDescription(
+	# Name of interface to query interface description of
+	interface: string
+) -> (
+	# Interface description in Varlink IDL format
+	description: string
+)
+
+# Error returned if a method is called on an unknown interface
+error InterfaceNotFound(
+	# Name of interface that was called but does not exist
+	interface: string
+)
+
+# Error returned if an unknown method is called on an known interface
+error MethodNotFound(
+	# Name of method that was called but does not exist
+	method: string
+)
+
+# Error returned if a method is called that is known but not implemented
+error MethodNotImplemented(
+	# Name of method that was called but is not implemented
+	method: string
+)
+
+# Error returned if a method is called with an invalid parameter
+error InvalidParameter(
+	# Name of the invalid parameter
+	parameter: string
+)
+
+# General permission error
+error PermissionDenied()
+
+# A method was called with the 'more' flag off, but it may only be called with the flag turned on
+error ExpectedMore()

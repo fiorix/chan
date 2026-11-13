@@ -20,6 +20,11 @@
     "description": "Set up a devserver and connect to its terminals and workspaces from the Computers window."
   },
   {
+    "slug": "systemd",
+    "title": "systemd integration",
+    "description": "Run the devserver as a systemd user service, restart and upgrade it without losing terminals, and report its metrics to systemd-report."
+  },
+  {
     "slug": "browser",
     "title": "Chan in a browser",
     "description": "Serve a workspace or a devserver from the chan binary alone and use it from any browser, no desktop needed."

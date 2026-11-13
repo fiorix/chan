@@ -618,8 +618,10 @@ retained samples to it. --watch repeats about once per second: the first
 output is complete, and with --json each later line is one object that
 carries only the samples newer than the last one sent.
 
---varlink serves the same view as the Varlink interface io.chan.Metrics
-on stdin and stdout, for a systemd socket unit.
+--varlink makes the devserver a systemd-report source: it serves the
+readings as systemd's metrics interface, io.systemd.Metrics, on stdin
+and stdout, for a socket named io.chan.Devserver in the directory
+systemd-report reads. Each family is io.chan.Devserver.<Name>.
 ";
 
 /// `chan metrics` examples, side effects, and caveats.
@@ -644,10 +646,10 @@ out of the argument list:
   chan metrics --url 'http://127.0.0.1:8787/?t=TOKEN'
   CHAN_METRICS_TOKEN=TOKEN chan metrics --url http://127.0.0.1:8787
 
-The Varlink interface, once the example user units are installed:
+The devserver in systemd-report, once the example user units are
+installed (systemd-report lives in /usr/lib/systemd):
   systemctl --user enable --now chan-metrics.socket
-  varlinkctl call "$XDG_RUNTIME_DIR/chan-metrics/io.chan.Metrics" \
-    io.chan.Metrics.Get '{}'
+  /usr/lib/systemd/systemd-report --user metrics io.chan.Devserver
 
 SIDE EFFECTS:
 None on this machine's disk. Each read is one GET of the server's
@@ -675,10 +677,11 @@ CHAN_METRICS_TOKEN is ignored.
 --varlink is not for a terminal: systemd passes it one connected client
 on stdin and stdout, from a socket unit with Accept=yes and a service
 template with StandardInput=socket. Example units are in the chan
-repository under docs/systemd/; no package installs them. The adapter
-reads the running devserver on every call and never starts it: with the
-devserver down, io.chan.Metrics.Get answers io.chan.Metrics.Unavailable.
-The adapter is built on Unix only; on Windows the flag is refused.
+repository under docs/systemd/; no package installs them. Each List call
+reads the running devserver once and never starts it: with the devserver
+down, List answers io.systemd.Metrics.NoSuchMetric, which systemd-report
+reads as no metrics, and the reason goes to stderr, the unit's journal.
+The source is built on Unix only; on Windows the flag is refused.
 
 SEE ALSO:
 `chan ps` for which workspaces are served, `chan devserver status` for

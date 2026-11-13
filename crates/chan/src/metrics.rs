@@ -1,4 +1,4 @@
-//! CLI diagnostics and the socket-activated Varlink adapter.
+//! CLI diagnostics and the devserver's systemd-report source.
 
 #[cfg(unix)]
 mod varlink;
@@ -27,8 +27,8 @@ impl Client {
     }
 
     /// The metrics URL and bearer to read, resolved afresh on every read: the
-    /// activated adapter can outlive a server restart, port change or token
-    /// rotation.
+    /// activated systemd-report source can outlive a server restart, port
+    /// change or token rotation.
     fn target(&self) -> Result<(reqwest::Url, Option<String>)> {
         match &self.args.url {
             Some(raw) => explicit_target(raw, url_token(self.args.token.as_deref()).as_deref()),
@@ -160,33 +160,24 @@ impl Source for Client {
 /// nothing sent while nothing is newer. A new `identity.instanceId` between
 /// two successful reads means the server restarted and its sequences with
 /// it, so the stream starts over with a complete view. A failed read is
-/// returned to the caller, which ends the stream: `--watch` exits with it and
-/// a Varlink call ends with `Unavailable`.
+/// returned to the caller, which ends the stream: `--watch` exits with it.
 pub(crate) struct Subscription {
     history: bool,
-    since: Option<u64>,
     /// The instance and the newest sequence already sent, if any was.
     sent: Option<(String, Option<u64>)>,
 }
 
 impl Subscription {
-    pub(crate) fn new(history: bool, since: Option<u64>) -> Self {
+    pub(crate) fn new(history: bool) -> Self {
         Self {
             history,
-            since,
             sent: None,
         }
     }
 
     /// The next view to send, or `None` when nothing is newer than what was.
     pub(crate) async fn next(&mut self, source: &impl Source) -> Result<Option<View>> {
-        // The caller's `since` shapes the first reply alone. After that each
-        // reply holds what is newer than the last sample sent, even when the
-        // caller asked from past the server's newest sample.
-        let since = match &self.sent {
-            None => self.since,
-            Some((_, newest)) => *newest,
-        };
+        let since = self.sent.as_ref().and_then(|(_, newest)| *newest);
         let mut view = source.read(self.history, since).await?;
         if let Some((instance, newest)) = &self.sent {
             if view.identity.instance_id != *instance {
@@ -208,7 +199,13 @@ pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
     let client = Client::new(args.clone())?;
     if args.varlink {
         #[cfg(unix)]
-        return varlink::serve(&client, tokio::io::stdin(), tokio::io::stdout()).await;
+        return varlink::serve(
+            &client,
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            std::io::stderr(),
+        )
+        .await;
         #[cfg(not(unix))]
         anyhow::bail!("Varlink socket activation is available on Unix");
     }
@@ -241,7 +238,7 @@ async fn watch(
     // arrives, so a listener made anew for each wait would miss a Ctrl-C
     // that lands while a read is in flight.
     tokio::pin!(cancel);
-    let mut stream = Subscription::new(history, None);
+    let mut stream = Subscription::new(history);
     loop {
         let view = tokio::select! {
             _ = &mut cancel => return Ok(()),
@@ -1186,9 +1183,9 @@ mod tests {
             ),
             asked: Default::default(),
         };
-        let mut stream = Subscription::new(true, Some(2));
+        let mut stream = Subscription::new(true);
         let expected = [
-            Some((vec![3, 4, 5], Some(5))),
+            Some((vec![1, 2, 3, 4, 5], Some(5))),
             Some((vec![6], Some(6))),
             // Nothing newer, nothing sent.
             None,
@@ -1202,34 +1199,7 @@ mod tests {
         }
         assert_eq!(
             *script.asked.lock().unwrap(),
-            [Some(2), Some(5), Some(6), Some(6), Some(8), None, Some(2)]
+            [None, Some(5), Some(6), Some(6), Some(8), None, Some(2)]
         );
-    }
-
-    #[tokio::test]
-    async fn a_since_past_the_servers_newest_sample_shapes_only_the_first_reply() {
-        // A caller resuming from an older instance can ask from a sequence
-        // this server has not reached; later replies still carry what is new.
-        let base = sampled_view().await;
-        let script = Script {
-            views: std::sync::Mutex::new(
-                [
-                    view_of(&base, "a", 1..=5),
-                    view_of(&base, "a", 1..=6),
-                    view_of(&base, "a", 1..=8),
-                ]
-                .into(),
-            ),
-            asked: Default::default(),
-        };
-        let mut stream = Subscription::new(true, Some(900));
-        for expected in [
-            Some((vec![], Some(5))),
-            Some((vec![6], Some(6))),
-            Some((vec![7, 8], Some(8))),
-        ] {
-            assert_eq!(sequences(stream.next(&script).await.unwrap()), expected);
-        }
-        assert_eq!(*script.asked.lock().unwrap(), [Some(900), Some(5), Some(6)]);
     }
 }

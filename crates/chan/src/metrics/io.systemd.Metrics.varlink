@@ -1,0 +1,41 @@
+# Metrics APIs
+interface io.systemd.Metrics
+
+# An enum representing various metric family types
+type MetricFamilyType(
+	# A counter metric family type which is a monotonically increasing value
+	counter,
+	# A gauge metric family type which is a value that can go up and down
+	gauge,
+	# A string metric family type
+	string,
+	# An object metric family type whose value is an arbitrary JSON object
+	object
+)
+
+# Method to get a list of metrics among which the collection of related metrics forms a metric family
+# [Requires 'more' flag]
+method List() -> (
+	# Metric family name, e.g. io.systemd.Manager.unitsByTypeTotal or io.systemd.Manager.unitActiveState
+	name: string,
+	# Metric object name can be unit name, process name, etc, e.g. dev-hvc0.device
+	object: ?string,
+	# Metric fields are values to differentiate between different metrics in the same metric family
+	fields: ?object,
+	# Metric value
+	value: any
+)
+
+# Method to get the metric families
+# [Requires 'more' flag]
+method Describe() -> (
+	# Metric family name
+	name: string,
+	# Metric family description
+	description: string,
+	# Metric family type
+	type: MetricFamilyType
+)
+
+# No such metric found
+error NoSuchMetric()
