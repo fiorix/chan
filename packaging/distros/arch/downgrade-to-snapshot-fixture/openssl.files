@@ -1,0 +1,7 @@
+/usr/
+/usr/include/
+/usr/lib/
+/usr/lib/libcrypto.so.3
+/usr/lib/libssl.so.3
+/usr/share/
+/usr/share/licenses/

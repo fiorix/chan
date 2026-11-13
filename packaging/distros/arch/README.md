@@ -38,6 +38,8 @@ RELEASE_TAG=vX.Y.Z PKGBASE=chan-desktop-bin AUR_LOCAL_SOURCE=target/aur-ci-sourc
     packaging/distros/arch/build-in-ci.sh docker.io/archlinux/archlinux:base-devel
 ```
 
+`downgrade-to-snapshot.sh` does the downgrade. `pacman -Suu` takes every installed package the snapshot carries to the snapshot's version and leaves installed the ones the snapshot lacks, and one of those that shares a file with a snapshot package fails the whole transaction on a file conflict: an image with openssl 4 carries the `openssl-3` compat package, whose `libssl.so.3` the snapshot's openssl 3 also owns. The script drops the packages the snapshot lacks from pacman's database first, keeps their files on disk until the snapshot's packages have replaced them (any of them could hold a library pacman itself loads), and deletes what no snapshot package took over. It then fails unless every installed package is in the snapshot at the snapshot's version with its dependencies met, and the failure names the packages and the snapshot. Starting from the image of the snapshot's own date instead would need a registry lookup, since an image tag carries a build number a date does not give, and would not reach the local sdme path, which imports one rootfs. `packaging/distros/arch/test-downgrade-to-snapshot.sh` runs the script against a pacman stand-in that serves pacman's real output for the `openssl-3` case.
+
 `make aur-check` covers the two source packages only.
 
 The asset name carries the pkgrel, so a published asset is never replaced: a retry of the same version and pkgrel downloads and reuses it, and a repaired recipe is a new pkgrel and a new asset. The binary links WebKitGTK, libsoup, and GTK by API-versioned sonames (`webkit2gtk-4.1`, `libsoup-3.0`, `gtk-3`), which change with a new package name rather than in place; a soname change in any of them would need a release whose snapshot is past it.
@@ -51,6 +53,7 @@ The AUR is a collection of git repositories containing build recipes; it does no
 - `desktop-bin-asset.sh` names the `chan-desktop-bin` asset and packs it from a built `chan-desktop` package.
 - `publish-aur.sh` holds the workflow's dry-run report, AUR push, and RPC index check, shared by every pkgbase.
 - `build-in-container.sh` is the shared clean-Arch build, install and smoke path used by CI and sdme.
+- `downgrade-to-snapshot.sh` takes that container to the Arch Linux Archive snapshot the `chan-desktop-bin` asset is built on.
 - `build-with-sdme.sh` archives a committed local revision and runs both packages in a disposable sdme container.
 - `build-in-ci.sh` is the workflow's entry point: it validates the tag and `pkgrel`, then runs the same container build against the image the job provides, so the x86_64 and aarch64 jobs cannot drift apart.
 

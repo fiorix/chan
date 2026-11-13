@@ -2,11 +2,11 @@
 # Render, build, install, and smoke AUR packages inside a clean Arch-family
 # container. CI and build-with-sdme.sh deliberately share this implementation.
 #
-# ARCH_SNAPSHOT=YYYY/MM/DD pins pacman to that Arch Linux Archive date and
-# downgrades the image to it before anything is built. DESKTOP_BIN_ASSET_DIR
-# makes a smoked chan-desktop build also pack the chan-desktop-bin release
-# asset there. PKGBASE=chan-desktop-bin builds that package from the asset
-# AUR_LOCAL_ASSET names.
+# ARCH_SNAPSHOT=YYYY/MM/DD pins pacman to that Arch Linux Archive date, and
+# downgrade-to-snapshot.sh downgrades the image to it before anything is built.
+# DESKTOP_BIN_ASSET_DIR makes a smoked chan-desktop build also pack the
+# chan-desktop-bin release asset there. PKGBASE=chan-desktop-bin builds that
+# package from the asset AUR_LOCAL_ASSET names.
 
 set -euo pipefail
 
@@ -41,9 +41,7 @@ if [ "$(id -u)" -eq 0 ]; then
         # shellcheck disable=SC2016 # $repo and $arch are pacman's, not the shell's
         printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "$ARCH_SNAPSHOT" \
             > /etc/pacman.d/mirrorlist
-        # -uu downgrades whatever the image carries past the snapshot, so the
-        # build links against the snapshot's libraries rather than the image's.
-        pacman -Syyuu --noconfirm
+        bash "$SRC/packaging/distros/arch/downgrade-to-snapshot.sh" "$ARCH_SNAPSHOT"
     fi
     echo ">> refreshing the package database and base build tools" >&2
     if pacman -Q archlinuxarm-keyring >/dev/null 2>&1; then
