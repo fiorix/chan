@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR,
   GhosttyViewportController,
+  ghosttyHistoryRows,
   type GhosttyViewportContext,
 } from "./ghosttyViewport";
 
@@ -91,20 +92,57 @@ describe("GhosttyViewportController writes", () => {
 
   // A pixel scroll leaves the offset a fraction of a row back. Less than a
   // row back the view shows no history row: the bottom view, its prompt and
-  // cursor, and output follows it, ghostty-web's write snapping the offset
-  // to the bottom. A whole row or more back the view is anchored.
-  test.each([0, 0.3, 0.999])("a view %s rows back shows no history row and follows output to the bottom", (offset) => {
-    const { state, term } = fakeGhostty(offset, 20);
+  // cursor, which follows output as at the bottom, while the fraction the
+  // gesture gathered is kept for the next wheel delta to add to. A whole
+  // row or more back the view is anchored.
+  test("a view at the bottom follows output natively", () => {
+    const { state, term } = fakeGhostty(0, 20);
     term.appendedByWrite.push(3, 1);
     const controller = new GhosttyViewportController(term, context());
 
     controller.write("line\r\n");
-    expect(state.viewportY).toBe(0);
     controller.write("more\r\n");
 
     expect(term.scrollToLine).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(0);
     expect(state.scrollback).toBe(24);
+  });
+
+  test.each([0.3, 0.999])("a view %s rows back follows output and keeps its fraction", (offset) => {
+    const { state, term } = fakeGhostty(offset, 20);
+    term.appendedByWrite.push(3, 1);
+    const controller = new GhosttyViewportController(term, context());
+
+    controller.write("line\r\n");
+    expect(state.viewportY).toBe(offset);
+    controller.write("more\r\n");
+
+    // The same fraction, not the bottom and not the fraction plus the
+    // appended rows: the view still shows no history row.
+    expect(term.scrollToLine.mock.calls.flat()).toEqual([offset, offset]);
+    expect(state.viewportY).toBe(offset);
+    expect(ghosttyHistoryRows(state.viewportY)).toBe(0);
+    expect(state.scrollback).toBe(24);
+  });
+
+  test("a slow gesture under streaming output gathers its fraction until it leaves the bottom", () => {
+    const { state, term } = fakeGhostty(0, 20);
+    const controller = new GhosttyViewportController(term, context());
+    // 20px rows and the 0.5 factor: an 8px delta is 0.2 of a row up.
+    const gentle = { deltaY: -8, deltaMode: DOM_DELTA_PIXEL };
+
+    for (let i = 1; i <= 5; i++) {
+      controller.handleWheel(gentle);
+      term.appendedByWrite.push(1);
+      controller.write(`line ${i}\r\n`);
+      if (i < 5) expect(ghosttyHistoryRows(state.viewportY), `after delta ${i}`).toBe(0);
+    }
+    // Five deltas reach a whole row: that write already anchored the view,
+    // and the next one keeps it on its rows as output grows the history.
+    expect(state.viewportY).toBe(2);
+    term.appendedByWrite.push(2);
+    controller.write("two more\r\n\r\n");
+    expect(state.viewportY).toBe(4);
   });
 
   test.each([

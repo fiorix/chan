@@ -328,6 +328,21 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(`${lines(ROWS + 3)}\r\nexport TOKEN=abcdef`, [at(-0.5), bottom(-0.5), at(-1), bottom(-1)], { masking: true });
   });
 
+  // chan's viewport controller keeps a fraction less than a row back under
+  // output (ghosttyViewport.ts): the frames that follow paint the bottom
+  // view, the prompt the output ends on and its cursor.
+  test("output written while the view rests a fraction back paints the bottom view and its cursor", async () => {
+    const cursorShown = (y: number) => (r: Rig) => {
+      const { x, y: row } = r.core.getCursor();
+      expect(r.picture(y)[row][x].join(" | "), `the cursor at ${y}`).toContain(`fill ${THEME.cursor}`);
+    };
+    await run(`${lines(ROWS + 12)}\r\n$ `, [
+      at(0.3), "out 1\r\n$ ", bottom(0.3), cursorShown(0.3),
+      "out 2\r\nout 3\r\n$ ", bottom(0.3),
+      at(0.999), "out 4\r\n$ ", bottom(0.999), cursorShown(0.999),
+    ]);
+  });
+
   test("a masked value in the history scrolled back by a fraction of a row", async () => {
     // The value's row is history row 3 of 7: at an offset of 5 it shows on
     // view row 1, where the masker's floored offset finds it too.

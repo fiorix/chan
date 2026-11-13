@@ -85,15 +85,20 @@ export class GhosttyViewportController {
   /// ghostty-web calls scrollToBottom() after every write whenever the
   /// viewport is away from the bottom. Restore a user's scrolled viewport
   /// immediately after the synchronous WASM write, advancing the distance
-  /// from bottom as new scrollback lines are appended. A viewport that shows
-  /// no history row keeps following output natively: at the bottom, or less
-  /// than a row back, where the write's scrollToBottom() takes the offset to
-  /// the bottom. Writes never feed the wheel path, so programmatic output
-  /// cannot masquerade as user scroll input.
+  /// from bottom as new scrollback lines are appended. A viewport at the
+  /// bottom keeps following output natively. One less than a row back shows
+  /// no history row: it follows output too, and gets back the fraction its
+  /// gesture gathered, so the next wheel delta adds to it and a slow scroll
+  /// leaves the bottom under streaming output once it reaches a row. Writes
+  /// never feed the wheel path, so programmatic output cannot masquerade as
+  /// user scroll input.
   write(data: string | Uint8Array): void {
     const viewportBefore = this.terminal.getViewportY();
-    if (ghosttyHistoryRows(viewportBefore) === 0) {
+    if (viewportBefore <= 0) {
       this.terminal.write(data);
+    } else if (ghosttyHistoryRows(viewportBefore) === 0) {
+      this.terminal.write(data);
+      this.terminal.scrollToLine(viewportBefore);
     } else {
       const scrollbackBefore = this.terminal.getScrollbackLength();
       this.terminal.write(data);
