@@ -351,6 +351,36 @@ describe("the ghostty renderer's partial redraws", () => {
     await run(lines(ROWS - 2), ["\x1b[2;2H", "\x1b[2;8H", "\x1b[7;1H", "\x1b[1;20H", "\x1b[A", "\x1b[3B"]);
   });
 
+  // DECTCEM hides and shows the cursor where it stands (`tput civis` at an
+  // idle prompt); the core marks no row dirty for it. The prompt is on row
+  // 4, two rows below the nearest row the status write repaints.
+  const HIDE = "\x1b[?25l";
+  const SHOW = "\x1b[?25h";
+  const PROMPT = "$ ls\r\na\r\nb\r\nc\r\n$ ";
+  const ELSEWHERE = "\x1b7\x1b[1;1Hstatus\x1b8";
+
+  test.each(["block", "underline", "bar"] as const)("a %s cursor hidden where it stands", async (cursorStyle) => {
+    await run(PROMPT, [HIDE], { cursorStyle });
+  });
+
+  test("a hidden cursor shown where it stands", async () => {
+    await run(PROMPT + HIDE, [SHOW]);
+  });
+
+  test("a cursor hidden as a write lands on another row", async () => {
+    await run(PROMPT, [ELSEWHERE + HIDE]);
+  });
+
+  test("a cursor hidden, written under, moved and shown again", async () => {
+    await run(PROMPT, [HIDE, "x", SHOW, HIDE + "\x1b[1;3H", SHOW, "\x1b[5;4H", ELSEWHERE + HIDE, ELSEWHERE + SHOW]);
+  });
+
+  test("a blinking cursor hidden and shown where it stands", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const blink = () => vi.advanceTimersByTime(530);
+    await run(PROMPT, [HIDE, blink, SHOW, blink, blink, HIDE, blink, ELSEWHERE + SHOW], { cursorBlink: true });
+  });
+
   test("box and block glyphs at a device pixel ratio of two", async () => {
     await run(
       "\x1b[?25l┌──┐\r\n│██│\r\n└──┘ ╭─╮\r\n▀▄▌▐ ░▒▓",

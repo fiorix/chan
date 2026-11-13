@@ -83,6 +83,7 @@ export class CanvasRenderer {
   private cursorVisible: boolean = true;
   private cursorBlinkInterval?: number;
   private lastCursorPosition: { x: number; y: number } = { x: 0, y: 0 };
+  private lastCursorShown: boolean = true;
 
   // Viewport tracking (for scrolling)
   private lastViewportY: number = 0;
@@ -264,10 +265,13 @@ export class CanvasRenderer {
       this.lastViewportY = viewportY;
     }
 
-    // Check if cursor position changed or if blinking (need to redraw cursor line)
+    // Check if cursor position changed or if blinking (need to redraw cursor line).
+    // A cursor hidden or shown where it stands repaints its line as a move
+    // does: the core marks no row dirty for it.
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
-    if (cursorMoved || this.cursorBlink) {
+    const cursorShownChanged = cursor.visible !== this.lastCursorShown;
+    if (cursorMoved || cursorShownChanged || this.cursorBlink) {
       // Mark cursor lines as needing redraw
       if (!forceAll && !term.isRowDirty(cursor.y)) {
         // Need to redraw cursor line
@@ -404,8 +408,9 @@ export class CanvasRenderer {
       this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
     }
 
-    // Update last cursor position
+    // Update last cursor position and visibility
     this.lastCursorPosition = { x: cursor.x, y: cursor.y };
+    this.lastCursorShown = cursor.visible;
 
     // ALWAYS end the frame after rendering, regardless of forceAll: what
     // changed is painted now, and the next frame lists only newer changes.
