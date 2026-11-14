@@ -26,3 +26,10 @@ Facts read at `826adee91`: `handle_window_new` in `control_socket.rs` passes the
 
 1. A server test with a stand-in desktop: `cs window new` answers only once the registry shows the window live, and past the bound answers the timeout; red on today's code for the first.
 2. The driver, judging `first=0` for both kinds of window, red at the base and green at the tip in a desktop guest, ten runs each.
+
+## Folded in, 2026-11-14
+
+The owner took the round's candidates as recommended on 2026-11-14 ("Take all my recommendations", answering `dev/v0131-team/reports/owner-candidates-1.md`, item 2), folding in a finding of the warm chan-term review (`dev/v0131-team/reviews/review-warmterm-1.md`, note 2): `cs window new` for a terminal and the launcher's new-terminal route (`DesktopWindowOp::New { kind: Terminal }`, `desktop/src-tauri/src/window_ops.rs:44-46`) mint the window through `serve::spawn_local_terminal_window` and request no raise, so a `cs window new` run from a Terminal.app shell on macOS can leave the new window behind, as chan-term did before the warm chan-term row.
+
+- Contract 4: a terminal window `cs window new` opens comes forward through the shared raise, as the warm chan-term launch does, on every platform.
+- Acceptance 3: a test that the terminal arm of `cs window new` requests the raise, red on today's code; the driver's run in the desktop guest shows the new window focused; the owner's Mac line, in his batch.
