@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { flushSync, mount, tick, unmount } from "svelte";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import { api } from "../api/client";
 import { surveyState } from "../state/survey.svelte";
-import { tabFocusPulse } from "../state/tabs.svelte";
+import { layout, setActivePane, tabFocusPulse, type LeafNode } from "../state/tabs.svelte";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
 
 // The survey overlay renders ONE slot's survey (per-terminal): a markdown
@@ -17,6 +18,10 @@ import type { SurveySpec } from "../api/client";
 // (no clicks, so no /api/survey/reply network).
 
 const mounted: Array<Record<string, any>> = [];
+
+beforeEach(() => {
+  resetLayout([terminalTab({ id: "t1" })]);
+});
 
 function spec(over: Partial<SurveySpec> = {}): SurveySpec {
   return {
@@ -35,6 +40,122 @@ afterEach(() => {
   surveyState.windowWide = null;
   tabFocusPulse.value = 0;
   vi.restoreAllMocks();
+});
+
+describe("a survey's pane owns its keyboard", () => {
+  async function twoPanes({ captured = true } = {}) {
+    const ownerPane = layout.activePaneId;
+    layout.nodes.other = { kind: "leaf", id: "other", tabs: [terminalTab({ id: "t2" })], activeTabId: "t2" };
+    const owner = document.createElement("div");
+    owner.className = "terminal-tab";
+    const terminal = document.createElement("textarea");
+    const target = document.createElement("div");
+    const other = document.createElement("textarea");
+    owner.append(terminal, target);
+    document.body.append(owner, other);
+    (captured ? terminal : other).focus();
+    const restoreFocus = vi.fn(() => terminal.focus());
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: "t1", restoreFocus } }));
+    await tick();
+    return { ownerPane, owner, target, terminal, other, restoreFocus };
+  }
+
+  function show() {
+    surveyState.byTab = { t1: { spec: spec(), busy: false } };
+  }
+
+  test.each([true, false])("closing remotely in another pane does not restore focus (captured=%s)", async (captured) => {
+    const { target, other, restoreFocus } = await twoPanes({ captured });
+    show();
+    await tick();
+    expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+    setActivePane("other");
+    other.focus();
+    await tick();
+    surveyState.byTab = {};
+    await tick();
+    expect(document.activeElement).toBe(other);
+    expect(restoreFocus).not.toHaveBeenCalled();
+  });
+
+  test.each(["appear", "close"])("a queued %s respects a focus move before its microtask", async (operation) => {
+    const { target, other, restoreFocus } = await twoPanes();
+    if (operation === "close") {
+      show();
+      await tick();
+      expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+    }
+    flushSync(() => {
+      if (operation === "appear") show();
+      else surveyState.byTab = {};
+    });
+    setActivePane("other");
+    other.focus();
+    await tick();
+    expect(document.activeElement).toBe(other);
+    expect(restoreFocus).not.toHaveBeenCalled();
+  });
+
+  test("returning to the survey pane and relocating it both reclaim its card", async () => {
+    const { target, owner, ownerPane, other } = await twoPanes();
+    show();
+    await tick();
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    expect(document.activeElement).toBe(card);
+    setActivePane("other");
+    other.focus();
+    await tick();
+    expect(document.activeElement).toBe(other);
+    setActivePane(ownerPane);
+    await tick();
+    expect(document.activeElement).toBe(card);
+
+    owner.remove();
+    document.body.append(owner);
+    expect(document.activeElement).not.toBe(card);
+    const source = layout.nodes[ownerPane] as LeafNode;
+    const destination = layout.nodes.other as LeafNode;
+    destination.tabs.push(source.tabs[0]);
+    source.tabs = [];
+    source.activeTabId = null;
+    destination.activeTabId = "t1";
+    setActivePane("other");
+    await tick();
+    expect(document.activeElement).toBe(card);
+  });
+
+  test("the visible side and active tab determine whether the survey takes focus", async () => {
+    const { target, ownerPane, other } = await twoPanes();
+    const pane = layout.nodes[ownerPane] as LeafNode;
+    pane.bTabs = [terminalTab({ id: "t2" })];
+    pane.bActiveTabId = "t2";
+    pane.side = "b";
+    other.focus();
+    show();
+    await tick();
+    expect(document.activeElement).toBe(other);
+    pane.side = "a";
+    await tick();
+    expect(document.activeElement).toBe(target.querySelector(".survey-card"));
+    pane.activeTabId = "missing";
+    other.focus();
+    tabFocusPulse.value += 1;
+    await tick();
+    expect(document.activeElement).toBe(other);
+  });
+
+  test("an unfocused survey still accepts a pointer answer", async () => {
+    const { target, other } = await twoPanes();
+    setActivePane("other");
+    other.focus();
+    show();
+    await tick();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    target.querySelector<HTMLButtonElement>(".survey-option")!.click();
+    await tick();
+    expect(reply).toHaveBeenCalledWith({ surveyId: "survey-1", kind: "option", optionIndex: 0, optionLabel: "BM25" });
+    expect(document.activeElement).toBe(other);
+  });
 });
 
 describe("survey overlay", () => {
