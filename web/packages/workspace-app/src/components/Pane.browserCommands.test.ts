@@ -367,6 +367,27 @@ test.each([false, true])("Paste retains its originating surface while awaiting t
   expect(fbActiveInstanceId()).toBe(`fb-tab-${RIGHT_TAB}`);
 });
 
+test.each([false, true])("restoring the focused browser tab gives it the keyboard and commands, prior dock %s", async (priorDock) => {
+  if (priorDock) {
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+  }
+  expect(fbActiveInstanceId()).toBe(priorDock ? "fb-dock-left" : null);
+  await restoreLayout({ k: "s", d: "c",
+    a: { k: "l", t: [{ k: "b", bs: LEFT_PATH, bp: "docs", a: 1 }] },
+    b: { k: "l", f: 1, t: [{ k: "b", bs: RIGHT_PATH, bp: "notes", a: 1 }] },
+  });
+  await settleLong();
+
+  expect(document.querySelectorAll(".pane .browser")).toHaveLength(2);
+  expect(browser(layout.activePaneId).contains(document.activeElement), "the restored focused browser holds the keyboard").toBe(true);
+  expect(document.activeElement?.getAttribute("role")).toBe("listbox");
+  const tab = activeBrowserTab();
+  if (!tab) throw new Error("no active restored browser tab");
+  expect(tab.selected).toBe(RIGHT_PATH);
+  await expectCommandsTarget(`fb-tab-${tab.id}`, RIGHT_PATH);
+});
+
 describe("passive browser tabs leave the command surface alone", () => {
   test("a background pane with no previous surface", async () => {
     expect(fbActiveInstanceId()).toBeNull();
