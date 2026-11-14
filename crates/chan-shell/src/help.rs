@@ -1482,9 +1482,10 @@ picked up as-is while the existing bootstrap.md stays untouched.
 
 With `--script` it writes nothing and spawns nothing: the paste-and-run
 bootstrap script for the saved team goes to stdout. When it runs, the
-script writes bootstrap.md only where none exists, so the team's brief
-and hand edits survive. Its fixed `sleep 3` is an approximation of the
-server path's PTY readiness gate.
+script writes config.toml and bootstrap.md only where each is missing,
+preserving existing files byte for byte, including comments and hand
+edits. Its fixed `sleep 3` is an approximation of the server path's PTY
+readiness gate.
 
 Without `--script`, `--window`, `--pane`, and `--side a|b` place every
 surfaced member tab at one exact live destination. Members carrying
