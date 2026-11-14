@@ -220,6 +220,8 @@ Transfers are a per-window model: `cs upload`, `cs download`, the Files app's up
 
 ## The graph and the index
 
+Each graph tab keeps a filesystem spine under the window's shared graph. A filesystem change reads the affected parent levels and any named directory whose children the spine already holds, so a directory that takes another's name replaces its old children. A patch that would read as many directories as a whole fetch instead reads the root and the opened directories again.
+
 The inspectors read one cached graph view. A burst of filesystem events re-arms a quiet window and costs one fetch when the burst ends, after any fetch already in flight; with no graph or browser tab open the view is dropped instead and the next surface fetches it. The server's `graph_applied` frame, sent when the indexer has written a set of watched changes, counts as one more change of the window, so a save in the editor costs one fetch after its watch frames and one after its apply frame. A view fetched while the index was rebuilding is marked gated and reloaded when the index returns to idle.
 
 ## The Dashboard
