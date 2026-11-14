@@ -92,6 +92,12 @@
 #            The browser must hold the keyboard and move its selection, and
 #            the terminal's shell, a recorder of every byte its PTY gets,
 #            must get none; a typed x back in the terminal is the control.
+# Optional group, selected explicitly in BASIC_FLOWS_ARMS:
+#   reload-focus  on each backend, a trusted click on the file browser's
+#            status text moves focus from the terminal, then location.reload
+#            runs after the click's event and microtasks. Browser hash, focus
+#            and keyboard must survive. A control waits at least 350 ms;
+#            immediate arms follow left and right/menu/Escape terminal presses.
 # In every selection with an image group, a paste whose items carry the
 # image as a File (which the handler reads from the event without asking
 # the desktop) runs on each surface as the control: it must land, or the
@@ -120,9 +126,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASIC_FLOWS_ARMS="${BASIC_FLOWS_ARMS:-native,trusted,drop,xdnd,terminal,editor,open,search,panes,focus}"
 for group in ${BASIC_FLOWS_ARMS//,/ }; do
     case "$group" in
-    native | trusted | drop | xdnd | terminal | editor | open | search | panes | focus) ;;
+    native | trusted | drop | xdnd | terminal | editor | open | search | panes | focus | reload-focus) ;;
     *)
-        echo "basic-flows: cannot run: unknown arm group $group in BASIC_FLOWS_ARMS (native, trusted, drop, xdnd, terminal, editor, open, search, panes, focus)" >&2
+        echo "basic-flows: cannot run: unknown arm group $group in BASIC_FLOWS_ARMS (native, trusted, drop, xdnd, terminal, editor, open, search, panes, focus, reload-focus)" >&2
         exit 2
         ;;
     esac

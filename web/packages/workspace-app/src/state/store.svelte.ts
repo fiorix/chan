@@ -3894,21 +3894,48 @@ function applyOverlaysFromHash(): void {
 /// session save (it never touches disk) but long enough to collapse a
 /// burst of layout mutations into one `history.replaceState`.
 const HASH_DEBOUNCE_MS = 150;
+// All layout writers share this rolling budget. The headroom covers the
+// infrequent URL rewrites outside layout persistence, with two slots kept
+// for the final unload flush. No-op writes use no slot.
+const HASH_WRITE_WINDOW_MS = 10_250;
+const HASH_WRITE_BUDGET = 80;
+const HASH_EXIT_RESERVE = 2;
 let hashDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let hashFocusTask: object | null = null;
+const hashWriteTimes: number[] = [];
+let hashRetryAfter = 0;
+
+function hashWriteDelay(now: number, exiting: boolean): number {
+  while (hashWriteTimes.length && hashWriteTimes[0] <= now - HASH_WRITE_WINDOW_MS) {
+    hashWriteTimes.shift();
+  }
+  const limit = HASH_WRITE_BUDGET + (exiting ? HASH_EXIT_RESERVE : 0);
+  const capacityAt = hashWriteTimes.length >= limit
+    ? hashWriteTimes[hashWriteTimes.length - limit] + HASH_WRITE_WINDOW_MS
+    : now;
+  return Math.max(0, capacityAt - now, hashRetryAfter - now);
+}
+
+function queueHashWrite(delay = HASH_DEBOUNCE_MS): void {
+  if (hashDebounceTimer !== null) clearTimeout(hashDebounceTimer);
+  hashDebounceTimer = setTimeout(() => {
+    hashDebounceTimer = null;
+    persistStateToHash();
+  }, Math.max(HASH_DEBOUNCE_MS, delay));
+}
 
 /// Write the current layout + overlay state to `location.hash` via
 /// `history.replaceState` (so reloads are silent and the browser
 /// back/forward stack stays clean). Empty values strip their key
 /// entirely so a hash never grows orphans.
 ///
-/// Synchronous + idempotent. This is the FLUSH path: the
-/// pagehide/beforeunload handler calls it (via `persistLayoutToHash`)
-/// expecting the write to land before the page tears down, so a
-/// reload restores the exact caret. Hot reactive callers should use
-/// `schedulePersistStateToHash` instead. A pending debounced write is
-/// cancelled here so an explicit flush always supersedes a queued one.
-export function persistStateToHash(): void {
-  if (hashDebounceTimer) {
+/// Synchronous while the shared write budget has capacity. The unload
+/// caller can use its reserved slots; other callers defer until capacity
+/// returns. Hot reactive callers use `schedulePersistStateToHash` instead.
+/// An explicit flush supersedes queued work and always serializes live state.
+export function persistStateToHash({ exiting = false }: { exiting?: boolean } = {}): void {
+  hashFocusTask = null;
+  if (hashDebounceTimer !== null) {
     clearTimeout(hashDebounceTimer);
     hashDebounceTimer = null;
   }
@@ -3945,7 +3972,29 @@ export function persistStateToHash(): void {
   // file-browser expansion effect re-runs on every `fbTreeInstances`
   // registry churn and recomputes the same hash each time; this
   // collapses that storm to zero writes.
-  if (href !== window.location.href) history.replaceState(null, "", href);
+  if (href !== window.location.href) {
+    const delay = hashWriteDelay(performance.now(), exiting);
+    if (delay > 0) {
+      queueHashWrite(delay);
+      return;
+    }
+    try {
+      history.replaceState(null, "", href);
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== "SecurityError") throw error;
+      hashRetryAfter = performance.now() + HASH_WRITE_WINDOW_MS;
+      queueHashWrite(HASH_WRITE_WINDOW_MS);
+      return;
+    }
+    // Chromium may refuse a flooded history call without throwing. Keep the
+    // reload metadata paired with the URL that actually took the write.
+    if (window.location.href !== href) {
+      hashRetryAfter = performance.now() + HASH_WRITE_WINDOW_MS;
+      queueHashWrite(HASH_WRITE_WINDOW_MS);
+      return;
+    }
+    hashWriteTimes.push(performance.now());
+  }
   writeCliReloadBits(params.get(HASH_LAYOUT) ?? "", cliReloadBits);
 }
 
@@ -3954,23 +4003,27 @@ export function dismissCliReloadNotice(tab: TerminalTab): void {
   persistStateToHash();
 }
 
-/// Immediate hash-persistence alias used elsewhere in the tree, including the
-/// synchronous pagehide/beforeunload flush, which relies on this
-/// writing immediately.
+/// Hash-persistence alias, including the unload flush that uses reserved
+/// write capacity by passing `exiting: true`.
 export const persistLayoutToHash = persistStateToHash;
 
-/// Debounced entry for the hot reactive callers (the file-browser
-/// expansion effect, App's layout-walking effects). Coalesces a burst
-/// of layout mutations into a single trailing write so the burst can't
-/// trip the `history.replaceState` SecurityError. The final state is
-/// still captured on exit because the pagehide handler flushes
-/// synchronously via `persistLayoutToHash`.
-export function schedulePersistStateToHash(): void {
-  if (hashDebounceTimer) clearTimeout(hashDebounceTimer);
-  hashDebounceTimer = setTimeout(() => {
-    hashDebounceTimer = null;
-    persistStateToHash();
-  }, HASH_DEBOUNCE_MS);
+/// Focus changes coalesce until the event ends, so an ordinary reload sees
+/// the focused pane. Other layout changes use the trailing debounce. Both
+/// paths share the writer's budget; an exhausted budget defers the latest
+/// state until capacity returns, including focus beyond that limit.
+export function schedulePersistStateToHash({ focus = false }: { focus?: boolean } = {}): void {
+  if (focus) {
+    if (hashFocusTask !== null) return;
+    const task = {};
+    hashFocusTask = task;
+    queueMicrotask(() => {
+      if (hashFocusTask !== task) return;
+      hashFocusTask = null;
+      persistStateToHash();
+    });
+  } else if (hashFocusTask === null) {
+    queueHashWrite();
+  }
 }
 
 /// Test hook for URL-hash overlay restore. The public bootstrap path

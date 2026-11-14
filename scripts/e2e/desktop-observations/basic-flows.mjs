@@ -24,7 +24,9 @@
 // Enter), `panes` (a split by chord, a focus by click, a tab dragged to
 // the other pane and both closed by chord) and `focus` (a pane focus move
 // from a terminal to a file browser, after a press into the terminal, on
-// each terminal backend). The records are facts: what
+// each terminal backend). The optional `reload-focus` group reloads after
+// a trusted browser focus click, immediately and after a settled control.
+// The records are facts: what
 // the X clipboard offered
 // (its TARGETS), the clipboard or drop shape the page's own listener saw,
 // the image embeds, the files on disk and their pixels decoded against the
@@ -66,6 +68,7 @@ const xdo = (...words) => spawnSync("xdotool", words.map(String), { encoding: "u
 
 const IMAGE_GROUPS = ["native", "trusted", "drop", "xdnd"];
 const GROUPS = [...IMAGE_GROUPS, "terminal", "editor", "open", "search", "panes", "focus"];
+const OPTIONAL_GROUPS = ["reload-focus"];
 const BACKENDS = ["xterm", "ghostty"];
 // The text the terminal arms paste: a space and a newline, which a paste
 // must carry whole inside one bracketed pair.
@@ -633,7 +636,7 @@ async function run() {
   } catch (error) {
     record({ arm: "bundle", error: String(error) });
   }
-  if (["trusted", "xdnd", "terminal", "open", "panes", "focus"].some(want)) {
+  if (["trusted", "xdnd", "terminal", "open", "panes", "focus", "reload-focus"].some(want)) {
     const calibration = await calibrate();
     offset = calibration.offset;
     record({ arm: "calibrate", ...calibration });
@@ -1373,6 +1376,182 @@ async function run() {
     await writeBackend(Boolean(ghostty));
   }
 
+  // The compact hash and restored pane IDs differ across reloads. Read the
+  // focused surface's kind, never paths, tokens, commands or terminal IDs.
+  function reloadFocusState() {
+    const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility === "visible"; };
+    const leaf = (node) => !node ? null : node.k === "s" ? leaf(node.a) ?? leaf(node.b) : node.f === 1 ? node : null;
+    let hashFocus = "invalid";
+    try {
+      const raw = new URLSearchParams(location.hash.slice(1)).get("s");
+      const focused = leaf(raw ? JSON.parse(raw) : null);
+      const tabs = focused ? (focused.sb ? focused.bt : focused.t) ?? [] : [];
+      const active = tabs.find((tab) => tab.a === 1) ?? tabs[0];
+      hashFocus = active?.k === "b" ? "browser" : active?.k === "t" ? "terminal" : "other";
+    } catch { /* The reader reports an invalid hash without retaining it. */ }
+    const focused = document.querySelector(".pane.focused");
+    const browser = [...(focused?.querySelectorAll(".browser") ?? [])].find(visible);
+    const host = [...(focused?.querySelectorAll(".terminal-host") ?? [])].find(visible);
+    const active = document.activeElement;
+    const keyboard = active?.closest(".browser") ? "browser"
+      : active?.closest(".terminal-host") ? (active.tagName === "TEXTAREA" ? "terminal-textarea" : "terminal") : "other";
+    const allHosts = [...document.querySelectorAll(".terminal-host")].filter(visible);
+    const backend = allHosts.some((el) => el.querySelector(".xterm-screen")) ? "xterm"
+      : allHosts.some((el) => el.querySelector("canvas")) ? "ghostty" : "none";
+    return { at: performance.now(), document: performance.timeOrigin, hashFocus,
+      focused: browser ? "browser" : host ? "terminal" : "other", keyboard, backend,
+      panes: document.querySelectorAll(".pane[data-pane-id]").length };
+  }
+  const reloadState = () => page.evaluate(`(${reloadFocusState})()`);
+
+  async function reloadFocusArms(backend) {
+    const group = "reload-focus";
+    await writeBackend(backend === "ghostty");
+    await reloadPage(`the ${backend} reload focus arms`);
+    const tab = `basic-flows-reload-${backend}-${stamp}`;
+    const made = cs(["terminal", "new", "--tab-name", tab]);
+    const setup = { arm: group, surface: `${backend}-setup`, terminalNew: made.status };
+    let splitCreated = false;
+    try {
+      const mounted = await poll(reloadState, (s) => s.backend === backend, 15000);
+      if (made.status !== 0 || !mounted.met) throw new Error("the requested terminal backend did not mount");
+      const file = join(args.work, `reload-focus-${backend}-${stamp}.bytes`);
+      const recorder = cs(["terminal", "write", "--tab-name", tab, `stty raw -echo && exec dd bs=1 status=none of=${file}\n`]);
+      if (recorder.status !== 0 || !(await poll(async () => existsSync(file), Boolean, 10000)).met) throw new Error("the PTY recorder did not start");
+      for (let i = 0; i < 4; i++) writeFileSync(join(args.ws, `reload-focus-${backend}-${stamp}-${i}.txt`), `${i}\n`);
+      const panesBefore = layout().panes.length;
+      await command("app.pane.splitDown");
+      const split = await poll(async () => layout(), (l) => l.panes.length === panesBefore + 1, 6000);
+      if (!split.met) throw new Error("the browser pane did not split");
+      splitCreated = true;
+      await command("app.files.toggle");
+      const listed = await poll(() => page.evaluate('document.querySelectorAll(".pane .browser [role=option]").length'), (n) => n >= 3, 15000);
+      if (!listed.met) throw new Error("the file browser has fewer than three rows");
+      setup.backend = backend;
+      setup.panes = split.value.panes.length;
+      record(setup);
+      for (const scenario of [
+        { label: "control", press: "left", delay: 400 },
+        { label: "immediate-right", press: "right", delay: 0 },
+        { label: "immediate-left", press: "left", delay: 0 },
+      ]) {
+        const row = { arm: group, surface: `${backend}-${scenario.label}`, backend, delay: scenario.delay, press: scenario.press };
+        try {
+          const host = await help("h.center(h.host())");
+          row.presses = 0;
+          do {
+            row.presses++;
+            await clickAt(host, { button: scenario.press === "right" ? 3 : 1 });
+            if (scenario.press === "right") {
+              row.menuOpened = (await poll(() => page.evaluate('Boolean(document.querySelector(".terminal-tab-menu-bubble"))'), Boolean, 5000)).met;
+              xdo("key", "Escape");
+              row.menuClosed = (await poll(() => page.evaluate('Boolean(document.querySelector(".terminal-tab-menu-bubble"))'), (open) => !open, 5000)).met;
+            }
+            await sleep(300);
+            row.terminal = await reloadState();
+          } while (backend === "ghostty" && scenario.press === "right" && row.terminal.keyboard !== "terminal-textarea" && row.presses < 3);
+          const bytesBefore = statSync(file).size;
+          xdo("type", "x");
+          row.recorderControl = (await poll(async () => [...readFileSync(file).subarray(bytesBefore)], (bytes) => bytes.includes(120), 5000)).met;
+          const terminal = await poll(reloadState, (s) => s.focused === "terminal" && s.keyboard.startsWith("terminal") && s.hashFocus === "terminal", 5000);
+          if (!terminal.met || !row.recorderControl) throw new Error("the terminal focus/hash/PTY control did not settle");
+          row.terminal = terminal.value;
+          const point = await page.evaluate(`(() => {
+            const status = [...document.querySelectorAll(".pane .browser-status > span")].find((el) => el.getBoundingClientRect().width > 0);
+            return status ? window.__flowsHelp.center(status) : null;
+          })()`);
+          if (!point) throw new Error("no browser status text to click");
+          const key = `chan.basic-flows.reload-focus.${backend}.${scenario.label}`;
+          await page.evaluate(`(() => {
+            const read = ${reloadFocusState};
+            const key = ${JSON.stringify(key)};
+            const trace = { delay: ${scenario.delay}, before: read(), writes: [], click: null, reload: null, failedFocus: false };
+            const save = () => sessionStorage.setItem(key, JSON.stringify(trace));
+            const replace = history.replaceState;
+            history.replaceState = function (...values) {
+              const entry = { at: performance.now(), success: false };
+              try { const result = Reflect.apply(replace, this, values); entry.success = true; return result; }
+              catch (error) { entry.error = error.name; throw error; }
+              finally { entry.hashFocus = read().hashFocus; trace.writes.push(entry); save(); }
+            };
+            const afterFocus = () => {
+              const current = read();
+              if ((current.focused !== "browser" || current.keyboard !== "browser") && current.at - trace.click.at < 3000) {
+                requestAnimationFrame(afterFocus); return;
+              }
+              trace.failedFocus = current.focused !== "browser" || current.keyboard !== "browser";
+              trace.reload = current;
+              save();
+              location.reload();
+            };
+            const clicked = (event) => {
+              if (!event.isTrusted || !event.target.closest?.(".browser-status")) return;
+              removeEventListener("click", clicked, true);
+              trace.click = { at: performance.now(), trusted: event.isTrusted };
+              save();
+              setTimeout(afterFocus, trace.delay);
+            };
+            addEventListener("click", clicked, true);
+            addEventListener("beforeunload", () => { trace.unload = read(); save(); }, { once: true });
+            save();
+            return true;
+          })()`);
+          row.clickStatus = await clickAt(point);
+          await page.close();
+          const restored = await poll(async () => {
+            let next = null;
+            try {
+              next = await attach(args.page);
+              const state = await next.evaluate(`(${reloadFocusState})()`);
+              if (state.document !== row.terminal.document && state.panes === setup.panes && state.backend === backend && await next.evaluate("document.readyState === 'complete'")) return next;
+            } catch { /* A reload replaces the inspector's page target. */ }
+            await next?.close();
+            return null;
+          }, Boolean, 60000);
+          if (!restored.met) throw new Error("the reloaded native page did not return");
+          page = restored.value;
+          await plantWitness();
+          row.after = await reloadState();
+          await sleep(1500);
+          row.settled = await reloadState();
+          row.trace = await page.evaluate(`JSON.parse(sessionStorage.getItem(${JSON.stringify(key)}))`);
+          await page.evaluate(`sessionStorage.removeItem(${JSON.stringify(key)}); true`);
+          row.reloadWaitedMs = restored.waitedMs;
+          row.screenshot = `reload-focus-${row.surface}.png`;
+          shot(`reload-focus-${row.surface}`);
+        } catch (error) {
+          row.error = String(error);
+        }
+        record(row);
+        if (row.error) throw new Error(`the ${scenario.label} observation did not complete`);
+      }
+    } catch (error) {
+      record({ arm: group, surface: `${backend}-incomplete`, error: String(error) });
+    } finally {
+      if (splitCreated) {
+        const point = await page.evaluate(`(() => {
+          const status = document.querySelector(".pane .browser-status > span");
+          return status ? window.__flowsHelp.center(status) : null;
+        })()`).catch(() => null);
+        if (point) {
+          await clickAt(point);
+          const browser = await poll(reloadState, (s) => s.focused === "browser", 3000);
+          if (browser.met) await command("app.pane.kill");
+        }
+      }
+      const closed = cs(["terminal", "close", "--tab-name", tab]);
+      record({ arm: group, surface: `${backend}-cleanup`, terminalClose: closed.status, panes: layout().panes.length });
+      // Finish cleanup persistence before the next backend's setup reload.
+      await sleep(350);
+    }
+  }
+
+  if (want("reload-focus")) {
+    const ghostty = await settle('window.__flowsHelp.api("/api/config").then((c) => c.preferences?.terminal?.ghostty ?? false)');
+    for (const backend of BACKENDS) await reloadFocusArms(backend);
+    await writeBackend(Boolean(ghostty));
+  }
+
   // 5. A real drop where no zone takes it, last: it must leave the window
   // on its page and upload nothing.
   if (want("xdnd")) {
@@ -1421,7 +1600,7 @@ function verdict() {
     process.exit(3);
   }
   const groups = find("selection")?.groups;
-  if (!groups?.length || groups.some((g) => !GROUPS.includes(g))) {
+  if (!groups?.length || groups.some((g) => !GROUPS.includes(g) && !OPTIONAL_GROUPS.includes(g))) {
     say(`INCONCLUSIVE: the records name no valid arm selection (${JSON.stringify(groups ?? null)})`);
     process.exit(3);
   }
@@ -1479,6 +1658,7 @@ function verdict() {
   if (want("editor")) outcome.editor = judgeEditor();
   if (want("terminal")) outcome.terminal = judgeTerminal();
   if (want("focus")) outcome.focus = judgeFocus();
+  if (want("reload-focus")) outcome["reload-focus"] = judgeReloadFocus();
 
   const states = Object.values(outcome);
   if (states.includes("fault")) process.exit(10);
@@ -1489,7 +1669,8 @@ function verdict() {
       open: "a double-click on a Files row opened the file in the editor",
       search: "a query typed into Search found the file and Enter opened it on the hit",
       panes: "a pane split by chord, took focus by click, received a tab dragged from the other pane and closed by chord",
-      focus: "on both terminal backends, after a left or right press into a terminal, a pane focus move to the file browser below by Alt+] and by a click on its strip handed the browser the keyboard, an ArrowDown moved its selection and no key reached the PTY" })[g]).join("; ")}`);
+      focus: "on both terminal backends, after a left or right press into a terminal, a pane focus move to the file browser below by Alt+] and by a click on its strip handed the browser the keyboard, an ArrowDown moved its selection and no key reached the PTY",
+      "reload-focus": "on both terminal backends, an immediate reload after a trusted browser focus click restored browser focus and keyboard, as did the settled controls" })[g]).join("; ")}`);
     process.exit(0);
   }
   process.exit(3);
@@ -1830,6 +2011,46 @@ function verdict() {
           if (!row.focus?.startsWith("browser-") || !row.selection?.moved || row.pty?.length) fault(states, `focus ${surface} (${how}): ${facts}`);
           else held(states, `focus ${surface} (${how}): ${facts}`);
         }
+      }
+    }
+    return stateOf(states);
+  }
+
+  function judgeReloadFocus() {
+    const states = [];
+    const ready = (row) => row && !row.error && BACKENDS.includes(row.backend) && row.clickStatus === 0 && row.recorderControl
+      && row.terminal?.focused === "terminal" && row.terminal?.hashFocus === "terminal" && row.terminal?.keyboard?.startsWith("terminal")
+      && row.trace?.before?.focused === "terminal" && row.trace?.before?.hashFocus === "terminal" && row.trace?.before?.keyboard?.startsWith("terminal") && row.trace?.click?.trusted === true
+      && row.trace?.reload?.focused === "browser" && row.trace?.reload?.keyboard === "browser" && row.trace?.failedFocus === false
+      && Number.isFinite(row.trace.reload.at) && Number.isFinite(row.trace.click.at) && row.trace.reload.at >= row.trace.click.at && Array.isArray(row.trace.writes)
+      && Number.isFinite(row.settled?.document) && Number.isFinite(row.terminal?.document)
+      && row.settled?.document !== row.terminal?.document && row.settled?.backend === row.backend
+      && (row.press !== "right" || (row.menuOpened && row.menuClosed))
+      && (row.backend !== "ghostty" || row.press !== "right" || row.terminal.keyboard === "terminal-textarea");
+    const retained = (row) => row.settled?.focused === "browser" && row.settled?.keyboard === "browser" && row.settled?.hashFocus === "browser";
+    const gap = (row) => row.trace.reload.at - row.trace.click.at;
+    const historyErrors = (row) => row.trace.writes.filter((write) => !write.success).map((write) => write.error);
+    for (const backend of BACKENDS) {
+      const setup = find("reload-focus", `${backend}-setup`);
+      const cleanup = find("reload-focus", `${backend}-cleanup`);
+      const incomplete = find("reload-focus", `${backend}-incomplete`);
+      if (pageWhy || !setup || setup.backend !== backend || incomplete || cleanup?.terminalClose !== 0 || cleanup?.panes !== setup.panes - 1) {
+        unsure(states, `reload focus ${backend}: ${pageWhy ?? incomplete?.error ?? "missing setup or cleanup proof"}`);
+        continue;
+      }
+      const control = find("reload-focus", `${backend}-control`);
+      if (!ready(control) || gap(control) < 350 || !retained(control) || historyErrors(control).length) {
+        unsure(states, `reload focus ${backend}: the delayed control did not retain browser hash/focus/keyboard (${JSON.stringify(control)})`);
+        continue;
+      }
+      held(states, `reload focus ${backend} control: browser hash/focus/keyboard survived a reload ${gap(control).toFixed(1)} ms after the trusted click`);
+      for (const label of ["immediate-right", "immediate-left"]) {
+        const row = find("reload-focus", `${backend}-${label}`);
+        if (!ready(row)) { unsure(states, `reload focus ${backend} ${label}: missing trusted focus, terminal control or completed reload (${JSON.stringify(row)})`); continue; }
+        if (gap(row) >= 150) { unsure(states, `reload focus ${backend} ${label}: reload began ${gap(row).toFixed(1)} ms after the click, outside the immediate window`); continue; }
+        const facts = `trusted click to reload ${gap(row).toFixed(1)} ms, outgoing browser focus/keyboard and ${row.trace.reload.hashFocus} hash, restored ${row.settled.focused}/${row.settled.keyboard}/${row.settled.hashFocus}, history writes ${row.trace.writes.length}, errors ${JSON.stringify(historyErrors(row))}`;
+        if (retained(row) && !historyErrors(row).length) held(states, `reload focus ${backend} ${label}: ${facts}`);
+        else fault(states, `reload focus ${backend} ${label}: ${facts}`);
       }
     }
     return stateOf(states);

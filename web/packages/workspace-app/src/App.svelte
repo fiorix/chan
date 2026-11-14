@@ -319,8 +319,16 @@
     }
   });
 
-  // Visibility changes must reach the reload URL before a user reloads.
-  // Keep this flush separate from keystrokes and resize drags, which debounce.
+  // Within the shared write budget, focus reaches the address at the event
+  // boundary. Other layout churn debounces; an unload write can miss reload.
+  $effect(() => {
+    if (!bootstrapped) return;
+    void layout.activePaneId;
+    untrack(() => schedulePersistStateToHash({ focus: true }));
+  });
+
+  // Visibility changes flush while history capacity is available. Keep
+  // this separate from keystrokes and resize drags, which debounce.
   $effect(() => {
     if (!bootstrapped) return;
     void searchPanel.open;
@@ -1808,11 +1816,9 @@
   // unreliable, and a synchronous localStorage write is fine.
   function onUnloadFlushBuffers(): void {
     flushEditsToRecovery();
-    // The caret is only mirrored into the URL hash on layout changes, not
-    // on every selection move. Flush the layout here (which serializes each
-    // tab's caret as the `c` field) so a reload restores the exact caret
-    // position. maybeRestoreCaret then re-asserts keyboard focus.
-    persistLayoutToHash();
+    // Reserve history capacity for the final layout, including each tab's
+    // caret. Focus has its own event-boundary persistence path.
+    persistLayoutToHash({ exiting: true });
   }
   onMount(() => {
     window.addEventListener("beforeunload", onUnloadFlushBuffers);
