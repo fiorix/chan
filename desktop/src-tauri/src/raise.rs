@@ -736,6 +736,27 @@ mod tests {
     }
 
     #[test]
+    fn requested_terminal_refusal_logging_does_not_hold_locks() {
+        let main = production(include_str!("main.rs"));
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        assert_eq!(callback.matches("tracing::debug!(").count(), 1);
+        let arguments = callback.split_once("tracing::debug!(").unwrap().1;
+        let arguments = arguments.split_once("\n                    );").unwrap().0;
+        assert!(arguments.contains("\"requested terminal raise callback refused\""));
+        let arguments: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [".lock(", "put_away("] {
+            assert!(
+                !arguments.contains(call),
+                "refusal logging must snapshot {call} before the debug macro: {arguments}"
+            );
+        }
+    }
+
+    #[test]
     fn a_requested_terminal_raise_uses_the_live_local_visibility_rule() {
         let main = production(include_str!("main.rs"));
         let eligibility = body(main, "\nfn requested_terminal_is_shown(");
