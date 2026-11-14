@@ -38,7 +38,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
 | [a paste ends early at its end marker][pastend] | not started | build |
-| [ghostty selection text turns grey][selfg] | not started | build |
+| [ghostty selection text turns grey][selfg] | merged | owner |
 | [ghostty underlines are all straight][ulstyle] | not started | build |
 | [a background ghostty takes the keyboard][ghosttyopen] | not started | build |
 
