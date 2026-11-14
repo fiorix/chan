@@ -150,35 +150,6 @@ export class LinkDetector {
   }
 
   /**
-   * Invalidate cache for specific rows
-   * Used when only part of the terminal changed
-   */
-  invalidateRows(startRow: number, endRow: number): void {
-    // Remove scanned markers
-    for (let row = startRow; row <= endRow; row++) {
-      this.scannedRows.delete(row);
-    }
-
-    // Remove cached links in this range
-    // This is conservative - we remove any link that touches these rows
-    const toDelete: string[] = [];
-    for (const [key, link] of this.linkCache.entries()) {
-      const { start, end } = link.range;
-      if (
-        (start.y >= startRow && start.y <= endRow) ||
-        (end.y >= startRow && end.y <= endRow) ||
-        (start.y < startRow && end.y > endRow)
-      ) {
-        toDelete.push(key);
-      }
-    }
-
-    for (const key of toDelete) {
-      this.linkCache.delete(key);
-    }
-  }
-
-  /**
    * Dispose and cleanup
    */
   dispose(): void {
@@ -203,11 +174,7 @@ export interface ITerminalForLinkDetector {
       getLine(y: number):
         | {
             length: number;
-            getCell(x: number):
-              | {
-                  getHyperlinkId(): number;
-                }
-              | undefined;
+            getCell(x: number): object | undefined;
           }
         | undefined;
     };

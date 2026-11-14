@@ -777,7 +777,6 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
     },
   );
   term = new GhosttyTerminal({
-    allowTransparency: false,
     cols: COLS,
     cursorBlink: false,
     cursorStyle: scenario.cursorStyle ?? "block",

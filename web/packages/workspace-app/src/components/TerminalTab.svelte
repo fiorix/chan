@@ -1241,7 +1241,6 @@
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
-        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,

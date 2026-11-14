@@ -1,13 +1,12 @@
 /**
- * Buffer API - xterm.js-compatible buffer access
+ * Buffer API - read-only terminal buffer access
  *
- * Provides read-only access to terminal buffer contents, cursor state,
- * and viewport position. Wraps Ghostty WASM terminal state.
+ * Wraps Ghostty WASM terminal contents.
  *
  * Usage:
  * ```typescript
  * const cell = term.buffer.active.getLine(0)?.getCell(5);
- * console.log(cell?.getChars(), cell?.isBold());
+ * console.log(cell?.getChars(), cell?.getWidth());
  *
  * if (term.buffer.active.type === 'alternate') {
  *   console.log('Full-screen app running');
@@ -15,14 +14,12 @@
  * ```
  */
 
-import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
-import { EventEmitter } from './event-emitter';
+import { ABI, VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import type {
   IBuffer,
   IBufferCell,
   IBufferLine,
   IBufferNamespace,
-  IEvent,
 } from './interfaces';
 import type { Terminal } from './terminal';
 
@@ -52,7 +49,6 @@ function nullCell(): VtCell {
  */
 export class BufferNamespace implements IBufferNamespace {
   private terminal: Terminal;
-  private bufferChangeEmitter = new EventEmitter<IBuffer>();
 
   // Lazy-initialized buffer wrappers (stateless, so we can cache them)
   private _normalBuffer?: Buffer;
@@ -85,18 +81,6 @@ export class BufferNamespace implements IBufferNamespace {
     }
     return this._alternateBuffer;
   }
-
-  get onBufferChange(): IEvent<IBuffer> {
-    return this.bufferChangeEmitter.event;
-  }
-
-  /**
-   * Internal: Fire buffer change event when screen switches
-   * Should be called by Terminal when detecting screen change
-   */
-  _fireBufferChange(buffer: IBuffer): void {
-    this.bufferChangeEmitter.fire(buffer);
-  }
 }
 
 // ============================================================================
@@ -109,7 +93,6 @@ export class BufferNamespace implements IBufferNamespace {
 export class Buffer implements IBuffer {
   private terminal: Terminal;
   private bufferType: 'normal' | 'alternate';
-  private nullCell: BufferCell;
   // A view for each screen row its lines are read into, which reads nothing
   // while its row is unchanged.
   private screenRows: VtCells[] = [];
@@ -117,37 +100,10 @@ export class Buffer implements IBuffer {
   constructor(terminal: Terminal, type: 'normal' | 'alternate') {
     this.terminal = terminal;
     this.bufferType = type;
-
-    // Create a null cell (codepoint=0, default colors, no flags)
-    this.nullCell = new BufferCell(nullCell(), 0);
   }
 
   get type(): 'normal' | 'alternate' {
     return this.bufferType;
-  }
-
-  get cursorX(): number {
-    const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().x;
-  }
-
-  get cursorY(): number {
-    const wasmTerm = this.getWasmTerm();
-    if (!wasmTerm) return 0;
-    return wasmTerm.getCursor().y;
-  }
-
-  get viewportY(): number {
-    // Get viewport offset from Terminal
-    // For now, return 0 (no scrollback navigation implemented yet)
-    return 0;
-  }
-
-  get baseY(): number {
-    // For normal buffer: 0
-    // For alternate buffer: 0 (alternate has no scrollback)
-    return 0;
   }
 
   get length(): number {
@@ -209,10 +165,6 @@ export class Buffer implements IBuffer {
     return new BufferLine(cells, isWrapped, wasmTerm.cols);
   }
 
-  getNullCell(): IBufferCell {
-    return this.nullCell;
-  }
-
   private getWasmTerm(): VtTerminal | undefined {
     return this.terminal.wasmTerm;
   }
@@ -252,10 +204,10 @@ export class BufferLine implements IBufferLine {
     const cell = this.cells.at(x);
     if (!cell) {
       // Cell beyond what was returned (empty/null cell)
-      return new BufferCell(nullCell(), x);
+      return new BufferCell(nullCell());
     }
 
-    return new BufferCell(cell, x);
+    return new BufferCell(cell);
   }
 
   translateToString(trimRight = false, startColumn = 0, endColumn = this._length): string {
@@ -290,7 +242,7 @@ export class BufferLine implements IBufferLine {
 export class BufferCell implements IBufferCell {
   private cell: VtCell;
 
-  constructor(cell: VtCell, _x: number) {
+  constructor(cell: VtCell) {
     this.cell = cell;
   }
 
@@ -312,66 +264,8 @@ export class BufferCell implements IBufferCell {
     return String.fromCodePoint(codepoint);
   }
 
-  getCode(): number {
-    return this.cell.codepoint;
-  }
-
   getWidth(): number {
     return this.cell.width;
-  }
-
-  getFgColorMode(): number {
-    // Return -1 for RGB (we always use RGB in our WASM implementation)
-    // xterm.js uses different values:
-    // 0 = default, 1 = palette 16, 2 = palette 256, 3 = RGB
-    // For simplicity, we return -1 for RGB
-    return -1;
-  }
-
-  getBgColorMode(): number {
-    return -1;
-  }
-
-  getFgColor(): number {
-    // RGB packed into a single number: 0xRRGGBB
-    return this.cell.fg;
-  }
-
-  getBgColor(): number {
-    // RGB packed into a single number: 0xRRGGBB
-    return this.cell.bg;
-  }
-
-  isBold(): number {
-    return (this.cell.flags & VtFlag.BOLD) !== 0 ? 1 : 0;
-  }
-
-  isItalic(): number {
-    return (this.cell.flags & VtFlag.ITALIC) !== 0 ? 1 : 0;
-  }
-
-  isUnderline(): number {
-    return (this.cell.flags & VtFlag.UNDERLINE) !== 0 ? 1 : 0;
-  }
-
-  isStrikethrough(): number {
-    return (this.cell.flags & VtFlag.STRIKETHROUGH) !== 0 ? 1 : 0;
-  }
-
-  isBlink(): number {
-    return (this.cell.flags & VtFlag.BLINK) !== 0 ? 1 : 0;
-  }
-
-  isInverse(): number {
-    return (this.cell.flags & VtFlag.INVERSE) !== 0 ? 1 : 0;
-  }
-
-  isInvisible(): number {
-    return (this.cell.flags & VtFlag.INVISIBLE) !== 0 ? 1 : 0;
-  }
-
-  isFaint(): number {
-    return (this.cell.flags & VtFlag.FAINT) !== 0 ? 1 : 0;
   }
 
   /**
@@ -388,13 +282,5 @@ export class BufferCell implements IBufferCell {
    */
   getCodepoint(): number {
     return this.cell.codepoint;
-  }
-
-  /**
-   * Check if cell has dim/faint attribute
-   * Added for IBufferCell compatibility
-   */
-  isDim(): boolean {
-    return (this.cell.flags & VtFlag.FAINT) !== 0;
   }
 }
