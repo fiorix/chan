@@ -93,6 +93,8 @@ enum DevserverVerb {
 /// the [`DevserverVerb`] it selects. The client-side subcommands (register,
 /// ls, connect, disconnect, forget) carry no server-side flags and come back
 /// whole in the `Err`, so the caller dispatches them itself.
+/// Boxing keeps the `Err` below clippy's large-error threshold on Windows,
+/// where [`DevserverServeArgs`] is wider.
 fn devserver_verb(
     action: DevserverAction,
 ) -> Result<(DevserverServeArgs, DevserverVerb), Box<DevserverAction>> {
