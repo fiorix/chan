@@ -185,8 +185,9 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
 /// of what it mounted, since the launcher's on and off mount and unmount
 /// through the host alone; it answers from the keys it stores, and `key`,
 /// the root the workspace's registry row stores as its control socket sends
-/// it, is one of them, so nothing is resolved. Returns the new window's
-/// composite native label.
+/// it, is one of them, so nothing is resolved. Returns the new window's id
+/// as the registry stores it: the id `cs window list` shows and `--window`
+/// takes, not the native label the desktop names its view by.
 async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String, String> {
     let embedded = state
         .embedded()
@@ -195,7 +196,7 @@ async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String
         return Err(format!("workspace {key} is not running"));
     }
     let record = embedded.mint_workspace_window(Path::new(key))?;
-    Ok(crate::window_watcher::native_label(&record))
+    Ok(record.window_id)
 }
 
 /// `cs window hide` / the launcher window hide: route through the OS
@@ -373,6 +374,71 @@ mod tests {
             desktop.window_paths(),
             [stored],
             "cs window new did not open a window under the registry row"
+        );
+    }
+
+    /// `cs window new` replies with the window's id as the registry stores
+    /// it, the one `--window` and `cs window open`, `hide` and `rm` take.
+    #[test]
+    fn cs_window_new_replies_with_the_id_the_registry_stores() {
+        if !own_home("cs_window_new_replies_with_the_id_the_registry_stores") {
+            return;
+        }
+        let desktop = Desktop::new();
+        let root = tempfile::tempdir().expect("root");
+        let stored = desktop.register(root.path());
+        let key = stored.to_string_lossy().into_owned();
+        desktop
+            .runtime
+            .block_on(desktop.embedded().open_workspace(&key))
+            .expect("the host mounts the workspace");
+        let replied = desktop
+            .runtime
+            .block_on(new_workspace_window(&desktop.state, &key))
+            .expect("cs window new opens a window of the workspace");
+        let stored_ids: Vec<String> = desktop
+            .embedded()
+            .workspace_window_paths_for_tests()
+            .into_iter()
+            .map(|(window_id, _)| window_id)
+            .collect();
+        assert_eq!(
+            stored_ids,
+            [replied],
+            "cs window new replied with an id the registry does not store"
+        );
+    }
+
+    /// A standalone terminal's `cs window new` replies the same way for the
+    /// terminal window it opens.
+    #[test]
+    fn cs_window_new_in_a_standalone_terminal_replies_with_the_id_the_registry_stores() {
+        if !own_home(
+            "cs_window_new_in_a_standalone_terminal_replies_with_the_id_the_registry_stores",
+        ) {
+            return;
+        }
+        let desktop = Desktop::new();
+        let replied = desktop
+            .runtime
+            .block_on(serve::spawn_local_terminal_window(Arc::clone(
+                &desktop.state,
+            )))
+            .expect("cs window new opens a terminal window");
+        let stored_ids: Vec<String> = desktop
+            .embedded()
+            .host_for_tests()
+            .window_registry()
+            .expect("the local window registry is installed")
+            .snapshot()
+            .into_iter()
+            .filter(|row| row.kind == chan_server::WindowKind::Terminal)
+            .map(|row| row.window_id)
+            .collect();
+        assert_eq!(
+            stored_ids,
+            [replied],
+            "cs window new replied with an id the registry does not store"
         );
     }
 

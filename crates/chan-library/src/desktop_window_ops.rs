@@ -83,7 +83,8 @@ pub enum WireguardKeyOutcome {
 /// Each carries a `oneshot` the desktop completes with `Ok(..)`/`Err(msg)`.
 #[derive(Debug)]
 pub enum DesktopWindowOp {
-    /// Spawn a new window; the reply carries its new id (Tauri label).
+    /// Spawn a new window; the reply carries its id as the window registry
+    /// stores it, the one every `--window` and `cs window` verb takes.
     New {
         kind: NewWindowKind,
         reply: oneshot::Sender<Result<String, String>>,

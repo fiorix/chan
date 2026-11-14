@@ -503,8 +503,8 @@ fn navigate_in_place(
 /// the watcher opens it (in `?kind=terminal` mode) at the ONE shared `/terminal`
 /// tenant, mounted on first use. All terminal windows share that tenant -- so a
 /// terminal moved between windows keeps its live PTY -- and it lives for the
-/// process lifetime (orphaned PTYs idle-prune). Returns the new window's
-/// composite native label.
+/// process lifetime (orphaned PTYs idle-prune). Returns the new window's id
+/// as the registry stores it, which is what `cs window new` prints.
 pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String, String> {
     let Some(embedded) = state.embedded.get() else {
         return Err("embedded local server is unavailable".to_string());
@@ -515,7 +515,7 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
     // Mint the window; the watcher opens it. The registry is the sole window
     // authority, so the terminal can never be double-opened and it persists.
     let record = embedded.mint_window(WindowKind::Terminal, None)?;
-    Ok(crate::window_watcher::native_label(&record))
+    Ok(record.window_id)
 }
 
 /// Open a throwaway standalone terminal window whose first terminal starts in
