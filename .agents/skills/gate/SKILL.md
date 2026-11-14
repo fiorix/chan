@@ -2,9 +2,9 @@
 name: gate
 description: >-
   Run the chan pre-push gate (shellcheck, actionlint, fmt, clippy, rustdoc,
-  test, no-default-features build, gateway build, web checks, release
-  devserver smoke, native desktop package) and the isolated/own-gate model for
-  multi-agent rounds.
+  test, no-default-features build, the gateway workspace's checks on Linux,
+  web checks, release devserver smoke, native desktop package) and the
+  isolated/own-gate model for multi-agent rounds.
 when_to_use: >-
   Before any push, when CI fails, or when you need to validate a
   change against the same checks CI runs.
