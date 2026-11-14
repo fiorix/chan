@@ -1,6 +1,6 @@
 # Typing into a ghostty terminal leaves a scrolled-back view where it is
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 
 Record: reported by the owner on 2026-11-13 in his Mac report for v0.129.0's terminal renderer batch, as a note on the guide: "on ghostty, typing does not snap the view back to the cursor" (`dev/v0129/owner/reports/batch3-terminal-renderer-at-09d7a4f9e.md`). Recorded as a candidate in `dev/v0129/row-notes.md` ("Command deck: owed at the row record and the cut", the batch 3 bullet): "on the ghostty backend typing does not bring a scrolled-back view to the cursor, where xterm.js does (the same in v0.128.0 by reading)". The owner, for v0.130.0: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now".
 

@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.130.0
 
-Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner kept it to the devserver's metrics as a `systemd-report` source ([sdreport]), the panes drawn flush on the window's edges ([flushedges]), and terminal bug fixes: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now". Among those, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]) and a standalone terminal window loading the saved shortcut overrides ([termkeys]). From the notes v0.129.0 left, four more terminal faults: typing that leaves a ghostty view in history ([typescroll]), a fast stream that loses output past a lag ([streamlag]), pure black backgrounds a ghostty terminal leaves unpainted ([blackbg]), and history pulled into a ConPTY terminal's screen on a resize, read on Windows first ([conpty]). On his word the two rows with a security side join them ("sure, let's include them"): another account holding the Windows claim ([winclaim]), and the AppImage handing its environment to host programs while its CLI searches the current directory for libraries ([appenv]). Then four more on his word: a pasted or delivered text that ends its bracketed paste early with `ESC[201~` ("yes in v0.130.0", [pastend]), and as small fixes ("let's add all as small fixes to v0.130") selected ghostty text drawn in a fixed dark grey ([selfg]) and every ghostty underline style drawn as one straight line ([ulstyle]); the fourth, the gate skill's list of Windows test crates, was a one-line fix with no row. The ghostty-web fork's parts 3 to 6, the FUSE reading, `New` and `Paste`, and the warm `chan-term` launch moved to v0.131.0. From the pane-focus build's review he took one more terminal fault as a row of its own ("get its own row"): a ghostty terminal opening in a background pane taking the keyboard for a moment ([ghosttyopen]).
+Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner kept it to the devserver's metrics as a `systemd-report` source ([sdreport]), the panes drawn flush on the window's edges ([flushedges]), and terminal bug fixes: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now". Among those, a file browser pane that takes focus while the keyboard stays in the terminal it left ([panekeys]) and a standalone terminal window loading the saved shortcut overrides ([termkeys]). From the notes v0.129.0 left, four more terminal faults: typing that leaves a ghostty view in history ([typescroll]), a fast stream that loses output past a lag ([streamlag]), pure black backgrounds a ghostty terminal leaves unpainted ([blackbg]), and history pulled into a ConPTY terminal's screen on a resize, read on Windows first ([conpty]). On his word the two rows with a security side join them ("sure, let's include them"): another account holding the Windows claim ([winclaim]), and the AppImage handing its environment to host programs while its CLI searches the current directory for libraries ([appenv]). Then four more on his word: a pasted or delivered text that ends its bracketed paste early with `ESC[201~` ("yes in v0.130.0", [pastend]), and as small fixes ("let's add all as small fixes to v0.130") selected ghostty text drawn in a fixed dark grey ([selfg]) and every ghostty underline style drawn as one straight line ([ulstyle]); the fourth, the gate skill's list of Windows test crates, was a one-line fix with no row. The ghostty-web fork's parts 3 to 6, the FUSE reading, `New` and `Paste`, and the warm `chan-term` launch moved to v0.131.0. From the pane-focus build's review he took one more terminal fault as a row of its own ("get its own row"): a ghostty terminal opening in a background pane taking the keyboard for a moment ([ghosttyopen]). On 2026-11-14 the owner took the release to its cut with the rows built by then and moved the five not started to v0.131.0: typing scroll ([typescroll]), the fast stream ([streamlag]), the ConPTY reading ([conpty]), the Windows claim ([winclaim]) and the AppImage environment ([appenv]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -31,12 +31,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [systemd-report cannot read the metrics][sdreport] | merged | closed |
 | [a focused browser pane gets no keys][panekeys] | merged | closed |
 | [a terminal window ignores saved shortcuts][termkeys] | merged | owner |
-| [typing leaves a ghostty view in history][typescroll] | not started | build |
-| [a fast stream loses output][streamlag] | not started | measure |
 | [ghostty leaves black unpainted][blackbg] | merged | owner |
-| [ConPTY pulls history into the screen][conpty] | not started | measure |
-| [another account holds the claim][winclaim] | not started | build |
-| [AppImage children get its environment][appenv] | not started | build |
 | [a paste ends early at its end marker][pastend] | not started | build |
 | [ghostty selection text turns grey][selfg] | merged | owner |
 | [ghostty underlines are all straight][ulstyle] | not started | build |
@@ -46,12 +41,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 [sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
 [panekeys]: v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md
 [termkeys]: v0.130.0/a-standalone-terminal-window-loads-no-saved-shortcut-overrides.md
-[typescroll]: v0.130.0/typing-into-a-ghostty-terminal-leaves-a-scrolled-back-view-where-it-is.md
-[streamlag]: v0.130.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [blackbg]: v0.130.0/a-ghostty-terminal-leaves-a-pure-black-background-unpainted.md
-[conpty]: v0.130.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
-[winclaim]: v0.130.0/the-windows-claim-is-a-name-another-account-can-hold.md
-[appenv]: v0.130.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [pastend]: v0.130.0/a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early.md
 [selfg]: v0.130.0/selected-text-in-a-ghostty-terminal-loses-its-colour-to-a-fixed-dark-grey.md
 [ulstyle]: v0.130.0/every-underline-style-in-a-ghostty-terminal-draws-one-straight-line.md
@@ -80,6 +70,11 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a terminal launch gets no focus][raisefocus] | not started | build |
 | [a minimized window stays minimized][unbury] | not started | build |
 | [slides and PDFs show raw wikilinks][wikirender] | not started | build |
+| [typing leaves a ghostty view in history][typescroll] | not started | build |
+| [a fast stream loses output][streamlag] | not started | measure |
+| [ConPTY pulls history into the screen][conpty] | not started | measure |
+| [another account holds the claim][winclaim] | not started | build |
+| [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | not started | measure |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
@@ -99,6 +94,11 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [raisefocus]: v0.131.0/a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing.md
 [unbury]: v0.131.0/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md
 [wikirender]: v0.131.0/slides-and-pdf-export-show-wikilinks-as-raw-text.md
+[typescroll]: v0.131.0/typing-into-a-ghostty-terminal-leaves-a-scrolled-back-view-where-it-is.md
+[streamlag]: v0.131.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
+[conpty]: v0.131.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
+[winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
+[appenv]: v0.131.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
 
 ## Completed

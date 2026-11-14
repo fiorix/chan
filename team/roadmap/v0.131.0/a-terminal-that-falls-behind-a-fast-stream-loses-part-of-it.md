@@ -1,6 +1,6 @@
 # A terminal that falls behind a fast stream loses part of it
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 
 Record: reported by the owner on 2026-11-13 in his Mac report for v0.129.0's terminal renderer batch, part R9: during `yes 'the quick brown fox' | head -400000` and a `cat` of `/usr/share/dict/words` the terminal printed "terminal error: terminal output lagged; reconnect to replay retained scrollback", and part of the stream never reached the view. He ran the same in the installed v0.128.0: it "feels the same", and he is "pretty sure it is the same thing" there (`dev/v0129/owner/reports/batch3-terminal-renderer-at-09d7a4f9e.md`; the integrator's reading in `dev/v0129/status.md`). Recorded as a candidate in `dev/v0129/row-notes.md` ("Command deck: owed at the row record and the cut", the batch 3 bullet). The owner, for v0.130.0: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now".
 

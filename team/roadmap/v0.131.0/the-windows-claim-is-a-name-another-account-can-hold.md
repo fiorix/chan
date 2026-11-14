@@ -1,6 +1,6 @@
 # The Windows claim is a name another account can hold
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 
 Record: raised before v0.128.0 by the review of the Windows handoff pipe's account isolation (gaps 1 and 2; in the `chan-dev` repository under `releases/v0128/team/reviews/review-winpipe-t3.md`), stated as a limit in that release's row ([the Windows handoff pipe row](../done/the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts.md), "Built: the account isolation") and drafted as a row for the next release on the owner's word (`releases/v0128/team/reports/row-draft-the-windows-claim-is-a-name-another-account-can-hold.md` in the same repository; `team/release/release-v0.128.0.md`, "Rows drafted for the next release"). v0.129.0's record lists it as still without a row. On 2026-11-13 the integrator named it, with the AppImage's environment, as the two items with a security angle: another account can take the Windows claim pipe. The owner: "sure, let's include them".
 

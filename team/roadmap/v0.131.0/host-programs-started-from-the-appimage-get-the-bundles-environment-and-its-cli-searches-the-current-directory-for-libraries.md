@@ -1,6 +1,6 @@
 # Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 on 2026-11-14, when he took v0.130.0 to its release with the rows built by then; not started.
 
 Record: found by reading in the last fix round of the `chan-term` work before v0.129.0, the same in v0.128.0, and left open for the owner (`dev/v0129/row-notes.md`, the sections "AppImage: host programs started by the desktop get the bundle's environment" and "chan-term: follow-ups from the round 7 review"; the review `dev/v0129/reviews/review-termfix-7.md`, finding 2 and "Found sound"). On 2026-11-13 the integrator named it, with the Windows claim, as one of the two items with a security angle: the CLI started from an AppImage keeps an empty `LD_LIBRARY_PATH` entry, which puts the current directory on the library search path. The owner: "sure, let's include them". The two behaviours are one row because both come from what a chan process of the AppImage keeps and passes on of AppRun's environment, which one module reads and one medium shows. A fix of the CLI's search path alone would still leave its extensions with the bundle's environment.
 
