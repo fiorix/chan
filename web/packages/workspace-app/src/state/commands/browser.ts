@@ -12,14 +12,12 @@
 // A row of the tree's menu acts on its entry and the command of its title on
 // the selection, through one function: Download through the store's
 // download, Open in new file browser through the store's reveal, and Copy
-// path through copyEntryPath here. Upload is the one title with two
-// meanings. The launcher's command and the file browser menu's own row run
-// one function and upload into the directory the surface is in: the one its
-// New and Paste rows choose, except that a tree with nothing selected takes
-// the directory a create starts in (FileTree's uploadDir), which in a
-// standalone window is the home directory, not the filesystem root. The
-// rows on an entry share the title and act on that entry: a directory's row
-// and its Details upload into it, Workspace details into the workspace
+// path through copyEntryPath here. New, Paste and Upload dispatch to the
+// command surface and share FileTree's targetDirectory: the folder a list
+// shows, or a tree's selected folder or file's parent. An empty tree takes
+// the workspace root or the standalone window's home. New with no surface
+// takes that same default. Upload's rows on an entry act on that entry:
+// a directory's row and its Details upload into it, Workspace details into the workspace
 // root, and a file's row replaces the file.
 
 import {
@@ -49,9 +47,7 @@ import {
   fbClearSelection,
   fbClipboard,
   fbClipboardClear,
-  fbClipboardPaste,
   fbClipboardSet,
-  fbSelectSet,
   fileOps,
   openFsGraphForDirectory,
   openFsGraphForFile,
@@ -106,12 +102,6 @@ function activeSelection(selection = fbActiveSelection()): BrowserSelection | nu
   const path = selection?.path;
   if (!path) return null;
   return { path, isDir: entryFor(path)?.is_dir ?? false };
-}
-
-function targetDirFromSelection(selection = fbActiveSelection()): string {
-  const sel = activeSelection(selection);
-  if (!sel) return defaultCreateDirectory();
-  return sel.isDir ? sel.path : parentDir(sel.path);
 }
 
 function importDefaultDir(): string {
@@ -234,13 +224,6 @@ function cutFileBrowserSelection(): void {
   if (paths.length > 0) fbClipboardSet("cut", paths);
 }
 
-async function pasteFileBrowserClipboard(): Promise<void> {
-  const selection = fbActiveSelection();
-  if (!selection) return;
-  const landed = await fbClipboardPaste(targetDirFromSelection(selection));
-  if (landed.length > 0) fbSelectSet(landed, undefined, selection);
-}
-
 /// What a file browser's row menu offers for an entry, main action first.
 export type RowActions = (path: string, isDir: boolean) => FileActionSet;
 
@@ -295,7 +278,10 @@ registerCommands([
     requirement: "files",
     keywords: ["create", "file", "folder"],
     available: inWorkspace,
-    run: () => void fileOps.createFileOrDir(targetDirFromSelection()),
+    run: () => {
+      if (commandSurfaceId() !== null) dispatchChanCommand("app.browser.newFsEntry");
+      else void fileOps.createFileOrDir(defaultCreateDirectory());
+    },
   },
   {
     id: "app.browser.open",
@@ -459,7 +445,7 @@ registerCommands([
     keywords: ["Paste file browser clipboard", "copy", "cut", "move", "files"],
     available: (ctx) => onBrowser(ctx) && commandSurfaceId() !== null && fbClipboard.mode !== null,
     unavailableReason: () => commandSurfaceId() === null ? needsBrowser() : needsClipboard(),
-    run: () => void pasteFileBrowserClipboard(),
+    run: () => dispatchChanCommand("app.browser.pasteSelection"),
   },
   {
     id: "app.browser.selectMultiple",

@@ -838,7 +838,7 @@
   }
   /// Download for the row's entry, what the launcher's Download runs for the
   /// selection, and Upload for the row's entry: into a directory, or over a
-  /// file. The launcher's Upload is the file browser menu's (uploadDir).
+  /// file. The launcher's Upload is the file browser menu's (targetDirectory).
   function downloadEntry(path: string, isDir: boolean): void {
     menu = null;
     fileOps.downloadPathWithProgress(path, isDir);
@@ -971,8 +971,8 @@
         else if (fbClipboard.mode) fbClipboardClear();
         else { const cursor = selection.path; fbClearSelection(); selection.path = cursor; }
         break;
-      case "new": void newFileOrDir(view === "list" ? directory : pasteTargetDir()); break;
-      case "upload": uploadEntry(uploadDir(), true); break;
+      case "new": void newFileOrDir(targetDirectory()); break;
+      case "upload": uploadEntry(targetDirectory(), true); break;
       case "download": if (selected) downloadEntry(selected.path, selected.isDir); break;
       case "copyPath": if (selected) void copyEntryPath(selected.path); break;
       case "terminal": terminalFromHere(selected?.path ?? directory, selected?.isDir ?? true); break;
@@ -1057,28 +1057,16 @@
     });
   });
 
-  /// The directory New and Paste choose: the directory a list shows; in a
-  /// tree the selected directory, the selected file's directory, or the
-  /// tree's root with nothing selected. Mirrors how a desktop file browser
-  /// pastes "into the current folder".
-  function pasteTargetDir(): string {
+  /// New, Paste and Upload use the folder a list shows. A tree uses its
+  /// selected directory or file's parent, including a selection hidden
+  /// under a collapsed ancestor; without a selection it uses the workspace
+  /// root or the standalone window's home.
+  function targetDirectory(): string {
     if (view === "list") return directory;
     const cur = selection.path;
-    if (!cur) return "";
-    const row = visibleRows.find((r) => r.path === cur);
-    if (row?.isDir) return cur;
+    if (!cur) return defaultCreateDirectory();
+    if (entryByPath.get(cur)?.is_dir) return cur;
     return parentDir(cur);
-  }
-
-  /// The directory an upload goes into from this surface, for the file
-  /// browser menu's Upload and the launcher's alike: the one New and Paste
-  /// choose, except that a tree with nothing selected takes the directory a
-  /// create starts in when nothing names one. That is the tree's root in a
-  /// workspace window and the home directory in a standalone window, whose
-  /// tree's root is the filesystem's.
-  function uploadDir(): string {
-    if (view === "tree" && !selection.path) return defaultCreateDirectory();
-    return pasteTargetDir();
   }
 
   /// Paste the clipboard into the resolved target dir, then select the
@@ -1086,17 +1074,19 @@
   /// clears as the clipboard empties).
   async function pasteIntoTarget(): Promise<void> {
     if (!fbClipboard.mode) return;
-    const dest = pasteTargetDir();
+    const dest = targetDirectory();
+    const targetSelection = selection;
+    const targetId = instanceId;
     const landed = await fbClipboardPaste(dest);
     if (landed.length > 0) {
-      // Make sure the destination dir is expanded so the new entries
-      // are visible, then select them. Expansion is this surface's own
-      // per-instance state.
-      if (dest) {
-        expanded[dest] = true;
-        persistFbTreeInstanceExpansion(instanceId);
+      // A transfer can outlive its surface. Reveal only in that same
+      // instance, never in a replacement mounted under the same id.
+      const targetInstance = fbTreeInstance(targetId);
+      if (targetInstance?.selection === targetSelection) {
+        for (let path = dest; path; path = parentDir(path)) targetInstance.expanded[path] = true;
+        persistFbTreeInstanceExpansion(targetId);
       }
-      fbSelectSet(landed);
+      fbSelectSetFor(landed, undefined, targetSelection);
     }
   }
 
