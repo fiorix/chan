@@ -282,6 +282,8 @@ export default {
     let originalPrefs = null;
     let primary = null;
     try {
+      // WINDOW is unique to this page; its routed reply proves subscription.
+      await ctx.waitWindowLive(WINDOW);
       originalPrefs = await readTerminalPrefs(page, token);
       await writeTerminalPrefs(page, token, { ghostty: true });
       const panes = await layOut(ctx, page, terminals);

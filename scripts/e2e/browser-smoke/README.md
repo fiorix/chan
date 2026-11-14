@@ -77,6 +77,8 @@ The suite was counted whole and each check alone on a guest capped at two and at
 
 A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use xterm.js on every platform unless ghostty is stored as true. The runner grants clipboard read and sanitized write to every check's browser context.
 
+A check that creates another page with a fresh window id waits for `ctx.waitWindowLive(id)` before PATCHing preferences. The routed reply proves that window has subscribed to the event bus; DOMContentLoaded and a mounted pane do not. The preference helper still requires that page's post-PATCH workspace refresh. This window-level barrier identifies a page only when no co-viewer shares its id.
+
 `results.json` is written after `teardownServer`, so a teardown that throws takes the results file, the `ALL GREEN` / `N FAILURE(S)` line, and the exit code with it. The run's screenshots still land in the output directory, but its verdict does not, and a full run is exactly where that hurts because `98-workspace-root-loss` deletes the workspace root the teardown then reads. Treat an output directory holding screenshots and no `results.json` as a lost verdict, not as a pass, and read the console transcript for the per-check lines.
 
 Add a new check by dropping a numbered file into `checks/`; nothing else needs editing.
