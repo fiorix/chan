@@ -9,8 +9,11 @@
 // In a window of its own, terminals on xterm.js and then on ghostty
 // (terminal.ghostty written before each and restored after) each run a shell
 // that turns into a raw recorder of every byte its PTY receives: one asks for
-// bracketed paste (DECSET 2004) first, the other does not. Two pastes per
-// terminal, each of a text with a space, an LF and a CRLF that names its leg:
+// bracketed paste (DECSET 2004) first, the other does not. Four pastes per
+// terminal, two texts by each of two paths. Each text names its leg; the plain
+// one has a space, an LF and a CRLF, and the hostile one, check 223's, would
+// end its own bracket, colour the screen and interrupt the shell, with a CRLF
+// and an LF:
 //
 //   chord -- the text is written to Chrome's clipboard with writeText and
 //            Ctrl+Shift+V is pressed on the focused terminal with the devtools
@@ -26,8 +29,11 @@
 // Enter sends: xterm.js rewrites each \n and \r\n as \r before it brackets
 // the text (prepareTextForTerminal), and chan's ghostty paste does the same
 // (ghosttyPaste.ts) where ghostty-web would send the text as the clipboard
-// holds it. A capture listener records the trusted paste events the page saw
-// for the chord.
+// holds it. In the hostile text ESC, Ctrl+C and the other bytes the ghostty
+// core's paste encoder replaces reach the PTY as spaces on both engines, so
+// its ESC[201~ cannot end the bracket: chan cleans an xterm.js paste with the
+// encoder's byte set before xterm.js frames it (xtermPaste.ts). A capture
+// listener records the trusted paste events the page saw for the chord.
 
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -93,9 +99,9 @@ async function pressPasteChord(page) {
 }
 
 /// The bytes the recorder holds past `offset`, as text, once `end` (the
-/// closing bracket, or the paste's last line without one) has arrived and a
-/// further half second added nothing; or whatever arrived when ten seconds
-/// pass without it.
+/// paste's last line, with its closing bracket under bracketed paste) has
+/// arrived and a further half second added nothing; or whatever arrived when
+/// ten seconds pass without it.
 async function pastedSince(file, offset, end) {
   const read = () => readFileSync(file).subarray(offset).toString("latin1");
   const deadline = Date.now() + 10_000;
@@ -151,13 +157,26 @@ async function clickMenuPaste(page) {
   throw new Error("the body menu has no Paste row");
 }
 
-/// One paste over the recorder: write `text` to the clipboard, paste it by
-/// `how`, and return what the PTY read and what the page saw.
-async function pasteLeg(ctx, page, file, engine, mode, how, failures) {
+/// The text a leg pastes, named by `label`, and the bytes the PTY must read
+/// for it: line ends as CRs, the hostile text's control bytes as spaces, and
+/// the frame under bracketed paste.
+function legText(kind, label, bracketed) {
+  const plain = kind === "plain";
+  const text = plain
+    ? `216 ${label} ${RUN}\nsecond line\r\nthird line`
+    : `216 ${label} ${RUN}\x1b[201~; echo injected\r\nprintf '\x1b[31mred\x1b[0m'\x03\nlast`;
+  const lines = plain
+    ? text.replace(/\r?\n/g, "\r")
+    : `216 ${label} ${RUN} [201~; echo injected\rprintf ' [31mred [0m' \rlast`;
+  const last = plain ? "third line" : "last";
+  return { text, want: bracketed ? OPEN + lines + CLOSE : lines, end: bracketed ? last + CLOSE : last };
+}
+
+/// One paste over the recorder: write the `kind` text to the clipboard, paste
+/// it by `how`, and return what the PTY read and what the page saw.
+async function pasteLeg(ctx, page, file, engine, mode, how, kind, failures) {
   const bracketed = mode === "bracketed";
-  const text = `216 ${how} ${engine} ${mode} ${RUN}\nsecond line\r\nthird line`;
-  const lines = text.replace(/\r?\n/g, "\r");
-  const want = bracketed ? OPEN + lines + CLOSE : lines;
+  const { text, want, end } = legText(kind, `${how} ${engine} ${mode} ${kind}`, bracketed);
   await writeClipboardText(page, text);
   const offset = statSync(file).size;
   const events = await page.evaluate(() => window.__pastes216.length);
@@ -174,12 +193,12 @@ async function pasteLeg(ctx, page, file, engine, mode, how, failures) {
     await page.mouse.click(host.x, host.y, { button: "right" });
     await page.waitForSelector(MENU, { visible: true, timeout: 10_000 });
     menuEngine = await page.$eval(`${MENU} .terminal-backend-label`, (el) => el.getAttribute("data-terminal-backend"));
-    await ctx.shot(`216-${engine}-${mode}-menu`, page);
+    await ctx.shot(`216-${engine}-${mode}-menu-${kind}`, page);
     await clickMenuPaste(page);
   }
-  const pty = await pastedSince(file, offset, bracketed ? CLOSE : "third line");
+  const pty = await pastedSince(file, offset, end);
   const seen = await page.evaluate((from) => window.__pastes216.slice(from), events);
-  const leg = `${engine}-${mode}-${how}`;
+  const leg = `${engine}-${mode}-${how}-${kind}`;
   const result = { leg, text, pty: pty.bytes, complete: pty.complete, events: seen, focus: await focusOnTerminal(page) };
   if (menuEngine !== null) {
     result.menuEngine = menuEngine;
@@ -224,7 +243,9 @@ export default {
           const file = join(dir, `${engine}-${mode}.bytes`);
           await startRecorder(page, file, { bracketedPaste: mode === "bracketed" });
           for (const how of ["chord", "menu"]) {
-            result.legs.push(await pasteLeg(ctx, page, file, engine, mode, how, failures));
+            for (const kind of ["plain", "hostile"]) {
+              result.legs.push(await pasteLeg(ctx, page, file, engine, mode, how, kind, failures));
+            }
           }
           await ctx.shot(`216-${engine}-${mode}`, page);
         }

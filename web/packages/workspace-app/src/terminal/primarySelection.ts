@@ -3,6 +3,7 @@ import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { isTauriDesktop, readPrimarySelection, writePrimarySelection } from "../api/desktop";
 import { currentOS } from "../state/shortcuts";
 import { pasteIntoGhostty } from "./ghosttyPaste";
+import { pasteIntoXterm } from "./xtermPaste";
 
 export function isPrimarySelectionDesktop(): boolean {
   return isTauriDesktop() && currentOS() === "linux";
@@ -80,7 +81,7 @@ export function installTerminalPrimarySelection(
     void readPrimarySelection().then((text) => {
       if (!alive || !text) return;
       if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);
-      else term.paste(text);
+      else pasteIntoXterm(term as XtermTerminal, text);
     });
   };
   // Both widgets answer a right click by putting the selection in their
