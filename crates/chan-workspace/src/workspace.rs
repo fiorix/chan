@@ -2281,9 +2281,10 @@ impl Workspace {
 
     /// One-level directory listing. Use `list_tree` for the
     /// recursive variant. Skips workspace-internal noise (`.chan/`,
-    /// `.git/`) at the top level and drops special entries (FIFOs,
-    /// sockets, devices) at every level. Symlinks stay visible to
-    /// the browser and are classified by the server-side wire view.
+    /// `.git/`) at the top level and drops atomic-write temporaries and
+    /// special entries (FIFOs, sockets, devices) at every level. Symlinks
+    /// stay visible to the browser and are classified by the server-side
+    /// wire view.
     /// Errors with `ListingTooLarge` past `LIST_DIR_LIMIT`.
     ///
     /// Per-entry errors (a vanished entry mid-iteration, a
@@ -12211,14 +12212,13 @@ mod tests {
             } if size == cap + 1 && limit == cap
         ));
         assert!(!workspace.exists("copy.bin"));
+        // Read the directory itself: listings hide the writer's temporaries.
         assert_eq!(
-            workspace
-                .list("")
+            std::fs::read_dir(root.path())
                 .unwrap()
-                .into_iter()
-                .map(|entry| entry.name)
+                .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>(),
-            vec!["huge.bin".to_string()],
+            vec![std::ffi::OsString::from("huge.bin")],
             "a rejected copy must remove its same-directory temp"
         );
     }

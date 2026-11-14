@@ -84,7 +84,8 @@ struct RootHandle {
 
 /// Per-owner listing policy: the workspace hides its top-level control
 /// dirs and tolerates lossy names; a standalone owner shows everything
-/// ordinary and skips names its strict-UTF-8 wire cannot carry.
+/// ordinary and skips names its strict-UTF-8 wire cannot carry. Neither
+/// policy lists the atomic writer's reserved temporaries.
 #[derive(Clone, Copy)]
 pub(crate) struct ListPolicy {
     pub(crate) hide_internal_top_level: bool,
@@ -911,7 +912,8 @@ impl RootedFs {
     }
 
     /// One-level listing with the workspace posture: top-level `.chan` /
-    /// `.git` hidden, non-UTF-8 names carried lossily.
+    /// `.git` and atomic-write temporaries hidden, non-UTF-8 names carried
+    /// lossily.
     pub(crate) fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
         self.list_with(
             rel,
@@ -961,6 +963,12 @@ impl RootedFs {
                 None => entry.file_name().to_string_lossy().into_owned(),
             };
             if policy.hide_internal_top_level && at_root && (name == ".chan" || name == ".git") {
+                continue;
+            }
+            // An atomic write's temporary sits beside its target until it is
+            // renamed over it, so a listing taken mid-write (an upload in
+            // progress) or after an interrupted one would otherwise show it.
+            if fs_ops::is_atomic_write_temp_name(&name) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -2706,5 +2714,70 @@ mod root_availability_tests {
             fs.ensure_root_available(),
             Err(ChanError::WorkspaceRootMissing(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use std::fs;
+
+    const WORKSPACE: ListPolicy = ListPolicy {
+        hide_internal_top_level: true,
+        skip_non_utf8: false,
+    };
+    const STANDALONE: ListPolicy = ListPolicy {
+        hide_internal_top_level: false,
+        skip_non_utf8: true,
+    };
+
+    fn names(rooted: &RootedFs, rel: &str, policy: ListPolicy) -> Vec<String> {
+        let mut names: Vec<String> = rooted
+            .list_with(rel, policy)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A listing taken while a streamed write is still feeding its temporary
+    /// (an upload in progress) shows the directory as it was, under both
+    /// owners' policies, for a create and for a replace.
+    #[test]
+    fn a_listing_omits_an_in_flight_atomic_write_temporary() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1 << 20).unwrap();
+        fs::create_dir(root.path().join("sub")).unwrap();
+        // Names beside the reserved prefix stay ordinary user content.
+        fs::write(root.path().join("sub/.chan-note"), "user").unwrap();
+        fs::write(root.path().join("sub/.chan-writer"), "user").unwrap();
+        for (policy, before) in [
+            (WORKSPACE, vec![".chan-note", ".chan-writer"]),
+            (STANDALONE, vec![".chan-note", ".chan-writer", "upload.bin"]),
+        ] {
+            rooted
+                .write_atomic_stream("sub/upload.bin", AtomicWriteKind::Bytes, |sink| {
+                    sink.write_chunk(b"partial")?;
+                    let on_disk: Vec<String> = fs::read_dir(root.path().join("sub"))
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .collect();
+                    assert!(
+                        on_disk
+                            .iter()
+                            .any(|name| fs_ops::is_atomic_write_temp_name(name)),
+                        "the write's temporary is on disk: {on_disk:?}"
+                    );
+                    assert_eq!(names(&rooted, "sub", policy), before);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            names(&rooted, "sub", WORKSPACE),
+            [".chan-note", ".chan-writer", "upload.bin"]
+        );
     }
 }
