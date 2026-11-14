@@ -28,3 +28,7 @@ Read at `342dbe791`, in `web/packages/workspace-app/src/components/GraphPanel.sv
 
 1. Workspace app tests over the graph panel with the fs-graph stub (`web/packages/workspace-app/src/__tests__/graphPanel.ts`): one opened directory's level rejects with a request timeout; the tab draws the other levels, is not dimmed and shows no error once the shared graph covers that directory; the level is asked for once more; a later change is a patch, not a whole fetch. Red on the code without the change.
 2. In a guest, the builder's kernel-tree restore (`dev/v0129/evidence/graphfix/r3-diag-wide/`, hundreds of directories opened), five restores on the code without the change and five with it: the error text over a dimmed graph recorded where it shows, none with the change, and the count of levels that timed out recorded.
+
+## Rulings for v0.131.0, 2026-11-14
+
+From the decisions document for v0.131.0 (`dev/v0131/decisions.md`, points 10 and 13.3), answered by the owner on 2026-11-14 ("as you recommend"): the kernel tree acceptance 2 restores lived in a guest destroyed on 2026-11-13 and is rebuilt from `dev/v0129/evidence/graphfix/scripts/kgit-build.sh` before that reading.

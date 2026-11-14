@@ -29,3 +29,11 @@ Read at `342dbe791`; WebKit's code read at its `main` on 2026-11-13.
 1. A workspace app test that presses each kind of tab as WebKit does, on the first native `button` or `select` inside the element with role `tab` or on that element when it holds none, with mouse down, mouse up and click: the tab is selected and still open; red on today's markup, where the press reaches the close button. The same press on the close control closes the tab.
 2. On the owner's Mac, on chan-desktop: AXPress on a live terminal tab, a file tab and a terminal tab with no session (System Events' `perform action "AXPress"` on each tab's element, as the report did) selects each and closes none; AXPress on each close button closes it, with the prompt for the live terminal; VoiceOver's activate on a tab selects it.
 3. In an sdme guest on chan-desktop for Linux: the AT-SPI default action on a tab, from a script, selects it and closes nothing.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, points 9 and 11) on 2026-11-14: "as you recommend".
+
+- The close button moves out of the element with `role="tab"`. The outer `div.tab` keeps its class, pointer handlers, drag and tooltip and loses the role; an inner element holding the icon and the label takes `role="tab"`, `tabindex` and `aria-selected`; the close button is that element's sibling. A press then lands on the tab element and bubbles to the outer element's `mousedown` and `mouseup` handlers, the mouse path.
+- Folded in: Enter and Space on a focused tab label select it, as a press on the label does (a keydown on the same element running the same selection, with its test). This replaces the boundary's "not here" for those two keys; arrow keys along the strip stay out.
+- What moves with it: anything that reads `aria-selected` or `tabindex` off `.tab`, and focus styles on `.tab`. Screenshots of the strip at base and tip in both engines.

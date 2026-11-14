@@ -37,3 +37,11 @@ Read at `f6c175793`; nothing was run.
 1. A test, red on the code without the change: the self-update's client, handed a recorded config (`chan_tls::testing::recording`), dials the loopback sink (`chan_tls::testing::Sink`). It reads back that it started TLS with that config and offered `http/1.1`, as `crates/chan/src/http_client.rs`'s test does for the metrics client.
 2. In an sdme guest, with a throwaway CA in the system store and a TLS-inspecting proxy named by `HTTPS_PROXY` whose leaves that CA signs, `chan upgrade --check` from an install.sh install answers. With the CA removed, it fails naming the certificate. At the base, it fails with the CA installed (the red).
 3. The same reading on the Windows VM (`dev/vm/windows.sh`), from the Windows CLI zip, with the CA in the machine's Root store. Then on the owner's Mac, from install.sh, with the CA in the System keychain.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, points 11 and 13.1) on 2026-11-14: "as you recommend" on the folds, and on the Mac line: "not doing it for this release, we can postpone".
+
+- Folded in from v0.130.0's follow-ups, with a security side: an https to http redirect is followed today for the metadata and the archive (`update.rs`; reqwest 0.12 refuses it only under `https_only`). The metadata is unsigned, so a plain-http hop of its fetch would let a network attacker rewrite the version, the URL and the hash. The builder this row rewrites sets `https_only`, keeping the loopback test base. This amends contract 2's "the redirect policy" unchanged: every hop of every self-update client is https.
+- From point 13.3: the TLS-inspecting proxy acceptance 2 needs is new work; v0.128.0's system CA recipe has a throwaway CA and no proxy.
+- Acceptance 3's Mac line is postponed; the row closes on its guest and Windows VM lines and says in its closing section that the macOS reading was not made.

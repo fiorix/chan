@@ -29,3 +29,12 @@ Read at `342dbe791`; the GTK arm of the raise is unchanged since the readings (`
 1. Tests: a request with the field and one without it both parse; the second launch puts its environment's id in the request, and a time-only id when it has none; the desktop applies the id it was given and none otherwise. Each red on the code without the change.
 2. In an sdme guest, the raise reading of v0.129.0 (`dev/v0129/evidence/minraise/scripts/readset.sh`: openbox, metacity with the chan window clicked, metacity with it never clicked; three control cycles, ten minimized, ten behind) on the code without the change and with it: under metacity with the chan window clicked, focused 10 of 10 in both arms with the change where it is 0 of 10 without; the control cycles still focus nothing; the other sets as in v0.129.0's reading after its fix.
 3. The same reading with the second launch given a `DESKTOP_STARTUP_ID`, as a desktop launcher sets one.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 13.2) on 2026-11-14: "as you recommend".
+
+- The field is one optional string on `Activate`, carrying the launcher's id verbatim or the `_TIME<timestamp>` form for a launch with none.
+- `OpenTerminal` takes the same field in this row, since a warm `chan-term` started by a hotkey meets the same refusal and its desktop entry sets `StartupNotify` false. `OpenPath` waits.
+- Reading the X server's time in the second launch needs an X connection before any GUI exists; the build chooses how, and a new crate is a lock change with its Nix re-pin.
+- The field is a wire shape: two reviewers read the range.

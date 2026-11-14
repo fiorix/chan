@@ -49,17 +49,17 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 
 ### v0.131.0
 
-Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved out of v0.130.0 when he kept that release to the `systemd-report` source, the flush pane edges and terminal bug fixes ("yes v0.131"): the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]); the reading of the AppImage in FUSE mode ([fusemode]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). With them, the rest of the notes v0.129.0 left, as rows: the launcher's file commands acting on the file browser focused last ([fbtarget]); an accessibility press on a tab closing it ([axclose]); a PDF export holding each page as one image ([pdftext]); the model download trusting only bundled roots ([modelroots]) and the CLI's self-update doing the same ("perhaps the cli's self-update can move to v0.131, no rush with this", [updroots]); the Windows-target lint of the whole dependency graph red in the `chan` crate ([winlint]); a heading the editor's parse reaches late having no fold chevron ([foldlate]); three of the graph tab's, a timed-out directory read failing the first load ([graphtimeout]), the window stalling while a large graph streams in ([graphstall]) and a directory keeping its old files after another takes its name ([graphrename]); and two of the raise's, a second launch from a terminal refused focus under focus-stealing prevention ([raisefocus]) and the raise paths that leave a minimized window minimized ([unbury]). Later that day, from the pane-focus build, a reloaded window coming back focused on another pane than its session saved ([reloadfocus]).
+Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved out of v0.130.0 when he kept that release to the `systemd-report` source, the flush pane edges and terminal bug fixes ("yes v0.131"): the ghostty-web fork, which continues with parts 3 to 6 ([ghosttyng]); the reading of the AppImage in FUSE mode ([fusemode]); the file browser's `New` and `Paste` choosing the folder the launcher's commands of those titles choose ([newpaste]); and a warm `chan-term` launch bringing Chan forward on macOS ([warmterm]). With them, the rest of the notes v0.129.0 left, as rows: the launcher's file commands acting on the file browser focused last ([fbtarget]); an accessibility press on a tab closing it ([axclose]); a PDF export holding each page as one image ([pdftext]); the model download trusting only bundled roots ([modelroots]) and the CLI's self-update doing the same ("perhaps the cli's self-update can move to v0.131, no rush with this", [updroots]); the Windows-target lint of the whole dependency graph red in the `chan` crate ([winlint]); a heading the editor's parse reaches late having no fold chevron ([foldlate]); three of the graph tab's, a timed-out directory read failing the first load ([graphtimeout]), the window stalling while a large graph streams in ([graphstall]) and a directory keeping its old files after another takes its name ([graphrename]); and two of the raise's, a second launch from a terminal refused focus under focus-stealing prevention ([raisefocus]) and the raise paths that leave a minimized window minimized ([unbury]). Later that day, from the pane-focus build, a reloaded window coming back focused on another pane than its session saved ([reloadfocus]). On 2026-11-14 the owner moved five rows from v0.130.0 here at its cut, typing scroll ([typescroll]), the fast stream ([streamlag]), the ConPTY reading ([conpty]), the Windows claim ([winclaim]) and the AppImage environment ([appenv]), and answered the decisions document for this release (`dev/v0131/decisions.md`): he withdrew the PDF text layer ("leave just the raster, no need to add text to our generated PDFs", [pdftext]); took Upload's rule for `New` and `Paste`; ruled each reading's outcomes in advance; and took six small rows and one reading from v0.130.0's follow-ups ("as you recommend"): a close test that fails a loaded gate ([closetest]), a shortcut edit that erases another window's shortcuts ([keysmerge]), the team load overwriting a hand-edited config ([teamload]), a survey taking another pane's keyboard ([surveykeys]), a bracketing override sending a body uncleaned ([bracketbody]), directory downloads and copies carrying write temporaries ([writetemps]), and the reading of whether a gateway page can delete a saved layout ([gwlayout]). Nine more of those follow-ups fold into rows here, each recorded in the row that takes it.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [New and Paste choose two folders][newpaste] | not started | decision |
+| [New and Paste choose two folders][newpaste] | not started | build |
 | [a warm chan-term leaves Chan behind][warmterm] | not started | build |
 | [the launcher acts on a stale browser][fbtarget] | not started | build |
 | [an accessibility press closes a tab][axclose] | not started | build |
-| [a PDF export is images only][pdftext] | not started | design |
+| [a PDF export is images only][pdftext] | withdrawn | closed |
 | [the model download trusts bundled roots][modelroots] | not started | build |
 | [the self-update trusts bundled roots][updroots] | not started | build |
 | [the Windows lint is red in chan][winlint] | not started | build |
@@ -76,6 +76,13 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | not started | measure |
+| [a close test fails a loaded gate][closetest] | not started | build |
+| [an edit erases another window's keys][keysmerge] | not started | build |
+| [team load overwrites the config][teamload] | not started | build |
+| [a survey takes another pane's keys][surveykeys] | not started | build |
+| [an override sends a body raw][bracketbody] | not started | build |
+| [downloads carry write temporaries][writetemps] | not started | build |
+| [a gateway page may drop a layout][gwlayout] | not started | measure |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
@@ -100,6 +107,13 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.131.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
+[closetest]: v0.131.0/a-devserver-close-test-holds-a-tenth-of-the-production-release-budget-and-fails-a-loaded-gate.md
+[keysmerge]: v0.131.0/a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved.md
+[teamload]: v0.131.0/cs-terminal-team-load-script-overwrites-a-hand-edited-team-config.md
+[surveykeys]: v0.131.0/a-terminals-survey-takes-the-keyboard-from-another-pane.md
+[bracketbody]: v0.131.0/a-bracketing-submit-override-sends-a-gemini-or-muse-body-uncleaned.md
+[writetemps]: v0.131.0/directory-downloads-and-copies-carry-chans-write-temporaries.md
+[gwlayout]: v0.131.0/a-gateway-page-may-delete-a-saved-layout.md
 
 ## Completed
 

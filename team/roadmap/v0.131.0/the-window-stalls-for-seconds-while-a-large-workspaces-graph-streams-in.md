@@ -28,3 +28,13 @@ Read at `342dbe791`, in `web/packages/workspace-app/src/`:
 1. First, a profile: the branch-switch reading on the kernel tree in a guest, in a release build (`dev/v0129/evidence/graphfix/scripts/checkout-burst.mjs`), with a performance trace, on the code without the change, naming what the longest task runs. If it is not the stream's handling, the row goes back to the owner rewritten from the trace before anything is built.
 2. Workspace app tests: a graph stream of many `nodes` and `edges` events delivered in one chunk publishes at most one view per frame and the whole view at the end; a refresh builds no view per event. Red on the code without the change, which publishes one view per event.
 3. The reading of step 1, five runs without the change and five with it on the same ref pair: the longest main-thread task and the total task time recorded, the longest task with the change below the lowest without it.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 10) on 2026-11-14: "as you recommend". The profile's outcomes are ruled in advance:
+
+- First, from point 10 and 13.3: the kernel tree is gone with its guest (`chan-v0129-graphfix`, destroyed on 2026-11-13). It is rebuilt from `dev/v0129/evidence/graphfix/scripts/kgit-build.sh` before the profile. No trace of the graph was ever captured; a trace harness exists in the `chan-dev` repository (`releases/v0103-team/evidence/Diagnostics103/chrome-doc-profile.mjs`).
+- The longest task is in the stream's handling (the per-event views, the publish, `readNdjsonStream` not yielding): built as written.
+- The longest task is one derive or layout of the whole graph in the tab: contracts 1 and 2 are built anyway, acceptance 3 reads "total main-thread task time lower in all five runs, the longest task recorded", and a row is drafted for the layout's cost.
+- The longest task is elsewhere in the app's reaction to the same rebuild: the row is rewritten from the trace, and built only if it stays inside this row's files; otherwise it goes back to the owner.
+- The stall does not reproduce (the longest task under 500 ms in five runs): contracts 1 and 2 are built on the unit test's red, the numbers recorded, and the row closes.

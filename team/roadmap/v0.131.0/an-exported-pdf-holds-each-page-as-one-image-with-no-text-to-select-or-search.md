@@ -30,3 +30,11 @@ Read at `342dbe791`. The report names a draft; by reading, every PDF export is d
 2. A browser check reads back, with a PDF text extractor, the text of a `cs export` of a document and of a deck: a known paragraph in order, a heading and a word with accents, each on the page that shows it; red on today's export.
 3. In an sdme guest on chan-desktop for Linux, and on the owner's Mac on chan-desktop: the launcher's `Export to PDF` of a draft and of a workspace file, opened in a PDF reader (Preview on the Mac), finds a word, copies a line that pastes as typed, and looks as today's export of the same file.
 4. The size and the time of an export of a long document with images, at the base and at the tip in one guest, are in the row's record.
+
+## Rulings for v0.131.0, 2026-11-14
+
+Withdrawn by the owner on 2026-11-14, answering the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 1): "leave just the raster, no need to add text to our generated PDFs; what I care about is that we can render our documents and slide decks as PDFs and things like images and diagrams fit well in the translation between our "pageless" editor plus the virtual page from our slide decks to a PDF with pages. Retaining the dark/light theme is also important. Having text, searcheable text, not really important. Plus Preview can already search our rastered PDFs anyway with OCR."
+
+- Nothing of this row is built. It moves to `done/` at the release's close as withdrawn, linking the release record.
+- In its place the round reads today's export once against his words: a document and a deck holding images and diagrams, exported in the light and the dark theme, in a guest, looking at how images and diagrams fit across pages and whether the theme holds. What the reading shows goes to the owner as a report; a defect it finds is a candidate for him, not scope.
+- From point 13.3, for the record: the manual's export section is `manual/previews.html#export`, not the editor page.

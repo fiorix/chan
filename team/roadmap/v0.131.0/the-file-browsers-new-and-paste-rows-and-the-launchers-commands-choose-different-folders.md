@@ -31,3 +31,12 @@ The review's run in a guest (`dev/v0129/evidence/deckfiles/review-1/run-1/`), in
 
 1. Tests that drive the real components and commands, in a list view and in a tree, with nothing selected, a directory selected and a file selected: the row and the command reach one folder in each, red on today's code where they differ.
 2. The manual says where `New` and `Paste` put what they make, in the words the code holds.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 2) on 2026-11-14: "As you recommend, the upload rule."
+
+- The rule is Upload's, as `uploadDir()` (`FileTree.svelte`) holds it: the menu row's rule, except that a tree with nothing selected takes the default create directory, which in a standalone window is home and not the filesystem root. One function for the three titles, reading the selection's kind from the entry and not from the visible rows.
+- A list keeps "the folder shown" even with a directory row selected. With no file browser surface at all, the launcher's `New` takes the default create directory, as now.
+- The collapsed-parent case of finding 6 is taken here: the selection's kind is read from the entry, and a target's ancestors are expanded when something lands in it.
+- Built after the launcher's surface row, which edits the same files. The tests add the standalone tree and the collapsed parent; the manual's Files page says the rule in the code's words.

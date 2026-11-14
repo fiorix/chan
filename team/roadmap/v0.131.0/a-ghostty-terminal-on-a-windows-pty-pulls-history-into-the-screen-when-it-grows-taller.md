@@ -30,3 +30,13 @@ Read at `342dbe791`; nothing run on Windows.
 
 1. On the Windows VM (`dev/vm/windows.sh`), chan-desktop at the base, a ghostty terminal and then an xterm.js one, each over PowerShell: a screen of output with history above it (`1..300`), the window made shorter, then taller, by its height alone and then by a corner (rows and columns at once), then a command run. Record, beside Windows Terminal doing the same, whether the prompt, its output and the rows above stay where they belong and whether any row is lost, blank or doubled, with screenshots.
 2. If acceptance 1 shows the drift: tests that a ghostty terminal on a ConPTY session sets the option off and one on another PTY leaves it on (and `windowsPty` likewise on xterm.js, where it applies), red on today's code; then acceptance 1 again at the tip, its rows in place.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 10) on 2026-11-14: "as you recommend". The reading's outcomes are ruled in advance:
+
+- Rows stay as in Windows Terminal on both backends: the row closes withdrawn, as contract 1 says.
+- Drift on ghostty, on xterm.js or on both: contract 2 or 3 is built for the backend that drifts. The wire shape: the attach prelude's `session` frame gains `pty`, `"conpty"` from a Windows server and absent elsewhere and from older servers (a client reads its absence as today's behaviour), and beside it the Windows build number, which xterm.js's `windowsPty` needs.
+- Inconclusive (the resize cannot be scripted, or the screenshots do not settle it): one more run with the v0.126.0 drag tools (in the `chan-dev` repository, `releases/v0126/team/reports/Win126/scripts/qdrag.py` and `winstate.ps1`). Still inconclusive: the ghostty option is built off under ConPTY on the core's own comment, xterm.js is left as it is, and the reading is recorded as inconclusive.
+- The option off reads worse at the tip: reverted, and the row closes withdrawn with both readings.
+- Windows Terminal is installed on the VM if it is not there.

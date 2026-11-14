@@ -35,3 +35,12 @@ Read at `342dbe791`, by reading only. The claim is as v0.128.0 left it: v0.129.0
 2. On the Windows VM with the installed build, a second local account holds each shape of the claim's name. This account's Start menu launch starts Chan, a second launch brings it forward with exit 0, and `chan serve` hands its workspace to that desktop. At the base, the first shape boots two desktops and the second shows "Chan is not responding" after about 35 s. The v0.128.0 row's two-account readings are repeated.
 3. On the Windows VM: a v0.129.0 desktop running and a launch of this build started by hand beside it, and the reverse, each end in one desktop.
 4. `crates/chan-server/design.md`, `desktop/design.md` and `crates/chan-winpipe/design.md` say what the claim is, without the two limits. The manual's install page (`web/packages/marketing/src/pages/manual/install.html`) is checked against the result.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 8) on 2026-11-14: "as you recommend".
+
+- The lock is `%LOCALAPPDATA%\chan\run\desktop.lock`, taken with `File::try_lock`, in a directory created with an owner-only descriptor through chan-winpipe (the descriptor it builds for pipes) and checked at every claim: owned by this account's SID and granting this account alone. A directory that fails the check is `ClaimError::Unavailable`, as on unix: the launch runs without the listener. chan-winpipe gains the file form of its descriptor reader; chan-server keeps `forbid(unsafe_code)`.
+- The desktop still creates the claim pipe, as a sign and never as the claim, so an older launch beside a new desktop reads it as held, asks, and is answered.
+- One gap across the release boundary is accepted: a launch of this release while an older desktop is still booting (it holds the claim pipe and has no endpoint yet) cannot tell that pipe from another account's without opening it, and boots a second desktop. The window is seconds, once per update, and ends when no desktop older than this release runs. Contract 4 reads with that exception.
+- From point 13.3: the older desktop of the compatibility reading (acceptance 3) is v0.130.0, whose claim code is the same as v0.129.0's. The VM's second account (`ch.an`) and v0.128.0's pipe holder (in the `chan-dev` repository, `releases/v0128/team/evidence/Desk128/winpipe-3/scripts/vm/t3-squat.ps1`, both shapes) are reused.

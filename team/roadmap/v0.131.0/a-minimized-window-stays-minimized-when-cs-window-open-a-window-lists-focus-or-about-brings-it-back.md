@@ -29,3 +29,9 @@ Read at `342dbe791`, with tao 0.37.2 as locked; by reading, not run.
 1. Tests in the raise's own style (its decision table and source pins): the caller pin names the new callers, and each of the four sites restores before it focuses; red on the code without the change.
 2. In a guest, a minimized workspace window brought back by `cs window open` from outside it, and a minimized About window by the About item, ten times each under openbox and under metacity with the chan window never clicked (the reading of the raise row's harness, `dev/v0129/evidence/minraise/scripts/read.sh`): restored and focused 10 of 10 with the change, still minimized without it.
 3. On the Windows VM (`dev/vm/windows.sh`) and on the owner's Mac, `cs window open` on a minimized window, ten runs each: the window restored and in front.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`) on 2026-11-14; on its point 11 he wrote "as you recommend".
+
+- Folded in from v0.130.0's follow-ups: on GTK the shared raise leaves a hidden window shown but unfocused (`raise.rs`'s module comment: "A window that read hidden is shown by the queued `show` after `set_focus` has already skipped it, so the raise leaves it unfocused"). This row routes a hidden window's path through that raise (`unbury_window`'s last branch), so the raise focuses a window that read hidden once it reads shown, as it does a window that read minimized once it no longer does. The boundary's "the raise itself is unchanged" gives way for that arm alone; the caller pin and the decision table cover it, and acceptance 2's guest reading adds a hidden live window brought back by `cs window open`, restored and focused 10 of 10 under openbox and metacity.

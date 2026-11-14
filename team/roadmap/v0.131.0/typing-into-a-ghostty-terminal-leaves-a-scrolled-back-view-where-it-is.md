@@ -29,3 +29,10 @@ Read at `342dbe791`, and the same at v0.128.0 (`8ded1bda9`); not run.
 1. App tests over a ghostty terminal scrolled back several rows, in a suite the gate runs (the widget's own tests in `lib/` are not run): a letter typed through ghostty-web's input, an arrow `ghosttyKeys.ts` sends, and a paste through `pasteIntoGhostty` each leave `getViewportY()` at 0; a copy chord and a write of output leave it where it was. The three inputs are red on today's code.
 2. The same over an xterm.js terminal for Ctrl+/ and an Option-as-Meta key; red on today's code.
 3. On chan-desktop (the owner's Mac, or a desktop guest on Linux), with a few hundred lines of history on each backend: scroll back and type a letter; the view jumps to the prompt with the letter at the cursor.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`) on 2026-11-14; on its point 11 he wrote "as you recommend".
+
+- Folded in from v0.130.0's follow-ups: a file dropped into a terminal does not scroll it, on either backend (that release's record, "Follow-ups", the ghostty widget). The drop is input the user makes, which contract 1 already names through the paste: `onTerminalFileDrop` (`web/packages/workspace-app/src/components/TerminalTab.svelte`) sends the escaped paths through `sendUserInput`. Acceptance 1 and 2 gain a dropped file on each backend, red on today's code.
+- For the build and its reviewer, from the same document's point 13.3: wheel and mouse reports also pass through `sendUserInput` (`TerminalTab.svelte`, the wheel and mouse paths), so the rule sits at the callers that are the user's input, not inside `sendUserInput`; a mouse report or a wheel delta sent to the program does not move the view by this rule.

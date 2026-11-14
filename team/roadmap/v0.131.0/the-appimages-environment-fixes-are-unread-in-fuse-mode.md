@@ -38,3 +38,11 @@ v0.129.0 changed what chan's AppImage hands the processes it starts: the desktop
 
 1. Each item of the list read on a host with FUSE against the AppImage of the release under test, with the v0.128.0 AppImage as the older parent where an item names one, and the output recorded.
 2. Every failure fixed with a test that fails without the fix, or carried as a row of its own, before this row closes.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 3) on 2026-11-14: "take your recommendation; if it turns out to be too complicated we can postpone until we can have a proper setup. this isn't very important to me."
+
+- Where it runs: an sdme desktop guest given the host's `/dev/fuse` by a bind and a `DeviceAllow` drop-in on its unit, starting no chan process for the first probe (point 3's commands); the Arch VM under `dev/vm/` as the fallback, and for one item read as an unprivileged user as a control, since the guest runs as root and does not exercise the setuid `fusermount` path.
+- When: after the AppImage environment row merges, so the list is read once, against an AppImage that holds that fix, with v0.128.0's as the older parent. That row's third acceptance line joins this list.
+- An item that fails and is small goes to the desktop seat as a fix with a test; a larger one, or one in the update's relaunch, is drafted as a row and put to the owner. Once both routes have been tried and the reading is still too complicated, this row moves to the next release without a survey, with what was tried written here.

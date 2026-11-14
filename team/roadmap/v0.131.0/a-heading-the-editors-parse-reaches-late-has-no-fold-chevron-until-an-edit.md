@@ -31,3 +31,11 @@ Read at `342dbe791`, with `@codemirror/view` 6.43.15 and `@codemirror/language` 
 1. First, the reading, in a guest: the workspace app in a browser opens a long note and counts the painted chevrons against the lines drawn as headings on the first screen before any input, with headings on that screen past the first 3,000 characters; then the same after a jump to the note's end. Run on the code without the change. If every count matches, the row goes back to the owner with that reading, to close it or keep contract 2 alone.
 2. Workspace app tests over a view with the creation parse cut (probe P10's shape; `withShortCreationParse` in `editor/fold.test.ts`): after the worker's publish, with no input, every heading has its chevron; a click beside a heading the creation parse did not reach folds its section. Each red on the code without the change.
 3. The reading of step 1 as a browser check under `scripts/e2e/browser-smoke/checks/`, green on the change in a guest.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 10) on 2026-11-14: "as you recommend". The reading's outcomes are ruled in advance:
+
+- Chevrons missing on the first screen or after the jump: both contract lines are built.
+- Every count matches: contract 1 is built anyway on the jsdom red (probe P10: three headings styled, one chevron, still one after the worker's publish, three after an edit), acceptance 3 is dropped since a browser check that cannot go red proves nothing, and the row records that no browser showed the gap. The reason: the gutter depends on the syntax tree and `lineMarkerChange` ignores tree changes; a browser's height measure repairing it is an accident, not a contract.
+- A gap whose cause lies outside `fold.ts` (the walker or the language setup, which this row excludes): back to the owner with the reading.

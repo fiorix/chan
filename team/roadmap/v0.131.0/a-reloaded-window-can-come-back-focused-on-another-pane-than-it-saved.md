@@ -27,3 +27,13 @@ So after something in that sequence the hash stops following the focused pane wh
 
 1. A reading first: the arm of check 226's sequence after which the hash stops naming the focused pane, and the mechanism, with a control that keeps the hash current.
 2. Then a browser check, red on today's code, that runs that arm, presses on another pane, reloads, and reads the focused pane and where the keyboard is.
+
+## Rulings for v0.131.0, 2026-11-14
+
+The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`, point 10) on 2026-11-14: "as you recommend". The reading's outcomes are ruled in advance:
+
+- The write is skipped by the no-change test against a stale address, or overwritten by a later write of an older layout: fixed in `persistStateToHash` and its scheduler (`state/store.svelte.ts`), browser check red first.
+- The browser refuses `replaceState` after a burst (the store's comment names WebKit's limit): a trailing write once the limit's window has passed.
+- Pane ids renumbering at a restore is the cause (v0.130.0's record: pane-1 came back as pane-3): fixed in the restore, inside this row's boundary.
+- Not reproduced in 20 runs of check 226's sequence on both backends at the base: the row closes withdrawn with the runs, keeping the sequence-then-reload assertion as a check shown red by a mutation that stales the hash.
+- Any fix that needs the session to outrank the hash at a reload goes back to the owner.
