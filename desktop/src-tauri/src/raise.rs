@@ -1,8 +1,11 @@
 //! The raise a window gets when chan brings it forward on request: a second
 //! launch coming forward (`single_instance::come_forward`), a close
-//! confirmation (`serve::on_close_requested`) and a Window menu row
-//! (`show_window` in `main.rs`). Those three call [`raise_window`] and nothing
-//! else does, so no path takes focus that nobody asked for.
+//! confirmation (`serve::on_close_requested`), an open Window menu row
+//! (`show_window` in `main.rs`), a window list or `cs window open` request or
+//! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
+//! for an existing window (`open_about_window` in `main.rs`). These call
+//! [`raise_window`] and nothing else does, so no path takes focus that nobody
+//! asked for.
 //!
 //! The raise restores the window, shows it and focuses it through Tauri, and
 //! then settles what those calls leave undone on the platform. The focus call
@@ -24,13 +27,14 @@
 //!   show for the GTK main loop and clears its minimized flag only when GTK
 //!   reports the window's new state, after the window manager has handled
 //!   the restore, so a `set_focus` that follows the restore at once finds
-//!   the window still minimized. A window that read minimized before the
-//!   raise is focused again once it no longer reads minimized, looked at off
-//!   the main thread every [`RESTORE_POLL`] for at most [`RESTORE_WAIT`]; one
-//!   that still reads minimized then is left as the window manager put it.
+//!   the window still minimized. A window that read minimized or hidden
+//!   before the raise is focused again once it reads visible and no longer
+//!   minimized, looked at off the main thread every [`RESTORE_POLL`] for at
+//!   most [`RESTORE_WAIT`]; one that still reads minimized or hidden then is
+//!   left as the window manager put it.
 //!   A window that read shown needs nothing more, since `set_focus` presented
-//!   it. A window that read hidden is shown by the queued `show` after
-//!   `set_focus` has already skipped it, so the raise leaves it unfocused.
+//!   it. Waiting for visibility also covers the queued `show` of a hidden
+//!   window, which the immediate `set_focus` skips.
 //!   Whether the window manager gives a presented window the focus is its
 //!   own decision: one that prevents focus stealing weighs the request's
 //!   time, which GTK takes from the last input the app received, against
@@ -42,10 +46,10 @@
 
 use std::time::Duration;
 
-use tauri::WebviewWindow;
+use tauri::{Runtime, WebviewWindow};
 
 /// How long a raise on the GTK desktops waits for a window that read
-/// minimized to read restored, and how often it looks. A window manager
+/// minimized or hidden to read restored and visible, and how often it looks. A window manager
 /// answers a restore within a few frames; the bound keeps a window that never
 /// reads restored from being focused long after the user moved on.
 const RESTORE_WAIT: Duration = Duration::from_secs(1);
@@ -54,12 +58,13 @@ const RESTORE_POLL: Duration = Duration::from_millis(20);
 /// Restore, show and focus `window`, then settle the platform's remainder
 /// (see the module comment). Fails only when Tauri cannot reach the window's
 /// event loop.
-pub(crate) fn raise_window(window: &WebviewWindow) -> tauri::Result<()> {
+pub(crate) fn raise_window<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     let was_minimized = window.is_minimized().unwrap_or(false);
+    let was_visible = window.is_visible().unwrap_or(true);
     let _ = window.unminimize();
     window.show()?;
     window.set_focus()?;
-    match settle_for(Platform::CURRENT, was_minimized) {
+    match settle_for(Platform::CURRENT, was_minimized, was_visible) {
         Settle::ActivateApp => {
             #[cfg(target_os = "macos")]
             activate_app(window);
@@ -94,16 +99,16 @@ impl Platform {
 enum Settle {
     /// Unhide the app, make the window key and activate the app.
     ActivateApp,
-    /// Focus the window again once it no longer reads minimized.
+    /// Focus the window again once it reads visible and no longer minimized.
     FocusOnceRestored,
     /// The window calls were enough.
     Nothing,
 }
 
-fn settle_for(platform: Platform, was_minimized: bool) -> Settle {
+fn settle_for(platform: Platform, was_minimized: bool, was_visible: bool) -> Settle {
     match platform {
         Platform::MacOs => Settle::ActivateApp,
-        Platform::Gtk if was_minimized => Settle::FocusOnceRestored,
+        Platform::Gtk if was_minimized || !was_visible => Settle::FocusOnceRestored,
         Platform::Gtk | Platform::Windows => Settle::Nothing,
     }
 }
@@ -116,7 +121,7 @@ fn settle_for(platform: Platform, was_minimized: bool) -> Settle {
 /// decline while another app is active, as one is when a second launch asks
 /// chan to come forward.
 #[cfg(target_os = "macos")]
-fn activate_app(window: &WebviewWindow) {
+fn activate_app<R: Runtime>(window: &WebviewWindow<R>) {
     use objc2_app_kit::{NSApplication, NSWindow};
 
     let target = window.clone();
@@ -146,13 +151,13 @@ fn activate_app(window: &WebviewWindow) {
     }
 }
 
-/// Focus `window` once it no longer reads minimized, from a task of its own
-/// so the caller's thread, the main thread for two of the three callers, is
-/// never held.
-fn focus_once_restored(window: WebviewWindow) {
+/// Focus `window` once it reads visible and no longer minimized, from a task
+/// of its own so a caller on the main thread is never held.
+fn focus_once_restored<R: Runtime>(window: WebviewWindow<R>) {
     tauri::async_runtime::spawn(async move {
         let restored = focus_when_restored(
             || window.is_minimized().ok(),
+            || window.is_visible().ok(),
             || {
                 if let Err(e) = window.set_focus() {
                     tracing::warn!(label = %window.label(), error = %e, "focusing the restored window failed");
@@ -164,10 +169,10 @@ fn focus_once_restored(window: WebviewWindow) {
             Restored::Focused(waited) => {
                 tracing::debug!(label = %window.label(), ?waited, "focused the raised window once it read restored")
             }
-            Restored::StillMinimized => tracing::info!(
+            Restored::NotReady => tracing::info!(
                 label = %window.label(),
                 waited = ?RESTORE_WAIT,
-                "the raised window still reads minimized; its focus is left to the window manager"
+                "the raised window still reads minimized or hidden; its focus is left to the window manager"
             ),
             Restored::Gone => {
                 tracing::debug!(label = %window.label(), "the raised window went before it read restored")
@@ -181,29 +186,30 @@ fn focus_once_restored(window: WebviewWindow) {
 enum Restored {
     /// The window read restored after this long and was focused.
     Focused(Duration),
-    /// It still read minimized when the wait was spent.
-    StillMinimized,
+    /// It still read minimized or hidden when the wait was spent.
+    NotReady,
     /// It could not be read, so it is gone.
     Gone,
 }
 
-/// Look at `minimized` every [`RESTORE_POLL`] and call `focus` once it reads
-/// `false`, for at most [`RESTORE_WAIT`]. `minimized` answers `None` for a
-/// window that cannot be read.
+/// Look every [`RESTORE_POLL`] and call `focus` once the window reads visible
+/// and not minimized, for at most [`RESTORE_WAIT`]. Either reading answers
+/// `None` for a window that cannot be read.
 async fn focus_when_restored(
     mut minimized: impl FnMut() -> Option<bool>,
+    mut visible: impl FnMut() -> Option<bool>,
     focus: impl FnOnce(),
 ) -> Restored {
     let start = tokio::time::Instant::now();
     loop {
         let waited = start.elapsed();
-        match after_look(minimized(), waited) {
+        match after_look(minimized(), visible(), waited) {
             Look::Focus => {
                 focus();
                 return Restored::Focused(waited);
             }
             Look::Again => tokio::time::sleep(RESTORE_POLL).await,
-            Look::StillMinimized => return Restored::StillMinimized,
+            Look::NotReady => return Restored::NotReady,
             Look::Gone => return Restored::Gone,
         }
     }
@@ -214,16 +220,16 @@ async fn focus_when_restored(
 enum Look {
     Focus,
     Again,
-    StillMinimized,
+    NotReady,
     Gone,
 }
 
-fn after_look(minimized: Option<bool>, waited: Duration) -> Look {
-    match minimized {
-        Some(false) => Look::Focus,
-        Some(true) if waited < RESTORE_WAIT => Look::Again,
-        Some(true) => Look::StillMinimized,
-        None => Look::Gone,
+fn after_look(minimized: Option<bool>, visible: Option<bool>, waited: Duration) -> Look {
+    match (minimized, visible) {
+        (Some(false), Some(true)) => Look::Focus,
+        (Some(_), Some(_)) if waited < RESTORE_WAIT => Look::Again,
+        (Some(_), Some(_)) => Look::NotReady,
+        _ => Look::Gone,
     }
 }
 
@@ -272,33 +278,48 @@ mod tests {
     #[test]
     fn each_platform_settles_the_raise_its_own_way() {
         for was_minimized in [false, true] {
+            for was_visible in [false, true] {
+                assert_eq!(
+                    settle_for(Platform::MacOs, was_minimized, was_visible),
+                    Settle::ActivateApp
+                );
+                assert_eq!(
+                    settle_for(Platform::Windows, was_minimized, was_visible),
+                    Settle::Nothing
+                );
+            }
+        }
+        for (minimized, visible) in [(true, true), (false, false), (true, false)] {
             assert_eq!(
-                settle_for(Platform::MacOs, was_minimized),
-                Settle::ActivateApp
-            );
-            assert_eq!(
-                settle_for(Platform::Windows, was_minimized),
-                Settle::Nothing
+                settle_for(Platform::Gtk, minimized, visible),
+                Settle::FocusOnceRestored
             );
         }
-        assert_eq!(settle_for(Platform::Gtk, true), Settle::FocusOnceRestored);
-        // A window that did not read minimized was presented by the focus
-        // call already, and is not waited for.
-        assert_eq!(settle_for(Platform::Gtk, false), Settle::Nothing);
+        assert_eq!(settle_for(Platform::Gtk, false, true), Settle::Nothing);
     }
 
     #[test]
-    fn a_look_focuses_a_restored_window_and_waits_for_a_minimized_one_within_the_bound() {
-        assert_eq!(after_look(Some(false), Duration::ZERO), Look::Focus);
-        assert_eq!(after_look(Some(false), RESTORE_WAIT * 2), Look::Focus);
-        assert_eq!(after_look(Some(true), Duration::ZERO), Look::Again);
-        assert_eq!(
-            after_look(Some(true), RESTORE_WAIT - RESTORE_POLL),
-            Look::Again
-        );
-        assert_eq!(after_look(Some(true), RESTORE_WAIT), Look::StillMinimized);
-        assert_eq!(after_look(None, Duration::ZERO), Look::Gone);
-        assert_eq!(after_look(None, RESTORE_WAIT), Look::Gone);
+    fn a_look_requires_a_visible_restored_window_and_bounds_the_wait() {
+        for waited in [Duration::ZERO, RESTORE_WAIT * 2] {
+            assert_eq!(after_look(Some(false), Some(true), waited), Look::Focus);
+        }
+        for (minimized, visible) in [(true, true), (false, false), (true, false)] {
+            for waited in [Duration::ZERO, RESTORE_WAIT - RESTORE_POLL] {
+                assert_eq!(
+                    after_look(Some(minimized), Some(visible), waited),
+                    Look::Again
+                );
+            }
+            assert_eq!(
+                after_look(Some(minimized), Some(visible), RESTORE_WAIT),
+                Look::NotReady
+            );
+        }
+        for (minimized, visible) in [(None, Some(true)), (Some(false), None), (None, None)] {
+            for waited in [Duration::ZERO, RESTORE_WAIT] {
+                assert_eq!(after_look(minimized, visible, waited), Look::Gone);
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -312,6 +333,7 @@ mod tests {
                     looks += 1;
                     Some(looks < 4)
                 },
+                || Some(true),
                 || focused += 1,
             ),
         )
@@ -328,35 +350,73 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_window_that_stays_minimized_is_left_once_the_wait_is_spent() {
-        let start = tokio::time::Instant::now();
-        let mut focused = false;
-        let restored = tokio::time::timeout(
-            RESTORE_WAIT * 10,
-            focus_when_restored(|| Some(true), || focused = true),
-        )
-        .await
-        .expect("the wait is bounded");
-        assert_eq!(restored, Restored::StillMinimized);
-        assert!(!focused);
-        let waited = start.elapsed();
-        assert!(
-            waited >= RESTORE_WAIT && waited < RESTORE_WAIT + RESTORE_POLL,
-            "{waited:?}"
-        );
+    async fn a_window_that_stays_minimized_or_hidden_is_left_once_the_wait_is_spent() {
+        for (minimized, visible) in [(true, true), (false, false), (true, false)] {
+            let start = tokio::time::Instant::now();
+            let mut focused = false;
+            let restored = tokio::time::timeout(
+                RESTORE_WAIT * 10,
+                focus_when_restored(|| Some(minimized), || Some(visible), || focused = true),
+            )
+            .await
+            .expect("the wait is bounded");
+            assert_eq!(restored, Restored::NotReady);
+            assert!(!focused);
+            let waited = start.elapsed();
+            assert!(
+                waited >= RESTORE_WAIT && waited < RESTORE_WAIT + RESTORE_POLL,
+                "{waited:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hidden_window_waits_for_both_visibility_and_restore_before_focusing_once() {
+        use std::cell::Cell;
+        for hidden_first in [false, true] {
+            let looks = Cell::new(0);
+            let mut focused = 0;
+            let restored = tokio::time::timeout(
+                RESTORE_WAIT * 10,
+                focus_when_restored(
+                    || {
+                        looks.set(looks.get() + 1);
+                        Some(if hidden_first {
+                            looks.get() < 2
+                        } else {
+                            looks.get() < 4
+                        })
+                    },
+                    || {
+                        Some(if hidden_first {
+                            looks.get() >= 4
+                        } else {
+                            looks.get() >= 2
+                        })
+                    },
+                    || focused += 1,
+                ),
+            )
+            .await
+            .expect("the wait is bounded");
+            assert_eq!(restored, Restored::Focused(RESTORE_POLL * 3));
+            assert_eq!((looks.get(), focused), (4, 1));
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_window_that_cannot_be_read_is_not_focused() {
-        let mut focused = false;
-        let restored = tokio::time::timeout(
-            RESTORE_WAIT * 10,
-            focus_when_restored(|| None, || focused = true),
-        )
-        .await
-        .expect("the wait is bounded");
-        assert_eq!(restored, Restored::Gone);
-        assert!(!focused);
+        for (minimized, visible) in [(None, Some(true)), (Some(false), None)] {
+            let mut focused = false;
+            let restored = tokio::time::timeout(
+                RESTORE_WAIT * 10,
+                focus_when_restored(|| minimized, || visible, || focused = true),
+            )
+            .await
+            .expect("the wait is bounded");
+            assert_eq!(restored, Restored::Gone);
+            assert!(!focused);
+        }
     }
 
     /// A source pin: the window calls run in the order a minimized window
@@ -368,16 +428,17 @@ mod tests {
     fn the_raise_restores_shows_and_focuses_before_it_settles() {
         let raise = body(
             production(include_str!("raise.rs")),
-            "\npub(crate) fn raise_window(",
+            "\npub(crate) fn raise_window",
         );
         in_order(
             raise,
             &[
-                "window.is_minimized()",
+                "let was_minimized = window.is_minimized().unwrap_or(false);",
+                "let was_visible = window.is_visible().unwrap_or(true);",
                 "window.unminimize()",
                 "window.show()?",
                 "window.set_focus()?",
-                "settle_for(Platform::CURRENT, was_minimized)",
+                "settle_for(Platform::CURRENT, was_minimized, was_visible)",
                 "Settle::ActivateApp => {",
                 "activate_app(window);",
                 "Settle::FocusOnceRestored => focus_once_restored(window.clone())",
@@ -401,13 +462,14 @@ mod tests {
     fn the_wait_reads_and_focuses_the_raised_window() {
         let focus = body(
             production(include_str!("raise.rs")),
-            "\nfn focus_once_restored(",
+            "\nfn focus_once_restored",
         );
         in_order(
             focus,
             &[
                 "focus_when_restored(",
                 "|| window.is_minimized().ok(),",
+                "|| window.is_visible().ok(),",
                 "if let Err(e) = window.set_focus() {",
                 ".await;",
             ],
@@ -420,7 +482,7 @@ mod tests {
     /// as `set_focus` keys before it activates.
     #[test]
     fn the_app_is_unhidden_then_the_window_keyed_then_the_app_activated() {
-        let activate = body(production(include_str!("raise.rs")), "\nfn activate_app(");
+        let activate = body(production(include_str!("raise.rs")), "\nfn activate_app");
         in_order(
             activate,
             &[
@@ -436,11 +498,60 @@ mod tests {
         );
     }
 
-    /// The raise takes focus, so it is reached from the three raises a user
-    /// asked for and from nowhere else: one call in each of their files, by
-    /// the module path, and no other mention of it outside this module.
     #[test]
-    fn only_the_three_raises_take_the_shared_raise() {
+    fn each_unbury_branch_and_the_existing_about_window_take_the_shared_raise() {
+        let main = production(include_str!("main.rs"));
+        let unbury = body(main, "\npub fn unbury_window");
+        let (_, local) = unbury
+            .split_once("if label.starts_with(\"local::\") {")
+            .unwrap();
+        let (local, remote) = local
+            .split_once("if label.starts_with(\"lib-\") {")
+            .unwrap();
+        let (remote, other) = remote
+            .split_once("let shown = match app.get_webview_window(label)")
+            .unwrap();
+        for branch in [local, remote] {
+            in_order(
+                branch,
+                &[
+                    "view.unbury(label)",
+                    "if let Some(w) = app.get_webview_window(label)",
+                    "raise::raise_window(&w)",
+                ],
+            );
+            assert_eq!(branch.matches("raise::raise_window(&w)").count(), 1);
+        }
+        in_order(
+            other,
+            &["Some(w) => {", "raise::raise_window(&w)", "None => false"],
+        );
+        assert_eq!(other.matches("raise::raise_window(&w)").count(), 1);
+        let about = body(main, "\nfn open_about_window(");
+        let existing = about.split_once("let version =").unwrap().0;
+        in_order(
+            existing,
+            &[
+                "if let Some(win) = app.get_webview_window(\"about\")",
+                "raise::raise_window(&win)",
+                "return Ok(())",
+            ],
+        );
+        assert_eq!(about.matches("raise::raise_window(&win)").count(), 1);
+        for caller in [unbury, existing] {
+            for own in [".show()", ".set_focus()", ".unminimize()"] {
+                assert!(
+                    !caller.contains(own),
+                    "caller must leave {own} to the shared raise"
+                );
+            }
+        }
+    }
+
+    /// Every direct caller is an explicit request to bring a window forward.
+    /// Count all mentions so an import cannot bypass the module-path pin.
+    #[test]
+    fn only_the_requested_raises_take_the_shared_raise() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut calls = BTreeMap::new();
         for entry in std::fs::read_dir(&src).expect("the crate's sources are readable") {
@@ -467,7 +578,7 @@ mod tests {
         assert_eq!(
             calls,
             BTreeMap::from([
-                ("main.rs".to_string(), 1),
+                ("main.rs".to_string(), 5),
                 ("serve.rs".to_string(), 1),
                 ("single_instance.rs".to_string(), 1),
             ])

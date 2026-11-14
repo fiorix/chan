@@ -7145,15 +7145,11 @@ pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) 
         if let Some(view) = state.local_watcher_view() {
             view.unbury(label);
         }
-        // FOCUS on an ALREADY-VISIBLE watcher window: `view.unbury` is a no-op
-        // (its webview is alive, not buried), and the early return below skips
-        // the show()/set_focus() the final branch does -- so raise + focus the
-        // live webview here. A BURIED window's webview was destroyed
-        // (`get_webview_window` is None → no-op), and the reconcile reopens it
-        // focused (the window builder focuses by default).
+        // A live watcher window needs an explicit raise: unburying its view
+        // changes nothing. A buried window has no webview, and the reconcile
+        // rebuilds it with the window builder's default focus.
         if let Some(w) = app.get_webview_window(label) {
-            let _ = w.show();
-            let _ = w.set_focus();
+            let _ = raise::raise_window(&w);
         }
         if removed {
             rebuild_window_menu(app);
@@ -7180,14 +7176,10 @@ pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) 
                 embedded.signal_library_change();
             }
         }
-        // FOCUS on an ALREADY-VISIBLE devserver window: as in the `local::`
-        // branch, `view.unbury` is a no-op on a live webview and the early
-        // return skips show()/set_focus(), so raise + focus it here. A buried
-        // window's webview is destroyed (None → no-op) and the reconcile reopens
-        // it focused.
+        // A live webview needs the raise; a buried one is rebuilt and focused
+        // by the reconcile, as in the local watcher branch.
         if let Some(w) = app.get_webview_window(label) {
-            let _ = w.show();
-            let _ = w.set_focus();
+            let _ = raise::raise_window(&w);
         }
         if removed {
             rebuild_window_menu(app);
@@ -7196,8 +7188,7 @@ pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) 
     }
     let shown = match app.get_webview_window(label) {
         Some(w) => {
-            let _ = w.show();
-            let _ = w.set_focus();
+            let _ = raise::raise_window(&w);
             true
         }
         None => false,
@@ -7221,7 +7212,7 @@ pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) 
 /// `app`-plugin capability just to render it.
 fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("about") {
-        let _ = win.set_focus();
+        let _ = raise::raise_window(&win);
         return Ok(());
     }
     let version = app.package_info().version.to_string();
