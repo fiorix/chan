@@ -9,14 +9,18 @@
 // fold range must not be truncated by a fenced `#` comment.
 
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { foldedRanges, syntaxTree } from "@codemirror/language";
+import { EditorView, ViewUpdate } from "@codemirror/view";
+import { foldEffect, foldedRanges, syntaxTree, unfoldEffect } from "@codemirror/language";
 import { describe, expect, test, vi } from "vitest";
 import { parsedState } from "../__tests__/parsedState";
+import { installEditorDom, recordTransactions } from "../__tests__/wysiwyg";
 import { chanMarkdown } from "./markdown/grammar";
+import { chanDecorations } from "./decorations";
 import { headingFold, headingLevelAt, headingFoldRange } from "./fold";
 import { setBlockKind, toggleBulletList } from "./commands/format";
 import { firstSlideHeadingCaret } from "./slides";
+
+installEditorDom();
 
 function mkState(doc: string, parse = true): EditorState {
   const state = EditorState.create({ doc, extensions: [chanMarkdown()] });
@@ -287,6 +291,40 @@ describe("firstSlideHeadingCaret skips a fenced comment", () => {
 describe("the fold gutter", () => {
   const DOC = "## Top\nbody line\n### Sub\nsub body\n## Next\ntail";
 
+  test("fold effects refresh the chevron without a tree or geometry change", () => {
+    const parent = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView({
+      parent,
+      state: parsedState(EditorState.create({ doc: DOC, extensions: [chanMarkdown(), headingFold()] })),
+    });
+    const tree = syntaxTree(view.state);
+    const range = realRange(headingFoldRange(view.state, 0));
+    const topChevron = () => [...parent.querySelectorAll<HTMLElement>(".cm-md-fold-chevron")].find(
+      (el) => el.closest<HTMLElement>(".cm-gutterElement")?.style.visibility !== "hidden",
+    );
+    // A fold effect does not promise a geometry signal. Suppress those flags
+    // while real fold effects change state, so only their refresh can repaint.
+    const height = vi.spyOn(ViewUpdate.prototype, "heightChanged", "get").mockReturnValue(false);
+    const viewport = vi.spyOn(ViewUpdate.prototype, "viewportChanged", "get").mockReturnValue(false);
+    try {
+      expect(topChevron()?.dataset.folded).toBe("false");
+      view.dispatch({ effects: foldEffect.of(range) });
+      expect(foldedRanges(view.state).size).toBe(1);
+      expect(syntaxTree(view.state)).toBe(tree);
+      expect(topChevron()?.dataset.folded, "the applied fold repaints its chevron").toBe("true");
+      view.dispatch({ effects: unfoldEffect.of(range) });
+      expect(foldedRanges(view.state).size).toBe(0);
+      expect(syntaxTree(view.state)).toBe(tree);
+      expect(topChevron()?.dataset.folded, "the removed fold repaints its chevron").toBe("false");
+      expect(view.state.doc.toString()).toBe(DOC);
+    } finally {
+      viewport.mockRestore();
+      height.mockRestore();
+      view.destroy();
+      parent.remove();
+    }
+  });
+
   test("a click on a heading's chevron folds exactly its section", () => {
     const parent = document.body.appendChild(document.createElement("div"));
     const view = new EditorView({
@@ -328,6 +366,98 @@ describe("the fold gutter", () => {
     expect(painted).toHaveLength(1);
     view.destroy();
     parent.remove();
+  });
+});
+
+describe("the fold gutter after a short creation parse", () => {
+  const DOC = "## A\nbody\n## B\nbody\n## C\ntail";
+
+  function mount(doc = DOC) {
+    const parent = document.body.appendChild(document.createElement("div"));
+    const recording = recordTransactions();
+    const { built: view } = withShortCreationParse(() => new EditorView({
+      parent,
+      state: EditorState.create({
+        doc,
+        extensions: [chanMarkdown(), chanDecorations(), headingFold(), recording.extension],
+      }),
+    }));
+    return { view, parent, transactions: recording.transactions };
+  }
+
+  function painted(parent: HTMLElement): HTMLElement[] {
+    return [...parent.querySelectorAll<HTMLElement>(".cm-md-fold-chevron")].filter(
+      (el) => el.closest<HTMLElement>(".cm-gutterElement")?.style.visibility !== "hidden",
+    );
+  }
+
+  function clickLine(view: EditorView, from: number) {
+    // jsdom has no layout; supply the line a real gutter hit test resolves.
+    const hit = vi.spyOn(view, "lineBlockAtHeight").mockReturnValue(view.lineBlockAt(from));
+    try {
+      view.dom.querySelector(".cm-md-fold-gutter")!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    } finally {
+      hit.mockRestore();
+    }
+  }
+
+  test("repaints all styled headings after the worker publishes, without input", async () => {
+    const { view, parent, transactions } = mount();
+    try {
+      expect(syntaxTree(view.state).length).toBeLessThan(DOC.indexOf("## B"));
+      expect(view.contentDOM.querySelectorAll(".cm-md-h2")).toHaveLength(3);
+      expect(painted(parent), "setup: only the first heading is in the published tree").toHaveLength(1);
+      await vi.waitFor(() => expect(syntaxTree(view.state).length).toBe(DOC.length), { timeout: 5000 });
+      expect(transactions.length, "the background worker published a transaction").toBeGreaterThan(0);
+      expect(transactions.some((tr) => tr.effects.length > 0)).toBe(true);
+      expect(transactions.every((tr) => !tr.docChanged && !tr.selection)).toBe(true);
+      expect(painted(parent), "every styled heading needs its chevron after publication").toHaveLength(3);
+      expect(view.state.doc.toString()).toBe(DOC);
+      expect(view.state.selection.main.head).toBe(0);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  test("a click beside a styled heading folds before its chevron is painted", () => {
+    const { view, parent } = mount();
+    try {
+      const from = DOC.indexOf("## B");
+      expect(headingLevelAt(view.state, from), "setup: the state tree has not reached B").toBe(0);
+      expect(view.contentDOM.querySelectorAll(".cm-md-h2")).toHaveLength(3);
+      expect(painted(parent)).toHaveLength(1);
+      clickLine(view, from);
+      const folds: Array<{ from: number; to: number }> = [];
+      foldedRanges(view.state).between(0, DOC.length, (from, to) => { folds.push({ from, to }); });
+      expect(folds).toEqual([{ from: from + "## B".length, to: DOC.indexOf("## C") - 1 }]);
+      expect(painted(parent).filter((el) => el.dataset.folded === "true")).toHaveLength(1);
+      clickLine(view, from);
+      expect(foldedRanges(view.state).size).toBe(0);
+      expect(painted(parent).every((el) => el.dataset.folded === "false")).toBe(true);
+      expect(view.state.doc.toString()).toBe(DOC);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  test("a click beside a late fenced hash line does not fold", () => {
+    const doc = "## A\nbody\n```sh\n## not a heading\ncode\n```\n## B\ntail";
+    const { view, parent } = mount(doc);
+    try {
+      const from = doc.indexOf("## not a heading");
+      expect(syntaxTree(view.state).length).toBeLessThan(from);
+      expect(view.contentDOM.querySelectorAll(".cm-md-h2")).toHaveLength(2);
+      clickLine(view, from);
+      expect(foldedRanges(view.state).size).toBe(0);
+      expect(view.state.doc.toString()).toBe(doc);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
   });
 });
 

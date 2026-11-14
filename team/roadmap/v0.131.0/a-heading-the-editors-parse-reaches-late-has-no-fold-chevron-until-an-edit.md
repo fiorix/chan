@@ -1,6 +1,6 @@
 # A heading the editor's parse reaches late has no fold chevron until an edit
 
-Status: accepted for v0.131.0 by the owner on 2026-11-13; not started.
+Status: implemented for v0.131.0; guest verification and review pending.
 
 Record: found on 2026-11-13 by the v0.129.0 worker that fixed the fold tests' flake under load, from reading and a jsdom probe, and left open for the owner (`dev/v0129/row-notes.md`, "Editor: fold chevrons missing where the tree has not reached"; `dev/v0129/status.md`, 2026-11-13; probe `dev/v0129/evidence/foldflake/09-views-probe-tip-4/`). Listed among v0.129.0's follow-ups (the [release record](../../release/release-v0.129.0.md)). Not seen in a browser. At v0.130.0's planning the owner placed the later group of rows, this one among them, in v0.131.0: "yes v0.131" (`dev/v0130/status.md`).
 
@@ -39,3 +39,15 @@ The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`
 - Chevrons missing on the first screen or after the jump: both contract lines are built.
 - Every count matches: contract 1 is built anyway on the jsdom red (probe P10: three headings styled, one chevron, still one after the worker's publish, three after an edit), acceptance 3 is dropped since a browser check that cannot go red proves nothing, and the row records that no browser showed the gap. The reason: the gutter depends on the syntax tree and `lineMarkerChange` ignores tree changes; a browser's height measure repairing it is an accident, not a contract.
 - A gap whose cause lies outside `fold.ts` (the walker or the language setup, which this row excludes): back to the owner with the reading.
+
+## Built, 2026-11-14
+
+The guest reading at `23ee2e97b3b5d1eb50ccc78a3a4cc90cf2bda660` reproduced the gap after Ctrl+End in all five runs: zero chevrons beside eight fully visible section headings, with all eight headings present in the published tree. The first screen matched (nine of nine); returning through Outline and jumping back restored eight of eight. The exact fixture is 353,989 characters. The evidence and screenshot readings are in `dev/v0131-team/followups/followup-Edit131-Lead131-6.md`, with raw J32 artifacts under `dev/v0131-team/evidence/Ops131/J32/`. The lead applied the owner's missing-chevron outcome, so both contract lines are implemented.
+
+The gutter compares the old and new published tree identities as well as fold effects. A click publishes the parse through the clicked line before heading detection, making a styled heading foldable before its marker appears. Heading classification, section boundaries and the incomplete-parse refusal remain unchanged. The decoration walker and language setup are unchanged. The editor design document and manual explain the refresh and click behavior.
+
+The two creation-parse-cut regressions failed at the unmodified implementation: the worker completed its tree but only one of three chevrons appeared, and clicking the late heading produced no fold instead of its exact section. The fixed implementation passed both. Additional coverage keeps fenced hash lines inert and fold/unfold chevrons current when geometry does not signal a change. Host evidence is under `dev/v0131-team/evidence/Edit131/foldlate/`; the browser regression is `scripts/e2e/browser-smoke/checks/261-foldlate.mjs`, using the reading's exact fixture and asserting each visible parsed heading has one chevron on the first screen and after Ctrl+End.
+
+The instrumented jsdom cost probe on that fixture measured one 36-line refresh after an effects-only worker publication: 46 bounded tree reads, 136 visited nodes and 0.183 ms summed marker callback time. Thirty document edits in each mode caused exactly one 36-line refresh per edit; thirty selections with an unchanged tree caused none. CodeMirror combines document and tree refresh reasons into one viewport sweep. Timing includes instrumentation and excludes parsing, DOM synchronization and browser painting; it is not an input-latency measurement. Full per-update evidence and the probe are in `dev/v0131-team/evidence/Edit131/foldlate/cost/`.
+
+At this implementation checkpoint, the committed-tip frontend gate and check 261's base/tip guest runs remain pending. No guest green or review acceptance is claimed here.
