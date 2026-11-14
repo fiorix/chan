@@ -186,6 +186,32 @@ test("the hidden session role badge returns when this window's reading flips", (
   expect(target.querySelector('[aria-label="session role"]')?.textContent?.trim()).toBe("follower");
 });
 
+test("a closed badge in a Chan Desktop window returns when the window regains the slot", () => {
+  type DesktopWindow = Window & { __TAURI_INTERNALS__?: unknown };
+  (window as DesktopWindow).__TAURI_INTERNALS__ = {};
+  try {
+    const participant = (role: "leader" | "follower", window_id: string): SessionParticipant =>
+      ({ window_id, name: null, role, status: "live" });
+    sessionState.participants = [participant("leader", sessionWindowId()), participant("follower", "remote-1")];
+    sessionState.leader = sessionWindowId();
+    mountBar();
+    close("hide session role");
+    expect(shown("session role")).toBe(false);
+
+    // A desktop window that does not lead shows no badge, which clears the
+    // close the way any section's absence does.
+    sessionState.leader = "remote-1";
+    flushSync();
+    expect(shown("session role"), "no badge while the gateway window leads").toBe(false);
+
+    sessionState.leader = sessionWindowId();
+    flushSync();
+    expect(target.querySelector('[aria-label="session role"]')?.textContent?.trim(), "the slot is back").toBe("leader");
+  } finally {
+    delete (window as DesktopWindow).__TAURI_INTERNALS__;
+  }
+});
+
 test("Hybrid Nav offers no close", () => {
   paneMode.active = true;
   mountBar();

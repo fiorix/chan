@@ -41,6 +41,7 @@
   // The buttons that run a command are named by it, which this registers.
   import "../state/commands/install";
   import { sessionWindowId } from "../api/client";
+  import { isTauriDesktop } from "../api/desktop";
   import { showMarked } from "../api/fileIdentity";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
   import { uploadRequestCount, uploadRequestState } from "../state/uploadRequest.svelte";
@@ -98,21 +99,26 @@
     statusVisible && !statusActionVisible && !isTransientStatus(),
   );
   const paneModeVisible = $derived(paneMode.active);
-  // Session role: shown only when the roster has two or more windows and at
-  // least one of them is remote. A row's `role` on the /ws roster is its
-  // origin (a local socket reads leader, a tunnel socket follower), so a sole
-  // user's all-local roster (standalone terminals, workspace windows) and a
-  // lone gateway window stay quiet, and the badge appears once a second
-  // window shares a session that a gateway window is in.
-  const roleVisible = $derived(
-    sessionState.participants.length >= 2 &&
-      sessionState.participants.some((p) => p.role === "follower"),
-  );
   // The badge names who leads, not where this window connects from: the
   // roster's `leader` is the one window holding the session's leader slot,
   // which handover, takeover and the launcher's leader gate act on. Every
-  // other window, local or remote, reads follower.
+  // other browser window, local or remote, reads follower.
   const role = $derived(sessionState.leader === sessionWindowId() ? "leader" : "follower");
+  // The launcher's leader gate restricts nothing in a Chan Desktop window, so
+  // a desktop window that does not lead has no follower state to report.
+  const onDesktop = isTauriDesktop();
+  // Session role: shown only when the roster has two or more windows and at
+  // least one of them is remote, and in a desktop window only while it leads.
+  // A row's `role` on the /ws roster is its origin (a local socket reads
+  // leader, a tunnel socket follower), so a sole user's all-local roster
+  // (standalone terminals, workspace windows) and a lone gateway window stay
+  // quiet, and the badge appears once a second window shares a session that
+  // a gateway window is in.
+  const roleVisible = $derived(
+    sessionState.participants.length >= 2 &&
+      sessionState.participants.some((p) => p.role === "follower") &&
+      (!onDesktop || role === "leader"),
+  );
 
   // A close hides one section until its content changes. Each closable
   // section names what it shows as tokens; a close records the tokens it
@@ -142,7 +148,9 @@
       warnings: warningKeys.length ? warningKeys : warningsLabel === null ? [] : [warningsLabel],
       // The rows decide when the badge shows; its text reads the leader
       // slot, which a handover or takeover moves without touching a row,
-      // so this window's own reading is a token of its own.
+      // so this window's own reading is a token of its own. A desktop
+      // window that loses the slot has no badge and no tokens, so its close
+      // is forgotten and the badge returns when the slot does.
       role: roleVisible
         ? [
             ...sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`),
