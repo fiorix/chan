@@ -224,3 +224,71 @@ describe("ghostty terminal key parity viewport", () => {
     expect(history(term)).toBe(7);
   });
 });
+
+describe("ghostty fractional and queued viewport movement", () => {
+  test("output advances the live screen and retains a half-row scroll fraction", async () => {
+    const { term, socket } = await scrolled("ghostty");
+    if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
+    term.scrollToLine(0.5);
+    const scrollback = term.getScrollbackLength();
+    await output(socket, "background output\r\n");
+    expect(term.getScrollbackLength()).toBe(scrollback + 1);
+    expect(term.getViewportY()).toBe(0.5);
+    expect(inputFrames(socket)).toEqual([]);
+  });
+
+  test.each([
+    ["typed text", "a"],
+    ["arrow", "\x1b[A"],
+    ["paste", "pasted"],
+    ["file drop", "'/tmp/fraction' "],
+  ] as const)("%s clears a half-row scroll fraction before sending", async (kind, bytes) => {
+    const { term, socket, host, target, inputHistory } = await scrolled("ghostty");
+    if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
+    term.scrollToLine(0.5);
+    expect(term.getViewportY()).toBe(0.5);
+    if (kind === "typed text") key(host, { key: "a", code: "KeyA", keyCode: 65 });
+    if (kind === "arrow") key(host, { key: "ArrowUp", code: "ArrowUp", keyCode: 38 });
+    if (kind === "paste") {
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: { getData: () => "pasted" } });
+      host.dispatchEvent(event);
+    }
+    if (kind === "file drop") {
+      runtime.paths = ["/tmp/fraction"];
+      drop(target);
+      await tick();
+    }
+    expect(inputFrames(socket)).toEqual([bytes]);
+    expect(inputHistory).toEqual([0]);
+    expect(term.getViewportY()).toBe(0);
+  });
+
+  test("a wheel followed by typing stays at the cursor when queued frames run", async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const { term, socket, host, inputHistory } = await scrolled("ghostty");
+    const canvas = host.querySelector("canvas")!;
+    // Line-mode scrolling takes the widget's own wheel path, including any
+    // animation it schedules, rather than macOS pixel calibration.
+    canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -3, deltaMode: 1 }));
+    expect(history(term), "the wheel moved farther into history").toBeGreaterThan(7);
+    expect(frames.size, "the renderer has pending frames when the key arrives").toBeGreaterThan(0);
+    key(host, { key: "a", code: "KeyA", keyCode: 65 });
+    expect(inputFrames(socket)).toEqual(["a"]);
+    expect(inputHistory).toEqual([0]);
+    expect(history(term)).toBe(0);
+    for (let frame = 0; frame < 6; frame++) {
+      const batch = [...frames.values()];
+      frames.clear();
+      for (const callback of batch) callback(performance.now() + frame * 16);
+      expect(history(term), `after frame ${frame + 1}`).toBe(0);
+    }
+  });
+});
