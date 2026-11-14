@@ -1,6 +1,6 @@
 # A ghostty terminal leaves a pure black background unpainted
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/ghostty-black-background` (`10b63b2d0`), not merged; the section "Built 2026-11-14" holds the evidence. Owed: acceptance 3 on chan-desktop.
+Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/ghostty-black-background` (`10b63b2d0`), merged into the integration branch (`dcf739d01`), not yet in a release; the section "Built 2026-11-14" holds the evidence. Owed: acceptance 3 on chan-desktop.
 
 Record: found by the widened terminal pixel oracle on 2026-11-12 and left as it was, so the renderer's PNGs stayed byte-identical through the renderer's rework: "RGB black backgrounds are left unpainted: `\e[48;2;0;0;0m` and `\e[48;5;16m` show the theme background; `\e[40m` paints the palette's `#0c0c0d`." (`dev/v0129/row-notes.md`, "ghosttyng: findings from the widened pixel oracle", item 1). The owner, for v0.130.0: "what i really want on v0.130 is the systemd and flush-window-edges, plus ghostty/terminal bug fixes like the one my other agent is actively fixing right now".
 

@@ -33,7 +33,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [a terminal window ignores saved shortcuts][termkeys] | merged | owner |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
-| [ghostty leaves black unpainted][blackbg] | not started | build |
+| [ghostty leaves black unpainted][blackbg] | merged | owner |
 | [ConPTY pulls history into the screen][conpty] | not started | measure |
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
