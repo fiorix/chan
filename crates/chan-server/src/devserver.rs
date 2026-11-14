@@ -22472,13 +22472,14 @@ mod tests {
         }
     }
 
-    // The session-role seam keys on `TunnelOrigin`: a request entering the
-    // tunnel clone carries it and reads as a Follower (`local == false`), while
-    // a loopback request does not and reads as a Leader (`local == true`).
-    // `ws_upgrade` reads the same `Option<Extension<TunnelOrigin>>` extractor and
-    // computes `let local = origin.is_none();`. A full `/ws` upgrade over a live
-    // tunnel is a host-smoke item; this pins the marker->local mapping the role
-    // derivation depends on at the route level, headless.
+    // A participant's origin role keys on `TunnelOrigin`: a request entering
+    // the tunnel clone carries it and is a Follower (`local == false`), while
+    // a loopback request does not and is a Leader (`local == true`). It is not
+    // the leader slot. `ws_upgrade` reads the same
+    // `Option<Extension<TunnelOrigin>>` extractor and computes
+    // `let local = origin.is_none();`. A full `/ws` upgrade over a live
+    // tunnel is a host-smoke item; this pins the marker->local mapping the
+    // origin role depends on at the route level, headless.
     #[tokio::test]
     async fn tunnel_origin_marks_ws_remote_loopback_local() {
         use axum::body::to_bytes;
