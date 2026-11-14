@@ -31,7 +31,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [New and Paste choose two folders][newpaste] | not started | build |
 | [a warm chan-term leaves Chan behind][warmterm] | not started | build |
-| [the launcher acts on a stale browser][fbtarget] | merged | fix |
+| [the launcher acts on a stale browser][fbtarget] | merged | closed |
 | [an accessibility press closes a tab][axclose] | not started | build |
 | [a PDF export is images only][pdftext] | withdrawn | closed |
 | [the model download trusts bundled roots][modelroots] | not started | build |
