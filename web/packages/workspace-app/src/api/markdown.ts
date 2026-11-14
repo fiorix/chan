@@ -43,7 +43,7 @@ function renderWikiLabels(input: string): string {
   // wikilinks by hiding delimiters from a later Markdown pass.
   wikiParser.parse(input).iterate({
     enter(node) {
-      if (node.name === "Image") return false;
+      if (node.name === "Image") return false; // Alt text becomes an attribute; keep span markup out of it.
       if (node.name !== "WikiLink") return;
       const { label } = parseWikiBody(input.slice(node.from + 2, node.to - 2));
       // Character references keep every label literal to marked, including

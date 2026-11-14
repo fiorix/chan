@@ -54,7 +54,7 @@ import {
   parseWikiBody,
   type ParsedWikiLink,
 } from "../links";
-export { parseWikiBody, type ParsedWikiLink } from "../links";
+export type { ParsedWikiLink } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { ApiError, apiErrorCode } from "../../api/errors";
