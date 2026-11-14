@@ -8020,7 +8020,10 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
     let state = Arc::clone(&app.state::<Arc<AppState>>());
     tauri::async_runtime::spawn(async move {
         match serve::spawn_local_terminal_window(Arc::clone(&state)).await {
-            Ok(label) => raise_new_terminal_window(app_for_task, state, label),
+            Ok(id) => {
+                let label = serve::resolve_window_label(&app_for_task, &id);
+                raise_new_terminal_window(app_for_task, state, label);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "opening standalone terminal window failed");
                 emit_system_notice(
