@@ -6176,7 +6176,7 @@ fn main() {
                                     },
                                     Err(message) => Response::Error { message },
                                 },
-                                Request::OpenTerminal { cwd, .. } => {
+                                Request::OpenTerminal { cwd, startup_id, .. } => {
                                     match serve::spawn_throwaway_terminal_window(
                                         Arc::clone(&state),
                                         PathBuf::from(cwd),
@@ -6184,7 +6184,7 @@ fn main() {
                                     .await
                                     {
                                         Ok(label) => {
-                                            raise_new_terminal_window(app.clone(), state, label);
+                                            raise_new_terminal_window(app.clone(), state, label, startup_id);
                                             Response::TerminalOpened {
                                                 desktop_version: CHAN_VERSION.into(),
                                             }
@@ -6192,8 +6192,8 @@ fn main() {
                                         Err(message) => Response::Error { message },
                                     }
                                 }
-                                Request::Activate { .. } => {
-                                    single_instance::come_forward(&app, &state)
+                                Request::Activate { startup_id, .. } => {
+                                    single_instance::come_forward(&app, &state, startup_id.as_deref())
                                 }
                                 Request::OpenPath { path, .. } => {
                                     serve::open_path_in_standalone_window(state, &path).await
@@ -8010,6 +8010,10 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
 /// notice rather than blocking the menu-event / IPC thread. Mirrors how
 /// the IPC commands drive `serve::start`.
 fn spawn_terminal_window(app: &tauri::AppHandle) {
+    spawn_terminal_window_from_launch(app, None);
+}
+
+fn spawn_terminal_window_from_launch(app: &tauri::AppHandle, startup_id: Option<&str>) {
     // A default-terminal launch has no library window registry to mint into:
     // its New Window is a sibling process.
     if let Some(mode) = app.try_state::<Arc<terminal_mode::TerminalMode>>() {
@@ -8018,9 +8022,10 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
     }
     let app_for_task = app.clone();
     let state = Arc::clone(&app.state::<Arc<AppState>>());
+    let startup_id = startup_id.map(str::to_owned);
     tauri::async_runtime::spawn(async move {
         match serve::spawn_local_terminal_window(Arc::clone(&state)).await {
-            Ok(label) => raise_new_terminal_window(app_for_task, state, label),
+            Ok(label) => raise_new_terminal_window(app_for_task, state, label, startup_id),
             Err(e) => {
                 tracing::warn!(error = %e, "opening standalone terminal window failed");
                 emit_system_notice(
@@ -8035,7 +8040,12 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
 
 /// A launch asks for focus only on its newly minted window. The watcher owns
 /// its build, so wait for the native window without holding the handoff reply.
-fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label: String) {
+fn raise_new_terminal_window(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    label: String,
+    startup_id: Option<String>,
+) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     tauri::async_runtime::spawn(async move {
         let Some(embedded) = state.embedded() else {
@@ -8064,7 +8074,8 @@ fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label:
                 return;
             }
             if let Some(window) = app.get_webview_window(&label) {
-                if let Err(error) = raise::raise_window(&window) {
+                if let Err(error) = raise::raise_window_from_launch(&window, startup_id.as_deref())
+                {
                     tracing::warn!(%label, %error, "raising the requested terminal failed");
                 }
             }

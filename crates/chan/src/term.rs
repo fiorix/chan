@@ -362,11 +362,12 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -
 /// listening on the first ask is no desktop; once one was heard, its going
 /// away is silence, since another may be on its way up.
 async fn ask_desktop(cwd: &str) -> CliOpenTerminal {
+    let startup_id = handoff::launch_startup_id();
     let deadline = Instant::now() + opener::ANSWER_BOUND;
     let mut heard = false;
     loop {
         let budget = deadline.saturating_duration_since(Instant::now());
-        match handoff::try_open_terminal(cwd, budget).await {
+        match handoff::try_open_terminal(cwd, startup_id.as_deref(), budget).await {
             CliOpenTerminal::NotListening if !heard => return CliOpenTerminal::NotListening,
             CliOpenTerminal::NotListening | CliOpenTerminal::Silent => {
                 heard = true;
