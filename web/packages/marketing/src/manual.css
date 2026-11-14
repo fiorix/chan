@@ -106,8 +106,8 @@
 
 /* A drawn diagram: two machines, the routes between them, and what sits
    under both. A library inside a machine is a dashed box. */
-.doc-diagram { margin: 26px 0; padding: 22px; border: 1px solid var(--rule); border-radius: 10px; background: radial-gradient(ellipse at top, color-mix(in srgb, var(--surface-raised) 31%, transparent), transparent 65%), var(--surface); }
-.doc-diagram figcaption { margin-top: 16px; color: var(--subtle); font: 11px/1.7 var(--mono); }
+.doc-diagram, .doc-scene { margin: 26px 0; padding: 22px; border: 1px solid var(--rule); border-radius: 10px; background: radial-gradient(ellipse at top, color-mix(in srgb, var(--surface-raised) 31%, transparent), transparent 65%), var(--surface); }
+.doc-diagram figcaption, .doc-scene figcaption { margin-top: 16px; color: var(--subtle); font: 11px/1.7 var(--mono); }
 .dg-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(112px, auto) minmax(0, 1fr); align-items: stretch; }
 .dg-node { display: flex; flex-direction: column; gap: 6px; padding: 16px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--panel); }
 .dg-node > small, .dg-inner > small { color: var(--subtle); font: 9px/1.6 var(--mono); letter-spacing: .08em; text-transform: uppercase; }

@@ -1,0 +1,343 @@
+/* A tour walks one drawn scene through a pose per beat. tour.js publishes the
+   reader's place (--k1..--kN, --fit, data-current, .is-on, .is-at) and every
+   pose here is derived from those. A tour (.tour) pins the scene beside its
+   copy, or above it on a narrow screen, and moves as the copy scrolls. A
+   stepped figure (.tour-figure) sits in a page's flow and moves by its own
+   steps. Without the script a scene rests in the pose its :not(.tour-live)
+   rule gives it and the beats read as a list. */
+
+.tour {
+  /* The line a beat's centre crosses to become current, as a share of the viewport height. */
+  --tour-focus: .5;
+  --fit: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  column-gap: 48px;
+  margin: 0 48px;
+}
+/* A lead is copy that opens the tour ahead of its beats, such as a page's hero. It is the first
+   beat, the stage runs beside it and the beats, and what it lets run over the stage's column
+   stays in front of the scene. */
+.tour-lead { grid-column: 1; grid-row: 1; position: relative; z-index: 1; }
+.tour-stage { grid-column: 2; grid-row: 1 / span 2; position: relative; align-self: start; height: 560px; }
+.tour.tour-live .tour-stage { position: sticky; top: 0; height: 100svh; }
+/* The camera's angle over a tilted scene. Parts that leave the stage during a move fade at its
+   sides instead of meeting a hard edge. */
+.tour-scene { --pitch: 54deg; --yaw: -45deg; position: absolute; inset: 0; display: grid; place-items: center; overflow: clip; mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent); }
+.tour-scene a { color: inherit; text-decoration: none; }
+
+.tour-beats { grid-column: 1; grid-row: 2; list-style: none; margin: 0; padding: 0; }
+/* A link to a beat lands with its copy where the scene shows that beat. */
+.tour-beat { padding: 32px 0; scroll-margin-top: 5svh; }
+.tour-beat.is-minor h2 { font-size: clamp(22px, 2.3vw, 28px); }
+.tour-beat > p:not([class]) { max-width: 44ch; margin: 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
+.tour-beat .text-link { min-height: 44px; margin-top: 20px; font-size: 14px; }
+.tour-live .tour-beat { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; min-height: 90svh; opacity: .28; transition: opacity .35s; }
+.tour-live .tour-beat.is-minor { min-height: 62svh; }
+/* The last beat is as tall as the stage, so the stage is still pinned when that beat is centred. */
+.tour-live .tour-beat:last-child { min-height: 100svh; }
+.tour-live .tour-beat[aria-current] { opacity: 1; }
+
+.tour-callout { position: absolute; right: 0; bottom: 28px; left: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; width: fit-content; max-width: min(100% - 24px, 540px); margin: 0 auto; padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 7px; background: color-mix(in srgb, var(--panel) 94%, transparent); color: var(--muted); font-size: 13px; line-height: 1.5; }
+.tour-callout[hidden] { display: none; }
+.tour-callout b { color: var(--fg); font: 700 11px var(--mono); text-transform: uppercase; }
+.tour-callout .text-link { min-height: 0; margin: 0; font-size: 13px; }
+
+/* The scene is drawn in its own pixels around the world's origin and scaled to
+   the stage. --px is one screen pixel in those units, so strokes and labels
+   keep their weight however far the camera pulls back. */
+.scene-world {
+  --px-n: calc(1 / (var(--fit) * var(--zoom, 1)));
+  --px: calc(1px * var(--px-n));
+  position: relative;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+  transform: translate(var(--shift-x, 0px), var(--shift-y, 0px)) scale(calc(var(--fit) * var(--zoom, 1))) rotateX(calc(var(--tilt, 0) * var(--pitch))) rotateZ(calc(var(--tilt, 0) * var(--yaw))) translate3d(var(--pan-x, 0px), var(--pan-y, 0px), 0);
+}
+/* A layer only places its parts in depth. Opacity on it would flatten them, so
+   each part fades by the layer's --show instead. */
+.scene-layer { position: absolute; top: 0; left: 0; transform-style: preserve-3d; transform: translateZ(var(--layer-z, 0px)); }
+.scene-layer > * { position: absolute; top: 0; left: 0; box-sizing: border-box; width: var(--w); height: var(--h); opacity: var(--show, 1); transform: translate3d(calc(var(--x, 0px) - 50%), calc(var(--y, 0px) - 50%), var(--z, 0px)); }
+/* A part answers the pointer during its layer's beats, or during its own when it names some: an
+   unseen layer still lies between the pointer and the layers under it. */
+.scene-layer:not(.is-at) > *, .scene-layer > [data-at]:not(.is-at), .win-body:not(.is-at) { pointer-events: none; }
+.scene-layer > [data-at].is-at { pointer-events: auto; }
+.scene-layer a.is-awake { outline: calc(2 * var(--px)) solid var(--accent); outline-offset: calc(3 * var(--px)); }
+
+/* A tag stands on its anchor point and faces the reader: it undoes the world's
+   rotation and scale. */
+.scene-layer > .scene-tag {
+  width: auto;
+  height: auto;
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  font: 700 11px/1 var(--mono);
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform-origin: 0 100%;
+  transform: translate3d(var(--x, 0px), calc(var(--y, 0px) - 100%), var(--z, 0px)) rotateZ(calc(var(--tilt, 0) * -1 * var(--yaw))) rotateX(calc(var(--tilt, 0) * -1 * var(--pitch))) scale(var(--px-n)) translate(10px, -4px);
+}
+.scene-layer > .scene-tag.is-caption, .scene-layer > .scene-tag.is-route {
+  transform-origin: 50% 100%;
+  transform: translate3d(calc(var(--x, 0px) - 50%), calc(var(--y, 0px) - 100%), var(--z, 0px)) rotateZ(calc(var(--tilt, 0) * -1 * var(--yaw))) rotateX(calc(var(--tilt, 0) * -1 * var(--pitch))) scale(var(--px-n));
+}
+.scene-tag i { color: var(--faint); font-style: normal; font-weight: 400; }
+.scene-layer > .scene-tag.is-route { padding: 3px 5px; border-color: transparent; color: var(--accent); font-weight: 400; text-transform: none; }
+.scene-layer > .scene-tag.is-awake { outline: 0; border-color: var(--accent); color: var(--accent); }
+
+/* A drawn window: a title bar over panes, each pane a strip of tabs over its app. */
+.win { display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: var(--px) solid color-mix(in srgb, var(--border-strong) calc(var(--solid, 1) * 100%), var(--muted)); border-radius: 10px; background: color-mix(in srgb, var(--panel) calc(var(--solid, 1) * 100%), transparent); box-shadow: 0 30px 80px color-mix(in srgb, black calc(var(--solid, 1) * 45%), transparent); color: var(--text); font: var(--win-font, 13px) / 1.55 var(--mono); }
+.win-bar { display: grid; align-items: center; height: 2.3em; padding: 0 .9em; border-bottom: var(--px) solid var(--rule); color: var(--subtle); font-size: .85em; }
+.win-title { grid-area: 1 / 1; justify-self: center; }
+.win-body { grid-area: 2 / 1; display: flex; min-height: 0; }
+.win-bar > *, .win-body { opacity: calc(.3 + .7 * var(--solid, 1)); }
+.win-pane { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
+.win-pane + .win-pane { border-left: var(--px) solid var(--rule); }
+.pane-tabs { display: flex; gap: .3em; min-height: 2.1em; padding: .3em .5em 0; border-bottom: var(--px) solid var(--rule); font-size: .85em; }
+.pane-tabs > span { padding: .15em .7em; border: var(--px) solid transparent; border-bottom: 0; border-radius: 5px 5px 0 0; color: var(--subtle); white-space: nowrap; }
+.pane-tabs > [data-from]:not(.is-on) { display: none; }
+.pane-tabs > .is-current, .pane-tabs > .is-at { border-color: var(--rule); background: var(--surface-raised); color: var(--fg); }
+.term { display: block; flex: 1; min-height: 0; padding: .6em .8em; overflow: hidden; }
+.term-line { display: block; overflow: hidden; white-space: nowrap; }
+.term-line[data-from]:not(.is-on) { display: none; }
+.term-line b { color: var(--accent-2); font-weight: 400; }
+.term-line.dim { color: var(--subtle); }
+.term-typed { display: inline-block; overflow: hidden; width: calc(var(--n) * 1ch); vertical-align: bottom; white-space: nowrap; }
+.is-on > .term-typed { animation: tour-type .55s steps(var(--n)) both; }
+.term-caret { display: inline-block; width: .6em; height: 1.15em; background: var(--text); vertical-align: text-bottom; animation: tour-blink 1.1s steps(1) infinite; }
+@keyframes tour-type { from { width: 0; } }
+@keyframes tour-blink { 50% { opacity: 0; } }
+
+.pane-apps { position: relative; flex: 1; min-height: 0; }
+.app { position: absolute; inset: 0; padding: .9em 1em; overflow: hidden; opacity: 0; visibility: hidden; transition: opacity .3s, visibility 0s .3s; }
+.app.is-at { opacity: 1; visibility: visible; transition-delay: 0s; }
+.app.is-awake { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.app-menu { display: flex; flex-wrap: wrap; align-content: center; justify-content: center; gap: .5em; }
+.app-menu span { padding: .15em .7em; border: var(--px) solid var(--rule); border-radius: 99px; color: var(--subtle); font-size: .85em; }
+.app-files span { display: block; padding: .1em .6em .1em 1.9em; border-radius: 4px; white-space: nowrap; }
+.app-files .is-dir { padding-left: .6em; color: var(--fg); }
+.app-files .is-dir::before { content: "\25BE"; margin-right: .5em; color: var(--faint); }
+.app-files .is-picked { background: var(--surface-raised); color: var(--fg); }
+.app-files.is-at span { animation: tour-rise .35s both; }
+.app-files.is-at span:nth-child(2) { animation-delay: 40ms; }
+.app-files.is-at span:nth-child(3) { animation-delay: 80ms; }
+.app-files.is-at span:nth-child(4) { animation-delay: .12s; }
+.app-files.is-at span:nth-child(5) { animation-delay: .16s; }
+.app-files.is-at span:nth-child(6) { animation-delay: .2s; }
+.app-editor b { display: block; margin-bottom: .5em; color: var(--fg); font: 700 1.5em/1.2 var(--sans); }
+.app-editor b.is-sub { margin-top: .9em; font-size: 1.15em; }
+.app-editor i { display: block; height: .55em; margin: .55em 0; border-radius: 3px; background: var(--rule); }
+.app-editor i.is-short { width: 58%; }
+.app-graph { display: grid; padding: .4em; }
+.app-graph svg { width: 100%; height: 100%; min-height: 0; }
+.graph-edges path { fill: none; stroke: var(--faint); stroke-width: 1.2; }
+.graph-link { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 240; stroke-dashoffset: 240; }
+.graph-nodes circle { fill: var(--panel); stroke: var(--text); stroke-width: 1.4; }
+.app-graph.is-at .graph-link { animation: tour-draw .9s .25s ease-out forwards; }
+@keyframes tour-rise { from { opacity: 0; transform: translateY(.5em); } }
+@keyframes tour-draw { to { stroke-dashoffset: 0; } }
+
+/* The layers scene: a terminal window, the library under it, and the Computers
+   screen under that, with one library per machine. The home page tours it: the
+   camera pulls back twice, then returns to the window, which is by then a
+   workspace's. The manual shows its pulled-back pose as a still. */
+.layers-scene {
+  --k1: 0;
+  --k2: 0;
+  --k3: 0;
+  --scene-w: 720;
+  --scene-h: 500;
+  --win-w: 640px;
+  --win-h: 400px;
+  --lib-w: calc(var(--win-w) + 120px);
+  --lib-h: calc(var(--win-h) + 100px);
+  --pad-w: calc(var(--lib-w) + 80px);
+  --pad-h: calc(var(--lib-h) + 80px);
+  --tile-w: calc((var(--lib-w) - 88px) / 2);
+  --tile-h: calc((var(--lib-h) - 88px) / 2);
+  /* Machines stand one gap apart, wide enough to follow what runs along a route. */
+  --gap: 260px;
+  --far-x: calc(var(--pad-w) + var(--gap));
+  --far-y: calc(var(--pad-h) + var(--gap));
+  --lift-lib: 150px;
+  --lift-win: 240px;
+  --zoom-library: .7;
+  --zoom-computers: .27;
+  --win-font: max(13px, 11.5px / var(--fit));
+  /* The workspace row lights up first; the camera leaves for it after. */
+  --lit: clamp(0, var(--k3) * 5, 1);
+  --away: calc(1 - clamp(0, (var(--k3) - .2) / .8, 1));
+  --swap: clamp(0, (var(--k3) - .5) * 5, 1);
+  /* The layers under the window are gone before the camera is close enough to crop them. */
+  --under: clamp(0, 1 - (var(--k3) - .2) * 3, 1);
+  --tilt: calc(var(--k1) * var(--away));
+  --solid: calc(1 - var(--tilt));
+  --zoom: calc(1 - var(--away) * (var(--k1) * (1 - var(--zoom-library)) + var(--k2) * (var(--zoom-library) - var(--zoom-computers))));
+  --pan-x: calc(var(--k2) * var(--away) * var(--far-x) / -2);
+  --pan-y: calc(var(--k2) * var(--away) * var(--far-y) / 2);
+  --shift-x: calc(var(--tilt) * (1 - var(--k2)) * -44px);
+  /* On the first screen the headline runs over the stage's column, so the window starts below it. */
+  --lead-clear: calc(clamp(72px, 10vh, 130px) + 2.15 * clamp(50px, 6.1vw, 82px) + 40px);
+  --shift-lead: max(0px, var(--lead-clear) - (100svh - var(--win-h) * var(--fit)) / 2);
+  --shift-y: calc((1 - var(--k1)) * var(--shift-lead) + var(--tilt) * var(--fit) * (64px - var(--k2) * 30px));
+}
+.layers-scene:not(.tour-live) { --k1: 1; --k2: 1; }
+/* The headline keeps its two lines and runs over the stage's column, above the window. */
+@media (min-width: 901px) { .layers-scene .tour-lead h1 { white-space: nowrap; } }
+
+.scene-window { --layer-z: calc((var(--k2) * var(--lift-lib) + var(--k1) * var(--lift-win)) * var(--away)); }
+.scene-window > .win { --w: var(--win-w); --h: var(--win-h); }
+.scene-window .is-standalone { opacity: calc((1 - var(--swap)) * (.3 + .7 * var(--solid))); }
+.scene-window .is-workspace { opacity: calc(var(--swap) * (.3 + .7 * var(--solid))); }
+.scene-tag.is-window { --x: calc(var(--win-w) / 2); --y: calc(var(--win-h) / 2); --show: calc(var(--tilt) * (1 - var(--k2))); }
+
+.scene-library { --layer-z: calc(var(--k2) * var(--lift-lib) * var(--away)); --show: calc(var(--k1) * var(--under)); }
+.scene-lib { --w: var(--lib-w); --h: var(--lib-h); border: var(--px) solid var(--faint); border-radius: 14px; background: color-mix(in srgb, var(--surface) 86%, transparent); }
+.scene-tile { --w: var(--tile-w); --h: var(--tile-h); --z: 1px; --x: calc(var(--side-x) * (var(--tile-w) / 2 + 12px)); --y: calc(var(--side-y) * (var(--tile-h) / 2 + 12px)); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 18px; border: var(--px) solid var(--faint); border-radius: 9px; background: var(--panel); font: clamp(20px, 10 * var(--px), 34px) / 1.25 var(--mono); }
+.scene-tile.is-a { --side-x: -1; --side-y: -1; }
+.scene-tile.is-b { --side-x: 1; --side-y: -1; }
+.scene-tile.is-c { --side-x: -1; --side-y: 1; }
+.scene-tile.is-d { --side-x: 1; --side-y: 1; border-color: color-mix(in srgb, var(--accent) calc(var(--lit) * 100%), var(--faint)); }
+.scene-tile > * { opacity: calc(1 - var(--k2)); }
+.scene-tile b { color: var(--fg); font-weight: 400; }
+.scene-tile i { color: var(--subtle); font-size: .85em; font-style: normal; }
+.scene-tile.is-a { border-color: var(--accent-2); }
+.scene-tile.is-a i { color: var(--accent-2); }
+.scene-tile .scene-on, .scene-tile.is-on .scene-off { display: none; }
+.scene-tile.is-on .scene-on { display: inline; color: var(--accent); }
+.scene-layer > .scene-post { --x: calc(var(--side-x) * var(--win-w) / 2); --y: calc(var(--side-y) * var(--win-h) / 2); width: 0; height: calc(var(--k1) * var(--lift-win)); border-left: var(--px) dashed var(--subtle); transform-origin: 0 0; transform: translate3d(var(--x), var(--y), 0) rotateX(90deg); }
+.scene-post.is-nw { --side-x: -1; --side-y: -1; }
+.scene-post.is-ne { --side-x: 1; --side-y: -1; }
+.scene-post.is-se { --side-x: 1; --side-y: 1; }
+.scene-post.is-sw { --side-x: -1; --side-y: 1; }
+.scene-miniwin { --w: calc(var(--tile-w) * .62); --h: calc(var(--tile-h) * .62); --x: calc(var(--tile-w) / -2 - 12px); --y: calc(var(--tile-h) / 2 + 12px); --z: calc(var(--k1) * 90px); border: var(--px) solid var(--faint); border-radius: 6px; }
+.scene-tag.is-library { --x: calc(var(--lib-w) / 2); --y: calc(var(--lib-h) / 2); --show: calc(var(--k1) * var(--under) * (1 - var(--k2))); }
+.layers-scene[data-current="library"] .scene-tag.is-library { border-color: var(--accent); color: var(--accent); }
+
+.scene-computers { --show: calc(var(--k2) * var(--under)); }
+.scene-ground { --w: calc(var(--far-x) + var(--pad-w) + 100px); --h: calc(var(--far-y) + var(--pad-h) + 100px); --x: calc(var(--far-x) / 2); --y: calc(var(--far-y) / -2); border: var(--px) dashed var(--border-strong); border-radius: 40px; }
+.scene-pad { --w: var(--pad-w); --h: var(--pad-h); --z: 1px; border: var(--px) solid var(--faint); border-radius: 22px; background: color-mix(in srgb, var(--panel) 70%, transparent); }
+.is-east { --x: var(--far-x); }
+.is-north { --y: calc(-1 * var(--far-y)); }
+.is-back { --x: var(--far-x); --y: calc(-1 * var(--far-y)); }
+.scene-pad.is-ghost { border-style: dashed; background: none; }
+/* A gateway holds no library: over its footprint stands a ring, at the height of the libraries it connects. */
+.scene-gate { --w: var(--lib-w); --h: var(--lib-h); --z: calc(var(--k2) * var(--lift-lib)); border: calc(1.5 * var(--px)) solid var(--accent-2); border-radius: 50%; background: color-mix(in srgb, var(--accent-2) 8%, transparent); }
+.scene-gate::before { content: ""; position: absolute; inset: 24%; border: var(--px) solid var(--accent-2); border-radius: 50%; }
+.scene-farlib { --w: var(--lib-w); --h: var(--lib-h); --z: calc(var(--k2) * var(--lift-lib)); display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 24px; padding: 32px; border: var(--px) solid var(--faint); border-radius: 14px; background: color-mix(in srgb, var(--surface) 86%, transparent); }
+.scene-farlib i { border: var(--px) solid var(--faint); border-radius: 9px; background: var(--panel); }
+/* A route is a wire between two libraries, at their height. Dots run along it from the end that
+   opens the connection: the desktop reaches a devserver and the gateway, a devserver dials out. */
+.scene-route {
+  --z: calc(var(--k2) * var(--lift-lib) + 6px);
+  --dot: calc(5.5 * var(--px));
+  --run: calc(14 * var(--px));
+  --wire: color-mix(in srgb, var(--accent) 40%, transparent);
+  animation: .8s linear infinite;
+}
+.scene-route.is-east, .scene-route.is-far { --w: calc(var(--far-x) - var(--lib-w)); --h: var(--dot); --x: calc(var(--far-x) / 2); background: radial-gradient(circle calc(var(--dot) / 2) at calc(var(--run) / 2) 50%, var(--accent) 80%, transparent 100%) 0 50% / var(--run) 100%, linear-gradient(var(--wire), var(--wire)) 0 50% / 100% var(--px) repeat-x; animation-name: route-along-x; }
+.scene-route.is-far { --y: calc(-1 * var(--far-y)); animation-direction: reverse; }
+.scene-route.is-north { --w: var(--dot); --h: calc(var(--far-y) - var(--lib-h)); --x: 0px; --y: calc(var(--far-y) / -2); background: radial-gradient(circle calc(var(--dot) / 2) at 50% calc(var(--run) / 2), var(--accent) 80%, transparent 100%) 50% 0 / 100% var(--run), linear-gradient(var(--wire), var(--wire)) 50% 0 / var(--px) 100% repeat-y; animation-name: route-along-y; animation-direction: reverse; }
+@keyframes route-along-x { to { background-position: var(--run) 50%, 0 50%; } }
+@keyframes route-along-y { to { background-position: 50% var(--run), 50% 0; } }
+.scene-miniwin.is-d { --x: calc(var(--tile-w) / 2 + 12px); }
+/* The build-up: the manual shows the same scene one layer at a time. --k1 adds the library under
+   the window, --k2 the local machine and its other windows, --k3 a devserver, --k4 the gateway. */
+.layers-build {
+  --k4: 0;
+  --lit: 0;
+  --away: 1;
+  --swap: 0;
+  --under: 1;
+  --tilt: var(--k1);
+  --zoom: calc(1 - var(--k1) * .3 - var(--k2) * .18 - var(--k3) * .15 - var(--k4) * .1);
+  --pan-x: calc(var(--k3) * var(--far-x) / -2);
+  --pan-y: calc(var(--k4) * var(--far-y) / 2);
+  --shift-x: calc(var(--k1) * (1 - var(--k3)) * -40px);
+  --shift-y: calc(var(--k1) * var(--fit) * (56px + var(--k2) * 5px - var(--k3) * 21px - var(--k4) * 10px));
+}
+.layers-build:not(.tour-live) { --k3: 1; --k4: 1; }
+.layers-build .scene-computers { --show: 1; }
+.layers-build .scene-pad.is-here { --show: var(--k2); }
+.layers-build .scene-miniwin { --z: calc(var(--k2) * 90px); --show: var(--k2); }
+.layers-build :is(.scene-pad, .scene-farlib, .scene-route).is-east { --show: var(--k3); }
+.layers-build :is(.scene-ground, .scene-gate, .scene-pad.is-north, .scene-pad.is-back, .scene-farlib.is-back, .scene-route.is-north, .scene-route.is-far) { --show: var(--k4); }
+/* A name shows from the step that brings its part, or only during the steps it lists. */
+.layers-build .scene-layer > .scene-tag { --show: 0; transition: opacity .35s; }
+.layers-build .scene-layer > .scene-tag:is(.is-on, .is-at), .layers-build:not(.tour-live) .scene-layer > .scene-tag { --show: 1; }
+.layers-build[data-current="library"] .scene-tag.is-library, .layers-build[data-current="desktop"] .scene-tag.is-here, .layers-build[data-current="devserver"] .scene-tag.is-caption.is-east, .layers-build[data-current="gateway"] .scene-tag.is-gate { border-color: var(--accent); color: var(--accent); }
+
+/* A route's name stands on the middle of its wire. */
+.scene-tag.is-route { --z: calc(var(--k2) * var(--lift-lib) + 14px); }
+.scene-tag.is-route.is-east { --x: calc(var(--far-x) / 2); --y: 0px; }
+.scene-tag.is-route.is-north { --x: 0px; --y: calc(var(--far-y) / -2); }
+.scene-tag.is-route.is-far { --x: calc(var(--far-x) / 2); --y: calc(-1 * var(--far-y)); }
+/* A machine's name floats over its stack; this machine's stands at its near corner, clear of the window. */
+.scene-tag.is-caption { --z: calc(var(--lift-lib) + 70px); }
+.scene-tag.is-caption.is-here { --x: calc(var(--pad-w) / -2); --y: calc(var(--pad-h) / 2); --z: 2px; color: var(--fg); }
+.scene-tag.is-caption.is-ghost { --z: 2px; }
+.scene-tag.is-caption.is-ghost { border-style: dashed; color: var(--subtle); font-weight: 400; }
+.scene-tag.is-caption.is-workspace { --x: calc(var(--tile-w) / -2 - 12px); --y: calc(var(--tile-h) / 2 + 12px); --z: 2px; }
+.layers-scene[data-current="computers"] .scene-tag.is-caption.is-here { border-color: var(--accent); }
+
+/* A stepped figure: the stage takes its scale from its own width, each beat is a step with a
+   button, and the figure plays through them while it is on screen until the reader picks one. */
+.tour-figure { --fit: tan(atan2(100cqw, calc(var(--scene-w) * 1px))); }
+.tour-figure .tour-stage { container-type: inline-size; grid-column: auto; grid-row: auto; height: auto; max-width: 760px; margin-inline: auto; aspect-ratio: var(--scene-w) / var(--scene-h); }
+.tour-play { position: absolute; top: 0; right: 0; z-index: 2; display: none; min-width: 58px; padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg); color: var(--muted); font: 10px/1.4 var(--mono); cursor: pointer; }
+.tour-live .tour-play { display: block; }
+.tour-play:hover { border-color: var(--faint); color: var(--fg); }
+.tour-steps { display: grid; gap: 2px; margin: 18px 0 0; padding: 0; list-style: none; }
+.tour-steps > li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: baseline; margin: 0; padding: 8px 12px 8px 10px; border-left: 2px solid transparent; border-radius: 0 6px 6px 0; transition: background .25s, border-color .25s; }
+.tour-live .tour-steps > li[aria-current] { border-left-color: var(--accent); background: color-mix(in srgb, var(--surface-raised) 70%, transparent); }
+.tour-step { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 1px solid var(--border-strong); border-radius: 50%; background: none; color: var(--muted); font: 700 11px/1 var(--mono); cursor: pointer; }
+.tour-step:hover, li[aria-current] > .tour-step { border-color: var(--accent); color: var(--accent); }
+/* Steps that are only names run in one row under the stage. */
+.tour-steps.is-row { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
+.tour-steps.is-row > li { display: block; padding: 0; border: 0; background: none; }
+.tour-steps.is-row .tour-step { display: flex; gap: 8px; width: 100%; height: auto; min-height: 44px; padding: 6px 10px; border-radius: 6px; font-weight: 400; text-align: left; }
+.tour-steps.is-row .tour-step b { color: var(--faint); }
+.tour-steps.is-row li[aria-current] > .tour-step { background: color-mix(in srgb, var(--surface-raised) 70%, transparent); color: var(--fg); }
+.tour-steps.is-row li[aria-current] > .tour-step b { color: var(--accent); }
+.tour-figure tr.is-at > td { background: color-mix(in srgb, var(--surface-raised) 70%, transparent); }
+.tour-figure tr > td { transition: background .25s; }
+@container (max-width: 520px) {
+  .tour-figure .scene-layer > .scene-tag { padding: 3px 5px; font-size: 9px; }
+  .tour-figure .scene-tag.is-route { display: none; }
+}
+@media (max-width: 720px) {
+  .tour-steps.is-row { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  /* One column, in the order lead, stage, beats: the stage pins under the top edge while the beats pass below it. */
+  .tour { --tour-focus: .84; display: block; margin: 0; }
+  .tour-lead, .tour-beats { padding-inline: 32px; }
+  .tour > .tour-stage { height: 440px; }
+  .tour.tour-live .tour-stage { z-index: 1; height: 50svh; background: var(--bg); }
+  .tour.tour-live .tour-stage::after { content: ""; position: absolute; top: 100%; right: 0; left: 0; height: 28px; background: linear-gradient(var(--bg), transparent); pointer-events: none; }
+  .tour-beat { scroll-margin-top: 50svh; }
+  .tour-beat > p:not([class]) { font-size: 15px; }
+  .tour-live .tour-beat { justify-content: flex-start; min-height: 66svh; padding-top: 36px; }
+  .tour-live .tour-beat.is-minor, .tour-live .tour-beat:last-child { min-height: 54svh; }
+  .tour-callout { bottom: 10px; font-size: 12px; }
+  .tour.layers-scene { --shift-lead: 0px; --scene-w: 680; --scene-h: 660; --win-h: 600px; --zoom-library: .5; --zoom-computers: .24; }
+  .scene-tag.is-caption i { display: none; }
+  .tour.layers-scene:not(.tour-live) { --fit: .5; }
+  .scene-window .win-body.is-workspace { flex-direction: column; }
+  .scene-window .win-pane + .win-pane { border-top: var(--px) solid var(--rule); border-left: 0; }
+}
+
+@media (max-width: 720px) {
+  .tour-lead, .tour-beats { padding-inline: 20px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-live .tour-beat, .app, .tour-steps > li, .tour-figure tr > td, .layers-build .scene-layer > .scene-tag { transition: none; }
+  .is-on > .term-typed, .term-caret, .app-files.is-at span, .app-graph.is-at .graph-link, .scene-route { animation: none; }
+  .graph-link { stroke-dashoffset: 0; }
+}

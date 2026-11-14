@@ -1,31 +1,151 @@
 <a class="home-skip" href="#intro">Skip to content</a>
-<section class="terminal-hero" id="intro" aria-labelledby="hero-title">
-  <div class="hero-copy">
-    <h1 id="hero-title">A supercharged<br />terminal emulator<span class="orange">.</span></h1>
-    <p>Scriptable, multiplexed, local and remote. Free and open source, on your own machines.</p>
-    <div class="hero-actions">
-      <a class="home-button solid" href="/install/">Get Chan <span aria-hidden="true">&#8595;</span></a>
-      <a class="home-button outline" href="#computers">Explore Chan <span aria-hidden="true">&#8594;</span></a>
+<section class="tour layers-scene" id="tour" aria-labelledby="hero-title" data-tour>
+  <div class="terminal-hero tour-lead" id="intro" data-beat="terminal">
+    <div class="hero-copy">
+      <h1 id="hero-title">A supercharged<br />terminal emulator<span class="orange">.</span></h1>
+      <p>Scriptable, multiplexed, local and remote. Free and open source, on your own machines.</p>
+      <div class="hero-actions">
+        <a class="home-button solid" href="/install/">Get Chan <span aria-hidden="true">&#8595;</span></a>
+        <a class="home-button outline" href="#library">Explore Chan <span aria-hidden="true">&#8594;</span></a>
+      </div>
+      <p class="platform-note"><span class="platforms">macOS / Linux / Windows / FreeBSD</span><span class="license-note">Free &amp; open source</span></p>
     </div>
-    <p class="platform-note"><span class="platforms">macOS / Linux / Windows / FreeBSD</span><span class="license-note">Free &amp; open source</span></p>
   </div>
-</section>
+  <div class="tour-stage">
+    <div class="tour-scene" aria-hidden="true">
+      <div class="scene-world">
 
-<section class="computers-tour" id="computers" aria-labelledby="computers-title" data-home-morph-target>
-  <header class="computers-tour-heading">
-    <p class="section-label"><span>01 /</span> COMPUTERS</p>
-    <h2 id="computers-title">The Computers Screen<span class="orange">.</span></h2>
-    <p>The Computers screen gives you access to all your Chan windows, local and remote, and your tmux sessions. Open it from any Chan window with <span class="key-chord"><kbd>Cmd</kbd> + <kbd>P</kbd></span> on macOS, or <span class="key-chord"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></span> on Linux, FreeBSD, and Windows.</p>
-  </header>
-  <figure class="computers-demo">
-    <iframe src="/demo/computers/" title="Interactive Computers screen preview" loading="lazy"></iframe>
-    <figcaption>Try the Computers screen from a keyboard. Use shift left and right for machine navigation.</figcaption>
-  </figure>
+        <div class="scene-layer scene-computers" data-at="computers">
+          <i class="scene-ground"></i>
+          <i class="scene-route is-east"></i>
+          <i class="scene-route is-north"></i>
+          <a class="scene-pad is-here" href="/manual/computers/" tabindex="-1" data-part="Local machine" data-line="Chan Desktop runs a library on it and shows its windows as native windows."></a>
+          <a class="scene-pad is-east" href="/manual/devserver/" tabindex="-1" data-part="A devserver" data-line="The same library, headless on another machine. It keeps running when you disconnect."></a>
+          <a class="scene-pad is-north" href="/manual/devserver/" tabindex="-1" data-part="A devserver" data-line="The same library, headless on another machine. It keeps running when you disconnect."></a>
+          <a class="scene-pad is-back is-ghost" href="/manual/connect/" tabindex="-1" data-part="Add devserver" data-line="An address and a connect script, such as ssh -L."></a>
+          <span class="scene-farlib is-east"><i></i><i></i><i></i><i></i></span>
+          <span class="scene-farlib is-north"><i></i><i></i><i></i><i></i></span>
+          <span class="scene-tag is-route is-east">ssh</span>
+          <span class="scene-tag is-route is-north">ET</span>
+          <span class="scene-tag is-caption is-here">Local machine</span>
+          <span class="scene-tag is-caption is-east">build-01 <i>devserver</i></span>
+          <span class="scene-tag is-caption is-north">devbox <i>devserver</i></span>
+          <span class="scene-tag is-caption is-back is-ghost">+ Add devserver</span>
+        </div>
+
+        <div class="scene-layer scene-library" data-at="library computers">
+          <i class="scene-lib"></i>
+          <a class="scene-tile is-a" href="/manual/standalone/" tabindex="-1" data-part="Standalone terminal" data-line="A window with no workspace. Its file browser and editor reach the whole machine."><b>Terminal Window 1</b><i>this window</i></a>
+          <a class="scene-tile is-b" href="/manual/standalone/" tabindex="-1" data-part="A hidden window" data-line="Hide a window and its terminals keep running. Show it again from the Computers screen."><b>Terminal Window 2</b><i>hidden</i></a>
+          <a class="scene-tile is-c" href="/manual/workspaces/" tabindex="-1" data-part="Workspace" data-line="A directory registered with chan, with its own windows, panes and tabs."><b>notes</b><i>on, 1 window</i></a>
+          <a class="scene-tile is-d" href="/manual/workspaces/" tabindex="-1" data-from="workspace" data-part="Workspace" data-line="On means served: indexed, watched and ready for windows. Off means registered only."><b>app</b><i class="scene-off">off</i><i class="scene-on">on</i></a>
+          <i class="scene-post is-nw"></i><i class="scene-post is-ne"></i><i class="scene-post is-se"></i><i class="scene-post is-sw"></i>
+          <i class="scene-miniwin"></i>
+          <a class="scene-tag is-layer is-library" href="/manual/concepts/#library" tabindex="-1" data-at="library" data-part="Library" data-line="Everything one chan server holds: workspaces, standalone terminals and windows.">Library</a>
+        </div>
+
+        <div class="scene-layer scene-window" data-at="terminal workspace files editor graph">
+          <div class="win">
+            <div class="win-bar">
+              <span class="win-title is-standalone">Terminal Window 1</span>
+              <span class="win-title is-workspace">app</span>
+            </div>
+            <div class="win-body is-standalone" data-at="terminal">
+              <a class="win-pane" href="/manual/terminal/" tabindex="-1" data-part="Terminal" data-line="Tabs, split panes and named sessions that outlive the window.">
+                <span class="pane-tabs"><span class="is-current">zsh</span><span>logs</span></span>
+                <span class="term">
+                  <span class="term-line"><b>~/src/app $</b> git status -sb</span>
+                  <span class="term-line dim">## main...origin/main</span>
+                  <span class="term-line dim"> M src/server.rs</span>
+                  <span class="term-line"><b>~/src/app $</b> cargo test -q</span>
+                  <span class="term-line dim">running 48 tests</span>
+                  <span class="term-line dim">test result: ok. 48 passed</span>
+                  <span class="term-line"><b>~/src/app $</b> <i class="term-caret"></i></span>
+                </span>
+              </a>
+            </div>
+            <div class="win-body is-workspace" data-at="workspace files editor graph">
+              <a class="win-pane" href="/manual/cs/" tabindex="-1" data-part="cs" data-line="Every chan terminal can drive the window it runs in.">
+                <span class="pane-tabs"><span class="is-current">zsh</span></span>
+                <span class="term">
+                  <span class="term-line" data-from="workspace"><b>$</b> <span class="term-typed" style="--n: 11">chan open .</span></span>
+                  <span class="term-line" data-from="files"><b>$</b> <span class="term-typed" style="--n: 22">p=$(cs pane new right)</span></span>
+                  <span class="term-line" data-from="files"><b>$</b> <span class="term-typed" style="--n: 23">cs open src --pane "$p"</span></span>
+                  <span class="term-line" data-from="editor"><b>$</b> <span class="term-typed" style="--n: 29">cs open README.md --pane "$p"</span></span>
+                  <span class="term-line" data-from="graph"><b>$</b> <span class="term-typed" style="--n: 20">cs graph --pane "$p"</span></span>
+                  <span class="term-line"><b>$</b> <i class="term-caret"></i></span>
+                </span>
+              </a>
+              <div class="win-pane">
+                <span class="pane-tabs"><span data-from="files" data-at="files">src</span><span data-from="editor" data-at="editor">README.md</span><span data-from="graph" data-at="graph">Graph</span></span>
+                <div class="pane-apps">
+                  <a class="app app-menu" data-at="workspace" href="/manual/workspaces/" tabindex="-1" data-part="A workspace window" data-line="Its pane menu lists the apps: terminal, file browser, graph, dashboard, team and more.">
+                    <span>terminal</span><span>file browser</span><span>graph</span><span>dashboard</span><span>diagram</span><span>draft</span><span>slide deck</span><span>team</span>
+                  </a>
+                  <a class="app app-files" data-at="files" href="/manual/files/" tabindex="-1" data-part="File browser" data-line="Browse, copy, move, upload and download, from the keyboard.">
+                    <span class="is-dir">src</span><span>lib.rs</span><span>routes.rs</span><span class="is-picked">server.rs</span><span>store.rs</span><span>tunnel.rs</span>
+                  </a>
+                  <a class="app app-editor" data-at="editor" href="/manual/editor/" tabindex="-1" data-part="Editor" data-line="Markdown that renders as you type, with the source one switch away.">
+                    <b>app</b><i></i><i></i><i class="is-short"></i><b class="is-sub">Build</b><i></i><i class="is-short"></i>
+                  </a>
+                  <a class="app app-graph" data-at="graph" href="/manual/graph/" tabindex="-1" data-part="Graph" data-line="The directory tree, with each file's links, tags and mentions drawn over it.">
+                    <svg viewBox="0 0 300 220" preserveAspectRatio="xMidYMid meet"><g class="graph-edges"><path d="M150 196 L150 150" /><path d="M150 150 L84 108" /><path d="M150 150 L216 108" /><path d="M84 108 L48 60" /><path d="M84 108 L112 56" /><path d="M216 108 L190 56" /><path d="M216 108 L256 62" /></g><path class="graph-link" d="M112 56 Q150 24 190 56" /><path class="graph-link" d="M48 60 Q150 -10 256 62" /><g class="graph-nodes"><circle cx="150" cy="196" r="7" /><circle cx="150" cy="150" r="6" /><circle cx="84" cy="108" r="6" /><circle cx="216" cy="108" r="6" /><circle cx="48" cy="60" r="5" /><circle cx="112" cy="56" r="5" /><circle cx="190" cy="56" r="5" /><circle cx="256" cy="62" r="5" /></g></svg>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+          <a class="scene-tag is-layer is-window" href="/manual/concepts/#windows" tabindex="-1" data-at="library" data-part="Window" data-line="Windows belong to the server: one can reload, hide, or show on another computer.">Window</a>
+        </div>
+
+      </div>
+    </div>
+    <p class="tour-callout" hidden><b></b><span></span><a class="text-link" href="/manual/">In the manual <span aria-hidden="true">&#8594;</span></a></p>
+  </div>
+
+  <ol class="tour-beats">
+    <li class="tour-beat" id="library" data-beat="library" data-home-morph-target>
+      <p class="section-label"><span>01 /</span> LIBRARY</p>
+      <h2>The window is a view<span class="orange">.</span></h2>
+      <p>Its shell runs in the library: the one server on the local machine that holds every workspace, standalone terminal and window. Reload or hide a window and its shells keep running.</p>
+      <a class="text-link" href="/manual/concepts/#layers">How the layers fit <span aria-hidden="true">&#8594;</span></a>
+    </li>
+    <li class="tour-beat" id="computers" data-beat="computers">
+      <p class="section-label"><span>02 /</span> COMPUTERS</p>
+      <h2>One library per machine<span class="orange">.</span></h2>
+      <p>The Computers screen lists the local machine and each devserver. A devserver is the same library, running headless somewhere else. Disconnect, and everything stays running there.</p>
+      <a class="text-link" href="/manual/computers/">The Computers screen <span aria-hidden="true">&#8594;</span></a>
+    </li>
+    <li class="tour-beat" id="workspace" data-beat="workspace">
+      <p class="section-label"><span>03 /</span> WORKSPACE</p>
+      <h2>Any directory becomes a workspace<span class="orange">.</span></h2>
+      <p><code>chan open .</code> registers the directory and opens a window of it. Your files stay ordinary files; what chan derives from them lives under <code>~/.chan</code>.</p>
+      <a class="text-link" href="/manual/workspaces/">Workspaces <span aria-hidden="true">&#8594;</span></a>
+    </li>
+    <li class="tour-beat is-minor" id="files" data-beat="files">
+      <p class="section-label"><span>03.1 /</span> FILE BROWSER</p>
+      <h2>Files, beside the shell<span class="orange">.</span></h2>
+      <p><code>cs pane new right</code> splits the window from the shell, and <code>cs open src</code> opens the directory in the new pane's file browser.</p>
+      <a class="text-link" href="/manual/files/">Files <span aria-hidden="true">&#8594;</span></a>
+    </li>
+    <li class="tour-beat is-minor" id="editor" data-beat="editor">
+      <p class="section-label"><span>03.2 /</span> EDITOR</p>
+      <h2>Markdown that renders as you type<span class="orange">.</span></h2>
+      <p><code>cs open README.md</code> opens a text file in the editor, with its source one switch away.</p>
+      <a class="text-link" href="/manual/editor/">The editor <span aria-hidden="true">&#8594;</span></a>
+    </li>
+    <li class="tour-beat is-minor" id="graph" data-beat="graph">
+      <p class="section-label"><span>03.3 /</span> GRAPH</p>
+      <h2>The project, drawn<span class="orange">.</span></h2>
+      <p><code>cs graph</code> opens the directory tree with each file's links, tags and mentions drawn over it.</p>
+      <a class="text-link" href="/manual/graph/">The graph <span aria-hidden="true">&#8594;</span></a>
+    </li>
+  </ol>
 </section>
 
 <section class="connection-section" id="tmux" aria-labelledby="tmux-title">
   <div class="connection-intro">
-    <p class="section-label"><span>02 /</span> TMUX -CC</p>
+    <p class="section-label"><span>04 /</span> TMUX -CC</p>
     <h2 id="tmux-title">Your tmux, in Chan<span class="orange">.</span></h2>
     <p>Run <code>tmux -CC</code> locally or over ssh. Each tmux window opens as a Chan window, with its terminal and panes and layout. Use Chan's shortcuts and hybrid nav to split and resize panes, create new windows. Manage tmux sessions from the Computers screen.</p>
     <a class="text-link" href="/manual/tmux/">tmux setup and controls <span aria-hidden="true">&#8594;</span></a>
@@ -40,7 +160,7 @@
 </section>
 
 <section class="connection-section" id="devserver" aria-labelledby="devserver-title">
-  <div class="connection-intro"><p class="section-label"><span>03 /</span> CHAN DEVSERVER</p><h2 id="devserver-title">Your tools, on any machine<span class="orange">.</span></h2></div>
+  <div class="connection-intro"><p class="section-label"><span>05 /</span> CHAN DEVSERVER</p><h2 id="devserver-title">Your tools, on any machine<span class="orange">.</span></h2></div>
   <div class="connection-detail">
     <p>Install Chan on a remote machine and use <strong>Add devserver</strong> in Computers to configure access. Connect over ssh or Eternal Terminal, as in the examples above. Your terminals, files, and workspaces live on that machine, ready when you reconnect.</p>
     <div class="connection-route" role="img" aria-label="Chan Desktop connects to a remote devserver over ssh or Eternal Terminal"><span>Chan Desktop</span><span aria-hidden="true">&#8596;</span><span>ssh / ET</span><span aria-hidden="true">&#8596;</span><span>Devserver</span></div>
@@ -49,7 +169,7 @@
 </section>
 
 <section class="connection-section" id="gateway" aria-labelledby="gateway-title">
-  <div class="connection-intro"><p class="section-label"><span>04 /</span> CHAN GATEWAY</p><h2 id="gateway-title">Always-on environments.<br />Your domain<span class="orange">.</span></h2></div>
+  <div class="connection-intro"><p class="section-label"><span>06 /</span> CHAN GATEWAY</p><h2 id="gateway-title">Always-on environments.<br />Your domain<span class="orange">.</span></h2></div>
   <div class="connection-detail">
     <p>Provision managed devservers with your tools and a PAT. Give people access through OAuth2, without ssh. Run the gateway on your own infrastructure, with admission control, access policy, live switches, and a scalable proxy fleet.</p>
     <div class="connection-route" role="img" aria-label="Chan Desktop or a browser connects through your gateway to managed devservers"><span>Desktop / browser</span><span aria-hidden="true">&#8596;</span><span>Your gateway</span><span aria-hidden="true">&#8596;</span><span>Devservers</span></div>

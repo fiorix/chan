@@ -14,7 +14,8 @@
             {
               "slug": "",
               "title": "Overview",
-              "description": "The layers of chan, from a terminal to devservers and gateways, and where each is taught."
+              "description": "The layers of chan, from a terminal to devservers and gateways, and where each is taught.",
+              "head": "scene"
             },
             {
               "slug": "install",
@@ -25,7 +26,8 @@
             {
               "slug": "concepts",
               "title": "Concepts",
-              "description": "Workspaces, libraries, windows, the Computers screen, devservers and gateways, and how each layer builds on the one before."
+              "description": "Workspaces, libraries, windows, the Computers screen, devservers and gateways, and how each layer builds on the one before.",
+              "head": "scene"
             }
           ]
         },

@@ -22,10 +22,14 @@ const checks = [
     { path, status: 200, includes: 'src="/assets/site-motion.js"' },
     ...(path === "/" ? [] : [{ path, status: 200, includes: 'data-site-animation="waves"' }]),
   ]),
-  { path: "/", status: 200, includes: 'href="#computers">Explore Chan' },
-  { path: "/", status: 200, before: ['id="computers"', 'id="tmux"'] },
-  { path: "/", status: 200, includes: 'src="/demo/computers/"' },
-  { path: "/demo/computers/", status: 200, includes: 'data-variant="populated"' },
+  { path: "/", status: 200, includes: 'href="#library">Explore Chan' },
+  { path: "/", status: 200, before: ['id="tour"', 'id="tmux"'] },
+  { path: "/", status: 200, includes: 'src="/assets/tour.js"' },
+  { path: "/", status: 200, before: ['data-beat="terminal"', 'data-beat="library"'] },
+  { path: "/", status: 200, before: ['data-beat="library"', 'data-beat="computers"'] },
+  { path: "/", status: 200, before: ['data-beat="computers"', 'data-beat="workspace"'] },
+  { path: "/assets/tour.js", status: 200 },
+  { path: "/assets/tour.css", status: 200 },
   { path: "/", status: 200, before: ['id="tmux"', 'id="devserver"'] },
   { path: "/", status: 200, before: ['id="devserver"', 'id="gateway"'] },
   { path: "/devserver/", status: 200, includes: 'id="remote-tools"' },
@@ -144,7 +148,7 @@ async function checkDocSet(port, set) {
       if (process.env.CHAN_SITE_PLACEHOLDERS !== "1") {
         assert.equal(doc.querySelector("[data-shot]"), null, `${route}: no capture placeholder in a published page`);
         for (const figure of doc.querySelectorAll("#manual-content figure")) {
-          assert.ok(figure.querySelector("img, video, iframe, .dg-row, .launcher-demo-wrap"), `${route}: a figure with nothing in it`);
+          assert.ok(figure.querySelector("img, video, iframe, .dg-row, .launcher-demo-wrap, .tour-scene"), `${route}: a figure with nothing in it`);
         }
       }
       assert.equal(!!doc.querySelector('script[src="/assets/launcher-demo.js"]'), withLauncher.has(route), `${route}: the launcher bundle loads only where the page mounts it`);
