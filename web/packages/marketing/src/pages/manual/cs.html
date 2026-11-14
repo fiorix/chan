@@ -1,5 +1,5 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="cs-drive-terminal" data-shot-kind="clip">clip to capture<small>two panes; in the left terminal run cs terminal new --tab-name build, then cs terminal write --tab-name build with make test; the build tab runs it on the right; cs terminal scrollback prints its last lines on the left</small></div>
+  <div class="shot-placeholder-frame" data-shot="cs-drive-terminal" data-shot-kind="clip">clip to capture<small>one terminal; right=$(cs pane new right) splits the window, then cs terminal new --pane "$right" --tab-name build opens the build tab in the right pane; cs terminal write --tab-name build with make test runs it there; cs terminal scrollback prints its last lines on the left</small></div>
   <figcaption>One terminal opens a named terminal, runs a command in it, and reads its output.</figcaption>
 </figure>
 
@@ -98,6 +98,7 @@
     <li>
       <h3>Open a named terminal</h3>
       <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal new --tab-name build</b></code>{{copyButton}}</div>
+      <p>The tab opens in the window's active pane, which is the one you typed in. To open it beside you, pass <code>--pane</code> a pane id, as in <a href="#pane">cs pane</a>.</p>
     </li>
     <li>
       <h3>Run a command in it</h3>
@@ -115,7 +116,7 @@
         <tr><th>Command</th><th>Example</th><th>What it does</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>new</code></td><td><code>cs terminal new src --tab-name build --tab-group ci</code></td><td>Opens a terminal tab in this window, in a directory, with a name and group. <code>--command</code> runs a program instead of the shell.</td></tr>
+        <tr><td><code>new</code></td><td><code>cs terminal new src --tab-name build --tab-group ci</code></td><td>Opens a terminal tab in this window's active pane, in a directory, with a name and group. <code>--command</code> runs a program instead of the shell.</td></tr>
         <tr><td><code>write</code></td><td><code>cs terminal write --tab-group ci $'git pull\n'</code></td><td>Queues text for every match, delivered when each goes quiet. <code>--submit AGENT</code> also submits it to an agent; <code>--stdin</code> reads the text.</td></tr>
         <tr><td><code>list</code></td><td><code>cs terminal list --json | jq -r '.groups.ci[].name'</code></td><td>Lists live terminals by group, with window, pane, agent, program status, queue and directory.</td></tr>
         <tr><td><code>scrollback</code></td><td><code>cs terminal scrollback --tab-name build &gt; build.log</code></td><td>Prints one terminal's recent output, escape sequences included.</td></tr>

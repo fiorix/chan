@@ -95,14 +95,14 @@
       <tbody>
         <tr><td>A directory</td><td>How many levels are open below it. Lower it to close them, down to 0 to close the directory itself. The rest of the tree stays as you left it.</td></tr>
         <tr><td>The workspace root</td><td>Levels open below the root, from 1. Raise it for a view of the whole repository.</td></tr>
-        <tr><td>A file, tag, mention or contact</td><td>Hops of references followed from it, in both directions, from 1 to 6. It starts again at 1 for each node you select.</td></tr>
+        <tr><td>A file, tag, mention or contact</td><td>Hops of references followed from it, in both directions, from 1 to 6. Nodes past the first hop are drawn dimmed, with their directories. It starts again at 1 for each node you select.</td></tr>
         <tr><td>A language</td><td>Fixed at 1: a language always shows its files.</td></tr>
       </tbody>
     </table>
   </div>
-  <p>The control reads <code>[max]</code> when there is nothing further to reveal. What hops reveal leaves again when the selection moves, unless its directory is open.</p>
+  <p>The control reads <code>[max]</code> when there is nothing further to reveal. Only the selection, its direct neighbours and its path to the root are lit. A node a hop reveals that the open tree already shows does not change, and what hops reveal leaves again when the selection moves, unless its directory is open.</p>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="graph-depth" data-shot-kind="clip">clip to capture<small>the workspace root selected, right-click, drag Depth from 1 to 3 and the tree opens level by level; then select a Markdown file and raise Depth from 1 to 2 to light a second hop</small></div>
+    <div class="shot-placeholder-frame" data-shot="graph-depth" data-shot-kind="clip">clip to capture<small>the workspace root selected, right-click, drag Depth from 1 to 3 and the tree opens level by level, then back to 1; select a top-level Markdown file whose links lead on to files in closed directories, and raise its Depth from 1 to 2: those files appear, dimmed, with their directories</small></div>
   </figure>
   <details class="doc-details">
     <summary>Details and limits</summary>
