@@ -58,7 +58,10 @@ async function clickTerminal(page, tab) {
   await page.click(`${terminalSelector(tab)} .terminal-host`);
   await page.waitForFunction((selector) => {
     const terminal = document.querySelector(selector);
-    return terminal?.closest(".pane")?.classList.contains("focused") &&
+    const pane = terminal?.closest(".pane");
+    // The focus border is drawn only when there is more than one pane.
+    const focused = pane && (document.querySelectorAll(".pane").length === 1 || pane.classList.contains("focused"));
+    return focused &&
       terminal.querySelector(".terminal-host")?.contains(document.activeElement);
   }, { timeout: 10_000 }, terminalSelector(tab));
 }
