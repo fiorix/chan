@@ -4129,6 +4129,15 @@ function applySessionSidecars(p: SessionPayload): void {
 /// other leader nobody else owns the window, and the unsent DELETE would only
 /// strand it. A window with no row of its own is no follower, and desktop
 /// windows always manage their own blob.
+///
+/// The decision is made once, by the first save that finds the view empty
+/// (the debounced save, else the exit flush), from the roster this page last
+/// received. A suppressed debounced save records the empty view as saved, so
+/// no later save of that view and no exit flush sends the DELETE, even after
+/// this window gains the slot. The roster is not cleared when the socket
+/// drops, so during a reconnect the page decides on its last roster even if
+/// the server has moved the slot since: a gateway window deletes its own blob
+/// when that roster named it leader, and keeps it when it named another.
 function followerSuppressesSessionDelete(): boolean {
   if (isTauriDesktop() || !isFollower()) return false;
   return sessionState.leader !== null && sessionState.leader !== sessionWindowId();
@@ -4285,8 +4294,8 @@ function commitSessionSave(): Promise<void> | undefined {
     // deletes its blob so it leaves the saved-window list. A gateway window
     // skips this while another window leads (followerSuppressesSessionDelete).
     if (followerSuppressesSessionDelete()) {
-      // Seeded, not sent: a page that stops being a follower before it
-      // goes must not DELETE the blob at exit either.
+      // Seeded, not sent: neither a later save nor the exit flush sends the
+      // DELETE, even once this window gains the leader slot.
       seedSessionSnapshot(next);
       return;
     }
