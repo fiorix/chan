@@ -41,7 +41,7 @@
   </div>
 
   <h3 id="devserver-commands"><a class="heading-anchor" href="#devserver-commands">chan devserver</a></h3>
-  <p>The first commands run the devserver of this machine. The rest manage the devservers on Chan Desktop's Computers screen, so they need Chan Desktop running; <code>NAME</code> is the name or URL <code>chan devserver ls</code> shows.</p>
+  <p>The first commands run the devserver of the machine you type them on. The rest manage the devservers on Chan Desktop's Computers screen, so they need Chan Desktop running; <code>NAME</code> is the name or URL <code>chan devserver ls</code> shows.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
@@ -60,7 +60,7 @@
       </tbody>
     </table>
   </div>
-  <p>The commands for this machine's devserver share <code>--bind</code>, <code>--port</code> and <code>--service</code>, and the tunnel flags that <a href="/gateway/publish/#publish">publish a devserver through a gateway</a>.</p>
+  <p>The commands for a machine's own devserver share <code>--bind</code>, <code>--port</code> and <code>--service</code>, and the tunnel flags that <a href="/gateway/publish/#publish">publish a devserver through a gateway</a>.</p>
 
   <h3 id="other-commands"><a class="heading-anchor" href="#other-commands">Other commands</a></h3>
   <div class="manual-table-wrap">
@@ -99,7 +99,7 @@
     <ul>
       <li>Only a server the command binds itself can enforce <code>--no-settings</code>, so a serve that would hand the workspace to Chan Desktop or a devserver is refused. Add <code>--standalone</code>.</li>
       <li><code>--timeout</code> takes a whole number with <code>s</code>, <code>m</code> or <code>h</code>, such as <code>30s</code>; zero is refused.</li>
-      <li><code>--devserver=PORT</code> also takes a URL on this machine, such as <code>--devserver=http://127.0.0.1:9999</code>, always with <code>=</code>. A URL of another host is refused.</li>
+      <li><code>--devserver=PORT</code> also takes a URL on the same machine, such as <code>--devserver=http://127.0.0.1:9999</code>, always with <code>=</code>. A URL of another host is refused.</li>
       <li><code>--on NAME</code> takes no other serve flag, and its PATH is a path on that devserver.</li>
       <li><code>-4</code> or <code>-6</code> with a <code>--host</code> of the other kind is refused.</li>
       <li><code>chan serve</code> takes a path only; a URL is refused with a pointer to <code>chan devserver register</code>.</li>

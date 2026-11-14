@@ -24,7 +24,7 @@
     </li>
     <li>
       <h3>Start tmux in a Chan terminal</h3>
-      <p>On this machine:</p>
+      <p>On the local machine:</p>
       <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>tmux -CC new -A -s dev</b></code>{{copyButton}}</div>
       <p>On another machine, over ssh:</p>
       <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>ssh -t user@host tmux -CC new -A -s dev</b></code>{{copyButton}}</div>
@@ -71,7 +71,7 @@ trust = ["ssh", "et"]</code></pre>
 
 <section class="manual-block" id="card">
   <h2><a class="heading-anchor" href="#card">The connection's card</a></h2>
-  <p>A connection is a card on the Computers screen, beside this machine and your devservers. Its rows are the connection's windows.</p>
+  <p>A connection is a card on the Computers screen, beside the local machine and your devservers. Its rows are the connection's windows.</p>
   <figure class="inline-shot">
     <div class="shot-placeholder-frame" data-shot="tmux-card" data-shot-kind="still">screenshot to capture<small>Computers with a "tmux -CC from ssh" card and its window rows</small></div>
   </figure>
@@ -81,7 +81,7 @@ trust = ["ssh", "et"]</code></pre>
         <tr><th>The card is titled</th><th>When tmux runs</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>tmux -CC on this machine</code></td><td>In a terminal of this machine.</td></tr>
+        <tr><td><code>tmux -CC on this machine</code></td><td>In a terminal of the local machine.</td></tr>
         <tr><td><code>tmux -CC on</code> and the devserver's name</td><td>In a devserver's terminal.</td></tr>
         <tr><td><code>tmux -CC from</code> and the command that reached it, such as <code>tmux -CC from ssh -t user@host tmux -CC new -A -s dev</code></td><td>Behind another program, here ssh.</td></tr>
       </tbody>
@@ -130,7 +130,7 @@ trust = ["ssh", "et"]</code></pre>
   <h2><a class="heading-anchor" href="#next">Next</a></h2>
   <div class="next-cards">
     <a class="next-card" href="/manual/navigation/#hybrid-nav"><strong>Hybrid Nav</strong><span>Arrange panes from the keyboard, staged until you commit.</span></a>
-    <a class="next-card" href="/manual/computers/"><strong>Computers</strong><span>The screen that lists this machine, devservers, and tmux connections.</span></a>
+    <a class="next-card" href="/manual/computers/"><strong>Computers</strong><span>The screen that lists the local machine, devservers, and tmux connections.</span></a>
     <a class="next-card" href="/manual/cs/#terminal"><strong>Terminal commands</strong><span>List, write to, and read terminals with <code>cs</code>.</span></a>
   </div>
 </section>
