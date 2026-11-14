@@ -1,6 +1,6 @@
 # Moving pane focus to a file browser leaves the keyboard in the terminal
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-13 on the branch `fix/pane-focus-keyboard`, rebased onto `v0130/int` (`6b7b17199`), not merged; the section "Built 2026-11-13" holds the evidence. The owner took a Linux desktop reading in place of his own walk ("linux walk should be enough"); it is in that section.
+Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-13 on the branch `fix/pane-focus-keyboard`, rebased onto `v0130/int` (`6b7b17199`) and merged into it (`7ed970eb3`), not yet in a release; the section "Built 2026-11-13" holds the evidence. The owner took a Linux desktop reading in place of his own walk ("linux walk should be enough"); it is in that section.
 
 Record: reported by the owner on 2026-11-13 from chan-desktop, with a terminal in the top pane and a file browser in the bottom one: "if i switch the pane focus from the termianl to the file browser, the arrow keys still go to the terminal.. pressing arrow up rolls the terminal history up by 1, arrow down, down by 1.. and the focus border show in the file browser". He expects the web build to show it as well. Not recorded: which way he moved the focus (the Next pane chord, Hybrid Nav or a press) and which backend the terminal ran (ghostty is the default).
 

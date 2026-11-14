@@ -27,9 +27,9 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 
 | Item | State | Next |
 | --- | --- | --- |
-| [a pane keeps a margin on the window's edge][flushedges] | merged | gate |
-| [systemd-report cannot read the metrics][sdreport] | merged | gate |
-| [a focused browser pane gets no keys][panekeys] | built, unmerged | landed |
+| [a pane keeps a margin on the window's edge][flushedges] | merged | closed |
+| [systemd-report cannot read the metrics][sdreport] | merged | closed |
+| [a focused browser pane gets no keys][panekeys] | merged | closed |
 | [a terminal window ignores saved shortcuts][termkeys] | not started | build |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
