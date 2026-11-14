@@ -2,7 +2,7 @@
   // Dashboard slides keep stable persisted ids; their display order starts
   // with Metrics. Hover, focus and hidden tabs pause the five-second rotation.
 
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { api } from "../api/client";
   import { withTokenQuery } from "../api/transport";
   import type { BuildInfo, IndexingStateResponse } from "../api/types";
@@ -30,6 +30,12 @@
   } from "../state/tabs.svelte";
   import { parentDir } from "../state/format";
   import { directoryNodeId, type CanvasEdge, type CanvasNode } from "../graph/canvasNodes";
+  import {
+    drawnIndexingNodes,
+    drawnOpenedDirs,
+    sameIndexingState,
+    withoutVanishedDirs,
+  } from "../graph/indexingSpine";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
@@ -104,10 +110,11 @@
   // ---- Search slide (index 1) - indexing graph (read-only spine) ---------
 
   /// Indexing state response cache. Re-fetched whenever the Search
-  /// slide becomes active and again every 3 s while it stays active so
+  /// slide becomes active, again every 3 s while it stays active so
   /// orange (in-flight) nodes can flip to green as the indexer
-  /// makes progress. Polling stops the moment the slide hides; the
-  /// effect cleanup clears the timer.
+  /// makes progress, and at once when a directory is opened or closed.
+  /// Polling stops the moment the slide hides; the effect cleanup clears
+  /// the timer.
   // Seed from the shared cache so a carousel mounted later in the page
   // (another Dashboard tab, or this one mounted again) renders the graph
   // immediately instead of flashing empty (the poll below still refreshes
@@ -118,19 +125,45 @@
   let indexingError = $state<string | null>(null);
   let indexingLoading = $state(false);
 
-  async function refreshIndexing(): Promise<void> {
+  /// Answers are taken in the order of their requests. Requests overlap:
+  /// one can take longer than the 3 s between polls, and opening or closing
+  /// a directory asks again at once. An answer that lands after a later
+  /// request's is dropped: it is older news, and one asked before a
+  /// directory was opened would hide the level just drawn until the next
+  /// poll. A failure is shown only when no later request has answered.
+  let asks = 0;
+  let landed = 0;
+
+  async function refreshIndexing(open: readonly string[]): Promise<void> {
+    const ask = ++asks;
     indexingLoading = true;
     try {
-      indexing = await api.indexingState();
+      const answer = await api.indexingState(open);
+      if (ask < landed) return;
+      landed = ask;
+      // An equal answer keeps the one held. A new object would hand the
+      // canvas new arrays, and it warms its layout again for those.
+      if (!sameIndexingState(indexing, answer)) indexing = answer;
       // Persist for the next mount so it has data on hand.
       indexingCache.last = indexing;
       indexingError = null;
+      if (answer) {
+        const held = expandedIndexDirs;
+        const kept = withoutVanishedDirs(held, open, answer.nodes);
+        if (kept.length !== held.length) expandedIndexDirs = [...kept];
+      }
+      fitOpenedDirectory(open);
     } catch (e) {
-      indexingError = (e as Error).message;
+      if (ask > landed) indexingError = (e as Error).message;
     } finally {
-      indexingLoading = false;
+      if (ask === asks) indexingLoading = false;
     }
   }
+
+  /// The opened directories the slide draws the level of, which a request
+  /// asks for, and their key, which changes only when they do.
+  const openDirs = $derived.by(() => drawnOpenedDirs(expandedIndexDirs));
+  const openKey = $derived(JSON.stringify(openDirs));
 
   /// Which directory states are actually present right now. The Search
   /// front legend always shows "indexed" (the steady state) but only
@@ -143,6 +176,12 @@
   const hasPendingNodes = $derived(
     indexing?.nodes.some((n) => n.state === "pending") ?? false,
   );
+  /// Whether a double-click has a directory to open: the hint under the
+  /// graph names the gesture only while one of the listed directories
+  /// holds directories of its own.
+  const hasOpenableNodes = $derived(
+    indexing?.nodes.some((n) => n.path !== "" && n.children_count > 0) ?? false,
+  );
 
   function basename(path: string): string {
     if (path === "") return "/";
@@ -151,9 +190,11 @@
   }
 
   /// Synthesize the read-only directory spine for GraphCanvas. We
-  /// emit one `folder` node per indexed directory (plus the
-  /// workspace root sentinel) and one `contains` edge per
-  /// parent → child relationship. The `indexState` field on each
+  /// emit one `folder` node per drawn directory (the workspace root
+  /// sentinel, its directories and those of each opened directory) and
+  /// one `contains` edge per parent → child relationship. A closed
+  /// directory's state covers its subtree, so the spine reports the whole
+  /// workspace at any depth it is opened to. The `indexState` field on each
   /// folder node drives the green/grey/pulsing-orange palette
   /// inside GraphCanvas; the main Graph-tab view leaves
   /// `indexState` unset and falls back to the standard folder
@@ -164,10 +205,11 @@
   }>(() => {
     const data = indexing;
     if (!data) return { nodes: [], edges: [] };
+    const drawn = drawnIndexingNodes(data.nodes, expandedIndexDirs);
     const nodes: CanvasNode[] = [];
     const known = new Set<string>();
-    for (const n of data.nodes) known.add(n.path);
-    for (const n of data.nodes) {
+    for (const n of drawn) known.add(n.path);
+    for (const n of drawn) {
       // Omit `indexState` for the workspace-root node so
       // GraphCanvas's `indexFill` override does NOT replace the
       // workspace's standard `bgCard` disc fill. The hard-drive icon
@@ -197,7 +239,7 @@
       });
     }
     const edges: CanvasEdge[] = [];
-    for (const n of data.nodes) {
+    for (const n of drawn) {
       if (n.path === "") continue;
       const parent = parentDir(n.path);
       if (!known.has(parent)) continue;
@@ -210,9 +252,9 @@
     return { nodes, edges };
   });
 
-  /// `visibleNodeIds` mirrors the full synthesized set: this
-  /// surface is depth-max + spine-only, there's no filter chip /
-  /// scope picker to thin it. Same for `visibleEdges`.
+  /// `visibleNodeIds` mirrors the full synthesized set: the opened
+  /// directories already chose what is drawn, and there's no filter chip
+  /// to thin it. Same for `visibleEdges`.
   const indexingNodeIds = $derived.by<Set<string>>(() => {
     const out = new Set<string>();
     for (const n of indexingGraph.nodes) out.add(n.id);
@@ -237,7 +279,65 @@
   /// the selection and dismisses the inspector. Clicking the
   /// inspector's close affordance does the same.
   function onIndexingSelect(id: string | null): void {
+    if (id !== null && selectedIndexId === null) settleDetails();
     selectedIndexId = id;
+  }
+
+  /// A click that opens Details may be the first of a double-click, and
+  /// the panel lands where the canvas's right side was: over the node, for
+  /// one clicked there. For the length of a double-click the panel is an
+  /// overlay the pointer passes through, and the canvas keeps its width, so
+  /// the second click reaches the node and not a control of the panel.
+  /// After that the panel takes its room in the row. Details restored with
+  /// a saved selection takes it at once, as no click opened it.
+  const DETAILS_SETTLE_MS = 500;
+  let detailsSettling = $state(false);
+  let detailsSettled: number | undefined;
+
+  function settleDetails(): void {
+    detailsSettling = true;
+    window.clearTimeout(detailsSettled);
+    detailsSettled = window.setTimeout(() => {
+      detailsSettling = false;
+    }, DETAILS_SETTLE_MS);
+  }
+
+  onDestroy(() => window.clearTimeout(detailsSettled));
+
+  /// A double-click on a directory opens or closes it in place, as the
+  /// graph tab's does. The taps before it selected the directory, so this
+  /// reads the selection. The root stays open, and a directory that holds
+  /// no directory has no level to draw, so both are left as they are.
+  function toggleIndexingDirectory(): void {
+    const path = selectedIndexPath;
+    if (path === null || path === "") return;
+    if (expandedIndexDirs.includes(path)) {
+      expandedIndexDirs = expandedIndexDirs.filter((dir) => dir !== path);
+      if (openedDirectory === path) openedDirectory = null;
+      return;
+    }
+    const node = indexing?.nodes.find((n) => n.path === path);
+    if (!node || node.children_count === 0) return;
+    expandedIndexDirs = [...expandedIndexDirs, path];
+    openedDirectory = path;
+  }
+
+  /// The directory a double-click opened, until an answer lists its level.
+  /// The canvas is then asked to bring the directory, its parent and what
+  /// it holds into view. The press that opened it took the view from the
+  /// canvas's own fit, so nothing else would.
+  let openedDirectory: string | null = null;
+  let indexingFit = $state<{ nonce: number; ids: string[] } | null>(null);
+
+  function fitOpenedDirectory(open: readonly string[]): void {
+    const dir = openedDirectory;
+    if (dir === null || !open.includes(dir)) return;
+    openedDirectory = null;
+    const below = (indexing?.nodes ?? []).filter((n) => n.path !== "" && parentDir(n.path) === dir);
+    indexingFit = {
+      nonce: (indexingFit?.nonce ?? 0) + 1,
+      ids: [dir, parentDir(dir), ...below.map((n) => n.path)].map(directoryNodeId),
+    };
   }
   /// Resolve the selected node id back to a workspace-relative
   /// path. `directoryNodeId(path)` is the canonical mapping that
@@ -271,6 +371,10 @@
   // indexing poll.
   type Props = {
     selectedIndexId?: string | null;
+    /// The directories opened on the Search slide: workspace-relative
+    /// paths, without the root, which is always open. The host keeps them
+    /// (a Dashboard tab saves them with its layout).
+    expandedIndexDirs?: string[];
     inspectorWidth?: number;
     slide?: number;
     onSlideChange?: (slide: number) => void;
@@ -286,6 +390,7 @@
   };
   let {
     selectedIndexId = $bindable(null),
+    expandedIndexDirs = $bindable([]),
     inspectorWidth = $bindable(320),
     slide = DASHBOARD_METRICS_SLIDE,
     onSlideChange,
@@ -382,14 +487,17 @@
 
   /// Re-fetch indexing state when the Search slide (index 1) becomes
   /// active, and poll every 3 s while it stays visible so orange (in-flight)
-  /// nodes can flip to green as the indexer makes progress. The
-  /// cleanup clears the timer on slide change / unmount so we
-  /// never hammer the server in the background.
+  /// nodes can flip to green as the indexer makes progress. A directory
+  /// opened or closed changes the key, which asks again at once for the
+  /// levels now drawn. The cleanup clears the timer on slide change /
+  /// unmount so we never hammer the server in the background.
   $effect(() => {
     if (slideIndex !== 1 || !active) return;
-    void refreshIndexing();
+    void openKey;
+    const open = untrack(() => openDirs);
+    void refreshIndexing(open);
     const handle = window.setInterval(() => {
-      void refreshIndexing();
+      void refreshIndexing(open);
     }, 3000);
     return () => window.clearInterval(handle);
   });
@@ -520,9 +628,10 @@
            `/api/indexing/state` and feed it to the same
            `GraphCanvas` the main Graph tab uses; the per-directory
            `indexState` drives the green / grey / pulsing-orange
-           palette inside the canvas. No chrome (inspector / scope
-           picker / depth slider / filter chips): the slide is purely
-           a status read-out. -->
+           palette inside the canvas. The spine is drawn by level, the
+           root's and each opened directory's, and a double-click opens
+           or closes a directory. No other chrome (depth slider / filter
+           chips): the slide is a status read-out. -->
       <div class="slide slide-indexing" aria-label="Indexing graph">
         <!-- The slot is labelled "Search": the graph itself is the indexing
              spine, so its aria-label stays "Indexing graph". -->
@@ -548,7 +657,7 @@
             {/if}
           </div>
         {:else}
-          <div class="indexing-row">
+          <div class="indexing-row" class:details-settling={detailsSettling}>
             <div class="indexing-graph-host">
               <GraphCanvas
                 open={slideIndex === 1}
@@ -561,6 +670,8 @@
                 focalAnchor="bounds"
                 selectedId={selectedIndexId}
                 onSelect={onIndexingSelect}
+                onSetAsScope={toggleIndexingDirectory}
+                expansionFitRequest={indexingFit}
               />
             </div>
             <!-- Selecting a directory node surfaces the same
@@ -573,7 +684,7 @@
               <Inspector
                 title={selectedIndexLabel}
                 floating
-                reserveSpace
+                reserveSpace={!detailsSettling}
                 bind:width={inspectorWidth}
                 onClose={() => onIndexingSelect(null)}
               >
@@ -633,6 +744,9 @@
               </span>
             {/if}
           </div>
+          {#if hasOpenableNodes}
+            <div class="indexing-hint">double-click a directory to open it</div>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -954,6 +1068,10 @@
     isolation: isolate;
     overflow-x: auto;
   }
+  /* Details as a click has just opened it: see `settleDetails`. */
+  .indexing-row.details-settling :global(aside.inspector) {
+    pointer-events: none;
+  }
   .indexing-graph-host {
     flex: 1;
     min-height: 0;
@@ -972,6 +1090,12 @@
     font-size: 11px;
     color: var(--text-secondary);
     margin-top: 4px;
+    align-self: center;
+  }
+  .indexing-hint {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
     align-self: center;
   }
   .indexing-legend .legend-pair {

@@ -30,6 +30,48 @@ test.each([null, "", "directory:notes"])("dashboard Details selection %s and wid
   expect(tab.indexingSelectedId ?? null).toBeNull();
 });
 
+test("a dashboard's opened directories survive serialization, and none are saved once all are closed", async () => {
+  await restoreLayout({ k: "l", t: [{ k: "d", cs: 1, de: ["docs", "docs/api", "notes"] }] });
+  let tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["docs", "docs/api", "notes"]);
+  await restoreLayout(serializeLayout()!);
+  tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["docs", "docs/api", "notes"]);
+  tab.indexingExpanded = undefined;
+  expect((serializeLayout() as SerLeaf).t[0].de).toBeUndefined();
+  // An entry that is no directory path is dropped, and a repeat is kept once.
+  await restoreLayout({ k: "l", t: [{ k: "d", de: ["", 7, "docs", "docs"] as string[] }] });
+  tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["docs"]);
+});
+
+test("a dashboard saved with a nested directory selected and none opened restores with the path to it opened", async () => {
+  // A tab as a session holds it from when the Search slide drew the whole
+  // tree: the selection alone, three levels down.
+  await restoreLayout({ k: "l", t: [{ k: "d", cs: 1, dsi: "directory:docs/api/v1" }] });
+  let tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingSelectedId).toBe("directory:docs/api/v1");
+  expect(tab.indexingExpanded).toEqual(["docs", "docs/api"]);
+
+  // A directory named for an Object member is a directory like any other.
+  await restoreLayout({ k: "l", t: [{ k: "d", dsi: "directory:__proto__/a/b" }] });
+  tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["__proto__", "__proto__/a"]);
+
+  // A top-level selection, and the root's, need nothing opened.
+  for (const selection of ["directory:docs", ""]) {
+    await restoreLayout({ k: "l", t: [{ k: "d", dsi: selection }] });
+    tab = activePane().tabs[0];
+    if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+    expect(tab.indexingExpanded).toBeUndefined();
+  }
+});
+
 test("a graph tab saved with a scope of its own restores as the workspace with that node selected", async () => {
   // Tabs as a session holds them from when a graph could be scoped to a
   // node, or be the filesystem's (`gm: "f"`) or a language's (`gm: "l"`).

@@ -36,7 +36,7 @@
       <tbody>
         <tr><td>Metrics</td><td>The chan process serving the window. See <a href="#metrics">below</a>.</td></tr>
         <tr><td>Workspace</td><td>The root path, files, subdirectories, size and last change; file kinds; the code report by language; contacts.</td></tr>
-        <tr><td>Search</td><td>The indexing graph: each directory as indexed, indexing or pending.</td></tr>
+        <tr><td>Search</td><td>The indexing graph: the workspace's directories, a level at a time, as indexed, indexing or pending.</td></tr>
         <tr><td>About</td><td>The chan version and build, links to chan.app and the source, and credits.</td></tr>
       </tbody>
     </table>
@@ -89,7 +89,8 @@
   <h2><a class="heading-anchor" href="#index">Follow the index</a></h2>
   <p>Each workspace has its own index, kept under the chan home, not in the workspace. It makes content <a href="/manual/search/">searchable</a>, gives <a href="/manual/graph/">the graph</a> its links, tags and mentions, and follows the files as they change.</p>
   <ul>
-    <li>The Search slide draws the directories as a graph: green when indexed, pulsing orange while indexing, grey while pending. Click a directory for its Details.</li>
+    <li>The Search slide draws the workspace's first level of directories as a graph: green when indexed, pulsing orange while indexing, grey while pending. A directory's colour covers everything inside it.</li>
+    <li>Double-click a directory to open or close it in place. Click one for its Details.</li>
     <li>While the index works, a pill in the status bar says so. Click it to open the Search slide.</li>
     <li>A draft enters the index once you save it into the workspace.</li>
   </ul>

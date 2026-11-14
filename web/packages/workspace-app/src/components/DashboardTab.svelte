@@ -9,6 +9,7 @@
   import { chordFor, shortcutLabel } from "../state/shortcuts";
   import {
     openCommandLauncherFromMenu,
+    schedulePersistStateToHash,
     scheduleSessionSave,
     surfaceThemeOverride,
   } from "../state/store.svelte";
@@ -38,6 +39,18 @@
   function onCarouselSlideChange(i: number): void {
     if (tab.carouselSlide === i) return;
     tab.carouselSlide = i;
+    scheduleSessionSave();
+  }
+
+  // The directories opened on the Search slide live on the tab, so they
+  // outlast the slide (the carousel mounts one slide at a time) and a window
+  // reload. One array stands for "none", so the carousel is not handed a new
+  // list each time it reads an unset field.
+  const NO_DIRECTORIES: string[] = [];
+
+  function setIndexingExpanded(dirs: string[]): void {
+    tab.indexingExpanded = dirs.length > 0 ? dirs : undefined;
+    schedulePersistStateToHash();
     scheduleSessionSave();
   }
 
@@ -181,6 +194,7 @@
 
   <EmptyPaneCarousel
     bind:selectedIndexId={() => tab.indexingSelectedId ?? null, (id) => (tab.indexingSelectedId = id)}
+    bind:expandedIndexDirs={() => tab.indexingExpanded ?? NO_DIRECTORIES, setIndexingExpanded}
     bind:inspectorWidth={() => tab.inspectorWidth ?? 320, (width) => (tab.inspectorWidth = width)}
     slide={tab.carouselSlide ?? 0}
     onSlideChange={onCarouselSlideChange}

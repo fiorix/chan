@@ -14,7 +14,8 @@
 // the donation QR and the free-software line; its dots and rotation skip a
 // switched-off slide, and its index graph draws only while the carousel is
 // active; a directory picked on that graph opens an inspector that offers no
-// upload. A lone pane with no tabs shows the welcome surface
+// upload, and a double-click on one opens it on the tab, which its layout
+// saves. A lone pane with no tabs shows the welcome surface
 // instead, and the pane menu's Apps rows, in title order, spawn every tab
 // kind, the dashboard included.
 
@@ -436,6 +437,54 @@ describe("the carousel's slides", () => {
       tree.entries = [];
       indexingCache.last = null;
     }
+  });
+});
+
+describe("the Search slide of a dashboard tab in a pane", () => {
+  beforeEach(async () => {
+    vi.spyOn(api, "buildInfo").mockResolvedValue({ version: "1.2.3", build: "abc", features: { embeddings: false } });
+    // The route's answer: the root's level, and the level of each directory
+    // the request names as open.
+    vi.spyOn(api, "indexingState").mockImplementation(async (open = []) => ({
+      root: "",
+      nodes: [
+        { path: "", state: "indexed", children_count: 1 },
+        { path: "docs", state: "indexed", children_count: 1 },
+        ...(open.includes("docs") ? [{ path: "docs/api", state: "indexed" as const, children_count: 0 }] : []),
+      ],
+    }));
+    await mountApp(
+      demoData([
+        { path: "docs/a.md", kind: "document", size: 5, mtime: 100, content: "hello" },
+        { path: "docs/api/b.md", kind: "document", size: 5, mtime: 100, content: "hello" },
+      ]),
+    );
+    resetLayout([dashboard({ carouselSlide: 1, autoRotate: false })]);
+    await settle();
+  });
+
+  afterEach(async () => {
+    indexingCache.last = null;
+    vi.restoreAllMocks();
+    await unmountApp();
+  });
+
+  test("a double-click on a directory opens it on the tab, which its layout saves", async () => {
+    await vi.waitFor(() => expect(graphCanvas.last?.nodeScreenCircle("directory:docs")).toBeTruthy());
+    expect(graphCanvas.last!.nodeScreenCircle("directory:docs/api"), "a closed directory's level").toBeNull();
+    const docs = graphCanvas.last!.nodeScreenCircle("directory:docs")!;
+    const canvas = document.querySelector<HTMLCanvasElement>(".indexing-graph-host canvas")!;
+    for (const type of ["mousedown", "mouseup", "mousedown", "mouseup", "dblclick"]) {
+      canvas.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: docs.x, clientY: docs.y }),
+      );
+    }
+
+    const tab = pane().tabs[0] as Dashboard;
+    await vi.waitFor(() => expect(tab.indexingExpanded).toEqual(["docs"]));
+    await vi.waitFor(() => expect(graphCanvas.last?.nodeScreenCircle("directory:docs/api")).toBeTruthy());
+    expect(api.indexingState).toHaveBeenLastCalledWith(["docs"]);
+    expect((serializeLayout() as Extract<SerNode, { k: "l" }>).t[0]).toMatchObject({ k: "d", de: ["docs"] });
   });
 });
 

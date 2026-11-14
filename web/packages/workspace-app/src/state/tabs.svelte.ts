@@ -32,6 +32,7 @@ import {
 import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
 import { forgetLinkKinds } from "../editor/widgets/wikilink";
+import { dirsAbove } from "../graph/indexingSpine";
 import { openedForPath, selectionOfScope } from "../graph/selectionView";
 import { uiConfirm } from "./confirm.svelte";
 import { windowCaps } from "./windowCaps";
@@ -693,6 +694,10 @@ export type BrowserTab = {
 export type DashboardTab = {
   /// The selected indexing directory opens Details; null means closed.
   indexingSelectedId?: string | null;
+  /// The directories opened on the Search slide, which draws the root's
+  /// level and each opened directory's. Workspace-relative; the root is
+  /// always open and never listed. Absent when nothing below it is open.
+  indexingExpanded?: string[];
   inspectorWidth?: number;
   kind: "dashboard";
   id: string;
@@ -4635,6 +4640,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   inspectorOpen: "carry",
   inspectorWidth: "carry",
   indexingSelectedId: "carry",
+  indexingExpanded: "carry",
   keyboardProtocol: "carry",
   kind: "carry",
   loading: "carry",
@@ -4782,6 +4788,7 @@ function cloneTab(src: Tab): Tab {
   }
   if (clone.kind === "dashboard") {
     if (clone.disabledSlots) clone.disabledSlots = [...clone.disabledSlots];
+    if (clone.indexingExpanded) clone.indexingExpanded = [...clone.indexingExpanded];
     return clone;
   }
   if (clone.kind === "extension") return clone;
@@ -7130,6 +7137,9 @@ export type SerTab = {
   cs?: number;
   /// Selected indexing directory. Empty string is the workspace root.
   dsi?: string;
+  /// Directories opened on the Search slide. The root is always open and
+  /// omitted. Absent when nothing below it is open.
+  de?: string[];
   /// DashboardTab disabled slot indices. Omitted when empty (all slots
   /// enabled, the default).
   ds?: number[];
@@ -7209,7 +7219,7 @@ export const paneModeConflictFieldSets = {
       included: ["k", "a"],
       excluded: ["bi", "bs", "bd", "be", "bsc", "iw", "bp", "bo", "br", "bsel"],
     },
-    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar", "dsi", "iw"] },
+    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar", "dsi", "de", "iw"] },
     x: { included: ["k", "a", "xi"], excluded: ["n"] },
   },
 } as const;
@@ -7663,6 +7673,9 @@ function serializeTab(
     return {
       k: "d",
       ...(typeof t.indexingSelectedId === "string" ? { dsi: t.indexingSelectedId } : {}),
+      ...(t.indexingExpanded && t.indexingExpanded.length > 0
+        ? { de: [...t.indexingExpanded] }
+        : {}),
       ...(t.inspectorWidth && t.inspectorWidth > 0
         ? { iw: Math.round(t.inspectorWidth) }
         : {}),
@@ -7931,13 +7944,28 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
     rawDs.length > 0 && DASHBOARD_SLOT_ORDER.some((i) => dashboardSlotAvailable(i) && !rawDs.includes(i))
       ? rawDs
       : [];
+  const selected =
+    typeof sertab.dsi === "string" && (sertab.dsi === "" || sertab.dsi.startsWith("directory:"))
+      ? sertab.dsi
+      : null;
+  // The slide draws a directory only under opened ones. A saved tab can
+  // name a nested selection with nothing opened above it, as a session
+  // from a release whose slide drew the whole tree does: the directories
+  // above the selection open with it, so Details has its node.
+  const indexingExpanded = [
+    ...new Set([
+      ...(Array.isArray(sertab.de)
+        ? sertab.de.filter((dir) => typeof dir === "string" && dir.length > 0)
+        : []),
+      ...(selected ? dirsAbove(selected.slice("directory:".length)) : []),
+    ]),
+  ];
   const tab: DashboardTab = {
     kind: "dashboard",
     id: id("dashboard"),
     title: "Dashboard",
-    ...(typeof sertab.dsi === "string" && (sertab.dsi === "" || sertab.dsi.startsWith("directory:"))
-      ? { indexingSelectedId: sertab.dsi }
-      : {}),
+    ...(selected !== null ? { indexingSelectedId: selected } : {}),
+    ...(indexingExpanded.length > 0 ? { indexingExpanded } : {}),
     ...(typeof sertab.iw === "number" && sertab.iw > 0
       ? { inspectorWidth: sertab.iw }
       : {}),

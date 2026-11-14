@@ -92,6 +92,20 @@ export function readGraphDiscs(page, hostSelector) {
   }, { host: hostSelector, margin: ROOT_BOTTOM_MARGIN });
 }
 
+/// The last frame's discs on the canvas under `hostSelector`, in the order
+/// the graph painted them, each as the point of the page a pointer has to be
+/// at to be over its middle, in CSS pixels. Empty when no frame was traced.
+export function graphDiscPoints(page, hostSelector) {
+  return page.evaluate((host) => {
+    const canvas = document.querySelector(`${host} canvas`);
+    const frame = canvas && window.__smokeGraphDiscs?.frames.get(canvas);
+    if (!canvas || !frame || canvas.clientWidth === 0) return [];
+    const box = canvas.getBoundingClientRect();
+    const scale = canvas.width / canvas.clientWidth;
+    return frame.discs.map((d) => ({ x: box.left + d.x / scale, y: box.top + d.y / scale }));
+  }, hostSelector);
+}
+
 /// The discs once their box holds: two reads `gap` ms apart within a pixel on
 /// every side, with the same count of discs and the same count on the status
 /// line. The graph eases into its fit as the layout settles, over a second

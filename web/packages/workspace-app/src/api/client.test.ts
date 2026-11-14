@@ -29,6 +29,26 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
+describe("the indexing state request", () => {
+  test("names each opened directory in an open value of its own, whatever characters it holds", async () => {
+    const requests = recordRequests(() => json({ root: "", nodes: [] }));
+    try {
+      await api.indexingState();
+      const opened = ["docs", "a b/c&d", "50%+x", "caf\u00e9/open=1"];
+      await api.indexingState(opened);
+
+      expect(requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+        "GET /api/indexing/state",
+        "GET /api/indexing/state",
+      ]);
+      expect(requests[0]!.query.has("open"), "nothing opened").toBe(false);
+      expect(requests[1]!.query.getAll("open")).toEqual(opened);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+});
+
 describe("standalone filesystem request markers", () => {
   /// The served shell's own declaration that this tenant mounted a
   /// filesystem. The api layer reads the document, not the state modules,

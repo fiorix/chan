@@ -339,6 +339,7 @@ const allCurrentTabFields = {
   bsc: true,
   cs: true,
   dsi: true,
+  de: true,
   ds: true,
   ar: true,
   xi: true,
@@ -413,7 +414,7 @@ const representativeTabs = {
     bsel: ["src/main.ts"],
     iw: 240,
   } as SerTab,
-  d: { k: "d", a: 1, cs: 1, ds: [1], ar: true, dsi: "directory:docs", iw: 320 } as SerTab,
+  d: { k: "d", a: 1, cs: 1, ds: [1], ar: true, dsi: "directory:docs", de: ["docs"], iw: 320 } as SerTab,
   x: { k: "x", a: 1, xi: "calendar", n: "Calendar" } as SerTab,
 } satisfies Record<TabKind, SerTab>;
 
@@ -544,6 +545,7 @@ const excludedTabFields: ExcludedTabField[] = [
   ["terminal Details visibility o", "t", "o", undefined, 1],
   ["terminal Details width iw", "t", "iw", 280, 320],
   ["dashboard Details selection dsi", "d", "dsi", undefined, "directory:docs"],
+  ["dashboard opened directories de", "d", "de", ["docs"], ["docs", "docs/api"]],
   ["dashboard Details width iw", "d", "iw", 320, 350],
   ["controlled terminal tc", "t", "tc", undefined, 1],
   ["keyboard protocol kp", "t", "kp", { modifyOtherKeys: 1 }, { kitty: true }],
