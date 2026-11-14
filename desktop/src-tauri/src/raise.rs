@@ -49,9 +49,10 @@ use std::time::Duration;
 use tauri::{Runtime, WebviewWindow};
 
 /// How long a raise on the GTK desktops waits for a window that read
-/// minimized or hidden to read restored and visible, and how often it looks. A window manager
-/// answers a restore within a few frames; the bound keeps a window that never
-/// reads restored from being focused long after the user moved on.
+/// minimized or hidden to read restored and visible, and how often it looks.
+/// A window manager answers a restore within a few frames; the bound keeps a
+/// window that never reads restored from being focused long after the user
+/// moved on.
 const RESTORE_WAIT: Duration = Duration::from_secs(1);
 const RESTORE_POLL: Duration = Duration::from_millis(20);
 
@@ -456,8 +457,8 @@ mod tests {
         assert_eq!(Platform::CURRENT, Platform::Gtk);
     }
 
-    /// A source pin: the wait for a restore reads the window's minimized
-    /// state and focuses that same window.
+    /// A source pin: the wait for a restore reads the window's minimized and
+    /// visible states and focuses that same window.
     #[test]
     fn the_wait_reads_and_focuses_the_raised_window() {
         let focus = body(
@@ -554,25 +555,34 @@ mod tests {
     fn only_the_requested_raises_take_the_shared_raise() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut calls = BTreeMap::new();
-        for entry in std::fs::read_dir(&src).expect("the crate's sources are readable") {
-            let path = entry.expect("a source entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if name == "raise.rs" {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).expect("a source file reads");
-            let production = production(&source);
-            let by_path = production.matches("raise::raise_window(").count();
-            assert_eq!(
-                production.matches("raise_window").count(),
-                by_path,
-                "{name} reaches the raise only by its module path"
-            );
-            if by_path > 0 {
-                calls.insert(name, by_path);
+        let mut directories = vec![src.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).expect("the crate's sources are readable") {
+                let entry = entry.expect("a source entry");
+                let path = entry.path();
+                if entry.file_type().expect("a source entry's type").is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let relative = path.strip_prefix(&src).expect("a source path under src");
+                if relative == std::path::Path::new("raise.rs") {
+                    continue;
+                }
+                let name = relative.to_string_lossy().into_owned();
+                let source = std::fs::read_to_string(&path).expect("a source file reads");
+                let production = production(&source);
+                let by_path = production.matches("raise::raise_window(").count();
+                assert_eq!(
+                    production.matches("raise_window").count(),
+                    by_path,
+                    "{name} reaches the raise only by its module path"
+                );
+                if by_path > 0 {
+                    calls.insert(name, by_path);
+                }
             }
         }
         assert_eq!(
