@@ -175,7 +175,7 @@ export class InputHandler {
   private encoder: VtKeyEncoder;
   private container: HTMLElement;
   private inputElement?: HTMLElement;
-  private onDataCallback: (data: string) => void;
+  private onDataCallback: (data: string, isUserInput?: boolean) => void;
   private onKeyCallback?: (keyEvent: IKeyEvent) => void;
   private customKeyEventHandler?: (event: KeyboardEvent) => boolean;
   private getModeCallback?: (mode: number) => boolean;
@@ -210,7 +210,7 @@ export class InputHandler {
    * Create a new InputHandler
    * @param ghostty - The core binding (for creating the key encoder)
    * @param container - DOM element to attach listeners to
-   * @param onData - Callback for terminal data (escape sequences to send to PTY)
+   * @param onData - Callback for terminal data; mouse reports pass false as the second argument
    * @param _onBell - Callback for bell/beep event; the handler raises none
    * @param onKey - Optional callback for raw key events
    * @param customKeyEventHandler - Optional custom key event handler
@@ -222,7 +222,7 @@ export class InputHandler {
   constructor(
     ghostty: GhosttyVt,
     container: HTMLElement,
-    onData: (data: string) => void,
+    onData: (data: string, isUserInput?: boolean) => void,
     _onBell: () => void,
     onKey?: (keyEvent: IKeyEvent) => void,
     customKeyEventHandler?: (event: KeyboardEvent) => boolean,
@@ -807,7 +807,7 @@ export class InputHandler {
       sequence = this.encodeMouseX10(x10Button, col, row, modifiers);
     }
 
-    this.onDataCallback(sequence);
+    this.onDataCallback(sequence, false);
   }
 
   /**

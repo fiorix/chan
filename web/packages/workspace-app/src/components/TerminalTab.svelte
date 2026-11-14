@@ -1449,7 +1449,7 @@
         chanBytes: (e) =>
           controlSlashBytes(e, resolvedEventKey(e)) ??
           terminalMetaKeyBytes(e, tab.keyboardProtocol),
-        send: sendUserInput,
+        send: sendTypedInput,
       });
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
@@ -2359,7 +2359,14 @@
     e.preventDefault();
     const paths = await readDroppedPaths();
     const typed = shellEscapePaths(paths);
-    if (typed) sendUserInput(typed);
+    if (typed) sendTypedInput(typed);
+  }
+
+  /// Keys and dropped paths bypass the widgets' own input scroll. Mouse
+  /// reports and program replies keep the send path without this scroll.
+  function sendTypedInput(data: string): void {
+    term?.scrollToBottom();
+    sendUserInput(data);
   }
 
   function sendUserInput(data: string, binary = false): void {
@@ -3135,11 +3142,11 @@
     if (backend === "ghostty") return true;
     const slash = controlSlashBytes(e, resolvedEventKey(e));
     if (slash !== null) {
-      sendUserInput(slash);
+      sendTypedInput(slash);
       consumeKey(e);
       return false;
     }
-    return handleTerminalMetaKey(e, sendUserInput, tab.keyboardProtocol);
+    return handleTerminalMetaKey(e, sendTypedInput, tab.keyboardProtocol);
   }
 
   function descendantOwnsCopy(e: KeyboardEvent): boolean {
