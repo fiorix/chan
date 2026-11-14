@@ -2151,7 +2151,7 @@ struct TeamRequest {
     config_toml: Option<String>,
     /// The brief text (`cs terminal team new --brief <file>`, read client-side)
     /// folded verbatim into the generated `bootstrap.md`. `new`-only; ignored
-    /// by `load` (which never regenerates the bootstrap).
+    /// by `load`, whose script keeps an existing bootstrap.
     brief_content: Option<String>,
     script: bool,
     /// The caller's window ($CHAN_WINDOW_ID), when present: every spawned
@@ -2239,7 +2239,12 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             }
             if script {
                 return ControlResponse::Ok {
-                    message: generate_bootstrap_script(dir, &config, brief_content.as_deref()),
+                    message: generate_bootstrap_script(
+                        dir,
+                        &config,
+                        brief_content.as_deref(),
+                        false,
+                    ),
                 };
             }
             let workspace = match workspace_from_cell(workspace_cell) {
@@ -2303,9 +2308,10 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             };
             if script {
                 return ControlResponse::Ok {
-                    // Load never folds a brief: it reads an existing team and
-                    // never regenerates its `bootstrap.md`.
-                    message: generate_bootstrap_script(dir, &config, None),
+                    // Load never folds a brief, and its script writes
+                    // `bootstrap.md` only where none exists: a saved team's
+                    // own may carry its brief or hand edits.
+                    message: generate_bootstrap_script(dir, &config, None, true),
                 };
             }
             // Load brings the saved team UP, not just summarizes it: read
@@ -13118,6 +13124,128 @@ position = { row = 0, col = 1 }
             }
             other => panic!("unexpected non-ok response: {other:?}"),
         }
+    }
+
+    /// Run a `cs terminal team ... --script` script under bash from `cwd`,
+    /// with `cs` and `sleep` on PATH as no-ops: what the script writes is
+    /// what the caller reads, not what it spawns or pokes.
+    fn run_team_script(script: &str, cwd: &Path) {
+        let bin = private_tempdir().expect("stub bin dir");
+        for stub in ["cs", "sleep"] {
+            let stub = bin.path().join(stub);
+            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub");
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("mark stub executable");
+        }
+        let script_path = bin.path().join("team.sh");
+        std::fs::write(&script_path, script).expect("write script");
+        let path = match std::env::var_os("PATH") {
+            Some(inherited) => format!("{}:{}", bin.path().display(), inherited.to_string_lossy()),
+            None => bin.path().display().to_string(),
+        };
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(cwd)
+            .env("PATH", path)
+            .output()
+            .expect("run the script under bash");
+        assert!(
+            output.status.success(),
+            "script failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The script `cs terminal team load --script` emits writes the team's
+    /// tree again when it runs. An existing bootstrap.md, which may carry the
+    /// brief the team was created with or hand edits, is left as it is; a
+    /// team directory without one gets one.
+    #[tokio::test]
+    async fn a_load_script_keeps_an_existing_bootstrap_and_writes_a_missing_one() {
+        use crate::routes::team_config::{
+            generate_bootstrap_md, read_team_config, write_team_config,
+        };
+        let (_cfg, root, cell) = bound_empty_cell();
+        let workspace = cell
+            .read()
+            .expect("cell lock")
+            .as_ref()
+            .expect("bound cell")
+            .workspace
+            .clone();
+        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("valid shell team");
+        write_team_config(&workspace, "saved", &config, Some("Custom brief.")).expect("saved team");
+        write_team_config(&workspace, "fresh", &config, None).expect("fresh team");
+        std::fs::remove_file(root.path().join("fresh").join("bootstrap.md"))
+            .expect("drop the fresh team's bootstrap.md");
+        let saved = root.path().join("saved").join("bootstrap.md");
+        let kept = std::fs::read_to_string(&saved).expect("saved bootstrap.md");
+        assert!(
+            kept.contains("Custom brief."),
+            "the saved team has its brief"
+        );
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+
+        for dir in ["saved", "fresh"] {
+            let response = handle_request(
+                ControlRequest::TerminalTeam {
+                    dir: dir.to_string(),
+                    op: TeamOp::Load,
+                    config_toml: None,
+                    brief_content: None,
+                    script: true,
+                    window_id: None,
+                    destination: None,
+                    tabs: false,
+                },
+                &ctx,
+            )
+            .await;
+            let ControlResponse::Ok { message: script } = response else {
+                panic!("{dir}: unexpected response: {response:?}");
+            };
+            run_team_script(&script, root.path());
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&saved).expect("saved bootstrap.md"),
+            kept,
+            "an existing bootstrap.md, brief included, is left as it is"
+        );
+        let fresh = read_team_config(&workspace, "fresh").expect("fresh config");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("fresh").join("bootstrap.md"))
+                .expect("fresh bootstrap.md"),
+            generate_bootstrap_md("fresh", &fresh, None),
+            "a team directory without a bootstrap.md gets one"
+        );
+
+        // `new` creates the team, so its script regenerates bootstrap.md
+        // over an existing one.
+        let response = handle_request(
+            ControlRequest::TerminalTeam {
+                dir: "saved".to_string(),
+                op: TeamOp::New,
+                config_toml: Some(SHELL_TEAM_TOML.to_string()),
+                brief_content: None,
+                script: true,
+                window_id: None,
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        )
+        .await;
+        let ControlResponse::Ok { message: script } = response else {
+            panic!("new: unexpected response: {response:?}");
+        };
+        run_team_script(&script, root.path());
+        assert_eq!(
+            std::fs::read_to_string(&saved).expect("saved bootstrap.md"),
+            generate_bootstrap_md("saved", &config, None),
+            "a new team's script regenerates bootstrap.md"
+        );
     }
 
     #[tokio::test]

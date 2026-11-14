@@ -10,8 +10,9 @@
 //!   config.toml   the TeamConfig (users may hand-edit; revalidated
 //!                 on every reload)
 //!   bootstrap.md  generated team-wide process doc (tool-owned;
-//!                 regenerated from config.toml on every write but the
-//!                 dialog Load's re-save, which keeps an existing one)
+//!                 regenerated from config.toml on every write except
+//!                 a load's (the dialog's re-save, a `load --script`
+//!                 script), which keeps an existing one)
 //!   tasks/        task-{from}-{to}-{n}.md  (owned by `to`, append-only)
 //!   journals/     journal-{member}.md      (owned by each member)
 //!   followups/    followup-{from}-{to}-{n}.md (owned by `to`)
@@ -606,6 +607,10 @@ fn heredoc_delimiter(base: &str, body: &str) -> String {
 ///      env + launch), then
 ///   5. an identity poke per agent (`cs terminal write --submit=<agent>`).
 ///
+/// With `keep_bootstrap` (a `load`), step 3 runs only where no
+/// `bootstrap.md` exists, as the route's `keep_bootstrap` write does: a
+/// saved team's own may carry the brief it was created with or hand edits.
+///
 /// The script resolves `{dir}` against `$PWD` once, at the top, prints the
 /// result, and uses that one value for the tree it writes and for the pokes
 /// it sends, so the two cannot disagree wherever it runs. `team_dir` is the
@@ -622,6 +627,7 @@ pub(crate) fn generate_bootstrap_script(
     team_dir: &str,
     config: &TeamConfig,
     brief: Option<&str>,
+    keep_bootstrap: bool,
 ) -> String {
     let dir = team_dir.trim_end_matches('/');
     // The team's terminal group base. The `--script` form uses it verbatim
@@ -672,8 +678,16 @@ pub(crate) fn generate_bootstrap_script(
     }
     out.push_str(&format!("{config_eof}\n\n"));
 
-    out.push_str("# 3. bootstrap.md (server-generated team process doc).\n");
     let bootstrap_eof = heredoc_delimiter("CHAN_TEAM_BOOTSTRAP_EOF", &bootstrap_md);
+    if keep_bootstrap {
+        out.push_str(
+            "# 3. bootstrap.md (server-generated team process doc), only where none\n\
+             #    exists: the team's own may carry its brief or hand edits.\n\
+             if [ ! -e \"$chan_team_dir\"/bootstrap.md ]; then\n",
+        );
+    } else {
+        out.push_str("# 3. bootstrap.md (server-generated team process doc).\n");
+    }
     out.push_str(&format!(
         "cat <<'{bootstrap_eof}' > \"$chan_team_dir\"/bootstrap.md\n"
     ));
@@ -681,7 +695,11 @@ pub(crate) fn generate_bootstrap_script(
     if !bootstrap_md.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("{bootstrap_eof}\n\n"));
+    out.push_str(&format!("{bootstrap_eof}\n"));
+    if keep_bootstrap {
+        out.push_str("fi\n");
+    }
+    out.push('\n');
 
     // Spawn order: lead first, then the rest in roster order, mirroring
     // runTeamBootstrap (the lead's pane is never momentarily empty in the
@@ -1606,7 +1624,7 @@ mod tests {
     #[test]
     fn a_brief_cannot_end_the_bootstrap_heredoc() {
         let brief = "Plan\nCHAN_TEAM_BOOTSTRAP_EOF\ntouch pwned\n";
-        let script = generate_bootstrap_script("new-team-1", &sample_config(), Some(brief));
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), Some(brief), false);
         let lines: Vec<&str> = script.lines().collect();
         let open = lines
             .iter()
@@ -1634,7 +1652,7 @@ mod tests {
 
     #[test]
     fn script_writes_tree_config_bootstrap_and_spawns_lead_first() {
-        let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), None, false);
         assert!(
             script.contains("cat <<'CHAN_TEAM_BOOTSTRAP_EOF'"),
             "a body without the terminator keeps the plain one"
@@ -1716,7 +1734,7 @@ sleep 3"
 
     #[test]
     fn script_is_pure_ascii_no_em_dashes() {
-        let script = generate_bootstrap_script("teams/alpha", &sample_config(), None);
+        let script = generate_bootstrap_script("teams/alpha", &sample_config(), None, false);
         assert!(script.is_ascii(), "script must be pure ASCII");
         assert!(!script.contains('\u{2014}'), "no em dashes");
     }
@@ -1729,7 +1747,7 @@ sleep 3"
         // box / submit chord).
         config.members[1].handle = "@@Shell".into();
         config.members[1].command = "bash".into();
-        let script = generate_bootstrap_script("new-team-1", &config, None);
+        let script = generate_bootstrap_script("new-team-1", &config, None, false);
         assert!(
             script.contains("--tab-name='@@Shell'"),
             "shell member spawned"
@@ -1746,7 +1764,7 @@ sleep 3"
 
     #[test]
     fn script_header_does_not_ask_for_the_workspace_root() {
-        let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), None, false);
         let header: Vec<&str> = script
             .lines()
             .take_while(|line| line.starts_with('#'))
@@ -1771,7 +1789,7 @@ sleep 3"
     #[cfg(unix)]
     #[test]
     fn script_run_from_another_directory_pokes_the_path_it_wrote() {
-        let script = generate_bootstrap_script("new-team-1", &sample_config(), None);
+        let script = generate_bootstrap_script("new-team-1", &sample_config(), None, false);
         let scratch = tempfile::TempDir::new().unwrap();
         // `cs` records each argument of every call on its own line, so a
         // poke that word splitting broke into several arguments does not
@@ -1873,7 +1891,7 @@ sleep 3"
     fn script_passes_each_member_env_on_its_spawn_line() {
         let config = config_with_member_env();
         validate_team_config(&config).expect("the script is generated from an accepted config");
-        let script = generate_bootstrap_script("new-team-1", &config, None);
+        let script = generate_bootstrap_script("new-team-1", &config, None, false);
         let spawn = script
             .lines()
             .find(|line| line.starts_with("cs terminal new --tab-name='@@Alice'"))
@@ -1946,6 +1964,7 @@ sleep 3"
             "new-team-1",
             &config_with_member_env(),
             None,
+            false,
         ));
         let spawns: Vec<&Vec<String>> = calls
             .iter()
