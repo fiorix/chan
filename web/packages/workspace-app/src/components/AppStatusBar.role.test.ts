@@ -4,8 +4,10 @@
 // least one of them is a gateway window (a gateway browser joined a
 // devserver). A sole user's all-local roster, a lone gateway window and an
 // empty roster stay quiet. The badge names who leads: "leader" only in the
-// window the roster names as the session leader, "follower" in every other,
-// wherever each window connects from.
+// window the roster names as the session leader, "follower" in every other
+// browser window, wherever each window connects from. A Chan Desktop window
+// shows the badge only while it leads: the leader gate restricts nothing in a
+// desktop window, so "follower" there would claim a limit that does not hold.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";
@@ -88,7 +90,7 @@ describe("the session role badge", () => {
     expect(badge([participant("leader", "w-local"), participant("follower", self)], "w-local")).toBe("follower");
   });
 
-  test("reads follower in a local window that does not lead", () => {
+  test("reads follower in a browser window on the serving machine that does not lead", () => {
     const self = sessionWindowId();
     const roster = [participant("leader", "w-first"), participant("leader", self), participant("follower", "w-remote")];
     expect(badge(roster, "w-first")).toBe("follower");
@@ -116,5 +118,46 @@ describe("the session role badge", () => {
     applySessionRoster({ participants: roster, leader: "w-local" });
     flushSync();
     expect(shownBadge(), "leadership taken back").toBe("follower");
+  });
+});
+
+describe("the session role badge in a Chan Desktop window", () => {
+  type DesktopWindow = Window & { __TAURI_INTERNALS__?: unknown };
+
+  // isTauriDesktop() reads this global; the bar reads it when it mounts.
+  function onDesktop(): void {
+    (window as DesktopWindow).__TAURI_INTERNALS__ = {};
+  }
+
+  afterEach(() => {
+    delete (window as DesktopWindow).__TAURI_INTERNALS__;
+  });
+
+  test("stays hidden in a window that does not lead while a gateway window is present", () => {
+    onDesktop();
+    const self = sessionWindowId();
+    const roster = [participant("leader", "w-first"), participant("leader", self), participant("follower", "w-remote")];
+    expect(badge(roster, "w-first")).toBeNull();
+
+    applySessionRoster({ participants: roster, leader: "w-remote" });
+    flushSync();
+    expect(shownBadge(), "the gateway window leads").toBeNull();
+  });
+
+  test("reads leader in the window that leads", () => {
+    onDesktop();
+    const self = sessionWindowId();
+    expect(badge([participant("leader", self), participant("follower", "w-remote")], self)).toBe("leader");
+  });
+
+  test("shows once this window gains the slot", () => {
+    onDesktop();
+    const self = sessionWindowId();
+    const roster = [participant("leader", "w-first"), participant("leader", self), participant("follower", "w-remote")];
+    expect(badge(roster, "w-first")).toBeNull();
+
+    applySessionRoster({ participants: roster, leader: self });
+    flushSync();
+    expect(shownBadge(), "a handover to this window").toBe("leader");
   });
 });

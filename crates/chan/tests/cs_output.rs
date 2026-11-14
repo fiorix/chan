@@ -181,7 +181,7 @@ fn cases() -> Vec<Case> {
   "tenant": "workspace"
 }
 "#,
-            markdown: "| field | value |\n| --- | --- |\n| id | c-1 |\n| holder | laptop |\n| name | home |\n| status | live |\n| connected_at | 1 |\n| last_seen | 2 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n\n| participant | value |\n| --- | --- |\n| window_id | w-1 |\n| name | Ada |\n| role | follower |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n",
+            markdown: "| field | value |\n| --- | --- |\n| id | c-1 |\n| holder | laptop |\n| name | home |\n| status | live |\n| connected_at | 1 |\n| last_seen | 2 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n\n| participant | value |\n| --- | --- |\n| window_id | w-1 |\n| name | Ada |\n| origin | gateway |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n",
             request: |request| matches!(request, ControlRequest::SessionSelf { window_id, name: None, reset: false, .. } if window_id == "w-1"),
         },
         Case {
