@@ -1377,7 +1377,8 @@
       );
       termWriter = term;
     }
-    const keyboardBeforeOpen = document.activeElement;
+    // Neither backend's open() takes the keyboard; a terminal in the focused
+    // pane is focused once start() has wired it, below.
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
@@ -1499,21 +1500,6 @@
         effectiveSecretMasking,
         onSecretMaskingFailure,
       );
-      if (!focused) {
-        // ghostty-web's open() focuses the element it opened in (xterm waits
-        // for the `focused` check at the end of start()). Blur back and hand
-        // the keyboard to whatever held it, so a spawn or a session restore
-        // in a background pane can't take it.
-        term.blur();
-        if (
-          keyboardBeforeOpen instanceof HTMLElement &&
-          keyboardBeforeOpen !== document.body &&
-          keyboardBeforeOpen.isConnected &&
-          !host.contains(keyboardBeforeOpen)
-        ) {
-          keyboardBeforeOpen.focus({ preventScroll: true });
-        }
-      }
     }
     refreshTerminalRenderer();
     installHostResumeListeners();

@@ -527,8 +527,10 @@ export class Terminal implements ITerminalCore {
       // Start render loop
       this.startRenderLoop();
 
-      // Focus input (auto-focus so user can start typing immediately)
-      this.focus();
+      // No focus here, as xterm.js's open() takes none: a terminal can open
+      // where it is not the one being typed into, and taking the keyboard
+      // even for a moment blurs the element that holds it, which can end an
+      // edit there. The caller focuses the terminal when it should have it.
     } catch (error) {
       // Clean up on error
       this.isOpen = false;
