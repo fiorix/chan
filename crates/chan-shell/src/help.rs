@@ -677,10 +677,12 @@ times, windows, transports, PTYs and requested grids. Both support
 
 `self` identifies the client attached to $CHAN_WINDOW_ID and shows its
 record plus, in a workspace window, that window's participant: window,
-name, role, status, leadership and gateway identity when present. A
-workspace window with no joined participant reports its client, while
-`--name` and `--reset` refuse there. A standalone terminal window has no
-participant. JSON also names the tenant: `workspace` or `terminal`.
+name, origin (`local` on the serving machine, `gateway` through a
+gateway), status, leadership (`is_leader`) and gateway identity when
+present. A workspace window with no joined participant reports its
+client, while `--name` and `--reset` refuse there. A standalone terminal
+window has no participant. JSON carries the origin as `role`, `leader`
+or `follower`, and also names the tenant: `workspace` or `terminal`.
 With several clients attached, an interactive caller selects Identify
 this client in its frontend; scripts pass `--id ID` from `list`.
 

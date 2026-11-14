@@ -1605,6 +1605,8 @@ fn render_session_list_markdown(raw: &str) -> Result<String> {
 
 /// Render a client and its connections. A self response also includes the
 /// calling window's participant or an absence described by its tenant kind.
+/// The participant's wire `role` prints as `origin`: `local` for `leader`,
+/// `gateway` for `follower`; `--json` keeps the wire field.
 fn render_session_self_markdown(raw: &str) -> Result<String> {
     let value: serde_json::Value =
         serde_json::from_str(raw).context("parsing session info JSON")?;
@@ -1652,21 +1654,28 @@ fn render_session_self_markdown(raw: &str) -> Result<String> {
             }
         } else {
             out.push_str("\n| participant | value |\n| --- | --- |\n");
-            for key in [
-                "window_id",
-                "name",
-                "role",
-                "status",
-                "is_leader",
-                "identity",
+            for (row, key) in [
+                ("window_id", "window_id"),
+                ("name", "name"),
+                ("origin", "role"),
+                ("status", "status"),
+                ("is_leader", "is_leader"),
+                ("identity", "identity"),
             ] {
                 if let Some(v) = participant.get(key) {
                     let text = v
                         .as_str()
                         .map(str::to_owned)
-                        .unwrap_or_else(|| v.to_string())
-                        .replace('|', "\\|");
-                    out.push_str(&format!("| {key} | {text} |\n"));
+                        .unwrap_or_else(|| v.to_string());
+                    // `role` is where the window connects from, not whether
+                    // it leads (`is_leader`). A value this client does not
+                    // know, from an older or newer server, prints as received.
+                    let text = match (key, text.as_str()) {
+                        ("role", "leader") => "local".to_owned(),
+                        ("role", "follower") => "gateway".to_owned(),
+                        _ => text,
+                    };
+                    out.push_str(&format!("| {row} | {} |\n", text.replace('|', "\\|")));
                 }
             }
         }
@@ -3663,7 +3672,25 @@ mod tests {
         client["tenant"] = serde_json::json!("workspace");
         client["participant"] = serde_json::json!({"window_id":"w-a","name":"Alice","role":"follower","status":"live","is_leader":true,"identity":"Ada <ada@example.test>"});
         let workspace = render_session_self_markdown(&client.to_string()).unwrap();
-        assert!(workspace.ends_with("\n| participant | value |\n| --- | --- |\n| window_id | w-a |\n| name | Alice |\n| role | follower |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n"), "{workspace}");
+        assert!(workspace.ends_with("\n| participant | value |\n| --- | --- |\n| window_id | w-a |\n| name | Alice |\n| origin | gateway |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n"), "{workspace}");
+    }
+
+    #[test]
+    fn session_self_prints_the_participant_origin_under_its_own_name() {
+        let origin = |role: serde_json::Value| {
+            let client = serde_json::json!({"id":"c-home","holder":"h-home","name":"Alice","status":"live","connected_at":10,"last_seen":20,"connections":[],"tenant":"workspace","participant":{"window_id":"w-a","name":"Alice","role":role,"status":"live","is_leader":false}});
+            let out = render_session_self_markdown(&client.to_string()).unwrap();
+            assert!(!out.contains("| role |"), "{out}");
+            out.lines()
+                .find_map(|line| line.strip_prefix("| origin | "))
+                .and_then(|rest| rest.strip_suffix(" |"))
+                .map(str::to_owned)
+        };
+        assert_eq!(origin("leader".into()).as_deref(), Some("local"));
+        assert_eq!(origin("follower".into()).as_deref(), Some("gateway"));
+        assert_eq!(origin("observer".into()).as_deref(), Some("observer"));
+        assert_eq!(origin("a|b".into()).as_deref(), Some("a\\|b"));
+        assert_eq!(origin(serde_json::Value::Null).as_deref(), Some("null"));
     }
 
     #[test]

@@ -53,7 +53,7 @@
       </thead>
       <tbody>
         <tr><td><code>cs session list</code></td><td>Lists the server's clients across its workspace and terminal windows: id, name, status, and how many windows and terminals each holds.</td></tr>
-        <tr><td><code>cs session self</code></td><td>Shows your client and, in a workspace window, your participant: name, status, <code>role</code>, and <code>is_leader</code>. <code>role</code> is where the window connects from: <code>leader</code> on the serving machine, <code>follower</code> through a gateway. <code>is_leader</code> is <code>true</code> in the window that leads.</td></tr>
+        <tr><td><code>cs session self</code></td><td>Shows your client and, in a workspace window, your participant: name, status, <code>origin</code>, and <code>is_leader</code>. <code>origin</code> is where the window connects from: <code>local</code> on the serving machine, <code>gateway</code> through a gateway. <code>is_leader</code> is <code>true</code> in the window that leads. <code>--json</code> carries the origin as <code>role</code>, <code>leader</code> or <code>follower</code>.</td></tr>
         <tr><td><code>cs session self --name "laptop"</code></td><td>Names your client and your workspace participant at once. <code>--reset</code> restores the defaults.</td></tr>
         <tr><td><code>cs session info CLIENT_ID</code></td><td>Shows one client's windows, terminals, and connections. The id comes from <code>list</code>.</td></tr>
         <tr><td><code>cs session detach CLIENT_ID</code></td><td>Disconnects that client. Shared terminals, running programs, and saved layouts stay.</td></tr>
