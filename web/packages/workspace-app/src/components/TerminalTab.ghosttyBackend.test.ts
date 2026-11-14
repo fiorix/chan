@@ -150,6 +150,9 @@ const ghostty = vi.hoisted(() => {
     scrollLines(amount: number) {
       this.scrolled.push(amount);
     }
+    scrollToBottom() {
+      record.events.push("scrollToBottom");
+    }
     selectAll() {}
     clearSelection() {}
     dispose() {}
