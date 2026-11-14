@@ -4,7 +4,7 @@
 // the naming rules, no two commands of a scope answer to the same title, and
 // a renamed command is still found by the title it had.
 
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   PANE_GROUPS,
   allCommands,
@@ -15,6 +15,7 @@ import {
   type CommandScope,
 } from "../commands";
 import { SHORTCUTS } from "../shortcuts";
+import { disposeFbTreeInstance, fbActivateInstance } from "../store.svelte";
 
 import "./install";
 
@@ -237,6 +238,8 @@ describe("how a command is named", () => {
 });
 
 describe("why a command cannot run", () => {
+  afterEach(() => disposeFbTreeInstance("command-reasons"));
+
   test("a window that lacks the capability says which", () => {
     const terminalWindow = context({
       terminalOnly: true,
@@ -268,6 +271,7 @@ describe("why a command cannot run", () => {
   });
 
   test("a command on its tab gives its own reason", () => {
+    fbActivateInstance("command-reasons");
     const onBrowser = context({ activeSurface: "browser" });
     expect(commandUnavailableReason(byId("app.browser.deleteSelection"), onBrowser)).toBe(
       "Needs a selection",
