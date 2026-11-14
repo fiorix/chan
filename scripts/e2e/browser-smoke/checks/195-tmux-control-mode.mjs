@@ -40,7 +40,7 @@ async function pageInventory(ctx) {
     try {
       const state = await Promise.race([
         page.evaluate(() => ({
-          tabs: [...document.querySelectorAll('[role="tablist"] [role="tab"]')].map((tab) => ({ title: tab.title, selected: tab.getAttribute("aria-selected") })),
+          tabs: [...document.querySelectorAll('[role="tablist"] .tab > [role="tab"]')].map((tab) => ({ title: tab.closest(".tab").title, selected: tab.getAttribute("aria-selected") })),
           terminals: [...document.querySelectorAll(".terminal-tab")].map((tab) => ({ id: tab.getAttribute("data-terminal-tab-id"), active: tab.classList.contains("active") })),
           status: document.querySelector(".status-msg")?.textContent ?? null,
         })),

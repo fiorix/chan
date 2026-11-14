@@ -1578,7 +1578,7 @@
       {#if dropIndicator === i}
         <div class="drop-bar" aria-hidden="true"></div>
       {/if}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tab"
         class:active={t.id === visibleActiveTabId}
@@ -1627,10 +1627,6 @@
             bottom: e.clientY,
           });
         }}
-        role="tab"
-        tabindex={paneMode.stale ? -1 : 0}
-        aria-selected={t.id === visibleActiveTabId}
-        aria-disabled={paneMode.stale}
         title={tabTooltip(t)}
         draggable={!paneMode.stale}
         ondragstart={(e) => onDragStart(e, t.id, visibleSide)}
@@ -1638,140 +1634,156 @@
         ondragover={(e) => onTabDragOver(e, i)}
         ondrop={(e) => onTabDrop(e, i)}
       >
-        <!-- Spinner appears while the file is still loading from
-             disk; once loaded the tab leads with a kind icon (User
-             for contacts, FileText otherwise) so the row reads
-             scannably. -->
-        {#if t.kind === "file" && t.loading}
-          <span class="marker spinner" aria-hidden="true"></span>
-        {:else if t.kind === "file"}
-          <span class="tab-icon" aria-hidden="true">
-            {#if contactPaths.has(t.path)}
-              <User size={14} strokeWidth={1.75} />
-            {:else if isExcalidraw(t.path)}
-              <Shapes size={14} strokeWidth={1.75} />
-            {:else}
-              <FileText size={14} strokeWidth={1.75} />
-            {/if}
-          </span>
-        {:else if t.kind === "terminal"}
-          <span
-            class="tab-icon program-activity"
-            data-program-activity={visual?.activity ?? "icon"}
-            role="img"
-            aria-label={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
-            title={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
-          >
-            {#if visual?.activity === "ring"}
-              <!-- A pie inside a ring: the sector is a circle stroked as wide
-                   as its diameter, so its dash length is the progress. -->
-              <svg class="program-progress" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-                <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3" />
-                <circle cx="7" cy="7" r="1.95" fill="none" stroke="currentColor" stroke-width="3.9" pathLength="100" stroke-dasharray={String(visual.progress) + " 100"} transform="rotate(-90 7 7)" />
-              </svg>
-            {:else if visual?.activity === "spinner"}
-              <!-- The Terminal icon's prompt with its underscore being typed. -->
-              <svg class="program-typing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="m4 17 6-6-6-6" />
-                <path class="cursor" d="M12 19h8" />
-              </svg>
-            {:else}
-              <Terminal size={14} strokeWidth={1.75} aria-hidden="true" />
-            {/if}
-          </span>
-          {#if t.broadcastEnabled}
-            {@const reach = terminalBroadcastReachCount(t)}
-            <span
-              class="broadcast-marker"
-              title={`Broadcasting to ${reach} tab(s)`}
-              aria-label={`Broadcasting to ${reach} tab(s)`}
-            >
-              <Radio size={13} strokeWidth={1.9} aria-hidden="true" />
-            </span>
-          {/if}
-        {:else if t.kind === "graph"}
-          <span class="tab-icon" aria-hidden="true">
-            <Network size={14} strokeWidth={1.75} />
-          </span>
-        {:else if t.kind === "browser"}
-          <span class="tab-icon" aria-hidden="true">
-            <Folder size={14} strokeWidth={1.75} />
-          </span>
-        {:else if t.kind === "extension"}
-          <span class="tab-icon" aria-hidden="true">
-            <Blocks size={14} strokeWidth={1.75} />
-          </span>
-        {/if}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <span
-          class="path"
-          use:tabPathOverflow={label}
-          aria-haspopup="menu"
-          aria-expanded={tabMenu.openForTabId === t.id}
-          onclick={(e) => {
-            e.stopPropagation();
-          }}
-          oncontextmenu={(e) => {
+        <div
+          class="tab-label"
+          role="tab"
+          tabindex={paneMode.stale ? -1 : 0}
+          aria-selected={t.id === visibleActiveTabId}
+          aria-disabled={paneMode.stale}
+          onkeydown={(e) => {
+            if (paneMode.active || e.ctrlKey || e.metaKey || e.altKey || (e.key !== "Enter" && e.key !== " ")) return;
             e.preventDefault();
             e.stopPropagation();
+            clearPendingTerminalPress();
             selectTabInPane(pane.id, t.id);
             if (t.kind === "terminal") setTerminalActivity(t, false);
-            layout.activePaneId = pane.id;
-            openTabMenu(t.id, {
-              left: e.clientX,
-              top: e.clientY,
-              right: e.clientX,
-              bottom: e.clientY,
-            });
           }}
-        >{label}</span>
-        {#if isDirty(t)}
-          <span class="dirty unsaved" title="unsaved changes">●</span>
-        {/if}
-        {#if t.kind === "file" && (t.doc?.peers ?? 0) > 0}
-          {@const peers = t.doc?.peers ?? 0}
+        >
+          <!-- Spinner appears while the file is still loading from
+               disk; once loaded the tab leads with a kind icon (User
+               for contacts, FileText otherwise) so the row reads
+               scannably. -->
+          {#if t.kind === "file" && t.loading}
+            <span class="marker spinner" aria-hidden="true"></span>
+          {:else if t.kind === "file"}
+            <span class="tab-icon" aria-hidden="true">
+              {#if contactPaths.has(t.path)}
+                <User size={14} strokeWidth={1.75} />
+              {:else if isExcalidraw(t.path)}
+                <Shapes size={14} strokeWidth={1.75} />
+              {:else}
+                <FileText size={14} strokeWidth={1.75} />
+              {/if}
+            </span>
+          {:else if t.kind === "terminal"}
+            <span
+              class="tab-icon program-activity"
+              data-program-activity={visual?.activity ?? "icon"}
+              role="img"
+              aria-label={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
+              title={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
+            >
+              {#if visual?.activity === "ring"}
+                <!-- A pie inside a ring: the sector is a circle stroked as wide
+                     as its diameter, so its dash length is the progress. -->
+                <svg class="program-progress" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3" />
+                  <circle cx="7" cy="7" r="1.95" fill="none" stroke="currentColor" stroke-width="3.9" pathLength="100" stroke-dasharray={String(visual.progress) + " 100"} transform="rotate(-90 7 7)" />
+                </svg>
+              {:else if visual?.activity === "spinner"}
+                <!-- The Terminal icon's prompt with its underscore being typed. -->
+                <svg class="program-typing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m4 17 6-6-6-6" />
+                  <path class="cursor" d="M12 19h8" />
+                </svg>
+              {:else}
+                <Terminal size={14} strokeWidth={1.75} aria-hidden="true" />
+              {/if}
+            </span>
+            {#if t.broadcastEnabled}
+              {@const reach = terminalBroadcastReachCount(t)}
+              <span
+                class="broadcast-marker"
+                title={`Broadcasting to ${reach} tab(s)`}
+                aria-label={`Broadcasting to ${reach} tab(s)`}
+              >
+                <Radio size={13} strokeWidth={1.9} aria-hidden="true" />
+              </span>
+            {/if}
+          {:else if t.kind === "graph"}
+            <span class="tab-icon" aria-hidden="true">
+              <Network size={14} strokeWidth={1.75} />
+            </span>
+          {:else if t.kind === "browser"}
+            <span class="tab-icon" aria-hidden="true">
+              <Folder size={14} strokeWidth={1.75} />
+            </span>
+          {:else if t.kind === "extension"}
+            <span class="tab-icon" aria-hidden="true">
+              <Blocks size={14} strokeWidth={1.75} />
+            </span>
+          {/if}
+          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
           <span
-            class="peers-pill"
-            title={`${peers} collaborator(s) in this file`}
-            aria-label={`${peers} collaborator(s) in this file`}
-          >{peers}</span>
-        {/if}
-        {#if t.kind === "terminal"}
-        <span class="program-attention-place" data-program-attention={attention ? (attention.state === "blocked" ? (attention.kind ?? "other") : attention.state) : (t.terminalActivity && !visual?.working ? "output" : "none")}>
-        {#if attention && t.programStatus}
-          <span
-            class="program-attention"
-            class:blocked={attention.state === "blocked"}
-            class:error={attention.state === "error"}
-            class:done={attention.state === "done"}
-            role="img"
-            title={`${label}: ${programSummary(attention, t.programStatus)}`}
-            aria-label={`${label}: ${programSummary(attention, t.programStatus)}`}
-          >
-            {#if attention.state === "blocked" && attention.kind === "permission"}<Shield size={14} strokeWidth={2} aria-hidden="true" />
-            {:else if attention.state === "blocked" && attention.kind === "question"}<CircleQuestionMark size={14} strokeWidth={2} aria-hidden="true" />
-            {:else if attention.state === "blocked" && attention.kind === "auth"}<KeyRound size={14} strokeWidth={2} aria-hidden="true" />
-            {:else if attention.state === "blocked"}<Pause size={14} strokeWidth={2} aria-hidden="true" />
-            {:else if attention.state === "error"}<CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
-            {:else}<CircleCheck size={14} strokeWidth={2} aria-hidden="true" />{/if}
+            class="path"
+            use:tabPathOverflow={label}
+            aria-haspopup="menu"
+            aria-expanded={tabMenu.openForTabId === t.id}
+            onclick={(e) => {
+              e.stopPropagation();
+            }}
+            oncontextmenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              selectTabInPane(pane.id, t.id);
+              if (t.kind === "terminal") setTerminalActivity(t, false);
+              layout.activePaneId = pane.id;
+              openTabMenu(t.id, {
+                left: e.clientX,
+                top: e.clientY,
+                right: e.clientX,
+                bottom: e.clientY,
+              });
+            }}
+          >{label}</span>
+          {#if isDirty(t)}
+            <span class="dirty unsaved" title="unsaved changes">●</span>
+          {/if}
+          {#if t.kind === "file" && (t.doc?.peers ?? 0) > 0}
+            {@const peers = t.doc?.peers ?? 0}
+            <span
+              class="peers-pill"
+              title={`${peers} collaborator(s) in this file`}
+              aria-label={`${peers} collaborator(s) in this file`}
+            >{peers}</span>
+          {/if}
+          {#if t.kind === "terminal"}
+          <span class="program-attention-place" data-program-attention={attention ? (attention.state === "blocked" ? (attention.kind ?? "other") : attention.state) : (t.terminalActivity && !visual?.working ? "output" : "none")}>
+          {#if attention && t.programStatus}
+            <span
+              class="program-attention"
+              class:blocked={attention.state === "blocked"}
+              class:error={attention.state === "error"}
+              class:done={attention.state === "done"}
+              role="img"
+              title={`${label}: ${programSummary(attention, t.programStatus)}`}
+              aria-label={`${label}: ${programSummary(attention, t.programStatus)}`}
+            >
+              {#if attention.state === "blocked" && attention.kind === "permission"}<Shield size={14} strokeWidth={2} aria-hidden="true" />
+              {:else if attention.state === "blocked" && attention.kind === "question"}<CircleQuestionMark size={14} strokeWidth={2} aria-hidden="true" />
+              {:else if attention.state === "blocked" && attention.kind === "auth"}<KeyRound size={14} strokeWidth={2} aria-hidden="true" />
+              {:else if attention.state === "blocked"}<Pause size={14} strokeWidth={2} aria-hidden="true" />
+              {:else if attention.state === "error"}<CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
+              {:else}<CircleCheck size={14} strokeWidth={2} aria-hidden="true" />{/if}
+            </span>
+          {:else if t.terminalActivity && !visual?.working}
+            <span
+              class="dirty activity"
+              class:pulsing={t.terminalActivityPulsing}
+              title="terminal output since last focus"
+              aria-label="terminal output since last focus"
+            >●</span>
+          {/if}
           </span>
-        {:else if t.terminalActivity && !visual?.working}
-          <span
-            class="dirty activity"
-            class:pulsing={t.terminalActivityPulsing}
-            title="terminal output since last focus"
-            aria-label="terminal output since last focus"
-          >●</span>
-        {/if}
-        </span>
-        {/if}
-        {#if t.kind === "terminal" && (t.queueDepth ?? 0) > 0}
-          <span
-            class="queue-pill"
-            title="queued terminal messages"
-            aria-label="queued terminal messages"
-          >{t.queueDepth}</span>
-        {/if}
+          {/if}
+          {#if t.kind === "terminal" && (t.queueDepth ?? 0) > 0}
+            <span
+              class="queue-pill"
+              title="queued terminal messages"
+              aria-label="queued terminal messages"
+            >{t.queueDepth}</span>
+          {/if}
+        </div>
         <button
           class="close"
           disabled={paneMode.stale}
@@ -2591,6 +2603,13 @@
       color 80ms ease,
       transform 260ms var(--ease-pop);
   }
+  .tab-label {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+    border-radius: inherit;
+  }
   .tab:hover {
     color: var(--text);
     transform: scale(1.04);
@@ -2735,7 +2754,7 @@
   /* Chrome-style tab-name clipping. The overflow action adds
      `.overflowing` only when scrollWidth exceeds the rendered label box;
      short titles stay unmasked so their final glyphs render at full opacity.
-     The tooltip on the parent `<button>` (`title={tabTooltip(t)}`) still
+     The tooltip on the outer tab (`title={tabTooltip(t)}`) still
      surfaces the full path on hover so truncation never costs the user
      disambiguation.
      `max-width` caps the visible width without forcing a hard

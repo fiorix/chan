@@ -285,7 +285,7 @@ describe("the tab strip", () => {
     expect(activeTab()?.id, "press keeps the old terminal selected").toBe(first.id);
     expect(tabFocusPulse.value, "press defers the focus pulse").toBe(pulse);
     expect(marked.terminalActivity, "the mark stays until the matching release").toBe(true);
-    secondTab.focus();
+    secondTab.querySelector<HTMLElement>('[role="tab"]')!.focus();
     press(secondTab, "mouseup");
     expect(marked.terminalActivity, "the matching release clears the mark synchronously").toBeUndefined();
     await settle();
@@ -300,7 +300,7 @@ describe("the tab strip", () => {
     const before = focusMessages(first.id).length;
     press(tab, "mousedown");
     await settle();
-    tab.focus();
+    tab.querySelector<HTMLElement>('[role="tab"]')!.focus();
     press(tab, "mouseup");
     await settle();
     expect(focusMessages(first.id).slice(before), "active-tab click sends one true and no false").toEqual([true]);
@@ -503,7 +503,7 @@ describe("the tab strip", () => {
     selectNextTabInActivePane();
     await settle();
     const tab = stripTab(target, 1);
-    tab.focus();
+    tab.querySelector<HTMLElement>('[role="tab"]')!.focus();
 
     press(tab, "mousedown");
     await settle();
@@ -516,11 +516,12 @@ describe("the tab strip", () => {
     press(tab, "mousedown");
     await settle();
     // The browser's default action for the press focuses the tab itself.
-    tab.focus();
+    const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
+    label.focus();
 
     press(tab, "mouseup", 2);
     await settle();
-    expect(document.activeElement, "a right release leaves focus where it is").toBe(tab);
+    expect(document.activeElement, "a right release leaves focus where it is").toBe(label);
 
     press(tab, "mouseup");
     await settle();

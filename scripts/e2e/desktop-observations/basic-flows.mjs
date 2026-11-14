@@ -248,7 +248,7 @@ async function run() {
       s.dblclicks.push({ at: Math.round(performance.now()), isTrusted: e.isTrusted, onRow: Boolean(e.target?.closest?.('[role="option"], [role="treeitem"]')) });
     }, true);
     addEventListener("dragstart", (e) => {
-      const tab = e.target?.closest?.('.tab[role="tab"]');
+      const tab = e.target?.closest?.('.tab[draggable="true"]');
       s.dragstarts.push({ at: Math.round(performance.now()), isTrusted: e.isTrusted, tab: tab ? tab.getAttribute("title") || tab.textContent.trim().slice(0, 80) : null,
         pane: e.target?.closest?.(".pane[data-pane-id]")?.dataset.paneId ?? null });
     }, true);
@@ -827,8 +827,8 @@ async function run() {
   // its workspace-relative path.
   const activeTab = (paneId) => page.evaluate(`(() => {
     const pane = document.querySelector('.pane[data-pane-id="' + CSS.escape(${JSON.stringify(paneId)}) + '"]');
-    const tab = [...(pane?.querySelectorAll('.tab[role="tab"][aria-selected="true"], .tab[role="tab"].active') ?? [])].find((t) => t.getBoundingClientRect().width > 0);
-    return tab ? { title: tab.getAttribute("title"), label: tab.querySelector(".path")?.textContent.trim() ?? null } : null;
+    const tab = [...(pane?.querySelectorAll('.tab > [role="tab"][aria-selected="true"]') ?? [])].find((t) => t.getBoundingClientRect().width > 0);
+    return tab ? { title: tab.closest(".tab").getAttribute("title"), label: tab.querySelector(".path")?.textContent.trim() ?? null } : null;
   })()`);
   const contentText = (paneId) => help(`h.content(${JSON.stringify(paneId)})?.innerText ?? ""`);
   async function clickAt(point, { button = 1, repeat = 1 } = {}) {
@@ -1175,12 +1175,12 @@ async function run() {
       // Drag the note's tab onto the other pane's tab strip.
       const points = await page.evaluate(`(() => {
         const pane = (id) => document.querySelector('.pane[data-pane-id="' + CSS.escape(id) + '"]');
-        const tab = [...pane(${JSON.stringify(p0)})?.querySelectorAll('.tab[role="tab"]') ?? []].find((t) => t.getAttribute("title") === ${JSON.stringify(rel)} && t.getBoundingClientRect().width > 0);
+        const tab = [...pane(${JSON.stringify(p0)})?.querySelectorAll('.tab > [role="tab"]') ?? []].find((t) => t.closest(".tab").getAttribute("title") === ${JSON.stringify(rel)} && t.getBoundingClientRect().width > 0);
         const strip = [...pane(${JSON.stringify(p1)})?.querySelectorAll(".tabs") ?? []].find((s) => s.getBoundingClientRect().width > 0);
         if (!tab || !strip) return { tab: Boolean(tab), strip: Boolean(strip) };
         const r = strip.getBoundingClientRect();
-        const tabs = strip.querySelectorAll('.tab[role="tab"]');
-        const last = tabs.length ? tabs[tabs.length - 1].getBoundingClientRect().right : r.left;
+        const tabs = strip.querySelectorAll('.tab > [role="tab"]');
+        const last = tabs.length ? tabs[tabs.length - 1].closest(".tab").getBoundingClientRect().right : r.left;
         const x = Math.round(Math.min(r.right - 12, Math.max(last + 30, r.left + r.width * 0.5)));
         return { from: window.__flowsHelp.center(tab), to: { x, y: Math.round(r.top + r.height / 2) }, tab: true, strip: true };
       })()`);

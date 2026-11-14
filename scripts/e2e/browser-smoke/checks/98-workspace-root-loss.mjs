@@ -93,7 +93,7 @@ async function dispatch(page, name) {
 
 async function activateTab(page, selector, description) {
   const marker = await page.$(selector);
-  const tab = marker && (await marker.evaluateHandle((node) => node.closest('[role="tab"]'))).asElement();
+  const tab = marker && (await marker.evaluateHandle((node) => node.closest(".tab")?.querySelector('[role="tab"]'))).asElement();
   if (!tab) throw new Error(`could not activate retained ${description} tab`);
   await tab.click();
 }
