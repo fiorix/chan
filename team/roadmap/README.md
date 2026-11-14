@@ -57,7 +57,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [an override sends a body raw][bracketbody] | not started | build |
 | [downloads carry write temporaries][writetemps] | not started | build |
 | [a gateway page may drop a layout][gwlayout] | not started | measure |
-| [cs window new prints a refused id][winid] | not started | review |
+| [cs window new prints a refused id][winid] | merged | gate |
 | [cs window new returns too early][winrace] | not started | build |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
