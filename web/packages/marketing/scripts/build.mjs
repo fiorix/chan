@@ -380,6 +380,16 @@ async function imageSize(file) {
   if (data.length > 24 && data.readUInt32BE(0) === 0x89504e47) {
     return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
   }
+  if (data.length > 30 && data.toString("latin1", 0, 4) === "RIFF" && data.toString("latin1", 8, 12) === "WEBP") {
+    // The first chunk holds the size: an extended header's canvas, or a lossless or lossy frame.
+    const chunk = data.toString("latin1", 12, 16);
+    if (chunk === "VP8X") return { width: data.readUIntLE(24, 3) + 1, height: data.readUIntLE(27, 3) + 1 };
+    if (chunk === "VP8L") {
+      const bits = data.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (chunk === "VP8 ") return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff };
+  }
   if (data.length > 4 && data.readUInt16BE(0) === 0xffd8) {
     // Walk the JPEG segments to the frame header, which holds the size.
     let offset = 2;

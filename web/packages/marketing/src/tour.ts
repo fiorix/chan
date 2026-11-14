@@ -9,6 +9,7 @@ import { anchorOpeningBeat, beatIndex, beatPosition, moveProgress } from "./tour
 //   aria-current     on that beat
 //   .is-on           on an element from its data-from beat onward
 //   .is-at           on an element during the beats its data-at lists
+//   .is-playing      on a video in the stage while it plays, which it does during its data-at beats
 //
 // A tour moves by scroll: its stage is pinned and each beat is a block of copy
 // that scrolls past. A stepped figure (data-tour="steps") moves by its own
@@ -37,6 +38,7 @@ function startTour(tour: HTMLElement): void {
   const fromMarks = Array.from(tour.querySelectorAll<HTMLElement>("[data-from]"));
   const atMarks = Array.from(tour.querySelectorAll<HTMLElement>("[data-at]"));
   const parts = Array.from(stage.querySelectorAll<HTMLAnchorElement>("a[data-part]"));
+  const clips = Array.from(stage.querySelectorAll<HTMLVideoElement>("video[data-at]"));
   const callout = stage.querySelector<HTMLElement>(".tour-callout");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const followMs = stepped ? STEP_FOLLOW_MS : FOLLOW_MS;
@@ -66,6 +68,21 @@ function startTour(tour: HTMLElement): void {
     if (link) link.href = part.href;
   }
 
+  // A clip plays during its beats where the page shows it, and rests on the still under it
+  // otherwise: outside those beats, where the layout hides it, and under reduced motion. One
+  // that does not loop plays once on each visit to its beats, from its start.
+  function playClips(): void {
+    for (const clip of clips) {
+      const shown = clip.classList.contains("is-at") && !reducedMotion.matches && getComputedStyle(clip).display !== "none";
+      if (shown) {
+        if (!clip.ended) clip.play().catch(() => undefined);
+        continue;
+      }
+      clip.pause();
+      if (!clip.loop && clip.currentTime > 0) clip.currentTime = 0;
+    }
+  }
+
   function setBeat(index: number): void {
     current = index;
     tour.dataset.current = names[index];
@@ -73,6 +90,7 @@ function startTour(tour: HTMLElement): void {
     for (const mark of fromMarks) mark.classList.toggle("is-on", index >= names.indexOf(mark.dataset.from ?? ""));
     for (const mark of atMarks) mark.classList.toggle("is-at", (mark.dataset.at ?? "").split(/\s+/).includes(names[index]));
     wake(null);
+    playClips();
   }
 
   function apply(position: number): void {
@@ -203,6 +221,12 @@ function startTour(tour: HTMLElement): void {
       wake(part);
     });
   }
+  for (const clip of clips) {
+    clip.addEventListener("playing", () => clip.classList.add("is-playing"));
+    for (const rest of ["pause", "ended"]) clip.addEventListener(rest, () => clip.classList.remove("is-playing"));
+  }
+  window.addEventListener("resize", playClips);
+  reducedMotion.addEventListener("change", playClips);
 
   tour.classList.add("tour-live");
   if (stepped) followSteps();

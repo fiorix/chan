@@ -10,8 +10,11 @@
   /* The line a beat's centre crosses to become current, as a share of the viewport height. */
   --tour-focus: .5;
   --fit: 1;
+  /* How far the stage runs out past the tour's own margin: through the page's padding and, on a
+     screen wider than the page, on toward its edge, as far as a capture stays sharp. */
+  --tour-out: calc(48px + var(--shell-pad, 0px) + clamp(0px, (100vw - var(--shell-max, 100vw)) / 2 - 40px, 280px));
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
   column-gap: 48px;
   margin: 0 48px;
 }
@@ -19,11 +22,11 @@
    beat, the stage runs beside it and the beats, and what it lets run over the stage's column
    stays in front of the scene. */
 .tour-lead { grid-column: 1; grid-row: 1; position: relative; z-index: 1; }
-.tour-stage { grid-column: 2; grid-row: 1 / span 2; position: relative; align-self: start; height: 560px; }
+.tour-stage { grid-column: 2; grid-row: 1 / span 2; position: relative; align-self: start; height: 560px; margin-right: calc(-1 * var(--tour-out, 0px)); }
 .tour.tour-live .tour-stage { position: sticky; top: 0; height: 100svh; }
 /* The camera's angle over a tilted scene. Parts that leave the stage during a move fade at its
    sides instead of meeting a hard edge. */
-.tour-scene { --pitch: 54deg; --yaw: -45deg; position: absolute; inset: 0; display: grid; place-items: center; overflow: clip; mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent); }
+.tour-scene { --pitch: 54deg; --yaw: -45deg; position: absolute; inset: 0; display: grid; place-items: center; overflow: clip; mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent); }
 .tour-scene a { color: inherit; text-decoration: none; }
 
 .tour-beats { grid-column: 1; grid-row: 2; list-style: none; margin: 0; padding: 0; }
@@ -61,7 +64,7 @@
 .scene-layer > * { position: absolute; top: 0; left: 0; box-sizing: border-box; width: var(--w); height: var(--h); opacity: var(--show, 1); transform: translate3d(calc(var(--x, 0px) - 50%), calc(var(--y, 0px) - 50%), var(--z, 0px)); }
 /* A part answers the pointer during its layer's beats, or during its own when it names some: an
    unseen layer still lies between the pointer and the layers under it. */
-.scene-layer:not(.is-at) > *, .scene-layer > [data-at]:not(.is-at), .win-body:not(.is-at) { pointer-events: none; }
+.scene-layer:not(.is-at) > *, .scene-layer > [data-at]:not(.is-at) { pointer-events: none; }
 .scene-layer > [data-at].is-at { pointer-events: auto; }
 .scene-layer a.is-awake { outline: calc(2 * var(--px)) solid var(--accent); outline-offset: calc(3 * var(--px)); }
 
@@ -89,66 +92,37 @@
 .scene-layer > .scene-tag.is-route { padding: 3px 5px; border-color: transparent; color: var(--accent); font-weight: 400; text-transform: none; }
 .scene-layer > .scene-tag.is-awake { outline: 0; border-color: var(--accent); color: var(--accent); }
 
-/* A drawn window: a title bar over panes, each pane a strip of tabs over its app. */
-.win { display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: var(--px) solid color-mix(in srgb, var(--border-strong) calc(var(--solid, 1) * 100%), var(--muted)); border-radius: 10px; background: color-mix(in srgb, var(--panel) calc(var(--solid, 1) * 100%), transparent); box-shadow: 0 30px 80px color-mix(in srgb, black calc(var(--solid, 1) * 45%), transparent); color: var(--text); font: var(--win-font, 13px) / 1.55 var(--mono); }
-.win-bar { display: grid; align-items: center; height: 2.3em; padding: 0 .9em; border-bottom: var(--px) solid var(--rule); color: var(--subtle); font-size: .85em; }
-.win-title { grid-area: 1 / 1; justify-self: center; }
-.win-body { grid-area: 2 / 1; display: flex; min-height: 0; }
-.win-bar > *, .win-body { opacity: calc(.3 + .7 * var(--solid, 1)); }
-.win-pane { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
-.win-pane + .win-pane { border-left: var(--px) solid var(--rule); }
-.pane-tabs { display: flex; gap: .3em; min-height: 2.1em; padding: .3em .5em 0; border-bottom: var(--px) solid var(--rule); font-size: .85em; }
-.pane-tabs > span { padding: .15em .7em; border: var(--px) solid transparent; border-bottom: 0; border-radius: 5px 5px 0 0; color: var(--subtle); white-space: nowrap; }
-.pane-tabs > [data-from]:not(.is-on) { display: none; }
-.pane-tabs > .is-current, .pane-tabs > .is-at { border-color: var(--rule); background: var(--surface-raised); color: var(--fg); }
-.term { display: block; flex: 1; min-height: 0; padding: .6em .8em; overflow: hidden; }
-.term-line { display: block; overflow: hidden; white-space: nowrap; }
-.term-line[data-from]:not(.is-on) { display: none; }
-.term-line b { color: var(--accent-2); font-weight: 400; }
-.term-line.dim { color: var(--subtle); }
-.term-typed { display: inline-block; overflow: hidden; width: calc(var(--n) * 1ch); vertical-align: bottom; white-space: nowrap; }
-.is-on > .term-typed { animation: tour-type .55s steps(var(--n)) both; }
-.term-caret { display: inline-block; width: .6em; height: 1.15em; background: var(--text); vertical-align: text-bottom; animation: tour-blink 1.1s steps(1) infinite; }
-@keyframes tour-type { from { width: 0; } }
-@keyframes tour-blink { 50% { opacity: 0; } }
-
-.pane-apps { position: relative; flex: 1; min-height: 0; }
-.app { position: absolute; inset: 0; padding: .9em 1em; overflow: hidden; opacity: 0; visibility: hidden; transition: opacity .3s, visibility 0s .3s; }
-.app.is-at { opacity: 1; visibility: visible; transition-delay: 0s; }
-.app.is-awake { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.app-menu { display: flex; flex-wrap: wrap; align-content: center; justify-content: center; gap: .5em; }
-.app-menu span { padding: .15em .7em; border: var(--px) solid var(--rule); border-radius: 99px; color: var(--subtle); font-size: .85em; }
-.app-files span { display: block; padding: .1em .6em .1em 1.9em; border-radius: 4px; white-space: nowrap; }
-.app-files .is-dir { padding-left: .6em; color: var(--fg); }
-.app-files .is-dir::before { content: "\25BE"; margin-right: .5em; color: var(--faint); }
-.app-files .is-picked { background: var(--surface-raised); color: var(--fg); }
-.app-files.is-at span { animation: tour-rise .35s both; }
-.app-files.is-at span:nth-child(2) { animation-delay: 40ms; }
-.app-files.is-at span:nth-child(3) { animation-delay: 80ms; }
-.app-files.is-at span:nth-child(4) { animation-delay: .12s; }
-.app-files.is-at span:nth-child(5) { animation-delay: .16s; }
-.app-files.is-at span:nth-child(6) { animation-delay: .2s; }
-.app-editor b { display: block; margin-bottom: .5em; color: var(--fg); font: 700 1.5em/1.2 var(--sans); }
-.app-editor b.is-sub { margin-top: .9em; font-size: 1.15em; }
-.app-editor i { display: block; height: .55em; margin: .55em 0; border-radius: 3px; background: var(--rule); }
-.app-editor i.is-short { width: 58%; }
-.app-graph { display: grid; padding: .4em; }
-.app-graph svg { width: 100%; height: 100%; min-height: 0; }
-.graph-edges path { fill: none; stroke: var(--faint); stroke-width: 1.2; }
-.graph-link { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 240; stroke-dashoffset: 240; }
-.graph-nodes circle { fill: var(--panel); stroke: var(--text); stroke-width: 1.4; }
-.app-graph.is-at .graph-link { animation: tour-draw .9s .25s ease-out forwards; }
-@keyframes tour-rise { from { opacity: 0; transform: translateY(.5em); } }
-@keyframes tour-draw { to { stroke-dashoffset: 0; } }
+/* A window is a capture of the app's own window, chrome included. Its stills lie one over another
+   in the order the tour shows them, a clip may play over them, and regions of it link to the
+   manual. Tilted, it thins to a sheet so the layers under it show through. */
+.shot-win { border-radius: calc(var(--w) * .02); outline: var(--px) solid color-mix(in srgb, var(--muted) calc((1 - var(--solid, 1)) * 100%), transparent); box-shadow: 0 30px 80px color-mix(in srgb, black calc(var(--solid, 1) * 45%), transparent); }
+.shot { position: absolute; inset: 0; width: 100%; height: 100%; opacity: calc(.3 + .7 * var(--solid, 1)); }
+.shot > img { display: block; width: 100%; height: 100%; }
+.shot[data-from] { opacity: 0; transition: opacity .3s; }
+.shot[data-from].is-on { opacity: 1; }
+/* A clip shows only while it plays; at rest the still under it does. It laps the window's edge by
+   a screen pixel, or the still's own edge shows around it. Like a still it comes at two window
+   sizes, and the layout shows one. */
+.shot-clip { top: calc(-1 * var(--px)); left: calc(-1 * var(--px)); width: calc(100% + 2 * var(--px)); height: calc(100% + 2 * var(--px)); border-radius: inherit; object-fit: fill; opacity: 0; transition: opacity .4s; }
+.shot-clip.is-playing { opacity: 1; }
+.shot-clip.is-narrow { display: none; }
+.shot-part { position: absolute; inset: 0; border-radius: calc(var(--w) * .012); pointer-events: none; }
+.shot-part.is-at { pointer-events: auto; }
+.shot-part.is-shell { right: 50%; }
+.shot-part.is-app { left: 50%; }
+.shot-win .shot-part.is-awake { outline-offset: calc(-3 * var(--px)); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 
 /* The layers scene: a terminal window, the library under it, and the Computers
    screen under that, with one library per machine. The home page tours it: the
-   camera pulls back twice, then returns to the window, which is by then a
-   workspace's. The manual shows its pulled-back pose as a still. */
+   camera pulls back twice, returns to the window as it opens a workspace, and
+   moves into the workspace's own window, which opens a second one. The manual
+   builds the same scene up one layer at a time. */
 .layers-scene {
   --k1: 0;
   --k2: 0;
   --k3: 0;
+  --k4: 0;
+  --k5: 0;
   --scene-w: 720;
   --scene-h: 500;
   --win-w: 640px;
@@ -167,16 +141,24 @@
   --lift-win: 240px;
   --zoom-library: .7;
   --zoom-computers: .27;
-  --win-font: max(13px, 11.5px / var(--fit));
   /* The workspace row lights up first; the camera leaves for it after. */
   --lit: clamp(0, var(--k3) * 5, 1);
   --away: calc(1 - clamp(0, (var(--k3) - .2) / .8, 1));
   --swap: clamp(0, (var(--k3) - .5) * 5, 1);
+  /* The workspace's window opens a step in front of the terminal that ran chan open, and the
+     two close up again as the tour moves into it. */
+  --pair: clamp(0, (var(--k3) - .7) / .3, 1);
+  --apart: calc(var(--pair) * (1 - var(--k4)));
+  /* The workspace's second window opens the same way, in front of the shell that asked for it.
+     A step leaves that shell's commands in view over the window in front. */
+  --pair2: clamp(0, (var(--k5) - .55) / .45, 1);
+  --step-x: 26px;
+  --step-y: 35px;
   /* The layers under the window are gone before the camera is close enough to crop them. */
   --under: clamp(0, 1 - (var(--k3) - .2) * 3, 1);
   --tilt: calc(var(--k1) * var(--away));
   --solid: calc(1 - var(--tilt));
-  --zoom: calc(1 - var(--away) * (var(--k1) * (1 - var(--zoom-library)) + var(--k2) * (var(--zoom-library) - var(--zoom-computers))));
+  --zoom: calc(1 - var(--away) * (var(--k1) * (1 - var(--zoom-library)) + var(--k2) * (var(--zoom-library) - var(--zoom-computers))) - max(var(--apart), var(--pair2)) * .05);
   --pan-x: calc(var(--k2) * var(--away) * var(--far-x) / -2);
   --pan-y: calc(var(--k2) * var(--away) * var(--far-y) / 2);
   --shift-x: calc(var(--tilt) * (1 - var(--k2)) * -44px);
@@ -186,13 +168,20 @@
   --shift-y: calc((1 - var(--k1)) * var(--shift-lead) + var(--tilt) * var(--fit) * (64px - var(--k2) * 30px));
 }
 .layers-scene:not(.tour-live) { --k1: 1; --k2: 1; }
-/* The headline keeps its two lines and runs over the stage's column, above the window. */
-@media (min-width: 901px) { .layers-scene .tour-lead h1 { white-space: nowrap; } }
+/* The headline keeps its two lines and runs over the stage's column, above the window. Without
+   the script the overview rests below it. */
+@media (min-width: 901px) {
+  .layers-scene .tour-lead h1 { white-space: nowrap; }
+  .tour.layers-scene:not(.tour-live) { --shift-y: 150px; }
+  .tour.layers-scene:not(.tour-live) > .tour-stage { height: 720px; }
+}
 
 .scene-window { --layer-z: calc((var(--k2) * var(--lift-lib) + var(--k1) * var(--lift-win)) * var(--away)); }
-.scene-window > .win { --w: var(--win-w); --h: var(--win-h); }
-.scene-window .is-standalone { opacity: calc((1 - var(--swap)) * (.3 + .7 * var(--solid))); }
-.scene-window .is-workspace { opacity: calc(var(--swap) * (.3 + .7 * var(--solid))); }
+.scene-window > .shot-win { --w: var(--win-w); --h: var(--win-h); }
+.shot-win.is-first { --x: calc(var(--apart) * -1 * var(--step-x)); --y: calc(var(--apart) * -1 * var(--step-y)); --show: calc(1 - clamp(0, var(--k4) * 10 - 9, 1)); }
+.shot-win.is-first > .is-open { opacity: calc(var(--swap) * (.3 + .7 * var(--solid))); }
+.shot-win.is-second { --x: calc((var(--apart) - var(--pair2)) * var(--step-x)); --y: calc((var(--apart) - var(--pair2)) * var(--step-y) + (1 - var(--pair)) * 40px); --z: 1px; --show: var(--pair); }
+.shot-win.is-third { --x: calc(var(--pair2) * var(--step-x)); --y: calc(var(--pair2) * var(--step-y) + (1 - var(--pair2)) * 40px); --z: 2px; --show: var(--pair2); }
 .scene-tag.is-window { --x: calc(var(--win-w) / 2); --y: calc(var(--win-h) / 2); --show: calc(var(--tilt) * (1 - var(--k2))); }
 
 .scene-library { --layer-z: calc(var(--k2) * var(--lift-lib) * var(--away)); --show: calc(var(--k1) * var(--under)); }
@@ -252,6 +241,7 @@
   --lit: 0;
   --away: 1;
   --swap: 0;
+  --pair: 0;
   --under: 1;
   --tilt: var(--k1);
   --zoom: calc(1 - var(--k1) * .3 - var(--k2) * .18 - var(--k3) * .15 - var(--k4) * .1);
@@ -315,9 +305,10 @@
 
 @media (max-width: 900px) {
   /* One column, in the order lead, stage, beats: the stage pins under the top edge while the beats pass below it. */
-  .tour { --tour-focus: .84; display: block; margin: 0; }
+  .tour { --tour-focus: .84; --tour-out: var(--shell-pad, 0px); display: block; margin: 0; }
   .tour-lead, .tour-beats { padding-inline: 32px; }
-  .tour > .tour-stage { height: 440px; }
+  .tour > .tour-stage { height: 440px; margin-left: calc(-1 * var(--tour-out)); }
+  .tour .tour-scene { mask-image: none; }
   .tour.tour-live .tour-stage { z-index: 1; height: 50svh; background: var(--bg); }
   .tour.tour-live .tour-stage::after { content: ""; position: absolute; top: 100%; right: 0; left: 0; height: 28px; background: linear-gradient(var(--bg), transparent); pointer-events: none; }
   .tour-beat { scroll-margin-top: 50svh; }
@@ -325,11 +316,14 @@
   .tour-live .tour-beat { justify-content: flex-start; min-height: 66svh; padding-top: 36px; }
   .tour-live .tour-beat.is-minor, .tour-live .tour-beat:last-child { min-height: 54svh; }
   .tour-callout { bottom: 10px; font-size: 12px; }
-  .tour.layers-scene { --shift-lead: 0px; --scene-w: 680; --scene-h: 660; --win-h: 600px; --zoom-library: .5; --zoom-computers: .24; }
+  /* The window is the narrow capture, where the app's pane lies under the shell. */
+  .tour.layers-scene { --shift-lead: 0px; --scene-w: 660; --scene-h: 660; --win-h: 600px; --step-x: 12px; --step-y: 48px; --zoom-library: .5; --zoom-computers: .24; }
   .scene-tag.is-caption i { display: none; }
   .tour.layers-scene:not(.tour-live) { --fit: .5; }
-  .scene-window .win-body.is-workspace { flex-direction: column; }
-  .scene-window .win-pane + .win-pane { border-top: var(--px) solid var(--rule); border-left: 0; }
+  .shot-clip.is-wide { display: none; }
+  .shot-clip.is-narrow { display: block; }
+  .tour .shot-part.is-shell { right: 0; bottom: 48%; }
+  .tour .shot-part.is-app { top: 52%; left: 0; }
 }
 
 @media (max-width: 720px) {
@@ -337,7 +331,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tour-live .tour-beat, .app, .tour-steps > li, .tour-figure tr > td, .layers-build .scene-layer > .scene-tag { transition: none; }
-  .is-on > .term-typed, .term-caret, .app-files.is-at span, .app-graph.is-at .graph-link, .scene-route { animation: none; }
-  .graph-link { stroke-dashoffset: 0; }
+  .tour-live .tour-beat, .shot, .tour-steps > li, .tour-figure tr > td, .layers-build .scene-layer > .scene-tag { transition: none; }
+  .scene-route { animation: none; }
 }

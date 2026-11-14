@@ -1,4 +1,4 @@
-.home-page .site-shell { max-width: 1280px; padding: 0 40px; }
+.home-page .site-shell { --shell-max: 1280px; --shell-pad: 40px; max-width: var(--shell-max); padding: 0 var(--shell-pad); }
 .home-page :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 5px; }
 .home-page button { font-family: inherit; }
 .home-page code { font-size: .88em; }
@@ -30,9 +30,9 @@
 .text-link:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 4px; }
 .home-page .site-footer { border-top: 0; font: 10px/1.7 var(--mono); padding: 30px 0; margin: 0; color: var(--subtle); }
 @media (min-width: 1500px) { .terminal-hero h1 { font-size: 82px; } }
-@media (max-width: 1000px) { .home-page .site-shell { padding: 0 24px; } .terminal-hero { padding-top: 70px; } }
-@media (max-width: 720px) { .home-page .site-shell { padding: 0 16px; } .terminal-hero { padding-top: 65px; } .terminal-hero h1 { font-size: clamp(38px, 7.4vw, 53px); letter-spacing: 0; } .hero-copy > p:not(.platform-note) { font-size: 15px; max-width: 400px; } .section-label { margin-bottom: 20px; } .home-page .site-footer { gap: 10px; font-size: 9px; } }
-@media (max-width: 440px) { .home-page .site-shell { padding: 0 12px; } .hero-actions { gap: 9px; } .home-button { padding: 10px 14px; gap: 15px; font-size: 11px; } .platform-note { font-size: 9px; } .platform-note span { margin: 0 4px; } .platform-note .note-dot { margin: 0 6px; } }
+@media (max-width: 1000px) { .home-page .site-shell { --shell-pad: 24px; } .terminal-hero { padding-top: 70px; } }
+@media (max-width: 720px) { .home-page .site-shell { --shell-pad: 16px; } .terminal-hero { padding-top: 65px; } .terminal-hero h1 { font-size: clamp(38px, 7.4vw, 53px); letter-spacing: 0; } .hero-copy > p:not(.platform-note) { font-size: 15px; max-width: 400px; } .section-label { margin-bottom: 20px; } .home-page .site-footer { gap: 10px; font-size: 9px; } }
+@media (max-width: 440px) { .home-page .site-shell { --shell-pad: 12px; } .hero-actions { gap: 9px; } .home-button { padding: 10px 14px; gap: 15px; font-size: 11px; } .platform-note { font-size: 9px; } .platform-note span { margin: 0 4px; } .platform-note .note-dot { margin: 0 6px; } }
 
 .entry-page .terminal-hero {
   display: flex;

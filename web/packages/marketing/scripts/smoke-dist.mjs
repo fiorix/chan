@@ -30,6 +30,15 @@ const checks = [
   { path: "/", status: 200, before: ['data-beat="computers"', 'data-beat="workspace"'] },
   { path: "/assets/tour.js", status: 200 },
   { path: "/assets/tour.css", status: 200 },
+  { path: "/", status: 200, includes: '<img src="/assets/home/tour/terminal-wide.webp" alt="" width="1760" height="1100" fetchpriority="high" />' },
+  ...["terminal", "open", "workspace-new", "files", "shell-editor", "editor", "shell-graph", "graph"].flatMap((shot) => [
+    { path: `/assets/home/tour/${shot}-wide.webp`, status: 200 },
+    { path: `/assets/home/tour/${shot}-narrow.webp`, status: 200 },
+  ]),
+  ...["terminal-run", "files-run"].flatMap((clip) => [
+    { path: `/assets/home/tour/${clip}-wide.mp4`, status: 200 },
+    { path: `/assets/home/tour/${clip}-narrow.mp4`, status: 200 },
+  ]),
   { path: "/", status: 200, before: ['id="tmux"', 'id="devserver"'] },
   { path: "/", status: 200, before: ['id="devserver"', 'id="gateway"'] },
   { path: "/devserver/", status: 200, includes: 'id="remote-tools"' },
@@ -217,6 +226,7 @@ function contentType(file) {
   if (file.endsWith(".sh")) return "text/x-shellscript; charset=utf-8";
   if (file.endsWith(".ps1")) return "text/plain; charset=utf-8";
   if (file.endsWith(".png")) return "image/png";
+  if (file.endsWith(".webp")) return "image/webp";
   if (file.endsWith(".ico")) return "image/x-icon";
   return "application/octet-stream";
 }
