@@ -151,6 +151,15 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     expect(history(term)).toBe(0);
   });
 
+  test.each([0, 2, 3])("a prompt rejected by socket state %s preserves history", async (readyState) => {
+    const { tab, term, socket, promptHistory } = await scrolled(backend);
+    socket.readyState = readyState;
+    expect(sendPromptToTerminal(tab.id, "run it", "claude", "prompt-offline")).toBe(false);
+    expect(sentFrames(socket)).toEqual([]);
+    expect(promptHistory).toEqual([]);
+    expect(history(term)).toBe(7);
+  });
+
   test("a file drop types its escaped path and returns to the live cursor", async () => {
     const { target, term, socket, inputHistory } = await scrolled(backend);
     runtime.paths = ["/tmp/file with spaces"];

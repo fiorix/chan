@@ -2227,7 +2227,10 @@
   /// into a batch.
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
+  /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
+  /// a disconnected retry leaves the reader's viewport untouched.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
     return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
   }
