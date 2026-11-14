@@ -101,6 +101,7 @@
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
     browserSidePanes,
+    fbActivateInstance,
     currentPreferences,
     modalDialogOpen,
     openCommandLauncherFromMenu,
@@ -1504,7 +1505,12 @@
   onmousedown={(e) => {
     if (paneMode.stale) return;
     if (e.button === 2 && keepsRightPressFocus(e.target)) return;
-    if (!(e.button === 0 && pendingTerminalPress)) setActivePane(pane.id);
+    if (!(e.button === 0 && pendingTerminalPress)) {
+      setActivePane(pane.id);
+      // A dock can own file commands while this pane is already focused,
+      // so a press must activate its browser even without a focus change.
+      if (!paneMode.active && active?.kind === "browser") fbActivateInstance(`fb-tab-${active.id}`);
+    }
   }}
   onanimationend={(e) => {
     // Svelte scopes keyframe names (svelte-<hash>-pane-wobble-once), so a

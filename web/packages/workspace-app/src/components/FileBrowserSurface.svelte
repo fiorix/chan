@@ -27,7 +27,7 @@
     paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
     seedFbTreeInstanceFromReloadSnapshot, surfaceThemeOverride, toggleBrowserSidePane, tree, workspace,
   } from "../state/store.svelte";
-  import { activeBrowserTab, defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane, tabFocusPulse } from "../state/tabs.svelte";
+  import { defaultBrowserInspectorOpen, openBrowserInActivePane, openInActivePane, openTerminalInActivePane, tabFocusPulse } from "../state/tabs.svelte";
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
@@ -128,29 +128,16 @@
     return () => untrack(() => dropBrowserView(id));
   });
 
-  // The launcher's Open reaches this surface as a chan:command, because
-  // entering a directory moves the surface's own location. Only the tab the
-  // launcher targeted answers, with what Enter runs on its selection.
-  $effect(() => {
-    if (!isTab || !tab) return;
-    const id = tab.id;
-    const onCommand = (e: Event): void => {
-      if ((e as CustomEvent).detail?.name !== "app.browser.open") return;
-      if (activeBrowserTab()?.id === id) run("open");
-    };
-    window.addEventListener("chan:command", onCommand);
-    return () => window.removeEventListener("chan:command", onCommand);
-  });
-
-  // The launcher's Upload reaches this surface as a chan:command too, since
-  // the directory it uploads into is the surface's own. The surface the
-  // selection commands act on answers, a dock's included, with what its
-  // menu's Upload row runs.
+  // Open and Upload need the surface's own location and tree. Only the
+  // command surface answers, a dock included, with the same selection that
+  // the launcher used to offer the command.
   $effect(() => {
     const id = instanceId;
     const onCommand = (e: Event): void => {
-      if ((e as CustomEvent).detail?.name !== "app.browser.uploadSelection") return;
-      if (commandSurfaceId() === id) run("upload");
+      if (commandSurfaceId() !== id) return;
+      const name = (e as CustomEvent).detail?.name;
+      if (name === "app.browser.open") run("open");
+      else if (name === "app.browser.uploadSelection") run("upload");
     };
     window.addEventListener("chan:command", onCommand);
     return () => window.removeEventListener("chan:command", onCommand);

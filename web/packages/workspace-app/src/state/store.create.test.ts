@@ -16,6 +16,8 @@ import "./commands/browser";
 import { filesContext } from "./fileContext.svelte";
 import {
   browserSelection,
+  disposeFbTreeInstance,
+  fbActivateInstance,
   fileOps,
   pathPromptState,
   resolvePathPrompt,
@@ -46,6 +48,7 @@ afterEach(() => {
   filesContext.current = null;
   browserSelection.path = null;
   browserSelection.paths = [];
+  disposeFbTreeInstance("create-defaults");
   document.body.innerHTML = "";
   ui.status = null;
   ui.statusKind = null;
@@ -79,6 +82,7 @@ describe("file browser command defaults", () => {
   test("a selected directory wins over the standalone home", async () => {
     filesContext.current = { rootDisplay: "/", rootWire: "", homeWire: "home/u", identity: "files" };
     tree.entries.push({ path: "notes", is_dir: true, mtime: null, size: 0 });
+    fbActivateInstance("create-defaults");
     browserSelection.path = "notes";
     runBrowserCommand("app.browser.newFsEntry");
 

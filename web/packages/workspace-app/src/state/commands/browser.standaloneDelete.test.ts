@@ -62,7 +62,8 @@ async function standaloneWindow(
   });
   vi.spyOn(api, "list").mockImplementation(async () => listing());
   store.tree.entries = listing();
-  tabs.openBrowserInActivePane();
+  const browser = tabs.openBrowserInActivePane();
+  store.fbActivateInstance(`fb-tab-${browser.id}`);
 
   /// Run the Delete command on `paths` and return the confirm it raises.
   async function deleteSelection(paths: string[]): Promise<{ title: string; message: string }> {

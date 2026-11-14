@@ -85,7 +85,6 @@
   import {
     browserSelection,
     fbActivateInstance,
-    fbActiveInstanceId,
     clearTreeDirError,
     openCommandLauncherFromMenu,
     workspace,
@@ -406,7 +405,6 @@
   // under a different id). The workspace root (`""`) is kept expanded.
   $effect(() => {
     ensureFbTreeInstance(instanceId);
-    untrack(() => { if (!fbActiveInstanceId()) activate(); });
   });
   const expanded = $derived(fbTreeInstance(instanceId)?.expanded ?? { "": true });
   let menu = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);

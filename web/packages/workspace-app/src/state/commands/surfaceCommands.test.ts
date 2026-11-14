@@ -4,9 +4,10 @@
 // hand-built context, so these assert the surface gates without a live
 // layout or the launcher UI.
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { availableCommands, type CommandContext } from "../commands";
 import { fileTab, readTab, resetLayout } from "../../__tests__/tabs";
+import { disposeFbTreeInstance, fbActivateInstance } from "../store.svelte";
 
 import "./editor";
 import "./browser";
@@ -86,7 +87,10 @@ describe("graph surface commands", () => {
 });
 
 describe("file browser surface commands", () => {
+  afterEach(() => disposeFbTreeInstance("surface-commands"));
+
   it("appear only on a file browser surface", () => {
+    fbActivateInstance("surface-commands");
     const onBrowser = idsIn(ctx({ activeSurface: "browser" }));
     for (const id of [
       "app.browser.expandAll",
