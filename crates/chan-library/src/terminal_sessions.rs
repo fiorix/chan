@@ -8706,6 +8706,109 @@ mod tests {
         assert_eq!(delivered_input(&rx), b"body\n\n".to_vec());
     }
 
+    /// A message that would end its own bracket, colour the screen and
+    /// interrupt, with a line feed between its lines; and the same message
+    /// inside a bracketed template.
+    const BRACKET_END: &str = "one\x1b[201~; echo injected\nprintf '\x1b[31mred'\x03 last";
+    const BRACKET_END_CLEANED: &str = "one [201~; echo injected\nprintf ' [31mred'  last";
+
+    fn closing_brackets(bytes: &[u8]) -> usize {
+        bytes.windows(6).filter(|w| w == b"\x1b[201~").count()
+    }
+
+    #[test]
+    fn a_written_message_cannot_end_a_built_in_bracket_early() {
+        for agent in [
+            SubmitAgent::Agy,
+            SubmitAgent::Codex,
+            SubmitAgent::Kimi,
+            SubmitAgent::OpenCode,
+        ] {
+            let registry = Registry::new(test_config(1024, 4, 10));
+            let (session, rx) = test_agent_session(
+                1024,
+                "s-agent",
+                Some("@@Agent"),
+                None,
+                Some(agent.name()),
+                &[],
+            );
+            register_session(&registry, &session);
+
+            let outcome =
+                registry.enqueue_write_matching(Some("@@Agent"), None, BRACKET_END, Some(agent));
+            assert_eq!(outcome.queued, 1);
+
+            drain_now(&session);
+            let bytes = delivered_input(&rx);
+            assert_eq!(
+                String::from_utf8(bytes.clone()).unwrap(),
+                format!("\x1b[200~{BRACKET_END_CLEANED}\n\x1b[201~\r"),
+                "{}",
+                agent.name()
+            );
+            assert_eq!(closing_brackets(&bytes), 1, "{}", agent.name());
+        }
+    }
+
+    #[test]
+    fn a_rich_prompt_cannot_end_an_overridden_bracket_early() {
+        let (session, rx) =
+            test_agent_session(1024, "s-codex", Some("@@Codex"), None, Some("codex"), &[]);
+        let overridden = ResolvedSubmit {
+            agent: SubmitAgent::Codex,
+            template: "\x1b[200~{}\x1b[201~\n".to_string(),
+            source: SubmitTemplateSource::Override,
+        };
+        assert_eq!(
+            session.enqueue_prompt(BRACKET_END.to_string(), Some(overridden), Some("p1".into())),
+            Some(1)
+        );
+
+        drain_now(&session);
+        let bytes = delivered_input(&rx);
+        assert_eq!(
+            String::from_utf8(bytes.clone()).unwrap(),
+            format!("\x1b[200~{BRACKET_END_CLEANED}\n\x1b[201~\n")
+        );
+        assert_eq!(closing_brackets(&bytes), 1);
+    }
+
+    #[test]
+    fn a_claude_message_and_a_raw_write_reach_the_pty_as_written() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let (claude, claude_rx) = test_agent_session(
+            1024,
+            "s-claude",
+            Some("@@Claude"),
+            None,
+            Some("claude"),
+            &[],
+        );
+        let (shell, shell_rx) =
+            test_agent_session(1024, "s-shell", Some("@@Shell"), None, Some("bash"), &[]);
+        register_session(&registry, &claude);
+        register_session(&registry, &shell);
+
+        let to_claude = registry.enqueue_write_matching(
+            Some("@@Claude"),
+            None,
+            BRACKET_END,
+            Some(SubmitAgent::Claude),
+        );
+        assert_eq!(to_claude.queued, 1);
+        let raw = registry.enqueue_write_matching(Some("@@Shell"), None, BRACKET_END, None);
+        assert_eq!(raw.queued, 1);
+
+        drain_now(&claude);
+        drain_now(&shell);
+        assert_eq!(
+            delivered_input(&claude_rx),
+            format!("{BRACKET_END}\n\x1b[27;9;13~").into_bytes()
+        );
+        assert_eq!(delivered_input(&shell_rx), BRACKET_END.as_bytes().to_vec());
+    }
+
     // The sender-side chord authority: the agent named in `--submit` picks the
     // delivery bytes for every matched session. Each session's own derivation
     // from spawn command + CHAN_AGENT is still computed, but only to report a
