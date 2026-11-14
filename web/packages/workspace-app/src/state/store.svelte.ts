@@ -635,8 +635,9 @@ function persistHybridSurfaceTheme(kind: HybridSurfaceKind, choice: string): Pro
 
 // Route the keymap override layer's writes through the shared config helper:
 // every shortcut assign/clear replaces the composite override table at
-// `preferences.shortcuts`. The server broadcasts config_changed,
-// so applyServerPreferences re-hydrates every other window.
+// `preferences.shortcuts`. The server broadcasts config_changed, so every
+// other window re-hydrates: applyServerPreferences in a workspace window,
+// refreshStandalonePreferences in one without a workspace.
 registerOverridePersist((shortcuts) => {
   void updateGlobalConfigSerial(() => ({ shortcuts }));
 });
@@ -964,16 +965,19 @@ export function __testSetStandalonePreferences(prefs: Preferences | null): void 
 /// tenant serves no `/api/fs`, and it would fight the launcher's
 /// `local-theme` choice that a standalone terminal follows instead of the
 /// config theme. The terminal reads what it needs through `currentPreferences`.
-/// The per-surface body themes are the one part of that mirror applied here:
-/// each is an override over the window's theme, whichever source that has,
-/// and the surfaces this window draws (a terminal, a Dashboard, an editor and
-/// a file browser where the tenant serves files) read them from the live
-/// table rather than from the preferences.
+/// Two parts of that mirror are applied here, because what reads them reads a
+/// live table rather than the preferences. The per-surface body themes: each
+/// is an override over the window's theme, whichever source that has, and the
+/// surfaces this window draws (a terminal, a Dashboard, an editor and a file
+/// browser where the tenant serves files) read them from the store. And the
+/// saved shortcuts, which the chord resolver and the key dispatch read from
+/// the override table, dropping a retired command's row as they load.
 async function refreshStandalonePreferences(): Promise<void> {
   try {
     const prefs = (await api.config()).preferences;
     standalonePreferences.current = prefs;
     applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
+    hydrateOverrides(prefs.shortcuts);
   } catch {
     // Left as-is rather than cleared: a failed refresh should not throw away
     // preferences that are already applied and still correct.
