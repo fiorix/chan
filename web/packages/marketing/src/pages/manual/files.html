@@ -78,7 +78,7 @@
         <tr><td><strong>Upload</strong>, from the file browser's menu or the command launcher</td><td>Uploads into the folder a Files tab shows. In a dock: into the selected folder, or the selected file's folder; with nothing selected, the workspace root, or your home folder in a standalone terminal's window.</td></tr>
         <tr><td><strong>Upload</strong> in a folder's Details</td><td>Uploads into that folder.</td></tr>
         <tr><td><strong>Upload</strong> on a file, in its right-click menu or its Details</td><td>Replaces that file.</td></tr>
-        <tr><td><strong>Download</strong></td><td>Sends a file as it is, and a folder as a tar archive.</td></tr>
+        <tr><td><strong>Download</strong></td><td>Sends a file as it is, and a folder as a tar archive. Folder archives and copies leave out chan's reserved <code>.chan-write-*</code> temporary files and folders. A standalone terminal's folder archive keeps other entries, including <code>.git</code>.</td></tr>
       </tbody>
     </table>
   </div>

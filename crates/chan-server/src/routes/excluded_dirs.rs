@@ -127,10 +127,7 @@ fn normalize(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// The name of every directory under `root`, one at each step of a walk in
-/// progress: `.git` and `.chan` are not entered, no listing of the tree is
-/// built and no entry is counted. A name that is not Unicode is spelled as
-/// the walk's own filter spells it.
+/// Directory names admitted by the workspace listing walk, one at each step: `.git`, `.chan` and reserved atomic-write subtrees are not entered. No listing of the tree is built and no entry is counted. A name that is not Unicode is spelled as the walk's own filter spells it.
 fn directory_names(root: &Path) -> impl Iterator<Item = String> {
     chan_workspace::fs_ops::walk_workspace(root)
         .filter(|entry| entry.file_type().is_dir())

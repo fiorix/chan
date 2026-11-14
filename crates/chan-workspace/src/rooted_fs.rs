@@ -1378,9 +1378,7 @@ impl RootedFs {
         }
     }
 
-    /// Verify every node under `rel` is a readable regular file or
-    /// directory before any mutation starts, so a failure cannot strand a
-    /// half-copied destination.
+    /// Verify each copy source under `rel` is a readable regular file or directory before any mutation starts, so a failure cannot strand a half-copied destination. Reserved write temporaries are not sources.
     pub(crate) fn preflight_tree(&self, rel: &str, skip_control_dirs: bool) -> Result<()> {
         let (dir, rel_path) = self.resolve_io(rel)?;
         let meta = dir.symlink_metadata(&rel_path).map_err(ChanError::from)?;
@@ -1400,7 +1398,11 @@ impl RootedFs {
             ChanError::io_with_context(e, format!("unreadable source directory {rel}"))
         })? {
             let entry = entry.map_err(ChanError::from)?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            let name = entry.file_name();
+            if fs_ops::is_atomic_write_temp_name(&name.to_string_lossy()) {
+                continue;
+            }
+            let Some(name) = name.to_str().map(str::to_owned) else {
                 return Err(ChanError::Io(format!(
                     "source tree under {rel} contains a non-UTF-8 name"
                 )));
@@ -1511,9 +1513,7 @@ impl RootedFs {
             })
     }
 
-    /// Recursively copy the contents of directory `src_rel` into the
-    /// already-created `dst_rel`. Skips control dirs; refuses special
-    /// files; recreates child directories before copying their files.
+    /// Recursively copy the contents of directory `src_rel` into the already-created `dst_rel`. Skips control dirs and reserved write temporaries; refuses special files; recreates child directories before copying their files.
     fn copy_subtree(
         &self,
         src_rel: &std::path::Path,
@@ -1525,6 +1525,9 @@ impl RootedFs {
         for entry in read {
             let entry = entry.map_err(ChanError::from)?;
             let name = entry.file_name();
+            if fs_ops::is_atomic_write_temp_name(&name.to_string_lossy()) {
+                continue;
+            }
             let name_str = name.to_str().ok_or_else(|| {
                 ChanError::Io(format!(
                     "source tree under {} contains a non-UTF-8 name",
@@ -2098,6 +2101,88 @@ mod mutation_tests {
             assert_eq!(fs::read_to_string(source.join("a.md")).unwrap(), "note");
             assert_eq!(fs::read_dir(&source).unwrap().count(), 2);
         }
+    }
+
+    #[test]
+    fn directory_copy_omits_atomic_write_temporaries() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1 << 20).unwrap();
+        fs::create_dir_all(root.path().join("source/nested")).unwrap();
+        for name in [".CHAN-WRITE-user", ".chan-writer", ".hidden"] {
+            fs::write(root.path().join("source").join(name), b"user").unwrap();
+        }
+        rooted
+            .write_atomic_stream("source/nested/save.bin", AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"partial")?;
+                let temporary = fs::read_dir(root.path().join("source/nested"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .file_name();
+                assert!(fs_ops::is_atomic_write_temp_name(
+                    &temporary.to_string_lossy()
+                ));
+                let stage = root.path().join("source").join(temporary);
+                fs::create_dir(&stage).unwrap();
+                fs::write(stage.join("partial.bin"), b"partial").unwrap();
+                let copied = rooted.copy("source", "target").unwrap();
+                let mut paths = copied.created;
+                paths.sort();
+                assert_eq!(
+                    paths,
+                    [
+                        "target/.CHAN-WRITE-user",
+                        "target/.chan-writer",
+                        "target/.hidden"
+                    ],
+                    "copy must omit the live temporary and its reserved stage"
+                );
+                assert_eq!(fs::read_dir(root.path().join("target")).unwrap().count(), 4);
+                assert_eq!(
+                    fs::read_dir(root.path().join("target/nested"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read(root.path().join("source/nested/save.bin")).unwrap(),
+            b"partial"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_preflight_ignores_atomic_write_temporaries() {
+        let root = tempfile::tempdir().unwrap();
+        let rooted = RootedFs::open(root.path().to_path_buf(), 1024).unwrap();
+        fs::create_dir_all(root.path().join("source/nested")).unwrap();
+        rooted
+            .write_atomic_stream("source/nested/save.bin", AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"partial")?;
+                let temporary = fs::read_dir(root.path().join("source/nested"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .file_name();
+                assert!(fs_ops::is_atomic_write_temp_name(
+                    &temporary.to_string_lossy()
+                ));
+                let stage = root.path().join("source").join(temporary);
+                fs::create_dir(&stage).unwrap();
+                std::os::unix::fs::symlink("absent", stage.join("link")).unwrap();
+                for skip_control_dirs in [false, true] {
+                    rooted
+                        .preflight_tree("source", skip_control_dirs)
+                        .expect("a reserved subtree is not a copy source");
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
