@@ -58,7 +58,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [downloads carry write temporaries][writetemps] | not started | build |
 | [a gateway page may drop a layout][gwlayout] | merged | closed |
 | [cs window new prints a refused id][winid] | merged | gate |
-| [cs window new returns too early][winrace] | not started | build |
+| [cs window new returns too early][winrace] | partly built | build |
 | [a diagram's clicks land off][diagclick] | not started | measure |
 | [a reattach replays into a TUI][altreplay] | not started | build |
 
