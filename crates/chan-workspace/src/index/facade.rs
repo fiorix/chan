@@ -112,6 +112,10 @@ pub struct Hit {
     pub chunk_id: String,
     pub heading: String,
     pub start_line: u64,
+    /// Excerpt of the chunk as raw text: nothing is entity-escaped, and on
+    /// BM25 hits `<b>` and `</b>` bracket the matched spans. A consumer
+    /// that renders HTML escapes the whole string and then turns only that
+    /// marker pair into markup.
     pub snippet: String,
     pub score: f32,
 }

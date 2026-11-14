@@ -24,7 +24,7 @@ use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, SchemaBuilder, Value, FAST, INDEXED, STORED, STRING, TEXT,
 };
-use tantivy::snippet::SnippetGenerator;
+use tantivy::snippet::{collapse_overlapped_ranges, Snippet, SnippetGenerator};
 use tantivy::{
     doc, DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, TERMINATED,
 };
@@ -241,7 +241,7 @@ impl Bm25Index {
             let body_text = get_text(&doc, self.fields.body);
             let term_snippet = snippet_gen.snippet_from_doc(&doc);
             let snippet = if !term_snippet.is_empty() {
-                term_snippet.to_html()
+                marked_snippet(&term_snippet)
             } else if !prefix_terms.is_empty() {
                 // SnippetGenerator returns empty when the
                 // QueryParser-parsed terms aren't found as exact
@@ -390,6 +390,25 @@ fn has_operator(tok: &str) -> bool {
             b':' | b'*' | b'?' | b'~' | b'+' | b'"' | b'(' | b')' | b'-'
         )
     })
+}
+
+/// Render a tantivy snippet in the [`Hit::snippet`] format: the fragment's
+/// own text with each highlighted span wrapped in `<b>...</b>`, matching
+/// [`manual_prefix_snippet`]. `Snippet::to_html` would entity-escape the
+/// text as well, and consumers escape it themselves.
+fn marked_snippet(snippet: &Snippet) -> String {
+    let fragment = snippet.fragment();
+    let mut out = String::with_capacity(fragment.len() + 16);
+    let mut start = 0;
+    for range in collapse_overlapped_ranges(snippet.highlighted()) {
+        out.push_str(&fragment[start..range.start]);
+        out.push_str("<b>");
+        out.push_str(&fragment[range.clone()]);
+        out.push_str("</b>");
+        start = range.end;
+    }
+    out.push_str(&fragment[start..]);
+    out
 }
 
 /// Build a snippet for a body whose match is a prefix of an
@@ -837,6 +856,32 @@ mod tests {
         let hits = idx.search("fox", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("<b>fox</b>"));
+    }
+
+    /// Both highlighters return the body's own text with bare `<b>` markers:
+    /// the whole-token path (`fox`) and the typed-prefix fallback (`fo`)
+    /// agree, and neither entity-escapes, so a consumer that escapes before
+    /// rendering shows the text exactly once.
+    #[test]
+    fn snippets_are_raw_text_with_bare_highlight_markers() {
+        let (_tmp, idx) = fresh();
+        idx.index_file(
+            "a.md",
+            "# top\nif a > b && c <script>alert(1)</script> the fox ran\n",
+            &Chunking::WholeDoc,
+        )
+        .unwrap();
+        idx.commit().unwrap();
+        for (query, highlight) in [("fox", "<b>fox</b>"), ("fo", "<b>fo</b>x")] {
+            let hits = idx.search(query, 10).unwrap();
+            assert_eq!(hits.len(), 1, "{query}");
+            let snippet = &hits[0].snippet;
+            assert!(
+                snippet.contains("if a > b && c <script>alert(1)</script> the ")
+                    && snippet.contains(highlight),
+                "{query}: {snippet:?}"
+            );
+        }
     }
 
     #[test]
