@@ -2,10 +2,10 @@
  * Unit tests for InputHandler
  */
 
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import { Ghostty } from './ghostty';
+import { readFileSync } from 'node:fs';
+import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { GhosttyVt } from '../vt/ghosttyVt';
 import { InputHandler } from './input-handler';
-import { Key, KeyAction, Mods } from './types';
 
 // Mock DOM types for testing
 interface MockKeyboardEvent {
@@ -60,8 +60,8 @@ function createKeyEvent(
     shiftKey: modifiers.shift ?? false,
     metaKey: modifiers.meta ?? false,
     repeat: false,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
   };
 }
 
@@ -83,8 +83,8 @@ function createClipboardEvent(text: string | null): MockClipboardEvent {
             },
           }
         : null,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
   };
 }
 
@@ -95,8 +95,8 @@ function createBeforeInputEvent(inputType: string, data: string | null): MockInp
     inputType,
     data,
     isComposing: false,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
   };
 }
 interface MockCompositionEvent {
@@ -114,8 +114,8 @@ function createCompositionEvent(
   return {
     type,
     data,
-    preventDefault: mock(() => {}),
-    stopPropagation: mock(() => {}),
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
   };
 }
 // Helper to create mock container
@@ -176,21 +176,24 @@ function simulateKey(
 }
 
 describe('InputHandler', () => {
-  let ghostty: Ghostty;
+  let vendored: WebAssembly.Module;
+  let ghostty: GhosttyVt;
   let container: ReturnType<typeof createMockContainer>;
   let dataReceived: string[];
-  let bellCalled: boolean;
+
+  beforeAll(async () => {
+    vendored = await WebAssembly.compile(readFileSync('vendor/ghostty-vt/ghostty-vt.wasm'));
+  });
 
   beforeEach(async () => {
-    // Create a fresh Ghostty WASM instance for complete test isolation
-    ghostty = await Ghostty.load();
+    // Each handler gets isolated encoder state over the vendored core.
+    ghostty = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
 
     // Create mock container for each test
     container = createMockContainer();
 
     // Reset data tracking
     dataReceived = [];
-    bellCalled = false;
   });
 
   describe('Constructor and Lifecycle', () => {
@@ -199,9 +202,7 @@ describe('InputHandler', () => {
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       expect(handler.isActive()).toBe(true);
@@ -214,9 +215,7 @@ describe('InputHandler', () => {
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       handler.dispose();
@@ -230,9 +229,7 @@ describe('InputHandler', () => {
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       handler.dispose();
@@ -244,13 +241,11 @@ describe('InputHandler', () => {
 
   describe('Printable Characters', () => {
     test('encodes lowercase letters', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyA', 'a'));
@@ -261,13 +256,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes uppercase letters (with shift)', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyA', 'A', { shift: true }));
@@ -275,13 +268,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes digits', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Digit0', '0'));
@@ -292,13 +283,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes punctuation', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Comma', ','));
@@ -309,13 +298,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes space', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Space', ' '));
@@ -325,13 +312,11 @@ describe('InputHandler', () => {
 
   describe('IME Composition', () => {
     test('handles composition sequence', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Start composition
@@ -360,13 +345,11 @@ describe('InputHandler', () => {
     });
 
     test('ignores keydown during composition', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Start composition
@@ -391,13 +374,11 @@ describe('InputHandler', () => {
     });
 
     test('cleans up text nodes in container after composition', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Simulate browser inserting text node during composition
@@ -422,13 +403,11 @@ describe('InputHandler', () => {
 
     test('avoids duplicate commit when compositionend fires before beforeinput', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         undefined,
@@ -444,13 +423,11 @@ describe('InputHandler', () => {
 
     test('avoids duplicate commit when beforeinput fires before compositionend', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         undefined,
@@ -467,13 +444,11 @@ describe('InputHandler', () => {
 
   describe('Control Characters', () => {
     test('encodes Ctrl+A', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyA', 'a', { ctrl: true }));
@@ -484,13 +459,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Ctrl+C', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyC', 'c', { ctrl: true }));
@@ -501,13 +474,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Ctrl+D', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyD', 'd', { ctrl: true }));
@@ -518,13 +489,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Ctrl+Z', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyZ', 'z', { ctrl: true }));
@@ -535,13 +504,11 @@ describe('InputHandler', () => {
     });
 
     test('Cmd+C allows copy (no data sent)', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyC', 'c', { meta: true }));
@@ -554,13 +521,11 @@ describe('InputHandler', () => {
 
   describe('Special Keys', () => {
     test('encodes Enter', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Enter', 'Enter'));
@@ -571,13 +536,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Tab', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Tab', 'Tab'));
@@ -588,13 +551,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Escape', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Escape', 'Escape'));
@@ -605,13 +566,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Backspace', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Backspace', 'Backspace'));
@@ -625,13 +584,11 @@ describe('InputHandler', () => {
 
   describe('Arrow Keys', () => {
     test('encodes Up arrow', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('ArrowUp', 'ArrowUp'));
@@ -642,13 +599,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Down arrow', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('ArrowDown', 'ArrowDown'));
@@ -658,13 +613,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Left arrow', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('ArrowLeft', 'ArrowLeft'));
@@ -674,13 +627,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Right arrow', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('ArrowRight', 'ArrowRight'));
@@ -691,13 +642,11 @@ describe('InputHandler', () => {
 
     test('sends CSI sequences in normal cursor mode (mode 1 off)', () => {
       // Create handler with getMode callback that returns false (normal mode)
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         (_mode: number) => false // Normal cursor mode
@@ -718,13 +667,11 @@ describe('InputHandler', () => {
 
     test('sends SS3 sequences in application cursor mode (mode 1 on)', () => {
       // Create handler with getMode callback that returns true for mode 1
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         (mode: number) => mode === 1 // Application cursor mode enabled
@@ -746,13 +693,11 @@ describe('InputHandler', () => {
 
   describe('Function Keys', () => {
     test('encodes F1', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('F1', 'F1'));
@@ -763,13 +708,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes F12', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('F12', 'F12'));
@@ -782,13 +725,11 @@ describe('InputHandler', () => {
 
   describe('Navigation Keys', () => {
     test('encodes Home', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Home', 'Home'));
@@ -798,13 +739,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes End', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('End', 'End'));
@@ -814,13 +753,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes PageUp', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('PageUp', 'PageUp'));
@@ -830,13 +767,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes PageDown', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('PageDown', 'PageDown'));
@@ -846,13 +781,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Delete', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Delete', 'Delete'));
@@ -862,13 +795,11 @@ describe('InputHandler', () => {
     });
 
     test('encodes Insert', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('Insert', 'Insert'));
@@ -880,13 +811,11 @@ describe('InputHandler', () => {
 
   describe('Event Prevention', () => {
     test('prevents default on printable characters', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const event = createKeyEvent('KeyA', 'a');
@@ -896,13 +825,11 @@ describe('InputHandler', () => {
     });
 
     test('prevents default on special keys', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const event = createKeyEvent('Enter', 'Enter');
@@ -912,13 +839,11 @@ describe('InputHandler', () => {
     });
 
     test('prevents default on Ctrl+keys', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const event = createKeyEvent('KeyC', 'c', { ctrl: true });
@@ -930,13 +855,11 @@ describe('InputHandler', () => {
 
   describe('Unknown Keys', () => {
     test('ignores unmapped keys', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Simulate a key that's not in KEY_MAP
@@ -949,13 +872,11 @@ describe('InputHandler', () => {
 
   describe('Modifier Combinations', () => {
     test('handles Ctrl+Shift combinations', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyA', 'A', { ctrl: true, shift: true }));
@@ -966,13 +887,11 @@ describe('InputHandler', () => {
     });
 
     test('handles Alt combinations', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
@@ -985,13 +904,11 @@ describe('InputHandler', () => {
 
   describe('Clipboard Operations', () => {
     test('handles paste event', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const pasteText = 'Hello, World!';
@@ -1005,13 +922,11 @@ describe('InputHandler', () => {
 
     test('handles beforeinput insertFromPaste with data', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         undefined,
@@ -1030,13 +945,11 @@ describe('InputHandler', () => {
 
     test('uses bracketed paste for beforeinput insertFromPaste', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         (mode) => mode === 2004,
@@ -1054,13 +967,11 @@ describe('InputHandler', () => {
     });
 
     test('handles multi-line paste', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const pasteText = 'Line 1\nLine 2\nLine 3';
@@ -1074,13 +985,11 @@ describe('InputHandler', () => {
 
     test('ignores beforeinput insertFromPaste when paste already handled', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         undefined,
@@ -1101,13 +1010,11 @@ describe('InputHandler', () => {
 
     test('ignores paste when beforeinput insertFromPaste already handled', () => {
       const inputElement = createMockContainer();
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        },
+        vi.fn(),
         undefined,
         undefined,
         undefined,
@@ -1127,13 +1034,11 @@ describe('InputHandler', () => {
     });
 
     test('ignores paste with no clipboard data', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const pasteEvent = createClipboardEvent(null);
@@ -1144,13 +1049,11 @@ describe('InputHandler', () => {
     });
 
     test('ignores paste with empty text', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       const pasteEvent = createClipboardEvent('');
@@ -1161,13 +1064,11 @@ describe('InputHandler', () => {
     });
 
     test('allows Ctrl+V to trigger paste', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Ctrl+V should NOT call onData callback (lets paste event handle it)
@@ -1177,13 +1078,11 @@ describe('InputHandler', () => {
     });
 
     test('allows Cmd+V to trigger paste', () => {
-      const handler = new InputHandler(
+      new InputHandler(
         ghostty,
         container as any,
         (data) => dataReceived.push(data),
-        () => {
-          bellCalled = true;
-        }
+        vi.fn()
       );
 
       // Cmd+V should NOT call onData callback (lets paste event handle it)

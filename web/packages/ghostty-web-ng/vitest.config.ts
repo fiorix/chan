@@ -1,12 +1,11 @@
 import { defineConfig } from "vitest/config";
 
-// chan's tests of the binding and the vendored core under vt/. Upstream's
-// tests in lib/ import bun:test and preload Happy DOM (bunfig.toml), so they
-// are left out. Vitest reads this file before upstream's vite.config.js,
-// which imports a build plugin the workspace does not install.
+// The binding tests and input handler use the vendored core. The remaining
+// upstream tests use bun:test. Vitest reads this file before vite.config.js,
+// whose build plugin is not installed.
 export default defineConfig({
   test: {
-    include: ["vt/**/*.test.ts"],
+    include: ["vt/**/*.test.ts", "lib/input-handler.test.ts"],
     environment: "jsdom",
     testTimeout: 30_000,
     hookTimeout: 30_000,
