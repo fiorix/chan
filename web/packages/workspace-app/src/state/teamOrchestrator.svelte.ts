@@ -11,7 +11,8 @@
 //      the workers into new tabs (split-pane or tabs-in-Hybrid per
 //      the dialog's real estate).
 //   3. Each agent's identity is its `CHAN_TAB_NAME` env var.
-//   4. Place the identity prompt into the LEAD's embedded editor.
+//   4. Send an agent LEAD its identity prompt (a lead that is not an
+//      agent is sent nothing).
 //   5. Broadcast: deselect ALL terminals first, then enable ONLY the
 //      lead + workers set.
 
@@ -348,12 +349,14 @@ async function launchLead(
 /// the write queue (the prompt frame). The lead's WS may not be open the instant
 /// we ask, so retry until the send goes out; the lead typically connects within
 /// ~1s, we poll up to ~10s, then warn rather than silently strand the lead. The
-/// server enqueues + drains the prompt (with the agent's submit chord, none for
-/// "none") when the agent is idle - the same path every other prompt takes.
+/// server enqueues + drains the prompt (with the agent's submit chord) when the
+/// agent is idle - the same path every other prompt takes. Only an agent lead
+/// gets one: a lead with no compose box would run the prompt's lines as
+/// commands.
 async function deliverLeadIdentity(
   tabId: string,
   text: string,
-  agent: AgentTarget,
+  agent: Exclude<AgentTarget, "none">,
 ): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (sendPromptToTerminal(tabId, text, agent)) return;
@@ -482,13 +485,15 @@ export async function runTeamBootstrap(
   // Derive the lead's submit agent from its DIALOG command (+ a CHAN_AGENT
   // env override), the same algorithm the server uses (SubmitAgent::derive);
   // the wire carries command and env instead. A lead that derives no agent (a
-  // shell, or a program chan does not know) is sent "none": the server reads
-  // an omitted agent as claude, and a name it does not know as no chord.
+  // shell, or a program chan does not know) is sent nothing: it has no
+  // compose box, so the prompt would land at a shell prompt and its lines
+  // would run as commands the user never typed. `cs terminal team` pokes no
+  // such member either.
   const leadDraft = config.members.find((m) => m.isLead);
   const leadAgent = leadDraft
     ? agentForMember(leadDraft.command, leadDraft.env)
     : "none";
-  void deliverLeadIdentity(leadTab.id, prompt, leadAgent);
+  if (leadAgent !== "none") void deliverLeadIdentity(leadTab.id, prompt, leadAgent);
 
   // Restore focus to the lead's pane.
   setActivePane(ctx.leadPaneId);
@@ -503,5 +508,9 @@ export async function runTeamBootstrap(
     setTerminalBroadcastEnabled(tab, false);
   }
 
-  notify(`Team "${wire.team_name}" bootstrapped.`);
+  notify(
+    leadAgent === "none"
+      ? `Team "${wire.team_name}" bootstrapped; ${leadEntry.handle} is not an agent chan knows, so it was sent no prompt.`
+      : `Team "${wire.team_name}" bootstrapped.`,
+  );
 }
