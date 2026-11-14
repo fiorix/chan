@@ -192,7 +192,7 @@
   /// Synthesize the read-only directory spine for GraphCanvas. We
   /// emit one `folder` node per drawn directory (the workspace root
   /// sentinel, its directories and those of each opened directory) and
-  /// one `contains` edge per parent → child relationship. A closed
+  /// one `contains` edge per parent-child relationship. A closed
   /// directory's state covers its subtree, so the spine reports the whole
   /// workspace at any depth it is opened to. The `indexState` field on each
   /// folder node drives the green/grey/pulsing-orange palette

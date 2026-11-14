@@ -184,6 +184,38 @@ describe("a double-click on a directory of the Search slide", () => {
     expect(asked().at(-1)).toEqual([]);
   });
 
+  test("closing a directory cancels its pending fit before its opening answer lands", async () => {
+    await render();
+    const sent: Array<(value: IndexingStateResponse) => void> = [];
+    server.answer = () => new Promise((land) => sent.push(land));
+    await doubleClick("directory:docs");
+    await doubleClick("directory:docs");
+    expect(sent).toHaveLength(2);
+
+    sent[0](await serveLevels(["docs"]));
+    await settle();
+
+    expect(drawn()).toEqual(["", "directory:docs", "directory:notes"]);
+    expect(canvas.props!.expansionFitRequest).toBeNull();
+  });
+
+  test("a pending opening waits for an answer that lists its level before fitting", async () => {
+    indexingCache.last = answer(...ROOT_LEVEL);
+    const sent: Array<(value: IndexingStateResponse) => void> = [];
+    server.answer = () => new Promise((land) => sent.push(land));
+    await render();
+    await doubleClick("directory:docs");
+    expect(sent).toHaveLength(2);
+
+    sent[0](await serveLevels([]));
+    await settle();
+    expect(canvas.props!.expansionFitRequest).toBeNull();
+
+    sent[1](await serveLevels(["docs"]));
+    await settle();
+    expect(canvas.props!.expansionFitRequest?.ids).toEqual(["directory:docs", "", "directory:docs/api"]);
+  });
+
   test("leaves a directory that holds no directory, and the root, as they are", async () => {
     const written: string[][] = [];
     await render({
@@ -242,6 +274,22 @@ describe("a double-click on a directory of the Search slide", () => {
 });
 
 describe("a poll of the Search slide", () => {
+  test("an older request finishing leaves the loading note until the latest request finishes", async () => {
+    const sent: Array<(value: IndexingStateResponse | null) => void> = [];
+    server.answer = () => new Promise((land) => sent.push(land));
+    await render();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(sent).toHaveLength(2);
+
+    sent[0](null);
+    await settle();
+    expect(target.querySelector(".indexing-stub")?.textContent).toContain("Loading indexing state...");
+
+    sent[1](null);
+    await settle();
+    expect(target.querySelector(".indexing-stub")?.textContent).toContain("Indexing state unavailable.");
+  });
+
   test("hands the canvas the arrays it holds when its answer equals the one held", async () => {
     server.answer = serveLevels;
     await render();

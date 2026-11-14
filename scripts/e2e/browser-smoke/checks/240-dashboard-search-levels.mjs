@@ -17,7 +17,7 @@
 //
 // A double-click here is a user's: Details is closed, the first click
 // selects the directory, which opens Details, and the second follows a
-// quarter of a second later. Details opens over the right side of the
+// tenth of a second later. Details opens over the right side of the
 // canvas, so the last leg pans the spine until the fixture's disc lies
 // there and double-clicks it: the second click has to reach the disc under
 // the panel, not the panel, and open the directory.
@@ -135,13 +135,79 @@ async function closeDetails(page) {
   await page.waitForFunction(() => !document.querySelector(".slide-indexing aside.inspector"), { timeout: 5_000 });
 }
 
-/// Two clicks at one point a quarter of a second apart, the second counted
-/// as the second of a double-click.
-async function pressTwice(page, at) {
-  await page.mouse.click(at.x, at.y);
-  await delay(250);
-  await page.mouse.down({ clickCount: 2 });
-  await page.mouse.up({ clickCount: 2 });
+/// An observed settle window that expires is a delayed reading; a window
+/// that never starts is the defect this leg must still be able to find.
+function expiredDetails(reading) {
+  const error = new Error(`ENVIRONMENT_DETAILS_SETTLE_ELAPSED: Details' observed settle window cleared before the second click reached it: ${JSON.stringify(reading)}`);
+  error.code = "ENVIRONMENT_DETAILS_SETTLE_ELAPSED";
+  return error;
+}
+
+/// Two clicks at one point a tenth of a second apart. The overlay leg also
+/// observes the class before the first click, so a slow round trip cannot
+/// mislabel an absent settle window as one that already expired.
+export async function pressTwice(page, at, underDetails = false) {
+  const reading = {};
+  if (underDetails) {
+    await page.waitForFunction(() => {
+      const row = document.querySelector(".slide-indexing .indexing-row");
+      return row && !row.classList.contains("details-settling") && !row.querySelector("aside.inspector");
+    }, { timeout: 5_000 });
+    await page.evaluate(() => {
+      const row = document.querySelector(".slide-indexing .indexing-row");
+      const state = { entered: false, enteredAt: null, firstAt: null, secondAt: null, secondSettling: null };
+      const sample = (records = []) => {
+        const settling = row.classList.contains("details-settling");
+        if (settling || records.some((record) => record.oldValue?.split(/\s+/).includes("details-settling"))) {
+          state.entered = true;
+          state.enteredAt ??= performance.now();
+        }
+        return settling;
+      };
+      const observer = new MutationObserver(sample);
+      observer.observe(row, { attributes: true, attributeFilter: ["class"], attributeOldValue: true });
+      const press = (event) => {
+        if (event.detail === 1) state.firstAt = performance.now();
+        if (event.detail === 2) {
+          state.secondAt = performance.now();
+          state.secondSettling = sample(observer.takeRecords());
+        }
+      };
+      row.addEventListener("mousedown", press, true);
+      window.__smokeDetailsPress = {
+        read: () => {
+          const settling = sample(observer.takeRecords());
+          return { ...state, settling, readAt: performance.now() };
+        },
+        stop: () => { observer.disconnect(); row.removeEventListener("mousedown", press, true); },
+      };
+    });
+  }
+  try {
+    await page.mouse.click(at.x, at.y);
+    await delay(100);
+    if (underDetails) {
+      reading.before = await page.evaluate(() => window.__smokeDetailsPress.read());
+      assert.ok(reading.before.entered, `Details never entered its settle window after the first click: ${JSON.stringify(reading.before)}`);
+      if (!reading.before.settling) throw expiredDetails(reading);
+    }
+    await page.mouse.down({ clickCount: 2 });
+    await page.mouse.up({ clickCount: 2 });
+    if (underDetails) {
+      reading.after = await page.evaluate(() => window.__smokeDetailsPress.read());
+      assert.notEqual(reading.after.secondSettling, null, "the second mousedown was not observed on the indexing row");
+      if (!reading.after.secondSettling) throw expiredDetails(reading);
+    }
+    return reading;
+  } catch (error) {
+    error.smokeDetails = { detailsPress: reading };
+    throw error;
+  } finally {
+    if (underDetails) await page.evaluate(() => {
+      window.__smokeDetailsPress.stop();
+      delete window.__smokeDetailsPress;
+    });
+  }
 }
 
 /// The disc of the directory at `path`, with Details closed and the layout
@@ -290,7 +356,7 @@ export default {
       // draws alpha's level too, which stayed opened under it.
       const under = await panUnderDetails(again, (await discOf(ctx, again, DIR, [])).at);
       await ctx.shot("240-under-details", again);
-      await pressTwice(again, under);
+      const detailsPress = await pressTwice(again, under, true);
       const start3 = Date.now();
       while (!asked.at(-1).includes(DIR)) {
         if (Date.now() - start3 > 10_000) {
@@ -314,8 +380,15 @@ export default {
         restored: restored.count,
         shut: shut.count,
         underDetails: under,
+        detailsPress,
         requests: asked.length,
       };
+    } catch (error) {
+      error.smokeDetails = { ...error.smokeDetails, requests: asked, pageErrors: errors };
+      for (const [index, page] of pages.entries()) {
+        if (!page.isClosed()) await ctx.shot(`240-failure-${index}`, page).catch(() => {});
+      }
+      throw error;
     } finally {
       for (const page of pages) await page.close().catch(() => {});
       // The runner keeps one server and one workspace for every check: the
