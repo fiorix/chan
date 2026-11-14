@@ -140,8 +140,14 @@
       // The warnings themselves, not the status line they share: a
       // confirmation that replaces the line for a moment changes neither.
       warnings: warningKeys.length ? warningKeys : warningsLabel === null ? [] : [warningsLabel],
+      // The rows decide when the badge shows; its text reads the leader
+      // slot, which a handover or takeover moves without touching a row,
+      // so this window's own reading is a token of its own.
       role: roleVisible
-        ? sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`).sort()
+        ? [
+            ...sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`),
+            `self\u0000${role}`,
+          ].sort()
         : [],
     };
   });
@@ -353,7 +359,7 @@
               <span class="dot"></span>
               {role}
             </span>
-            {@render closeButton("role", "hide session role", "Hide until someone joins or leaves")}
+            {@render closeButton("role", "hide session role", "Hide until a new window joins or this window's role changes")}
           </span>
         {/if}
       </div>
