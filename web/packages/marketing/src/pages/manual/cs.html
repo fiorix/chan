@@ -238,7 +238,7 @@ cs terminal new --pane "$right" --side a --tab-name runner</code></pre>
       <tbody>
         <tr><td><code>0</code></td><td>Done, or queued to a live window. A queued tab or message arrives a moment later.</td></tr>
         <tr><td><code>1</code></td><td>Failed: refused, nothing matched, or a close blocked by unsaved work.</td></tr>
-        <tr><td><code>124</code></td><td>Nothing answered in time, as when a survey, a copy or paste, or a tunnel waits too long.</td></tr>
+        <tr><td><code>124</code></td><td>Nothing answered in time: a survey, a copy or paste, or a tunnel waited too long. An <code>export</code> or <code>session</code> wait that runs out exits 1.</td></tr>
         <tr><td><code>69</code></td><td>Only from an older devserver, which could refuse a <code>--submit</code>. The text was still queued.</td></tr>
       </tbody>
     </table>
