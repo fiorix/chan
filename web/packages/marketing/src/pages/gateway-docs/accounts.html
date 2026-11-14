@@ -1,6 +1,6 @@
 <section class="manual-block" id="enrol">
   <h2><a class="heading-anchor" href="#enrol">Let yourself in</a></h2>
-  <p>A new gateway lets nobody sign in. Two flags are off for every account until you grant them: <code>oauth_login</code> lets an account sign in, and <code>share_workspaces</code> shows its Devservers tab. Grant both to your own email, the one your sign-in provider account uses. As root, load the admin credentials the setup script wrote, then:</p>
+  <p>A new self-hosted gateway lets nobody sign in. Two flags are off for every account until you grant them: <code>oauth_login</code> lets an account sign in, and <code>share_workspaces</code> shows its Devservers tab. Grant both to your own email, the one your sign-in provider account uses. As root, load the admin credentials the setup script wrote, then:</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>#</span><b data-copy-value>set -a; . /etc/chan-gateway/admin.env; set +a
 chan-gateway-admin user create --email you@example.com
@@ -27,7 +27,7 @@ chan-gateway-admin flag grant share_workspaces you@example.com</b></code>
 </section>
 
 <section class="manual-block" id="access">
-  <h2><a class="heading-anchor" href="#access">Who can sign in</a></h2>
+  <h2><a class="heading-anchor" href="#access">Who can sign in with OAuth2</a></h2>
   <p>With the admin credentials loaded, each of these is one <code>chan-gateway-admin</code> command:</p>
   <div class="manual-table-wrap">
     <table class="manual-table">

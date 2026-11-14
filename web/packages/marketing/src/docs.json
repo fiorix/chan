@@ -14,7 +14,8 @@
             {
               "slug": "",
               "title": "Overview",
-              "description": "The layers of chan, from a terminal to devservers and gateways, and where each is taught."
+              "description": "The layers of chan, from a terminal to devservers and gateways, and where each is taught.",
+              "head": "scene"
             },
             {
               "slug": "install",
@@ -25,7 +26,8 @@
             {
               "slug": "concepts",
               "title": "Concepts",
-              "description": "Workspaces, libraries, windows, the Computers screen, devservers and gateways, and how each layer builds on the one before."
+              "description": "Workspaces, libraries, windows, the Computers screen, devservers and gateways, and how each layer builds on the one before.",
+              "head": "scene"
             }
           ]
         },
@@ -234,7 +236,7 @@
             {
               "slug": "edge",
               "title": "The edge proxy",
-              "description": "Put nginx in front of the gateway to terminate TLS and route sign-in, tunnels and devserver pages."
+              "description": "Put nginx in front of the gateway to terminate TLS and route OAuth2 sign-in, tunnels and devserver pages."
             }
           ]
         },
@@ -243,8 +245,8 @@
           "pages": [
             {
               "slug": "accounts",
-              "title": "Accounts and sign-in",
-              "description": "Let yourself in, set your username, and choose who else may sign in to the gateway."
+              "title": "Accounts and OAuth2 sign-in",
+              "description": "Let yourself in, set your username, and choose who else may sign in to the gateway you host."
             },
             {
               "slug": "publish",
@@ -254,7 +256,7 @@
             {
               "slug": "wireguard",
               "title": "WireGuard",
-              "description": "Let Chan Desktop reach the proxy nodes through WireGuard, with keys the gateway enrolls at sign-in."
+              "description": "Let Chan Desktop reach the proxy nodes through WireGuard, with keys your self-hosted gateway enrolls at sign-in."
             }
           ]
         },

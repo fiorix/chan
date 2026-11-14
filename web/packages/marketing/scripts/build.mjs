@@ -73,6 +73,7 @@ async function main() {
 
   const sharedTemplateValues = {
     copyButton: renderCopyButton(),
+    layersScene: await fs.readFile(path.join(srcRoot, "templates", "layers-scene.html"), "utf8"),
     githubReleasesUrl: githubRepoUrl + "/releases",
   };
   const launcherDemoHead =
@@ -81,6 +82,7 @@ async function main() {
   // Documentation pages share the landing page's labels and links (home.css)
   // and add their own layout and components (manual.css).
   const docHead = `${homeHead}\n<link rel="stylesheet" href="/assets/manual.css" />`;
+  const tourHead = '<link rel="stylesheet" href="/assets/tour.css" />\n<script type="module" src="/assets/tour.js"></script>';
   await writePage(
     "index.html",
     renderPage(baseTemplate, {
@@ -90,7 +92,7 @@ async function main() {
       description:
         "Chan is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces and agent teams. Free and open source on macOS, Windows, Linux, and FreeBSD.",
       content: fillTemplate(homeTemplate, { version, ...sharedTemplateValues }),
-      headExtra: homeHead,
+      headExtra: `${homeHead}\n${tourHead}`,
     }),
   );
 
@@ -123,7 +125,7 @@ async function main() {
     }),
   );
 
-  const docHeads = { "launcher-demo": launcherDemoHead };
+  const docHeads = { "launcher-demo": launcherDemoHead, scene: tourHead };
   for (const set of docSets) {
     for (const [index, page] of set.pages.entries()) {
       const template = await fs.readFile(path.join(srcRoot, page.slug ? path.join(set.source, `${page.slug}.html`) : set.index), "utf8");
@@ -178,17 +180,10 @@ async function main() {
     }),
   );
 
-  await writePage(
-    "demo/computers/index.html",
-    fillTemplate(demoEmbedTemplate, {
-      title: "Computers screen preview",
-      variant: "populated",
-    }),
-  );
-
   await buildLauncherDemo();
   await buildAnimationGallery();
   await buildSiteMotion();
+  await buildTour();
   await validateDist(version);
   console.log(`built marketing dist for chan ${version}`);
 }
@@ -215,6 +210,7 @@ async function copyStaticAssets() {
   await fs.copyFile(path.join(srcRoot, "styles.css"), path.join(distRoot, "assets", "site.css"));
   await fs.copyFile(path.join(srcRoot, "site.js"), path.join(distRoot, "assets", "site.js"));
   await fs.copyFile(path.join(srcRoot, "home.css"), path.join(distRoot, "assets", "home.css"));
+  await fs.copyFile(path.join(srcRoot, "tour.css"), path.join(distRoot, "assets", "tour.css"));
   await fs.copyFile(path.join(srcRoot, "guides.css"), path.join(distRoot, "assets", "guides.css"));
   await fs.copyFile(path.join(srcRoot, "manual.css"), path.join(distRoot, "assets", "manual.css"));
   await copyDir(path.join(siteRoot, "assets"), path.join(distRoot, "assets"));
@@ -384,6 +380,16 @@ async function imageSize(file) {
   if (data.length > 24 && data.readUInt32BE(0) === 0x89504e47) {
     return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
   }
+  if (data.length > 30 && data.toString("latin1", 0, 4) === "RIFF" && data.toString("latin1", 8, 12) === "WEBP") {
+    // The first chunk holds the size: an extended header's canvas, or a lossless or lossy frame.
+    const chunk = data.toString("latin1", 12, 16);
+    if (chunk === "VP8X") return { width: data.readUIntLE(24, 3) + 1, height: data.readUIntLE(27, 3) + 1 };
+    if (chunk === "VP8L") {
+      const bits = data.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (chunk === "VP8 ") return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff };
+  }
   if (data.length > 4 && data.readUInt16BE(0) === 0xffd8) {
     // Walk the JPEG segments to the frame header, which holds the size.
     let offset = 2;
@@ -447,6 +453,25 @@ async function buildSiteMotion() {
           entryFileNames: "[name].js",
           chunkFileNames: "site-motion-[name]-[hash].js",
           assetFileNames: "site-motion.[ext]",
+        },
+      },
+    },
+  });
+}
+
+async function buildTour() {
+  await viteBuild({
+    configFile: false,
+    root: siteRoot,
+    base: "/assets/",
+    build: {
+      emptyOutDir: false,
+      outDir: path.join(distRoot, "assets"),
+      rollupOptions: {
+        input: { tour: path.join(srcRoot, "tour.ts") },
+        output: {
+          entryFileNames: "[name].js",
+          chunkFileNames: "tour-[name]-[hash].js",
         },
       },
     },
@@ -571,7 +596,7 @@ async function validateDist(version) {
     }
   }
 
-  for (const required of ["index.html", "devserver/index.html", "gateway/index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "demo/computers/index.html", "animations/index.html", "install.sh", "install.ps1", "CNAME"]) {
+  for (const required of ["index.html", "devserver/index.html", "gateway/index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "animations/index.html", "install.sh", "install.ps1", "CNAME"]) {
     if (!allDistPaths.has(required)) throw new Error(`dist is missing ${required}`);
   }
 

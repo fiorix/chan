@@ -1,14 +1,14 @@
 <figure class="inline-shot">
   <div class="shot-placeholder-frame" data-shot="remote-tools-tunnel" data-shot-kind="clip">clip to capture<small>a devserver window split in two panes: <code>cs tunnel 8080</code> holding in one, <code>python -m http.server 8080</code> serving in the other; then the desktop's own browser opens <code>http://127.0.0.1:8080</code> and lists the remote directory</small></div>
-  <figcaption>A web server on the devserver, opened in this machine's browser through <code>cs tunnel</code>.</figcaption>
+  <figcaption>A web server on the devserver, opened in the local machine's browser through <code>cs tunnel</code>.</figcaption>
 </figure>
 
 <section class="manual-block" id="can-do">
   <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
   <ul class="can-do">
-    <li>Open a server running on the devserver in this machine's browser, with <code>cs tunnel</code>.</li>
+    <li>Open a server running on the devserver in the local machine's browser, with <code>cs tunnel</code>.</li>
     <li>Pull a file or a directory off the devserver with <code>cs download</code>.</li>
-    <li>Push files from this machine into any directory there with <code>cs upload</code>.</li>
+    <li>Push files from the local machine into any directory there with <code>cs upload</code>.</li>
     <li>Copy output on the devserver and paste it into any app here, or the other way round.</li>
     <li>Move text and images between two devservers through your clipboard.</li>
   </ul>
@@ -39,16 +39,16 @@
         <tr><th><code>cs tunnel</code></th><th>Forwards</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>3000</code></td><td>This machine's <code>127.0.0.1:3000</code> to port 3000 on the devserver.</td></tr>
+        <tr><td><code>3000</code></td><td>The local machine's <code>127.0.0.1:3000</code> to port 3000 on the devserver.</td></tr>
         <tr><td><code>8080:3000</code></td><td><code>127.0.0.1:8080</code> here to port 3000 there.</td></tr>
         <tr><td><code>5901 8080:3000</code></td><td>Two tunnels in one command. <kbd>Ctrl+C</kbd> closes both.</td></tr>
         <tr><td><code>8000-8003</code></td><td>Four tunnels, each to the same port there.</td></tr>
-        <tr><td><code>0:3000-3002</code></td><td>Three tunnels. This machine picks a free port for each, and the command prints them.</td></tr>
-        <tr><td><code>0.0.0.0:8080:3000</code></td><td>Port 8080 on every interface here, with a warning: anyone on this machine's network reaches port 3000 there.</td></tr>
+        <tr><td><code>0:3000-3002</code></td><td>Three tunnels. The local machine picks a free port for each, and the command prints them.</td></tr>
+        <tr><td><code>0.0.0.0:8080:3000</code></td><td>Port 8080 on every interface here, with a warning: anyone on the local machine's network reaches port 3000 there.</td></tr>
       </tbody>
     </table>
   </div>
-  <p>It needs Chan Desktop showing the window, and a devserver terminal: a browser cannot listen on your machine, and a terminal of this machine refuses. Through a gateway, only the devserver owner's Chan Desktop can open one.</p>
+  <p>It needs Chan Desktop showing the window, and a devserver terminal: a browser cannot listen on your machine, and a terminal of the local machine refuses. Through a gateway, only the devserver owner's Chan Desktop can open one.</p>
 </section>
 
 <section class="manual-block" id="transfers">
@@ -59,7 +59,7 @@
         <tr><th>Command</th><th>What happens</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>cs download FILE</code></td><td>The file downloads to this machine, through the browser's or Chan Desktop's download.</td></tr>
+        <tr><td><code>cs download FILE</code></td><td>The file downloads to the local machine, through the browser's or Chan Desktop's download.</td></tr>
         <tr><td><code>cs download DIR</code></td><td>The directory downloads as <code>DIR.tar</code>, built as it streams. <code>.</code> is the current directory.</td></tr>
         <tr><td><code>cs upload DIR</code></td><td>A file picker opens here, and the files you choose land in <code>DIR</code> on the devserver. A file path means its folder.</td></tr>
       </tbody>
@@ -68,7 +68,7 @@
   <p>Paths are on the terminal's machine; the files come from, and land on, the machine viewing the window. Any path your user can reach works, in a workspace window or a standalone terminal. Progress and Cancel are in the Transfers panel, opened from <strong>Transfers</strong> in the status bar; a browser lists a download in its own downloads instead.</p>
   <figure class="inline-shot">
     <div class="shot-placeholder-frame" data-shot="remote-tools-transfer" data-shot-kind="still">screenshot to capture<small>a Chan Desktop devserver window after <code>cs download build</code> and a click on Transfers in the status bar: the Transfers panel with <code>build.tar</code>, its progress and Cancel</small></div>
-    <figcaption>A download in progress: the bytes come off the devserver to this machine.</figcaption>
+    <figcaption>A download in progress: the bytes come off the devserver to the local machine.</figcaption>
   </figure>
   <p>The file browser's <strong>Upload</strong> and <strong>Download</strong> do the same with the mouse: see <a href="/manual/files/#transfers">File browser</a>.</p>
 </section>
@@ -95,7 +95,7 @@
     <summary>Details and limits</summary>
     <ul>
       <li><code>cs tunnel</code> runs for the tunnels' whole life, and exits when Chan Desktop disconnects or the window closes.</li>
-      <li>A tunnel group is all or nothing: a port this machine cannot bind fails the command and closes the others. With no listener after 10 seconds it exits 124.</li>
+      <li>A tunnel group is all or nothing: a port the local machine cannot bind fails the command and closes the others. With no listener after 10 seconds it exits 124.</li>
       <li>A devserver holds at most 32 live tunnels across its terminals: <code>server.tunnel.max_live</code> in <code>server.toml</code>.</li>
       <li>Tunnels carry TCP only. A standalone <code>chan serve</code> hosts none.</li>
       <li><code>cs upload</code> and <code>cs download</code> return once the window has the request. Progress and errors show in the window, not the terminal.</li>

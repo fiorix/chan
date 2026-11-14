@@ -1,6 +1,6 @@
 <section class="manual-block" id="wireguard">
   <h2><a class="heading-anchor" href="#wireguard">WireGuard enrollment</a></h2>
-  <p>A gateway can carry Chan Desktop's connections to its proxy nodes inside WireGuard. The gateway enrolls the desktop's key at sign-in, and the desktop runs the tunnels in its own process: no key to hand over, no VPN client to install. It is optional, with three parts:</p>
+  <p>A gateway you host can carry Chan Desktop's connections to its proxy nodes inside WireGuard. The gateway enrolls the desktop's key at sign-in, and the desktop runs the tunnels in its own process: no key to hand over, no VPN client to install. It is optional, with three parts:</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead><tr><th>Part</th><th>Where</th><th>Does</th></tr></thead>
@@ -130,7 +130,7 @@ sudo systemctl enable --now chan-gateway-wireguard-agent</b></code>
 
 <section class="manual-block" id="keys">
   <h2><a class="heading-anchor" href="#keys">When a key leaves</a></h2>
-  <p>An enrolled key lives as long as the sign-in token that enrolled it. When the token is revoked or expires, or the account is blocked, the key leaves every node at its agent's next check, every five seconds by default, and the desktop's tunnels stop carrying traffic.</p>
+  <p>On your self-hosted gateway, an enrolled key lives as long as the sign-in token that enrolled it. When the token is revoked or expires, or the account is blocked, the key leaves every node at its agent's next check, every five seconds by default, and the desktop's tunnels stop carrying traffic.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>

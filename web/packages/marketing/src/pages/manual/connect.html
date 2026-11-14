@@ -69,7 +69,7 @@
   <ul>
     <li><code>9901</code> is the tunnel's local end and must match the Address; <code>8787</code> is the devserver's port. For a second devserver, pick another free local port and use it in both.</li>
     <li>Eternal Terminal must be installed on both machines: see its <a href="https://eternalterminal.dev/usermanual/">setup guide</a>.</li>
-    <li>For a direct address, bind the devserver where this machine reaches it, or publish its port, and copy the URL from <code>chan devserver status</code> there.</li>
+    <li>For a direct address, bind the devserver where the local machine reaches it, or publish its port, and copy the URL from <code>chan devserver status</code> there.</li>
   </ul>
 </section>
 
@@ -162,7 +162,7 @@
       <li>Keep connect scripts in the foreground, as the form's tip says (<code>ssh -N</code>). A script that exits cleanly right after connecting, such as one that starts a background tunnel, leaves the connection up; one that exits cleanly later disconnects.</li>
       <li>A token in the Address is stored and wins over the one the script prints, so a script can be only the tunnel, such as <code>ssh -N -L ...</code>, to a devserver already running as a service. After <code>rotate-token</code>, edit the devserver and paste the new URL.</li>
       <li>The stored token is never shown again. An edit with a bare <code>host:port</code> keeps it, and a URL with an empty <code>?t=</code> clears it.</li>
-      <li>With no script and no token, Chan Desktop reads the token and port of the devserver that shares its own chan home on this machine.</li>
+      <li>With no script and no token, Chan Desktop reads the token and port of the devserver that shares its own chan home on the local machine.</li>
       <li>Click a devserver's name on its card to edit it. A connected devserver's settings are read-only: disconnect first.</li>
       <li>While a dead control terminal is open, Connect stays off and says to close it first.</li>
       <li>A devserver whose window feed stays silent is marked unreachable on its card; disconnect and connect again.</li>

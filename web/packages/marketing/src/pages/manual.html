@@ -1,13 +1,22 @@
 <section class="manual-block" id="what-is-chan">
   <h2><a class="heading-anchor" href="#what-is-chan">What is chan?</a></h2>
   <p>chan is a supercharged terminal emulator whose terminals live in a server process, not in the window, on your machine or on another one. Around the terminal it turns any directory into a workspace, and it is built in layers, each on the one before:</p>
-  <ul>
-    <li><strong><a href="/manual/terminal/">Terminal</a>.</strong> Tabs and split panes in windows, scriptable from the shell with <code>cs</code>, with tmux control mode. A window can reload or hide and the shell keeps running.</li>
-    <li><strong><a href="/manual/workspaces/">Workspace</a>.</strong> Any directory, with search, an editor, a file browser, a graph and agent teams beside your terminals. <code>chan serve</code> opens one in a browser.</li>
-    <li><strong><a href="/manual/computers/">Computers</a>.</strong> Chan Desktop's screen of this machine, its workspaces, its standalone terminals and every window.</li>
-    <li><strong><a href="/manual/remote/">Remote</a>.</strong> A devserver on another machine, reached over ssh or any TCP path you already have. Disconnecting leaves everything running there.</li>
-    <li><strong><a href="/manual/gateway/">Gateway</a>.</strong> A gateway you host publishes a devserver behind sign-in, to you and the people you share it with.</li>
-  </ul>
+  <div class="tour-figure layers-scene layers-build" data-tour="steps">
+    <figure class="doc-scene">
+      <div class="tour-stage">
+{{layersScene}}
+        <button type="button" class="tour-play" data-tour-play aria-pressed="true">Pause</button>
+      </div>
+      <figcaption>The layers, one at a time: a window, the library behind it, the local machine, a devserver on another machine, and a gateway you host.</figcaption>
+    </figure>
+    <ol class="tour-steps">
+      <li data-beat="window"><button type="button" class="tour-step" aria-label="Show the terminal in the diagram">1</button><span><strong><a href="/manual/terminal/">Terminal</a>.</strong> Tabs and split panes in windows, scriptable from the shell with <code>cs</code>, with tmux control mode. A window can reload or hide and the shell keeps running.</span></li>
+      <li data-beat="library"><button type="button" class="tour-step" aria-label="Show the workspace and the library in the diagram">2</button><span><strong><a href="/manual/workspaces/">Workspace</a>.</strong> Any directory, with search, an editor, a file browser, a graph and agent teams beside your terminals. <code>chan serve</code> opens one in a browser.</span></li>
+      <li data-beat="desktop"><button type="button" class="tour-step" aria-label="Show the local machine in the diagram">3</button><span><strong><a href="/manual/computers/">Computers</a>.</strong> Chan Desktop's screen of the local machine, its workspaces, its standalone terminals and every window.</span></li>
+      <li data-beat="devserver"><button type="button" class="tour-step" aria-label="Show a devserver in the diagram">4</button><span><strong><a href="/manual/remote/">Remote</a>.</strong> A devserver on another machine, reached over ssh or any TCP path you already have. Disconnecting leaves everything running there.</span></li>
+      <li data-beat="gateway"><button type="button" class="tour-step" aria-label="Show the gateway in the diagram">5</button><span><strong><a href="/manual/gateway/">Gateway</a>.</strong> A gateway you host publishes a devserver behind sign-in, to you and the people you share it with.</span></li>
+    </ol>
+  </div>
   <p><a href="/manual/concepts/">Concepts</a> shows how the layers fit together and what each one needs. chan is free and open source; its <a href="https://github.com/fiorix/chan/blob/main/design.md">design documents</a> describe the same layers from the inside.</p>
 </section>
 

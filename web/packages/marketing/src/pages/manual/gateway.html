@@ -1,13 +1,13 @@
 <figure class="inline-shot">
   <div class="shot-placeholder-frame" data-shot="gateway-add" data-shot-kind="clip">clip to capture<small>Computers, g flips to Gateways, Add gateway takes a URL, Connect opens the browser's Authorize page, Authorize, g flips back to a devserver marked "via" the gateway</small></div>
-  <figcaption>Add a gateway, sign in once, and its devservers join the Computers screen.</figcaption>
+  <figcaption>Add a self-hosted gateway, sign in once, and its devservers join the Computers screen.</figcaption>
 </figure>
 
 <section class="manual-block" id="can-do">
   <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
   <ul class="can-do">
     <li>Reach your devservers, and devservers shared with you, from Chan Desktop or any browser, without ssh.</li>
-    <li>Sign in once in your browser for the whole account.</li>
+    <li>Sign in once with OAuth2 in your browser for the whole account.</li>
     <li>Share a devserver you own with another account, and revoke it.</li>
     <li>Reach a private gateway through WireGuard, inside Chan Desktop, with no VPN client.</li>
   </ul>
@@ -15,7 +15,7 @@
 
 <section class="manual-block" id="what">
   <h2><a class="heading-anchor" href="#what">What a gateway is</a></h2>
-  <p>A gateway is a set of services that someone, your team or you, hosts on their own domain; chan is not an online service. Devservers dial out to it, and it publishes each one behind sign-in with GitHub, Google, or GitLab. To host one, read the <a href="/gateway/">gateway guide</a>.</p>
+  <p>A gateway is a set of services that someone, your team or you, hosts on their own domain; chan is not an online service. Devservers dial out to it, and it publishes each one behind OAuth2 sign-in with GitHub, Google, or GitLab. To host one, read the <a href="/gateway/">gateway guide</a>.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
@@ -75,8 +75,8 @@
 </section>
 
 <section class="manual-block" id="sign-in">
-  <h2><a class="heading-anchor" href="#sign-in">Sign in</a></h2>
-  <p>Connect opens your browser on the gateway. Sign in with your provider, then answer <strong>Authorize an app on this computer?</strong> with <strong>Authorize</strong> to return to Chan Desktop. One sign-in covers the whole account.</p>
+  <h2><a class="heading-anchor" href="#sign-in">Sign in with OAuth2</a></h2>
+  <p>Connect opens your browser on the gateway. Sign in with your OAuth2 provider, then answer <strong>Authorize an app on this computer?</strong> with <strong>Authorize</strong> to return to Chan Desktop. One sign-in covers the whole account.</p>
   <p>The first time you connect a devserver shared with you, Chan Desktop asks <strong>Grant native access?</strong> Native access lets its windows read and write your clipboard, read files you select, save downloads, control Chan windows, and open links in your browser. Grant it only if you trust the owner; <strong>Revoke native access</strong> on its card takes it back.</p>
 </section>
 
@@ -93,7 +93,7 @@
       </tbody>
     </table>
   </div>
-  <p>That address carries no token: your sign-in is the key. <strong>Copy link</strong> copies it, and it opens for the owner and everyone the devserver is shared with.</p>
+  <p>That address carries no token: your OAuth2 sign-in is the key. <strong>Copy link</strong> copies it, and it opens for the owner and everyone the devserver is shared with.</p>
   <p>To list a devserver of your own, start it with a token from the <strong>Tokens</strong> tab; the <strong>Devservers</strong> tab shows the command. See <a href="/gateway/publish/#publish">Publish a devserver</a>.</p>
 </section>
 
@@ -156,7 +156,7 @@
       <li><code>chan devserver ls</code> lists a gateway's devservers, marked; manage them from the Computers and Gateways screens, not with <code>chan devserver connect</code>.</li>
       <li>Tools that need your desktop, such as <a href="/manual/remote-tools/#tunnel"><code>cs tunnel</code></a>, work through a gateway connection too, on the devserver owner's desktop.</li>
       <li>A row under <strong>Shared with me</strong> does not say whether the devserver is online; while it is offline, its link answers not found.</li>
-      <li>gw.chan.app is the maintainer's own experimental deployment, with sign-in off by default. You cannot sign up there.</li>
+      <li>gw.chan.app is the maintainer's own experimental deployment, with OAuth2 sign-in off by default. You cannot sign up there.</li>
     </ul>
   </details>
 </section>
@@ -167,7 +167,7 @@
   <ul class="moved-list">
     <li id="overview"><a href="/gateway/">Your devservers, on your domain</a></li>
     <li id="dns"><a href="/gateway/plan/#dns">DNS and a certificate</a></li>
-    <li id="oauth"><a href="/gateway/plan/#oauth">A sign-in provider</a></li>
+    <li id="oauth"><a href="/gateway/plan/#oauth">An OAuth2 sign-in provider</a></li>
     <li id="install"><a href="/gateway/install/#install">Database and packages</a></li>
     <li id="configure"><a href="/gateway/configure/#configure">Configure the services</a></li>
     <li id="edge"><a href="/gateway/edge/#edge">The TLS edge</a></li>

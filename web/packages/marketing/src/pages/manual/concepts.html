@@ -1,33 +1,35 @@
 <section class="manual-block" id="layers">
   <h2><a class="heading-anchor" href="#layers">Five layers</a></h2>
   <p>chan is one binary that runs in five layers. Each runs on the one before it and adds to it, so you can stop at any of them.</p>
-    <figure class="doc-diagram">
-    <div class="dg-row">
-      <div class="dg-node"><small>Layer 3, this machine</small><strong>Chan Desktop</strong><span>Native windows and the Computers screen.</span>
-        <div class="dg-inner"><small>Layer 2, a library</small><ul><li>Workspaces (layer 1)</li><li>Standalone terminals</li></ul></div>
+  <div class="tour-figure layers-scene layers-build" data-tour="steps">
+    <figure class="doc-scene">
+      <div class="tour-stage">
+{{layersScene}}
+        <button type="button" class="tour-play" data-tour-play aria-pressed="true">Pause</button>
       </div>
-      <div class="dg-links"><span>an address,</span><span>or a connect script</span><span>such as ssh</span></div>
-      <div class="dg-node"><small>Layer 4, another machine</small><strong>A devserver</strong><span>Runs headless and keeps running.</span>
-        <div class="dg-inner"><small>A library</small><ul><li>Workspaces</li><li>Standalone terminals</li></ul></div>
-      </div>
-    </div>
-    <div class="dg-below"><span>&darr; signs in</span><span>dials out &darr;</span></div>
-    <div class="dg-node"><small>Layer 5, hosted by someone</small><strong>A gateway</strong><span>Publishes devservers behind sign-in, for you and the accounts you share with.</span></div>
-    <figcaption>A browser can stand in for Chan Desktop: chan serve opens one workspace in it, and a devserver or a gateway shows it the Computers screen.</figcaption>
-  </figure>
+      <figcaption>A browser can stand in for Chan Desktop: chan serve opens one workspace in it, and a devserver or a gateway shows it the Computers screen.</figcaption>
+    </figure>
+    <ol class="tour-steps is-row">
+      <li data-beat="window"><button type="button" class="tour-step"><b>1</b> A workspace</button></li>
+      <li data-beat="library"><button type="button" class="tour-step"><b>2</b> A library</button></li>
+      <li data-beat="desktop"><button type="button" class="tour-step"><b>3</b> Chan Desktop</button></li>
+      <li data-beat="devserver"><button type="button" class="tour-step"><b>4</b> A devserver</button></li>
+      <li data-beat="gateway"><button type="button" class="tour-step"><b>5</b> A gateway</button></li>
+    </ol>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
         <tr><th>Layer</th><th>What runs</th><th>What it adds</th></tr>
       </thead>
       <tbody>
-        <tr><td>1. A workspace</td><td><code>chan serve PATH</code></td><td>One workspace in a browser: terminals, editor, file browser, search, graph and <code>cs</code>.</td></tr>
-        <tr><td>2. A library</td><td>Chan Desktop's built-in server, or <code>chan devserver</code></td><td>Many workspaces, standalone terminals over the whole machine, and the Computers screen.</td></tr>
-        <tr><td>3. Chan Desktop</td><td>The desktop app</td><td>Native windows, the <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code> commands, and default apps.</td></tr>
-        <tr><td>4. A devserver elsewhere</td><td><code>chan devserver</code> on another machine</td><td>The same library, reached by address, by a connect script such as ssh, or from a browser. It keeps running when you disconnect.</td></tr>
-        <tr><td>5. A gateway</td><td>Services you host</td><td>Sign-in, sharing, and an always-on address for each devserver.</td></tr>
+        <tr data-at="window"><td>1. A workspace</td><td><code>chan serve PATH</code></td><td>One workspace in a browser: terminals, editor, file browser, search, graph and <code>cs</code>.</td></tr>
+        <tr data-at="library"><td>2. A library</td><td>Chan Desktop's built-in server, or <code>chan devserver</code></td><td>Many workspaces, standalone terminals over the whole machine, and the Computers screen.</td></tr>
+        <tr data-at="desktop"><td>3. Chan Desktop</td><td>The desktop app</td><td>Native windows, the <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code> commands, and default apps.</td></tr>
+        <tr data-at="devserver"><td>4. A devserver elsewhere</td><td><code>chan devserver</code> on another machine</td><td>The same library, reached by address, by a connect script such as ssh, or from a browser. It keeps running when you disconnect.</td></tr>
+        <tr data-at="gateway"><td>5. A gateway</td><td>Services you host</td><td>Sign-in, sharing, and an always-on address for each devserver.</td></tr>
       </tbody>
     </table>
+  </div>
   </div>
 </section>
 
@@ -48,12 +50,12 @@
 
 <section class="manual-block" id="computers">
   <h2><a class="heading-anchor" href="#computers">Computers screen</a></h2>
-  <p>The Computers screen lists this machine, each devserver and each tmux connection, with their workspaces and windows. Chan Desktop slides it in over any window; a browser at a devserver's address shows the same screen. See <a href="/manual/computers/">Computers screen</a>.</p>
+  <p>The Computers screen lists the local machine, each devserver and each tmux connection, with their workspaces and windows. Chan Desktop slides it in over any window; a browser at a devserver's address shows the same screen. See <a href="/manual/computers/">Computers screen</a>.</p>
 </section>
 
 <section class="manual-block" id="desktop">
   <h2><a class="heading-anchor" href="#desktop">Chan Desktop</a></h2>
-  <p>Chan Desktop is the app: it runs a library on this machine and shows its windows, and your devservers' windows, as native windows. It installs <code>chan</code>, <code>cs</code> and, outside Windows, <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code>. On Linux it can be your default terminal, file browser and Markdown editor.</p>
+  <p>Chan Desktop is the app: it runs a library on the local machine and shows its windows, and your devservers' windows, as native windows. It installs <code>chan</code>, <code>cs</code> and, outside Windows, <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code>. On Linux it can be your default terminal, file browser and Markdown editor.</p>
 </section>
 
 <section class="manual-block" id="devserver">
