@@ -59,8 +59,9 @@ function text(cells: VtCells): string {
 /// Screen row `y` of the terminal behind `handle` as the core resolves it,
 /// through a render state of the test's own and the core's per-cell reads:
 /// the raw cell, the style, the foreground and background the core
-/// resolves, and the cluster. A new render state copies the whole screen
-/// on its first update, whatever the terminal's dirty state.
+/// resolves (a cell it reports no background for has the default), and the
+/// cluster. A new render state copies the whole screen on its first update,
+/// whatever the terminal's dirty state.
 function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
   const view = () => new DataView(ex.memory.buffer);
   const make = (construct: (slot: number) => number) => {
@@ -104,6 +105,7 @@ function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
         flags: 0,
         fg,
         bg,
+        defaultBg: true,
         hyperlink: field(CELL_BITS.hyperlink),
       };
       if (field(CELL_BITS.style_id) !== 0) {
@@ -111,7 +113,10 @@ function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
         cell.flags = view().getUint16(out + LAYOUT.GhosttyStyle.fields.flags, true);
       }
       if (ex.ghostty_render_state_row_cells_get(cells, K.FG_COLOR, out) === ABI.GhosttyResult.SUCCESS) cell.fg = rgb(out);
-      if (ex.ghostty_render_state_row_cells_get(cells, K.BG_COLOR, out) === ABI.GhosttyResult.SUCCESS) cell.bg = rgb(out);
+      if (ex.ghostty_render_state_row_cells_get(cells, K.BG_COLOR, out) === ABI.GhosttyResult.SUCCESS) {
+        cell.bg = rgb(out);
+        cell.defaultBg = false;
+      }
       if (tag === T.CODEPOINT_GRAPHEME) {
         const B = LAYOUT.GhosttyCodepointBuffer.fields;
         view().setUint32(out + B.ptr, out + 64, true);

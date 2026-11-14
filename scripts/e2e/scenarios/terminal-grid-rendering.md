@@ -147,7 +147,7 @@ treatment.
 
 The reference patterns (TG-07) reproduce byte for byte across three runs under Xvfb in a rig guest (WebKitGTK 2.52.6, DejaVu fonts). What the patterns record today, so that a difference at a renderer change is read against what was there and not against what ought to be:
 
-- An explicit background of RGB (0,0,0) is left unpainted: the renderer takes a zero background for the default and keeps the theme's, so `\e[48;2;0;0;0m` and `\e[48;5;16m` cells show the theme background, while `\e[40m` paints the palette's black (`#0c0c0d` in the dark theme) and RGB (1,1,1) paints.
+- A background a program set paints, pure black included, however it is named: `\e[48;2;0;0;0m`, `\e[48;5;16m` and inverse video over a black foreground paint `#000000`, and `\e[40m` the palette's black (`#0c0c0d` in the dark theme). A cell whose background is the default paints nothing over the row's theme fill, which a see-through window leaves clear.
 - In a scrolled-back view, a history row's grapheme cluster is looked up in the screen row at the same viewport row, so the row `history 12` paints a blank where its cluster of `e` and U+0301 is.
 - Selected text keeps its own colour, after inverse and faint, since chan's theme names no selection foreground; the selection background replaces a selected cell's own background, where xterm.js blends the two.
 - Every underline style paints one straight underline; overline adds nothing to a cell and blinking text stays lit.

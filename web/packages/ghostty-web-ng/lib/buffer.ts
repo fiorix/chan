@@ -28,7 +28,7 @@ import type { Terminal } from './terminal';
 
 /// A cell nothing was written to, in ghostty-web's default colours.
 function nullCell(): VtCell {
-  return { codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0xcccccc, bg: 0x000000, hyperlink: 0 };
+  return { codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0xcccccc, bg: 0x000000, defaultBg: true, hyperlink: 0 };
 }
 
 // ============================================================================
