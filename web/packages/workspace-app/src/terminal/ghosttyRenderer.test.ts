@@ -9,6 +9,7 @@ import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import { transparentColor } from "./backgroundOpacity";
+import { alignGhosttyRendererToXterm, type CellDimensions } from "./ghosttyCompat";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
@@ -520,5 +521,473 @@ describe("the ghostty renderer's cell backgrounds", () => {
     expect(screen.term.getViewportY()).toBe(1);
     screen.frame();
     expectRow(screen, 0, theme, "history row 0 at view row 0");
+  });
+});
+
+type Point = { x: number; y: number };
+type Clip = { left: number; right: number; top: number; bottom: number };
+
+/// One stroke as the canvas held it when stroked: its colour, width, dash
+/// pattern and clip, the straight segments of its path and its curves, each
+/// curve as points along it.
+type Stroke = {
+  style: string;
+  width: number;
+  dash: number[];
+  dashOffset: number;
+  clip: Clip | null;
+  lines: [Point, Point][];
+  curves: Point[][];
+};
+
+/// A software context that also keeps each glyph it fills, with the colour
+/// it is filled in, and each stroke with its path, its colour and the dash
+/// and clip state it is stroked under, which save and restore keep.
+class PathRecordingContext extends SoftwareCanvasContext {
+  readonly texts: { text: string; x: number; y: number; fill: string }[] = [];
+  readonly strokes: Stroke[] = [];
+  #dash: number[] = [];
+  #clip: Clip | null = null;
+  #rect: Clip | null = null;
+  #lines: [Point, Point][] = [];
+  #curves: Point[][] = [];
+  #at: Point = { x: 0, y: 0 };
+  #states: { dash: number[]; dashOffset: number; clip: Clip | null; strokeStyle: string; lineWidth: number }[] = [];
+
+  override fillText(text = "", x = 0, y = 0): void {
+    this.texts.push({ text, x, y, fill: this.fillStyle });
+  }
+
+  override save(): void {
+    super.save();
+    const { lineDashOffset: dashOffset, strokeStyle, lineWidth } = this;
+    this.#states.push({ dash: this.#dash, dashOffset, clip: this.#clip, strokeStyle, lineWidth });
+  }
+
+  override restore(): void {
+    super.restore();
+    const state = this.#states.pop();
+    if (!state) return;
+    this.#dash = state.dash;
+    this.#clip = state.clip;
+    this.lineDashOffset = state.dashOffset;
+    this.strokeStyle = state.strokeStyle;
+    this.lineWidth = state.lineWidth;
+  }
+
+  override beginPath(): void {
+    this.#lines = [];
+    this.#curves = [];
+    this.#rect = null;
+  }
+
+  override moveTo(x = 0, y = 0): void {
+    this.#at = { x, y };
+  }
+
+  override lineTo(x = 0, y = 0): void {
+    this.#lines.push([this.#at, { x, y }]);
+    this.#at = { x, y };
+  }
+
+  override quadraticCurveTo(cx = 0, cy = 0, x = 0, y = 0): void {
+    const from = this.#at;
+    const at = (t: number, a: number, c: number, b: number) => (1 - t) * (1 - t) * a + 2 * (1 - t) * t * c + t * t * b;
+    const points: Point[] = [];
+    for (let i = 0; i <= 16; i++) points.push({ x: at(i / 16, from.x, cx, x), y: at(i / 16, from.y, cy, y) });
+    this.#curves.push(points);
+    this.#at = { x, y };
+  }
+
+  override rect(x = 0, y = 0, width = 0, height = 0): void {
+    this.#rect = { left: x, right: x + width, top: y, bottom: y + height };
+  }
+
+  override clip(): void {
+    const rect = this.#rect;
+    if (!rect) return;
+    const clip = this.#clip;
+    this.#clip = clip
+      ? {
+          left: Math.max(clip.left, rect.left),
+          right: Math.min(clip.right, rect.right),
+          top: Math.max(clip.top, rect.top),
+          bottom: Math.min(clip.bottom, rect.bottom),
+        }
+      : rect;
+  }
+
+  override setLineDash(dash: number[] = []): void {
+    this.#dash = [...dash];
+  }
+
+  override stroke(): void {
+    this.strokes.push({
+      style: this.strokeStyle,
+      width: this.lineWidth,
+      dash: this.#dash,
+      dashOffset: this.lineDashOffset,
+      clip: this.#clip,
+      lines: this.#lines,
+      curves: this.#curves,
+    });
+  }
+}
+
+/// The spans along x that a straight line from `from` to `to` inks under a
+/// dash pattern, as the canvas lays a pattern along each subpath: from its
+/// start, `offset` into the pattern.
+function dashed(from: number, to: number, dash: number[], offset: number): [number, number][] {
+  if (dash.length === 0) return [[from, to]];
+  const pattern = dash.length % 2 === 0 ? dash : [...dash, ...dash];
+  const period = pattern.reduce((a, b) => a + b, 0);
+  const spans: [number, number][] = [];
+  let at = -(((offset % period) + period) % period);
+  for (let i = 0; at < to - from; i = (i + 1) % pattern.length) {
+    const end = at + pattern[i];
+    if (i % 2 === 0 && Math.min(end, to - from) > Math.max(at, 0)) {
+      spans.push([from + Math.max(at, 0), from + Math.min(end, to - from)]);
+    }
+    at = end;
+  }
+  return spans;
+}
+
+/// What one stroke inks: each straight line as the spans it inks along x at
+/// its height, and each curve as its points, within the stroke's clip.
+type Ink = { style: string; width: number; runs: { from: number; to: number; y: number }[]; curves: Point[][]; clip: Clip | null };
+
+function ink(stroke: Stroke): Ink {
+  const left = stroke.clip?.left ?? -Infinity;
+  const right = stroke.clip?.right ?? Infinity;
+  const runs = stroke.lines.flatMap(([a, b]) => {
+    expect(a.y, "a decoration's straight line is level").toBe(b.y);
+    expect(a.x, "a decoration's straight line runs left to right").toBeLessThan(b.x);
+    return dashed(a.x, b.x, stroke.dash, stroke.dashOffset)
+      .map(([from, to]) => ({ from: Math.max(from, left), to: Math.min(to, right), y: a.y }))
+      .filter((run) => run.to > run.from);
+  });
+  const curves = stroke.curves.map((points) => points.filter((p) => p.x >= left && p.x <= right));
+  return { style: channels(stroke.style), width: stroke.width, runs, curves, clip: stroke.clip };
+}
+
+/// How many times a curve's points turn from falling to rising or back.
+function turns(points: Point[]): number {
+  let count = 0;
+  let last = 0;
+  for (let i = 1; i < points.length; i++) {
+    const dy = Math.sign(points[i].y - points[i - 1].y);
+    if (dy !== 0 && last !== 0 && dy !== last) count++;
+    if (dy !== 0) last = dy;
+  }
+  return count;
+}
+
+describe("the ghostty renderer's underline styles and overline", () => {
+  const cols = 40;
+  const rows = 3;
+  const THEME: ITheme = { background: "#1c1c1e", foreground: "#ebebf0", cursor: "#58a6ff" };
+  const GLYPH = channels(THEME.foreground!);
+  const RED = "255,0,0";
+
+  // Each sample by name: its SGR, its text and the columns its text takes.
+  // The row writes them in this order, a default space after each.
+  const SAMPLES = {
+    single: ["4", "S", 1],
+    double: ["4:2", "D", 1],
+    curly: ["4:3", "C", 1],
+    dotted: ["4:4", "O", 1],
+    dashed: ["4:5", "A", 1],
+    overline: ["53", "V", 1],
+    curlyRgb: ["4:3;58;2;255;0;0", "R", 1],
+    singlePalette: ["4;58;5;196", "P", 1],
+    resetColour: ["4;58;2;255;0;0m\x1b[59", "G", 1],
+    struck: ["9;4:3;58;2;255;0;0", "T", 1],
+    wideCurly: ["4:3", "漢", 2],
+    wideDashed: ["4:5", "字", 2],
+    plain: ["0", "plain", 5],
+  } as const;
+  type Sample = keyof typeof SAMPLES;
+  const ROW = Object.values(SAMPLES)
+    .map(([sgr, text]) => `\x1b[${sgr}m${text}\x1b[0m `)
+    .join("");
+  const COLUMN = {} as Record<Sample, number>;
+  {
+    let col = 0;
+    for (const [name, [, , width]] of Object.entries(SAMPLES)) {
+      COLUMN[name as Sample] = col;
+      col += width + 1;
+    }
+  }
+
+  let vendored: WebAssembly.Module;
+
+  beforeAll(async () => {
+    vendored = await WebAssembly.compile(readFileSync(VENDORED));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /// A terminal built from THEME as open() builds it, its core and its
+  /// renderer, written `bytes` with the cursor hidden. The font measures
+  /// `fontWidth` pixels a character; with `cell`, the renderer is aligned to
+  /// that cell as TerminalTab aligns it to xterm.js's grid.
+  async function painted(bytes: string, { fontWidth = 8, cell }: { fontWidth?: number; cell?: CellDimensions } = {}) {
+    const contexts = new WeakMap<HTMLCanvasElement, PathRecordingContext>();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      function (this: HTMLCanvasElement) {
+        const existing = contexts.get(this);
+        if (existing) return existing as unknown as CanvasRenderingContext2D;
+        const created = new PathRecordingContext(this, fontWidth);
+        contexts.set(this, created);
+        return created as unknown as CanvasRenderingContext2D;
+      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    );
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const term = new Terminal({ ghostty: vt, cols, rows, theme: THEME });
+    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
+    term.wasmTerm = vt.createTerminal(cols, rows, config);
+    const canvas = document.createElement("canvas");
+    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme: THEME });
+    renderer.resize(cols, rows);
+    if (cell) expect(alignGhosttyRendererToXterm(renderer, cell, cols, rows), "aligned").not.toBeNull();
+    term.renderer = renderer;
+    term.wasmTerm.write("\x1b[?25l" + bytes);
+    const context = contexts.get(canvas)!;
+    const metrics = renderer.getMetrics();
+    return {
+      term,
+      renderer,
+      metrics,
+      /// One full frame as the widget's render loop issues it.
+      frame() {
+        context.texts.length = 0;
+        context.strokes.length = 0;
+        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+      },
+      /// What the strokes of the last frame ink over the cell at `col` of
+      /// view row `y` that takes `width` columns, each stroke's ink cut to
+      /// the cell, the strokes that ink nothing there left out.
+      strokes(y: number, col: number, width = 1): Ink[] {
+        const left = col * metrics.width;
+        const right = (col + width) * metrics.width;
+        const top = y * metrics.height;
+        const bottom = top + metrics.height;
+        const inside = (p: Point) => p.x >= left && p.x <= right && p.y >= top && p.y < bottom;
+        return context.strokes
+          .map(ink)
+          .map((s) => ({
+            ...s,
+            runs: s.runs
+              .map((r) => ({ ...r, from: Math.max(r.from, left), to: Math.min(r.to, right) }))
+              .filter((r) => r.to > r.from && r.y >= top && r.y < bottom),
+            curves: s.curves.map((c) => c.filter(inside)).filter((c) => c.length > 0),
+          }))
+          .filter((s) => s.runs.length > 0 || s.curves.length > 0);
+      },
+      /// The colour the glyph at `col` of view row `y` is filled in.
+      glyph(y: number, col: number): string | undefined {
+        const t = context.texts.find((t) => t.x === col * metrics.width && t.y === y * metrics.height + metrics.baseline);
+        return t && channels(t.fill);
+      },
+    };
+  }
+
+  type Screen = Awaited<ReturnType<typeof painted>>;
+
+  /// The one stroke under a sample's cell on view row `y`, its spans in
+  /// cell coordinates: x from the cell's left, y from its top.
+  function underline(screen: Screen, y: number, name: Sample): Ink {
+    const [, , width] = SAMPLES[name];
+    const marks = screen.strokes(y, COLUMN[name], width);
+    expect(marks, `${name}: one stroke`).toHaveLength(1);
+    const left = COLUMN[name] * screen.metrics.width;
+    const top = y * screen.metrics.height;
+    const [mark] = marks;
+    return {
+      ...mark,
+      runs: mark.runs.map((r) => ({ from: r.from - left, to: r.to - left, y: r.y - top })),
+      curves: mark.curves.map((c) => c.map((p) => ({ x: p.x - left, y: p.y - top }))),
+    };
+  }
+
+  /// Each underline style's shape, in the glyph's colour, below the
+  /// baseline and inside the cell.
+  function expectShapes(screen: Screen, y: number): void {
+    const { width, height, baseline } = screen.metrics;
+    const below = baseline + 2;
+    const level = (ink: Ink) => ink.runs.map((r) => r.y);
+
+    // A single underline: one line across the cell, two pixels below the
+    // baseline, one pixel wide.
+    const single = underline(screen, y, "single");
+    expect.soft(single.runs, "single").toEqual([{ from: 0, to: width, y: below }]);
+    expect.soft(single.curves, "single").toEqual([]);
+    expect.soft(single.style, "single").toBe(GLYPH);
+    expect.soft(single.width, "single").toBe(1);
+
+    // Double: two lines across the cell, each on a whole pixel row with an
+    // empty row between them, the first on the single underline's line.
+    // Lines that straddle rows run together into one band.
+    const double = underline(screen, y, "double");
+    const lines = level(double);
+    expect.soft(double.runs.map((r) => [r.from, r.to]), "double: across the cell").toEqual([[0, width], [0, width]]);
+    expect.soft(lines.map((l) => l % 1), "double: on whole pixel rows").toEqual([0.5, 0.5]);
+    expect.soft(lines[1] - lines[0], "double: a row between").toBe(2);
+    expect.soft(Math.abs(lines[0] - below), "double: the first on the single's line").toBeLessThanOrEqual(0.5);
+    expect.soft(lines[1] + 0.5, "double: inside the cell").toBeLessThanOrEqual(height);
+    expect.soft(double.style, "double").toBe(GLYPH);
+
+    // Curly: a wave across the cell that falls and rises between the double
+    // underline's rows, kept to the cell.
+    const curly = underline(screen, y, "curly");
+    expect.soft(curly.runs, "curly").toEqual([]);
+    const points = curly.curves.flat();
+    expect.soft(points.length, "curly: a curve").toBeGreaterThan(0);
+    if (points.length > 0) {
+      const xs = points.map((p) => p.x);
+      const ys = points.map((p) => p.y);
+      expect.soft([Math.min(...xs), Math.max(...xs)], "curly spans the cell").toEqual([0, width]);
+      expect.soft(Math.max(...ys) - Math.min(...ys), "curly: its height").toBeGreaterThanOrEqual(1.5);
+      expect.soft([Math.min(...ys) % 1, Math.max(...ys) % 1], "curly: its crests on whole pixel rows").toEqual([0.5, 0.5]);
+      expect.soft(Math.min(...ys), "curly: below the baseline").toBeGreaterThan(baseline);
+      expect.soft(Math.max(...ys) + 0.5, "curly: inside the cell").toBeLessThanOrEqual(height);
+      expect.soft(turns(points), "curly: turns").toBeGreaterThanOrEqual(2);
+    }
+    expect.soft(curly.style, "curly").toBe(GLYPH);
+
+    // Dotted: dots of a pixel along the single underline's line, a pixel
+    // apart.
+    const dotted = underline(screen, y, "dotted");
+    expect.soft(new Set(level(dotted)), "dotted").toEqual(new Set([below]));
+    expect.soft(dotted.runs.length, "dotted: dots").toBeGreaterThanOrEqual(width / 2 - 1);
+    for (const run of dotted.runs) expect.soft(run.to - run.from, "dotted: a dot").toBeLessThanOrEqual(1);
+    expect.soft(dotted.style, "dotted").toBe(GLYPH);
+
+    // Dashed: one dash in the cell, along the single underline's line,
+    // shorter than the cell and longer than a dot.
+    const dashes = underline(screen, y, "dashed");
+    expect.soft(level(dashes), "dashed").toEqual([below]);
+    const [dash] = dashes.runs;
+    expect.soft(dash && dash.to - dash.from, "dashed: a dash").toBeGreaterThan(2);
+    expect.soft(dash && dash.to - dash.from, "dashed: a dash").toBeLessThan(width);
+    expect.soft(dashes.style, "dashed").toBe(GLYPH);
+
+    // Overline: one line across the cell along its top pixel row.
+    const overline = underline(screen, y, "overline");
+    expect.soft(overline.runs, "overline").toEqual([{ from: 0, to: width, y: 0.5 }]);
+    expect.soft(overline.style, "overline").toBe(GLYPH);
+  }
+
+  test("each underline style draws its own shape across the cell, and overline a line along its top", async () => {
+    const screen = await painted(ROW);
+    screen.frame();
+    expectShapes(screen, 0);
+  });
+
+  test("an underline takes the colour SGR 58 gives it, while the glyph keeps its own", async () => {
+    const screen = await painted(ROW);
+    screen.frame();
+    // RGB red on a curly underline, the 256-colour table's red on a single
+    // one; SGR 59 puts an underline back in the glyph's colour.
+    expect.soft(underline(screen, 0, "curlyRgb").style, "curly in RGB red").toBe(RED);
+    expect.soft(underline(screen, 0, "curlyRgb").curves.length, "curly in RGB red: a wave").toBeGreaterThan(0);
+    expect.soft(underline(screen, 0, "singlePalette").style, "single in colour 196").toBe(RED);
+    expect.soft(underline(screen, 0, "resetColour").style, "after SGR 59").toBe(GLYPH);
+    for (const name of ["curlyRgb", "singlePalette", "resetColour", "struck"] as const) {
+      expect.soft(screen.glyph(0, COLUMN[name]), `${name}: the glyph`).toBe(GLYPH);
+    }
+  });
+
+  test("a wide character's underline runs across both its columns", async () => {
+    const screen = await painted(ROW);
+    screen.frame();
+    const { width } = screen.metrics;
+    // A wave in each column, the two meeting at the boundary.
+    const wave = underline(screen, 0, "wideCurly");
+    for (const half of [0, 1]) {
+      const points = wave.curves.flat().filter((p) => p.x >= half * width && p.x <= (half + 1) * width);
+      expect.soft(turns(points), `curly, column ${half}: turns`).toBeGreaterThanOrEqual(2);
+    }
+    const xs = wave.curves.flat().map((p) => p.x);
+    expect.soft([Math.min(...xs), Math.max(...xs)], "curly spans both columns").toEqual([0, 2 * width]);
+    // A dash in each column.
+    const dashes = underline(screen, 0, "wideDashed").runs;
+    expect.soft(dashes.map((r) => Math.floor(r.from / width)), "a dash per column").toEqual([0, 1]);
+  });
+
+  test("strikethrough, a hovered link and a cell with no decoration draw as before", async () => {
+    const screen = await painted(ROW);
+    const { width, height, baseline } = screen.metrics;
+    screen.frame();
+    // Strikethrough stays a line across the middle in the glyph's colour,
+    // beside a red curly underline.
+    const struck = screen.strokes(0, COLUMN.struck);
+    const strike = struck.find((s) => s.runs.some((r) => r.y === height / 2));
+    expect.soft(strike?.style, "strikethrough").toBe(GLYPH);
+    expect.soft(strike?.runs, "strikethrough").toEqual([{ from: COLUMN.struck * width, to: (COLUMN.struck + 1) * width, y: height / 2 }]);
+    expect.soft(struck.filter((s) => s !== strike).map((s) => s.style), "its underline").toEqual([RED]);
+    // A cell with none of the attributes strokes nothing.
+    for (let col = COLUMN.plain; col < COLUMN.plain + 5; col++) {
+      expect.soft(screen.strokes(0, col), `plain, column ${col}`).toEqual([]);
+    }
+    // A hovered link's underline is one straight line in the hover colour.
+    screen.renderer.setHoveredLinkRange({ startX: COLUMN.plain, startY: 0, endX: COLUMN.plain + 4, endY: 0 });
+    screen.frame();
+    for (let col = COLUMN.plain; col < COLUMN.plain + 5; col++) {
+      const marks = screen.strokes(0, col);
+      expect.soft(marks.map((m) => [m.style, m.runs]), `hovered, column ${col}`).toEqual([
+        [channels("#4a90e2"), [{ from: col * width, to: (col + 1) * width, y: baseline + 2 }]],
+      ]);
+    }
+  });
+
+  test.each([8, 9])("adjacent dotted cells keep one rhythm of dots, %i pixels a cell", async (fontWidth) => {
+    // Dots a pixel long a pixel apart all along, where each cell starting
+    // its own pattern would put two dots together at an odd column's edge.
+    const screen = await painted("\x1b[4:4mdots\x1b[0m", { fontWidth });
+    expect(screen.metrics.width).toBe(fontWidth);
+    screen.frame();
+    const runs = screen
+      .strokes(0, 0, 4)
+      .flatMap((s) => s.runs)
+      .sort((a, b) => a.from - b.from);
+    expect(runs.length).toBeGreaterThanOrEqual(2 * fontWidth - 1);
+    for (const [i, run] of runs.entries()) {
+      expect.soft(run.to - run.from, `dot ${i}`).toBe(1);
+      if (i > 0) expect.soft(run.from - runs[i - 1].to, `gap before dot ${i}`).toBe(1);
+    }
+  });
+
+  test("a double or curly underline keeps inside a cell aligned shorter than the font's", async () => {
+    // The font's cell is 19 pixels with its baseline at 14; aligned to a
+    // 17-pixel cell the baseline moves up a pixel, and a second line two
+    // rows below a single underline's would reach past the cell's bottom.
+    const screen = await painted(ROW, { cell: { width: 8, height: 17 } });
+    const { height, baseline } = screen.metrics;
+    expect([height, baseline]).toEqual([17, 13]);
+    screen.frame();
+    // A single underline stays where it is, two pixels below the baseline.
+    expect.soft(underline(screen, 0, "single").runs.map((r) => r.y), "single").toEqual([baseline + 2]);
+    // The double's lines, a row between them, and the wave rise to fit.
+    const double = underline(screen, 0, "double").runs.map((r) => r.y);
+    expect.soft(double.length, "double: two lines").toBe(2);
+    expect.soft(double[1] - double[0], "double: apart").toBe(2);
+    expect.soft(Math.max(...double) + 0.5, "double: inside the cell").toBeLessThanOrEqual(height);
+    const wave = underline(screen, 0, "curly").curves.flat().map((p) => p.y);
+    expect.soft(Math.max(...wave) - Math.min(...wave), "curly: its height").toBeGreaterThanOrEqual(1.5);
+    expect.soft(Math.max(...wave) + 0.5, "curly: inside the cell").toBeLessThanOrEqual(height);
+  });
+
+  test("a history row draws the same decorations", async () => {
+    const screen = await painted(ROW + "\r\n".repeat(rows));
+    expect(screen.term.getScrollbackLength()).toBe(1);
+    screen.term.scrollLines(-1);
+    expect(screen.term.getViewportY()).toBe(1);
+    screen.frame();
+    expectShapes(screen, 0);
+    expect.soft(underline(screen, 0, "curlyRgb").style, "curly in RGB red").toBe(RED);
   });
 });

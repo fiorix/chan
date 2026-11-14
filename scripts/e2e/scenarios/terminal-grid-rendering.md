@@ -150,7 +150,7 @@ The reference patterns (TG-07) reproduce byte for byte across three runs under X
 - A background a program set paints, pure black included, however it is named: `\e[48;2;0;0;0m`, `\e[48;5;16m` and inverse video over a black foreground paint `#000000`, and `\e[40m` the palette's black (`#0c0c0d` in the dark theme). A cell whose background is the default paints nothing over the row's theme fill, which a see-through window leaves clear.
 - In a scrolled-back view, a history row's grapheme cluster is looked up in the screen row at the same viewport row, so the row `history 12` paints a blank where its cluster of `e` and U+0301 is.
 - Selected text keeps its own colour, after inverse and faint, since chan's theme names no selection foreground; the selection background replaces a selected cell's own background, where xterm.js blends the two.
-- Every underline style paints one straight underline; overline adds nothing to a cell and blinking text stays lit.
+- Each underline style paints its own shape across every column its cell takes: single a line two pixels below the baseline, double two lines on whole pixel rows with a row between them, from the single line's row down, curly a wave between those two rows, dotted one-pixel dots a pixel apart on the single line, and dashed one dash a column on it. An underline takes the colour SGR 58 gives it, a palette index or RGB, and the glyph's otherwise or after SGR 59. Overline paints a line along the cell's top pixel row in the glyph's colour. Blinking text stays lit.
 
 ### Windows
 

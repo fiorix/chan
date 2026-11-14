@@ -51,6 +51,7 @@ export const ABI = {
   GhosttyRenderStateRowCellsData: { RAW: 1, STYLE: 2, GRAPHEMES_BUF: 4, BG_COLOR: 5, FG_COLOR: 6 },
   GhosttyRowData: { WRAP_CONTINUATION: 2 },
   GhosttyStyleColorTag: { NONE: 0, PALETTE: 1, RGB: 2 },
+  GhosttySgrUnderline: { NONE: 0, SINGLE: 1, DOUBLE: 2, CURLY: 3, DOTTED: 4, DASHED: 5 },
   GhosttyCellContentTag: {
     CODEPOINT: 0,
     CODEPOINT_GRAPHEME: 1,
@@ -176,6 +177,13 @@ export type VtCell = {
   /// default then, which can be pure black, so only this tells a default
   /// background from one a program set.
   defaultBg: boolean;
+  /// The underline's style, a `GhosttySgrUnderline`: the style's bits of
+  /// `flags`, `NONE` when the cell has no underline.
+  underline: number;
+  /// The underline's colour as 0xRRGGBB, as SGR 58 set it, a palette index
+  /// resolved against the palette; null when the underline takes the
+  /// glyph's colour.
+  underlineColor: number | null;
   /// 1 when the cell carries an OSC 8 hyperlink, else 0. The core does not
   /// number links, so every link reads 1.
   hyperlink: number;
@@ -214,7 +222,18 @@ export class VtCells {
   /// first `length` a reader fills, every one. For `VtTerminal`'s readers.
   fill(source: object, history: boolean, row: number, version: number, length: number): VtCell[] {
     while (this.cells.length < length) {
-      this.cells.push({ codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0, bg: 0, defaultBg: true, hyperlink: 0 });
+      this.cells.push({
+        codepoint: 0,
+        cluster: null,
+        width: 1,
+        flags: 0,
+        fg: 0,
+        bg: 0,
+        defaultBg: true,
+        underline: ABI.GhosttySgrUnderline.NONE,
+        underlineColor: null,
+        hyperlink: 0,
+      });
     }
     this.source = source;
     this.history = history;
@@ -679,12 +698,15 @@ export class VtTerminal {
   /// The row the iterator stands on, -1 before its first row.
   private iteratorRow = -1;
   /// The styles a row's read has met, by style id: flags, foreground,
-  /// background and whether that is the default.
+  /// background and whether that is the default, the underline's style and
+  /// its colour (-1 for the glyph's).
   private readonly styleIds = new Int32Array(ROW_STYLES);
   private readonly styleFlags = new Uint16Array(ROW_STYLES);
   private readonly styleFg = new Int32Array(ROW_STYLES);
   private readonly styleBg = new Int32Array(ROW_STYLES);
   private readonly styleDefaultBg = new Uint8Array(ROW_STYLES);
+  private readonly styleUnderline = new Uint8Array(ROW_STYLES);
+  private readonly styleUnderlineColor = new Int32Array(ROW_STYLES);
   private styleCount = 0;
   /// The content tag and content of the raw cell `rawCell` read last.
   private rawTag = 0;
@@ -1390,6 +1412,8 @@ export class VtTerminal {
     cell.fg = this.fg;
     cell.bg = this.bg;
     cell.defaultBg = true;
+    cell.underline = ABI.GhosttySgrUnderline.NONE;
+    cell.underlineColor = null;
     cell.hyperlink = 0;
   }
 
@@ -1410,6 +1434,8 @@ export class VtTerminal {
     cell.fg = this.fg;
     cell.bg = this.bg;
     cell.defaultBg = true;
+    cell.underline = ABI.GhosttySgrUnderline.NONE;
+    cell.underlineColor = null;
     cell.hyperlink = cellBits(lo, hi, CELL_BITS.hyperlink);
     return cellBits(lo, hi, CELL_BITS.style_id);
   }
@@ -1440,12 +1466,15 @@ export class VtTerminal {
   private rememberStyle(id: number, view: DataView, ptr: number): number {
     const L = LAYOUT.GhosttyStyle.fields;
     const slot = this.styleCount < ROW_STYLES ? this.styleCount++ : ROW_STYLES - 1;
+    const flags = view.getUint16(ptr + L.flags, true);
     this.styleIds[slot] = id;
-    this.styleFlags[slot] = view.getUint16(ptr + L.flags, true);
+    this.styleFlags[slot] = flags;
     this.styleFg[slot] = this.styleColor(view, ptr + L.fg_color) ?? this.fg;
     const bg = this.styleColor(view, ptr + L.bg_color);
     this.styleBg[slot] = bg ?? this.bg;
     this.styleDefaultBg[slot] = bg === null ? 1 : 0;
+    this.styleUnderline[slot] = (flags & VtFlag.UNDERLINE) >> STYLE_FLAG_BITS.underline[0];
+    this.styleUnderlineColor[slot] = this.styleColor(view, ptr + L.underline_color) ?? -1;
     return slot;
   }
 
@@ -1454,6 +1483,9 @@ export class VtTerminal {
     cell.fg = this.styleFg[slot];
     cell.bg = this.styleBg[slot];
     cell.defaultBg = this.styleDefaultBg[slot] === 1;
+    cell.underline = this.styleUnderline[slot];
+    const underlineColor = this.styleUnderlineColor[slot];
+    cell.underlineColor = underlineColor < 0 ? null : underlineColor;
   }
 
   /// Points the codepoint buffer of a cell's multi-get at the scratch room.

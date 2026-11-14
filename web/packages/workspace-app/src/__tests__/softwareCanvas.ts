@@ -45,6 +45,7 @@ export class SoftwareCanvasContext {
   font = "";
   globalAlpha = 1;
   lineCap = "butt";
+  lineDashOffset = 0;
   lineJoin = "miter";
   lineWidth = 1;
   textAlign = "left";
@@ -137,7 +138,9 @@ export class SoftwareCanvasContext {
   fillText(): void {}
   lineTo(): void {}
   moveTo(): void {}
+  quadraticCurveTo(): void {}
   rect(): void {}
+  setLineDash(): void {}
   stroke(): void {}
   strokeText(): void {}
 
