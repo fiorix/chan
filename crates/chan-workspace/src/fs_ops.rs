@@ -12,9 +12,9 @@
 //     opening through a symlink can escape the workspace sandbox.
 //   - is_editable_text: extension whitelist gate.
 //   - walk_workspace / list_tree: recursive listing scoped to the workspace,
-//     skipping `.git/` and `.chan/` at any depth and dropping non-
-//     regular non-dir entries (symlinks, devices, sockets) so the
-//     UI tree and the indexer never see them.
+//     skipping `.git/`, `.chan/` and atomic-write temporaries at any
+//     depth and dropping non-regular non-dir entries (symlinks, devices,
+//     sockets) so the UI tree and the indexer never see them.
 //
 // Symlink policy: we never traverse a symlink that points outside
 // the workspace's canonical root. Symlinks that resolve back inside
@@ -807,6 +807,7 @@ impl chan_report::ReportPathPolicy for IndexScopePolicy {
 
 /// Recursive walker rooted at `root` that:
 ///   - skips `.git/` and `.chan/` at any depth;
+///   - leaves out the atomic writer's reserved temporaries at any depth;
 ///   - never follows symlinks (`walkdir` default; we set it
 ///     explicitly so a future maintainer cannot flip it without
 ///     understanding what they're trading away);
@@ -877,6 +878,25 @@ pub(crate) fn indexable_rel_files<'a>(
         })
 }
 
+/// Whether a recursive listing walk keeps `entry`, entering it when it is a
+/// directory. The atomic writer's reserved names are left out whatever
+/// their type (an in-flight temporary, a create's stage directory), as the
+/// one-level listing leaves them out; `.git`, `.chan` and the directories
+/// `filter` excludes are not entered.
+fn listing_walk_keeps(entry: &DirEntry, filter: Option<&WalkFilter>) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    if is_atomic_write_temp_name(&name) {
+        return false;
+    }
+    if !entry.file_type().is_dir() {
+        return true;
+    }
+    if name == ".git" || name == ".chan" {
+        return false;
+    }
+    !filter.is_some_and(|filter| filter.is_excluded(&name))
+}
+
 fn walk_workspace_with<'a>(
     root: &Path,
     filter: Option<&'a WalkFilter>,
@@ -886,21 +906,7 @@ fn walk_workspace_with<'a>(
         .follow_links(false)
         .same_file_system(true)
         .into_iter()
-        .filter_entry(move |e| {
-            if !e.file_type().is_dir() {
-                return true;
-            }
-            let n = e.file_name().to_string_lossy();
-            if n == ".git" || n == ".chan" {
-                return false;
-            }
-            if let Some(f) = filter {
-                if f.is_excluded(&n) {
-                    return false;
-                }
-            }
-            true
-        })
+        .filter_entry(move |e| listing_walk_keeps(e, filter))
         .filter_map(|res| match res {
             Ok(e) => Some(e),
             Err(e) => {
@@ -1289,9 +1295,9 @@ pub fn resolve_safe_strict_canon(
 }
 
 /// Whether a component belongs to the reserved atomic-write namespace.
-/// Reserved files and directory subtrees are hidden from one-level
-/// listings, indexing and watch events, including leftovers from an
-/// interrupted writer.
+/// Reserved files and directory subtrees are hidden from directory
+/// listings, recursive listing walks, indexing and watch events, including
+/// leftovers from an interrupted writer.
 pub fn is_atomic_write_temp_name(name: &str) -> bool {
     name.starts_with(atomic_write_temp::PREFIX)
 }
@@ -1852,9 +1858,9 @@ pub const LIST_TREE_LIMIT: usize = 500_000;
 /// that the editor's tree view is unusable anyway.
 pub const LIST_DIR_LIMIT: usize = 50_000;
 
-/// Recursively list everything under `root`. Skips `.git/` and
-/// `.chan/` at any depth. Errors with `ListingTooLarge` once the
-/// walker sees more than `LIST_TREE_LIMIT` entries, so a runaway
+/// Recursively list everything under `root`. Skips `.git/`, `.chan/` and
+/// atomic-write temporaries at any depth. Errors with `ListingTooLarge`
+/// once the walker sees more than `LIST_TREE_LIMIT` entries, so a runaway
 /// or mis-pointed workspace never OOMs the caller.
 pub fn list_tree(root: &Path) -> Result<Vec<TreeEntry>> {
     list_tree_cancelable(root, None)
@@ -2046,14 +2052,14 @@ fn list_tree_inner(
 ) -> Result<Vec<TreeEntry>> {
     let iter: Box<dyn Iterator<Item = DirEntry>> = if walk_from == root {
         // Same shape the public `walk_workspace` / `walk_workspace_filtered`
-        // helpers offer; reuse them so the .git / .chan and special-
-        // file filters live in one place.
+        // helpers offer; reuse them so the .git / .chan, reserved-name and
+        // special-file filters live in one place.
         match filter {
             Some(f) => Box::new(walk_workspace_filtered(root, f)),
             None => Box::new(walk_workspace(root)),
         }
     } else {
-        // Subtree walk. Inline the same filter chain `walk_workspace`
+        // Subtree walk. Apply the same entry filter `walk_workspace`
         // applies, with `min_depth` overridden so the prefix entry
         // itself is included for callers that want to see it. When a
         // `WalkFilter` is supplied it also prunes the blocklisted dir
@@ -2064,21 +2070,7 @@ fn list_tree_inner(
             .follow_links(false)
             .same_file_system(true)
             .into_iter()
-            .filter_entry(move |e| {
-                if !e.file_type().is_dir() {
-                    return true;
-                }
-                let n = e.file_name().to_string_lossy();
-                if n == ".git" || n == ".chan" {
-                    return false;
-                }
-                if let Some(f) = &filter {
-                    if f.is_excluded(&n) {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter_entry(move |e| listing_walk_keeps(e, filter.as_ref()))
             .filter_map(|res| match res {
                 Ok(e) => Some(e),
                 Err(e) => {
@@ -2450,6 +2442,83 @@ mod tests {
         // we want an empty listing rather than a hard error.
         let entries = list_tree_prefix(tmp.path(), &tmp.path().join("nope")).unwrap();
         assert!(entries.is_empty());
+    }
+
+    /// The recursive listing walks, taken while a streamed write holds its
+    /// temporary on disk and a create holds its stage directory, leave both
+    /// reserved names out at every depth, as the one-level listing does. A
+    /// subtree walk asked for a reserved name answers empty, as it does for
+    /// `.git`. Other dot names stay listed.
+    #[test]
+    fn recursive_listing_walks_omit_atomic_write_temporaries() {
+        let (_cfg, root, workspace) = workspace_fixture();
+        std::fs::create_dir_all(root.path().join("sub/deep")).unwrap();
+        for name in [".chan-note", "sub/.hidden", "sub/deep/a.md"] {
+            std::fs::write(root.path().join(name), "user").unwrap();
+        }
+        let sub = cap_std::fs::Dir::open_ambient_dir(
+            root.path().join("sub"),
+            cap_std::ambient_authority(),
+        )
+        .unwrap();
+        let stage = AtomicWriteStage::new(&sub).unwrap();
+        stage.dir().write("payload", b"staged").unwrap();
+        let filter = WalkFilter::new([] as [&str; 0]);
+        let rel = |entry: DirEntry| rel_path_text(entry.path().strip_prefix(root.path()).unwrap());
+        let paths = |tree: Vec<TreeEntry>| -> Vec<String> {
+            tree.into_iter().map(|entry| entry.path).collect()
+        };
+        workspace
+            .write_atomic_stream("sub/deep/upload.bin", AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"partial")?;
+                let reserved: Vec<String> = WalkDir::new(root.path())
+                    .into_iter()
+                    .map(|entry| entry.unwrap())
+                    .filter(|entry| is_atomic_write_temp_name(&entry.file_name().to_string_lossy()))
+                    .map(rel)
+                    .collect();
+                assert_eq!(
+                    reserved.len(),
+                    2,
+                    "a temporary and a stage on disk: {reserved:?}"
+                );
+                for (walk, listed) in [
+                    ("list_tree", paths(list_tree(root.path()).unwrap())),
+                    (
+                        "list_tree_filtered",
+                        paths(list_tree_filtered(root.path(), &filter).unwrap()),
+                    ),
+                    (
+                        "list_tree_prefix",
+                        paths(list_tree_prefix(root.path(), &root.path().join("sub")).unwrap()),
+                    ),
+                    (
+                        "walk_workspace",
+                        walk_workspace(root.path()).map(rel).collect(),
+                    ),
+                ] {
+                    assert!(
+                        !listed
+                            .iter()
+                            .any(|path| path.split('/').any(is_atomic_write_temp_name)),
+                        "{walk} lists a reserved name: {listed:?}"
+                    );
+                    for name in ["sub/.hidden", "sub/deep/a.md"] {
+                        assert!(listed.iter().any(|path| path == name), "{walk}: {listed:?}");
+                    }
+                }
+                for name in &reserved {
+                    assert_eq!(
+                        paths(list_tree_prefix(root.path(), &root.path().join(name)).unwrap()),
+                        Vec::<String>::new(),
+                        "{name}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        drop(stage);
+        assert!(paths(list_tree(root.path()).unwrap()).contains(&"sub/deep/upload.bin".to_string()));
     }
 
     #[test]

@@ -1524,6 +1524,81 @@ mod tests {
         assert!(out.contains("a.md"), "got: {out}");
     }
 
+    /// `list_files`, whole and under a prefix, taken while a streamed write
+    /// holds its temporary on disk beside its target, leaves the temporary
+    /// out. Other dot files stay listed.
+    #[tokio::test]
+    async fn list_files_omits_an_in_flight_atomic_write_temporary() {
+        let (_cfg, root, server) = fixture();
+        let workspace = (server.workspace_for)().unwrap();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join(".chan-note"), "user").unwrap();
+        std::fs::write(root.path().join("notes/.hidden"), "user").unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            workspace.write_atomic_stream(
+                "notes/upload.bin",
+                chan_workspace::AtomicWriteKind::Bytes,
+                |sink| {
+                    sink.write_chunk(b"partial")?;
+                    held_tx.send(()).unwrap();
+                    // A panicking test drops the sender, which ends the wait.
+                    let _ = release_rx.recv();
+                    Ok(())
+                },
+            )
+        });
+        held_rx.recv().unwrap();
+        let on_disk: Vec<String> = std::fs::read_dir(root.path().join("notes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            on_disk
+                .iter()
+                .any(|name| chan_workspace::fs_ops::is_atomic_write_temp_name(name)),
+            "the write's temporary is on disk: {on_disk:?}"
+        );
+        let mut listings = Vec::new();
+        for (prefix, expected) in [
+            (None, &[".chan-note", "notes", "notes/.hidden"][..]),
+            (Some("notes"), &["notes", "notes/.hidden"][..]),
+        ] {
+            let out = server
+                .list_files(
+                    Parameters(ListFilesParams {
+                        prefix: prefix.map(str::to_owned),
+                    }),
+                    request_context(),
+                )
+                .await;
+            listings.push((prefix, expected, out));
+        }
+        release_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+
+        for (prefix, expected, out) in listings {
+            let out = out.unwrap();
+            let body: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let paths: Vec<&str> = body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect();
+            assert!(
+                !paths.iter().any(|path| path
+                    .split('/')
+                    .any(chan_workspace::fs_ops::is_atomic_write_temp_name)),
+                "{prefix:?} lists the temporary: {paths:?}"
+            );
+            for name in expected {
+                assert!(paths.contains(name), "{prefix:?} misses {name}: {paths:?}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn resolve_path_keeps_sidecar_drafts_out_of_user_root() {
         let (_cfg, root, server) = fixture();
