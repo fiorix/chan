@@ -30,7 +30,7 @@
   const subline = $derived(
     ended === "detached" ? "This client's connection ended; you are not signed out. Running terminals and saved layouts are preserved. Reconnect reloads this view." : ended === "hidden"
       ? "the leader hid this window; reopen it from Computers"
-      : "the leader closed this window; reopen it from Computers",
+      : "the leader closed this window and ended its terminals; it cannot be reopened",
   );
 
   // Steal focus so keystrokes don't leak to the dead buffer behind the backdrop.
