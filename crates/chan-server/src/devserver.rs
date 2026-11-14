@@ -12322,10 +12322,6 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
-            // A mounted close reaches its bound in half a second here.
-            state
-                .host
-                .test_set_shutdown_release_budget(Duration::from_millis(500));
             state
                 .host
                 .library()
@@ -12364,7 +12360,16 @@ mod tests {
                 .expect_err("the caller expires while its filesystem call is held");
             caller.abort();
             assert!(caller.await.unwrap_err().is_cancelled());
-            let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+            let close_bound = if mounted {
+                // Only the held mounted close needs to reach a short budget.
+                state
+                    .host
+                    .test_set_shutdown_release_budget(Duration::from_millis(500));
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(8)
+            };
+            let outcome = tokio::time::timeout(close_bound, async {
                 if remove {
                     state
                         .host
@@ -12378,6 +12383,11 @@ mod tests {
                 }
             })
             .await;
+            if mounted {
+                state.host.test_set_shutdown_release_budget(
+                    chan_library::host::WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT,
+                );
+            }
             assert!(
                 outcome.is_ok(),
                 "the lifecycle operation waited for an abandoned {hop}"

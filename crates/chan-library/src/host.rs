@@ -428,7 +428,7 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     open_release_budget: std::time::Duration,
     #[cfg(any(test, feature = "test-util"))]
-    shutdown_release_budget: OnceLock<Duration>,
+    shutdown_release_budget: Mutex<Option<Duration>>,
     #[cfg(any(test, feature = "test-util"))]
     late_release_poll: OnceLock<Duration>,
     #[cfg(test)]
@@ -1564,7 +1564,7 @@ impl WorkspaceHost {
             #[cfg(test)]
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(any(test, feature = "test-util"))]
-            shutdown_release_budget: OnceLock::new(),
+            shutdown_release_budget: Mutex::new(None),
             #[cfg(any(test, feature = "test-util"))]
             late_release_poll: OnceLock::new(),
             #[cfg(test)]
@@ -5677,19 +5677,25 @@ impl WorkspaceHost {
     /// (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`).
     fn shutdown_release_budget(&self) -> Duration {
         #[cfg(any(test, feature = "test-util"))]
-        if let Some(budget) = self.shutdown_release_budget.get() {
-            return *budget;
+        if let Some(budget) = *self
+            .shutdown_release_budget
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            return budget;
         }
         WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT
     }
 
-    /// Shorten the time a teardown's blocking hop is awaited, for a test that
-    /// holds a teardown past it. Set once, before the first teardown.
+    /// Set the time a teardown's blocking hop is awaited, for a test that
+    /// holds a teardown past it. Dispatched teardowns keep their captured
+    /// budget, so restoring the production budget affects only later ones.
     #[cfg(any(test, feature = "test-util"))]
     pub fn test_set_shutdown_release_budget(&self, budget: Duration) {
-        self.shutdown_release_budget
-            .set(budget)
-            .expect("the teardown budget is set once");
+        *self
+            .shutdown_release_budget
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(budget);
     }
 
     /// How often a close's teardown hop looks, past its budget, for its
