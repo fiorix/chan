@@ -8,7 +8,7 @@
 //
 // Scanned: the widget's implementation in `lib/`, the binding and its tests
 // in `vt/`, and the package manifest.
-// The app scans its own sources (src/terminal/ghosttyOldFormat.test.ts).
+// The app scans its own sources (src/ghostty_old_format.test.ts).
 
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";

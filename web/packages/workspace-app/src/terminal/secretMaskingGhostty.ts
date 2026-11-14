@@ -49,9 +49,9 @@ type FrameKey = {
 
 /// Masks a ghostty terminal by painting over its canvas.
 ///
-/// ghostty-web has no decorations or markers and its onRender event never
-/// fires in the pinned build, so the painter wraps the renderer's render
-/// (the guarded private-hook pattern of ghosttyCompat.ts) and fills each
+/// The widget exposes no paint event or decoration layer, so the painter
+/// wraps the renderer's render (the guarded private-hook pattern of
+/// ghosttyCompat.ts) and fills each
 /// span onto the canvas in the frame that draws the content under it: the
 /// mask is on screen in the same frame as the value, with no overlay
 /// element to lag a frame behind a scroll, and the buffer, selection and
