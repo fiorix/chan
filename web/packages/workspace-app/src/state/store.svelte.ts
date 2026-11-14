@@ -5407,7 +5407,7 @@ const detachedBrowserSelection = $state<BrowserSelectionState>({
 });
 const browserFocus = $state<{ instanceId: string | null }>({ instanceId: null });
 
-/// Capture the command surface's selection before an operation awaits.
+/// The recorded surface's selection, or null when no surface is recorded or remains.
 export function fbActiveSelection(): BrowserSelectionState | null {
   const id = browserFocus.instanceId;
   return id ? fbTreeInstance(id)?.selection ?? null : null;
