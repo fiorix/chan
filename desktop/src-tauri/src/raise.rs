@@ -670,6 +670,25 @@ mod tests {
     }
 
     #[test]
+    fn requested_terminal_menu_raise_resolves_the_minted_registry_id() {
+        let main = production(include_str!("main.rs"));
+        let explicit = body(main, "\nfn spawn_terminal_window(");
+        assert!(
+            explicit.contains("serve::resolve_window_label("),
+            "the requested raise must resolve the minted registry id to its native label"
+        );
+        in_order(
+            explicit,
+            &[
+                "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
+                "Ok(id) => {",
+                "let label = serve::resolve_window_label(&app_for_task, &id);",
+                "raise_new_terminal_window(app_for_task, state, label);",
+            ],
+        );
+    }
+
+    #[test]
     fn requested_terminal_opens_raise_only_the_new_native_window() {
         let main = production(include_str!("main.rs"));
         let handoff = main
@@ -691,7 +710,9 @@ mod tests {
             explicit,
             &[
                 "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
-                "Ok(label) => raise_new_terminal_window(app_for_task, state, label)",
+                "Ok(id) => {",
+                "let label = serve::resolve_window_label(&app_for_task, &id);",
+                "raise_new_terminal_window(app_for_task, state, label);",
             ],
         );
         let requested = body(main, "\nfn raise_new_terminal_window(");

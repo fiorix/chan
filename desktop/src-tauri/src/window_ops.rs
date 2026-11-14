@@ -42,7 +42,12 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         DesktopWindowOp::New { kind, reply } => {
             let result = match kind {
                 NewWindowKind::Terminal => {
-                    serve::spawn_local_terminal_window(Arc::clone(&state)).await
+                    let result = serve::spawn_local_terminal_window(Arc::clone(&state)).await;
+                    if let Ok(id) = &result {
+                        let label = serve::resolve_window_label(&app, id);
+                        crate::raise_new_terminal_window(app, state, label);
+                    }
+                    result
                 }
                 NewWindowKind::Workspace { key } => new_workspace_window(&state, &key).await,
             };
@@ -440,6 +445,40 @@ mod tests {
             [replied],
             "cs window new replied with an id the registry does not store"
         );
+    }
+
+    #[test]
+    fn new_terminal_requests_raise_with_native_label_and_replies_with_registry_id() {
+        let source = include_str!("window_ops.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production precedes tests")
+            .0;
+        let arm = source
+            .split_once("NewWindowKind::Terminal => {")
+            .expect("terminal window creation arm")
+            .1
+            .split_once("NewWindowKind::Workspace { key } =>")
+            .expect("workspace arm follows terminal arm")
+            .0;
+        assert!(
+            arm.contains("crate::raise_new_terminal_window("),
+            "terminal window creation must request the shared raise"
+        );
+        let calls = [
+            "let result = serve::spawn_local_terminal_window(Arc::clone(&state)).await;",
+            "if let Ok(id) = &result {",
+            "let label = serve::resolve_window_label(&app, id);",
+            "crate::raise_new_terminal_window(app, state, label);",
+            "}\n                    result",
+        ];
+        let mut after = 0;
+        for call in calls {
+            let at = arm[after..]
+                .find(call)
+                .unwrap_or_else(|| panic!("terminal creation must include {call}"));
+            after += at + call.len();
+        }
+        assert_eq!(arm.matches("raise_new_terminal_window(").count(), 1);
     }
 
     /// `cs window hide` and the launcher's Hide on chan's last shown window
