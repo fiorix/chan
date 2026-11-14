@@ -1342,7 +1342,12 @@ const calls = {
     }>("GET", `/api/resolve-link?target=${encodeURIComponent(target)}`),
   indexStatus: async () =>
     readIndexStatus(await req<IndexStatusWire>("GET", "/api/index/status")),
-  indexingState: () => req<IndexingStateResponse>("GET", "/api/indexing/state"),
+  /// `open` names the directories whose level the answer lists beside the
+  /// root's; the Search slide passes the ones it draws opened.
+  indexingState: (open: readonly string[] = []) => {
+    const query = open.map((dir) => `open=${encodeURIComponent(dir)}`).join("&");
+    return req<IndexingStateResponse>("GET", `/api/indexing/state${query ? `?${query}` : ""}`);
+  },
   health: () => req<HealthResponse>("GET", "/api/health"),
   inspector: (path: string) =>
     req<InspectorPayload>(

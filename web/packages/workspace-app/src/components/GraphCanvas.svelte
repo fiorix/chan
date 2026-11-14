@@ -72,10 +72,10 @@
     selectedId: string | null;
     onSelect: (id: string | null) => void;
     onContextMenu?: (e: MouseEvent) => void;
-    /// Double-clicking a node fires the "graph from here" action.
-    /// The canvas only signals intent;
-    /// the parent owns the rescope (it has access to the current
-    /// selection's `path` / `isDir` and to `graphFromHere`).
+    /// Called on a double-click on a node. The canvas only signals the
+    /// gesture: the taps before it selected the node, so the host reads
+    /// its own selection and decides what the gesture does (the graph tab
+    /// and the Dashboard's Search slide open or close a directory).
     onSetAsScope?: () => void;
     /// Where the automatic fit places the view. "bottom" (default) anchors
     /// the single focal node near the bottom edge so the cluster grows upward
@@ -97,9 +97,10 @@
     /// object to re-tune (the sim rebuilds + reheats on reference
     /// change).
     force?: GraphForce;
-    /// Incremented by GraphPanel after a directory expansion. Fits the
-    /// expanded directory, its parent, and the newly visible nodes without
-    /// resetting the user's manual-pan ownership for later refreshes.
+    /// Sent by the host after a directory expansion, with a new nonce.
+    /// Fits the expanded directory, its parent, and the newly visible
+    /// nodes without resetting the user's manual-pan ownership for later
+    /// refreshes.
     expansionFitRequest?: ExpansionFitRequest | null;
   };
   let {
@@ -259,10 +260,10 @@
   let expansionRefit: { until: number; ids: Set<string> } | null = null;
   let seenExpansionFitNonce = 0;
   /// Once the user has manually panned, zoomed, or dragged a node,
-  /// the view belongs to them. Periodic re-renders within the same scope
-  /// (e.g., the Dashboard indexing slide polling
-  /// `/api/indexing/state` every 3s, which produces fresh array
-  /// references with no structural change) must not snap the view
+  /// the view belongs to them. Re-renders within the same scope
+  /// (e.g., the Dashboard indexing slide, whose poll of
+  /// `/api/indexing/state` hands over fresh arrays with no structural
+  /// change when a directory's state moves) must not snap the view
   /// back to fit-content. A new scope clears the flag so its nodes fit.
   let userInteracted = false;
   /// When `start()` runs before the host has been measured
@@ -1626,15 +1627,12 @@
     downAt = null;
   }
 
-  /// A double-click on a node calls `onSetAsScope` so the parent
-  /// re-roots the graph at that node
-  /// (`graphFromHere`). The preceding two single-clicks already
-  /// fired onSelect for the parent, so the parent's selectedId
-  /// reflects the dblclicked node when this handler runs; the
-  /// parent reads its own selection to derive (path, isDir).
-  /// Skipping when no node sits under the cursor keeps double-
-  /// clicking empty space a no-op (no rescope to workspace from
-  /// a stray double-tap).
+  /// A double-click on a node calls `onSetAsScope`. The preceding
+  /// two single-clicks already fired onSelect for the parent, so the
+  /// parent's selectedId reflects the dblclicked node when this
+  /// handler runs; the parent reads its own selection to derive
+  /// (path, isDir). Skipping when no node sits under the cursor keeps
+  /// double-clicking empty space a no-op.
   function onDoubleClick(e: MouseEvent): void {
     if (!canvas) return;
     const p = localCoords(e);
@@ -1961,8 +1959,8 @@
     untrack(() => {
       if (!sim) return;
       // The Dashboard indexing slide polls /api/indexing/state every
-      // 3s, which produces a new (content-identical) `nodes`/`edges`
-      // array reference each tick. When the working set hasn't changed
+      // 3s and hands over new `nodes`/`edges` arrays for each answer
+      // that differs from the last. When the working set hasn't changed
       // (only node fields like `indexState` colour have refreshed),
       // this is a content-update tick, not a structural change: skip
       // the refit so the user's view stays put rather than zooming
@@ -1974,7 +1972,8 @@
       const before = dNodes.length;
       // Pick the simulation re-warm alpha by structural delta, not by
       // a binary "same set vs not". The Dashboard indexing slide adds
-      // nodes one at a time as files appear on disk; alpha=1 (full-swap
+      // a level of nodes when a directory is opened, and a node when one
+      // appears on disk; alpha=1 (full-swap
       // strength) would yank every node toward the layout origin and
       // look more like a scope change than a fluid file-browser update.
       // Treat anything with >=50% overlap as incremental (gentle alpha
@@ -2029,10 +2028,11 @@
     if (!sim) return;
     const { added, removed } = rebuildWorkingSet();
     // The Dashboard indexing slide re-derives its `visibleNodeIds`
-    // (a new Set ref) + `visibleEdges` (a new array ref) every 3s
-    // poll. When the working set is unchanged (no nodes added or
-    // removed), this is a content-only re-render: skip the refit +
-    // the alpha bump so the canvas stays still.
+    // (a new Set ref) + `visibleEdges` (a new array ref) with each
+    // poll answer that differs from the last. When the working set is
+    // unchanged (no nodes added or removed), this is a content-only
+    // re-render: skip the refit + the alpha bump so the canvas stays
+    // still.
     //
     // The same-set path still rebinds the d3-force link force to the
     // freshly-rebuilt `dEdges` (rebuildWorkingSet replaces it on

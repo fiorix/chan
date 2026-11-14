@@ -35,9 +35,10 @@
 // root as the one disc drawn with the hard drive. A colour cannot do this: a
 // pending directory's grey disc, under a folder glyph stroked in the page's
 // colour, blends through the root's fill colour at the glyph's edges. The
-// seed has no directories, so the check makes a few nested ones for the
-// spine and removes them after; directories an earlier check left, pending
-// or being indexed, join them. The note is shown by answering the slide's
+// seed has no directories, so the check makes a few in the workspace's root,
+// the level the slide draws with nothing opened, and removes them after;
+// directories an earlier check left there, pending or being indexed, join
+// them. The note is shown by answering the slide's
 // indexing-state poll with no directories, through the browser's request
 // interception, which leaves every other request alone; the resize is read
 // with that poll held unanswered, so the layout is at rest and only the new
@@ -68,10 +69,9 @@ const SETTLE_MS = 15_000;
 const REST_MS = 4_000;
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
-/// The directories the Search slide's spine draws, under one fixture
-/// directory: a chain three deep with a branch off it, and a sibling.
-const SPINE_DIR = "dashboard-spine-213";
-const SPINE_LEAVES = ["alpha/one/two", "alpha/three", "beta"];
+/// The directories the Search slide's spine draws: three in the workspace's
+/// root, the level the slide draws with nothing opened.
+const SPINE_DIRS = ["dashboard-spine-213-alpha", "dashboard-spine-213-beta", "dashboard-spine-213-gamma"];
 const EMPTY_NOTE = "No directories to graph yet.";
 const GRAPH = ".slide-indexing .indexing-graph-host canvas";
 /// The start of the hard drive's outline in the workspace glyph's SVG, which
@@ -687,26 +687,23 @@ async function indexingStates(ctx) {
 }
 
 /// Make the spine's directories, each with a note in it, and wait until the
-/// indexing state lists the deepest, so the slide's first poll draws them.
+/// indexing state lists them all, so the slide's first poll draws them.
 /// Answers how many directories the state lists in each state then.
 async function makeSpine(ctx) {
-  const root = join(ctx.workspaceDir, SPINE_DIR);
-  for (const leaf of SPINE_LEAVES) {
-    const dir = join(root, leaf);
+  for (const name of SPINE_DIRS) {
+    const dir = join(ctx.workspaceDir, name);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "note.md"), `# ${leaf}\n`);
+    writeFileSync(join(dir, "note.md"), `# ${name}\n`);
   }
-  const deepest = `${SPINE_DIR}/${SPINE_LEAVES[0]}`;
   const deadline = Date.now() + 30_000;
   let last = null;
   while (Date.now() < deadline) {
     last = await request(ctx, "/api/indexing/state");
-    if (last.status === 200 && last.json?.nodes?.some((n) => n.path === deepest)) {
-      return countStates(last.json);
-    }
+    const listed = new Set(last.status === 200 ? last.json?.nodes?.map((n) => n.path) : []);
+    if (SPINE_DIRS.every((name) => listed.has(name))) return countStates(last.json);
     await delay(250);
   }
-  throw new Error(`the indexing state never listed ${deepest}: ${last?.status} ${last?.text?.slice(0, 200)}`);
+  throw new Error(`the indexing state never listed ${SPINE_DIRS.join(", ")}: ${last?.status} ${last?.text?.slice(0, 200)}`);
 }
 
 export default {
@@ -714,7 +711,6 @@ export default {
   async run(ctx) {
     const { page } = ctx;
     await page.bringToFront();
-    const spineRoot = join(ctx.workspaceDir, SPINE_DIR);
     const cdp = await page.createCDPSession();
     // The slide's indexing-state poll, while intercepted, is either answered
     // with a spine of no directories ("empty") or left waiting ("hold");
@@ -817,10 +813,11 @@ export default {
 
       // The tab changes size with the Search slide showing: from the last
       // size, with the spine fitted there, to the wide, tall one, with no
-      // other slide shown in between. Each poll answered warms the layout,
-      // and the graph follows a moving layout anyway, so the polls are held
-      // and the layout left to rest first: the new size alone has to frame
-      // the spine again.
+      // other slide shown in between. A poll whose answer differs from the
+      // last warms the layout, as one does while a directory is indexed, and
+      // the graph follows a moving layout anyway, so the polls are held and
+      // the layout left to rest first: the new size alone has to frame the
+      // spine again.
       const from = SIZES[SIZES.length - 1];
       const to = SIZES[3];
       const resized = `Search resized from ${from.width}x${from.height} to ${to.width}x${to.height}`;
@@ -860,7 +857,7 @@ export default {
       await untraceGraphDraws(page).catch(() => {});
       await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
       if (stopped) await setCycling(page, true).catch(() => {});
-      rmSync(spineRoot, { recursive: true, force: true });
+      for (const name of SPINE_DIRS) rmSync(join(ctx.workspaceDir, name), { recursive: true, force: true });
     }
   },
 };

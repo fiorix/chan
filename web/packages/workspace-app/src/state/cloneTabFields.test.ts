@@ -183,9 +183,9 @@ function loadedBrowserTab(): BrowserTab {
   } satisfies Required<BrowserTab>;
 }
 
-/// A dashboard tab carrying every optional field its kind allows. All three
-/// are optional and a clone that emits them conditionally loses them, so the
-/// fixture sets each to a value that is not the field's default.
+/// A dashboard tab carrying every optional field its kind allows. All of
+/// them are optional and a clone that emits them conditionally loses them,
+/// so the fixture sets each to a value that is not the field's default.
 function loadedDashboardTab(): DashboardTab {
   return {
     kind: "dashboard",
@@ -195,6 +195,7 @@ function loadedDashboardTab(): DashboardTab {
     disabledSlots: [1],
     autoRotate: false,
     indexingSelectedId: "directory:notes",
+    indexingExpanded: ["notes"],
     inspectorWidth: 320,
   } satisfies Required<DashboardTab>;
 }

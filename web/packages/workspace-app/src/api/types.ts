@@ -1133,6 +1133,10 @@ export type IndexingStateNode = {
   children_count: number;
 };
 
+/// The levels a request asked for, not the tree: the root, its directories,
+/// and the directories of each directory the request named as open. A
+/// directory's `state` covers everything below it and `children_count` is
+/// the directories it holds, listed or not.
 export type IndexingStateResponse = {
   root: string;
   nodes: IndexingStateNode[];

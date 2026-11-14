@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chan_workspace::{
@@ -367,7 +367,16 @@ struct DirectoryStateAccum {
 /// derives the view from the same filtered tree used by reindexing
 /// plus the persisted BM25 path snapshot, avoiding any parse/embed
 /// work on the request path.
-pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response {
+///
+/// The response lists the levels the slide draws, not the tree: the root,
+/// its directories, and the directories of each directory the query names
+/// with `open`. A directory's state covers everything below it, so one
+/// left closed still reports what its subtree holds.
+pub async fn api_indexing_state(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let opened = opened_dirs(query.as_deref());
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
@@ -397,16 +406,40 @@ pub async fn api_indexing_state(State(state): State<Arc<AppState>>) -> Response 
                 BTreeSet::new()
             }
         };
-        Json(build_indexing_state(
+        let mut response = build_indexing_state(
             &entries,
             &indexed_paths,
             current_file.as_deref(),
             embed_sweep,
             readiness,
-        ))
-        .into_response()
+        );
+        response.retain_opened_levels(&opened);
+        Json(response).into_response()
     })
     .await
+}
+
+/// The directories a query string names with `open`, one per value. They
+/// are compared with the paths the walk yields and never resolved, so a
+/// value that names no directory of the tree matches nothing.
+fn opened_dirs(query: Option<&str>) -> BTreeSet<String> {
+    url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .filter(|(key, _)| key == "open")
+        .map(|(_, dir)| dir.into_owned())
+        .collect()
+}
+
+impl IndexingStateResponse {
+    /// Keeps the root, its directories and the directories of each
+    /// directory in `opened`. The states were worked out over the whole
+    /// tree first, which is what lets a kept directory answer for the
+    /// levels dropped below it.
+    fn retain_opened_levels(&mut self, opened: &BTreeSet<String>) {
+        self.nodes.retain(|node| {
+            let parent = parent_dir(&node.path);
+            parent.is_empty() || opened.contains(parent)
+        });
+    }
 }
 
 fn current_index_file(status: IndexStatus) -> Option<String> {
@@ -936,6 +969,145 @@ mod tests {
         );
     }
 
+    fn listed(response: &IndexingStateResponse) -> Vec<&str> {
+        response
+            .nodes
+            .iter()
+            .map(|node| node.path.as_str())
+            .collect()
+    }
+
+    fn state_of(response: &IndexingStateResponse, path: &str) -> Option<IndexingDirectoryState> {
+        response
+            .nodes
+            .iter()
+            .find(|node| node.path == path)
+            .map(|node| node.state)
+    }
+
+    /// The response lists levels: the root's always, and a directory's only
+    /// when the request names it. A name with no such directory adds
+    /// nothing, and a named directory lists its level whether or not its
+    /// parent's level lists it.
+    #[test]
+    fn indexing_state_lists_the_root_level_and_each_opened_directory() {
+        let entries = vec![
+            tree_entry("docs", true),
+            tree_entry("docs/api", true),
+            tree_entry("docs/api/v1", true),
+            tree_entry("docs/api/v1/a.md", false),
+            tree_entry("docs/guide", true),
+            tree_entry("docs/guide/b.md", false),
+            tree_entry("notes", true),
+            tree_entry("notes/deep", true),
+            tree_entry("notes/deep/c.md", false),
+        ];
+        let build = |opened: &[&str]| {
+            let mut response = build_indexing_state(
+                &entries,
+                &BTreeSet::new(),
+                None,
+                false,
+                WorkspaceReadiness::default(),
+            );
+            response.retain_opened_levels(&opened.iter().map(|dir| dir.to_string()).collect());
+            response
+        };
+
+        assert_eq!(listed(&build(&[])), ["", "docs", "notes"]);
+        assert_eq!(
+            listed(&build(&["docs"])),
+            ["", "docs", "docs/api", "docs/guide", "notes"]
+        );
+        assert_eq!(
+            listed(&build(&["docs", "docs/api", "gone"])),
+            ["", "docs", "docs/api", "docs/api/v1", "docs/guide", "notes"]
+        );
+        assert_eq!(
+            listed(&build(&["docs/api"])),
+            ["", "docs", "docs/api/v1", "notes"]
+        );
+        // A listed directory still counts the directories it holds, which is
+        // how the slide tells one that opens from one that does not.
+        let root_level = build(&[]);
+        let docs = root_level
+            .nodes
+            .iter()
+            .find(|node| node.path == "docs")
+            .unwrap();
+        assert_eq!(docs.children_count, 2);
+    }
+
+    /// A closed directory is the only node the slide draws for its subtree,
+    /// so its state has to answer for files any number of levels down.
+    #[test]
+    fn indexing_state_of_a_closed_directory_covers_its_subtree() {
+        let entries = vec![
+            tree_entry("docs", true),
+            tree_entry("docs/top.md", false),
+            tree_entry("docs/api", true),
+            tree_entry("docs/api/v1", true),
+            tree_entry("docs/api/v1/deep.md", false),
+            tree_entry("notes", true),
+            tree_entry("notes/done.md", false),
+        ];
+        let build = |indexed: &[&str], current_file: Option<&str>| {
+            let mut response = build_indexing_state(
+                &entries,
+                &indexed.iter().map(|path| path.to_string()).collect(),
+                current_file,
+                false,
+                WorkspaceReadiness::default(),
+            );
+            response.retain_opened_levels(&BTreeSet::new());
+            response
+        };
+
+        // Its own file is indexed and one three levels down is not.
+        let pending = build(&["docs/top.md", "notes/done.md"], None);
+        assert_eq!(listed(&pending), ["", "docs", "notes"]);
+        assert_eq!(
+            state_of(&pending, "docs"),
+            Some(IndexingDirectoryState::Pending)
+        );
+        assert_eq!(
+            state_of(&pending, "notes"),
+            Some(IndexingDirectoryState::Indexed)
+        );
+
+        let indexing = build(
+            &["docs/top.md", "notes/done.md"],
+            Some("docs/api/v1/deep.md"),
+        );
+        assert_eq!(
+            state_of(&indexing, "docs"),
+            Some(IndexingDirectoryState::Indexing)
+        );
+        assert_eq!(
+            state_of(&indexing, "notes"),
+            Some(IndexingDirectoryState::Indexed)
+        );
+
+        let indexed = build(
+            &["docs/top.md", "docs/api/v1/deep.md", "notes/done.md"],
+            None,
+        );
+        assert_eq!(
+            state_of(&indexed, "docs"),
+            Some(IndexingDirectoryState::Indexed)
+        );
+    }
+
+    #[test]
+    fn opened_dirs_reads_each_open_value_decoded() {
+        assert_eq!(opened_dirs(None), BTreeSet::new());
+        assert_eq!(opened_dirs(Some("")), BTreeSet::new());
+        assert_eq!(
+            opened_dirs(Some("open=docs&t=1&open=docs%2Fapi+notes&open=docs")),
+            BTreeSet::from(["docs".to_string(), "docs/api notes".to_string()])
+        );
+    }
+
     /// `is_embedding_sweep` marks the background embed pass, the flag that
     /// makes the spine pulse every dir with indexable files when the chip
     /// carries no file. Only `Idle { embedding: Some(..) }` (BM25
@@ -1150,6 +1322,56 @@ mod tests {
             )
         }));
         assert!(nodes.iter().all(|node| node["children_count"].is_u64()));
+    }
+
+    #[tokio::test]
+    async fn indexing_state_endpoint_lists_the_levels_the_query_opens() {
+        let app = route_test_app();
+        app.state
+            .try_workspace()
+            .expect("indexing state test workspace")
+            .write_text("notes/deep/inner/far.md", "# far\n")
+            .unwrap();
+        let router = crate::router(app.state);
+        let paths = |query: &'static str| {
+            let router = router.clone();
+            async move {
+                let request = Request::builder()
+                    .uri(format!("/api/indexing/state{query}"))
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap();
+                let response = router.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                json["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|node| node["path"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(paths("").await, ["", "archive", "contacts", "notes"]);
+        assert_eq!(
+            paths("?open=notes").await,
+            ["", "archive", "contacts", "notes", "notes/deep"]
+        );
+        assert_eq!(
+            paths("?open=notes&open=notes%2Fdeep").await,
+            [
+                "",
+                "archive",
+                "contacts",
+                "notes",
+                "notes/deep",
+                "notes/deep/inner"
+            ]
+        );
     }
 
     #[tokio::test]
