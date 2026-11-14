@@ -149,6 +149,7 @@
   let react: typeof import("react") | null = null;
   let ex: typeof import("@excalidraw/excalidraw") | null = null;
   let api: ExcalidrawImperativeAPI | null = null;
+  let schedulePositionRefresh = () => {};
   let failureBoundary: unknown = null;
   let libraryFailed = $state(false);
   /// Set by the board's first seed and never cleared. The library is past
@@ -718,6 +719,7 @@
         viewModeEnabled: readonly,
         excalidrawAPI: (a: ExcalidrawImperativeAPI) => {
           api = a;
+          schedulePositionRefresh();
           // The library reports its loading state when it hands the API over,
           // so on the library this returns; it seeds a board whose library is
           // past its init when the API arrives.
@@ -740,6 +742,55 @@
       })),
     );
   }
+
+  onMount(() => {
+    const element = host!;
+    let frame: number | null = null;
+    let disposed = false;
+    const schedule = () => {
+      if (disposed || frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (!api) return;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const state = api.getAppState();
+        if (state.offsetLeft !== rect.left || state.offsetTop !== rect.top) api.refresh();
+      });
+    };
+    schedulePositionRefresh = schedule;
+    // A capped board can re-centre without resizing. A dock swap can even
+    // leave every ancestor's size unchanged, so observe the surrounding DOM
+    // as well as its sizes, excluding the React subtree's drawing churn.
+    const resize = new ResizeObserver(schedule);
+    const mutation = new MutationObserver(schedule);
+    for (let ancestor: HTMLElement | null = element; ancestor; ancestor = ancestor.parentElement) {
+      resize.observe(ancestor);
+      mutation.observe(ancestor, {
+        attributes: true,
+        attributeFilter: ["class", "style", "hidden"],
+        childList: true,
+      });
+    }
+    // Transforms do not resize a box; measure the settled pane after its
+    // animation, and an ancestor's scroll even when that event does not bubble.
+    const animationEnded = (event: Event) => {
+      if (event.target instanceof Element && event.target.contains(element)) schedule();
+    };
+    document.addEventListener("scroll", schedule, true);
+    document.addEventListener("animationend", animationEnded);
+    document.addEventListener("transitionend", animationEnded);
+    return () => {
+      disposed = true;
+      schedulePositionRefresh = () => {};
+      resize.disconnect();
+      mutation.disconnect();
+      document.removeEventListener("scroll", schedule, true);
+      document.removeEventListener("animationend", animationEnded);
+      document.removeEventListener("transitionend", animationEnded);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  });
 
   onMount(async () => {
     // Set the asset path before the package loads so the font registry
