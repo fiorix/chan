@@ -149,7 +149,7 @@ The reference patterns (TG-07) reproduce byte for byte across three runs under X
 
 - An explicit background of RGB (0,0,0) is left unpainted: the renderer takes a zero background for the default and keeps the theme's, so `\e[48;2;0;0;0m` and `\e[48;5;16m` cells show the theme background, while `\e[40m` paints the palette's black (`#0c0c0d` in the dark theme) and RGB (1,1,1) paints.
 - In a scrolled-back view, a history row's grapheme cluster is looked up in the screen row at the same viewport row, so the row `history 12` paints a blank where its cluster of `e` and U+0301 is.
-- Selected text is painted in the renderer's default selection foreground, `#1e1e1e`, since chan's theme names none.
+- Selected text keeps its own colour, after inverse and faint, since chan's theme names no selection foreground; the selection background replaces a selected cell's own background, where xterm.js blends the two.
 - Every underline style paints one straight underline; overline adds nothing to a cell and blinking text stays lit.
 
 ### Windows
