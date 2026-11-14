@@ -50,7 +50,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | not started | measure |
-| [a close test fails a loaded gate][closetest] | not started | build |
+| [a close test fails a loaded gate][closetest] | merged | closed |
 | [an edit erases another window's keys][keysmerge] | not started | build |
 | [team load overwrites the config][teamload] | not started | build |
 | [a survey takes another pane's keys][surveykeys] | not started | build |
