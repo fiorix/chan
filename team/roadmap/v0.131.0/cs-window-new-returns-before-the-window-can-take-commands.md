@@ -33,3 +33,7 @@ The owner took the round's candidates as recommended on 2026-11-14 ("Take all my
 
 - Contract 4: a terminal window `cs window new` opens comes forward through the shared raise, as the warm chan-term launch does, on every platform.
 - Acceptance 3: a test that the terminal arm of `cs window new` requests the raise, red on today's code; the driver's run in the desktop guest shows the new window focused; the owner's Mac line, in his batch.
+
+## Correction to contract 4's caller, 2026-11-14
+
+The fold above named the launcher's new-terminal route as `DesktopWindowOp::New { kind: Terminal }`. The build found otherwise by reading: only `control_socket.rs` constructs that operation (the `cs window new` bridge); the launcher's New Terminal button calls `backend.createWindow` (`state/library.svelte.ts`), which posts `/api/library/windows`, and chan-server mints the record directly (`routes/library.rs`), with no desktop bridge dispatch. A button in a chan window is pressed while chan is the active app, so its new window needs no raise across applications, which is what contract 4 is about. The lead's ruling: contract 4 covers the `cs window new` bridge and the desktop's own New Window terminal path (whose raise request compared a bare window id with the native label, so it was dropped); the launcher's HTTP route is outside it. The desktop guest's reading records where the launcher's new window opens; a window it leaves behind would be a new candidate.
