@@ -289,6 +289,10 @@ Source: `crates/chan-server/src/devserver.rs`. Written atomically at mode 0600 b
 | `library_id` | `String` | minted on first start | internal | the library's stable identity (`lib-<16hex>`), stamped on every window record so a client merging several libraries' feeds can partition them |
 | `port` | `u16` | `0` | internal | the last bound TCP port, so a local client re-discovers a `--port 0` devserver after a restart instead of trusting a stored URL |
 
+### `~/.chan/devserver/terminal-token`
+
+Source: `crates/chan-server/src/devserver.rs` and `crates/chan-server/src/auth.rs`. The bearer token of the devserver's shared terminal tenant, the one every standalone terminal window's URL carries, as one line of ASCII letters and digits. Written atomically at mode 0600, created when the tenant first mounts, and read back at every start, so a browser tab on a terminal window keeps its token across a restart. A start that mints or rotates `devserver_token`, and `chan devserver rotate-token`, write a new one; a running devserver serves the new one from its next start. A missing, empty or malformed file is replaced at the next start; one the devserver cannot write leaves the tenant on a token that ends with that process, named in a warning. A desktop host keeps no such file: its terminal tenants mint a token per launch.
+
 ### `~/.chan/devserver/workspaces.json` and `~/.chan/workspaces.json`: `WorkspaceOverlay`
 
 Source: `crates/chan-library/src/workspace_persist.rs`. The registry records which workspaces exist; this overlay records which ones a deployment intends to serve. The devserver keeps its copy under `devserver/`, the desktop keeps its own beside the registry, so one machine's desktop and devserver turn workspaces on and off independently. A row absent from the file reads as off; the mount prefix is not stored, each library derives it from the root path.
@@ -374,7 +378,7 @@ The chan home, with the files above and the state files that sit beside them:
 - `workspaces.json` and `windows.json`: the desktop library's workspace overlay and window records.
 - `Drafts/`: the desktop's standalone terminal draft store.
 - `desktop/config.json`: the desktop config above.
-- `devserver/`: the devserver's `config.json`, `workspaces.json`, `windows.json`, `Drafts/` and `terminals/` (parked PTYs for the systemd fd store), so a devserver's identity and state are one subtree.
+- `devserver/`: the devserver's `config.json`, `terminal-token`, `workspaces.json`, `windows.json`, `Drafts/` and `terminals/` (parked PTYs for the systemd fd store), so a devserver's identity and state are one subtree.
 - `workspaces/<metadata_key>/`: per-workspace metadata, where `metadata_key` is a readable slug of the canonical workspace path plus a short hash suffix.
 
 Under `workspaces/<metadata_key>/`:

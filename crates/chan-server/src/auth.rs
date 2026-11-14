@@ -1,10 +1,11 @@
 //! Persisted bearer token + axum middleware that gates `/api/*` and `/ws`.
 //!
-//! Token persistence lives at `<paths.tokens>/token` (mode 0600 on Unix)
-//! so a `cargo build && chan serve` cycle does not invalidate the
-//! browser's cached sessionStorage token. Atomic write goes through
-//! chan-workspace's `fs_ops::atomic_write` so the parent-dir fsync invariant
-//! matches the rest of the app.
+//! A workspace tenant's token lives at `<paths.tokens>/token`, and the
+//! devserver's shared terminal tenant's at a file its embedder names, both
+//! mode 0600 on Unix, so a `cargo build && chan serve` cycle or a devserver
+//! restart does not invalidate the browser's cached sessionStorage token.
+//! Atomic write goes through chan-workspace's `fs_ops::atomic_write` so the
+//! parent-dir fsync invariant matches the rest of the app.
 //!
 //! Devserver tunnel requests carry `TunnelOrigin`; the gateway is the trust
 //! boundary in that path, so the local bearer gate admits those requests after
@@ -43,15 +44,28 @@ pub fn random_token() -> String {
 /// token stays valid across `cargo build && chan serve` cycles.
 pub fn load_or_create_token(paths: &WorkspacePaths) -> std::io::Result<String> {
     ensure_tokens_dir(&paths.tokens)?;
-    let token_path = paths.tokens.join("token");
-    if let Ok(s) = std::fs::read_to_string(&token_path) {
+    load_or_create_token_at(&paths.tokens.join("token"))
+}
+
+/// Load the token persisted at `token_path`, or mint one and write it there
+/// (mode 0600 on Unix) when the file is missing, unreadable, empty or holds
+/// anything but ASCII alphanumerics.
+pub(crate) fn load_or_create_token_at(token_path: &Path) -> std::io::Result<String> {
+    if let Ok(s) = std::fs::read_to_string(token_path) {
         let s = s.trim();
         if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Ok(s.to_owned());
         }
     }
+    replace_token_at(token_path)
+}
+
+/// Mint a fresh token and write it over `token_path` (mode 0600 on Unix),
+/// returning it. The token a file held before stops being the one the next
+/// load reads.
+pub(crate) fn replace_token_at(token_path: &Path) -> std::io::Result<String> {
     let token = random_token();
-    write_token_atomic(&token_path, &token)?;
+    write_token_atomic(token_path, &token)?;
     Ok(token)
 }
 
@@ -485,6 +499,46 @@ mod tests {
         let token_path = tokens.join("token");
         write_token_atomic(&token_path, "abcdef").unwrap();
         assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "abcdef");
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A missing file is created owner-only, the next load reads it back,
+    /// and a file that holds no usable token is replaced rather than served.
+    #[test]
+    fn token_file_is_created_reused_and_healed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("terminal-token");
+
+        let minted = load_or_create_token_at(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), minted);
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(load_or_create_token_at(&path).unwrap(), minted);
+
+        for unusable in ["", "  \n", "not-a-token!"] {
+            std::fs::write(&path, unusable).unwrap();
+            let healed = load_or_create_token_at(&path).unwrap();
+            assert_eq!(healed.len(), TOKEN_LEN, "{unusable:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), healed);
+        }
+    }
+
+    #[test]
+    fn replacing_a_token_file_mints_a_new_owner_only_token() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("terminal-token");
+        let first = load_or_create_token_at(&path).unwrap();
+
+        let replaced = replace_token_at(&path).unwrap();
+        assert_ne!(replaced, first);
+        assert_eq!(load_or_create_token_at(&path).unwrap(), replaced);
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
     }
 
     /// Sanity: the happy path stays happy. `ensure_tokens_dir` on a

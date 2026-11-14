@@ -95,8 +95,8 @@ WantedBy=default.target</code></pre>
   <p>Only the devserver process restarts. The shells and their programs keep running with the same process ids, and the devserver rebuilds each terminal with its scrollback and screen.</p>
   <ul>
     <li>Each terminal reads <code>session ended (parked)</code> while the devserver is away. A restart that takes more than about half a second also greys the window under <code>reconnecting to the chan server</code>.</li>
-    <li>Chan Desktop windows, and a browser's workspace windows, then reload by themselves and reattach to the same shells.</li>
-    <li>If a browser tab of a standalone terminal window stays disconnected, reading <code>missing or invalid token</code>, open the window again from its row on the devserver's <a href="/manual/browser/#computers">Computers screen</a>. Its terminals are still there.</li>
+    <li>Chan Desktop windows, and a browser's workspace and standalone terminal windows, then reload by themselves and reattach to the same shells.</li>
+    <li>After <code>chan devserver rotate-token</code>, the next restart gives standalone terminal windows a new token too, as does a restart that rotates a token older than 30 days. A browser tab of one then reads <code>missing or invalid token</code>: open the devserver's <a href="/manual/browser/#computers">Computers screen</a> at the new URL and open the window again from its row. Its terminals are still there.</li>
     <li>Chan Desktop stays connected over ssh or Eternal Terminal when the devserver is back within 30 seconds.</li>
     <li>A coding agent mid-turn keeps working, and so does <code>cs</code> in the shells that carried on. A <code>cs tunnel</code> running at the restart ends.</li>
   </ul>

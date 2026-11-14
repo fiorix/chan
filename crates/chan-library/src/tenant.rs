@@ -476,6 +476,12 @@ pub struct TerminalTenantOptions {
     /// tenants keep. The embedder decides the path because only it knows
     /// which host identity it is, exactly like `session_dir`.
     pub drafts_store_root: Option<PathBuf>,
+    /// The file that persists the tenant's bearer token (mode 0600), read
+    /// back at every mount and created on the first, so a browser page that
+    /// holds the token survives a server restart. The embedder names it and
+    /// replaces it when its own bearer rotates; the devserver names one for
+    /// its shared terminal tenant. `None` mints a fresh token at each mount.
+    pub token_file: Option<PathBuf>,
 }
 
 /// The directory a terminal tenant's PTYs start in: `cwd` when the mount

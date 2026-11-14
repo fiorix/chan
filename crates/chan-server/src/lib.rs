@@ -149,7 +149,7 @@ use crate::terminal_sessions::{
     ControlSocketEnv, Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
     TerminalBackendResolver, TerminalProfilePrefs, TerminalProfilesResolver,
 };
-use auth::{auth_middleware, load_or_create_token, random_token};
+use auth::{auth_middleware, load_or_create_token, load_or_create_token_at, random_token};
 use bus::{make_progress_broadcast, make_watch_bridge};
 use routes::{
     api_backlinks, api_build_info, api_cloud_workspaces, api_create_diagram, api_create_draft,
@@ -495,10 +495,13 @@ enum TenantKind {
     /// surface and its construction succeeds; `None` keeps layouts in memory
     /// and serves terminals only. `cwd` is where the PTYs start (a
     /// default-terminal launch's `--dir`); `None` is the home directory.
+    /// `token_file` persists the tenant's bearer across restarts, as a
+    /// workspace's token directory does; `None` mints one per build.
     Terminal {
         session_dir: Option<PathBuf>,
         drafts_store_root: Option<PathBuf>,
         cwd: Option<PathBuf>,
+        token_file: Option<PathBuf>,
     },
 }
 
@@ -572,8 +575,24 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     } else {
         Some(match &tenant {
             TenantKind::Workspace { workspace, .. } => load_or_create_token(workspace.paths())?,
-            // Terminal tenants have no workspace token directory.
-            TenantKind::Terminal { .. } => random_token(),
+            // The devserver mounts this tenant before it serves anything, so
+            // a token file it cannot use must not fail the start: the tenant
+            // then serves a token that ends with this process, as one without
+            // a file does.
+            TenantKind::Terminal {
+                token_file: Some(path),
+                ..
+            } => load_or_create_token_at(path).unwrap_or_else(|error| {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "terminal tenant token file unusable; serving a token that ends with this process"
+                );
+                random_token()
+            }),
+            TenantKind::Terminal {
+                token_file: None, ..
+            } => random_token(),
         })
     };
 
@@ -1600,6 +1619,7 @@ impl chan_library::TenantBuilder for RouteLayer {
             cwd,
             session_dir,
             drafts_store_root,
+            token_file,
         } = options;
         let artifacts = build_tenant_app(
             TenantBuild {
@@ -1608,6 +1628,7 @@ impl chan_library::TenantBuilder for RouteLayer {
                     session_dir,
                     drafts_store_root,
                     cwd,
+                    token_file,
                 },
                 desktop,
                 unserve,
@@ -2863,6 +2884,7 @@ mod tenant_builder_tests {
                     session_dir: None,
                     drafts_store_root: None,
                     cwd: None,
+                    token_file: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Standalone,
@@ -2884,6 +2906,7 @@ mod tenant_builder_tests {
                     session_dir: Some(session_dir.path().to_path_buf()),
                     drafts_store_root: None,
                     cwd: None,
+                    token_file: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Standalone,
@@ -3219,6 +3242,7 @@ mod terminal_router_tests {
                     session_dir: None,
                     drafts_store_root: None,
                     cwd: Some(cwd.path().to_path_buf()),
+                    token_file: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Unsupported,
@@ -3236,6 +3260,72 @@ mod terminal_router_tests {
             dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
             "no cwd means the home directory"
         );
+    }
+
+    /// A terminal tenant with a token file reads its token back on every
+    /// build against one chan home, as a workspace tenant does; one without a
+    /// file gets a fresh token per build, and `--no-token` serves none and
+    /// writes nothing.
+    #[tokio::test]
+    async fn terminal_tenant_token_file_persists_across_builds() {
+        let home = tempfile::tempdir().unwrap();
+        let library = Library::open_at(home.path().join("library.toml")).unwrap();
+        let token_file = home.path().join("devserver").join("terminal-token");
+        let config = |no_token| ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token,
+            prefix: "/terminal-token-file".into(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let build = |token_file: Option<PathBuf>, no_token: bool| {
+            let library = library.clone();
+            async move {
+                let mut artifacts = build_tenant_app(
+                    TenantBuild {
+                        library,
+                        tenant: TenantKind::Terminal {
+                            session_dir: None,
+                            drafts_store_root: None,
+                            cwd: None,
+                            token_file,
+                        },
+                        desktop: DesktopBridge::default(),
+                        unserve: chan_library::UnserveMode::Unsupported,
+                        control_identity: None,
+                        bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                        client_sessions: chan_library::client_sessions::ClientSessions::new(),
+                    },
+                    &config(no_token),
+                )
+                .await
+                .expect("build terminal app");
+                let token = artifacts.token.clone();
+                assert_eq!(artifacts.state.token, token);
+                artifacts.tasks.shutdown().await;
+                token
+            }
+        };
+
+        assert_eq!(build(Some(token_file.clone()), true).await, None);
+        assert!(!token_file.exists(), "--no-token writes no token file");
+
+        let first = build(Some(token_file.clone()), false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&token_file).unwrap(), first);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(build(Some(token_file.clone()), false).await.unwrap(), first);
+
+        let fresh = build(None, false).await.unwrap();
+        assert_ne!(fresh, first);
+        assert_ne!(build(None, false).await.unwrap(), fresh);
     }
 
     /// Read `terminal_roster` frames off `events` until one lists `id` with
@@ -3307,6 +3397,7 @@ mod terminal_router_tests {
                     session_dir: None,
                     drafts_store_root: None,
                     cwd: Some(home.path().to_path_buf()),
+                    token_file: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Unsupported,
@@ -3382,6 +3473,7 @@ mod terminal_router_tests {
                     session_dir: None,
                     drafts_store_root: None,
                     cwd: None,
+                    token_file: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Unsupported,

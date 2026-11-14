@@ -137,6 +137,7 @@ async fn tenant(library: Library, identity: Option<String>) -> AppArtifacts {
                 session_dir: None,
                 drafts_store_root: None,
                 cwd: None,
+                token_file: None,
             },
             desktop: DesktopBridge::default(),
             unserve: chan_library::UnserveMode::Unsupported,

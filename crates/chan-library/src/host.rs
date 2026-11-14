@@ -2854,15 +2854,30 @@ impl WorkspaceHost {
         Err(insertion_error)
     }
 
-    /// Mount a workspace-less "terminal-only" tenant whose terminals run
-    /// the user's default interactive shell. Shorthand for
-    /// [`open_terminal_session_with_command`](Self::open_terminal_session_with_command)
-    /// with no command.
+    /// Mount the library's shared "terminal-only" tenant, whose terminals
+    /// run the user's default interactive shell, with a fresh bearer token.
+    /// Shorthand for
+    /// [`open_terminal_session_with_token_file`](Self::open_terminal_session_with_token_file)
+    /// with no token file.
     pub async fn open_terminal_session(
         &self,
         config: ServeConfig,
         session_dir: Option<PathBuf>,
         drafts_store_root: Option<PathBuf>,
+    ) -> Result<HostedWorkspace, Error> {
+        self.open_terminal_session_with_token_file(config, session_dir, drafts_store_root, None)
+            .await
+    }
+
+    /// [`open_terminal_session`](Self::open_terminal_session) with the
+    /// tenant's bearer token persisted at `token_file`
+    /// ([`TerminalTenantOptions::token_file`]); `None` mints a fresh one.
+    pub async fn open_terminal_session_with_token_file(
+        &self,
+        config: ServeConfig,
+        session_dir: Option<PathBuf>,
+        drafts_store_root: Option<PathBuf>,
+        token_file: Option<PathBuf>,
     ) -> Result<HostedWorkspace, Error> {
         // This is THE library's shared terminal tenant (every standalone
         // terminal window attaches here, sharing its prefix+token). Record its
@@ -2881,6 +2896,7 @@ impl WorkspaceHost {
             cwd: None,
             session_dir,
             drafts_store_root,
+            token_file,
         };
         let hosted = self.open_terminal_tenant(config, options, true).await?;
         let _ = self.terminal_tenant_prefix.set(prefix);
@@ -2907,6 +2923,7 @@ impl WorkspaceHost {
             cwd: None,
             session_dir,
             drafts_store_root: None,
+            token_file: None,
         };
         self.open_terminal_tenant(config, options, false).await
     }
@@ -2958,6 +2975,7 @@ impl WorkspaceHost {
             cwd,
             session_dir: None,
             drafts_store_root: None,
+            token_file: None,
         };
         self.open_terminal_tenant(config, options, false).await
     }
