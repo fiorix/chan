@@ -1,25 +1,36 @@
 // The ghostty widget's renderer over chan's binding on the vendored core,
 // wired the way Terminal.open() wires them, over a software canvas that keeps
-// the text the renderer hands it. The test writes the bytes and issues the
-// frames.
+// the text the renderer hands it and the colour it fills that text in. The
+// test writes the bytes and issues the frames.
 
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
+import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/ghostty-web-ng";
 import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
+import { expectPixel, SoftwareCanvasContext, sourceOver } from "../__tests__/softwareCanvas";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
 const ROWS = 3;
 
 /// A software context that also keeps each text it is asked to fill, at
-/// the point the renderer draws it from.
+/// the point the renderer draws it from, with the fill and the alpha it is
+/// drawn in, and each line it strokes, from the point the line starts.
 class TextRecordingContext extends SoftwareCanvasContext {
-  readonly texts: { text: string; x: number; y: number }[] = [];
+  readonly texts: { text: string; x: number; y: number; fill: string; alpha: number }[] = [];
+  readonly strokes: { x: number; y: number; stroke: string }[] = [];
+  #from = { x: 0, y: 0 };
 
   override fillText(text = "", x = 0, y = 0): void {
-    this.texts.push({ text, x, y });
+    this.texts.push({ text, x, y, fill: this.fillStyle, alpha: this.globalAlpha });
+  }
+
+  override moveTo(x = 0, y = 0): void {
+    this.#from = { x, y };
+  }
+
+  override stroke(): void {
+    this.strokes.push({ ...this.#from, stroke: this.strokeStyle });
   }
 }
 
@@ -203,5 +214,182 @@ describe("the ghostty renderer scrolled back", () => {
     for (const [y, { cells }] of view.entries()) {
       expect.soft(screen.painted(y), `view row ${y}`).toEqual(cells);
     }
+  });
+});
+
+/// A canvas colour as its red, green and blue channels, from the `#rrggbb`
+/// a theme names or the `rgb()` the renderer fills a cell's own colour in.
+function channels(style: string): string {
+  const hex = style.match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const value = Number.parseInt(hex[1], 16);
+    return `${(value >> 16) & 255},${(value >> 8) & 255},${value & 255}`;
+  }
+  const functional = style.match(/^rgba?\(([^)]+)\)$/);
+  if (!functional) throw new Error(`unsupported canvas colour: ${style}`);
+  return functional[1].split(",").slice(0, 3).map((part) => Number(part.trim())).join(",");
+}
+
+describe("the ghostty renderer's selected text", () => {
+  const cols = 24;
+  const rows = 4;
+
+  /// TerminalTab's terminalTheme() at its dark fallbacks, with the one
+  /// palette colour the rows use: a translucent selection background and no
+  /// selection foreground, as chan's themes name none.
+  const THEME: ITheme = {
+    background: "#1c1c1e",
+    foreground: "#ebebf0",
+    cursor: "#58a6ff",
+    selectionBackground: "rgba(88, 166, 255, 0.35)",
+    red: "#ff6b6b",
+  };
+
+  // Red, the default colour, inverse video, faint red and underlined red,
+  // by the columns each takes.
+  const ROW = "\x1b[31mred\x1b[0m def \x1b[7minv\x1b[0m \x1b[2;31mdim\x1b[0m \x1b[4;31mul\x1b[0m";
+  const RED = [0, 1, 2];
+  const DEFAULT = [4, 5, 6];
+  const INVERSE = [8, 9, 10];
+  const FAINT = [12, 13, 14];
+  const UNDERLINED = [16, 17];
+  const WRITTEN = [...RED, ...DEFAULT, ...INVERSE, ...FAINT, ...UNDERLINED];
+
+  let vendored: WebAssembly.Module;
+
+  beforeAll(async () => {
+    vendored = await WebAssembly.compile(readFileSync(VENDORED));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  /// A terminal whose first two rows hold the same cells, with ghostty-web's
+  /// own selection over the whole of the first, its core and its renderer
+  /// built from `theme` as open() builds them.
+  async function selected(theme: ITheme, bytes = "") {
+    const contexts = new WeakMap<HTMLCanvasElement, TextRecordingContext>();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      function (this: HTMLCanvasElement) {
+        const existing = contexts.get(this);
+        if (existing) return existing as unknown as CanvasRenderingContext2D;
+        const created = new TextRecordingContext(this);
+        contexts.set(this, created);
+        return created as unknown as CanvasRenderingContext2D;
+      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    );
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const term = new Terminal({ ghostty: vt, cols, rows, theme });
+    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
+    term.wasmTerm = vt.createTerminal(cols, rows, config);
+    const canvas = document.createElement("canvas");
+    const host = document.createElement("div");
+    host.append(canvas);
+    document.body.append(host);
+    (term as unknown as { element: HTMLElement }).element = host;
+    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme });
+    renderer.resize(cols, rows);
+    term.renderer = renderer;
+    const manager = new SelectionManager(term, renderer, term.wasmTerm, document.createElement("textarea"));
+    (term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
+    renderer.setSelectionManager(manager);
+    term.wasmTerm.write("\x1b[?25l" + ROW + "\r\n" + ROW + bytes);
+    term.select(0, 0, cols);
+    const context = contexts.get(canvas)!;
+    const { width, height, baseline } = renderer.getMetrics();
+    return {
+      renderer,
+      context,
+      /// One full frame as the widget's render loop issues it.
+      frame() {
+        context.texts.length = 0;
+        context.strokes.length = 0;
+        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+      },
+      /// The colour and alpha each written cell of view row `y` drew its
+      /// glyph in, by column, from the row's own pass.
+      glyphs(y: number): Map<number, { text: string; fill: string; alpha: number }> {
+        const painted = new Map<number, { text: string; fill: string; alpha: number }>();
+        for (const t of context.texts) {
+          const col = t.x / width;
+          if (t.y !== y * height + baseline || !WRITTEN.includes(col) || painted.has(col)) continue;
+          painted.set(col, { text: t.text, fill: channels(t.fill), alpha: t.alpha });
+        }
+        return painted;
+      },
+      /// The colour each underline under view row `y` is stroked in, by
+      /// column.
+      underlines(y: number): Map<number, string> {
+        const lines = new Map<number, string>();
+        for (const s of context.strokes) {
+          if (s.y !== y * height + baseline + 2) continue;
+          lines.set(s.x / width, channels(s.stroke));
+        }
+        return lines;
+      },
+      cell: { width, height },
+    };
+  }
+
+  test("a selected cell draws its glyph in the colour it has unselected", async () => {
+    const screen = await selected(THEME);
+    screen.frame();
+    const chosen = screen.glyphs(0);
+    const plain = screen.glyphs(1);
+    expect([...chosen.keys()].sort((a, b) => a - b)).toEqual(WRITTEN);
+    for (const col of WRITTEN) {
+      expect.soft(chosen.get(col), `column ${col}`).toEqual(plain.get(col));
+    }
+    // Each in the colour it was written in: red, the default foreground,
+    // inverse video's default background, and red at half strength.
+    for (const col of RED) expect.soft(chosen.get(col)?.fill, `red, column ${col}`).toBe(channels(THEME.red!));
+    for (const col of DEFAULT) expect.soft(chosen.get(col)?.fill, `default, column ${col}`).toBe(channels(THEME.foreground!));
+    for (const col of INVERSE) expect.soft(chosen.get(col)?.fill, `inverse, column ${col}`).toBe(channels(THEME.background!));
+    for (const col of FAINT) {
+      expect.soft(chosen.get(col), `faint, column ${col}`).toMatchObject({ fill: channels(THEME.red!), alpha: 0.5 });
+    }
+    // An underline follows its glyph.
+    for (const col of UNDERLINED) {
+      expect.soft(screen.underlines(0).get(col), `underline, column ${col}`).toBe(channels(THEME.red!));
+    }
+  });
+
+  test("a theme that names a selection foreground draws selected glyphs in it", async () => {
+    const theme = { ...THEME, selectionForeground: "#204060" };
+    const screen = await selected(theme);
+    screen.frame();
+    const chosen = screen.glyphs(0);
+    expect([...chosen.keys()].sort((a, b) => a - b)).toEqual(WRITTEN);
+    for (const col of WRITTEN) {
+      expect.soft(chosen.get(col)?.fill, `column ${col}`).toBe(channels("#204060"));
+    }
+    for (const col of UNDERLINED) {
+      expect.soft(screen.underlines(0).get(col), `underline, column ${col}`).toBe(channels("#204060"));
+    }
+    // The unselected row keeps its own colours.
+    for (const col of RED) expect.soft(screen.glyphs(1).get(col)?.fill, `row 1, column ${col}`).toBe(channels(THEME.red!));
+
+    // A theme switch that drops it puts the selected cells back in their
+    // own colours.
+    screen.renderer.setTheme(THEME);
+    screen.frame();
+    for (const col of RED) expect.soft(screen.glyphs(0).get(col)?.fill, `after the switch, column ${col}`).toBe(channels(THEME.red!));
+  });
+
+  test("the selection background and a cursor's glyph on a selected cell stay as they were", async () => {
+    // A visible block cursor parked on the first row's red "e".
+    const screen = await selected(THEME, "\x1b[?25h\x1b[1;2H");
+    screen.frame();
+    // The selection background over the theme's, filled whole: no glyph
+    // colour reaches the cell's pixels.
+    const { width, height } = screen.cell;
+    const at = screen.context.pixelAt(4.5 * width, 0.5 * height);
+    expectPixel(at, sourceOver({ r: 88, g: 166, b: 255, a: 0.35 }, { r: 28, g: 28, b: 30, a: 1 }));
+    // The cursor, drawn after the rows, redraws its glyph in the cursor
+    // accent, the renderer's default since the theme names none.
+    const cursorGlyph = screen.context.texts.filter((t) => t.x === width && t.text === "e").at(-1);
+    expect(cursorGlyph && channels(cursorGlyph.fill)).toBe(channels("#1e1e1e"));
   });
 });

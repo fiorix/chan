@@ -37,15 +37,21 @@ export interface FontMetrics {
 // Default Theme
 // ============================================================================
 
-export const DEFAULT_THEME: Required<ITheme> = {
+/**
+ * A theme with every color the renderer needs. The selection foreground is
+ * the one it does without: a theme that names none leaves selected text in
+ * its own color, as xterm.js does.
+ */
+type RendererTheme = Required<Omit<ITheme, 'selectionForeground'>> &
+  Pick<ITheme, 'selectionForeground'>;
+
+export const DEFAULT_THEME: RendererTheme = {
   foreground: '#d4d4d4',
   background: '#1e1e1e',
   cursor: '#ffffff',
   cursorAccent: '#1e1e1e',
-  // Selection colors: solid colors that replace cell bg/fg when selected
-  // Using Ghostty's approach: selection bg = default fg, selection fg = default bg
+  // A solid color that replaces a selected cell's background
   selectionBackground: '#d4d4d4',
-  selectionForeground: '#1e1e1e',
   black: '#000000',
   red: '#cd3131',
   green: '#0dbc79',
@@ -75,7 +81,7 @@ export class CanvasRenderer {
   private fontFamily: string;
   private cursorStyle: 'block' | 'underline' | 'bar';
   private cursorBlink: boolean;
-  private theme: Required<ITheme>;
+  private theme: RendererTheme;
   private devicePixelRatio: number;
   private metrics: FontMetrics;
 
@@ -509,7 +515,8 @@ export class CanvasRenderer {
 
   /**
    * Render a cell's text and decorations (Pass 2 of two-pass rendering)
-   * Selection foreground color is applied here to match the selection background.
+   * A selected cell keeps its own color unless the theme names a selection
+   * foreground.
    */
   private renderCellText(cell: VtCell, x: number, y: number, colorOverride?: string): void {
     const cellX = x * this.metrics.width;
@@ -533,7 +540,7 @@ export class CanvasRenderer {
     // Set text color - use override, selection foreground, or normal color
     if (colorOverride) {
       this.ctx.fillStyle = colorOverride;
-    } else if (isSelected) {
+    } else if (isSelected && this.theme.selectionForeground) {
       this.ctx.fillStyle = this.theme.selectionForeground;
     } else {
       // Extract colors and handle inverse: when inverted, foreground
