@@ -69,7 +69,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a renamed directory keeps old files][graphrename] | not started | build |
 | [a terminal launch gets no focus][raisefocus] | not started | build |
 | [a minimized window stays minimized][unbury] | not started | build |
-| [slides and PDFs show raw wikilinks][wikirender] | not started | build |
+| [slides and PDFs show raw wikilinks][wikirender] | merged | fix |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
 | [ConPTY pulls history into the screen][conpty] | not started | measure |
