@@ -52,6 +52,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { sendPromptToTerminal } from "../state/tabs.svelte";
 import {
   attach, installTerminalDom, output, receive, resetTerminals,
   seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
@@ -117,14 +118,17 @@ async function scrolled(backend: "xterm" | "ghostty") {
   expect(history(term)).toBe(7);
   socket.sent.length = 0;
   const inputHistory: number[] = [];
+  const promptHistory: number[] = [];
   const send = socket.send.bind(socket);
   vi.spyOn(socket, "send").mockImplementation((data) => {
-    if ((JSON.parse(data) as { type: string }).type === "input") inputHistory.push(history(term));
+    const type = (JSON.parse(data) as { type: string }).type;
+    if (type === "input") inputHistory.push(history(term));
+    if (type === "prompt") promptHistory.push(history(term));
     send(data);
   });
   const host = target.querySelector<HTMLElement>(".terminal-host")!;
   const input = term instanceof GhosttyTerminal ? host : term.textarea!;
-  return { target, term, socket, host, input, inputHistory };
+  return { tab: tab!, target, term, socket, host, input, inputHistory, promptHistory };
 }
 function key(input: HTMLElement, init: KeyboardEventInit): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
@@ -137,6 +141,16 @@ function drop(target: HTMLElement): Event {
 }
 
 describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (backend) => {
+  test("a Rich Prompt returns to the live cursor before sending its queued frame", async () => {
+    const { tab, term, socket, promptHistory } = await scrolled(backend);
+    expect(sendPromptToTerminal(tab.id, "run it", "claude", "prompt-scroll")).toBe(true);
+    expect(sentFrames(socket)).toEqual([
+      { type: "prompt", data: "run it", agent: "claude", id: "prompt-scroll" },
+    ]);
+    expect(promptHistory).toEqual([0]);
+    expect(history(term)).toBe(0);
+  });
+
   test("a file drop types its escaped path and returns to the live cursor", async () => {
     const { target, term, socket, inputHistory } = await scrolled(backend);
     runtime.paths = ["/tmp/file with spaces"];
@@ -275,8 +289,8 @@ describe("ghostty fractional and queued viewport movement", () => {
     vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
     const { term, socket, host, inputHistory } = await scrolled("ghostty");
     const canvas = host.querySelector("canvas")!;
-    // Line-mode scrolling takes the widget's own wheel path, including any
-    // animation it schedules, rather than macOS pixel calibration.
+    // Line-mode scrolling takes the widget's own wheel path; its pending
+    // render frames also run after input returns the view to the cursor.
     canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -3, deltaMode: 1 }));
     expect(history(term), "the wheel moved farther into history").toBeGreaterThan(7);
     expect(frames.size, "the renderer has pending frames when the key arrives").toBeGreaterThan(0);

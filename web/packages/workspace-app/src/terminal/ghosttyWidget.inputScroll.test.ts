@@ -32,9 +32,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function openTerminal() {
+async function openTerminal(options: { smoothScrollDuration?: number } = { smoothScrollDuration: 0 }) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
+  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, ...options });
   const host = document.createElement("div");
   document.body.append(host);
   term.open(host);
@@ -71,6 +71,31 @@ function commitComposition({ host }: OpenTerminal): void {
   host.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "\u00e9" }));
 }
 
+function queueFrames() {
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+  return {
+    frames,
+    advance() {
+      const batch = [...frames.values()];
+      frames.clear();
+      for (const callback of batch) callback(performance.now());
+    },
+  };
+}
+
+function wheelIntoHistory({ canvas }: OpenTerminal): void {
+  canvas.dispatchEvent(new WheelEvent("wheel", {
+    bubbles: true, cancelable: true, deltaY: -3, deltaMode: 1,
+  }));
+}
+
 const INPUTS: Array<{ name: string; send(state: OpenTerminal): void; bytes: string }> = [
   { name: "a letter through the widget's input handler", send: typeLetter, bytes: "a" },
   { name: "a composition commit", send: commitComposition, bytes: "\u00e9" },
@@ -80,6 +105,37 @@ const INPUTS: Array<{ name: string; send(state: OpenTerminal): void; bytes: stri
 ];
 
 describe("the ghostty widget's input scroll", () => {
+  test("typing interrupts default smooth scrolling and stays at the cursor as frames run", async () => {
+    const scheduler = queueFrames();
+    const state = await openTerminal({});
+    expect(state.term.options.smoothScrollDuration).toBe(100);
+    wheelIntoHistory(state);
+    expect(state.term.getViewportY()).toBeGreaterThan(HISTORY_OFFSET);
+    expect(state.term.getViewportY(), "the wheel's target has not been reached").toBeLessThan(HISTORY_OFFSET + 3);
+    typeLetter(state);
+    expect(state.sent).toEqual([{ data: "a", viewport: 0 }]);
+    for (let frame = 0; frame < 6; frame++) {
+      scheduler.advance();
+      expect(state.term.getViewportY(), `after frame ${frame + 1}`).toBe(0);
+    }
+  });
+
+  test("typing removes the pending smooth-scroll frame and a later wheel can animate", async () => {
+    const { frames } = queueFrames();
+    const state = await openTerminal({});
+    const beforeWheel = new Set(frames.keys());
+    wheelIntoHistory(state);
+    const wheelFrames = [...frames.keys()].filter((id) => !beforeWheel.has(id));
+    expect(wheelFrames, "the wheel schedules a scroll frame").toHaveLength(1);
+    typeLetter(state);
+    expect(wheelFrames.some((id) => frames.has(id)), "the interrupted animation leaves no pending callback").toBe(false);
+    expect(state.term.getViewportY()).toBe(0);
+    wheelIntoHistory(state);
+    expect(state.term.getViewportY(), "a subsequent wheel starts a fresh animation").toBeGreaterThan(0);
+    expect(state.term.getViewportY()).toBeLessThan(3);
+    expect(state.sent).toEqual([{ data: "a", viewport: 0 }]);
+  });
+
   test.each(INPUTS)("$name reveals the cursor before sending bytes", async ({ send, bytes }) => {
     const state = await openTerminal();
     send(state);
