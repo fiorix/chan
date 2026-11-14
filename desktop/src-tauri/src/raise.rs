@@ -5,12 +5,11 @@
 //! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
 //! for an existing window (`open_about_window` in `main.rs`), and a requested
 //! terminal once its watcher builds it (`raise_new_terminal_window` in
-//! `main.rs`). These call
-//! [`raise_window`] and nothing else does, so no path takes focus that nobody
-//! asked for.
+//! `main.rs`). Only these explicit requests call [`raise_window`] or
+//! [`raise_window_from_launch`]; startup restores call neither.
 //!
-//! The raise restores the window, shows it and focuses it through Tauri, and
-//! then settles what those calls leave undone on the platform. The focus call
+//! Without an X11 launch id, the raise restores the window, shows it and
+//! focuses it through Tauri, then settles the platform's remainder. The focus call
 //! is tao's `set_focus`, which on every platform does nothing while the window
 //! reads minimized or not visible. Each platform settles that its own way:
 //!
