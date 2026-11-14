@@ -61,12 +61,12 @@ chan devserver start --port 8787 \
     <div class="shot-placeholder-frame" data-shot="gateway-publish-devservers-tab" data-shot-kind="still">screenshot to capture<small>Devservers tab: build-host under My devservers, online, with Open, Copy link and Share</small></div>
     <figcaption>The Devservers tab lists your devservers and the ones shared with you.</figcaption>
   </figure>
-  <p>Under <strong>My devservers</strong>, <code>build-host</code> is online. Click <strong>Open</strong>: the browser lands on the devserver's own origin, such as <code>https://alice--3f9c2a7b1e04.p1.proxy.example.com/</code>, on the Computers screen of <a href="/manual/browser/#computers">Chan in a browser</a>. The URL holds no token: the gateway sign-in is the key.</p>
+  <p>Under <strong>My devservers</strong>, <code>build-host</code> is online. Click <strong>Open</strong>: the browser lands on the devserver's own origin, such as <code>https://alice--3f9c2a7b1e04.p1.proxy.example.com/</code>, on the Computers screen of <a href="/manual/browser/#computers">Chan in a browser</a>. The URL holds no token: the gateway's OAuth2 sign-in is the key.</p>
 </section>
 
 <section class="manual-block" id="desktop">
   <h2><a class="heading-anchor" href="#desktop">Connect Chan Desktop</a></h2>
-  <p>Chan Desktop adds the gateway by its URL and signs in through the browser; <a href="/manual/gateway/#add">Connect to a gateway</a> has the steps. The gateway carries the connection, with no connect script or control terminal, and <code>cs tunnel</code> works through it.</p>
+  <p>Chan Desktop adds your self-hosted gateway by its URL and signs in through the browser; <a href="/manual/gateway/#add">Connect to a gateway</a> has the steps. The gateway carries the connection, with no connect script or control terminal, and <code>cs tunnel</code> works through it.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>

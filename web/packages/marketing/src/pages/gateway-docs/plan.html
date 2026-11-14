@@ -1,6 +1,6 @@
 <aside class="doc-note">
   <strong>For the person who runs a gateway</strong>
-  <p>These pages set up and run a chan gateway. To sign in to one, open its devservers, or share them, see <a href="/manual/gateway/">Connect to a gateway</a>.</p>
+  <p>These pages set up and run a self-hosted chan gateway. To sign in to one, open its devservers, or share them, see <a href="/manual/gateway/">Connect to a gateway</a>.</p>
 </aside>
 
 <section class="manual-block" id="phases">
@@ -14,7 +14,7 @@
         <tr><td><a href="/gateway/install/">Install</a></td><td>Which packages, and where does the data live?</td><td>Postgres with the gateway database, and the service packages</td></tr>
         <tr><td><a href="/gateway/configure/">Configure</a></td><td>How do the services find each other and their public names?</td><td>The configuration under <code>/etc/chan-gateway/</code>, and the services running</td></tr>
         <tr><td><a href="/gateway/edge/">The edge proxy</a></td><td>How does traffic from the internet reach the services?</td><td>nginx terminating TLS for the three names</td></tr>
-        <tr><td><a href="/gateway/accounts/">Accounts and sign-in</a></td><td>Who may sign in?</td><td>Your own account, signed in, with its username set</td></tr>
+        <tr><td><a href="/gateway/accounts/">Accounts and OAuth2 sign-in</a></td><td>Who may sign in?</td><td>Your own account, signed in, with its username set</td></tr>
         <tr><td><a href="/gateway/publish/">Publish a devserver</a></td><td>Does it work end to end?</td><td>A devserver online, opened in a browser, and shared</td></tr>
         <tr><td><a href="/gateway/wireguard/">WireGuard</a>, optional</td><td>Can desktops reach the proxy nodes through WireGuard?</td><td>Desktops enrolled at sign-in</td></tr>
         <tr><td><a href="/gateway/operate/">Operate</a></td><td>How do I run it from day to day?</td><td>The admin CLI, more nodes, upgrades, health checks</td></tr>
@@ -30,7 +30,7 @@
     <table class="manual-table">
       <thead><tr><th>Service</th><th>Does</th><th>Reached at</th></tr></thead>
       <tbody>
-        <tr><td>identity</td><td>Sign-in with GitHub, Google or GitLab, the account page, access tokens, sharing, the desktop's sign-in</td><td><code>gw.example.com</code></td></tr>
+        <tr><td>identity</td><td>OAuth2 sign-in with GitHub, Google or GitLab, the account page, access tokens, sharing, the desktop's sign-in</td><td><code>gw.example.com</code></td></tr>
         <tr><td>profile</td><td>Accounts, devservers, shares and policy, in Postgres</td><td>Internal only</td></tr>
         <tr><td>devserver-control</td><td>Admits devservers and tracks the proxy nodes. No devserver traffic crosses it.</td><td>Internal only</td></tr>
         <tr><td>devserver-proxy</td><td>Takes the devservers' tunnels and serves each devserver at an origin of its own</td><td><code>proxy.example.com</code>, <code>*.p1.proxy.example.com</code></td></tr>
@@ -43,7 +43,7 @@
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
-      <li><code>gw.chan.app</code> is the maintainer's own deployment of this code: experimental, with sign-in off by default. It is not a hosted product and takes no sign-ups.</li>
+      <li><code>gw.chan.app</code> is the maintainer's own deployment of this code: experimental, with OAuth2 sign-in off by default. It is not a hosted product and takes no sign-ups.</li>
       <li>To run the services on Kubernetes instead of one server, follow <a href="https://github.com/fiorix/chan/tree/main/packaging/kube#apply-to-a-real-cluster">packaging/kube</a>. The WireGuard agent has no manifest, since it changes the host's own network interface.</li>
     </ul>
   </details>
@@ -58,7 +58,7 @@
         <tr><td>A server: Ubuntu 24.04, amd64 or arm64, TCP ports 80 and 443 open</td><td>Every service, Postgres and nginx</td><td>You, with sudo on it</td></tr>
         <tr><td>A domain whose DNS you control</td><td>The three names below</td><td>Whoever manages the domain's DNS</td></tr>
         <tr><td>An API credential at your DNS provider</td><td>The DNS challenge a wildcard certificate needs</td><td>The DNS provider's account</td></tr>
-        <tr><td>An OAuth app at GitHub, Google or GitLab</td><td>Sign-in</td><td>An account at that provider, or an admin of its organization</td></tr>
+        <tr><td>An OAuth app at GitHub, Google or GitLab</td><td>OAuth2 sign-in</td><td>An account at that provider, or an admin of its organization</td></tr>
         <tr><td>UDP port 51820 open, only for WireGuard</td><td>Desktops' WireGuard tunnels</td><td>You, at the server's firewall</td></tr>
       </tbody>
     </table>
@@ -72,7 +72,7 @@
     <table class="manual-table">
       <thead><tr><th>Name</th><th>Serves</th></tr></thead>
       <tbody>
-        <tr><td><code>gw.example.com</code></td><td>Sign-in, accounts, and desktop discovery.</td></tr>
+        <tr><td><code>gw.example.com</code></td><td>OAuth2 sign-in, accounts, and desktop discovery.</td></tr>
         <tr><td><code>proxy.example.com</code></td><td>Tunnel ingress, where devservers dial in, and proxy health.</td></tr>
         <tr><td><code>*.p1.proxy.example.com</code></td><td>One origin per devserver on proxy node <code>p1</code>. A <code>*.example.com</code> record does not cover these names.</td></tr>
       </tbody>
@@ -100,7 +100,7 @@ sudo certbot certonly --dns-cloudflare \
 </section>
 
 <section class="manual-block" id="oauth">
-  <h2><a class="heading-anchor" href="#oauth">A sign-in provider</a></h2>
+  <h2><a class="heading-anchor" href="#oauth">An OAuth2 sign-in provider</a></h2>
   <p>The gateway needs at least one of GitHub, Google and GitLab. For GitHub, open <a href="https://github.com/settings/developers">Developer settings</a>, choose <strong>New OAuth App</strong>, and set:</p>
   <div class="manual-table-wrap">
     <table class="manual-table">

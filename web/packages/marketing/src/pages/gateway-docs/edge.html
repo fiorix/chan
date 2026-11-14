@@ -5,7 +5,7 @@
     <table class="manual-table">
       <thead><tr><th>Traffic</th><th>Arrives at</th><th>Goes to</th></tr></thead>
       <tbody>
-        <tr><td>Sign-in and accounts</td><td><code>gw.example.com</code></td><td>identity, <code>127.0.0.1:7000</code></td></tr>
+        <tr><td>OAuth2 sign-in and accounts</td><td><code>gw.example.com</code></td><td>identity, <code>127.0.0.1:7000</code></td></tr>
         <tr><td>Devservers' tunnels, long-lived HTTP/2 streams</td><td><code>proxy.example.com/v1/tunnel</code></td><td>The proxy's tunnel listener, <code>127.0.0.1:7100</code>, as h2c</td></tr>
         <tr><td>Proxy health and readiness</td><td><code>proxy.example.com</code></td><td>The proxy, <code>127.0.0.1:7002</code></td></tr>
         <tr><td>Devserver pages and WebSockets</td><td><code>*.p1.proxy.example.com</code></td><td>The proxy, <code>127.0.0.1:7002</code></td></tr>
@@ -128,6 +128,6 @@ sudo nginx -t &amp;&amp; sudo systemctl reload nginx</b></code>
 <section class="manual-block" id="next">
   <h2><a class="heading-anchor" href="#next">Next</a></h2>
   <div class="next-cards">
-    <a class="next-card" href="/gateway/accounts/"><strong>Accounts and sign-in</strong><span>Let yourself in and choose who else may sign in.</span></a>
+    <a class="next-card" href="/gateway/accounts/"><strong>Accounts and OAuth2 sign-in</strong><span>Let yourself in and choose who else may sign in with OAuth2.</span></a>
   </div>
 </section>
