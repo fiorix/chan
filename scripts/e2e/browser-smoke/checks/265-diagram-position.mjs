@@ -289,19 +289,52 @@ export default {
       report.afterDraw = await draw(ctx, page, "diagram-position-after-details");
       assertDraw(report.afterDraw, "after Details close");
       const shape = report.afterDraw.created;
-      await page.keyboard.press("Escape");
-      const current = await settled(page);
-      assert.ok(!Object.values(current.view.selected).some(Boolean), "Escape did not clear selection before click");
+      // Escape finalizes the tool and retains rectangle selection. Deselect
+      // through a trusted empty-canvas click before testing selection again.
+      const drawn = await read(page);
+      assert.equal(drawn.tool, "selection", "drawing did not return to the selection tool");
+      const emptyPoint = { x: drawn.rect.left + drawn.rect.width * 0.8,
+        y: drawn.rect.top + drawn.rect.height * 0.8 };
+      const emptyScene = { x: (emptyPoint.x - drawn.rect.left) / drawn.view.zoom - drawn.view.scrollX,
+        y: (emptyPoint.y - drawn.rect.top) / drawn.view.zoom - drawn.view.scrollY };
+      const margin = 20 / drawn.view.zoom;
+      assert.ok(drawn.elements.every((element) => element.angle === 0 && (
+        emptyScene.x < element.x - margin || emptyScene.x > element.x + element.width + margin ||
+        emptyScene.y < element.y - margin || emptyScene.y > element.y + element.height + margin)),
+      "deselect point must be outside every element and its selection handles");
+      assert.ok(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.matches(".excalidraw canvas"),
+        emptyPoint), "deselect point is obstructed");
+      await page.evaluate(() => { window.__diagramPosition.events.length = 0; });
+      await page.mouse.click(emptyPoint.x, emptyPoint.y);
+      await page.waitForFunction(() => !Object.values(window.__diagramPosition.read().view.selected).some(Boolean),
+        { polling: 50, timeout: 10_000 });
+      const current = await read(page);
+      report.deselect = { point: emptyPoint, state: current,
+        events: await page.evaluate(() => window.__diagramPosition.events) };
+      assert.ok(report.deselect.events.some((event) => event.type === "pointerdown" && event.trusted) &&
+        report.deselect.events.some((event) => event.type === "pointerup" && event.trusted),
+      "trusted empty-canvas click was not observed");
+      assert.deepEqual(current.elements, drawn.elements, "deselect changed scene elements");
       const point = { x: current.rect.left + (shape.x + shape.width / 2 + current.view.scrollX) * current.view.zoom,
         y: current.rect.top + (shape.y + current.view.scrollY) * current.view.zoom };
       cursors.length = 0;
       await page.mouse.move(point.x, point.y);
       const hoverDeadline = Date.now() + 10_000;
-      while (cursors.length === 0) {
-        if (Date.now() >= hoverDeadline) throw new Error("hover emitted no scene cursor frame");
+      let cursor;
+      // Presence is throttled: the deselection click can still have a cursor
+      // frame in flight. Wait for this hover's coordinates, not any frame.
+      while (true) {
+        cursor = cursors.at(-1);
+        if (cursor && Math.abs((cursor.x - shape.x - shape.width / 2) * current.view.zoom) <= 2 &&
+            Math.abs((cursor.y - shape.y) * current.view.zoom) <= 2) break;
+        if (Date.now() >= hoverDeadline) {
+          report.hover = { point, observed: [...cursors] };
+          throw new Error("hover emitted no cursor frame at the requested point");
+        }
         await sleep(50);
+        await page.mouse.move(point.x, point.y);
       }
-      report.hover = { point, cursor: cursors.at(-1), events: await page.evaluate(() => window.__diagramPosition.events.slice(-1)) };
+      report.hover = { point, cursor, observed: [...cursors], events: await page.evaluate(() => window.__diagramPosition.events.slice(-1)) };
       assert.equal(report.hover.events[0]?.trusted, true, "hover was not trusted");
       near((report.hover.cursor.x - shape.x - shape.width / 2) * current.view.zoom, 0, "hover x");
       near((report.hover.cursor.y - shape.y) * current.view.zoom, 0, "hover y");

@@ -590,6 +590,19 @@ describe("the canvas position after surrounding layout changes", () => {
     expect(b.api.refresh).not.toHaveBeenCalled();
     expect(b.frames.size).toBe(0);
   });
+
+  test("a late observer callback cannot schedule work after an idle board unmounts", async () => {
+    const b = await positionedBoard();
+    expect(b.frames.size).toBe(0);
+    const lateCallbacks = [...resizeObservers].map((observer) => observer.notify);
+    expect(lateCallbacks.length).toBeGreaterThan(0);
+    await unmount(mounted.pop()!);
+    expect(resizeObservers.size).toBe(0);
+    for (const callback of lateCallbacks) callback();
+    expect(b.frames.size).toBe(0);
+    await b.paint();
+    expect(b.api.refresh).not.toHaveBeenCalled();
+  });
 });
 
 describe("a board that has not taken its first seed", () => {
