@@ -22,6 +22,7 @@ import {
   ensureSyntaxTree,
   foldEffect,
   foldedRanges,
+  forceParsing,
   syntaxTree,
   syntaxTreeAvailable,
   unfoldEffect,
@@ -54,8 +55,7 @@ function nodeHeadingLevel(
 /// The heading level of the line containing `pos`, or 0 when it is not a
 /// heading. A heading is a non-empty `ATXHeading1..6` node beginning on the
 /// line; a `#` inside code or frontmatter resolves to a non-heading node and
-/// returns 0. The lazy tree is enough here: callers ask only about visible
-/// lines.
+/// returns 0. Reads the state's published tree without advancing the parse.
 export function headingLevelAt(state: EditorState, pos: number): number {
   const line = state.doc.lineAt(pos);
   let level = 0;
@@ -181,11 +181,10 @@ const headingFoldGutter = gutter({
     if (findHeadingFold(view, { from: line.from, to: line.to })) return CHEVRON_FOLDED;
     return hasSection(view.state, line.number, level) ? CHEVRON_UNFOLDED : null;
   },
-  // Re-render gutter markers whenever the fold state changes; without this the
-  // chevron stays on `▾` after a click even though the fold applied (lineMarker
-  // is otherwise only re-evaluated on doc / viewport changes, which folding
-  // alone doesn't trigger).
+  // Neither a background parse publication nor a fold effect necessarily
+  // changes the document or viewport. Both affect visible heading markers.
   lineMarkerChange: (update) => {
+    if (syntaxTree(update.startState) !== syntaxTree(update.state)) return true;
     for (const tr of update.transactions) {
       for (const e of tr.effects) {
         if (e.is(foldEffect) || e.is(unfoldEffect)) return true;
@@ -197,6 +196,9 @@ const headingFoldGutter = gutter({
   domEventHandlers: {
     click(view, blockInfo) {
       const line = view.state.doc.lineAt(blockInfo.from);
+      // The decoration walker may have parsed this heading without publishing
+      // its tree. Make that tree available to detection and range selection.
+      forceParsing(view, line.to, PARSE_BUDGET_MS);
       if (headingLevelAt(view.state, line.from) === 0) return false;
       const existing = findHeadingFold(view, { from: line.from, to: line.to });
       if (existing) {
