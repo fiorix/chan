@@ -128,3 +128,19 @@ test("a previewed note loads images relative to its own path", async () => {
     expect(images[1].getAttribute("src")).toBe("https://example.com/x.png");
   });
 });
+
+test("a link preview leaves wikilinks as authored", async () => {
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: "[[note]] [[note|alias]]",
+    mtime: null,
+    writable: true,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  open(anchor, "notes/a.md");
+  await vi.waitFor(() => {
+    expect(document.querySelector(".md-preview-md p")?.textContent)
+      .toBe("[[note]] [[note|alias]]");
+  });
+});

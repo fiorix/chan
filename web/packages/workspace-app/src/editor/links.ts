@@ -2,6 +2,41 @@
 
 import { draftDirOf, isDraftClientPath } from "../api/fileIdentity";
 
+export interface ParsedWikiLink {
+  target: string;
+  label: string;
+  anchor: string;
+  wasAbs: boolean;
+}
+
+/// Parse the raw inner text of a `[[wikilink|alias#anchor]]` body.
+export function parseWikiBody(body: string): ParsedWikiLink {
+  let label: string | null = null;
+  let anchor = "";
+  const pipeIdx = body.indexOf("|");
+  if (pipeIdx !== -1) {
+    label = body.slice(pipeIdx + 1).trim();
+    body = body.slice(0, pipeIdx);
+  }
+  const blockIdx = body.indexOf("^");
+  const headIdx = body.indexOf("#");
+  const anchorIdx =
+    blockIdx === -1
+      ? headIdx
+      : headIdx === -1
+        ? blockIdx
+        : Math.min(blockIdx, headIdx);
+  if (anchorIdx !== -1) {
+    anchor = body.slice(anchorIdx + (body[anchorIdx] === "#" ? 1 : 0));
+    body = body.slice(0, anchorIdx);
+  }
+  const target = body.trim();
+  const wasAbs = target.startsWith("/");
+  const displayLabel =
+    label ?? (target.split("/").pop() ?? target).replace(/\.md$/, "");
+  return { target, label: displayLabel, anchor, wasAbs };
+}
+
 /// Serialize a wiki link target and label to markdown.
 ///
 /// `fromPath` is the path of the file whose markdown is being
