@@ -53,7 +53,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a close test fails a loaded gate][closetest] | merged | closed |
 | [an edit erases another window's keys][keysmerge] | not started | build |
 | [team load overwrites the config][teamload] | not started | build |
-| [a survey takes another pane's keys][surveykeys] | not started | build |
+| [a survey takes another pane's keys][surveykeys] | merged | fix |
 | [an override sends a body raw][bracketbody] | not started | build |
 | [downloads carry write temporaries][writetemps] | not started | build |
 | [a gateway page may drop a layout][gwlayout] | not started | measure |
