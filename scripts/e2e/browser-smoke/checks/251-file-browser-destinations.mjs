@@ -152,9 +152,44 @@ async function upload(ctx, page, label, action, destination, observations) {
   await result.chooser.accept([source]);
   const target = join(destination, basename(source));
   await poll(`${label}: upload reaches ${target}`, () => existsSync(target) && readFileSync(target, "utf8") === contents);
+  await settleUpload(page, basename(source), label, observations);
   observations.push({ label, kind: "upload", target, multiple });
   assert.equal(multiple, true, `${label}: surface Upload accepts multiple files`);
   return target;
+}
+
+async function settleUpload(page, filename, label, observations) {
+  // A landed file precedes the client's relist and reveal. Wait for the
+  // transfer's persistent completion state before changing its selection.
+  await launcher(page, "Show transfers");
+  await page.waitForFunction((filename) => [...document.querySelectorAll('.transfer-bubble .tb-row')].some((row) =>
+    row.querySelector('.tb-line')?.textContent?.trim() === `Uploaded ${filename}` && row.querySelector('.tb-bar.done')),
+  { timeout: 30_000 }, filename);
+  await page.click('button[aria-label="Hide transfers"]');
+  await page.waitForSelector('[role="dialog"][aria-label="File transfers"]', { hidden: true });
+  observations.push({ label, kind: "upload-ui-complete", navigationHit: await page.evaluate(() => {
+    const button = document.querySelector('.browser:not(.dock) button[aria-label="Enter directory path"]');
+    if (!button) return null;
+    const rect = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return { button: button.contains(hit), status: Boolean(hit?.closest('.app-statusbar')), tag: hit?.tagName ?? null };
+  }) });
+  // A long upload status can cover the Files toolbar. Collapse it through
+  // its own control before the next native navigation click.
+  const collapse = await page.$('.app-statusbar button[title="hide status"]');
+  if (collapse) {
+    await collapse.click();
+    await collapse.dispose();
+    await page.waitForSelector('.app-statusbar.collapsed', { visible: true });
+  }
+}
+
+async function selectedPath(page, scope, path) {
+  await page.waitForFunction(({ scope, path }) => {
+    const tree = document.querySelector(`${scope} .tree`);
+    const active = document.getElementById(tree?.getAttribute('aria-activedescendant') ?? '');
+    return active?.getAttribute('title') === path;
+  }, { timeout: 30_000 }, { scope, path });
 }
 
 export default {
@@ -169,6 +204,7 @@ export default {
       left: Boolean(await page.$('aside[aria-label="left file browser"]')),
       right: Boolean(await page.$('aside[aria-label="right file browser"]')),
     };
+    const originalStatusCollapsed = Boolean(await page.$('.app-statusbar.collapsed'));
     let standalone = null;
     let standalonePage = null;
     let standaloneHome = null;
@@ -232,6 +268,7 @@ export default {
             const landed = join(ctx.workspaceDir, dest, sourceName);
             workspaceLanded.push(landed);
             await poll(`${label}: Paste reaches ${landed}`, () => existsSync(landed) && readFileSync(landed, "utf8") === `paste ${label}\n`);
+            await selectedPath(page, scope, landed);
             observations.push({ label, kind: "paste", route: route === "row" && selected === "none" ? "keyboard" : route, target: landed });
             if (view === "tree" && selected === "directory") {
               await page.waitForSelector(treeRow(ctx.workspaceDir, `${dest}/${sourceName}`), { visible: true });
@@ -275,6 +312,7 @@ export default {
       assert.equal(picked.chooser.isMultiple(), false, "entry file Upload remains replacement");
       await picked.chooser.accept([replacement]);
       await poll("entry upload replaces selected file", () => readFileSync(join(ctx.workspaceDir, directory, "anchor.txt"), "utf8") === "replacement contents\n");
+      await settleUpload(page, "anchor.txt", "entry-file-upload", observations);
       observations.push({ label: "entry-file-upload", target: `${directory}/anchor.txt` });
       await ctx.shot("entry-upload-exceptions");
 
@@ -333,6 +371,7 @@ export default {
         const landed = join(home, sourceName);
         standaloneLanded.push(landed);
         await poll(`${label}: Paste reaches home`, () => existsSync(landed) && readFileSync(landed, "utf8") === `standalone ${route}\n`);
+        await selectedPath(standalonePage, DOCK, landed);
         observations.push({ label, kind: "paste", route: route === "row" ? "keyboard" : route, target: landed });
       }
       await ctx.shot("standalone-empty-tree", standalonePage);
@@ -360,6 +399,10 @@ export default {
       await cleanup("dismiss active overlay", () => page.keyboard.press("Escape"));
       await cleanup("restore left dock", () => setDock(page, "left", originalDocks.left));
       await cleanup("restore right dock", () => setDock(page, "right", originalDocks.right));
+      await cleanup("restore status presentation", async () => {
+        const control = await page.$(`.app-statusbar button[title="${originalStatusCollapsed ? "hide status" : "show status"}"]`);
+        if (control) { await control.click(); await control.dispose(); }
+      });
       if (cleanupErrors.length) observations.push({ label: "cleanup-errors", errors: cleanupErrors });
       await cleanup("save observations", () => writeFileSync(join(ctx.outDir, "251-file-browser-destinations.observations.json"), JSON.stringify(observations, null, 2)));
       if (cleanupErrors.length) {
