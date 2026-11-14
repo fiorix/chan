@@ -20,7 +20,9 @@ import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } fro
 import { terminalTab } from "../__tests__/tabs";
 import { xterm } from "../__tests__/xterm";
 import { fbTreeInstance } from "../state/store.svelte";
-import { cancelPaneMode, closeTab, layout, paneMode, type BrowserTab, type Tab } from "../state/tabs.svelte";
+import { api } from "../api/client";
+import { resetSurveysForTest, showSurvey, surveyFor } from "../state/survey.svelte";
+import { bumpTabFocusPulse, cancelPaneMode, closeTab, layout, paneMode, setActivePane, type BrowserTab, type Tab } from "../state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -52,10 +54,12 @@ beforeEach(async () => {
 
 afterEach(async () => {
   cancelPaneMode();
+  resetSurveysForTest();
   document.removeEventListener("keydown", recordTerminalKeys, true);
   await unmountApp();
   xterm.terminals.splice(0);
   xterm.textareaFocus = false;
+  vi.restoreAllMocks();
 });
 
 function browserTab(over: Partial<BrowserTab> = {}): BrowserTab {
@@ -165,6 +169,31 @@ async function expectBrowserTakesKeys(): Promise<void> {
 }
 
 describe("a pane focus move from a terminal to a file browser hands the browser the keyboard", () => {
+  test("a visible survey in another pane leaves the browser's keyboard and keys alone", async () => {
+    await layOut({ active: BOTTOM });
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    showSurvey({ surveyId: "other-pane", title: "Choose", bodyMarkdown: "Pick one", options: ["A", "B"] }, TERMINAL);
+    await settleLong();
+    expect(pane(TOP).querySelector(".survey-card"), "the survey remains visible").not.toBeNull();
+    expect(browser().contains(document.activeElement), "showing another pane's survey keeps browser focus").toBe(true);
+
+    bumpTabFocusPulse();
+    await settleLong();
+    await typeKey("1", "Digit1");
+    expect(browser().contains(document.activeElement), "another pane's pulse keeps browser focus").toBe(true);
+    expect(reply).not.toHaveBeenCalled();
+    expect(surveyFor(TERMINAL)?.surveyId).toBe("other-pane");
+    await expectBrowserTakesKeys();
+
+    setActivePane(TOP);
+    await settleLong();
+    expect(document.activeElement).toBe(pane(TOP).querySelector(".survey-card"));
+    await typeKey("1", "Digit1");
+    expect(reply).toHaveBeenCalledWith({ surveyId: "other-pane", kind: "option", optionIndex: 0, optionLabel: "A" });
+    expect(surveyFor(TERMINAL)).toBeNull();
+    reply.mockRestore();
+  });
+
   test("Next pane", async () => {
     await layOut();
     await terminalHoldsKeyboard();
