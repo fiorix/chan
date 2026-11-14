@@ -565,14 +565,22 @@ export class CanvasRenderer {
       this.ctx.globalAlpha = 1.0;
     }
 
-    // Draw underline, of whichever underline style
-    if (cell.flags & VtFlag.UNDERLINE) {
-      const underlineY = cellY + this.metrics.baseline + 2;
+    // Draw the underline in its style: in the colour SGR 58 gave it, which
+    // neither a selection nor the cursor changes, or else in the glyph's
+    if (cell.underline !== ABI.GhosttySgrUnderline.NONE) {
+      this.ctx.strokeStyle =
+        cell.underlineColor === null ? this.ctx.fillStyle : this.rgbToCSS(cell.underlineColor);
+      this.renderUnderline(cell.underline, cellX, cellY, cell.width);
+    }
+
+    // Draw overline along the top pixel row of the cell
+    if (cell.flags & VtFlag.OVERLINE) {
+      const overlineY = cellY + 0.5;
       this.ctx.strokeStyle = this.ctx.fillStyle;
       this.ctx.lineWidth = 1;
       this.ctx.beginPath();
-      this.ctx.moveTo(cellX, underlineY);
-      this.ctx.lineTo(cellX + cellWidth, underlineY);
+      this.ctx.moveTo(cellX, overlineY);
+      this.ctx.lineTo(cellX + cellWidth, overlineY);
       this.ctx.stroke();
     }
 
@@ -622,6 +630,75 @@ export class CanvasRenderer {
         this.ctx.stroke();
       }
     }
+  }
+
+  /**
+   * Stroke an underline of `style` (a `GhosttySgrUnderline`) under the cell
+   * at (cellX, cellY) that takes `columns` columns, in the current stroke
+   * style. A single underline is one line two pixels below the baseline, and
+   * dotted and dashed ones lie on the same line. A double underline is two
+   * lines on whole pixel rows with a row between them, the first on the
+   * single underline's row, since lines that straddle rows run together into
+   * one band; a curly one waves between the two rows. Both rise together
+   * when the lower row would leave the cell. Each column holds one period of
+   * the wave or one dash, so the underlines of adjacent cells run on as one.
+   */
+  private renderUnderline(style: number, cellX: number, cellY: number, columns: number): void {
+    const U = ABI.GhosttySgrUnderline;
+    const ctx = this.ctx;
+    const { width, height, baseline } = this.metrics;
+    const right = cellX + width * columns;
+    const y = cellY + baseline + 2;
+    // The middle of the double underline's upper row.
+    const top = Math.min(Math.floor(y), Math.floor(cellY + height) - 3) + 0.5;
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    switch (style) {
+      case U.DOUBLE:
+        ctx.moveTo(cellX, top);
+        ctx.lineTo(right, top);
+        ctx.moveTo(cellX, top + 2);
+        ctx.lineTo(right, top + 2);
+        break;
+      case U.CURLY:
+        // A stroke's end reaches past the column where the wave meets the
+        // next one at a slant; the clip keeps it off a neighbour that has no
+        // wave.
+        ctx.rect(cellX, cellY, right - cellX, height);
+        ctx.clip();
+        ctx.beginPath();
+        for (let i = 0; i < columns; i++) {
+          const x = cellX + i * width;
+          ctx.moveTo(x, top + 1);
+          ctx.quadraticCurveTo(x + width / 4, top + 3, x + width / 2, top + 1);
+          ctx.quadraticCurveTo(x + (width * 3) / 4, top - 1, x + width, top + 1);
+        }
+        break;
+      case U.DOTTED:
+        // The dash pattern starts at the line's start; offset by the cell's
+        // own x, its dots fall on the even pixels of the row whatever column
+        // the cell starts at, as one dotted line across adjacent cells.
+        ctx.setLineDash([1, 1]);
+        ctx.lineDashOffset = cellX;
+        ctx.moveTo(cellX, y);
+        ctx.lineTo(right, y);
+        break;
+      case U.DASHED: {
+        const gap = Math.max(1, Math.round(width / 4));
+        for (let i = 0; i < columns; i++) {
+          const x = cellX + i * width;
+          ctx.moveTo(x + gap / 2, y);
+          ctx.lineTo(x + width - gap / 2, y);
+        }
+        break;
+      }
+      default:
+        ctx.moveTo(cellX, y);
+        ctx.lineTo(right, y);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   /**

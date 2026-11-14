@@ -3,7 +3,7 @@
 
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, test } from "vitest";
-import { ABI, CELL_BITS, GhosttyVt, LAYOUT, VtCells, VtFlag, type VtCell, type VtTerminal } from "./ghosttyVt";
+import { ABI, CELL_BITS, GhosttyVt, LAYOUT, STYLE_FLAG_BITS, VtCells, VtFlag, type VtCell, type VtTerminal } from "./ghosttyVt";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 const D = ABI.GhosttyRenderStateDirty;
@@ -60,8 +60,10 @@ function text(cells: VtCells): string {
 /// through a render state of the test's own and the core's per-cell reads:
 /// the raw cell, the style, the foreground and background the core
 /// resolves (a cell it reports no background for has the default), and the
-/// cluster. A new render state copies the whole screen on its first update,
-/// whatever the terminal's dirty state.
+/// cluster. The core resolves no underline colour: a palette index in the
+/// style resolves against the render state's palette. A new render state
+/// copies the whole screen on its first update, whatever the terminal's
+/// dirty state.
 function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
   const view = () => new DataView(ex.memory.buffer);
   const make = (construct: (slot: number) => number) => {
@@ -83,6 +85,7 @@ function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
     const rgb = (at: number) => (view().getUint8(at) << 16) | (view().getUint8(at + 1) << 8) | view().getUint8(at + 2);
     const fg = rgb(out + C.fields.foreground);
     const bg = rgb(out + C.fields.background);
+    const palette = Array.from({ length: 256 }, (_, i) => rgb(out + C.fields.palette + i * 3));
     view().setUint32(out, rows, true);
     ex.ghostty_render_state_get(state, ABI.GhosttyRenderStateData.ROW_ITERATOR, out);
     for (let r = 0; r <= y; r++) expect(ex.ghostty_render_state_row_iterator_next(rows)).toBe(1);
@@ -106,11 +109,19 @@ function coreRow(ex: Exports, handle: number, y: number): VtCell[] {
         fg,
         bg,
         defaultBg: true,
+        underline: ABI.GhosttySgrUnderline.NONE,
+        underlineColor: null,
         hyperlink: field(CELL_BITS.hyperlink),
       };
       if (field(CELL_BITS.style_id) !== 0) {
         ex.ghostty_render_state_row_cells_get(cells, K.STYLE, out);
         cell.flags = view().getUint16(out + LAYOUT.GhosttyStyle.fields.flags, true);
+        cell.underline = (cell.flags >> STYLE_FLAG_BITS.underline[0]) & ((1 << STYLE_FLAG_BITS.underline[1]) - 1);
+        const color = out + LAYOUT.GhosttyStyle.fields.underline_color;
+        const { tag, value } = LAYOUT.GhosttyStyleColor.fields;
+        const S = ABI.GhosttyStyleColorTag;
+        if (view().getUint8(color + tag) === S.PALETTE) cell.underlineColor = palette[view().getUint8(color + value)];
+        else if (view().getUint8(color + tag) === S.RGB) cell.underlineColor = rgb(color + value);
       }
       if (ex.ghostty_render_state_row_cells_get(cells, K.FG_COLOR, out) === ABI.GhosttyResult.SUCCESS) cell.fg = rgb(out);
       if (ex.ghostty_render_state_row_cells_get(cells, K.BG_COLOR, out) === ABI.GhosttyResult.SUCCESS) {
@@ -151,7 +162,8 @@ const SCREENS: Record<string, string> = {
   ).join("\r\n"),
   "RGB, inverse and every attribute":
     "\x1b[38;2;10;20;30;48;2;200;100;50mrgb\x1b[0m \x1b[1mb\x1b[22;3mi\x1b[23;4mu\x1b[24;9ms\x1b[29;7mr\x1b[27;8mh\x1b[28;5mk\x1b[25;2mf\x1b[22;53mo\x1b[0m" +
-    "\r\n\x1b[4:2mU2\x1b[4:3mU3\x1b[4:4mU4\x1b[4:5mU5\x1b[0m \x1b[7;31;44mx\x1b[0m \x1b[38;2;0;0;0;48;2;0;0;0mblack\x1b[0m \x1b[30;40mpalette black\x1b[0m",
+    "\r\n\x1b[4:2mU2\x1b[4:3mU3\x1b[4:4mU4\x1b[4:5mU5\x1b[0m \x1b[7;31;44mx\x1b[0m \x1b[38;2;0;0;0;48;2;0;0;0mblack\x1b[0m \x1b[30;40mpalette black\x1b[0m" +
+    "\r\n\x1b[4:3;58;2;255;0;0mred\x1b[58;5;2mpalette\x1b[58;5;196mtable\x1b[59mglyph\x1b[24mnone\x1b[0m",
   "backgrounds erased in a colour": "\x1b[44m\x1b[K\x1b[0m\r\n\x1b[48;2;1;2;3m\x1b[10X\x1b[0m\r\n\x1b[48;5;200m\x1b[5X\x1b[0mtext",
   "wide characters, spacers and clusters": `日本語 ｗｉｄｅ é ñ \u{1f468}‍\u{1f469}‍\u{1f467} ❤️\r\n${"x".repeat(79)}漢`,
   "a cluster beyond the scratch": "e" + "́".repeat(40) + "x",
@@ -175,7 +187,7 @@ describe("the frame reader's rows", () => {
   test("every cell reads as the core resolves it after the program sets colours", async () => {
     const { vt, exports } = await core();
     const t = vt.createTerminal(40, 4, { fgColor: 0xd0d0d0, bgColor: 0x101010 });
-    t.write("\x1b[31mred\x1b[0m \x1b[42mgreen\x1b[0m default\r\n\x1b[38;5;1mone\x1b[0m");
+    t.write("\x1b[31mred\x1b[0m \x1b[42mgreen\x1b[0m default\r\n\x1b[38;5;1mone\x1b[0m \x1b[4:3;58;5;2mtwo\x1b[0m");
     const view = new VtCells();
     expect(t.readRow(0, view)).toBe(true);
     t.write("\x1b]4;1;rgb:00/ff/00\x07\x1b]4;2;rgb:12/34/56\x07\x1b]10;rgb:ff/ff/00\x07\x1b]11;rgb:20/20/40\x07");

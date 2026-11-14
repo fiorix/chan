@@ -393,6 +393,38 @@ describe("upstream's terminal through the binding", () => {
     expect(read(row(t, 0, true)), "in the history").toEqual(want.map((d, x) => [d, bgs[x]]));
   });
 
+  test("a cell reads its underline's style and colour, on the screen and in the history", async () => {
+    const t = (await upstream()).createTerminal(20, 3, { fgColor: 0xd0d0d0, palette: [0, 0x800000] });
+    t.write(
+      "p\x1b[4mu\x1b[4:2md\x1b[4:3mc\x1b[4:4mo\x1b[4:5ma\x1b[24m" +
+        "\x1b[4:3;58;2;255;0;0mr\x1b[58;5;1mi\x1b[58;5;196mx\x1b[59mg\x1b[0m\x1b[58;2;0;0;255mn\x1b[0m",
+    );
+    const U = ABI.GhosttySgrUnderline;
+    // By column: no underline, then single, double, curly, dotted and
+    // dashed; curly in RGB red, in the palette's colour 1 and the 256-colour
+    // table's 196, and back in the glyph's colour after SGR 59; and a colour
+    // on a cell with no underline, which the core keeps.
+    const want = [
+      [U.NONE, null],
+      [U.SINGLE, null],
+      [U.DOUBLE, null],
+      [U.CURLY, null],
+      [U.DOTTED, null],
+      [U.DASHED, null],
+      [U.CURLY, 0xff0000],
+      [U.CURLY, 0x800000],
+      [U.CURLY, 0xff0000],
+      [U.CURLY, null],
+      [U.NONE, 0x0000ff],
+      [U.NONE, null],
+    ];
+    const read = (cells: VtCells) => want.map((_, x) => [cells.at(x)!.underline, cells.at(x)!.underlineColor]);
+    expect(read(row(t, 0)), "on the screen").toEqual(want);
+    t.write("\r\n".repeat(3));
+    expect(t.getScrollbackLength()).toBe(1);
+    expect(read(row(t, 0, true)), "in the history").toEqual(want);
+  });
+
   test("only the rows a write touched are dirty after a clean", async () => {
     const t = (await upstream()).createTerminal(20, 6);
     t.write("a\r\nb\r\nc");

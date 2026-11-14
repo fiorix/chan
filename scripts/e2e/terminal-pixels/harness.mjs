@@ -256,7 +256,10 @@ const PATTERNS = {
   // Colours and attributes. Row 1 sets explicit black backgrounds beside
   // default ones: the palette's black, the 256-colour table's black (16),
   // RGB black and RGB (1,1,1), each of which the renderer paints, where a
-  // default cell shows the theme's background. Rows 10 and 11 give cells a
+  // default cell shows the theme's background. Row 9 writes each underline
+  // style under an underline colour (SGR 58) from the 256-colour table and
+  // from RGB, one that SGR 59 puts back, and a colour under inverse video,
+  // on a wide character and on an overline. Rows 10 and 11 give cells a
   // background and no character, by erasing in a colour.
   attrs: {
     bytes() {
@@ -296,6 +299,12 @@ const PATTERNS = {
           ["31", "█"], ["2", "█"], ["2;33", "▀▄"], ["7", "█"], ["8;41", "█"],
           ["33;44", "─│┼"], ["2;36", "═║╬"], ["7;35", "▌▐"], ["1", "░▒▓"],
           ["4;32", "──"], ["9", "││"], ["38;2;255;128;0;48;2;0;0;0", "█─"],
+        ]),
+        sampleRow(9, "ulc ", [
+          ["4;58;5;196", "Ul"], ["4:2;58;5;196", "U2"], ["4:3;58;5;196", "U3"],
+          ["4:4;58;5;196", "U4"], ["4:5;58;5;196", "U5"], ["4:3;58;2;255;160;0", "Rg"],
+          ["4:2;58;2;0;200;255", "Rd"], ["4:3;58;5;196;59", "59"], ["7;4:3;58;5;46", "In"],
+          ["31;4:4;58;5;21", "Fg"], ["4:3;58;5;196", "漢"], ["53;58;5;196", "Ov"],
         ]),
         cup(0, 10) + "el  \x1b[45m\x1b[K\x1b[0m",
         cup(0, 11) + "ech \x1b[48;2;40;80;120m\x1b[6X",
