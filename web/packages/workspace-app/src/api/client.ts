@@ -1666,12 +1666,20 @@ const calls = {
   /// bootstrap.md server-side (its own section after the Roster). It is the
   /// brief TEXT, not a path (the server has no client filesystem); the dialog
   /// reads the file client-side, mirroring the CLI's `--brief`. It is not part
-  /// of config.toml, so it travels as a sibling field.
-  writeTeamConfig: (dir: string, config: TeamConfigWire, briefContent?: string) =>
+  /// of config.toml, so it travels as a sibling field. `keepBootstrap` leaves
+  /// an existing bootstrap.md as it is (a Load's re-save); the server then
+  /// generates one only where none exists.
+  writeTeamConfig: (
+    dir: string,
+    config: TeamConfigWire,
+    briefContent?: string,
+    keepBootstrap = false,
+  ) =>
     mutate<void>("POST", "/api/team-config/write", {
       dir,
       config,
       brief_content: briefContent,
+      ...(keepBootstrap ? { keep_bootstrap: true } : {}),
     }),
 
   /// Reply to a survey raised by `cs terminal survey`. The blocked CLI is

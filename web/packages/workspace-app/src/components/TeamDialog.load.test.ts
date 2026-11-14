@@ -24,7 +24,8 @@ workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 // Load mode reads an existing team's config.toml from the directory the user
 // names, fills the dialog's form with it (still editable), and says which
 // file it found or why it could not. The directory field suggests workspace
-// folders only. Bootstrap writes the edited config back to that directory.
+// folders only. Bootstrap writes the edited config back to that directory and
+// leaves the team's bootstrap.md, which may carry a brief, as it is.
 
 describe("the team-config client calls", () => {
   afterEach(stopRecordingRequests);
@@ -142,6 +143,35 @@ describe("the dialog's Load mode", () => {
     expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe("Team directory required");
   });
 
+  test("Bootstrap re-saves the loaded config and asks the server to keep its bootstrap.md", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
+    vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
+      session: `session-${request.name}`,
+      tab_label: request.name ?? "",
+    }));
+    const requests = recordRequests(() => json({}));
+    try {
+      const target = await openLoad();
+      await enter(dirInput(target), "saved-team");
+
+      target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!.click();
+
+      await vi.waitFor(() =>
+        expect(requests.filter((r) => r.path === "/api/team-config/write")).toHaveLength(1),
+      );
+      const write = requests.find((r) => r.path === "/api/team-config/write")!;
+      expect(write.body).toMatchObject({
+        dir: "saved-team",
+        config: { host_name: "Trinity" },
+        keep_bootstrap: true,
+      });
+      expect(write.body, "a Load sends no brief").not.toHaveProperty("brief_content");
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
   test("suggests workspace folders only, matching what is typed", async () => {
     const list = vi.spyOn(api, "list").mockImplementation(async (dir) =>
       dir === "teams"
@@ -250,5 +280,25 @@ describe("Load -> edit -> Bootstrap re-saves the config", () => {
     expect(write.mock.calls[0][0]).toBe("saved-team");
     // The persisted wire carries the loaded host name.
     expect(write.mock.calls[0][1]).toMatchObject({ host_name: "Trinity" });
+  });
+
+  test("a New bootstrap sends its brief and lets the server regenerate bootstrap.md", async () => {
+    setLayout(leadTab());
+    vi.spyOn(api, "spawnTerminal").mockResolvedValue({ session: "w", tab_label: "w" });
+    const requests = recordRequests(() => json({}));
+    try {
+      const cfg = resizeTeamMembers({
+        ...wireToDialog(loadedWire(), "saved-team"),
+        configMode: "new",
+        brief: "# Brief",
+      });
+      await runTeamBootstrap(cfg, { leadTabId: "lead-tab", leadPaneId: "pane-test" });
+
+      const write = requests.find((r) => r.path === "/api/team-config/write")!;
+      expect(write.body).toMatchObject({ dir: "saved-team", brief_content: "# Brief" });
+      expect(write.body).not.toHaveProperty("keep_bootstrap");
+    } finally {
+      stopRecordingRequests();
+    }
   });
 });

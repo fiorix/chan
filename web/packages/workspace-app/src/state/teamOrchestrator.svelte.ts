@@ -413,8 +413,10 @@ export async function runTeamBootstrap(
   //    special-file refusal (see api.writeTeamConfig). A non-empty brief
   //    folds verbatim into the generated bootstrap.md (server-side); the
   //    brief is not part of config.toml, so it travels as a separate arg.
+  //    Load shows no brief field and keeps the team's existing bootstrap.md,
+  //    which may carry the brief it was created with or hand edits.
   const brief = config.brief.trim() ? config.brief : undefined;
-  await api.writeTeamConfig(config.teamDir, wire, brief);
+  await api.writeTeamConfig(config.teamDir, wire, brief, config.configMode === "load");
 
   const leadEntry = wire.members.find((m) => m.is_lead);
   if (!leadEntry) throw new Error("config has no lead member");

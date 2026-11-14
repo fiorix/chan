@@ -10,7 +10,8 @@
 //!   config.toml   the TeamConfig (users may hand-edit; revalidated
 //!                 on every reload)
 //!   bootstrap.md  generated team-wide process doc (tool-owned;
-//!                 regenerated from config.toml on every write)
+//!                 regenerated from config.toml on every write but the
+//!                 dialog Load's re-save, which keeps an existing one)
 //!   tasks/        task-{from}-{to}-{n}.md  (owned by `to`, append-only)
 //!   journals/     journal-{member}.md      (owned by each member)
 //!   followups/    followup-{from}-{to}-{n}.md (owned by `to`)
@@ -47,12 +48,17 @@ pub struct ReadTeamConfigPayload {
 /// `chan_workspace::TeamConfig`). `brief_content` is the optional brief
 /// folded verbatim into the generated `bootstrap.md` (the dialog reads the
 /// file client-side and sends its text, mirroring the CLI's `--brief`).
+/// `keep_bootstrap` leaves an existing `bootstrap.md` as it is: the dialog's
+/// Load re-saves a team whose bootstrap may carry a brief or hand edits that a
+/// regenerate would drop.
 #[derive(Deserialize)]
 pub struct WriteTeamConfigPayload {
     pub dir: String,
     pub config: TeamConfig,
     #[serde(default)]
     pub brief_content: Option<String>,
+    #[serde(default)]
+    pub keep_bootstrap: bool,
 }
 
 /// Up-front guard so a bad `dir` produces a clean 400 message instead
@@ -206,9 +212,9 @@ pub async fn api_team_config_read(
 }
 
 /// `POST /api/team-config/write` - validate, create the `{dir}/` tree,
-/// then write `config.toml` + the regenerated `bootstrap.md` through
-/// the Workspace sandbox. 200 `{}` on success; 400 on bad dir / failed
-/// validation / write failure.
+/// then write `config.toml` + the regenerated `bootstrap.md` (or, with
+/// `keep_bootstrap`, only a missing one) through the Workspace sandbox.
+/// 200 `{}` on success; 400 on bad dir / failed validation / write failure.
 pub async fn api_team_config_write(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<WriteTeamConfigPayload>,
@@ -219,12 +225,13 @@ pub async fn api_team_config_write(
     };
     let config = payload.config;
     let brief = payload.brief_content;
+    let keep_bootstrap = payload.keep_bootstrap;
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
     let result = run_blocking("write team config", move || {
-        write_team_config(&workspace, &dir, &config, brief.as_deref())
+        write_team_files(&workspace, &dir, &config, brief.as_deref(), keep_bootstrap)
     })
     .await;
     match result {
@@ -288,6 +295,18 @@ pub(crate) fn write_team_config(
     config: &TeamConfig,
     brief: Option<&str>,
 ) -> Result<(), String> {
+    write_team_files(workspace, dir, config, brief, false)
+}
+
+/// `write_team_config`, except that `keep_bootstrap` leaves an existing
+/// `{dir}/bootstrap.md` as it is and generates one only where none exists.
+fn write_team_files(
+    workspace: &chan_workspace::Workspace,
+    dir: &str,
+    config: &TeamConfig,
+    brief: Option<&str>,
+    keep_bootstrap: bool,
+) -> Result<(), String> {
     validate_team_config(config)?;
     let toml_text =
         toml::to_string_pretty(config).map_err(|e| format!("cannot serialize team config: {e}"))?;
@@ -312,6 +331,9 @@ pub(crate) fn write_team_config(
         .map_err(|e| format!("cannot write {config_rel}: {e}"))?;
 
     let bootstrap_rel = format!("{dir}/bootstrap.md");
+    if keep_bootstrap && workspace.exists(&bootstrap_rel) {
+        return Ok(());
+    }
     let bootstrap = generate_bootstrap_md(dir, config, brief);
     workspace
         .write_text(&bootstrap_rel, &bootstrap)
@@ -321,8 +343,9 @@ pub(crate) fn write_team_config(
 }
 
 /// Generate the team-wide `bootstrap.md` process doc from `config`.
-/// Tool-owned artifact, regenerated on every write. ASCII only, no em
-/// dashes. `team_dir` is the workspace-relative dir the team lives in.
+/// Tool-owned artifact, regenerated on every write that does not keep an
+/// existing one (`keep_bootstrap`). ASCII only, no em dashes. `team_dir` is
+/// the workspace-relative dir the team lives in.
 /// Shared by the HTTP write path, the `cs terminal team` control-socket
 /// handler, and the `--script` generator so there is one source of truth
 /// for the bootstrap text (never a client-side regeneration).
@@ -2061,5 +2084,75 @@ sleep 3"
         );
         // Backslash + single quote are escaped.
         assert_eq!(ansi_c_escape("a'b\\c"), "a\\'b\\\\c");
+    }
+
+    /// POST `/api/team-config/write` with `body` through the real router.
+    async fn post_write(router: axum::Router, body: serde_json::Value) -> StatusCode {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/team-config/write")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The dialog's Load re-saves an existing team's config.toml but leaves
+    /// its bootstrap.md, which may carry a brief or hand edits, as it is; a
+    /// team directory without one still gets one.
+    #[tokio::test]
+    async fn write_route_keeps_an_existing_bootstrap_when_asked() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        write_team_config(&workspace, "saved", &sample_config(), Some("Custom brief.")).unwrap();
+        let kept = workspace.read_text("saved/bootstrap.md").unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace.clone(),
+            )
+        });
+        let router = crate::router(state);
+
+        let mut edited = sample_config();
+        edited.tab_group = "edited".into();
+        for dir in ["saved", "fresh"] {
+            let body = serde_json::json!({ "dir": dir, "config": edited, "keep_bootstrap": true });
+            assert_eq!(
+                post_write(router.clone(), body).await,
+                StatusCode::OK,
+                "{dir}"
+            );
+            assert_eq!(
+                read_team_config(&workspace, dir).unwrap().tab_group,
+                "edited",
+                "{dir}: config.toml is re-saved"
+            );
+        }
+        assert_eq!(
+            workspace.read_text("saved/bootstrap.md").unwrap(),
+            kept,
+            "an existing bootstrap.md, brief included, is left as it is"
+        );
+        assert_eq!(
+            workspace.read_text("fresh/bootstrap.md").unwrap(),
+            generate_bootstrap_md("fresh", &edited, None),
+            "a team directory without a bootstrap.md gets one"
+        );
     }
 }
