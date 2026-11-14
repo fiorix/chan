@@ -127,7 +127,7 @@ describe("the widget's retained selection and buffer reads", () => {
     const { term } = await openTerminal();
     const normal = term.buffer.normal;
     term.write("normal\x1b[?1049h\x1b[2;1Halternate");
-    expect(term.buffer.active).toBe(term.buffer.alternate);
+    expect(term.buffer.active === term.buffer.alternate, "the alternate screen exposes its alternate buffer").toBe(true);
     expect(term.buffer.active).not.toBe(normal);
     expect(term.buffer.active.type).toBe("alternate");
     expect(term.buffer.active.length).toBe(ROWS);
