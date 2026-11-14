@@ -2228,6 +2228,7 @@
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    term?.scrollToBottom();
     return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
   }
 
