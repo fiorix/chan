@@ -4,6 +4,9 @@
 // File notifications wait until after the assertion: their paths would
 // otherwise repair a stale directory-only patch. Directory rename events and
 // HTTP responses pass unchanged; the shared graph refreshes after recovery.
+// Directory-only bursts occur on macOS/Windows, which have no descendant
+// catch-up scan, and on Linux/FreeBSD when that scan arrives after the 250 ms
+// quiet window.
 
 import assert from "node:assert/strict";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
