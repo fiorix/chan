@@ -1,6 +1,6 @@
 # A window that edits a shortcut erases the shortcuts another window saved
 
-Status: accepted for v0.131.0 by the owner on 2026-11-14 (`dev/v0131/decisions.md`, point 11: "as you recommend"); not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-14 (`dev/v0131/decisions.md`, point 11: "as you recommend"); implementation in progress, with the committed gate, guest proof and review pending.
 
 Record: a follow-up of v0.130.0 with no row (its release record, "Follow-ups", the standalone shortcuts; `dev/v0130/reports/termkeys-1-handback.md`): the override writer sends a window's whole table instead of merging over the server's copy, so a window behind another's write drops that window's rows. The decisions document for v0.131.0 checked it against the code and sorted it as a row of its own, as one that loses user data; the owner took that recommendation.
 
@@ -28,3 +28,11 @@ Read at `f7457becb`, by reading; not run.
 1. Workspace app tests: two windows' writers over one stub server, the second holding a stale table, each edits a different binding; the server ends with both. Red on today's code. A conflict replays the merge.
 2. A test that a reconnect refreshes the preferences a window holds; red on today's code.
 3. In a guest, two windows of one devserver, one disconnected while the other saves a chord, then an edit in the first: both chords are in the server's config afterwards.
+
+## Implementation, 2026-11-14
+
+An override assignment or reset sends its command id, platform slot and chord (null for a reset) to the preference writer. The writer merges that one binding over the table its revisioned read returns, rebuilding the merge after every conflict; the persisted table and the override resolver are unchanged. Each watch-socket connection schedules the existing preference refresh for its window kind, including the standalone tenant's config-only refresh.
+
+The local regression runs two independent window module graphs over one revisioned HTTP stub. Eight cases fail on the base at the expected lost-binding or stale-preference assertions, then pass with the implementation: different commands and platform slots, reset preserving other rows, a conflict caused by the other real writer, queued assignment/reset, and preference refresh in workspace and standalone windows. Evidence is in `dev/v0131-team/evidence/Edit131/keysmerge/red.log` and `green.log` with their status files. The existing override seam's 22 tests, server reconnect's 10 tests and standalone shortcuts' 7 tests pass; workspace-app typecheck reports no errors or warnings (`seam.log`, `reconnect-neighbor.log`, `standalone-neighbor.log`, `typecheck.log` in the same directory).
+
+Seven isolated faults each fail at the intended assertion: discarding the server table, discarding sibling platform slots, skipping a reset, retaining an empty command, reusing the first merge after a revision conflict, and omitting the reconnect refresh for either window kind. Each `mutant-*.log` has its exit status, isolated patch and original/mutated/restored SHA256 record beside it. All source bytes were restored and the regression's eight cases pass again (`restored.log`). The committed frontend gate, the guest two-window reading and review remain pending; this is not a closing verdict.

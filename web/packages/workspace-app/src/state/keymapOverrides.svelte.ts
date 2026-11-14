@@ -201,16 +201,16 @@ registerOverrideEscapeMatcher((chord) => commandIdForChord(chord) !== undefined)
 // devserver holds a web set for its browser clients). The config layer
 // installs the persist writer; until it does, assignment is in-memory.
 
-let persistOverrides: ((wire: KeymapOverridesWire) => void) | null = null;
+/// One assignment or reset. The writer merges this edit over the server's
+/// current table, which can contain bindings this window has not loaded.
+export type OverrideEdit = { id: string; slot: OverrideSlot; chord: Chord | null };
+
+let persistOverrides: ((edit: OverrideEdit) => void) | null = null;
 
 export function registerOverridePersist(
-  fn: ((wire: KeymapOverridesWire) => void) | null,
+  fn: ((edit: OverrideEdit) => void) | null,
 ): void {
   persistOverrides = fn;
-}
-
-function persist(): void {
-  persistOverrides?.(serializeOverrides());
 }
 
 // ---- mutation ----------------------------------------------------------
@@ -226,7 +226,7 @@ export function assignOverride(
     ...(keymapOverrides.byId[id] ?? {}),
     [slot]: chord,
   };
-  persist();
+  persistOverrides?.({ id, slot, chord });
 }
 
 /// Remove `id`'s override for `slot` (dropping the command entirely when no
@@ -241,7 +241,7 @@ export function clearOverride(
   delete next[slot];
   if (Object.keys(next).length === 0) delete keymapOverrides.byId[id];
   else keymapOverrides.byId[id] = next;
-  persist();
+  persistOverrides?.({ id, slot, chord: null });
 }
 
 // ---- retired commands ----------------------------------------------------
