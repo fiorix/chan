@@ -1,19 +1,18 @@
 # chan design
 
-chan is a supercharged terminal emulator. This is the whole-system reference: what the product is, which components build it, the shapes it runs in, and the invariants that hold across all of them. It stays above the level of routes, flags and timeouts; those live in the code and in each crate's own design document, indexed in the root [README.md](README.md).
+chan is a supercharged terminal emulator. This is the whole-system reference: what the product is, what builds it, and the rules that hold across all of it. It reads from the outside in:
+
+- [What chan is](#what-chan-is) - the product, as six layers and the workspaces around them.
+- [Components](#components) - the crates, apps and services, and the direction they depend in.
+- [Runtime shapes](#runtime-shapes) - the same system run locally, as a devserver over a TCP tunnel, and as a devserver through a gateway.
+- [The terminal](#the-terminal), [The workspace](#the-workspace), [The web apps and the desktop shell](#the-web-apps-and-the-desktop-shell), [Process metrics](#process-metrics) - how each part works.
+- [State and ownership](#state-and-ownership), [Invariants](#invariants) - what is stored where, and the rules every component keeps.
+
+It stays above the level of routes, flags and timeouts; those live in the code and in each crate's own design document, indexed in the root [README.md](README.md#design-documents).
 
 ## What chan is
 
-The product reads as layers. Each one builds on the previous, and the same binary carries all of them.
-
-1. **A terminal emulator.** Terminals open in tabs and split panes inside windows. The terminal core is Ghostty's libghostty-vt compiled to WebAssembly and drawn by ghostty-web's renderer; chan carries ghostty-web's sources, the vendored core and chan's binding of it as the workspace package `@chan/ghostty-web-ng`, with xterm.js as the fallback backend. The session behind a terminal, its program and its scrollback, lives in the server process rather than in the view, so a window can reload, close, or attach from another machine and the shell keeps running.
-2. **Scriptable, from the shell, the keyboard and the mouse.** Every chan terminal carries a control socket and the `cs` command, so a shell can drive the window that spawned it: open a file, split a pane, start a named terminal, type into another tab and read its scrollback, raise a survey, put bytes on the viewer's clipboard, upload and download files, export a document to PDF. The same actions sit behind the command launcher and configurable shortcuts for the keyboard, and behind pane menus, tab drag and drop and context menus for the mouse. Programs report back through the terminal too: the Program Status Protocol (OSC 7501) marks a tab as working, done or blocked, and the Rich Prompt composes Markdown and images into a program's input.
-3. **A multiplexer of its own, and tmux.** chan's multiplexer is windows, panes with two sides, tabs, and named sessions that outlive their views and are listed, grouped and addressed by name. It also speaks tmux control mode: a `tmux -CC` run in a chan terminal, locally or through ssh, turns that tmux server's windows and panes into chan windows and panes, with tmux keeping the geometry.
-4. **Local and remote, the same.** The process that owns terminals and workspaces is a server with an HTTP and WebSocket API. The desktop app embeds it for local work; `chan devserver` runs it headless on another machine. Browsers and desktop windows attach to either, and several viewers can share one session.
-5. **A devserver over a TCP tunnel.** A devserver binds loopback by default and is reached over whatever TCP path already exists: an `ssh -L` port forward, a VM's or container's published port, a LAN address. The desktop stores the address and a connect script, runs the script in a control terminal, and opens the devserver's terminals and workspaces as native windows. Disconnecting leaves everything running there.
-6. **A devserver through a gateway.** For an always-on, team-wide setup, a devserver dials out to a chan gateway with a personal access token, and the gateway publishes it at an origin of its own behind sign-in, to the owner and to the accounts the owner shares it with, from any browser or desktop. The gateway is a set of services you deploy on your own infrastructure. Nothing about chan is an online service, and chan itself is free and open source under the Apache 2.0 license.
-
-Around the terminal, chan turns any directory into a workspace: content search, a Markdown editor with diagrams, slide decks and PDF export, a file browser with transfers, a graph of the project's links, tags, mentions and code, a dashboard, and teams of coding agents provisioned into named tabs. A workspace is commonly a git repository. A terminal window with no workspace behind it still browses and edits the machine's own filesystem and has a Dashboard with Metrics and About.
+The product reads as layers. Each one builds on the previous, and the same binary carries all of them. The diagram names them; the list after it describes each.
 
 ```mermaid
 flowchart TB
@@ -27,6 +26,15 @@ flowchart TB
   L1 --> L2 --> L3 --> L4 --> L5 --> L6
   L4 --> W
 ```
+
+1. **A terminal emulator.** Terminals open in tabs and split panes inside windows. The terminal core is Ghostty's libghostty-vt compiled to WebAssembly and drawn by ghostty-web's renderer; chan carries ghostty-web's sources, the vendored core and chan's binding of it as the workspace package `@chan/ghostty-web-ng`, with xterm.js as the fallback backend. The session behind a terminal, its program and its scrollback, lives in the server process rather than in the view, so a window can reload, close, or attach from another machine and the shell keeps running.
+2. **Scriptable, from the shell, the keyboard and the mouse.** Every chan terminal carries a control socket and the `cs` command, so a shell can drive the window that spawned it: open a file, split a pane, start a named terminal, type into another tab and read its scrollback, raise a survey, put bytes on the viewer's clipboard, upload and download files, export a document to PDF. The same actions sit behind the command launcher and configurable shortcuts for the keyboard, and behind pane menus, tab drag and drop and context menus for the mouse. Programs report back through the terminal too: the Program Status Protocol (OSC 7501) marks a tab as working, done or blocked, and the Rich Prompt composes Markdown and images into a program's input.
+3. **A multiplexer of its own, and tmux.** chan's multiplexer is windows, panes with two sides, tabs, and named sessions that outlive their views and are listed, grouped and addressed by name. It also speaks tmux control mode: a `tmux -CC` run in a chan terminal, locally or through ssh, turns that tmux server's windows and panes into chan windows and panes, with tmux keeping the geometry.
+4. **Local and remote, the same.** The process that owns terminals and workspaces is a server with an HTTP and WebSocket API. The desktop app embeds it for local work; `chan devserver` runs it headless on another machine. Browsers and desktop windows attach to either, and several viewers can share one session.
+5. **A devserver over a TCP tunnel.** A devserver binds loopback by default and is reached over whatever TCP path already exists: an `ssh -L` port forward, a VM's or container's published port, a LAN address. The desktop stores the address and a connect script, runs the script in a control terminal, and opens the devserver's terminals and workspaces as native windows. Disconnecting leaves everything running there.
+6. **A devserver through a gateway.** For an always-on, team-wide setup, a devserver dials out to a chan gateway with a personal access token, and the gateway publishes it at an origin of its own behind sign-in, to the owner and to the accounts the owner shares it with, from any browser or desktop. The gateway is a set of services you deploy on your own infrastructure. Nothing about chan is an online service, and chan itself is free and open source under the Apache 2.0 license.
+
+Around the terminal, chan turns any directory into a workspace: content search, a Markdown editor with diagrams, slide decks and PDF export, a file browser with transfers, a graph of the project's links, tags, mentions and code, a dashboard, and teams of coding agents provisioned into named tabs. A workspace is commonly a git repository. A terminal window with no workspace behind it still browses and edits the machine's own filesystem and has a Dashboard with Metrics and About.
 
 ## Components
 
