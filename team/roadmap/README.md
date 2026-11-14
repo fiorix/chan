@@ -42,7 +42,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a streaming graph stalls the window][graphstall] | not started | measure |
 | [a renamed directory keeps old files][graphrename] | not started | build |
 | [a terminal launch gets no focus][raisefocus] | not started | build |
-| [a minimized window stays minimized][unbury] | not started | build |
+| [a minimized window stays minimized][unbury] | merged | vm |
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
