@@ -49,6 +49,7 @@ export class FakeTerminal {
   selectionHandlers: Array<() => void> = [];
   focusCount = 0;
   blurCount = 0;
+  scrollToBottomCount = 0;
   disposed = false;
   /// The textarea open() made when `xterm.textareaFocus` is set.
   textarea: HTMLTextAreaElement | null = null;
@@ -138,6 +139,9 @@ export class FakeTerminal {
   }
   refresh(start: number, end: number): void {
     this.refreshCalls.push([start, end]);
+  }
+  scrollToBottom(): void {
+    this.scrollToBottomCount += 1;
   }
   onSelectionChange(handler: () => void): { dispose(): void } {
     this.selectionHandlers.push(handler);

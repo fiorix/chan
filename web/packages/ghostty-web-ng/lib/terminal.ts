@@ -450,11 +450,13 @@ export class Terminal implements ITerminalCore {
       this.inputHandler = new InputHandler(
         this.ghostty!,
         parent,
-        (data: string) => {
+        (data: string, isUserInput = true) => {
           // Check if stdin is disabled
           if (this.options.disableStdin) {
             return;
           }
+          // Mouse reports share this callback but leave a reader in history.
+          if (isUserInput && data) this.scrollToBottom();
           // Clear selection when user types
           this.selectionManager?.clearSelection();
           this.awaitingEcho = true;
@@ -637,10 +639,12 @@ export class Terminal implements ITerminalCore {
 
     // Check if terminal has bracketed paste mode enabled
     if (this.wasmTerm!.hasBracketedPaste()) {
+      this.scrollToBottom();
       // Wrap with bracketed paste sequences (DEC mode 2004)
       this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
     } else {
       // Send data directly
+      if (data) this.scrollToBottom();
       this.dataEmitter.fire(data);
     }
   }
@@ -660,6 +664,7 @@ export class Terminal implements ITerminalCore {
     }
 
     if (wasUserInput) {
+      if (data) this.scrollToBottom();
       this.awaitingEcho = true;
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);
