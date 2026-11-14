@@ -185,6 +185,8 @@ chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devser
 
 The local desktop's `cs window new` mints a window through the desktop bridge, then chan-server waits up to ten seconds for its id to be live in the calling tenant's session registry before returning it to the shell. This makes the id immediately usable by `--window` commands; native focus remains the operating system's decision. A connection timeout exits 124 and names the id without deleting its record. A devserver has no desktop window-management bridge, even when a desktop views its windows.
 
+External links cross the desktop boundary through a limited URL command on the same window and origin grants as the page's other native actions. The editor, dashboard and About page, native menus, launcher and sign-in share the desktop's host opener; an AppImage starts the host handler with the same environment scrub as a terminal. Pages have no direct opener-plugin grant. The command and capability contract is in [desktop/design.md](desktop/design.md#exact-origin-trust-and-native-ipc).
+
 ## Process metrics
 
 The outer server router owns a metrics runtime shared by its launcher and all tenants. One worker samples process and subsystem counters every second into a bounded ten-minute memory history; a separate worker scans chan-home storage while someone reads it. Dashboard, `chan metrics`, and an optional socket-activated source for Linux `systemd-report` read the same cache. The source queries the running devserver and never owns collection or starts that devserver. Measurement scopes, the HTTP contract, and example user units are in [docs/metrics.md](docs/metrics.md).

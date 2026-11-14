@@ -71,7 +71,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
@@ -671,9 +670,7 @@ fn open_authorize_url<R: tauri::Runtime>(
     if let Some(open) = _attempt.signin_hooks.opener.lock().unwrap().take() {
         return open(url);
     }
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| format!("opening browser: {e}"))
+    crate::external_open::open(app, url)
 }
 
 fn fail_signin<R: tauri::Runtime>(

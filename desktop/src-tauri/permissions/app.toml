@@ -4,6 +4,7 @@ description = "Allows per-workspace windows to call their app commands."
 permissions = [
   "allow-reload-window",
   "allow-open-devtools",
+  "allow-open-external-url",
   "allow-open-new-window",
   "allow-request-app-quit",
   "allow-request-close-window",
@@ -52,6 +53,7 @@ description = "Allows authenticated gateway-served lib-* windows to call their a
 permissions = [
   "allow-reload-window",
   "allow-open-devtools",
+  "allow-open-external-url",
   "allow-open-new-window",
   "allow-request-app-quit",
   "allow-request-close-window",
@@ -162,6 +164,11 @@ commands.allow = ["toggle_launcher_panel"]
 identifier = "allow-reload-window"
 description = "Enables the reload_window command."
 commands.allow = ["reload_window"]
+
+[[permission]]
+identifier = "allow-open-external-url"
+description = "Opens an http, https, mailto or tel link with the host environment."
+commands.allow = ["open_external_url"]
 
 [[permission]]
 identifier = "allow-open-devtools"

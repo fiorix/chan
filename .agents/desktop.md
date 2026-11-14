@@ -13,7 +13,7 @@ chan-desktop is the desktop edition of chan, a supercharged terminal emulator: a
 
 ```bash
 make -C desktop dev         # cargo tauri dev (or: make desktop-dev at the root)
-make -C desktop build       # cargo tauri build, every bundle for the host
+make -C desktop build       # compile and package every bundle for the host
 make -C desktop check       # cargo check
 make -C desktop lint        # clippy, all targets, warnings denied
 make -C desktop test        # cargo test --all-targets
@@ -22,7 +22,9 @@ make -C desktop xwin-check  # compile-check the core crates for the MSVC target 
 
 `xwin-check` needs the LLVM toolchain (`llvm-lib`, `clang-cl`) on PATH. It proves the `cfg(windows)` arms of chan-server, chan-shell and chan-workspace compile; the desktop's own Windows build is proven by `make ci-windows` on a native Windows host.
 
-On Linux, `make build` splits a dashed candidate version: Tauri requires semver, so the deb and AppImage build with the dashed version and the RPM is bundled separately with the undashed `version` and `0~<suffix>` as `Release`, which sorts before the GA release `1`. The Fedora specs instead put `~<suffix>` in `Version`. `make linux-chan-desktop` builds the Linux bundles inside an sdme container (`packaging/sdme/build-chan-desktop.sh`), which is how a macOS workstation produces them.
+On Linux, `make build` compiles with the product name `Chan`, packages the deb and RPM, then bundles the AppImage separately. Tauri derives the AppImage's desktop filename from `productName`, so its bundle-only configuration uses `chan-desktop` and its desktop template keeps the visible name `Chan`. The AppImage and any detached signature are renamed to the public `Chan_` asset prefix without changing their bytes. Use the Makefile's build or `ci-linux` target for AppImages: a raw `cargo tauri build` bypasses that identity configuration and asset normalization.
+
+For a dashed candidate version, Tauri requires semver, so the deb and AppImage use the dashed version and the RPM is bundled separately with the undashed `version` and `0~<suffix>` as `Release`, which sorts before the GA release `1`. The Fedora specs instead put `~<suffix>` in `Version`. `make linux-chan-desktop` builds the Linux bundles inside an sdme container (`packaging/sdme/build-chan-desktop.sh`), which is how a macOS workstation produces them.
 
 ### Package proofs without secrets
 
@@ -124,6 +126,6 @@ The client probes one static manifest, `https://chan.app/dl/desktop/latest.json`
 
 ## Release artifact names and versions
 
-Bundle names derive from `src-tauri/tauri.conf.json`: `productName` gives the `Chan` prefix and `version` the semantic version. The local DMG builds as `Chan_<version>_<arch>.dmg`; `release.yml` renames it to `Chan_<version>.dmg`, the name the Homebrew cask template and the site's asset list expect, and publishes `Chan_<version>_aarch64.app.tar.gz` beside it. A dashed candidate version ships the AppImage as the desktop payload; its deb and RPM are uploaded as diagnostic workflow artifacts on a prerelease only.
+Bundle names derive from `src-tauri/tauri.conf.json`: `productName` gives the `Chan` prefix and `version` the semantic version. The AppImage bundle-only override uses `chan-desktop`, and the Makefile restores the public `Chan_` asset prefix, including a detached signature when present. The local DMG builds as `Chan_<version>_<arch>.dmg`; `release.yml` renames it to `Chan_<version>.dmg`, the name the Homebrew cask template and the site's asset list expect, and publishes `Chan_<version>_aarch64.app.tar.gz` beside it. A dashed candidate version ships the AppImage as the desktop payload; its deb and RPM are uploaded as diagnostic workflow artifacts on a prerelease only.
 
 `version` is a manual pin in the release version-pin bump; `release.yml`'s `context` job asserts that the tag, the workspace Cargo version, this field and the gateway version all match. The crate's Rust version is inherited from the workspace, so once this field matches, the `.app` and the workspace agree.

@@ -1,7 +1,7 @@
 .PHONY: dev build check fmt fmt-check lint test clean web tauri-cli \
         app-signed app-notarized sign-prereqs notarize-prereqs \
         dmg-layout-proof windows-installer xwin-prereqs xwin-check \
-        ci-linux-prereqs ci-linux ci-macos ci-windows
+        ci-linux-prereqs ci-linux ci-macos ci-windows bundle-appimage
 
 # Monorepo root. Override via CHAN_REPO=/path on CI.
 CHAN_REPO ?= ..
@@ -58,18 +58,41 @@ dev: tauri-cli web
 
 # Fedora specs put prereleases in Version as ~rcN. Tauri requires semver,
 # so its RPM uses the GA Version and 0~rcN Release for the same ordering.
+# The AppImage has a separate bundle step so its desktop ID does not change
+# the compiled app's product name or another platform's package metadata.
 build: tauri-cli web
 	@version="$$(node -p 'require("./src-tauri/tauri.conf.json").version')" || exit; \
-	if [ "$$(uname -s)" = Linux ] && [ "$${version#*-}" != "$$version" ]; then \
-	    suffix="$${version#*-}"; \
-	    printf 'desktop bundle: candidate %s, RPM release 0~%s\n' "$$version" "$$suffix"; \
-	    override="$$(printf '{"version":"%s","bundle":{"linux":{"rpm":{"release":"0~%s"}}}}' "$${version%%-*}" "$$suffix")"; \
-	    cd src-tauri && $(TAURI) build --bundles deb,appimage && \
-	    $(TAURI) bundle --bundles rpm --config "$$override"; \
+	if [ "$$(uname -s)" = Linux ]; then \
+	    if [ "$${version#*-}" != "$$version" ]; then \
+	        suffix="$${version#*-}"; \
+	        printf 'desktop bundle: candidate %s, RPM release 0~%s\n' "$$version" "$$suffix"; \
+	        override="$$(printf '{"version":"%s","bundle":{"linux":{"rpm":{"release":"0~%s"}}}}' "$${version%%-*}" "$$suffix")"; \
+	        (cd src-tauri && $(TAURI) build --bundles deb && \
+	            $(TAURI) bundle --bundles rpm --config "$$override") || exit; \
+	    else \
+	        (cd src-tauri && $(TAURI) build --bundles deb,rpm) || exit; \
+	    fi; \
+	    $(MAKE) bundle-appimage; \
 	else \
 	    printf 'desktop bundle: single build %s\n' "$$version"; \
 	    cd src-tauri && $(TAURI) build; \
 	fi
+
+# Tauri derives an AppImage's desktop filename from productName. Apply the
+# override only to bundling; the template keeps the visible Name as Chan.
+# The release assets keep their public filenames, with any detached signature.
+bundle-appimage:
+	cd src-tauri && $(TAURI) bundle --bundles appimage --config tauri.appimage.conf.json
+	@set -e; \
+	    set -- "$(BUNDLE_DIR)"/appimage/chan-desktop_*.AppImage; \
+	    [ "$$#" -eq 1 ] && [ -f "$$1" ] \
+	        || { echo "error: expected one chan-desktop AppImage" >&2; exit 1; }; \
+	    image="$$1"; \
+	    renamed="$(BUNDLE_DIR)/appimage/Chan_$${image##*/chan-desktop_}"; \
+	    [ ! -e "$$renamed" ] && [ ! -e "$$renamed.sig" ] \
+	        || { echo "error: AppImage destination already exists" >&2; exit 1; }; \
+	    mv "$$image" "$$renamed"; \
+	    if [ -f "$$image.sig" ]; then mv "$$image.sig" "$$renamed.sig"; fi
 
 windows-installer: tauri-cli web
 	cd $(CHAN_REPO) && $(CARGO) build --release -p chan
@@ -89,7 +112,8 @@ ci-linux: ci-linux-prereqs tauri-cli $(CI_WEB_PREREQ)
 	@test "$$(uname -s)" = Linux || { \
 	    echo "error: desktop ci-linux requires a native Linux host"; exit 1; \
 	}
-	cd src-tauri && $(TAURI) build --bundles appimage
+	cd src-tauri && $(TAURI) build --no-bundle
+	$(MAKE) bundle-appimage
 	@appimage="$$(find "$(BUNDLE_DIR)/appimage" -name '*.AppImage' \
 	    -type f -print -quit)"; \
 	    [ -n "$$appimage" ] \

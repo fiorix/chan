@@ -26,6 +26,11 @@ function state(doc: string): EditorState {
 }
 
 describe("external link helpers", () => {
+  afterEach(() => {
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.restoreAllMocks();
+  });
   test("recognizes only browser-openable external schemes", () => {
     expect(isOpenableExternalUrl("https://example.com")).toBe(true);
     expect(isOpenableExternalUrl("http://example.com")).toBe(true);
@@ -68,32 +73,50 @@ describe("external link helpers", () => {
     expect(linkUrlAtPos(state(imgDoc), imgDoc.indexOf("a"))).toBeNull();
   });
 
-  test("uses the Tauri opener bridge when available", async () => {
+  test("uses the chan command even when the plugin bridge is present", async () => {
     const openUrl = vi.fn().mockResolvedValue(undefined);
+    const invoke = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window, "__TAURI__", {
       configurable: true,
-      value: { opener: { openUrl } },
+      value: { opener: { openUrl }, core: { invoke } },
     });
 
     await expect(openExternalUrl("https://example.com")).resolves.toBe(true);
-    expect(openUrl).toHaveBeenCalledWith("https://example.com");
-
-    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    expect(invoke).toHaveBeenCalledWith("open_external_url", { url: "https://example.com" });
+    expect(openUrl).not.toHaveBeenCalled();
   });
 
-  test("falls back to the Tauri invoke bridge when opener is unavailable", async () => {
+  test.each(["internal", "core", "invoke"])("uses the chan command through the %s bridge", async (bridge) => {
     const invoke = vi.fn().mockResolvedValue(undefined);
+    if (bridge === "internal") {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        configurable: true,
+        value: { invoke },
+      });
+    } else {
+      Object.defineProperty(window, "__TAURI__", {
+        configurable: true,
+        value: bridge === "core" ? { core: { invoke } } : { invoke },
+      });
+    }
+
+    for (const url of ["https://example.com", "http://example.com", "mailto:a@example.com", "tel:+15551212"]) {
+      await expect(openExternalUrl(url)).resolves.toBe(true);
+      expect(invoke).toHaveBeenLastCalledWith("open_external_url", { url });
+    }
+    expect(invoke).toHaveBeenCalledTimes(4);
+  });
+
+  test.each(["javascript:alert(1)", "file:///tmp/private", "ftp://example.com", "notes.md", "#local"])("does not invoke the desktop for %s", async (url) => {
+    const invoke = vi.fn();
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
       value: { invoke },
     });
-
-    await expect(openExternalUrl("https://example.com")).resolves.toBe(true);
-    expect(invoke).toHaveBeenCalledWith("plugin:opener|open_url", {
-      url: "https://example.com",
-    });
-
-    delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    await expect(openExternalUrl(url)).resolves.toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   test("uses window.open outside Tauri", async () => {
@@ -115,11 +138,11 @@ describe("openExternalUrl no-default-browser fallback", () => {
     setNotifyHandler((msg) => console.warn(msg));
   });
 
-  test("surfaces a status message and copies URL when the Tauri opener throws", async () => {
-    const openUrl = vi.fn().mockRejectedValue(new Error("no app found"));
+  test("surfaces a status message and copies URL when the chan opener throws", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("no app found"));
     Object.defineProperty(window, "__TAURI__", {
       configurable: true,
-      value: { opener: { openUrl } },
+      value: { core: { invoke } },
     });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -131,7 +154,7 @@ describe("openExternalUrl no-default-browser fallback", () => {
 
     await expect(openExternalUrl("https://example.com")).resolves.toBe(false);
 
-    expect(openUrl).toHaveBeenCalledWith("https://example.com");
+    expect(invoke).toHaveBeenCalledWith("open_external_url", { url: "https://example.com" });
     expect(writeText).toHaveBeenCalledWith("https://example.com");
     expect(notifications).toEqual([
       "Couldn't open link in browser - URL copied to clipboard",
@@ -139,10 +162,10 @@ describe("openExternalUrl no-default-browser fallback", () => {
   });
 
   test("falls back to including the raw URL when clipboard also fails", async () => {
-    const openUrl = vi.fn().mockRejectedValue(new Error("opener denied"));
+    const invoke = vi.fn().mockRejectedValue(new Error("opener denied"));
     Object.defineProperty(window, "__TAURI__", {
       configurable: true,
-      value: { opener: { openUrl } },
+      value: { core: { invoke } },
     });
     const writeText = vi.fn().mockRejectedValue(new Error("clipboard denied"));
     Object.defineProperty(navigator, "clipboard", {
@@ -161,7 +184,7 @@ describe("openExternalUrl no-default-browser fallback", () => {
 
   test("copies the URL natively where the webview has no Clipboard API", async () => {
     const invoke = vi.fn(async (cmd: string) => {
-      if (cmd === "plugin:opener|open_url") throw new Error("no app found");
+      if (cmd === "open_external_url") throw new Error("no app found");
     });
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
@@ -179,11 +202,34 @@ describe("openExternalUrl no-default-browser fallback", () => {
     ]);
   });
 
-  test("does not fall back to window.open inside the Tauri webview", async () => {
-    const openUrl = vi.fn().mockRejectedValue(new Error("no app found"));
+  test("does not use the plugin when the chan invoke bridge is absent", async () => {
+    const openUrl = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window, "__TAURI__", {
       configurable: true,
       value: { opener: { openUrl } },
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const notifications: string[] = [];
+    setNotifyHandler((msg) => notifications.push(msg));
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    open.mockClear();
+
+    await expect(openExternalUrl("https://example.com")).resolves.toBe(false);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(writeText).toHaveBeenCalledWith("https://example.com");
+    expect(notifications).toEqual(["Couldn't open link in browser - URL copied to clipboard"]);
+  });
+
+  test("does not fall back to window.open inside the Tauri webview", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("no app found"));
+    Object.defineProperty(window, "__TAURI__", {
+      configurable: true,
+      value: { core: { invoke } },
     });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,

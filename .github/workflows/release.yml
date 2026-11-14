@@ -515,7 +515,7 @@ jobs:
   linux-desktop-artifacts:
     name: linux desktop packages (${{ matrix.package_arch }})
     # GitHub-hosted runners are ubuntu-only, so CI ships the UNIVERSAL
-    # AppImage that Tauri targets:"all" already emits, on amd64 AND arm64
+    # AppImage that the desktop Makefile packages, on amd64 AND arm64
     # (matching the CLI + gateway matrix jobs). The AppImage is also the
     # Linux desktop updater payload, so each one is minisign-signed here
     # with the same key as the macOS payload and its detached .sig ships

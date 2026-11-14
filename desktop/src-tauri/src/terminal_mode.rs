@@ -190,7 +190,11 @@ fn run_window(launch: TerminalLaunch, cwd: PathBuf) -> Result<(), String> {
     let mode_for_run = Arc::clone(&mode);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        );
     // Registered so the updater's state exists for the shared command table;
     // nothing in this mode starts a check. FreeBSD has no updater.
     #[cfg(not(target_os = "freebsd"))]

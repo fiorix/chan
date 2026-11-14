@@ -4117,14 +4117,8 @@ mod tests {
         assert_eq!(library_window_title(&record), "Control Terminal");
     }
 
-    // Watcher-opened webviews host the SPA, which
-    // routes external http(s) link clicks through tauri-plugin-opener
-    // via the `plugin:opener|open_url` IPC. Without these permissions
-    // the IPC denies, the SPA falls back to the clipboard-copy notify
-    // branch, and "click external link" looks like a no-op to the
-    // user. Pin the capability
-    // shape here so a future capability-file edit can't silently drop
-    // the permissions without the test catching it.
+    // The SPA's external links need the app command grant on every window
+    // that serves it; the plugin's direct opener would bypass the host scrub.
     const WORKSPACE_CAPABILITY_JSON: &str = include_str!("../capabilities/workspace.json");
     const LOCAL_DROP_CAPABILITY_JSON: &str = include_str!("../capabilities/local-drop.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
@@ -4261,6 +4255,41 @@ mod tests {
     }
 
     #[test]
+    fn no_capability_grants_the_unscrubbed_link_opener() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut capabilities: Vec<(String, String)> = std::fs::read_dir(directory)
+            .expect("capability directory")
+            .map(|entry| entry.expect("capability entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .map(|path| {
+                let raw = std::fs::read_to_string(&path).expect("capability JSON");
+                (path.display().to_string(), raw)
+            })
+            .collect();
+        assert!(!capabilities.is_empty(), "static capabilities were read");
+        capabilities.push((
+            "runtime gateway".into(),
+            crate::runtime_capability::exact_origin_capability_json(
+                "https://alice--0a1b2c3d4e5f.p1.proxy.chan.app",
+            )
+            .expect("runtime capability"),
+        ));
+        for (name, raw) in capabilities {
+            let cap: serde_json::Value = serde_json::from_str(&raw).expect("valid capability");
+            for permission in cap["permissions"].as_array().expect("permissions array") {
+                let id = permission
+                    .as_str()
+                    .or_else(|| permission["identifier"].as_str())
+                    .expect("permission identifier");
+                assert!(
+                    !id.starts_with("opener:"),
+                    "{name} bypasses the host opener with {id}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn workspace_capability_grants_app_commands_and_opener() {
         let perms = capability_permissions(WORKSPACE_CAPABILITY_JSON);
         assert!(
@@ -4268,8 +4297,16 @@ mod tests {
             "workspace capability must include workspace-window app commands: {perms:?}",
         );
         assert!(
-            perms.iter().any(|p| p == "opener:allow-open-url"),
-            "workspace capability must include opener:allow-open-url: {perms:?}",
+            app_permission_set_commands("workspace-window")
+                .iter()
+                .any(|command| command == "open_external_url"),
+            "workspace windows must reach the host link opener",
+        );
+        assert!(
+            capability_permissions(ABOUT_CAPABILITY_JSON)
+                .iter()
+                .any(|permission| permission == "allow-open-external-url"),
+            "About links must reach the host link opener",
         );
     }
 
@@ -5006,14 +5043,13 @@ mod tests {
         commands
     }
 
-    /// Plugin invokes fired through a module's own thin invoke wrapper
-    /// (editor/external_links.ts): `invoke("plugin:...")` literals.
-    fn plugin_invoke_commands(source: &str) -> Vec<String> {
+    /// Invokes fired through a module's own thin invoke wrapper.
+    fn direct_invoke_commands(source: &str) -> Vec<String> {
         source
-            .match_indices("invoke(\"plugin:")
+            .match_indices("invoke(\"")
             .map(|(idx, _)| {
                 let quoted = &source[idx + "invoke(\"".len()..];
-                let end = quoted.find('"').expect("plugin invoke literal closes");
+                let end = quoted.find('"').expect("invoke literal closes");
                 quoted[..end].to_string()
             })
             .collect()
@@ -5050,10 +5086,6 @@ mod tests {
             "plugin:window|internal_toggle_maximize" => {
                 Some(&["core:window:allow-internal-toggle-maximize"])
             }
-            // opener:default alone does not name open_url; every capability
-            // in this tree that means to grant it carries the explicit
-            // allow-open-url, so that is the identifier the walk requires.
-            "plugin:opener|open_url" => Some(&["opener:allow-open-url"]),
             _ => None,
         }
     }
@@ -5323,12 +5355,12 @@ mod tests {
     fn origin_aware_acl_grants_spa_invoke_vocabulary_per_window_class() {
         let mut vocabulary: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         vocabulary.extend(tauri_invoke_commands(WORKSPACE_APP_DESKTOP_TS));
-        vocabulary.extend(plugin_invoke_commands(WORKSPACE_APP_EXTERNAL_LINKS_TS));
+        vocabulary.extend(direct_invoke_commands(WORKSPACE_APP_EXTERNAL_LINKS_TS));
         vocabulary.extend(initialization_invoke_commands(KEY_BRIDGE_JS));
         vocabulary.extend(initialization_invoke_commands(crate::privacy::BRIDGE));
 
         // Parser honesty: the hard forms must have parsed (the generic and
-        // multi-line native transfer calls, both plugin channels, a
+        // multi-line native transfer calls, the plugin channel, a
         // KEY_BRIDGE chord). If any is missing the subset assertion below
         // is hollow, so fail here first.
         for expected in [
@@ -5338,7 +5370,7 @@ mod tests {
             "read_clipboard_text",
             "read_dropped_paths",
             "plugin:window|set_fullscreen",
-            "plugin:opener|open_url",
+            "open_external_url",
             "zoom_in",
             "privacy_settings",
             "set_privacy_settings",

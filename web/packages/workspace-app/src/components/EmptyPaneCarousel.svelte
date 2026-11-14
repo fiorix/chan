@@ -4,7 +4,9 @@
 
   import { onDestroy, onMount, untrack } from "svelte";
   import { api } from "../api/client";
+  import { isTauriDesktop } from "../api/desktop";
   import { withTokenQuery } from "../api/transport";
+  import { openExternalUrl } from "../editor/external_links";
   import type { BuildInfo, IndexingStateResponse } from "../api/types";
   import {
     workspace,
@@ -60,6 +62,12 @@
   // so the About card stays "what + who".
 
   let buildInfo = $state<BuildInfo | null>(null);
+
+  function openAboutLink(event: MouseEvent & { currentTarget: HTMLAnchorElement }): void {
+    if (event.defaultPrevented || event.button !== 0 || !isTauriDesktop()) return;
+    event.preventDefault();
+    void openExternalUrl(event.currentTarget.href);
+  }
 
   async function loadBuildInfo(): Promise<void> {
     try {
@@ -552,6 +560,7 @@
             <a
               class="about-link"
               href="https://chan.app"
+              onclick={openAboutLink}
               target="_blank"
               rel="noopener"
               title="chan.app"
@@ -562,6 +571,7 @@
             <a
               class="about-link"
               href="https://github.com/fiorix/chan"
+              onclick={openAboutLink}
               target="_blank"
               rel="noopener"
               title="github.com/fiorix/chan"

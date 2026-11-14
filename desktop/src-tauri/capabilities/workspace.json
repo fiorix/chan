@@ -13,8 +13,6 @@
     "core:webview:allow-set-webview-zoom",
     "core:window:allow-set-fullscreen",
     "core:window:allow-start-dragging",
-    "core:window:allow-internal-toggle-maximize",
-    "opener:default",
-    "opener:allow-open-url"
+    "core:window:allow-internal-toggle-maximize"
   ]
 }

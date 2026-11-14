@@ -100,6 +100,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "native_transfer_status",
     "native_vocabulary",
     "open_devtools",
+    "open_external_url",
     "open_new_window",
     "open_reverse_tunnel",
     "platform_os",
@@ -138,7 +139,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
 /// gateway-window permission set, native transfer permissions, the event
 /// listen pair (a page follows the desktop's terminal background opacity
 /// through an event), fullscreen, window dragging and the maximize toggle
-/// (the drag space of a tab bar in the title bar), webview zoom, and opener,
+/// (the drag space of a tab bar in the title bar), and webview zoom,
 /// `lib-*` windows only, and one `remote.urls` entry. The gateway-window set is
 /// workspace-window without `allow-probe-url`, because the connecting screen
 /// is a local app page and a remote gateway origin must not receive the
@@ -170,8 +171,6 @@ pub fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String
             "core:window:allow-set-fullscreen",
             "core:window:allow-start-dragging",
             "core:window:allow-internal-toggle-maximize",
-            "opener:default",
-            "opener:allow-open-url",
         ],
     })
     .to_string())

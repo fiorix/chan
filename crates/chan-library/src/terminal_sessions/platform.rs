@@ -992,6 +992,24 @@ pub fn hand_appimage_host_env(
     }
 }
 
+/// Strip the AppImage bundle environment from a host program's command.
+///
+/// Applies the terminal's scrub to `parent`, including the GTK hook's keys,
+/// so a browser, extension or system tool uses the host's libraries and
+/// toolkit defaults. Off an AppImage the command is unchanged. A child that
+/// starts chan's AppImage again needs [`hand_appimage_host_env`] instead.
+pub fn clear_appimage_command_env(
+    cmd: &mut Command,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    for (key, scrub) in appimage_host_env(parent, HostEnvFor::Terminal) {
+        match scrub {
+            Scrub::Remove => cmd.env_remove(key),
+            Scrub::Rewrite(value) => cmd.env(key, value),
+        };
+    }
+}
+
 /// The value of `name` a process chan starts should get from `parent`, this
 /// process's environment: as the user had it before chan's AppImage built
 /// `parent` (`None` when they had none), or as `parent` has it off an
@@ -1323,9 +1341,9 @@ mod appimage_env_tests {
     #[cfg(unix)]
     mod apprun_shapes {
         use super::super::{
-            appimage_host_env, appimage_host_var, hand_appimage_host_env, holds_gui_stack_library,
-            host_value_given, own_apprun_value, without_apprun_blocks,
-            without_foreign_apprun_blocks, Mount, GUI_STACK_REEXEC_LIBRARY,
+            appimage_host_env, appimage_host_var, clear_appimage_command_env,
+            hand_appimage_host_env, holds_gui_stack_library, host_value_given, own_apprun_value,
+            without_apprun_blocks, without_foreign_apprun_blocks, Mount, GUI_STACK_REEXEC_LIBRARY,
         };
         use super::{scrub, HostEnvFor, Scrub, APPDIR};
         use std::ffi::{OsStr, OsString};
@@ -1858,6 +1876,100 @@ mod appimage_env_tests {
                 appimage_host_var("HOME", appimage_desktop(None)),
                 Some(OsString::from("/home/u"))
             );
+        }
+
+        #[test]
+        fn a_host_command_gets_the_terminal_scrub() {
+            let mut parent = appimage_desktop(None);
+            parent.extend(
+                [
+                    ("PYTHONHOME", format!("{APPDIR}/usr")),
+                    ("GIO_MODULE_DIR", format!("{APPDIR}/usr/lib/gio/modules")),
+                    ("GTK_THEME", "Adwaita:light".into()),
+                    ("APPIMAGE_GTK_THEME", "Adwaita:light".into()),
+                    ("PYTHONDONTWRITEBYTECODE", "1".into()),
+                    ("CHAN_LINUX_SYSTEM_GUI_REEXEC_PID", "1234".into()),
+                    ("CHAN_LINUX_SYSTEM_GUI_APPLIED", "1".into()),
+                ]
+                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+            );
+            let mut command = std::process::Command::new("xdg-open");
+            clear_appimage_command_env(&mut command, parent.clone());
+            let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                env.get(OsStr::new("PATH")),
+                Some(&Some(OsStr::new("/usr/local/bin:/usr/bin")))
+            );
+            for key in [
+                "LD_LIBRARY_PATH",
+                "XDG_DATA_DIRS",
+                "APPDIR",
+                "APPIMAGE",
+                "ARGV0",
+                "OWD",
+                "PYTHONHOME",
+                "GTK_PATH",
+                "GIO_MODULE_DIR",
+                "GDK_BACKEND",
+                "GTK_THEME",
+                "APPIMAGE_GTK_THEME",
+                "PYTHONDONTWRITEBYTECODE",
+                "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID",
+                "CHAN_LINUX_SYSTEM_GUI_APPLIED",
+            ] {
+                assert_eq!(env.get(OsStr::new(key)), Some(&None), "{key}");
+            }
+            assert!(!env.contains_key(OsStr::new("HOME")));
+
+            let mut image = std::process::Command::new("Chan.AppImage");
+            hand_appimage_host_env(&mut image, parent);
+            assert!(image
+                .get_envs()
+                .all(|(key, _)| { key != "GDK_BACKEND" && key != "APPIMAGE_GTK_THEME" }));
+        }
+
+        #[test]
+        fn a_host_command_scrubs_both_apprun_library_shapes() {
+            let host = reexec_library_dir();
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let old = block_under("/tmp/.mount_chanZZ", &LD_BLOCK);
+            for user in ["", "/opt/a:/opt/b", ":", ":/opt/a", "/opt/a:"] {
+                for value in [
+                    format!("{own}:{user}"),
+                    format!("{own}:{}:{old}:{user}", host.path().display()),
+                ] {
+                    let mut parent = appimage_desktop(None);
+                    parent.retain(|(key, _)| key != "LD_LIBRARY_PATH");
+                    parent.push(("LD_LIBRARY_PATH".into(), value.clone().into()));
+                    let mut command = std::process::Command::new("xdg-open");
+                    clear_appimage_command_env(&mut command, parent);
+                    let got = command
+                        .get_envs()
+                        .find(|(key, _)| *key == "LD_LIBRARY_PATH")
+                        .map(|(_, value)| value.map(OsStr::to_os_string));
+                    let want = (!user.is_empty()).then(|| OsString::from(user));
+                    assert_eq!(got, Some(want), "{value}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_host_command_is_unchanged_without_both_appimage_keys() {
+            for absent in ["APPDIR", "APPIMAGE"] {
+                for empty in [false, true] {
+                    let mut parent = appimage_desktop(None);
+                    parent.retain(|(key, _)| key != absent);
+                    if empty {
+                        parent.push((absent.into(), OsString::new()));
+                    }
+                    let mut command = std::process::Command::new("xdg-open");
+                    clear_appimage_command_env(&mut command, parent);
+                    assert_eq!(command.get_envs().count(), 0, "{absent} empty={empty}");
+                }
+            }
+            let mut command = std::process::Command::new("xdg-open");
+            clear_appimage_command_env(&mut command, Vec::new());
+            assert_eq!(command.get_envs().count(), 0);
         }
 
         const PATH_BLOCK: [&str; 5] = ["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"];

@@ -5,7 +5,7 @@
 // capability files and pins the SPA's invoke vocabulary as a subset.
 // It reads that vocabulary from exactly two modules via include_str!:
 // api/desktop.ts (the tauriInvoke call sites) and
-// editor/external_links.ts (its thin plugin-opener invoke). An invoke
+// editor/external_links.ts (its external-URL command invoke). An invoke
 // added anywhere else would escape the walk and surface only as a
 // runtime ACL denial in the shipped app, so this test scans every
 // shipped source (import.meta.glob, mirroring no_native_dialogs) and

@@ -16,7 +16,6 @@ type TauriWindow = Window &
     __TAURI__?: {
       invoke?: (cmd: string, args?: unknown) => Promise<unknown>;
       core?: { invoke?: (cmd: string, args?: unknown) => Promise<unknown> };
-      opener?: { openUrl?: (url: string) => Promise<unknown> };
     };
   };
 
@@ -26,22 +25,18 @@ export function isOpenableExternalUrl(url: string): boolean {
 }
 
 /// Best-effort handoff to the desktop opener. Returns true when the
-/// call resolved; false when neither bridge was present or the call
+/// call resolved; false when no invoke bridge was present or the call
 /// threw (capability denied, no default browser, no app handler for
 /// the scheme). Errors are logged to the console for debugging - the
 /// caller decides what the user sees.
 async function tryTauriOpen(w: TauriWindow, url: string): Promise<boolean> {
   try {
-    if (typeof w.__TAURI__?.opener?.openUrl === "function") {
-      await w.__TAURI__.opener.openUrl(url);
-      return true;
-    }
     const invoke =
       w.__TAURI_INTERNALS__?.invoke ??
       w.__TAURI__?.core?.invoke ??
       w.__TAURI__?.invoke;
     if (invoke) {
-      await invoke("plugin:opener|open_url", { url });
+      await invoke("open_external_url", { url });
       return true;
     }
   } catch (err) {
@@ -74,9 +69,8 @@ export async function openExternalUrl(url: string): Promise<boolean> {
   if (!isOpenableExternalUrl(url)) return false;
   const w = window as TauriWindow;
   // Detect the Tauri webview by either of the runtime globals.
-  // Chan.app ships tauri-plugin-opener; the local desktop process
-  // is the one that should call out to the OS browser so tunnelled
-  // sessions still open links on the user's machine.
+  // The local desktop process opens links with its host-program environment,
+  // so tunnelled sessions still use the browser on the user's machine.
   const inTauri = Boolean(w.__TAURI__ || w.__TAURI_INTERNALS__);
   if (inTauri) {
     const ok = await tryTauriOpen(w, url);

@@ -262,10 +262,18 @@ def check_desktop_contract() -> None:
             "ci-linux",
             (
                 "ci-linux-prereqs",
-                "--bundles appimage",
+                "bundle-appimage",
                 "$(BUNDLE_DIR)/appimage",
                 "check-desktop-entries.py\" --appimage",
                 "smoke-built-devserver.sh",
+            ),
+        ),
+        (
+            "bundle-appimage",
+            (
+                "bundle --bundles appimage --config tauri.appimage.conf.json",
+                "$(BUNDLE_DIR)/appimage/Chan_",
+                'mv "$$image.sig" "$$renamed.sig"',
             ),
         ),
         (

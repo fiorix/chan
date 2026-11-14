@@ -58,8 +58,8 @@ pub use platform::prime_windows_shell;
 #[cfg(unix)]
 pub use platform::user_shell;
 pub use platform::{
-    appimage_host_var, hand_appimage_host_env, own_appimage, own_apprun_value,
-    without_apprun_blocks, without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
+    appimage_host_var, clear_appimage_command_env, hand_appimage_host_env, own_appimage,
+    own_apprun_value, without_apprun_blocks, without_foreign_apprun_blocks, APPRUN_SEARCH_PATHS,
     GUI_STACK_REEXEC_LIBRARY, GUI_STACK_REEXEC_MARKER, GUI_STACK_REEXEC_MARKERS,
 };
 use platform::{

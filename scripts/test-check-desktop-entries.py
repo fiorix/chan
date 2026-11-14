@@ -22,14 +22,9 @@ SHARED = ROOT / "packaging/distros/shared"
 
 
 ENTRY_NAMES = ("chan-files.desktop", "chan-edit.desktop", "chan-term.desktop")
-# The entry Tauri writes for the app, which the bundler links at the root.
-ROOT_ENTRY = """[Desktop Entry]
-Exec=chan-desktop
-Icon=chan-desktop
-Name=Chan
-Terminal=false
-Type=Application
-"""
+# Captured from a Tauri AppImage; the ID is the filename, not its display name.
+ROOT_ENTRY = (ROOT / "scripts/testdata/desktop-entries/appimage-main.desktop").read_text()
+DESKTOP_ID = "chan-desktop.desktop"
 
 
 def run(*args: str | Path) -> subprocess.CompletedProcess[str]:
@@ -50,8 +45,8 @@ def appimage_tree(directory: Path) -> Path:
     carried = tree / "usr/share/chan/applications"
     for d in (applications, carried):
         d.mkdir(parents=True)
-    (applications / "Chan.desktop").write_text(ROOT_ENTRY, encoding="utf-8")
-    (tree / "Chan.desktop").symlink_to("usr/share/applications/Chan.desktop")
+    (applications / DESKTOP_ID).write_text(ROOT_ENTRY, encoding="utf-8")
+    (tree / DESKTOP_ID).symlink_to(f"usr/share/applications/{DESKTOP_ID}")
     for name in ENTRY_NAMES:
         shutil.copy(SHARED / name, carried / name)
     return tree
@@ -164,25 +159,37 @@ def moved_to_applications(*names: str):
 
 def root_runs(binary: str):
     def apply(tree: Path) -> None:
-        path = tree / "usr/share/applications/Chan.desktop"
+        path = tree / "usr/share/applications" / DESKTOP_ID
         path.write_text(ROOT_ENTRY.replace("Exec=chan-desktop", f"Exec={binary}"), encoding="utf-8")
 
     return apply
 
 
 def root_unlinked(tree: Path) -> None:
-    (tree / "Chan.desktop").unlink()
+    (tree / DESKTOP_ID).unlink()
 
 
 def root_dangling(tree: Path) -> None:
-    (tree / "usr/share/applications/Chan.desktop").unlink()
+    (tree / "usr/share/applications" / DESKTOP_ID).unlink()
+
+
+def old_root_id(tree: Path) -> None:
+    (tree / DESKTOP_ID).rename(tree / "Chan.desktop")
+
+
+def old_applications_id(tree: Path) -> None:
+    (tree / "usr/share/applications" / DESKTOP_ID).rename(
+        tree / "usr/share/applications/Chan.desktop"
+    )
+    (tree / DESKTOP_ID).unlink()
+    (tree / DESKTOP_ID).symlink_to("usr/share/applications/Chan.desktop")
 
 
 APPIMAGE_CASES = [
     (
         "a second desktop file in the root",
         linked_at_root("chan-edit.desktop"),
-        "the AppImage root holds 2 desktop files (Chan.desktop, chan-edit.desktop)",
+        "the AppImage root holds 2 desktop files (chan-desktop.desktop, chan-edit.desktop)",
     ),
     (
         "no desktop file in the root",
@@ -192,22 +199,42 @@ APPIMAGE_CASES = [
     (
         "a root link that leads to no file",
         root_dangling,
-        "Chan.desktop in the AppImage root leads to no file",
+        "chan-desktop.desktop in the AppImage root leads to no file",
     ),
     (
         "a root entry that runs another binary",
         root_runs("chan-edit %U"),
-        "Chan.desktop in the AppImage root must run chan-desktop, got 'chan-edit %U'",
+        "chan-desktop.desktop in the AppImage root must run chan-desktop, got 'chan-edit %U'",
     ),
     (
         "an entry beside Chan's under usr/share/applications",
         moved_to_applications("chan-files.desktop"),
-        "usr/share/applications holds Chan.desktop, chan-files.desktop; linuxdeploy links",
+        "usr/share/applications holds chan-desktop.desktop, chan-files.desktop; linuxdeploy links",
     ),
     (
         "every entry under usr/share/applications",
         moved_to_applications(*ENTRY_NAMES),
         "chan-files.desktop: missing from",
+    ),
+    (
+        "the old desktop ID in the root",
+        old_root_id,
+        "the AppImage root entry must be chan-desktop.desktop, got Chan.desktop",
+    ),
+    (
+        "the old desktop ID under usr/share/applications",
+        old_applications_id,
+        "usr/share/applications must hold chan-desktop.desktop, got Chan.desktop",
+    ),
+    (
+        "the wrong window class",
+        broken("usr/share/applications/chan-desktop.desktop", "StartupWMClass=chan-desktop", "StartupWMClass=Chan"),
+        "chan-desktop.desktop: StartupWMClass must be 'chan-desktop', got 'Chan'",
+    ),
+    (
+        "the ID used as the display name",
+        broken("usr/share/applications/chan-desktop.desktop", "Name=Chan", "Name=chan-desktop"),
+        "chan-desktop.desktop: Name must be 'Chan', got 'chan-desktop'",
     ),
 ]
 

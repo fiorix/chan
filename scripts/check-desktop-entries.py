@@ -24,6 +24,8 @@ image's root, in directory order, and linuxdeploy links into that root the
 first desktop file it lists under `usr/share/applications`. So each of the
 two holds Chan's entry alone, whatever order a filesystem lists them in, and
 the AppImage carries the three entries under `usr/share/chan/applications`.
+The app's entry is `chan-desktop.desktop` in both places, matching the distro
+packages and the window class GNOME uses to associate a window with its pin.
 
 Exits 0 when every entry passes, 1 with one line per finding otherwise, and 2
 when it cannot run (no desktop-file-validate, no AppImage, one that will not
@@ -62,6 +64,7 @@ TERMINAL_KEYS = {
 # The binary the AppImage's root entry runs, and where the image carries the
 # three entries: away from `usr/share/applications`, which linuxdeploy reads.
 MAIN_BINARY = "chan-desktop"
+DESKTOP_ID = "chan-desktop.desktop"
 APPIMAGE_ENTRIES = "usr/share/chan/applications"
 
 
@@ -155,16 +158,26 @@ def appdir_findings(tree: Path, validate: str) -> list[str]:
     elif not (tree / root[0]).is_file():
         found.append(f"{root[0]} in the AppImage root leads to no file")
     else:
-        exec_line = desktop_entry(tree / root[0]).get("Exec", "")
+        if root[0] != DESKTOP_ID:
+            found.append(f"the AppImage root entry must be {DESKTOP_ID}, got {root[0]}")
+        keys = desktop_entry(tree / root[0])
+        exec_line = keys.get("Exec", "")
         if exec_line.split()[:1] != [MAIN_BINARY]:
             found.append(
                 f"{root[0]} in the AppImage root must run {MAIN_BINARY}, got {exec_line!r}"
             )
+        for key, expected in (("Name", "Chan"), ("StartupWMClass", MAIN_BINARY)):
+            if keys.get(key) != expected:
+                found.append(f"{root[0]}: {key} must be {expected!r}, got {keys.get(key)!r}")
     listed = desktop_files(tree / "usr/share/applications")
     if len(listed) > 1:
         found.append(
             f"usr/share/applications holds {', '.join(listed)}; linuxdeploy links the first it "
             "lists into the AppImage root, so it holds the root's entry alone"
+        )
+    elif listed != [DESKTOP_ID]:
+        found.append(
+            f"usr/share/applications must hold {DESKTOP_ID}, got {', '.join(listed) or 'none'}"
         )
     return found + findings(tree / APPIMAGE_ENTRIES, validate)
 

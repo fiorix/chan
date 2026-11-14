@@ -14,7 +14,7 @@ WEB_ALREADY_BUILT ?= 0
 
 # chan-desktop Linux build. Distinct from the CLI deb/rpm/archpkg targets
 # above: those cross-compile the `chan` CLI on the host and package the binary,
-# whereas chan-desktop runs `cargo tauri build` (which bundles the AppImage)
+# whereas chan-desktop uses its Makefile to compile and package the AppImage
 # inside an sdme container so a macOS host can produce Linux desktop bundles.
 DISTRO ?= ubuntu
 SDME ?= limactl shell default sudo sdme

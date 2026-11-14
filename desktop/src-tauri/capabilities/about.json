@@ -5,7 +5,6 @@
   "windows": ["about"],
   "permissions": [
     "core:default",
-    "opener:default",
-    "opener:allow-open-url"
+    "allow-open-external-url"
   ]
 }

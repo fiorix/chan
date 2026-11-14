@@ -53,7 +53,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Listener, Manager, WebviewWindow, WindowEvent};
-use tauri_plugin_opener::OpenerExt;
 
 use crate::{serve, window_ops, AppState, ZoomAction};
 
@@ -1105,7 +1104,7 @@ fn build_panel(
 
 fn open_externally(app: &AppHandle, target: &str) {
     if target.starts_with("https://") || target.starts_with("http://") {
-        if let Err(e) = app.opener().open_url(target, None::<&str>) {
+        if let Err(e) = crate::external_open::open(app, target) {
             tracing::warn!(url = %target, error = %e, "opening a launcher link failed");
         }
     }

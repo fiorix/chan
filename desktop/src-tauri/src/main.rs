@@ -8,6 +8,7 @@ mod download;
 mod dropped_files;
 mod dropped_paths;
 mod embedded;
+mod external_open;
 mod gateway;
 mod handoff_registrations;
 mod last_window;
@@ -60,7 +61,6 @@ use tauri::menu::{Menu, MenuItemBuilder, Submenu};
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_opener::OpenerExt;
 
 use config::{ConfigStore, WindowGeometry};
 use handoff_registrations::HandoffRegistrations;
@@ -5512,6 +5512,7 @@ fn wait_for_child(child: &mut std::process::Child, timeout: std::time::Duration)
 fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         platform_os,
+        open_external_url,
         read_clipboard_text,
         write_clipboard_text,
         read_primary_selection,
@@ -5775,7 +5776,11 @@ fn main() {
     let state_for_setup = Arc::clone(&state);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        );
     // FreeBSD has no signed updater feed and no updater plugin.
     #[cfg(not(target_os = "freebsd"))]
     let app = app.plugin(tauri_plugin_updater::Builder::new().build());
@@ -7264,7 +7269,7 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
 /// Open the FOCUSED workspace window's contents in the system browser. Mints a
 /// browser-affinity record for the same workspace (chan-desktop's watcher skips
 /// non-native records, so no native twin opens), composes its loopback URL with
-/// its own `?w=` / `?lib=`, and hands it to the opener plugin. A no-op when the
+/// its own `?w=` / `?lib=`, and hands it to the host link opener. A no-op when the
 /// focused window is a launcher or terminal (nothing workspace-shaped to open).
 fn open_focused_window_in_browser(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
@@ -7305,9 +7310,12 @@ fn open_window_in_browser(app: &tauri::AppHandle, label: &str) -> Result<(), Str
     // gets its own window_id and the desktop never opens a native twin for it.
     let minted = mint_workspace_window_copy(embedded, &record, chan_server::WindowOrigin::Browser)?;
     let url = serve::browser_window_url(app, embedded.addr(), &minted)?;
-    app.opener()
-        .open_url(url.to_string(), None::<&str>)
-        .map_err(|e| format!("opening the browser window URL: {e}"))
+    external_open::open(app, url.as_str())
+}
+
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    external_open::open(&app, &url)
 }
 
 /// Mint a copy of the local workspace window `source`: a record of its own

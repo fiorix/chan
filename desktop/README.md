@@ -16,10 +16,12 @@ Requirements: stable Rust (pinned in `rust-toolchain.toml`) and npm for the embe
 
 ```bash
 make dev      # cargo tauri dev (launch the desktop app in dev mode)
-make build    # cargo tauri build (release bundle for the host platform)
+make build    # compile and package release bundles for the host platform
 make check    # cargo check
 make clean    # cargo clean
 ```
+
+On Linux, use `make build` to package the AppImage with the shared `chan-desktop.desktop` identity; its bundle-only configuration and public asset filename are applied by the Makefile. The packaging details are in the [contributor guide](../.agents/desktop.md#dev-loop).
 
 The desktop app stores its config at `~/.chan/desktop/config.json` -- the same `~/.chan` home as the CLI registry, not a separate OS app-data directory.
 
