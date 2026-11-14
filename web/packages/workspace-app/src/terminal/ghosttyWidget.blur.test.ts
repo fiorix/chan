@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 //
-// A ghostty terminal gives up the keyboard on blur() from whichever of its
-// elements holds it. ghostty-web's Terminal is opened over the binding on the
-// vendored core in a host element. A press on its canvas focuses the hidden
-// textarea inside the host; a left press then focuses the host again through
-// the selection manager, while a middle or right press (the right one opens
-// chan's terminal menu) leaves the textarea holding the keyboard. chan's own
-// focus focuses the host. The input handler's key listener sits on the host,
-// so a key reaches the program from either. open() focuses the host, and so
-// does focus(), each again on a zero-delay timer, so every reading after a
-// blur waits a task for that timer. What the terminal hands the program is
-// what its onData fires.
+// A ghostty terminal opens without taking the keyboard, and gives it up on
+// blur() from whichever of its elements holds it. ghostty-web's Terminal is
+// opened over the binding on the vendored core in a host element. A press on
+// its canvas focuses the hidden textarea inside the host; a left press then
+// focuses the host again through the selection manager, while a middle or
+// right press (the right one opens chan's terminal menu) leaves the textarea
+// holding the keyboard. chan's own focus focuses the host. The input
+// handler's key listener sits on the host, so a key reaches the program from
+// either. focus() focuses the host, and again on a zero-delay timer, so every
+// reading after a focus or an open waits a task for that timer. What the
+// terminal hands the program is what its onData fires.
 
 import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
@@ -66,6 +66,46 @@ function typeKey(key: string, code: string): void {
   const target = document.activeElement ?? document.body;
   target.dispatchEvent(new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true }));
 }
+
+// A terminal opens in a pane that may not be the focused one, while a field
+// that ends its edit on blur (a CSV cell, a tab being renamed) holds the
+// keyboard; its caller focuses it when its pane is the focused one.
+describe("open() on a ghostty terminal", () => {
+  test("moves no focus: the field holding the keyboard sees no blur and keeps it", async () => {
+    const field = document.createElement("input");
+    document.body.append(field);
+    const seen: string[] = [];
+    for (const type of ["blur", "focus"]) field.addEventListener(type, () => void seen.push(type));
+    field.focus();
+    seen.length = 0;
+
+    const { host, sent } = await openTerminal();
+    expect(seen, "the field saw no focus change as the terminal opened").toEqual([]);
+    await nextTask();
+    expect(seen, "nor a task later").toEqual([]);
+    expect(document.activeElement).toBe(field);
+    expect(host.contains(document.activeElement)).toBe(false);
+    typeKey("ArrowUp", "ArrowUp");
+    expect(sent, "a key at the field reaches no program").toEqual([]);
+  });
+
+  test("with nothing holding the keyboard, it stays on the body", async () => {
+    await openTerminal();
+    expect(document.activeElement).toBe(document.body);
+    await nextTask();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  test("leaves the host focusable, and focus() then takes the keyboard", async () => {
+    const { term, host, sent } = await openTerminal();
+    expect(host.getAttribute("tabindex")).toBe("0");
+    term.focus();
+    await nextTask();
+    expect(document.activeElement).toBe(host);
+    typeKey("a", "KeyA");
+    expect(sent).toEqual(["a"]);
+  });
+});
 
 describe("blur() on a ghostty terminal", () => {
   test.each([
