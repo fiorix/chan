@@ -739,6 +739,9 @@ export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About", "Metrics"]
 export const DASHBOARD_SLOT_ORDER = [3, 0, 1, 2] as const;
 export const DASHBOARD_METRICS_SLIDE = 3;
 export const DASHBOARD_SLOT_COUNT = DASHBOARD_SLOT_LABELS.length;
+export const DASHBOARD_MAX_RESTORED_DIRECTORIES = 256;
+const DASHBOARD_RESTORED_DIRECTORY_BYTES = 1024;
+const DASHBOARD_RESTORED_QUERY_BYTES = 32 * 1024;
 
 type DashboardSlotSet = { readonly disabledSlots?: readonly number[] };
 
@@ -7944,24 +7947,42 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
     rawDs.length > 0 && DASHBOARD_SLOT_ORDER.some((i) => dashboardSlotAvailable(i) && !rawDs.includes(i))
       ? rawDs
       : [];
+  const validDirectory = (dir: unknown): dir is string =>
+    typeof dir === "string" && dir.split("/").every((part) => part !== "" && part !== "..");
   const selected =
-    typeof sertab.dsi === "string" && (sertab.dsi === "" || sertab.dsi.startsWith("directory:"))
+    typeof sertab.dsi === "string" && (sertab.dsi === "" || (
+      sertab.dsi.startsWith("directory:") && validDirectory(sertab.dsi.slice("directory:".length))
+    ))
       ? sertab.dsi
       : null;
   // The slide draws a directory only under opened ones. A saved tab can
   // name a nested selection with nothing opened above it, as a session
   // from a release whose slide drew the whole tree does: the directories
   // above the selection open with it, so Details has its node.
-  // Each drawn-open path goes in the poll's query. Shared links and saved
-  // layouts must not restore an unbounded list or parent/empty segments.
-  const indexingExpanded = [
-    ...new Set([
-      ...(Array.isArray(sertab.de) ? sertab.de : []),
-      ...(selected ? dirsAbove(selected.slice("directory:".length)) : []),
-    ].filter((dir) =>
-      typeof dir === "string" && dir.split("/").every((part) => part !== "" && part !== ".."),
-    )),
-  ].slice(0, 256);
+  // Each drawn-open path goes in the poll's query. Bound its encoded size
+  // as well as the count, so a shared link fits the server's request head.
+  const indexingExpanded: string[] = [];
+  const seen = new Set<string>();
+  const encoder = new TextEncoder();
+  let queryBytes = 0;
+  for (const dir of [
+    ...(Array.isArray(sertab.de) ? sertab.de : []),
+    ...(selected ? dirsAbove(selected.slice("directory:".length)) : []),
+  ]) {
+    if (!validDirectory(dir) || seen.has(dir) || encoder.encode(dir).byteLength > DASHBOARD_RESTORED_DIRECTORY_BYTES) continue;
+    let encoded: string;
+    try {
+      encoded = encodeURIComponent(dir);
+    } catch {
+      continue;
+    }
+    const bytes = (indexingExpanded.length ? 1 : 0) + "open=".length + encoded.length;
+    if (queryBytes + bytes > DASHBOARD_RESTORED_QUERY_BYTES) break;
+    indexingExpanded.push(dir);
+    seen.add(dir);
+    queryBytes += bytes;
+    if (indexingExpanded.length === DASHBOARD_MAX_RESTORED_DIRECTORIES) break;
+  }
   const tab: DashboardTab = {
     kind: "dashboard",
     id: id("dashboard"),
