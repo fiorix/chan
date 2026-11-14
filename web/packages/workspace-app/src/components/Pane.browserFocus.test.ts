@@ -89,7 +89,9 @@ async function layOut(
   layout.rootId = "root";
   layout.activePaneId = active;
   await settleLong();
-  await vi.waitFor(() => expect(rows().length).toBe(3));
+  if (bottom.some((tab) => tab.kind === "browser")) {
+    await vi.waitFor(() => expect(rows().length).toBe(3));
+  }
 }
 
 async function settleLong(): Promise<void> {
@@ -167,6 +169,46 @@ async function expectBrowserTakesKeys(): Promise<void> {
   expect(selected(), "an ArrowDown in the browser moves its selection").toBe("docs/b.md");
   expect(terminalKeys, "no key reached the terminal").toEqual([]);
 }
+
+describe("a survey releases the keyboard when its pane loses focus", () => {
+  test.each(["Next pane", "Hybrid Nav commit"])("%s to a dashboard leaves the survey unanswered", async (navigation) => {
+    await layOut({ bottom: [{ kind: "dashboard", id: "dashboard-keys", title: "Dashboard", autoRotate: false }] });
+    expect(pane(BOTTOM).querySelector(".dashboard")).not.toBeNull();
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    showSurvey({ surveyId: "leave-pane", title: "Choose", bodyMarkdown: "Pick one", options: ["A", "B"] }, TERMINAL);
+    await settleLong();
+    const card = pane(TOP).querySelector(".survey-card");
+    expect(card).not.toBeNull();
+    expect(document.activeElement).toBe(card);
+
+    if (navigation === "Next pane") {
+      press({ key: "]", code: "BracketRight", altKey: true });
+    } else {
+      press({ key: ".", code: "Period", ctrlKey: true });
+      press({ key: "h", code: "KeyH" });
+      await settleLong();
+      expect(paneMode.active).toBe(true);
+      press({ key: "ArrowDown", code: "ArrowDown" });
+      press({ key: "Enter", code: "Enter" });
+    }
+    await settleLong();
+    expect(paneMode.active).toBe(false);
+    expect(layout.activePaneId).toBe(BOTTOM);
+    await typeKey("1", "Digit1");
+    expect(reply, "a key in the dashboard pane must not answer the terminal's survey").not.toHaveBeenCalled();
+    expect(surveyFor(TERMINAL)?.surveyId).toBe("leave-pane");
+    expect(document.activeElement).not.toBe(card);
+
+    setActivePane(TOP);
+    await settleLong();
+    const returnedCard = pane(TOP).querySelector(".survey-card");
+    expect(returnedCard).not.toBeNull();
+    expect(document.activeElement).toBe(returnedCard);
+    await typeKey("1", "Digit1");
+    expect(reply).toHaveBeenCalledWith({ surveyId: "leave-pane", kind: "option", optionIndex: 0, optionLabel: "A" });
+    expect(surveyFor(TERMINAL)).toBeNull();
+  });
+});
 
 describe("a pane focus move from a terminal to a file browser hands the browser the keyboard", () => {
   test("a visible survey in another pane leaves the browser's keyboard and keys alone", async () => {
