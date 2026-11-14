@@ -126,6 +126,8 @@ template = '\e[200~{}\e[201~\r'
 
 The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini and muse split their normalized body and submit chord into two ordered PTY writes; overriding either template does not change that.
 
+When the part of a template before `{}` leaves a bracketed paste open (an `\e[200~` with no `\e[201~` after it), a default or an override alike, the body's NUL, ENQ, EOT, BS, ESC and DEL bytes and its Ctrl+C, `Ctrl+\`, Ctrl+U, Ctrl+Z, Ctrl+Q, Ctrl+S, Ctrl+W, Ctrl+V, Ctrl+R and Ctrl+O characters are sent as spaces, as a terminal's paste sends them, so a body holding `\e[201~` cannot end the bracket early; line feeds and tabs are kept. Any other template sends the body unchanged.
+
 ### `~/.chan/preferences.toml`: `EditorPrefs`
 
 Source: `crates/chan-server/src/preferences.rs`.

@@ -10348,6 +10348,37 @@ is_lead = false
     }
 
     #[test]
+    fn a_bootstrap_path_holding_a_bracket_end_cannot_end_its_paste_early() {
+        // The identity poke names the team directory, a path whose bytes the
+        // user chose; a bracketed delivery turns its control bytes into
+        // spaces like any other submitted text.
+        let (root, registry) = empty_registry();
+        let config = spawnable_config();
+        let dir = "evil\x1b[201~\x03dir";
+        let spawn = spawn_team(&registry, root.path(), dir, &config, false, None);
+        let poke = spawn
+            .pokes
+            .iter()
+            .find(|poke| poke.member == "@@Alice")
+            .expect("the codex worker's identity poke");
+        assert_eq!(poke.writes.len(), 1, "{:?}", poke.writes);
+        let write = &poke.writes[0];
+        assert!(
+            write.starts_with("\x1b[200~# Team work") && write.ends_with("\n\x1b[201~\r"),
+            "one bracketed paste, then the submit: {write:?}"
+        );
+        assert_eq!(
+            write.matches("\x1b[201~").count(),
+            1,
+            "one closing bracket: {write:?}"
+        );
+        assert!(
+            write.contains("evil [201~ dir"),
+            "the path's control bytes are spaces: {write:?}"
+        );
+    }
+
+    #[test]
     fn spawn_team_muse_lead_gets_its_body_then_a_bare_cr() {
         let (root, registry) = empty_registry();
         let mut config = spawnable_config();

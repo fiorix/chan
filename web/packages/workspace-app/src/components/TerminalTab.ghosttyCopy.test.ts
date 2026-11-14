@@ -668,7 +668,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  test("xterm middle click sends PRIMARY through its real paste encoder", async () => {
+  test("xterm middle click sends PRIMARY cleaned, through xterm.js's own paste", async () => {
     const text = "one\r\ntwo\nthree\x1b[201~";
     const invoke = desktop(text);
     const term = await renderXterm();
@@ -682,8 +682,10 @@ describe("the Linux desktop PRIMARY selection", () => {
     const paste = vi.spyOn(term, "paste").mockImplementation((value) => real.paste(value));
     const before = inputs().length;
     const event = middle(term.element!);
-    await vi.waitFor(() => expect(inputs().slice(before)).toEqual(["\x1b[200~one\rtwo\rthree\x1b[201~\x1b[201~"]));
-    expect(paste).toHaveBeenCalledExactlyOnceWith(text);
+    // The pasted ESC[201~ reaches the program as " [201~" inside one bracket,
+    // as a ghostty terminal sends it.
+    await vi.waitFor(() => expect(inputs().slice(before)).toEqual(["\x1b[200~one\rtwo\rthree [201~\x1b[201~"]));
+    expect(paste).toHaveBeenCalledExactlyOnceWith("one\r\ntwo\nthree [201~");
     subscription.dispose();
     real.dispose();
     expect(event.defaultPrevented).toBe(true);

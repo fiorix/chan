@@ -213,6 +213,7 @@
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
+  import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
   import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import { ghosttyScrollbackText, type GhosttyVt } from "@chan/ghostty-web-ng/vt";
@@ -2503,17 +2504,19 @@
     }
   }
 
-  /// The tab's capture-phase paste: the PTY size reclaim on both backends,
-  /// then, under ghostty, the paste itself, cleaned before ghostty-web would
-  /// frame it as the clipboard holds it, and an empty one (an image) that
-  /// ghostty-web would drop (ghosttyPaste.ts). Only a paste aimed at the
-  /// renderer host: the composer inside the tab takes its own pastes, images
-  /// included.
+  /// The tab's capture-phase paste: the PTY size reclaim, then the paste
+  /// itself, cleaned before the renderer would frame it as the clipboard
+  /// holds it: under ghostty by the core's encoder, with an empty one (an
+  /// image) that ghostty-web would drop (ghosttyPaste.ts), and under xterm.js
+  /// with the encoder's byte set before xterm.js's own paste (xtermPaste.ts).
+  /// Only a paste aimed at the renderer host: the composer inside the tab
+  /// takes its own pastes, images included.
   function onTerminalPasteCapture(event: ClipboardEvent): void {
     reclaimPtySize(event);
-    if (backend !== "ghostty" || !host) return;
+    if (!host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
-    handleGhosttyPaste(event, term as GhosttyTerminal | null);
+    if (backend === "ghostty") handleGhosttyPaste(event, term as GhosttyTerminal | null);
+    else handleXtermPaste(event, term as Terminal | null);
   }
 
   /// Under ghostty, a paste delivered as an input with no paste event before
@@ -2791,18 +2794,18 @@
   }
 
   // The right-click menu's "Paste" entry. A menu click is NOT an OS paste
-  // gesture, so unlike Cmd+V (which rides xterm's native `paste` event) it must
+  // gesture, so unlike Cmd+V (which rides the native `paste` event) it must
   // read the clipboard programmatically. `readClipboardText` does that natively
   // in Rust under chan-desktop so it bypasses WKWebView's DOM-paste "Paste"
   // button; on web it falls back to the gesture-permitted navigator.clipboard.
-  // The text goes the way Cmd+V's does: `term.paste` under xterm.js, chan's
-  // cleaned paste under ghostty.
+  // The text goes the way Cmd+V's does: chan's cleaned paste on either
+  // backend.
   async function pasteClipboard(): Promise<void> {
     closeTabMenu();
     const text = await readClipboardText();
     if (text && term) {
       if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);
-      else term.paste(text);
+      else pasteIntoXterm(term as Terminal, text);
     }
     focusTerminal();
   }
@@ -3103,10 +3106,10 @@
     // the PTY. Resolve them here (the custom handler runs before xterm
     // processes the key) so no bytes reach the shell and Ctrl+Shift+C does not
     // raise SIGINT. `false` tells xterm to skip the keystroke. Paste leaves the
-    // browser's native event to travel: xterm.js's own `paste` listener takes
-    // it, and under ghostty the tab's capture listener (onTerminalPasteCapture);
-    // Ghostty's pre-inversion result is true so its wrapper also passes the key
-    // through without suppressing that native event.
+    // browser's native event to travel to the tab's capture listener
+    // (onTerminalPasteCapture), which takes it on both backends; Ghostty's
+    // pre-inversion result is true so its wrapper also passes the key through
+    // without suppressing that native event.
     if (
       handleTerminalClipboardChord(e, {
         os: currentOS(),

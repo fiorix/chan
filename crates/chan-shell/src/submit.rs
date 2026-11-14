@@ -311,11 +311,58 @@ fn resolve_template_with_source(
     )
 }
 
+/// The bytes Ghostty's paste encoder (`ghostty_paste_encode`, which native
+/// Ghostty and chan's ghostty terminals paste with) replaces with a space:
+/// NUL, ENQ, EOT, BS, ESC, DEL and the ten characters a tty's line discipline
+/// acts on (Ctrl+C, `Ctrl+\`, Ctrl+U, Ctrl+Z, Ctrl+Q, Ctrl+S, Ctrl+W,
+/// Ctrl+V, Ctrl+R, Ctrl+O). The server has no Ghostty core to call, so this is a
+/// copy; the tests pin it to `fixtures/paste-encoder/replaced-bytes.json`,
+/// which the workspace app's tests read off the core's own encoder.
+const PASTE_REPLACED_BYTES: [u8; 16] = [
+    0x00, 0x03, 0x04, 0x05, 0x08, 0x0f, 0x11, 0x12, 0x13, 0x15, 0x16, 0x17, 0x1a, 0x1b, 0x1c, 0x7f,
+];
+
+const BRACKETED_PASTE_START: &str = "\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
+
+/// Whether text placed after `prefix`, the part of a template before its
+/// `{}`, sits inside a bracketed paste the template opened: the prefix's last
+/// `ESC[200~` comes after any `ESC[201~`. Only these 7-bit spellings count.
+fn opens_bracketed_paste(prefix: &str) -> bool {
+    match (
+        prefix.rfind(BRACKETED_PASTE_START),
+        prefix.rfind(BRACKETED_PASTE_END),
+    ) {
+        (Some(start), Some(end)) => start > end,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// `text` as a terminal's paste sends it inside a bracket: each byte of
+/// `PASTE_REPLACED_BYTES` a space, so an `ESC[201~` in it cannot end the
+/// bracket and no byte acts as a key. Line feeds and tabs pass. Every
+/// replaced byte is ASCII, so no multi-byte character is touched.
+fn paste_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| match u8::try_from(c) {
+            Ok(byte) if PASTE_REPLACED_BYTES.contains(&byte) => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Put `text` into `template` at its `{}`, cleaned by `paste_safe` when the
+/// template opens a bracketed paste before it, built in or overridden alike;
+/// a template that frames nothing gets the text as it is. A template without
+/// `{}` is a suffix after the text.
 fn apply_template(text: &str, template: &str) -> String {
-    if template.contains("{}") {
-        template.replacen("{}", text, 1)
-    } else {
-        format!("{text}{template}")
+    match template.split_once("{}") {
+        Some((before, after)) if opens_bracketed_paste(before) => {
+            format!("{before}{}{after}", paste_safe(text))
+        }
+        Some((before, after)) => format!("{before}{text}{after}"),
+        None => format!("{text}{template}"),
     }
 }
 
@@ -407,9 +454,11 @@ pub fn plan_submitted_input(
 ///
 /// The agent's resolved template (default or overridden) drives the bytes. A
 /// template with a `{}` placeholder substitutes the text there (the codex and
-/// opencode bracketed-paste wraps are expressed this way); a template WITHOUT
-/// `{}` is treated as a pure suffix appended after the text, so a bare-chord override
-/// like `CHAN_SUBMIT_GEMINI=$'\r'` still works.
+/// opencode bracketed-paste wraps are expressed this way), cleaned as a
+/// terminal's paste is when the template opens a bracketed paste before it,
+/// so the text cannot end the bracket (`apply_template`); a template WITHOUT
+/// `{}` is treated as a pure suffix appended after the text, so a bare-chord
+/// override like `CHAN_SUBMIT_GEMINI=$'\r'` still works.
 ///
 /// Defaults mirror the live-probed bytes. The SPA sends only the agent name;
 /// the server applies this encoding.
@@ -1174,6 +1223,155 @@ mod tests {
             wrong.is_empty(),
             "(command, CHAN_AGENT, derived, wanted): {wrong:#?}"
         );
+    }
+
+    /// A message that would end its own bracket, colour the screen and
+    /// interrupt, with a tab and a line feed between its lines, and the same
+    /// message as a bracketed template delivers it.
+    const HOSTILE: &str = "one\x1b[201~; echo injected\nprintf '\x1b[31mred'\x03\tlast";
+    const CLEANED: &str = "one [201~; echo injected\nprintf ' [31mred' \tlast";
+
+    /// The bytes Ghostty's paste encoder replaces with a space, from the
+    /// fixture the workspace app's tests read off the encoder itself.
+    fn fixture_replaced_bytes() -> Vec<u8> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/paste-encoder/replaced-bytes.json"
+        ))
+        .expect("the paste encoder fixture is JSON");
+        fixture["replaced"]
+            .as_array()
+            .expect("a replaced array")
+            .iter()
+            .map(|hex| {
+                let hex = hex.as_str().expect("a hex string");
+                u8::from_str_radix(hex.trim_start_matches("0x"), 16).expect("a byte")
+            })
+            .collect()
+    }
+
+    fn bracketing_built_ins() -> [SubmitAgent; 4] {
+        [
+            SubmitAgent::Agy,
+            SubmitAgent::Codex,
+            SubmitAgent::Kimi,
+            SubmitAgent::OpenCode,
+        ]
+    }
+
+    #[test]
+    fn a_bracketing_built_in_template_turns_the_encoders_bytes_into_spaces() {
+        let replaced = fixture_replaced_bytes();
+        assert_eq!(replaced.len(), 16, "the fixture holds the encoder's set");
+        for agent in bracketing_built_ins() {
+            let submit = built_in(agent);
+            for byte in 0u8..0x80 {
+                let ch = char::from(byte);
+                let kept = if replaced.contains(&byte) { ' ' } else { ch };
+                assert_eq!(
+                    plan_submitted_input(format!("a{ch}z"), Some(&submit), false).parts,
+                    vec![format!("\x1b[200~a{kept}z\n\x1b[201~\r").into_bytes()],
+                    "{} byte 0x{byte:02x}",
+                    agent.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_cannot_end_a_built_in_bracket_early() {
+        for agent in bracketing_built_ins() {
+            let want = format!("\x1b[200~{CLEANED}\n\x1b[201~\r");
+            let submit = built_in(agent);
+            for batched in [false, true] {
+                let parts = plan_submitted_input(HOSTILE.into(), Some(&submit), batched).parts;
+                assert_eq!(parts, vec![want.clone().into_bytes()], "{}", agent.name());
+            }
+            assert_eq!(apply_submit_chord(HOSTILE.into(), Some(agent)), want);
+            assert_eq!(submit_writes(HOSTILE.into(), Some(agent)), vec![want]);
+        }
+    }
+
+    #[test]
+    fn a_message_cannot_end_an_overridden_bracket_early() {
+        // An override that opens a bracketed paste before its text is cleaned
+        // as a built-in one is, whichever agent it is for: claude's built-in
+        // frames nothing, this one does.
+        let (template, source) = resolve_template_with_source(
+            SubmitAgent::Claude,
+            |key| (key == "CHAN_SUBMIT_CLAUDE").then(|| r"\e[200~{}\e[201~\e[27;9;13~".to_string()),
+            None,
+        );
+        assert_eq!(source, SubmitTemplateSource::Override);
+        let claude = ResolvedSubmit {
+            agent: SubmitAgent::Claude,
+            template,
+            source,
+        };
+        assert_eq!(
+            plan_submitted_input(HOSTILE.into(), Some(&claude), false).parts,
+            vec![format!("\x1b[200~{CLEANED}\n\x1b[201~\x1b[27;9;13~").into_bytes()]
+        );
+
+        // A config-file override of codex that submits on a line feed.
+        let mut file = HashMap::new();
+        file.insert("codex".to_string(), r"\e[200~{}\e[201~\n".to_string());
+        let (template, source) =
+            resolve_template_with_source(SubmitAgent::Codex, |_| None, Some(&file));
+        let codex = ResolvedSubmit {
+            agent: SubmitAgent::Codex,
+            template,
+            source,
+        };
+        assert_eq!(
+            plan_submitted_input(HOSTILE.into(), Some(&codex), false).parts,
+            vec![format!("\x1b[200~{CLEANED}\n\x1b[201~\n").into_bytes()]
+        );
+    }
+
+    #[test]
+    fn a_template_that_frames_nothing_and_a_raw_write_send_the_text_as_it_is() {
+        let body = format!("{HOSTILE}\n");
+        assert_eq!(
+            plan_submitted_input(HOSTILE.into(), Some(&built_in(SubmitAgent::Claude)), false).parts,
+            vec![format!("{body}\x1b[27;9;13~").into_bytes()]
+        );
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            assert_eq!(
+                plan_submitted_input(HOSTILE.into(), Some(&built_in(agent)), false).parts,
+                vec![body.clone().into_bytes(), b"\r".to_vec()],
+                "{}",
+                agent.name()
+            );
+        }
+        assert_eq!(
+            plan_submitted_input(HOSTILE.into(), None, false).parts,
+            vec![HOSTILE.as_bytes().to_vec()]
+        );
+        assert_eq!(apply_submit_chord(HOSTILE.into(), None), HOSTILE);
+
+        // Overrides whose text is not inside a bracket they open: a suffix
+        // with no placeholder, and a text after a bracket already closed.
+        for (template, want) in [
+            (
+                "\x1b[200~\x1b[201~\r",
+                format!("{body}\x1b[200~\x1b[201~\r"),
+            ),
+            (
+                "\x1b[200~\x1b[201~{}\r",
+                format!("\x1b[200~\x1b[201~{body}\r"),
+            ),
+        ] {
+            let submit = ResolvedSubmit {
+                agent: SubmitAgent::Codex,
+                template: template.to_string(),
+                source: SubmitTemplateSource::Override,
+            };
+            assert_eq!(
+                plan_submitted_input(HOSTILE.into(), Some(&submit), false).parts,
+                vec![want.into_bytes()],
+                "{template:?}"
+            );
+        }
     }
 
     #[cfg(feature = "client")]

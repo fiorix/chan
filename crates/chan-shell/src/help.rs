@@ -1686,7 +1686,11 @@ target a mixed-agent group per session rather than by group.
 The applied encodings: claude appends a chord, agy, codex, kimi,
 and opencode wrap the text in bracketed paste plus a CR, gemini and
 muse take the CR as its own later queue entry, one idle gate after
-the body.
+the body. Inside a bracketed paste, built in or overridden, the
+text's ESC, NUL, ENQ, EOT, BS, DEL and tty control characters
+(Ctrl+C, Ctrl+U, Ctrl+Z and the like) are sent as spaces, as a
+terminal's paste sends them, so the text cannot end the bracket
+early. Line feeds and tabs are kept.
 Omit --submit and the text parks in the agent's compose box
 unsubmitted, since a bare newline is a newline to an agent, not a
 submit.
