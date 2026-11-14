@@ -7952,14 +7952,16 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
   // name a nested selection with nothing opened above it, as a session
   // from a release whose slide drew the whole tree does: the directories
   // above the selection open with it, so Details has its node.
+  // Each drawn-open path goes in the poll's query. Shared links and saved
+  // layouts must not restore an unbounded list or parent/empty segments.
   const indexingExpanded = [
     ...new Set([
-      ...(Array.isArray(sertab.de)
-        ? sertab.de.filter((dir) => typeof dir === "string" && dir.length > 0)
-        : []),
+      ...(Array.isArray(sertab.de) ? sertab.de : []),
       ...(selected ? dirsAbove(selected.slice("directory:".length)) : []),
-    ]),
-  ];
+    ].filter((dir) =>
+      typeof dir === "string" && dir.split("/").every((part) => part !== "" && part !== ".."),
+    )),
+  ].slice(0, 256);
   const tab: DashboardTab = {
     kind: "dashboard",
     id: id("dashboard"),
