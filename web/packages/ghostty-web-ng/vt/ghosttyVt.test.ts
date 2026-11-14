@@ -372,6 +372,27 @@ describe("upstream's terminal through the binding", () => {
     expect(blank.bg, "a cell nothing was written to has the default background").toBe(0x101010);
   });
 
+  test("a cell says whether its background is the default, which can be black", async () => {
+    // A see-through window's theme hands the core a default background of
+    // 0, so a default cell and a pure black one carry the same colour.
+    const t = (await upstream()).createTerminal(20, 3, { bgColor: 0, palette: [0x0c0c0d] });
+    t.write(
+      "d\x1b[48;2;0;0;0mr\x1b[0m\x1b[48;5;16mp\x1b[0m\x1b[40mq\x1b[0m\x1b[7;38;2;0;0;0mi\x1b[0m" +
+        "\x1b[48;2;0;0;0m\x1b[2X\x1b[0m\x1b[2C\x1b[48;5;16m\x1b[2X\x1b[0m\x1b[2Ce",
+    );
+    // By column: the default, RGB black, the 256-colour table's black, the
+    // palette's black, inverse video over the default background, cells
+    // erased in RGB black and in the table's black, the default again, and
+    // a cell nothing was written to.
+    const want = [true, false, false, false, true, false, false, false, false, true, true];
+    const bgs = [0, 0, 0, 0x0c0c0d, 0, 0, 0, 0, 0, 0, 0];
+    const read = (cells: VtCells) => want.map((_, x) => [cells.at(x)!.defaultBg, cells.at(x)!.bg]);
+    expect(read(row(t, 0)), "on the screen").toEqual(want.map((d, x) => [d, bgs[x]]));
+    t.write("\r\n".repeat(3));
+    expect(t.getScrollbackLength()).toBe(1);
+    expect(read(row(t, 0, true)), "in the history").toEqual(want.map((d, x) => [d, bgs[x]]));
+  });
+
   test("only the rows a write touched are dirty after a clean", async () => {
     const t = (await upstream()).createTerminal(20, 6);
     t.write("a\r\nb\r\nc");

@@ -500,17 +500,15 @@ export class CanvasRenderer {
       return; // Selection background replaces cell background
     }
 
-    // Extract background color and handle inverse: when inverted,
-    // background becomes foreground
-    const bg = cell.flags & VtFlag.INVERSE ? cell.fg : cell.bg;
-
-    // Only draw cell background if it's different from the default (black)
-    // This lets the theme background (drawn earlier) show through for default cells
-    const isDefaultBg = bg === 0;
-    if (!isDefaultBg) {
-      this.ctx.fillStyle = this.rgbToCSS(bg);
-      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
-    }
+    // A default background paints nothing over the row's theme fill, which
+    // a see-through theme leaves clear. Its colour cannot say it is the
+    // default: a see-through theme's resolves to black in the core, as a
+    // pure black a program set does. Inverse video paints the foreground,
+    // default or not.
+    const inverse = (cell.flags & VtFlag.INVERSE) !== 0;
+    if (!inverse && cell.defaultBg) return;
+    this.ctx.fillStyle = this.rgbToCSS(inverse ? cell.fg : cell.bg);
+    this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
   }
 
   /**

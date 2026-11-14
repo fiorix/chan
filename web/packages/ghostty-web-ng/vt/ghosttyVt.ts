@@ -171,6 +171,11 @@ export type VtCell = {
   /// palette and the terminal's default colours.
   fg: number;
   bg: number;
+  /// Whether the background is the terminal's default, as the core reports
+  /// a cell whose style and content name no background. `bg` holds the
+  /// default then, which can be pure black, so only this tells a default
+  /// background from one a program set.
+  defaultBg: boolean;
   /// 1 when the cell carries an OSC 8 hyperlink, else 0. The core does not
   /// number links, so every link reads 1.
   hyperlink: number;
@@ -209,7 +214,7 @@ export class VtCells {
   /// first `length` a reader fills, every one. For `VtTerminal`'s readers.
   fill(source: object, history: boolean, row: number, version: number, length: number): VtCell[] {
     while (this.cells.length < length) {
-      this.cells.push({ codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0, bg: 0, hyperlink: 0 });
+      this.cells.push({ codepoint: 0, cluster: null, width: 1, flags: 0, fg: 0, bg: 0, defaultBg: true, hyperlink: 0 });
     }
     this.source = source;
     this.history = history;
@@ -673,12 +678,13 @@ export class VtTerminal {
   private iteratorGeneration = -1;
   /// The row the iterator stands on, -1 before its first row.
   private iteratorRow = -1;
-  /// The styles a row's read has met, by style id: flags, foreground and
-  /// background.
+  /// The styles a row's read has met, by style id: flags, foreground,
+  /// background and whether that is the default.
   private readonly styleIds = new Int32Array(ROW_STYLES);
   private readonly styleFlags = new Uint16Array(ROW_STYLES);
   private readonly styleFg = new Int32Array(ROW_STYLES);
   private readonly styleBg = new Int32Array(ROW_STYLES);
+  private readonly styleDefaultBg = new Uint8Array(ROW_STYLES);
   private styleCount = 0;
   /// The content tag and content of the raw cell `rawCell` read last.
   private rawTag = 0;
@@ -1383,6 +1389,7 @@ export class VtTerminal {
     cell.flags = 0;
     cell.fg = this.fg;
     cell.bg = this.bg;
+    cell.defaultBg = true;
     cell.hyperlink = 0;
   }
 
@@ -1402,6 +1409,7 @@ export class VtTerminal {
     cell.flags = 0;
     cell.fg = this.fg;
     cell.bg = this.bg;
+    cell.defaultBg = true;
     cell.hyperlink = cellBits(lo, hi, CELL_BITS.hyperlink);
     return cellBits(lo, hi, CELL_BITS.style_id);
   }
@@ -1412,9 +1420,11 @@ export class VtTerminal {
     const T = ABI.GhosttyCellContentTag;
     if (this.rawTag === T.BG_COLOR_PALETTE) {
       cell.bg = this.paletteColor(this.rawContent & 0xff);
+      cell.defaultBg = false;
     } else if (this.rawTag === T.BG_COLOR_RGB) {
       const c = this.rawContent;
       cell.bg = ((c & 0xff) << 16) | (c & 0xff00) | ((c >>> 16) & 0xff);
+      cell.defaultBg = false;
     }
   }
 
@@ -1433,7 +1443,9 @@ export class VtTerminal {
     this.styleIds[slot] = id;
     this.styleFlags[slot] = view.getUint16(ptr + L.flags, true);
     this.styleFg[slot] = this.styleColor(view, ptr + L.fg_color) ?? this.fg;
-    this.styleBg[slot] = this.styleColor(view, ptr + L.bg_color) ?? this.bg;
+    const bg = this.styleColor(view, ptr + L.bg_color);
+    this.styleBg[slot] = bg ?? this.bg;
+    this.styleDefaultBg[slot] = bg === null ? 1 : 0;
     return slot;
   }
 
@@ -1441,6 +1453,7 @@ export class VtTerminal {
     cell.flags = this.styleFlags[slot];
     cell.fg = this.styleFg[slot];
     cell.bg = this.styleBg[slot];
+    cell.defaultBg = this.styleDefaultBg[slot] === 1;
   }
 
   /// Points the codepoint buffer of a cell's multi-get at the scratch room.

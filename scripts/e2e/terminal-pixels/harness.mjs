@@ -254,10 +254,10 @@ const SWITCHED_THEME = {
 /// unless the cursor is its subject.
 const PATTERNS = {
   // Colours and attributes. Row 1 sets explicit black backgrounds beside
-  // default ones: the palette's black and RGB (1,1,1), which the renderer
-  // paints, and the 256-colour table's black (16) and RGB black, which it
-  // leaves unpainted as if they were the default. Rows 10 and 11 give cells
-  // a background and no character, by erasing in a colour.
+  // default ones: the palette's black, the 256-colour table's black (16),
+  // RGB black and RGB (1,1,1), each of which the renderer paints, where a
+  // default cell shows the theme's background. Rows 10 and 11 give cells a
+  // background and no character, by erasing in a colour.
   attrs: {
     bytes() {
       return [

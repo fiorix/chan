@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/ghostty-web-ng";
 import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { expectPixel, SoftwareCanvasContext, sourceOver } from "../__tests__/softwareCanvas";
+import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
+import { transparentColor } from "./backgroundOpacity";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
@@ -391,5 +392,133 @@ describe("the ghostty renderer's selected text", () => {
     // accent, the renderer's default since the theme names none.
     const cursorGlyph = screen.context.texts.filter((t) => t.x === width && t.text === "e").at(-1);
     expect(cursorGlyph && channels(cursorGlyph.fill)).toBe(channels("#1e1e1e"));
+  });
+});
+
+/// A canvas colour as a pixel, from the `#rrggbb` a theme names or the
+/// `rgb()` and `rgba()` the renderer and a see-through theme fill in.
+function pixel(style: string): Rgba {
+  const [r, g, b] = channels(style).split(",").map(Number);
+  const alpha = style.match(/^rgba\((?:[^,]+,){3}([^)]+)\)$/);
+  return { r, g, b, a: alpha ? Number(alpha[1]) : 1 };
+}
+
+describe("the ghostty renderer's cell backgrounds", () => {
+  const cols = 24;
+  const rows = 3;
+
+  /// TerminalTab's terminalTheme() at its fallbacks, each with its palette's
+  /// black, opaque and as a see-through window builds it: the background at
+  /// alpha 0, which the widget hands the core as black.
+  const DARK: ITheme = { background: "#1c1c1e", foreground: "#ebebf0", cursor: "#58a6ff", black: "#0c0c0d" };
+  const LIGHT: ITheme = { background: "#ffffff", foreground: "#1c1c1e", cursor: "#0969da", black: "#24292f" };
+  const THEMES: [string, ITheme][] = [
+    ["dark", DARK],
+    ["light", LIGHT],
+    ["dark, see-through", { ...DARK, background: transparentColor(DARK.background!) }],
+    ["light, see-through", { ...LIGHT, background: transparentColor(LIGHT.background!) }],
+  ];
+
+  // By column: default cells; pure black named as RGB, from the 256-colour
+  // table and by inverse video over a black foreground; cells erased in RGB
+  // black and in the table's black; the palette's black; inverse video over
+  // the default colours; and default cells between them and after.
+  const ROW =
+    "df \x1b[48;2;0;0;0mrg\x1b[0m \x1b[48;5;16m16\x1b[0m \x1b[7;38;2;0;0;0miv\x1b[0m " +
+    "\x1b[48;2;0;0;0m\x1b[3X\x1b[0m\x1b[3C\x1b[48;5;16m\x1b[3X\x1b[0m\x1b[3C " +
+    "\x1b[40mpb\x1b[0m \x1b[7mx\x1b[0m";
+  const BLACK = [3, 4, 6, 7, 9, 10, 12, 13, 14, 15, 16, 17];
+  const PALETTE_BLACK = [19, 20];
+  const INVERSE = [22];
+  const DEFAULT = Array.from({ length: cols }, (_, x) => x).filter(
+    (x) => !BLACK.includes(x) && !PALETTE_BLACK.includes(x) && !INVERSE.includes(x),
+  );
+
+  let vendored: WebAssembly.Module;
+
+  beforeAll(async () => {
+    vendored = await WebAssembly.compile(readFileSync(VENDORED));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /// A terminal built from `theme` as open() builds it, its core and its
+  /// renderer, written `bytes` with the cursor hidden.
+  async function painted(theme: ITheme, bytes: string) {
+    const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      function (this: HTMLCanvasElement) {
+        const existing = contexts.get(this);
+        if (existing) return existing as unknown as CanvasRenderingContext2D;
+        const created = new SoftwareCanvasContext(this);
+        contexts.set(this, created);
+        return created as unknown as CanvasRenderingContext2D;
+      } as unknown as typeof HTMLCanvasElement.prototype.getContext,
+    );
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
+    const term = new Terminal({ ghostty: vt, cols, rows, theme });
+    const config = (term as unknown as { buildWasmConfig(): Parameters<GhosttyVt["createTerminal"]>[2] }).buildWasmConfig();
+    term.wasmTerm = vt.createTerminal(cols, rows, config);
+    const canvas = document.createElement("canvas");
+    const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme });
+    renderer.resize(cols, rows);
+    term.renderer = renderer;
+    term.wasmTerm.write("\x1b[?25l" + bytes);
+    const context = contexts.get(canvas)!;
+    const { width, height } = renderer.getMetrics();
+    return {
+      term,
+      /// One full frame as the widget's render loop issues it.
+      frame() {
+        renderer.render(term.wasmTerm!, true, term.getViewportY(), 0);
+      },
+      /// The pixel at the middle of the cell at column `x` of view row `y`.
+      /// The software canvas paints no glyphs, so it is the cell's
+      /// background over the row's.
+      at(x: number, y: number): Rgba {
+        return context.pixelAt((x + 0.5) * width, (y + 0.5) * height);
+      },
+    };
+  }
+
+  /// What each cell of the row paints under `theme`: pure black, the
+  /// palette's black and inverse video's default foreground over the row's
+  /// theme fill, and the theme fill alone where the background is the
+  /// default, clear in a see-through window.
+  function expected(theme: ITheme): Map<number, Rgba> {
+    const clear = { r: 0, g: 0, b: 0, a: 0 };
+    const row = sourceOver(pixel(theme.background!), clear);
+    const cells = new Map<number, Rgba>();
+    for (const x of DEFAULT) cells.set(x, row);
+    for (const x of BLACK) cells.set(x, sourceOver(pixel("#000000"), row));
+    for (const x of PALETTE_BLACK) cells.set(x, sourceOver(pixel(theme.black!), row));
+    for (const x of INVERSE) cells.set(x, sourceOver(pixel(theme.foreground!), row));
+    return cells;
+  }
+
+  function expectRow(screen: Awaited<ReturnType<typeof painted>>, y: number, theme: ITheme, where: string): void {
+    for (const [x, want] of expected(theme)) {
+      const got = screen.at(x, y);
+      for (const channel of ["r", "g", "b", "a"] as const) {
+        expect.soft(got[channel], `${where}, column ${x}, ${channel}`).toBeCloseTo(want[channel], 6);
+      }
+    }
+  }
+
+  test.each(THEMES)("a screen row paints the backgrounds a program set, pure black included (%s)", async (_name, theme) => {
+    const screen = await painted(theme, ROW);
+    screen.frame();
+    expectRow(screen, 0, theme, "screen row 0");
+  });
+
+  test.each(THEMES)("a history row paints the backgrounds a program set, pure black included (%s)", async (_name, theme) => {
+    const screen = await painted(theme, ROW + "\r\n".repeat(rows));
+    expect(screen.term.getScrollbackLength()).toBe(1);
+    screen.term.scrollLines(-1);
+    expect(screen.term.getViewportY()).toBe(1);
+    screen.frame();
+    expectRow(screen, 0, theme, "history row 0 at view row 0");
   });
 });
