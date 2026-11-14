@@ -585,6 +585,7 @@ describe("the canvas position after surrounding layout changes", () => {
     document.dispatchEvent(new Event("scroll"));
     document.body.dispatchEvent(new Event("animationend", { bubbles: true }));
     for (const callback of lateCallbacks) callback();
+    expect(b.frames.size).toBe(0);
     await b.paint();
     expect(b.api.refresh).not.toHaveBeenCalled();
     expect(b.frames.size).toBe(0);
