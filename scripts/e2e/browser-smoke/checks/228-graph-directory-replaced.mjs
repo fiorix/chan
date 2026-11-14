@@ -209,9 +209,13 @@ export default {
       assert.ok(typeof oldLabel === "string" && oldLabel.length > 0, "old.md needs its streamed label");
       assert.ok(typeof newLabel === "string" && newLabel.length > 0, "new.md needs its streamed label");
       assert.notEqual(oldLabel, newLabel, "the rename fixtures must draw distinct labels");
-      evidence.oldLabels = [oldLabel];
-      evidence.newLabels = [newLabel];
       evidence.initialLevels = await captureLevels();
+      const oldSpineLabel = evidence.initialLevels[v2].nodes.find((node) => node.id === oldPath)?.name;
+      assert.ok(typeof oldSpineLabel === "string" && oldSpineLabel.length > 0, "old.md needs its spine label");
+      // Once the shared graph drops a file, stale spine data can still draw
+      // it under its filesystem name rather than its semantic label.
+      evidence.oldLabels = [...new Set([oldLabel, oldSpineLabel])];
+      evidence.newLabels = [newLabel];
       await observePage(page);
       await page.setRequestInterception(true);
       await cdp.send("Network.enable");
