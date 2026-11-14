@@ -79,6 +79,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a renamed directory keeps old files][graphrename] | not started | build |
 | [a terminal launch gets no focus][raisefocus] | not started | build |
 | [a minimized window stays minimized][unbury] | not started | build |
+| [slides and PDFs show raw wikilinks][wikirender] | not started | build |
 | [a reload focuses another pane][reloadfocus] | not started | measure |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
@@ -97,6 +98,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [graphrename]: v0.131.0/a-graph-tab-keeps-a-directorys-old-files-after-another-directory-takes-its-name.md
 [raisefocus]: v0.131.0/a-second-launch-from-a-terminal-gets-no-focus-where-the-window-manager-prevents-focus-stealing.md
 [unbury]: v0.131.0/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md
+[wikirender]: v0.131.0/slides-and-pdf-export-show-wikilinks-as-raw-text.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
 
 ## Completed
