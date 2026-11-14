@@ -1,0 +1,409 @@
+import assert from "node:assert/strict";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { mask, poll } from "../lib/launcher-devserver.mjs";
+import { readPaneStripPreference, windowSessions, writePaneStripPreference } from "../lib/pane-strip.mjs";
+import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { readTerminalPrefs } from "../lib/terminal-prefs.mjs";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const TAB = ".tabs .tab-row > .tab";
+const CONFIRM = '[role="dialog"][aria-labelledby="confirm-title"]';
+
+function requireProduct(value, message) {
+  if (!value) throw new Error(`PRODUCT_TAB_ACTION: ${message}`);
+}
+
+// Observe native delivery and real session/exit frames, without changing the
+// application's state. Synthetic activation below is a separate control.
+function installProbe() {
+  const probe = window.__tab266 = { events: [], frames: [] };
+  for (const type of ["mousedown", "mouseup", "click", "keydown", "contextmenu", "dragstart", "dragend", "drop"]) {
+    document.addEventListener(type, (event) => {
+      const outer = event.target?.closest?.(".tabs .tab");
+      if (outer) probe.events.push({ type, trusted: event.isTrusted, key: event.key, button: event.button,
+        label: outer.querySelector(".path")?.textContent.trim(), target: event.target.className,
+        dropEffect: event.dataTransfer?.dropEffect });
+    }, true);
+  }
+  const NativeSocket = window.WebSocket;
+  window.WebSocket = new Proxy(NativeSocket, {
+    construct(target, args) {
+      const socket = Reflect.construct(target, args);
+      if (new URL(String(args[0]), location.href).pathname.endsWith("/api/terminal/ws")) {
+        let session = null;
+        socket.addEventListener("message", (event) => {
+          if (typeof event.data !== "string") return;
+          let frame;
+          try { frame = JSON.parse(event.data); } catch { return; }
+          if (frame.type === "session") session = frame.id;
+          if (frame.type === "session" || frame.type === "exit") probe.frames.push({ type: frame.type, session, code: frame.code });
+        });
+      }
+      return socket;
+    },
+  });
+}
+
+async function state(page) {
+  return page.evaluate((selector) => {
+    const box = (node) => {
+      if (!node) return null;
+      const { x, y, width, height } = node.getBoundingClientRect();
+      return { x, y, width, height };
+    };
+    const showing = (node) => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    return {
+      tabs: [...document.querySelectorAll(selector)].map((outer) => {
+        const role = outer.matches('[role="tab"]') ? outer : outer.querySelector('[role="tab"]');
+        const close = outer.querySelector("button.close");
+        return { label: outer.querySelector(".path")?.textContent.trim(), selected: role?.getAttribute("aria-selected") === "true",
+          active: outer.classList.contains("active"), closeName: close?.getAttribute("aria-label"), closeInsideRole: !!role?.contains(close),
+          rect: box(outer), labelRect: box(role), closeRect: box(close), inTitleBar: !!outer.closest(".tabs.in-bar") };
+      }),
+      dialogs: [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(showing).map((node) => ({
+        name: node.getAttribute("aria-label") ?? (node.getAttribute("aria-labelledby") ?? "").split(/\s+/).map((id) => document.getElementById(id)?.textContent.trim() ?? "").join(" "),
+        text: node.textContent.trim(),
+      })),
+      overflow: [...document.querySelectorAll(".tab-scroll-button")].filter(showing).map((node) => ({
+        name: node.getAttribute("aria-label"), disabled: node.getAttribute("aria-disabled"), rect: box(node),
+      })),
+      events: window.__tab266.events, frames: window.__tab266.frames,
+    };
+  }, TAB);
+}
+
+async function element(page, label, part = "label") {
+  const handle = await page.evaluateHandle(({ selector, wanted, part }) => {
+    const outer = [...document.querySelectorAll(selector)].find((node) => node.querySelector(".path")?.textContent.trim() === wanted);
+    if (!outer) return null;
+    if (part === "close") return outer.querySelector("button.close");
+    if (part === "role") return outer.matches('[role="tab"]') ? outer : outer.querySelector('[role="tab"]');
+    return outer.querySelector(".path");
+  }, { selector: TAB, wanted: label, part });
+  assert.ok(handle.asElement(), `instrument: ${part} exists for ${label}`);
+  return handle.asElement();
+}
+
+async function click(page, label, part = "label", button = "left") {
+  const handle = await element(page, label, part);
+  try { await handle.click({ button }); } finally { await handle.dispose(); }
+}
+
+function names(reading) { return reading.tabs.map((tab) => tab.label).sort(); }
+function sessionIds(sessions) { return sessions.map((session) => session.id).sort(); }
+
+async function allSessions(fixture) {
+  const { stdout } = await fixture.cs(["terminal", "list", "--json"]);
+  const { groups } = JSON.parse(stdout);
+  assert.ok(groups && typeof groups === "object" && !Array.isArray(groups), "instrument: terminal registry has groups");
+  const grouped = Object.values(groups);
+  assert.ok(grouped.every(Array.isArray), "instrument: terminal registry groups are arrays");
+  const rows = grouped.flat();
+  assert.ok(rows.every((row) => row && typeof row.session_id === "string" && typeof row.name === "string" && "window" in row),
+    "instrument: terminal registry rows have session identity");
+  return rows.map((row) => ({ id: row.session_id, name: row.name, window: row.window }));
+}
+
+function preserveSessions(before, after, action) {
+  requireProduct(JSON.stringify(sessionIds(after.sessions)) === JSON.stringify(sessionIds(before.sessions)), `${action} changed the window session set`);
+  requireProduct(JSON.stringify(sessionIds(after.allSessions)) === JSON.stringify(sessionIds(before.allSessions)), `${action} changed the global session set`);
+}
+
+async function snapshot(fixture) {
+  const { stdout } = await fixture.cs(["pane", "list", "--window", fixture.windowId, "--json"]);
+  return { ...await state(fixture.page), panes: JSON.parse(stdout), sessions: await windowSessions(fixture.page, fixture.token),
+    allSessions: await allSessions(fixture) };
+}
+
+async function fixture(ctx, index, report) {
+  const suffix = `${Date.now().toString(36)}-${index}`;
+  const result = { windowId: `tab266-${suffix}`, token: new URL(ctx.serverUrl).searchParams.get("t"), files: [], page: null,
+    labels: { control: `axc-control-${suffix}.md`, file: `axc-file-${suffix}.md`, live: `axc-live-${suffix}`, ended: `axc-ended-${suffix}` } };
+  result.cs = async (args) => {
+    try {
+      const reply = await ctx.exec(ctx.chanBin, ["shell", ...args], { cwd: ctx.workspaceDir, timeout: 30_000,
+        env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: result.windowId, CHAN_WORKSPACE_PATH: ctx.workspaceDir } });
+      report.commands.push({ args, exit: 0, stdout: mask(String(reply.stdout)), stderr: mask(String(reply.stderr)) });
+      return reply;
+    } catch (error) {
+      report.commands.push({ args, exit: error.code ?? null, error: mask(error.message) });
+      throw error;
+    }
+  };
+  report.fixture = result;
+  for (const label of [result.labels.control, result.labels.file]) {
+    const path = join(ctx.workspaceDir, label);
+    writeFileSync(path, `# ${label}\n\nClean file for tab activation.\n`);
+    result.files.push(path);
+  }
+  const page = result.page = await ctx.browser.newPage();
+  result.pageErrors = [];
+  page.on("pageerror", (error) => result.pageErrors.push(mask(error.message)));
+  await page.setViewport({ width: 1600, height: 1000 });
+  await page.evaluateOnNewDocument(installProbe);
+  const url = new URL(ctx.serverUrl);
+  url.hash = "";
+  url.searchParams.set("w", result.windowId);
+  url.searchParams.set("fresh", "1");
+  await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.waitForSelector(".pane", { timeout: 30_000 });
+  await page.bringToFront();
+  await ctx.waitWindowLive(result.windowId);
+  result.originalStrip = await readPaneStripPreference(page, result.token);
+  await writePaneStripPreference(page, result.token, false);
+  for (const label of [result.labels.control, result.labels.file]) await result.cs(["open", label, "--window", result.windowId]);
+  await poll("both clean file tabs", async () => (await state(page)).tabs.filter((tab) => tab.label?.endsWith(".md")).length === 2);
+  const prefs = await readTerminalPrefs(page, result.token);
+  const backend = prefs.ghostty ? "ghostty" : "xterm";
+  for (const kind of ["live", "ended"]) {
+    const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], backend);
+    result[`${kind}Session`] = row.session_id;
+  }
+  await result.cs(["terminal", "write", "--tab-name", result.labels.ended, "exit 0\n"]);
+  await poll("real shell exit and retained tab", async () => {
+    const reading = await state(page);
+    const sessions = await windowSessions(page, result.token);
+    const registry = await allSessions(result);
+    return reading.frames.some((frame) => frame.type === "exit" && frame.session === result.endedSession) &&
+      reading.tabs.some((tab) => tab.label === result.labels.ended) && sessions.length === 1 && sessions[0].id === result.liveSession &&
+      !registry.some((session) => session.id === result.endedSession || session.name === result.labels.ended);
+  });
+  const ready = await snapshot(result);
+  assert.deepEqual(names(ready), Object.values(result.labels).sort(), "instrument: exactly the four fixture tabs");
+  assert.equal(ready.panes.panes.length, 1, "instrument: one fixture pane");
+  assert.deepEqual(result.pageErrors, [], "instrument: fixture page has no runtime error");
+  report.initial = ready;
+  return result;
+}
+
+async function cleanup(f, report) {
+  if (!f) return;
+  const attempt = async (run) => { try { await run(); } catch (error) { (report.cleanupErrors ??= []).push(mask(error.message)); } };
+  if (f.page) {
+    await attempt(() => f.page.keyboard.press("Escape"));
+    await attempt(async () => {
+      const { stdout } = await f.cs(["pane", "list", "--window", f.windowId, "--json"]);
+      for (const pane of JSON.parse(stdout).panes) for (const side of Object.values(pane.sides ?? {})) for (const tab of side.tabs ?? []) {
+        await f.cs(["pane", "close-tab", "--pane", pane.id, "--tab", tab.id, "--force", "--window", f.windowId]);
+      }
+      await poll("cleanup released live sessions", async () => (await windowSessions(f.page, f.token)).length === 0);
+    });
+    // The registry remains usable if a failed DOM/control arm cannot close
+    // its pane. Only this fixture's unique terminal names are eligible.
+    await attempt(async () => {
+      const own = async () => {
+        const { stdout } = await f.cs(["terminal", "list", "--json"]);
+        return Object.values(JSON.parse(stdout).groups ?? {}).flat().filter((row) =>
+          [f.labels.live, f.labels.ended].includes(row.name));
+      };
+      for (const row of await own()) await f.cs(["terminal", "close", "--tab-name", row.name]);
+      await poll("cleanup removed fixture sessions from the registry", async () => (await own()).length === 0);
+    });
+    if (f.originalStrip) await attempt(() => writePaneStripPreference(f.page, f.token, f.originalStrip.on));
+    await attempt(() => f.page.close());
+  }
+  for (const path of f.files) await attempt(() => rmSync(path));
+}
+
+function preserved(before, after, label, mode) {
+  requireProduct(JSON.stringify(names(after)) === JSON.stringify(names(before)), `${mode} changed the tab set`);
+  const selected = after.tabs.find((tab) => tab.label === label);
+  requireProduct(selected?.selected && selected.active, `${mode} did not select ${label}`);
+  const menu = mode === "right" ? ["tab menu", "terminal tab settings"] : [];
+  requireProduct(after.dialogs.every((dialog) => menu.includes(dialog.name)), `${mode} opened a dialog: ${JSON.stringify(after.dialogs)}`);
+}
+
+async function activation(ctx, f, kind, mode) {
+  const arm = { kind, mode, synthetic: mode === "synthetic-webkit", status: "incomplete" };
+  const label = f.labels[kind];
+  try {
+    await click(f.page, f.labels.control);
+    await poll("control tab selected", async () => (await state(f.page)).tabs.find((tab) => tab.label === f.labels.control)?.selected);
+    arm.before = await snapshot(f);
+    assert.deepEqual(names(arm.before), Object.values(f.labels).sort(), "instrument: complete fixture before activation");
+    assert.ok(!arm.before.tabs.find((tab) => tab.label === label)?.selected && arm.before.dialogs.length === 0, "instrument: inactive subject and no dialog");
+    arm.beforeShot = await ctx.shot(`${kind}-${mode}-before`, f.page);
+    const eventStart = arm.before.events.length;
+    if (mode === "Enter" || mode === "Space") {
+      const role = await element(f.page, label, "role");
+      try {
+        await role.focus();
+        assert.ok(await role.evaluate((node) => document.activeElement === node), "instrument: role tab holds keyboard focus");
+        await f.page.keyboard.press(mode);
+      } finally { await role.dispose(); }
+    } else if (mode === "synthetic-webkit") {
+      const role = await element(f.page, label, "role");
+      try {
+        await role.evaluate((node) => {
+          const target = node.querySelector("button,select") ?? node;
+          for (const type of ["mousedown", "mouseup", "click"]) target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+        });
+      } finally { await role.dispose(); }
+    } else if (mode === "held-pointer" || mode === "drag" || mode === "right") {
+      const handle = await element(f.page, label);
+      const from = await handle.boundingBox();
+      await handle.dispose();
+      assert.ok(from, "instrument: inner label has a pointer target");
+      await f.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+      const button = mode === "right" ? "right" : "left";
+      await f.page.mouse.down({ button });
+      try {
+        if (mode === "right") {
+          arm.held = await snapshot(f);
+          preserved(arm.before, arm.held, label, mode);
+          preserveSessions(arm.before, arm.held, "right mousedown");
+        } else if (mode === "held-pointer") {
+          const until = Date.now() + 500;
+          arm.heldSamples = [];
+          do {
+            arm.held = await state(f.page);
+            requireProduct(arm.held.tabs.find((tab) => tab.label === f.labels.control)?.selected, "terminal mousedown selected before release");
+            requireProduct(arm.held.dialogs.length === 0, "terminal mousedown opened a dialog");
+            arm.heldSamples.push({ at: Date.now(), tabs: arm.held.tabs, dialogs: arm.held.dialogs });
+            await sleep(50);
+          } while (Date.now() < until);
+        } else {
+          const target = arm.before.tabs.find((tab) => tab.label === f.labels.control).rect;
+          await f.page.mouse.move(target.x + 3, target.y + target.height / 2, { steps: 14 });
+        }
+      } finally { await f.page.mouse.up({ button }); }
+    } else await click(f.page, label);
+    const deadline = Date.now() + 5_000;
+    do {
+      arm.after = await state(f.page);
+      if (arm.after.dialogs.length || !arm.after.tabs.some((tab) => tab.label === label) || arm.after.tabs.find((tab) => tab.label === label)?.selected) break;
+      await sleep(50);
+    } while (Date.now() < deadline);
+    preserved(arm.before, arm.after, label, mode);
+    const until = Date.now() + 500;
+    arm.holdSamples = [];
+    while (Date.now() < until) {
+      const sample = await state(f.page);
+      preserved(arm.before, sample, label, mode);
+      arm.holdSamples.push({ at: Date.now(), selected: label, dialogs: sample.dialogs, tabs: names(sample) });
+      await sleep(50);
+    }
+    arm.after = await snapshot(f);
+    preserved(arm.before, arm.after, label, mode);
+    preserveSessions(arm.before, arm.after, mode);
+    requireProduct(arm.after.panes.activePaneId === arm.after.panes.panes[0].id, `${mode} did not focus the subject pane`);
+    const events = arm.after.events.slice(eventStart);
+    if (!arm.synthetic) assert.ok(events.some((event) => event.trusted && event.label === label), "instrument: trusted input reached the subject");
+    if (mode === "right") requireProduct(arm.after.dialogs.some((dialog) => ["tab menu", "terminal tab settings"].includes(dialog.name)), "right press did not open the tab menu");
+    if (mode === "drag") {
+      assert.ok(["dragstart", "dragend", "drop"].every((type) => events.some((event) => event.type === type && event.trusted)), "instrument: trusted drag started, dropped and ended");
+      requireProduct(arm.after.tabs[0].label === label, "inner-label drag did not reorder before the control tab");
+    }
+    arm.status = "passed";
+  } catch (error) {
+    arm.status = error.message.startsWith("PRODUCT_TAB_ACTION:") ? "observed" : "incomplete";
+    arm.error = mask(error.message);
+    arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
+  } finally {
+    arm.afterShot = await ctx.shot(`${kind}-${mode}-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
+    await f.page.keyboard.press("Escape").catch(() => {});
+  }
+  return arm;
+}
+
+async function dialogButton(page, label) {
+  const handle = await page.evaluateHandle(({ selector, label }) => [...(document.querySelector(selector)?.querySelectorAll("button") ?? [])]
+    .find((node) => node.textContent.trim() === label), { selector: CONFIRM, label });
+  assert.ok(handle.asElement(), `instrument: confirmation has ${label}`);
+  try { await handle.asElement().click(); } finally { await handle.dispose(); }
+}
+
+async function closeControl(ctx, f, kind) {
+  const arm = { kind, mode: "close-control", status: "incomplete" };
+  const label = f.labels[kind];
+  try {
+    await click(f.page, f.labels.control);
+    arm.before = await snapshot(f);
+    arm.beforeShot = await ctx.shot(`${kind}-close-before`, f.page);
+    await click(f.page, label, "close");
+    if (kind === "live") {
+      await poll("live close prompt", async () => (await state(f.page)).dialogs.find((dialog) => dialog.name === "Close tab?"));
+      arm.prompt = await snapshot(f);
+      requireProduct(JSON.stringify(names(arm.prompt)) === JSON.stringify(names(arm.before)), "live prompt removed a tab before confirmation");
+      preserveSessions(arm.before, arm.prompt, "live prompt");
+      arm.promptShot = await ctx.shot("live-close-prompt", f.page);
+      await dialogButton(f.page, "Cancel");
+      await poll("close prompt cancelled", async () => (await state(f.page)).dialogs.length === 0);
+      arm.cancelled = await snapshot(f);
+      requireProduct(JSON.stringify(names(arm.cancelled)) === JSON.stringify(names(arm.before)), "Cancel changed tabs");
+      preserveSessions(arm.before, arm.cancelled, "Cancel");
+      await click(f.page, label, "close");
+      await f.page.waitForSelector(CONFIRM);
+      arm.secondPrompt = await snapshot(f);
+      requireProduct(JSON.stringify(names(arm.secondPrompt)) === JSON.stringify(names(arm.before)), "second live prompt removed a tab before confirmation");
+      preserveSessions(arm.before, arm.secondPrompt, "second live prompt");
+      await dialogButton(f.page, "Close");
+    }
+    const deadline = Date.now() + 10_000;
+    do {
+      arm.after = await snapshot(f);
+      if (arm.after.dialogs.length || (!arm.after.tabs.some((tab) => tab.label === label) &&
+        (kind !== "live" || (!arm.after.sessions.some((session) => session.id === f.liveSession) &&
+          !arm.after.allSessions.some((session) => session.id === f.liveSession))))) break;
+      await sleep(100);
+    } while (Date.now() < deadline);
+    requireProduct(JSON.stringify(names(arm.after)) === JSON.stringify(names(arm.before).filter((name) => name !== label)), "close control did not remove exactly its tab");
+    requireProduct(arm.after.dialogs.length === 0, "close control left an unexpected prompt");
+    const expected = sessionIds(arm.before.sessions).filter((id) => kind !== "live" || id !== f.liveSession);
+    requireProduct(JSON.stringify(sessionIds(arm.after.sessions)) === JSON.stringify(expected), "close control changed the wrong session set");
+    const globalExpected = sessionIds(arm.before.allSessions).filter((id) => kind !== "live" || id !== f.liveSession);
+    requireProduct(JSON.stringify(sessionIds(arm.after.allSessions)) === JSON.stringify(globalExpected), "close control changed the wrong global session set");
+    arm.status = "passed";
+  } catch (error) {
+    arm.status = error.message.startsWith("PRODUCT_TAB_ACTION:") ? "observed" : "incomplete";
+    arm.error = mask(error.message);
+    arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
+  } finally {
+    arm.afterShot = await ctx.shot(`${kind}-close-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
+  }
+  return arm;
+}
+
+export default {
+  name: "tab-accessibility",
+  async run(ctx) {
+    const evidence = { engine: "Chrome", nativeAccessibility: "not exercised", fixtures: [], arms: [], status: "incomplete" };
+    try {
+      assert.ok(ctx.controlSocket, "instrument: real control socket is available");
+      for (const kind of ["live", "file", "ended"]) for (const closing of [false, true]) {
+        const report = { kind, closing, commands: [] };
+        evidence.fixtures.push(report);
+        try {
+          const f = await fixture(ctx, evidence.fixtures.length, report);
+          if (evidence.fixtures.length === 1) {
+            report.initialShot = await ctx.shot("strip-1600-before", f.page);
+            await f.page.setViewport({ width: 640, height: 1000 });
+            report.overflowShot = await ctx.shot("strip-640-overflow", f.page);
+            report.overflow = await state(f.page);
+            await f.page.setViewport({ width: 1600, height: 1000 });
+          }
+          if (closing) evidence.arms.push(await closeControl(ctx, f, kind));
+          else {
+            const modes = [kind === "live" ? "held-pointer" : "pointer", "Enter", "Space",
+              ...(kind === "live" ? ["right", "drag"] : kind === "file" ? ["right"] : []), "synthetic-webkit"];
+            for (const mode of modes) evidence.arms.push(await activation(ctx, f, kind, mode));
+          }
+          report.pageErrors = f.pageErrors;
+        } catch (error) { report.setupError = mask(error.message); }
+        finally {
+          await cleanup(report.fixture, report);
+          delete report.fixture;
+        }
+      }
+      evidence.status = evidence.arms.length === 18 && evidence.arms.every((arm) => arm.status === "passed") &&
+        evidence.fixtures.every((report) => !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length) ? "passed" : "failed";
+    } catch (error) { evidence.error = mask(error.message); }
+    finally { writeFileSync(join(ctx.outDir, "tab266-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`); }
+    assert.equal(evidence.status, "passed", `tab-accessibility: ${JSON.stringify({
+      error: evidence.error, arms: evidence.arms.filter((arm) => arm.status !== "passed").map(({ kind, mode, status, error }) => ({ kind, mode, status, error })),
+      fixtures: evidence.fixtures.map(({ kind, closing, setupError, cleanupErrors, pageErrors }) => ({ kind, closing, setupError, cleanupErrors, pageErrors })),
+    })}`);
+    return evidence;
+  },
+};
