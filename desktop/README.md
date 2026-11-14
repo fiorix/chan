@@ -1,10 +1,8 @@
 # chan-desktop
 
-Desktop edition of [chan](https://chan.app), a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory. The product framing is in [`../design.md`](../design.md).
+Desktop edition of [chan](https://chan.app), a supercharged terminal emulator. What chan is, and where the desktop fits in it, is in the root [README](../README.md) and in [`../design.md`](../design.md); the desktop's own design is [`design.md`](design.md).
 
-chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a launcher for managing workspaces that toggles inside every window, and a one-click "open workspace" flow without a separate per-workspace `chan serve` process.
-
-The workspace UI is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or a configured devserver connection.
+chan-desktop is a Tauri shell: it puts chan's windows on the desktop, embeds the server for local work, reaches devservers over a TCP tunnel or through a self-hosted gateway, and is the `chan` and `cs` command line at the same time. One process supervises every standalone terminal, every local workspace and every connected devserver, so their windows sit side by side and share one launcher. Every window shows the workspace app the standalone `chan` binary also serves; the desktop adds native windows, menus, dialogs and transfers around it.
 
 ## Download
 
@@ -25,9 +23,9 @@ make clean    # cargo clean
 
 The desktop app stores its config at `~/.chan/desktop/config.json` -- the same `~/.chan` home as the CLI registry, not a separate OS app-data directory.
 
-## Workspace modes
+## Runtime shapes
 
-- Local embedded: desktop owns the local workspace runtime through its embedded `chan-server` host.
+- Local: desktop serves this machine's standalone terminals and workspaces from its embedded `chan-server` host.
 - Devserver: desktop connects to a configured `chan devserver` and mirrors its library-managed windows.
 - Gateway: desktop signs in to a gateway and projects its authenticated devserver roster into the launcher.
 
