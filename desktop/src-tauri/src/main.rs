@@ -8053,6 +8053,12 @@ fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label:
         })
         .await;
         if !ready {
+            tracing::debug!(
+                %label,
+                deadline_expired = tokio::time::Instant::now() >= deadline,
+                reason = "window was not ready before the request ended",
+                "requested terminal raise wait stopped",
+            );
             return;
         }
         let dispatch = app.clone();
@@ -8061,6 +8067,25 @@ fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label:
             if tokio::time::Instant::now() >= deadline
                 || !requested_terminal_is_shown(&state, &label)
             {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let record = state.embedded().and_then(|embedded| {
+                        embedded
+                            .local_window_records()
+                            .into_iter()
+                            .find(|record| window_watcher::native_label(record) == label)
+                    });
+                    tracing::debug!(
+                        %label,
+                        deadline_expired = tokio::time::Instant::now() >= deadline,
+                        shutdown_started = state.shutdown_started.load(std::sync::atomic::Ordering::SeqCst),
+                        buried = state.local_watcher_view().is_some_and(|view| view.is_buried(&label)),
+                        hide_pending = state.silent_hides.lock().unwrap().contains(&label),
+                        record_present = record.is_some(),
+                        record_hidden = ?record.as_ref().map(|record| record.hidden),
+                        reason = "request expired or window no longer shown",
+                        "requested terminal raise callback refused",
+                    );
+                }
                 return;
             }
             if let Some(window) = app.get_webview_window(&label) {

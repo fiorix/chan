@@ -2,12 +2,11 @@
 //! launch coming forward (`single_instance::come_forward`), a close
 //! confirmation (`serve::on_close_requested`), an open Window menu row
 //! (`show_window` in `main.rs`), a window list or `cs window open` request or
-//! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
+//! hidden Window menu row (`unbury_window` in `main.rs`), the About item
 //! for an existing window (`open_about_window` in `main.rs`), and a requested
 //! terminal once its watcher builds it (`raise_new_terminal_window` in
-//! `main.rs`). These call
-//! [`raise_window`] and nothing else does, so no path takes focus that nobody
-//! asked for.
+//! `main.rs`). These call [`raise_window`] and nothing else does, so no path
+//! takes focus that nobody asked for.
 //!
 //! The raise restores the window, shows it and focuses it through Tauri, and
 //! then settles what those calls leave undone on the platform. The focus call
@@ -702,7 +701,9 @@ mod tests {
                 "requested_terminal_is_shown(&state, &label)",
                 "app.get_webview_window(&label).is_some()",
                 ".await",
-                "if !ready {\n            return;\n        }",
+                "if !ready {",
+                "requested terminal raise wait stopped",
+                "            );\n            return;\n        }\n        let dispatch",
                 "dispatch.run_on_main_thread(move || {",
             ],
         );
@@ -723,7 +724,7 @@ mod tests {
         assert!(callback.contains(concat!(
             "if tokio::time::Instant::now() >= deadline\n",
             "                || !requested_terminal_is_shown(&state, &label)\n",
-            "            {\n                return;\n            }",
+            "            {\n                if tracing::enabled!(tracing::Level::DEBUG) {",
         )));
         assert_eq!(requested.matches("raise::raise_window(").count(), 1);
         assert_eq!(main.matches("raise_new_terminal_window(").count(), 3);
