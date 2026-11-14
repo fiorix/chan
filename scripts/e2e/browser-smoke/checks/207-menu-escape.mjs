@@ -218,6 +218,8 @@ async function suiteWindow(ctx, name) {
   url.searchParams.set("w", windowId);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+  // This fresh window must subscribe before a preference write broadcasts.
+  await ctx.waitWindowLive(windowId);
   return { page, windowId };
 }
 

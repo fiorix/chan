@@ -234,6 +234,8 @@ export default {
       url.searchParams.set("w", `text-paste-216-${RUN}`);
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+      // This fresh window must subscribe before a preference write broadcasts.
+      await ctx.waitWindowLive(url.searchParams.get("w"));
       await page.evaluate(recordPastes);
       prefs = await readTerminalPrefs(page, token);
       for (const engine of ["xterm", "ghostty"]) {
