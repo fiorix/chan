@@ -27,8 +27,10 @@ import {
   receive,
   resetTerminals,
   seatTerminals,
+  sentFrames,
   terminalTab,
   TerminalSocket,
+  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -54,6 +56,25 @@ async function maskedTerminal() {
 }
 
 describe("a width change with secret masking on", () => {
+  test("sends the new grid to the PTY before scanning its visible masks", async () => {
+    xterm.fit.size = { cols: 80, rows: 24 };
+    const { term } = await maskedTerminal();
+    const socket = TerminalSocket.all.at(-1)!;
+    socket.sent = [];
+    const gridsAtScan: Array<Array<Record<string, unknown>>> = [];
+    proto.scanViewport = function (this: unknown, ...args: unknown[]) {
+      gridsAtScan.push(sentFrames(socket).filter((frame) => frame.type === "resize"));
+      return typeof ownViewportScan === "function" ? ownViewportScan.apply(this, args) : undefined;
+    };
+
+    term.resize(91, 24);
+
+    expect(gridsAtScan).toEqual([[{ type: "resize", cols: 91, rows: 24 }]]);
+    expect(sentFrames(socket).filter((frame) => frame.type === "resize")).toEqual([
+      { type: "resize", cols: 91, rows: 24 },
+    ]);
+  });
+
   test("rescans the whole buffer once the width stops changing, not at each change", async () => {
     const scanAll = vi.spyOn(TerminalSecretMasker.prototype, "scanAll");
     const { term } = await maskedTerminal();
