@@ -10,10 +10,7 @@
 //! the SPA's transfer bubble builds clean `/api/fs/...` URLs. These handlers
 //! re-root that path at `/` and read or write it directly.
 //!
-//! Downloads pre-flight readability before building the tarball.
-//! Terminal uploads rely on their atomic writer as the authoritative
-//! writability check; workspace uploads use
-//! `Workspace::ensure_writable`.
+//! Downloads pre-flight readability before building the tarball. Directory preflight and archives omit reserved atomic-write names, while retaining other entries, including VCS directories. Terminal uploads rely on their atomic writer as the authoritative writability check; workspace uploads use `Workspace::ensure_writable`.
 //!
 //! The configured transfer ceiling governs both directions on this tenant.
 //! Single-file reads and writes are bounded by it. Archive plans refuse when
@@ -53,6 +50,10 @@ use crate::static_assets::content_type_for;
 #[cfg(test)]
 #[path = "transfer_cancellation_tests.rs"]
 mod cancellation_tests;
+
+#[cfg(test)]
+#[path = "transfer_write_temp_tests.rs"]
+mod write_temp_tests;
 
 const TAR_BLOCK_BYTES: u64 = 512;
 pub(crate) const TAR_END_OF_ARCHIVE_BYTES: u64 = TAR_BLOCK_BYTES * 2;
@@ -159,6 +160,11 @@ fn verify_readable_fs_entry(
         for entry in entries {
             let entry =
                 entry.map_err(|e| format!("cannot read directory {}: {e}", abs.display()))?;
+            if chan_workspace::fs_ops::is_atomic_write_temp_name(
+                &entry.file_name().to_string_lossy(),
+            ) {
+                continue;
+            }
             encoded_bytes = encoded_bytes.saturating_add(verify_readable_fs_entry(
                 &entry.path(),
                 &archive_path.join(entry.file_name()),
@@ -177,6 +183,59 @@ fn verify_readable_fs_entry(
         };
         Ok(tar_entry_encoded_size(archive_path, None, content_len))
     }
+}
+
+fn append_terminal_directory<W: Write>(
+    builder: &mut tar::Builder<W>,
+    archive_path: &Path,
+    abs: &Path,
+) -> std::io::Result<()> {
+    let mut pending = vec![(abs.to_path_buf(), archive_path.join(""), true)];
+    while let Some((source, name, is_dir)) = pending.pop() {
+        if is_dir {
+            for entry in std::fs::read_dir(&source)? {
+                let entry = entry?;
+                // A writer can rename this name away immediately after read_dir.
+                // Exclude it before metadata access or queueing it for the tar.
+                if chan_workspace::fs_ops::is_atomic_write_temp_name(
+                    &entry.file_name().to_string_lossy(),
+                ) {
+                    continue;
+                }
+                pending.push((
+                    entry.path(),
+                    name.join(entry.file_name()),
+                    entry.file_type()?.is_dir(),
+                ));
+            }
+            builder.append_dir(&name, &source)?;
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+                let metadata = std::fs::symlink_metadata(&source)?;
+                let kind = metadata.file_type();
+                if kind.is_fifo() || kind.is_char_device() || kind.is_block_device() {
+                    // tar's single-entry helper uses the source path for special
+                    // entries; keep the archive-relative name used by its walk.
+                    let mut header = tar::Header::new_gnu();
+                    header.set_metadata(&metadata);
+                    let device = metadata.rdev();
+                    header.set_device_major(
+                        (((device >> 32) & 0xffff_f000) | ((device >> 8) & 0x0000_0fff)) as u32,
+                    )?;
+                    header.set_device_minor(
+                        (((device >> 12) & 0xffff_ff00) | (device & 0x0000_00ff)) as u32,
+                    )?;
+                    builder.append_data(&mut header, &name, std::io::empty())?;
+                    continue;
+                }
+            }
+            builder.append_path_with_name(&source, &name)?;
+        }
+    }
+    Ok(())
 }
 
 /// A `std::io::Write` that forwards each tar chunk to a streaming HTTP body
@@ -611,7 +670,7 @@ async fn stream_planned_download_tracked(
                 // `stream_tar_response_tracked`, which would submit again.
                 build_tar_into(&tx, cancel, limit, move |builder| {
                     if is_dir {
-                        builder.append_dir_all(&build_name, &build_abs)
+                        append_terminal_directory(builder, Path::new(&build_name), &build_abs)
                     } else {
                         builder.append_path_with_name(&build_abs, &build_name)
                     }
@@ -1707,7 +1766,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut bytes);
             builder.follow_symlinks(false);
-            builder.append_dir_all(&archive_name, dir.path()).unwrap();
+            append_terminal_directory(&mut builder, Path::new(&archive_name), dir.path()).unwrap();
             builder.finish().unwrap();
         }
 
@@ -1726,7 +1785,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut bytes);
             builder.follow_symlinks(false);
-            builder.append_dir_all(&archive_name, &root).unwrap();
+            append_terminal_directory(&mut builder, Path::new(&archive_name), &root).unwrap();
             builder.finish().unwrap();
         }
 

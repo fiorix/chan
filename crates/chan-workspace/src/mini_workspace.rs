@@ -550,7 +550,11 @@ impl MiniWorkspace {
             self.fs.create_dir(to)?;
             for entry in dir.read_dir(&from_path).map_err(ChanError::from)? {
                 let entry = entry.map_err(ChanError::from)?;
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                let name = entry.file_name();
+                if fs_ops::is_atomic_write_temp_name(&name.to_string_lossy()) {
+                    continue;
+                }
+                let Some(name) = name.to_str().map(str::to_owned) else {
                     return Err(ChanError::Io(format!(
                         "source tree under {from} contains a non-UTF-8 name"
                     )));
@@ -616,6 +620,74 @@ mod tests {
             root,
             mini,
         }
+    }
+
+    #[test]
+    fn plain_directory_copy_omits_atomic_write_temporaries() {
+        let fx = fixture();
+        for dir in ["source/nested", "source/.git", "source/.chan", "source/.hg"] {
+            stdfs::create_dir_all(fx.root.join(dir)).unwrap();
+        }
+        for name in [
+            ".CHAN-WRITE-user",
+            ".chan-writer",
+            ".hidden",
+            ".git/user.bin",
+            ".chan/user.bin",
+            ".hg/user.bin",
+        ] {
+            stdfs::write(fx.root.join("source").join(name), b"user").unwrap();
+        }
+        fx.mini
+            .write_atomic_stream("source/nested/save.bin", AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"partial")?;
+                let temporary = stdfs::read_dir(fx.root.join("source/nested"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .file_name();
+                assert!(fs_ops::is_atomic_write_temp_name(
+                    &temporary.to_string_lossy()
+                ));
+                let stage = fx.root.join("source").join(temporary);
+                stdfs::create_dir(&stage).unwrap();
+                stdfs::write(stage.join("partial.bin"), b"partial").unwrap();
+                fx.mini.copy_plain("source", "target").unwrap();
+                let mut names: Vec<_> = stdfs::read_dir(fx.root.join("target"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    [
+                        ".CHAN-WRITE-user",
+                        ".chan",
+                        ".chan-writer",
+                        ".git",
+                        ".hg",
+                        ".hidden",
+                        "nested"
+                    ],
+                    "a plain copy retains user entries but not reserved stage directories"
+                );
+                assert_eq!(
+                    stdfs::read_dir(fx.root.join("target/nested"))
+                        .unwrap()
+                        .count(),
+                    0,
+                    "a plain copy must omit the live atomic-write temporary"
+                );
+                for name in [".git/user.bin", ".chan/user.bin", ".hg/user.bin"] {
+                    assert_eq!(
+                        stdfs::read(fx.root.join("target").join(name)).unwrap(),
+                        b"user"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
