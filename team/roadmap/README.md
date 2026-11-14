@@ -57,6 +57,8 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [an override sends a body raw][bracketbody] | not started | build |
 | [downloads carry write temporaries][writetemps] | not started | build |
 | [a gateway page may drop a layout][gwlayout] | not started | measure |
+| [cs window new prints a refused id][winid] | not started | review |
+| [cs window new returns too early][winrace] | not started | build |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
@@ -88,6 +90,8 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [bracketbody]: v0.131.0/a-bracketing-submit-override-sends-a-gemini-or-muse-body-uncleaned.md
 [writetemps]: v0.131.0/directory-downloads-and-copies-carry-chans-write-temporaries.md
 [gwlayout]: v0.131.0/a-gateway-page-may-delete-a-saved-layout.md
+[winid]: v0.131.0/cs-window-new-prints-an-id-the-window-verbs-refuse.md
+[winrace]: v0.131.0/cs-window-new-returns-before-the-window-can-take-commands.md
 
 ## Completed
 
