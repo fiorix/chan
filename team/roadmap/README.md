@@ -62,7 +62,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a PDF export is images only][pdftext] | withdrawn | closed |
 | [the model download trusts bundled roots][modelroots] | not started | build |
 | [the self-update trusts bundled roots][updroots] | not started | build |
-| [the Windows lint is red in chan][winlint] | not started | build |
+| [the Windows lint is red in chan][winlint] | merged | vm |
 | [a late heading has no fold chevron][foldlate] | not started | measure |
 | [a timed-out read fails the graph][graphtimeout] | not started | build |
 | [a streaming graph stalls the window][graphstall] | not started | measure |
