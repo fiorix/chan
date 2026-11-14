@@ -61,6 +61,8 @@ import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 installTerminalDom();
 
 const mounted: Array<Record<string, unknown>> = [];
+const startTheme = ui.theme;
+let contexts: WeakMap<HTMLCanvasElement, SoftwareCanvasContext>;
 let frames: FrameRequestCallback[] = [];
 
 beforeAll(async () => {
@@ -69,7 +71,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   ghostty.events.length = 0;
-  const contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
+  contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
     let context = contexts.get(this);
     if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
@@ -78,7 +80,7 @@ beforeEach(() => {
   frames = [];
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
   vi.stubGlobal("cancelAnimationFrame", () => {});
-  vi.mocked(document.fonts.load).mockClear();
+  vi.mocked(document.fonts.load).mockReset().mockResolvedValue([{} as FontFace]);
   ui.theme = "dark";
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
 });
@@ -88,6 +90,7 @@ afterEach(async () => {
   ghostty.terminals.splice(0);
   resetTerminals();
   __testSetStandalonePreferences(null);
+  ui.theme = startTheme;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.body.replaceChildren();
@@ -169,7 +172,7 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
     });
     expect(term.options.theme.cursor).toBe(custom.cursor);
     expect(body.style.getPropertyValue("--terminal-background"), "the body and scrollbar share the canvas background").toBe(custom.background);
-    const context = (term.renderer as unknown as { ctx: SoftwareCanvasContext }).ctx;
+    const context = contexts.get(target.querySelector("canvas")!)!;
     const rgb = Number.parseInt(custom.background.slice(1), 16);
     expect(context.pixelAt(4, 20), "an empty row is repainted in the new background").toEqual({
       r: (rgb >> 16) & 255, g: (rgb >> 8) & 255, b: rgb & 255, a: 1,
