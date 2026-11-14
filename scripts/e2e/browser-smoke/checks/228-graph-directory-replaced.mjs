@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
-async function readApi(ctx, route, query = {}) {
+async function fetchApi(ctx, route, query = {}) {
   const url = new URL(route, ctx.serverUrl);
   url.search = new URLSearchParams(query).toString();
   const token = new URL(ctx.serverUrl).searchParams.get("t");
@@ -20,7 +20,28 @@ async function readApi(ctx, route, query = {}) {
     signal: AbortSignal.timeout(10_000),
   });
   assert.ok(response.ok, `${route}: ${response.status}`);
-  return response.json();
+  return response;
+}
+
+async function readApi(ctx, route, query = {}) {
+  return (await fetchApi(ctx, route, query)).json();
+}
+
+async function readGraphStream(ctx) {
+  const body = await (await fetchApi(ctx, "/api/graph", { stream: "1" })).text();
+  const events = body.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.type === "meta"), "graph stream must include metadata");
+  assert.equal(events.at(-1)?.type, "done", "graph stream must finish before its labels are read");
+  assert.ok(!events.some((event) => event.type === "error"), "graph stream must not fail");
+  // Semantic batches replace the initial filesystem labels for the same id.
+  // Keep the last node exactly as the app's streamed graph does.
+  const nodes = new Map();
+  for (const event of events) {
+    if (event.type === "nodes") {
+      for (const node of event.nodes) nodes.set(node.id, node);
+    }
+  }
+  return { events, nodes };
 }
 
 // Preserve the canvas's own methods. A graph at rest paints nothing new;
@@ -176,13 +197,20 @@ export default {
         const status = await readApi(ctx, "/api/index/status");
         if (!graph.gated && old && next && status.state === "idle") {
           evidence.initialGraph = graph;
-          evidence.oldLabels = [...new Set(["old.md", old.label])];
-          evidence.newLabels = [...new Set(["new.md", next.label])];
           break;
         }
         if (Date.now() > deadline) throw new Error("the index did not hold both rename fixtures while idle");
         await delay(250);
       }
+      const stream = await readGraphStream(ctx);
+      evidence.initialStream = stream.events;
+      const oldLabel = stream.nodes.get(oldPath)?.label;
+      const newLabel = stream.nodes.get(`${v1}/new.md`)?.label;
+      assert.ok(typeof oldLabel === "string" && oldLabel.length > 0, "old.md needs its streamed label");
+      assert.ok(typeof newLabel === "string" && newLabel.length > 0, "new.md needs its streamed label");
+      assert.notEqual(oldLabel, newLabel, "the rename fixtures must draw distinct labels");
+      evidence.oldLabels = [oldLabel];
+      evidence.newLabels = [newLabel];
       evidence.initialLevels = await captureLevels();
       await observePage(page);
       await page.setRequestInterception(true);
@@ -192,7 +220,7 @@ export default {
       url.searchParams.set("w", windowId);
       url.hash = "s=" + encodeURIComponent(JSON.stringify({
         k: "l", f: 1,
-        t: [{ k: "g", gp: v2, gn: `directory:${v2}`, ge: [root, releases, v2, spare], a: 1 }],
+        t: [{ k: "g", gp: v2, gn: `directory:${v2}`, gi: 1, ge: [root, releases, v2, spare], a: 1 }],
       }));
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".graph-tab.active canvas", { timeout: 30_000 });
