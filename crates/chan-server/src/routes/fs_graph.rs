@@ -768,13 +768,16 @@ fn ensure_parent_inside_workspace(root: &Path, abs: &Path, rel: &str) -> Result<
     Ok(())
 }
 
-/// Whether the walk leaves out an entry named `name`: chan's own `.chan`,
-/// the repository's `.git`, and the workspace's excluded directory names.
-/// `.chan` and `.git` match whatever their case, as a filesystem that
-/// ignores case opens `.GIT` as `.git`; the excluded names ignore case too.
+/// Whether the walk leaves out an entry named `name`: chan's own `.chan`
+/// and the atomic writer's reserved temporaries, the repository's `.git`,
+/// and the workspace's excluded directory names. `.chan` and `.git` match
+/// whatever their case, as a filesystem that ignores case opens `.GIT` as
+/// `.git`; the excluded names ignore case too. The temporaries match the
+/// name rule the listings and the indexer share.
 fn walk_skips(name: &str, filter: &chan_workspace::fs_ops::WalkFilter) -> bool {
     name.eq_ignore_ascii_case(".chan")
         || name.eq_ignore_ascii_case(".git")
+        || chan_workspace::fs_ops::is_atomic_write_temp_name(name)
         || filter.is_excluded(name)
 }
 
@@ -1180,7 +1183,8 @@ impl FsGraphWalker {
         let name_str = name.to_string_lossy();
         // Skip workspace-internal state and the per-workspace blocklist
         // dirs at ANY depth. Mirrors chan-workspace's `walk_workspace`
-        // (`.chan`/`.git` invariants) plus the `WalkFilter`
+        // (`.chan`/`.git` invariants and the atomic writer's reserved
+        // temporaries) plus the `WalkFilter`
         // (`node_modules`, `target`, `venv`, ...) so the filesystem
         // graph excludes the same set the index, the File Browser spine,
         // and the watcher feed exclude. A repo-root workspace otherwise
@@ -2477,6 +2481,62 @@ mod tests {
                 .any(|n| n.id == "notes" && n.kind == "directory"),
             "notes/ should be a direct child at depth 1"
         );
+    }
+
+    /// A filesystem graph drawn while a streamed write holds its temporary
+    /// on disk beside its target has no node for the temporary, whole or
+    /// paged, and names it as a path that is not there, as it does `.git`.
+    /// Other dot files stay drawn.
+    #[test]
+    fn the_walk_leaves_out_an_in_flight_atomic_write_temporary() {
+        let (_cfg, root, workspace) = open_workspace();
+        fs::write(root.path().join("notes/.hidden"), "user").unwrap();
+        workspace
+            .write_atomic_stream(
+                "notes/upload.bin",
+                chan_workspace::AtomicWriteKind::Bytes,
+                |sink| {
+                    sink.write_chunk(b"partial")?;
+                    let temporary = fs::read_dir(root.path().join("notes"))
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                        .find(|name| chan_workspace::fs_ops::is_atomic_write_temp_name(name))
+                        .expect("the write's temporary is on disk");
+                    let whole = build_fs_graph(&workspace, FsGraphScope::Directory, "", 3).unwrap();
+                    let paged = build_fs_graph_paged(
+                        &workspace,
+                        &FsGraphParams {
+                            scope: FsGraphScope::Directory,
+                            path: String::new(),
+                            depth: 3,
+                            cursor: None,
+                            limit: Some(BATCH_MAX_NODES),
+                        },
+                    )
+                    .unwrap();
+                    assert!(paged.done, "one batch holds the whole tree");
+                    for (walk, nodes) in [("whole", &whole.nodes), ("paged", &paged.nodes)] {
+                        let ids: Vec<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+                        assert!(
+                            !ids.iter().any(|id| id.contains(temporary.as_str())),
+                            "{walk} draws the temporary: {ids:?}"
+                        );
+                        for id in ["notes/a.md", "notes/.hidden"] {
+                            assert!(ids.contains(&id), "{walk} misses {id}: {ids:?}");
+                        }
+                    }
+                    let error = build_fs_graph(
+                        &workspace,
+                        FsGraphScope::File,
+                        &format!("notes/{temporary}"),
+                        1,
+                    )
+                    .unwrap_err();
+                    assert_eq!(error.status, StatusCode::NOT_FOUND, "{}", error.message);
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 
     // ---- Paced / paged delivery ----------------------------------------

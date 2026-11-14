@@ -76,7 +76,7 @@ Two gates sit on this axis. The editor gate decides what `read_text` and `write_
 
 ## Writes
 
-Every write chan makes, to user content and to its own records, is atomic: bytes go to a reserved same-directory temporary named `.chan-write-...`, the file is synced, renamed into place, and the directory synced. The writer preserves the target's mode and extended attributes and never touches the published target after the rename; scoped walks and the watcher exclude the reserved names, so a crash leaves at most a stray temporary, never a half-written note.
+Every write chan makes, to user content and to its own records, is atomic: bytes go to a reserved same-directory temporary named `.chan-write-...`, the file is synced, renamed into place, and the directory synced. The writer preserves the target's mode and extended attributes and never touches the published target after the rename; directory listings, recursive listings, scoped walks and the watcher exclude the reserved names, so a crash leaves at most a stray temporary, never a half-written note.
 
 `write_atomic_stream` is the canonical progressive path and the other write methods delegate to it: the caller feeds chunks into a sink that enforces the budget and validates UTF-8 as it goes, and the workspace commits only after the feed returns cleanly; any error, cancellation or panic drops the temporary and leaves the target as it was.
 

@@ -3795,6 +3795,76 @@ mod file_browser_listing_tests {
         assert!(root_dir.iter().any(|entry| entry.path == "note.md"));
     }
 
+    /// The recursive whole-tree listing (`GET /api/fs` without `dir`), taken
+    /// while a streamed write holds its temporary on disk beside its target,
+    /// leaves the temporary out, as the per-directory listing does. Other
+    /// dot files stay listed.
+    #[tokio::test]
+    async fn recursive_listing_omits_an_in_flight_atomic_write_temporary() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_cfg, root, state) = crate::routes::tests::served_state();
+        let workspace = state.try_workspace().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join(".chan-note"), "user").unwrap();
+        std::fs::write(root.path().join("sub/.hidden"), "user").unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            workspace.write_atomic_stream(
+                "sub/upload.bin",
+                chan_workspace::AtomicWriteKind::Bytes,
+                |sink| {
+                    sink.write_chunk(b"partial")?;
+                    held_tx.send(()).unwrap();
+                    // A panicking test drops the sender, which ends the wait.
+                    let _ = release_rx.recv();
+                    Ok(())
+                },
+            )
+        });
+        held_rx.recv().unwrap();
+        let on_disk: Vec<String> = std::fs::read_dir(root.path().join("sub"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(
+            on_disk
+                .iter()
+                .any(|name| chan_workspace::fs_ops::is_atomic_write_temp_name(name)),
+            "the write's temporary is on disk: {on_disk:?}"
+        );
+
+        let response = crate::router(state)
+            .oneshot(Request::get("/api/fs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        release_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let paths: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        assert!(
+            !paths.iter().any(|path| path
+                .split('/')
+                .any(chan_workspace::fs_ops::is_atomic_write_temp_name)),
+            "the recursive listing shows the temporary: {paths:?}"
+        );
+        for name in [".chan-note", "sub", "sub/.hidden"] {
+            assert!(paths.contains(&name), "{name} missing: {paths:?}");
+        }
+    }
+
     #[test]
     fn list_files_sync_distinguishes_missing_root_from_empty_workspace() {
         let cfg = tempfile::TempDir::new().unwrap();
