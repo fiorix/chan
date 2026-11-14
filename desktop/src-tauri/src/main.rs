@@ -8077,14 +8077,31 @@ fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label:
                             .into_iter()
                             .find(|record| window_watcher::native_label(record) == label)
                     });
+                    // Snapshot fields separately so tracing cannot retain a guard
+                    // while another field takes the same lock.
+                    let deadline_expired = tokio::time::Instant::now() >= deadline;
+                    let shutdown_started = state
+                        .shutdown_started
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let hide_pending = state.silent_hides.lock().unwrap().contains(&label);
+                    let put_away = last_window::put_away(&state);
+                    let buried = state
+                        .local_watcher_view()
+                        .is_some_and(|view| view.is_buried(&label));
+                    let record_present = record.is_some();
+                    let record_hidden = record.as_ref().map(|record| record.hidden);
+                    let shown = record
+                        .as_ref()
+                        .is_some_and(|record| window_watcher::should_show(record, &put_away));
                     tracing::debug!(
                         %label,
-                        deadline_expired = tokio::time::Instant::now() >= deadline,
-                        shutdown_started = state.shutdown_started.load(std::sync::atomic::Ordering::SeqCst),
-                        buried = state.local_watcher_view().is_some_and(|view| view.is_buried(&label)),
-                        hide_pending = state.silent_hides.lock().unwrap().contains(&label),
-                        record_present = record.is_some(),
-                        record_hidden = ?record.as_ref().map(|record| record.hidden),
+                        deadline_expired,
+                        shutdown_started,
+                        buried,
+                        hide_pending,
+                        record_present,
+                        ?record_hidden,
+                        shown,
                         reason = "request expired or window no longer shown",
                         "requested terminal raise callback refused",
                     );

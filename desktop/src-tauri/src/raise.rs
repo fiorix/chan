@@ -737,8 +737,7 @@ mod tests {
             &[
                 "tokio::time::Instant::now() >= deadline",
                 "!requested_terminal_is_shown(&state, &label)",
-                "return;",
-                "if let Some(window) = app.get_webview_window(&label)",
+                "                }\n                return;\n            }\n            if let Some(window) = app.get_webview_window(&label)",
                 "raise::raise_window(&window)",
             ],
         );
@@ -754,6 +753,27 @@ mod tests {
             production(include_str!("launch_paths.rs")),
         ] {
             assert!(!boot.contains("raise_new_terminal_window("));
+        }
+    }
+
+    #[test]
+    fn requested_terminal_refusal_logging_does_not_hold_locks() {
+        let main = production(include_str!("main.rs"));
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        assert_eq!(callback.matches("tracing::debug!(").count(), 1);
+        let arguments = callback.split_once("tracing::debug!(").unwrap().1;
+        let arguments = arguments.split_once("\n                    );").unwrap().0;
+        assert!(arguments.contains("\"requested terminal raise callback refused\""));
+        let arguments: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [".lock(", "put_away("] {
+            assert!(
+                !arguments.contains(call),
+                "refusal logging must snapshot {call} before the debug macro: {arguments}"
+            );
         }
     }
 
