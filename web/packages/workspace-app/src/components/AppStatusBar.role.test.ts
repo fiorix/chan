@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
-// The session role badge shows only when the roster is split by origin: at
-// least one local window and at least one gateway window (a gateway browser
-// joined a devserver). A sole user's all-local roster, a remote-only roster
-// and an empty one stay quiet. The badge names who leads: "leader" only in
-// the window the roster names as the session leader, "follower" in every
-// other, wherever each window connects from.
+// The session role badge shows when the roster has two or more windows and at
+// least one of them is a gateway window (a gateway browser joined a
+// devserver). A sole user's all-local roster, a lone gateway window and an
+// empty roster stay quiet. The badge names who leads: "leader" only in the
+// window the roster names as the session leader, "follower" in every other,
+// wherever each window connects from.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";
@@ -49,9 +49,29 @@ describe("the session role badge", () => {
     expect(badge([participant("leader", self), participant("leader")], self)).toBeNull();
   });
 
-  test("stays hidden for a remote-only roster", () => {
+  test("stays hidden for a lone gateway window", () => {
     const self = sessionWindowId();
-    expect(badge([participant("follower", self), participant("follower")], self)).toBeNull();
+    expect(badge([participant("follower", self)], self)).toBeNull();
+  });
+
+  test("shows for a remote-only roster of two or more windows", () => {
+    const self = sessionWindowId();
+    const roster = [participant("follower", self), participant("follower", "w-remote")];
+    expect(badge(roster, "w-remote")).not.toBeNull();
+
+    applySessionRoster({ participants: [...roster, participant("follower")], leader: "w-remote" });
+    flushSync();
+    expect(shownBadge(), "a third gateway window").not.toBeNull();
+  });
+
+  test("reads leader in the gateway window that leads and follower in the other", () => {
+    const self = sessionWindowId();
+    const roster = [participant("follower", self), participant("follower", "w-remote")];
+    expect(badge(roster, self)).toBe("leader");
+
+    applySessionRoster({ participants: roster, leader: "w-remote" });
+    flushSync();
+    expect(shownBadge(), "the other gateway window leads").toBe("follower");
   });
 
   test("stays hidden for an empty roster", () => {
