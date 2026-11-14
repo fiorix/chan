@@ -1,6 +1,6 @@
 # A ghostty terminal opening in a background pane takes the keyboard for a moment
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13 ("get its own row"); built on 2026-11-14 on the branch `v0130/ghostty-open-without-focus`, not merged; the section "Built" holds the evidence.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 ("get its own row"); built on 2026-11-14 on the branch `v0130/ghostty-open-without-focus`, merged into the integration branch (`ff45ca8ee`), not yet in a release; the section "Built" holds the evidence.
 
 Record: found by the review of the [pane-focus keyboard](moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) build on 2026-11-13, by reading; not observed in a running window.
 

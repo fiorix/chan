@@ -40,7 +40,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [a paste ends early at its end marker][pastend] | not started | build |
 | [ghostty selection text turns grey][selfg] | merged | owner |
 | [ghostty underlines are all straight][ulstyle] | not started | build |
-| [a background ghostty takes the keyboard][ghosttyopen] | not started | build |
+| [a background ghostty takes the keyboard][ghosttyopen] | merged | closed |
 
 [flushedges]: v0.130.0/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md
 [sdreport]: v0.130.0/systemd-report-cannot-read-the-devservers-metrics.md
