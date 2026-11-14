@@ -7,6 +7,7 @@
 import DOMPurify, { type Config } from "dompurify";
 import { marked } from "marked";
 import { embedIframeHtml, isAllowedEmbedSrc } from "./embed";
+import { parseWikiBody } from "../editor/links";
 
 // Defaults are fine for previews: GFM (tables, strikethrough),
 // auto-linking off (we don't want to silently rewrite text), no
@@ -22,6 +23,30 @@ marked.setOptions({
 // `marked` is a singleton imported only here, so this override is
 // scoped to the renderMarkdown pipeline.
 marked.use({
+  extensions: [
+    {
+      name: "wikilink",
+      level: "inline",
+      start(src) {
+        return src.indexOf("[[");
+      },
+      tokenizer(src) {
+        // Match the editor's nonempty, line-bound bodies without nested [[.
+        // An inline token leaves code spans and fenced blocks to marked.
+        const match = /^\[\[((?:(?!\[\[|\]\])[^\n])+)\]\]/.exec(src);
+        if (!match) return;
+        return {
+          type: "wikilink",
+          raw: match[0],
+          text: parseWikiBody(match[1]).label,
+        };
+      },
+      renderer(token) {
+        // Labels are literal text in the editor, including HTML and entities.
+        return token.text.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+      },
+    },
+  ],
   renderer: {
     image(token) {
       return embedIframeHtml(token.href) ?? false;

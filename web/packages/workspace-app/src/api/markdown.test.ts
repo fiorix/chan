@@ -3,6 +3,71 @@
 import { describe, expect, test } from "vitest";
 import { renderMarkdown, renderMarkdownWithBreaks } from "./markdown";
 
+describe("wikilink labels", () => {
+  test.each([
+    ["[[note]]", "note"],
+    ["[[note|alias]]", "alias"],
+    ["[[folder/note.md]]", "note"],
+    ["[[/folder/note.md#heading]]", "note"],
+    ["[[folder/note.md^block]]", "note"],
+    ["[[folder/note.md#heading| alias ]]", "alias"],
+    ["[[note|]]", ""],
+    ["[[folder/My Note.md]]", "My Note"],
+    ["[[note]] and [[other|alias]]", "note and alias"],
+    ["[[outer [[note]] tail]]", "[[outer note tail]]"],
+  ])("renders %s as the editor label", (source, label) => {
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown(source);
+    expect(root.querySelector("p")?.textContent).toBe(label);
+  });
+
+  test("keeps labels literal, including markup, entities and Markdown", () => {
+    const label = '<em>alias</em> &amp; **bold** <img src=x onerror="alert(1)">';
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown(`[[note|${label}]]`);
+    expect(root.querySelector("p")?.textContent).toBe(label);
+    expect(root.querySelector("em, strong, img")).toBeNull();
+  });
+
+  test("recognizes labels inside normal Markdown without changing its markup", () => {
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown(
+      "# Before [[note]] after\n\n- **[[note|alias]]** [web](https://example.com)\n",
+    );
+    expect(root.querySelector("h1")?.textContent).toBe("Before note after");
+    expect(root.querySelector("li strong")?.textContent).toBe("alias");
+    expect(root.querySelector("a")?.getAttribute("href")).toBe("https://example.com");
+  });
+
+  test("leaves inline code and fenced code as typed", () => {
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown(
+      "`[[note]]` and `[[note|alias]]`\n\n```text\n[[note]] [[note|alias]]\n```\n",
+    );
+    expect(Array.from(root.querySelectorAll("p code"), (el) => el.textContent))
+      .toEqual(["[[note]]", "[[note|alias]]"]);
+    expect(root.querySelector("pre code")?.textContent).toBe("[[note]] [[note|alias]]\n");
+  });
+
+  test.each(["[[]]", "[[first\nsecond]]", "\\[[note]]"])(
+    "leaves non-wikilink syntax %s as text",
+    (source) => {
+      const root = document.createElement("div");
+      root.innerHTML = renderMarkdown(source);
+      expect(root.querySelector("p")?.textContent).toBe(source.replace("\\", ""));
+    },
+  );
+
+  test("keeps the sanitizing boundary for surrounding Markdown", () => {
+    const root = document.createElement("div");
+    root.innerHTML = renderMarkdown(
+      '[[note|alias]] <img src="x" onerror="alert(1)"><script>alert(2)</script>',
+    );
+    expect(root.querySelector("p")?.textContent).toBe("alias ");
+    expect(root.querySelector("script, [onerror]")).toBeNull();
+  });
+});
+
 describe("survey body line breaks", () => {
   test("renderMarkdown collapses a single newline (global breaks:false soft-break)", () => {
     const html = renderMarkdown("line one\nline two");

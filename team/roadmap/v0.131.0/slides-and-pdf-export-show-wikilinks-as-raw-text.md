@@ -25,3 +25,9 @@ Read at `e50271361`; not run.
 
 1. Tests over `renderMarkdown` (or the slide and document DOM builders): `[[note]]` and `[[note|alias]]` render as `note` and `alias`, no brackets; red on today's code.
 2. In a guest's browser: a deck and a PDF export of a note holding both forms show the link text the editor shows.
+
+## Built, 2026-11-14
+
+The shared Markdown renderer recognizes wikilinks as inline tokens and emits the editor's literal label. The editor's existing body parser lives in `editor/links.ts` so the editor and exports use the same alias, basename, suffix and anchor rules. Code spans and fenced blocks keep the brackets; labels cannot inject HTML, and the rendered result still passes through DOMPurify. The editor design describes the rendering contract; the manual's previews page makes no claim that wikilinks render raw.
+
+The initial regression run on the base failed 11 assertions, including `[[note]]` and `[[note|alias]]`; the focused suite passes 68 tests across Markdown, the editor link parser, slide DOM and document DOM. Logs: `dev/v0131-team/evidence/Edit131/wikirender/red-base.log` and `green-focused-final.log`. The host's Node mutation runner was refused with `spawnSync git EPERM` before any mutation ran; the mutation stage, committed-tip frontend gate and browser/PDF proof are awaiting the guest runner. This section records implementation and unit evidence only; acceptance 2 is not yet established.

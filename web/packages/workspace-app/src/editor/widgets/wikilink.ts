@@ -47,7 +47,14 @@ import {
   selectionForReveal,
   selectionInRange,
 } from "../decorations/selection";
-import { decodePercent, isInternalHref, normalizeHref } from "../links";
+import {
+  decodePercent,
+  isInternalHref,
+  normalizeHref,
+  parseWikiBody,
+  type ParsedWikiLink,
+} from "../links";
+export { parseWikiBody, type ParsedWikiLink } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
 import { ApiError, apiErrorCode } from "../../api/errors";
@@ -89,13 +96,6 @@ function makeUserIcon(): SVGElement {
   return svg;
 }
 
-export interface ParsedWikiLink {
-  target: string;
-  label: string;
-  anchor: string;
-  wasAbs: boolean;
-}
-
 export interface WikiLinkClickArgs extends ParsedWikiLink {
   openInNewPane: boolean;
 }
@@ -107,34 +107,6 @@ export interface WikiLinkOptions {
   /// across files that reference the same target via different
   /// relative paths.
   getCurrentPath?: () => string | null;
-}
-
-/// Parse the raw inner text of a `[[wikilink|alias#anchor]]` body.
-export function parseWikiBody(body: string): ParsedWikiLink {
-  let label: string | null = null;
-  let anchor = "";
-  const pipeIdx = body.indexOf("|");
-  if (pipeIdx !== -1) {
-    label = body.slice(pipeIdx + 1).trim();
-    body = body.slice(0, pipeIdx);
-  }
-  const blockIdx = body.indexOf("^");
-  const headIdx = body.indexOf("#");
-  const anchorIdx =
-    blockIdx === -1
-      ? headIdx
-      : headIdx === -1
-        ? blockIdx
-        : Math.min(blockIdx, headIdx);
-  if (anchorIdx !== -1) {
-    anchor = body.slice(anchorIdx + (body[anchorIdx] === "#" ? 1 : 0));
-    body = body.slice(0, anchorIdx);
-  }
-  const target = body.trim();
-  const wasAbs = target.startsWith("/");
-  const displayLabel =
-    label ?? (target.split("/").pop() ?? target).replace(/\.md$/, "");
-  return { target, label: displayLabel, anchor, wasAbs };
 }
 
 /// Detect whether a markdown link URL is internal (workspace-relative or
