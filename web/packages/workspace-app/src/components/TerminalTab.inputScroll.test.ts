@@ -100,8 +100,8 @@ function history(term: Terminal): number {
 function inputFrames(socket: TerminalSocket): unknown[] {
   return sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data);
 }
-async function scrolled(backend: "xterm" | "ghostty") {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false }));
+async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false) {
+  __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false, mouse_capture: mouseCapture }));
   const [tab] = seatTerminals([terminalTab()]);
   const target = document.createElement("div");
   document.body.append(target);
@@ -158,6 +158,49 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     expect(sentFrames(socket)).toEqual([]);
     expect(promptHistory).toEqual([]);
     expect(history(term)).toBe(7);
+  });
+
+  test.each([
+    { name: "Ctrl+/ while connecting", readyState: 0, key: { key: "/", code: "Slash", ctrlKey: true } },
+    { name: "Option+Left while closing", readyState: 2, key: { key: "ArrowLeft", code: "ArrowLeft", altKey: true } },
+    { name: "a file drop while closed", readyState: 3, key: null },
+  ])("$name sends nothing and preserves history", async ({ readyState, key: init }) => {
+    const { target, term, socket, input, inputHistory } = await scrolled(backend);
+    socket.readyState = readyState;
+    if (init) {
+      key(input, init);
+    } else {
+      runtime.paths = ["/tmp/offline path"];
+      expect(drop(target).defaultPrevented).toBe(true);
+      await tick();
+    }
+    expect(sentFrames(socket)).toEqual([]);
+    expect(inputHistory).toEqual([]);
+    expect(history(term)).toBe(7);
+  });
+
+  test.each([
+    { name: "SGR mouse", sgr: true, wheel: false, bytes: "\x1b[<0;1;1M" },
+    { name: "X10 mouse", sgr: false, wheel: false, bytes: "\x1b[M !!" },
+    { name: "SGR wheel", sgr: true, wheel: true, bytes: "\x1b[<64;1;1M" },
+    { name: "X10 wheel", sgr: false, wheel: true, bytes: "\x1b[M`!!" },
+  ])("a native $name report follows the backend's input-scroll rule", async ({ sgr, wheel, bytes }) => {
+    const { term, socket, host, inputHistory } = await scrolled(backend, true);
+    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
+    await vi.waitFor(() => expect(term instanceof GhosttyTerminal
+      ? term.hasMouseTracking()
+      : term.modes.mouseTrackingMode === "vt200").toBe(true));
+    const surface = host.querySelector<HTMLElement>(backend === "ghostty" ? "canvas" : ".xterm-screen")!;
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+    const position = { bubbles: true, cancelable: true, clientX: 1, clientY: 1 };
+    surface.dispatchEvent(wheel
+      ? new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 })
+      : new MouseEvent("mousedown", { ...position, button: 0 }));
+    expect(inputFrames(socket)).toEqual([bytes]);
+    // xterm marks SGR reports as user data; its X10 reports use onBinary.
+    const expectedHistory = backend === "xterm" && sgr ? 0 : 7;
+    expect(inputHistory, "the viewport when the report reaches the socket").toEqual([expectedHistory]);
+    expect(history(term)).toBe(expectedHistory);
   });
 
   test("a file drop types its escaped path and returns to the live cursor", async () => {
@@ -225,26 +268,6 @@ describe("ghostty terminal key parity viewport", () => {
     expect(inputFrames(socket)).toEqual(["\r"]);
     expect(inputHistory).toEqual([0]);
     expect(history(term)).toBe(0);
-  });
-  test.each([true, false])("a native mouse report preserves history (SGR %s)", async (sgr) => {
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
-    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    const canvas = host.querySelector("canvas")!;
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientX: 10, clientY: 10 }));
-    expect(inputFrames(socket)).toHaveLength(1);
-    expect(inputHistory, "the report itself leaves the view alone").toEqual([7]);
-    expect(history(term)).toBe(7);
-  });
-  test.each([true, false])("a program's wheel report preserves history (SGR %s)", async (sgr) => {
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
-    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    const canvas = host.querySelector("canvas")!;
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
-    canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1, deltaMode: 1, clientX: 10, clientY: 10 }));
-    expect(inputFrames(socket)).toHaveLength(1);
-    expect(inputHistory, "the report itself leaves the view alone").toEqual([7]);
-    expect(history(term)).toBe(7);
   });
 });
 

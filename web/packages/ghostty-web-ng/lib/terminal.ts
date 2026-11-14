@@ -459,7 +459,7 @@ export class Terminal implements ITerminalCore {
           if (isUserInput && data) this.scrollToBottom();
           // Clear selection when user types
           this.selectionManager?.clearSelection();
-          this.awaitingEcho = true;
+          if (isUserInput) this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
