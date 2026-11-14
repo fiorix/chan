@@ -10,7 +10,9 @@ The config names `team_name`, `host_name`, `host_handle`, `tab_group` and one to
 
 ## The team directory
 
-The directory lives inside the workspace. Server routes write through the `Workspace` contract, so their writes are sandboxed and atomic, and the Markdown files are indexed and graphed like other content. Generated scripts write directly through the shell:
+The directory lives inside the workspace. Server routes write through the `Workspace` contract, so their writes are sandboxed and atomic, and the Markdown files are indexed and graphed like other content. Generated scripts write directly through the shell.
+
+The directory layout is:
 
 ```text
 {dir}/
