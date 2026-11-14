@@ -171,7 +171,11 @@ async function expectBrowserTakesKeys(): Promise<void> {
 }
 
 describe("a survey releases the keyboard when its pane loses focus", () => {
-  test.each(["Next pane", "Hybrid Nav commit"])("%s to a dashboard leaves the survey unanswered", async (navigation) => {
+  test.each([
+    { navigation: "Next pane", tabFirst: false },
+    { navigation: "Next pane after Tab", tabFirst: true },
+    { navigation: "Hybrid Nav commit (unmount control)", tabFirst: false },
+  ])("$navigation to a dashboard leaves the survey unanswered", async ({ navigation, tabFirst }) => {
     await layOut({ bottom: [{ kind: "dashboard", id: "dashboard-keys", title: "Dashboard", autoRotate: false }] });
     expect(pane(BOTTOM).querySelector(".dashboard")).not.toBeNull();
     const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
@@ -181,7 +185,20 @@ describe("a survey releases the keyboard when its pane loses focus", () => {
     expect(card).not.toBeNull();
     expect(document.activeElement).toBe(card);
 
-    if (navigation === "Next pane") {
+    if (tabFirst) {
+      const tab = new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true });
+      card!.dispatchEvent(tab);
+      await settleLong();
+      expect(tab.defaultPrevented, "Tab keeps its browser default").toBe(false);
+      // jsdom dispatches the key but does not move focus by the Tab default.
+      const option = card!.querySelector<HTMLButtonElement>(".survey-option");
+      expect(option).not.toBeNull();
+      option!.focus();
+      await settleLong();
+      expect(document.activeElement).toBe(option);
+    }
+
+    if (navigation.startsWith("Next pane")) {
       press({ key: "]", code: "BracketRight", altKey: true });
     } else {
       press({ key: ".", code: "Period", ctrlKey: true });
@@ -197,7 +214,9 @@ describe("a survey releases the keyboard when its pane loses focus", () => {
     await typeKey("1", "Digit1");
     expect(reply, "a key in the dashboard pane must not answer the terminal's survey").not.toHaveBeenCalled();
     expect(surveyFor(TERMINAL)?.surveyId).toBe("leave-pane");
-    expect(document.activeElement).not.toBe(card);
+    const backgroundCard = pane(TOP).querySelector(".survey-card");
+    expect(backgroundCard).not.toBeNull();
+    expect(backgroundCard!.contains(document.activeElement)).toBe(false);
 
     setActivePane(TOP);
     await settleLong();

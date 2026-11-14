@@ -72,10 +72,13 @@
       });
       return;
     }
-    // A hidden or unfocused survey must not hold another pane's keyboard.
-    // Keep the survey + return target intact for the later tab or pane return.
+    // A hidden survey must not hold the visible tab's keyboard; an unfocused
+    // one must not hold another pane's. Keep the survey and its return target
+    // intact for the later tab or pane return.
     if (!shown || !eligible) {
-      if (focusedSurveyId && !eligible && document.activeElement === card) card?.blur();
+      if (focusedSurveyId && !eligible && card?.contains(document.activeElement)) {
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
       return;
     }
     if (!focusedSurveyId) {
