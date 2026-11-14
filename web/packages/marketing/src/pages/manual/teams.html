@@ -55,7 +55,7 @@
       </thead>
       <tbody>
         <tr><td><code>config.toml</code></td><td>The team. You may edit it; it is checked again on every load.</td></tr>
-        <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. chan writes it, and hand edits are lost on the next write.</td></tr>
+        <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. Creating a new team writes it; loading a saved team keeps an existing copy.</td></tr>
         <tr><td><code>tasks/</code></td><td>One file per task, <code>task-{from}-{to}-{n}.md</code>.</td></tr>
         <tr><td><code>journals/</code></td><td>One journal per member, <code>journal-{member}.md</code>.</td></tr>
         <tr><td><code>followups/</code></td><td>Follow-ups, <code>followup-{from}-{to}-{n}.md</code>.</td></tr>
@@ -116,6 +116,7 @@ command = "codex"</code></pre>
       </tbody>
     </table>
   </div>
+  <p>Running a <code>team load --script</code> script writes <code>config.toml</code> and <code>bootstrap.md</code> only where each is missing. Existing files are kept byte for byte, including comments and hand edits. A <code>team new --script</code> script writes both files from the supplied configuration and brief.</p>
   <aside class="doc-note warning">Running <code>new</code> or <code>load</code> again starts another copy of the team in a new group. Close the running one first with <code>cs terminal close --tab-group review</code>.</aside>
   <h3 id="named-terminals"><a class="heading-anchor" href="#named-terminals">Named terminals without a team</a></h3>
   <p>Without a team, start and address named terminals directly:</p>
