@@ -45,6 +45,7 @@ import {
   copyTextToClipboard,
   expandAllFoldersForInstance,
   fbActiveInstanceId,
+  fbActiveSelection,
   fbClearSelection,
   fbClipboard,
   fbClipboardClear,
@@ -86,31 +87,29 @@ function inWorkspace(ctx: CommandContext): boolean {
   return workspaceOnly(ctx);
 }
 
-function selectedPath(tab = activeBrowserTab()): string | null {
-  return browserSelection.path ?? tab?.selected ?? null;
+function selectedPath(): string | null {
+  return fbActiveSelection()?.path ?? null;
 }
 
-function selectedPaths(tab = activeBrowserTab()): string[] {
-  if (browserSelection.paths.length > 0) return [...browserSelection.paths];
-  if (tab?.selectedPaths && tab.selectedPaths.length > 0) {
-    return [...tab.selectedPaths];
-  }
-  const path = selectedPath(tab);
-  return path ? [path] : [];
+function selectedPaths(): string[] {
+  const selection = fbActiveSelection();
+  if (!selection) return [];
+  if (selection.paths.length > 0) return [...selection.paths];
+  return selection.path ? [selection.path] : [];
 }
 
 function entryFor(path: string) {
   return tree.entries.find((entry) => entry.path === path);
 }
 
-function activeSelection(): BrowserSelection | null {
-  const path = selectedPath();
+function activeSelection(selection = fbActiveSelection()): BrowserSelection | null {
+  const path = selection?.path;
   if (!path) return null;
   return { path, isDir: entryFor(path)?.is_dir ?? false };
 }
 
-function targetDirFromSelection(): string {
-  const sel = activeSelection();
+function targetDirFromSelection(selection = fbActiveSelection()): string {
+  const sel = activeSelection(selection);
   if (!sel) return defaultCreateDirectory();
   return sel.isDir ? sel.path : parentDir(sel.path);
 }
@@ -199,10 +198,10 @@ function newGraphFromSelection(): void {
 }
 
 /// The instance id of the file browser surface the selection commands act
-/// on: the last focused one, whose selection `browserSelection` reads, or
-/// the active file browser tab's while none is.
+/// on, whose selection `browserSelection` reads. A passive mount does not
+/// choose a command surface.
 export function commandSurfaceId(): string | null {
-  return fbActiveInstanceId() ?? activeBrowserInstanceId();
+  return fbActiveInstanceId();
 }
 
 function downloadSelection(): void {
@@ -236,8 +235,10 @@ function cutFileBrowserSelection(): void {
 }
 
 async function pasteFileBrowserClipboard(): Promise<void> {
-  const landed = await fbClipboardPaste(targetDirFromSelection());
-  if (landed.length > 0) fbSelectSet(landed);
+  const selection = fbActiveSelection();
+  if (!selection) return;
+  const landed = await fbClipboardPaste(targetDirFromSelection(selection));
+  if (landed.length > 0) fbSelectSet(landed, undefined, selection);
 }
 
 /// What a file browser's row menu offers for an entry, main action first.
@@ -274,6 +275,7 @@ function toggleActiveView(key: keyof BrowserView): void {
 
 const needsSelection = (): string => "Needs a selection";
 const needsClipboard = (): string => "Needs a copied or cut selection";
+const needsBrowser = (): string => "Focus a file browser";
 
 /// Why a command for one kind of entry cannot run: nothing is selected, or
 /// the selection is not `needed`.
@@ -307,7 +309,7 @@ registerCommands([
     available: (ctx) => onBrowser(ctx) && selectionOffers("open"),
     unavailableReason: needsSelected("a directory or a file an editor opens"),
     // Entering a directory moves the surface's own location, so the open
-    // reaches the active file browser as a chan:command and runs there what
+    // reaches the command surface as a chan:command and runs there what
     // Enter runs on the selection.
     run: () => dispatchChanCommand("app.browser.open"),
   },
@@ -358,7 +360,8 @@ registerCommands([
     kind: "open",
     requirement: "files",
     keywords: ["import", "file", "directory", "folder"],
-    available: onBrowser,
+    available: (ctx) => onBrowser(ctx) && commandSurfaceId() !== null,
+    unavailableReason: needsBrowser,
     // The directory an upload goes into is the surface's own, the folder a
     // list shows, so the upload reaches the surface the selection commands
     // act on as a chan:command and runs there what its menu's Upload runs.
@@ -454,8 +457,8 @@ registerCommands([
     order: 11,
     requirement: "files",
     keywords: ["Paste file browser clipboard", "copy", "cut", "move", "files"],
-    available: (ctx) => onBrowser(ctx) && fbClipboard.mode !== null,
-    unavailableReason: needsClipboard,
+    available: (ctx) => onBrowser(ctx) && commandSurfaceId() !== null && fbClipboard.mode !== null,
+    unavailableReason: () => commandSurfaceId() === null ? needsBrowser() : needsClipboard(),
     run: () => void pasteFileBrowserClipboard(),
   },
   {

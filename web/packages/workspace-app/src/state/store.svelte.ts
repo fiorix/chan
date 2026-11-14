@@ -5407,9 +5407,14 @@ const detachedBrowserSelection = $state<BrowserSelectionState>({
 });
 const browserFocus = $state<{ instanceId: string | null }>({ instanceId: null });
 
+/// Capture the command surface's selection before an operation awaits.
+export function fbActiveSelection(): BrowserSelectionState | null {
+  const id = browserFocus.instanceId;
+  return id ? fbTreeInstance(id)?.selection ?? null : null;
+}
+
 function activeBrowserSelection(): BrowserSelectionState {
-  return (browserFocus.instanceId && fbTreeInstance(browserFocus.instanceId)?.selection)
-    || detachedBrowserSelection;
+  return fbActiveSelection() ?? detachedBrowserSelection;
 }
 
 /// Commands target the last focused Files surface; each surface renders its own selection.

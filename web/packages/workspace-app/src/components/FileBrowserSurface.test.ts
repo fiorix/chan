@@ -343,7 +343,7 @@ describe("the tab variant", () => {
 
   test("the workspace path row shows the workspace in the inspector", async () => {
     const tab = seat(browserTab());
-    const target = await render({ variant: "tab", tab });
+    const target = await render({ variant: "tab", tab, focused: true });
     browserSelection.path = "notes/a.md";
     await openFromTabStrip(tab);
 
@@ -915,7 +915,7 @@ describe("the launcher's Open", () => {
 
   test("enters the selected directory, as Enter does", async () => {
     const tab = seat(browserTab({ selected: "notes" }));
-    await render({ variant: "tab", tab });
+    await render({ variant: "tab", tab, focused: true });
     expect(tab.directory).toBe("");
 
     open();
@@ -923,14 +923,15 @@ describe("the launcher's Open", () => {
     expect(tab.directory).toBe("notes");
   });
 
-  test("is answered by the active file browser tab alone", async () => {
+  test("is answered by the command surface alone", async () => {
     const tab = seat(browserTab({ selected: "notes" }));
-    await render({ variant: "tab", tab });
-    // Another tab takes the pane: the surface is still mounted here, and the
-    // launcher is no longer aimed at it.
+    await render({ variant: "tab", tab, focused: true });
+    // Mount and focus the next tab while keeping the first surface present
+    // so a second command listener would be observed.
     const pane = layout.nodes[PANE] as LeafNode;
     pane.tabs.push({ kind: "browser", id: "fb-2", title: "Files 2", inspectorOpen: false });
     pane.activeTabId = "fb-2";
+    await render({ variant: "tab", tab: pane.tabs[1] as BrowserTab, focused: true });
 
     open();
     await settle();
@@ -1059,7 +1060,7 @@ describe("the launcher's Open in new file browser", () => {
   /// A seated tab listing the root, with `paths` selected in it.
   async function select(paths: string[]): Promise<BrowserTab> {
     const tab = seat(browserTab({ id: "existing", selected: paths.at(-1), selectedPaths: paths }));
-    await render({ variant: "tab", tab });
+    await render({ variant: "tab", tab, focused: true });
     return tab;
   }
 
