@@ -30,7 +30,7 @@ Opened at the v0.129.0 cut on 2026-11-13. At its planning the same day the owner
 | [a pane keeps a margin on the window's edge][flushedges] | merged | closed |
 | [systemd-report cannot read the metrics][sdreport] | merged | closed |
 | [a focused browser pane gets no keys][panekeys] | merged | closed |
-| [a terminal window ignores saved shortcuts][termkeys] | not started | build |
+| [a terminal window ignores saved shortcuts][termkeys] | merged | owner |
 | [typing leaves a ghostty view in history][typescroll] | not started | build |
 | [a fast stream loses output][streamlag] | not started | measure |
 | [ghostty leaves black unpainted][blackbg] | not started | build |

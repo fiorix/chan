@@ -1,6 +1,6 @@
 # A standalone terminal window loads no saved shortcut overrides
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/terminal-window-shortcuts`, not merged; the section "Built" holds the evidence.
+Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/terminal-window-shortcuts`, merged into the integration branch (`ca652452a`), not yet in a release; the section "Built" holds the evidence.
 
 Record: left as built for the owner by the command deck's lanes, their point 6: "A standalone terminal window loads no saved shortcut overrides. This is the same on main." The owner: "it should, let's add an item for next version" (`dev/command-launcher-revamp/handoff.md`, "For the owner to decide"; quoted in the [command launcher row](../done/the-command-launcher-is-one-flat-list-behind-dead-keys.md)).
 
