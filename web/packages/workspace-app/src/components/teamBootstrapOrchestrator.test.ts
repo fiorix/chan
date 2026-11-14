@@ -227,10 +227,14 @@ describe("runTeamBootstrap: lead-first flow", () => {
     // The lead is a normal terminal: its identity prompt reaches the terminal's
     // prompt sink, retried until the freshly spawned lead's socket connects,
     // with the agent the lead's command names so the prompt is submitted with
-    // that agent's chord.
+    // that agent's chord. A lead chan does not recognise as an agent names
+    // "none", which the server answers with no chord; an omitted agent would
+    // be read as claude.
     for (const [command, env, agent] of [
       ["opencode --model test", "", "opencode"],
-      ["bash", "CHAN_AGENT=none", undefined],
+      ["bash", "CHAN_AGENT=none", "none"],
+      ["bash", "", "none"],
+      ["aider --model test", "", "none"],
     ] as const) {
       resetLayoutWithLead(leadTerminalTab());
       mockApi();
