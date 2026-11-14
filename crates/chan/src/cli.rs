@@ -195,9 +195,10 @@ pub(super) enum Command {
     /// Drive the current chan window from its terminal (the `cs` alias).
     ///
     /// Reached as `chan shell <action>` or, under the `cs` name on PATH,
-    /// as `cs <action>`. Every action targets the chan window that
-    /// spawned this terminal ($CHAN_WINDOW_ID + $CHAN_CONTROL_SOCKET);
-    /// outside a chan terminal they error clearly.
+    /// as `cs <action>`. Actions reach the chan server that spawned this
+    /// terminal ($CHAN_CONTROL_SOCKET), and window actions default to the
+    /// window that spawned it ($CHAN_WINDOW_ID); outside a chan terminal
+    /// they error clearly.
     ///
     /// Most installs put `cs` on your PATH. If `command -v cs` finds
     /// nothing, link it once yourself:
@@ -205,7 +206,7 @@ pub(super) enum Command {
     ///   ln -s "$(command -v chan)" ~/.local/bin/cs
     ///
     /// iproute2-style prefix matching: the cs actions disambiguate on
-    /// their first letter, so `cs o` / `cs g` / `cs d` / `cs t` resolve
+    /// their first letters, so `cs o` / `cs g` / `cs da` / `cs te` resolve
     /// to open / graph / dashboard / terminal.
     #[command(infer_subcommands = true)]
     Shell {
@@ -371,7 +372,8 @@ pub(super) enum DevserverAction {
     /// The service does not come back on the next login or boot.
     /// Idempotent. A foreground devserver (`chan devserver run`) is
     /// stopped with Ctrl-C. Stops the devserver on THIS machine; to drop
-    /// a connection to a remote one, see the launcher's Disconnect.
+    /// a connection to a remote one, see Disconnect on the Computers
+    /// screen.
     #[command(verbatim_doc_comment)]
     Stop {
         #[command(flatten)]
@@ -424,17 +426,18 @@ pub(super) enum DevserverAction {
         #[command(flatten)]
         args: DevserverServeArgs,
     },
-    /// Register a remote devserver with the desktop launcher
+    /// Register a remote devserver on the Computers screen
     ///
     /// Adds the URL to chan-desktop's devserver registry and returns,
-    /// without serving or dialing it; connecting is the launcher's
-    /// Connect button. Needs the chan desktop app running on this
-    /// machine.
+    /// without serving or dialing it; connecting is the Connect button
+    /// on the Computers screen. Needs the chan desktop app running on
+    /// this machine.
     #[command(verbatim_doc_comment)]
     Register {
         /// The devserver URL (scheme://host[:port]).
         url: String,
-        /// Optional label for the devserver's launcher section.
+        /// Optional label for the devserver's section on the Computers
+        /// screen.
         #[arg(long)]
         name: Option<String>,
         /// Optional connect script the desktop runs before it dials the
@@ -442,7 +445,7 @@ pub(super) enum DevserverAction {
         #[arg(long, verbatim_doc_comment)]
         script: Option<String>,
     },
-    /// List the desktop launcher's registered devservers
+    /// List the devservers registered on the Computers screen
     ///
     /// One row per registration with its live connection state. Rows
     /// synthesized from a gateway roster are marked; register / connect /
@@ -457,15 +460,15 @@ pub(super) enum DevserverAction {
     },
     /// Dial a registered devserver from the desktop
     ///
-    /// Resolves TARGET (a registered URL or launcher label) and starts
-    /// the desktop's connect: control script, token scrape, dial. Returns
-    /// as soon as the connect is underway; sign-in or trust prompts
-    /// surface in the launcher, which owns the progress. An unregistered
-    /// URL is refused: register first. Needs the chan desktop app
-    /// running.
+    /// Resolves TARGET (a registered URL, or its label on the Computers
+    /// screen) and starts the desktop's connect: control script, token
+    /// scrape, dial. Returns as soon as the connect is underway; sign-in
+    /// or trust prompts surface on the Computers screen, which owns the
+    /// progress. An unregistered URL is refused: register first. Needs
+    /// the chan desktop app running.
     #[command(verbatim_doc_comment)]
     Connect {
-        /// A registered devserver URL or launcher label.
+        /// A registered devserver URL or label.
         target: String,
     },
     /// Drop the desktop's connection to a devserver
@@ -476,10 +479,11 @@ pub(super) enum DevserverAction {
     /// running.
     #[command(verbatim_doc_comment)]
     Disconnect {
-        /// A registered devserver URL or launcher label.
+        /// A registered devserver URL, or its label on the Computers
+        /// screen.
         target: String,
     },
-    /// Remove a devserver registration from the desktop launcher
+    /// Remove a devserver registration from the Computers screen
     ///
     /// The undo of `chan devserver register`: drops the row, discarding
     /// its stored write-only token (re-registering needs the token
@@ -489,7 +493,8 @@ pub(super) enum DevserverAction {
     /// running.
     #[command(verbatim_doc_comment)]
     Forget {
-        /// A registered devserver URL or launcher label.
+        /// A registered devserver URL, or its label on the Computers
+        /// screen.
         target: String,
         /// Disconnect a live connection first instead of refusing.
         #[arg(long)]
@@ -703,9 +708,9 @@ pub(super) struct ServeCliArgs {
     )]
     pub(super) devserver: Option<DevserverSelector>,
     /// Serve PATH on a REGISTERED remote devserver instead of here. TARGET
-    /// is that devserver's URL or launcher label as `chan devserver ls`
-    /// shows it, resolved by the desktop; ambiguity refuses. PATH is a path
-    /// on that machine, passed verbatim (absolute). A local devserver PORT
+    /// is that devserver's URL or label as `chan devserver ls` shows it,
+    /// resolved by the desktop; ambiguity refuses. PATH is a path on
+    /// that machine, passed verbatim (absolute). A local devserver PORT
     /// belongs to --devserver=<port|url>, not here. Needs the chan desktop
     /// app running and the devserver connected; takes no local serve flag.
     #[arg(
@@ -731,9 +736,9 @@ pub(super) struct CloseCliArgs {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub(super) path: PathBuf,
     /// Close PATH on a REGISTERED remote devserver instead of here: TARGET
-    /// is its URL or launcher label as `chan devserver ls` shows it, PATH
-    /// is the workspace's path on that machine. The devserver's own
-    /// live-terminal guard applies; the workspace stays registered there.
+    /// is its URL or label as `chan devserver ls` shows it, PATH is the
+    /// workspace's path on that machine. The devserver's own live-terminal
+    /// guard applies; the workspace stays registered there.
     #[arg(long, value_name = "TARGET", value_parser = parse_on_target, verbatim_doc_comment)]
     pub(super) on: Option<String>,
 }
@@ -745,9 +750,9 @@ pub(super) struct ForgetCliArgs {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub(super) path: PathBuf,
     /// Forget PATH on a REGISTERED remote devserver instead of here: TARGET
-    /// is its URL or launcher label as `chan devserver ls` shows it, PATH
-    /// is the workspace's path on that machine. The devserver unmounts and
-    /// drops the registration (files on that machine untouched); its
+    /// is its URL or label as `chan devserver ls` shows it, PATH is the
+    /// workspace's path on that machine. The devserver unmounts and drops
+    /// the registration (files on that machine untouched); its
     /// live-terminal guard applies.
     #[arg(long, value_name = "TARGET", value_parser = parse_on_target, verbatim_doc_comment)]
     pub(super) on: Option<String>,
@@ -1343,20 +1348,22 @@ fn parse_devserver_selector(raw: &str) -> std::result::Result<DevserverSelector,
     Ok(DevserverSelector::Port(port))
 }
 
-/// `--on TARGET`: a registered devserver's URL or launcher label, resolved by
-/// the desktop. Only the shape is checked here: an all-digit value is a
+/// `--on TARGET`: a registered devserver's URL or label, resolved by the
+/// desktop. Only the shape is checked here: an all-digit value is a
 /// local devserver port, which belongs to `--devserver`, and is refused with
 /// that pointer so the two flags never guess at each other's grammar.
 fn parse_on_target(raw: &str) -> std::result::Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err("--on needs a registered devserver URL or launcher label".into());
+        return Err(
+            "--on needs a registered devserver URL, or its label on the Computers screen".into(),
+        );
     }
     if trimmed.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!(
-            "--on {trimmed} is port-shaped: --on names a REGISTERED devserver by URL or \
-             launcher label (see `chan devserver ls`); a live local devserver port belongs to \
-             --devserver={trimmed}"
+            "--on {trimmed} is port-shaped: --on names a REGISTERED devserver by URL or by its \
+             label on the Computers screen (see `chan devserver ls`); a live local devserver \
+             port belongs to --devserver={trimmed}"
         ));
     }
     Ok(trimmed.to_string())

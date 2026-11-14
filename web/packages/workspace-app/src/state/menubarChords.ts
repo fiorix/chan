@@ -5,7 +5,7 @@
 // against the menubar, and a page that cancels the keydown leaves AppKit
 // nothing to match, so the menu item never runs. A full-window cover cancels
 // every key aimed at the app behind it; it lets these keep their default
-// (App.svelte's window key handler), which keeps the Computers launcher, a new
+// (App.svelte's window key handler), which keeps the Computers screen, a new
 // window, hiding and quitting reachable from a window that is reconnecting or
 // locked. Off macOS the desktop's key bridge claims the window-level chords
 // (Ctrl+Shift+P, Ctrl+Shift+N, Ctrl+Q) before the page sees them, and a
@@ -22,13 +22,13 @@ export type MenubarChord = {
   option: boolean;
 };
 
-/// Toggle Launcher, New Window and Quit Chan are chan's own items
+/// Computers, New Window and Quit Chan are chan's own items
 /// (`install_app_menu` in desktop/src-tauri/src/main.rs); Hide, Hide Others
 /// and Minimize come from Tauri's default macOS menubar. Edit's items act on
 /// the page and New Terminal and Close Window reach the page as commands, so
 /// none of them is listed: a cover blocks them as it blocks the app's chords.
 export const MAC_MENUBAR_WINDOW_CHORDS: readonly MenubarChord[] = [
-  { item: "Toggle Launcher", letter: "P", shift: false, option: false },
+  { item: "Computers", letter: "P", shift: false, option: false },
   { item: "New Window", letter: "N", shift: true, option: false },
   { item: "Quit Chan", letter: "Q", shift: false, option: false },
   { item: "Hide", letter: "H", shift: false, option: false },

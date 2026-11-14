@@ -41,11 +41,12 @@ Drive the current chan window from its terminal.
 
 `cs` is the chan binary under a second name, picked by argv[0], so `cs
 open x.md` and `chan shell open x.md` are the same command. Every action
-targets the window that spawned this terminal, discovered from the
+reaches the chan server that spawned this terminal, discovered from the
 environment, except the offline manual, `cs dump-skill`, and the in-band
 reporter, `cs terminal status`. The reporter works in any terminal that
-supports OSC 7501. Window actions run outside a chan terminal error
-clearly instead of guessing.
+supports OSC 7501. Window actions default to the window that spawned
+this terminal; outside a chan terminal they error clearly instead of
+guessing.
 
 Actions disambiguate on their first letters, iproute2 style, so `cs o`,
 `cs te l`, and `cs sea` resolve to open, terminal list, and search. The
@@ -106,7 +107,8 @@ and `tunnel` work in a plain terminal window.
 
 No environment variable distinguishes a workspace window from a standalone
 terminal. A workspace-only command's refusal IS the check.
-`window new|open|rm|hide` and `tunnel` additionally need the desktop app.
+`window new|open|hide` and `tunnel` additionally need the desktop app;
+`window rm` also works headless.
 
 EXAMPLES:
 Confirm you are in a chan terminal, and find out which one:
@@ -581,11 +583,11 @@ pub enum ShellAction {
 }
 
 /// `cs window <action>`: read the window registry and drive the
-/// desktop's OS windows. The lifecycle verbs (`new`/`open`/`rm`/`hide`)
-/// need the chan desktop app; a standalone `chan serve` refuses
-/// them. `new` derives its kind from the calling tenant; the id-bearing
-/// verbs act on any window by id. Titles are library-owned and
-/// auto-derived; there is no rename verb.
+/// desktop's OS windows. The lifecycle verbs `new`/`open`/`hide` need the
+/// chan desktop app, while `rm` also works on a headless devserver, whose
+/// server owns the registry row. `new` derives its kind from the calling
+/// tenant; the id-bearing verbs act on any window by id. Titles are
+/// library-owned and auto-derived; there is no rename verb.
 #[derive(Subcommand, Debug)]
 pub enum WindowAction {
     /// List the windows chan knows about
@@ -1491,7 +1493,8 @@ async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
 
 /// `cs session <detach|handover|takeover>`: send a session command and print the
 /// server's reply. A `handover` request BLOCKS here until the leader accepts /
-/// rejects or the timeout elapses (the CLI exits 124 on timeout).
+/// rejects or the timeout elapses. The timeout reaches the caller as an
+/// ordinary error (exit 1): nothing here downcasts it to the 124 exit.
 async fn cmd_session_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
     let held = matches!(

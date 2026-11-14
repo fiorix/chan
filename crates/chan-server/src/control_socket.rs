@@ -4337,8 +4337,8 @@ async fn handle_tunnel<R, W>(
                 // The client left while waiting: drop the registrations and go.
                 _ = wait_for_client_eof(&mut reader) => return,
                 // The bounded wait elapsed: a `Timeout` line, which the CLI
-                // maps to exit 124 as for every other bounded blocking
-                // command, never the generic error.
+                // maps to exit 124 as it does for a survey, a copy and a
+                // paste, never the generic error.
                 _ = &mut ready_window => {
                     if let Some(status) = status.take() { status.tunnel_failed(false); }
                     let unanswered = bound.iter().filter(|authority| authority.is_none()).count();

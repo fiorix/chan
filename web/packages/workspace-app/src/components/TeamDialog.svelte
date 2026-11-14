@@ -45,9 +45,9 @@
 
   // The dialog is unmounted + remounted across requests so this
   // single-shot capture is intended. The lead terminal carries the live config
-  // draft (seeded with defaultTeamConfig at Cmd+P), so seeding from it here both
-  // resumes a normal open AND restores the in-progress config after a window
-  // reload reopened this dialog (#4 reload-survival).
+  // draft (seeded with defaultTeamConfig when New team creates it), so seeding
+  // from it here both resumes a normal open AND restores the in-progress config
+  // after a window reload reopened this dialog.
   // svelte-ignore state_referenced_locally
   let config: TeamDialogConfig = $state(
     teamWorkPendingConfig(request) ?? defaultTeamConfig(),
@@ -313,8 +313,8 @@
   }
 
   /// Cancel/dismiss: delete the exact Team Work Lead terminal tab
-  /// that Cmd+P created, then dismiss the dialog (restoring the
-  /// previous state).
+  /// that the New team command created, then dismiss the dialog
+  /// (restoring the previous state).
   function onCancel(): void {
     void closeTab(request.leadPaneId, request.leadTabId, { force: true });
     closeTeamDialog();
@@ -326,7 +326,7 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && !busy) {
-      // Capture phase + stopPropagation: Cmd+P opens this dialog OVER a
+      // Capture phase + stopPropagation: New team opens this dialog OVER a
       // freshly-spawned lead terminal whose xterm (and the Team Work
       // compose box) grabs focus, so a bubble-phase Escape was consumed
       // by the terminal before reaching the window. Listening in capture

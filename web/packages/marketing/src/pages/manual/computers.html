@@ -1,0 +1,137 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="computers-carousel" data-shot-kind="clip">clip to capture<small>Cmd+P over a terminal window: the Computers screen slides in, the cards turn from All windows to This machine to a devserver, then Esc returns to the window</small></div>
+  <figcaption>The Computers screen over a window, turned from card to card.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>See every window on this machine and your devservers, shown or hidden, in one place.</li>
+    <li>Open a standalone terminal, a new workspace, or another window of a workspace.</li>
+    <li>Turn workspaces on and off, and connect or disconnect devservers.</li>
+    <li>Hide a window while its terminals keep running, and show it again later.</li>
+    <li>Do all of it from the keyboard, one letter per action.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="open">
+  <h2><a class="heading-anchor" href="#open">Open it</a></h2>
+  <p>The screen slides in over the window you are in, and slides out when you go back.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Show or hide it</td><td><kbd>Cmd+P</kbd></td><td><kbd>Ctrl+Shift+P</kbd></td></tr>
+        <tr><td>Show or hide it from the menu</td><td><strong>View → Computers</strong></td><td><strong>View → Computers</strong>, while the screen is open</td></tr>
+        <tr><td>Show it from the command launcher</td><td colspan="2"><strong>All computers...</strong>, the last row of its Computers scope</td></tr>
+        <tr><td>Go back to the window</td><td><kbd>Esc</kbd></td><td><kbd>Esc</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>In a browser, a devserver's address opens the same screen with one card, This machine. See <a href="/manual/browser/#computers">Chan in a browser</a>.</p>
+</section>
+
+<section class="manual-block" id="cards">
+  <h2><a class="heading-anchor" href="#cards">The cards</a></h2>
+  <p>The screen is a carousel. Turn it with the arrows at its sides, the dots under it, or <kbd>Left</kbd> and <kbd>Right</kbd>.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="computers-this-machine" data-shot-kind="still">screenshot to capture<small>This machine's card in front: two standalone terminals under Terminals, one workspace under Workspaces expanded to its two windows, the key hint line under the cards</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Card</th><th>What it holds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>All windows</strong></td><td>First. Every window on every machine, with its machine and workspace, shown or hidden.</td></tr>
+        <tr><td><strong>This machine</strong></td><td><strong>New terminal</strong> and <strong>New workspace</strong>. <strong>Terminals</strong> lists the standalone terminals; <strong>Workspaces</strong> lists each workspace with its windows.</td></tr>
+        <tr><td>A devserver</td><td>Its name and address, <strong>Connect</strong> or <strong>Disconnect</strong>, and <strong>New terminal</strong> while connected. Its terminals and workspaces are listed as on This machine. Click the name to edit its config.</td></tr>
+        <tr><td>A tmux connection</td><td>The windows of a <code>tmux -CC</code> run, <strong>New tmux window</strong> and <strong>Detach</strong>. See <a href="/manual/tmux/#card">tmux control mode</a>.</td></tr>
+        <tr><td><strong>Add devserver</strong></td><td>Last. The form that adds a devserver; see <a href="/manual/connect/#add">Connect from Chan Desktop</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A workspace row has <strong>New window</strong>, <strong>New terminal window</strong>, and a power button that turns the workspace on or off. Its arrow shows or folds its windows.</p>
+</section>
+
+<section class="manual-block" id="keys">
+  <h2><a class="heading-anchor" href="#keys">Keys</a></h2>
+  <p>A letter acts on the selected row of the front card. The line under the cards lists them.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Key</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Up</kbd> <kbd>Down</kbd></td><td>Select a row on the front card.</td></tr>
+        <tr><td><kbd>Left</kbd> <kbd>Right</kbd></td><td>Walk the selected row's buttons. Past the first or the last, turn to the previous or next card.</td></tr>
+        <tr><td><kbd>Shift+Left</kbd> <kbd>Shift+Right</kbd></td><td>Turn the cards.</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>Run the row's main action, such as focusing a window.</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Move through the front card's buttons.</td></tr>
+        <tr><td><kbd>o</kbd></td><td>On or off: connect or disconnect a devserver or gateway, turn a workspace on or off, or detach a tmux connection. A gateway that is connecting cancels.</td></tr>
+        <tr><td><kbd>t</kbd></td><td>A new terminal on This machine or a connected devserver, a new terminal window of a workspace, or a new tmux window.</td></tr>
+        <tr><td><kbd>w</kbd></td><td>A new window of a workspace that is on.</td></tr>
+        <tr><td><kbd>h</kbd></td><td>Show or hide a window, on any card.</td></tr>
+        <tr><td><kbd>g</kbd></td><td>Flip between Computers and Gateways.</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Close the screen.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="windows">
+  <h2><a class="heading-anchor" href="#windows">Show, hide and focus windows</a></h2>
+  <p>Each window row has two buttons: focus brings the window to the front, and the eye shows or hides it. A row reads <code>Terminal Window 2</code> or <code>Window 1</code>, and <strong>This window</strong> marks the window the screen is over.</p>
+  <p>Hide a window to get it out of the way while its work runs: start a build or an agent, hide its window, and check on it later. Close it when you are done with it.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>From the window</th><th>macOS</th><th>Windows, Linux</th><th>The window</th><th>Its terminals</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Hide window</td><td><kbd>Cmd+Shift+H</kbd></td><td><kbd>Ctrl+Shift+H</kbd></td><td>Leaves the screen. Its row stays, marked hidden, until you show it.</td><td>Keep running.</td></tr>
+        <tr><td>Close window</td><td><kbd>Cmd+Shift+W</kbd></td><td><kbd>Ctrl+Alt+W</kbd></td><td>Goes, with its layout.</td><td>End.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A window's own close button asks <strong>Hide</strong>, <strong>Close</strong> or <strong>Cancel</strong>. Show a hidden window again from its row, with <kbd>h</kbd>, or from the <strong>Window</strong> menu.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="computers-close-prompt" data-shot-kind="still">screenshot to capture<small>the Hide, Close and Cancel prompt over a terminal window, after a click on the window's close button</small></div>
+  </figure>
+</section>
+
+<section class="manual-block" id="gateways">
+  <h2><a class="heading-anchor" href="#gateways">Gateways</a></h2>
+  <p>Press <kbd>g</kbd>, or click the screen's title, to flip to <strong>Gateways</strong>: the same carousel for the gateways you connect through, with <strong>Add gateway</strong> last. The devservers a gateway gives you show on Computers as cards that read <code>via</code> and the gateway's name.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="computers-gateways-flip" data-shot-kind="clip">clip to capture<small>on the Computers screen, press g: the deck flips to Gateways with one gateway card and Add gateway, then g flips back</small></div>
+  </figure>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/gateway/"><strong>Connect to a gateway</strong><span>Add a gateway, sign in, and open the devservers it publishes.</span></a>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>On macOS, <kbd>Cmd+P</kbd> with no Chan Desktop window focused opens a standalone terminal instead.</li>
+      <li>On Windows and Linux the window's menu bar shows only while the screen is open.</li>
+      <li>The letters leave forms, a window name you are editing, dialogs and the command launcher alone. Shift or uppercase letters work the same; Cmd, Ctrl and Alt combinations keep their usual meaning.</li>
+      <li>Click a window's name to add your own text; the row then reads <code>Terminal Window 2 [build]</code>.</li>
+      <li>A devserver's icon shows its state: connected, connecting, connection lost, or disconnected.</li>
+      <li><strong>Select</strong>, in the top bar, puts a check on each workspace, devserver and tmux connection. The bar at the bottom turns the checked ones on or off, or removes them after you confirm.</li>
+      <li>The top bar's command button opens the command launcher with the Computers scope alone.</li>
+      <li>In a browser the cards stand one under another, a window row has <strong>Open window</strong> and the eye, and the letters do not apply. Closing a browser tab ends its window's terminals; <a href="/manual/browser/#hide">hide the window</a> first.</li>
+      <li>When several browser pages show one devserver's screen, only the session leader shows and hides windows. See <a href="/manual/collaboration/#leadership">Collaboration</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/command-launcher/"><strong>Command launcher</strong><span>Reach any window and run any command from one list.</span></a>
+    <a class="next-card" href="/manual/connect/"><strong>Connect from Chan Desktop</strong><span>Add a devserver and open its terminals and workspaces.</span></a>
+    <a class="next-card" href="/manual/standalone/"><strong>Standalone terminal</strong><span>A window with no workspace, with the machine's files and an editor.</span></a>
+  </div>
+</section>

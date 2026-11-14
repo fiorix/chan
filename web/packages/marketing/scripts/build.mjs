@@ -40,8 +40,8 @@ const requiredInputs = [
   path.join(srcRoot, "pages", "gateway.html"),
   path.join(srcRoot, "guides.css"),
   path.join(srcRoot, "pages", "install.html"),
-  path.join(srcRoot, "pages", "manual.html"),
-  path.join(srcRoot, "manual-pages.json"),
+  path.join(srcRoot, "docs.json"),
+  path.join(srcRoot, "manual.css"),
   path.join(srcRoot, "pages", "animations.html"),
   path.join(srcRoot, "animation-credits.json"),
   path.join(srcRoot, "install.sh"),
@@ -59,8 +59,7 @@ async function main() {
   const baseTemplate = await fs.readFile(path.join(srcRoot, "templates", "base.html"), "utf8");
   const homeTemplate = await fs.readFile(path.join(srcRoot, "pages", "home.html"), "utf8");
   const installTemplate = await fs.readFile(path.join(srcRoot, "pages", "install.html"), "utf8");
-  const manualTemplate = await fs.readFile(path.join(srcRoot, "pages", "manual.html"), "utf8");
-  const manualPages = JSON.parse(await fs.readFile(path.join(srcRoot, "manual-pages.json"), "utf8"));
+  const docSets = await readDocSets();
   const animationsTemplate = await fs.readFile(path.join(srcRoot, "pages", "animations.html"), "utf8");
   const animationCredits = JSON.parse(await fs.readFile(path.join(srcRoot, "animation-credits.json"), "utf8"));
   const demoEmbedTemplate = await fs.readFile(path.join(srcRoot, "templates", "demo-embed.html"), "utf8");
@@ -79,6 +78,9 @@ async function main() {
   const launcherDemoHead =
     '<link rel="stylesheet" href="/assets/launcher-demo.css" />\n<script type="module" src="/assets/launcher-demo.js"></script>';
   const homeHead = '<link rel="stylesheet" href="/assets/home.css" />';
+  // Documentation pages share the landing page's labels and links (home.css)
+  // and add their own layout and components (manual.css).
+  const docHead = `${homeHead}\n<link rel="stylesheet" href="/assets/manual.css" />`;
   await writePage(
     "index.html",
     renderPage(baseTemplate, {
@@ -121,26 +123,30 @@ async function main() {
     }),
   );
 
-  for (const [index, page] of manualPages.entries()) {
-    const template = page.slug
-      ? await fs.readFile(path.join(srcRoot, "pages", "manual", `${page.slug}.html`), "utf8")
-      : manualTemplate;
-    const content = fillTemplate(template, {
-      version,
-      ...sharedTemplateValues,
-      manualChapters: manualPages.slice(1).map((chapter) => `<a class="manual-chapter" href="${manualUrl(chapter)}"><h2>${escapeHtml(chapter.title)}</h2><p>${escapeHtml(chapter.description)}</p></a>`).join("\n"),
-    });
-    await writePage(
-      `manual/${page.slug ? `${page.slug}/` : ""}index.html`,
-      renderPage(baseTemplate, {
-        active: "manual",
-        bodyClass: "manual-page",
-        title: page.slug ? `${page.title} - Chan manual` : "Chan manual",
-        description: page.description,
-        content: renderManual(manualPages, index, content),
-        headExtra: page.slug === "install" ? launcherDemoHead : "",
-      }),
-    );
+  const docHeads = { "launcher-demo": launcherDemoHead };
+  for (const set of docSets) {
+    for (const [index, page] of set.pages.entries()) {
+      const template = await fs.readFile(path.join(srcRoot, page.slug ? path.join(set.source, `${page.slug}.html`) : set.index), "utf8");
+      const content = await addIntrinsicSizes(
+        fillTemplate(template, {
+          version,
+          ...sharedTemplateValues,
+          manualChapters: renderDocChapters(set),
+        }),
+      );
+      if (page.head && !docHeads[page.head]) throw new Error(`docs.json: unknown head "${page.head}" on ${docUrl(set, page)}`);
+      await writePage(
+        `${docUrl(set, page).slice(1)}index.html`,
+        renderPage(baseTemplate, {
+          active: set.id,
+          bodyClass: "manual-page",
+          title: page.slug ? `${page.title} - ${set.title}` : set.title,
+          description: page.description,
+          content: renderDoc(set, index, content),
+          headExtra: [docHead, page.head ? docHeads[page.head] : ""].filter(Boolean).join("\n"),
+        }),
+      );
+    }
   }
 
   await writePage(
@@ -173,7 +179,7 @@ async function main() {
   await writePage(
     "demo/computers/index.html",
     fillTemplate(demoEmbedTemplate, {
-      title: "Computers window preview",
+      title: "Computers screen preview",
       variant: "populated",
     }),
   );
@@ -208,6 +214,7 @@ async function copyStaticAssets() {
   await fs.copyFile(path.join(srcRoot, "site.js"), path.join(distRoot, "assets", "site.js"));
   await fs.copyFile(path.join(srcRoot, "home.css"), path.join(distRoot, "assets", "home.css"));
   await fs.copyFile(path.join(srcRoot, "guides.css"), path.join(distRoot, "assets", "guides.css"));
+  await fs.copyFile(path.join(srcRoot, "manual.css"), path.join(distRoot, "assets", "manual.css"));
   await copyDir(path.join(siteRoot, "assets"), path.join(distRoot, "assets"));
 }
 
@@ -251,40 +258,126 @@ function renderPage(template, { active, bodyClass, title, description, content, 
   });
 }
 
-function manualUrl(page) {
-  return `/manual/${page.slug ? `${page.slug}/` : ""}`;
+// A documentation set is a base path, a sidebar label and groups of pages.
+// The flat `pages` list carries each page's group and fixes the reading order
+// that the sidebar and the previous and next links follow.
+async function readDocSets() {
+  const { sets } = JSON.parse(await fs.readFile(path.join(srcRoot, "docs.json"), "utf8"));
+  return sets.map((set) => ({
+    ...set,
+    pages: set.groups.flatMap((group) => group.pages.map((page) => ({ ...page, group: group.title }))),
+  }));
 }
 
-function renderManual(pages, index, content) {
-  const page = pages[index];
-  const headings = [...content.matchAll(/<h[23](?: id="[^"]+")?><a class="heading-anchor" href="#([^"]+)">([^<]+)<\/a><\/h[23]>/g)];
+function docUrl(set, page) {
+  return `${set.base}${page.slug ? `${page.slug}/` : ""}`;
+}
+
+function docSlug(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function renderDocChapters(set) {
+  return set.groups
+    .map((group) => {
+      const cards = group.pages
+        .filter((page) => page.slug)
+        .map((page) => `<a class="manual-chapter" href="${docUrl(set, page)}"><strong>${escapeHtml(page.title)}</strong><span>${escapeHtml(page.description)}</span></a>`);
+      if (!cards.length) return "";
+      return `<section class="manual-chapter-group">
+  <p class="section-label">${escapeHtml(group.title)}</p>
+  <div class="manual-chapters">
+${cards.join("\n")}
+  </div>
+</section>`;
+    })
+    .join("\n");
+}
+
+function renderDoc(set, index, content) {
+  const page = set.pages[index];
+  const headings = [...content.matchAll(/<h([23])(?: id="[^"]+")?><a class="heading-anchor" href="#([^"]+)">(.*?)<\/a><\/h\1>/gs)];
   const contents = page.slug && headings.length > 1
-    ? `<nav class="manual-toc" aria-label="On this page"><strong>On this page</strong><ul>${headings.map(([, id, title]) => `<li><a href="#${id}">${title}</a></li>`).join("")}</ul></nav>`
+    ? `<nav class="manual-toc" aria-label="On this page"><strong>On this page</strong><ul>${headings.map(([, level, id, title]) => `<li${level === "3" ? ' class="toc-sub"' : ""}><a href="#${id}">${title}</a></li>`).join("")}</ul></nav>`
     : "";
   const adjacent = (offset, label) => {
-    const target = pages[index + offset];
-    return target ? `<a href="${manualUrl(target)}" rel="${offset < 0 ? "prev" : "next"}"><span>${label}</span>${escapeHtml(target.title)}</a>` : "<span></span>";
+    const target = set.pages[index + offset];
+    return target ? `<a href="${docUrl(set, target)}" rel="${offset < 0 ? "prev" : "next"}"><span>${label}</span>${escapeHtml(target.title)}</a>` : "<span></span>";
   };
+  const navId = `${set.id}-nav`;
+  const groups = set.groups
+    .map((group) => {
+      const headingId = `${navId}-${docSlug(group.title)}`;
+      const links = group.pages.map((chapter) => `<li><a href="${docUrl(set, chapter)}"${chapter.slug === page.slug ? ' aria-current="page"' : ""}>${escapeHtml(chapter.title)}</a></li>`);
+      return `<p class="manual-nav-heading" id="${headingId}">${escapeHtml(group.title)}</p>
+      <ol aria-labelledby="${headingId}">${links.join("\n")}</ol>`;
+    })
+    .join("\n      ");
   return `<a class="manual-skip" href="#manual-content">Skip to content</a>
 <div class="manual-layout">
-  <nav class="manual-nav" aria-label="Manual sections">
-    <a class="manual-nav-title" href="/manual/">Manual</a>
-    <ol>${pages.map((chapter, i) => `<li><a href="${manualUrl(chapter)}"${i === index ? ' aria-current="page"' : ""}>${escapeHtml(chapter.title)}</a></li>`).join("\n")}</ol>
+  <nav class="manual-nav" aria-label="${escapeHtml(set.label)} sections">
+    <a class="manual-nav-title" href="${set.base}">${escapeHtml(set.label)}</a>
+    <input class="manual-nav-toggle" type="checkbox" id="${navId}-toggle" />
+    <label class="manual-nav-current" for="${navId}-toggle"><span>${escapeHtml(page.group)}</span>${escapeHtml(page.title)}</label>
+    <div class="manual-nav-groups">
+      ${groups}
+    </div>
   </nav>
-  <article class="manual-content" id="manual-content" tabindex="-1">
+  <article class="manual-content${contents ? "" : " no-toc"}" id="manual-content" tabindex="-1">
     <header class="page-head">
-      <p class="manual-eyebrow">Chan manual</p>
-      <h1>${page.slug ? escapeHtml(page.title) : "Manual"}</h1>
-      <p>${escapeHtml(page.description)}</p>
+      <p class="manual-eyebrow"><a href="${set.base}">${escapeHtml(set.label)}</a><span aria-hidden="true">/</span>${escapeHtml(page.group)}</p>
+      <h1>${page.slug ? escapeHtml(page.title) : escapeHtml(set.label)}</h1>
+      <p class="manual-lede">${escapeHtml(page.description)}</p>
     </header>
 ${contents}
 ${content}
-    <nav class="manual-pagination" aria-label="Adjacent manual sections">
+    <nav class="manual-pagination" aria-label="Adjacent ${escapeHtml(set.label.toLowerCase())} sections">
       ${adjacent(-1, "Previous")}
       ${adjacent(1, "Next")}
     </nav>
   </article>
 </div>`;
+}
+
+// Give each local image, and each video with a local poster, its intrinsic
+// width and height, so the page reserves the right box before the media loads
+// and a video keeps its source aspect.
+async function addIntrinsicSizes(html) {
+  const sizes = new Map();
+  const tags = [...html.matchAll(/<(img|video)\b[^>]*>/g)].filter(([tag]) => !/\swidth="/.test(tag));
+  for (const [tag, name] of tags) {
+    const source = tag.match(name === "img" ? /\ssrc="(\/assets\/[^"]+)"/ : /\sposter="(\/assets\/[^"]+)"/)?.[1];
+    if (!source || sizes.has(tag)) continue;
+    const size = await imageSize(path.join(siteRoot, source));
+    if (size) sizes.set(tag, tag.replace(/\s*\/?>$/, (end) => ` width="${size.width}" height="${size.height}"${end}`));
+  }
+  let sized = html;
+  for (const [tag, replacement] of sizes) sized = sized.split(tag).join(replacement);
+  return sized;
+}
+
+async function imageSize(file) {
+  let data;
+  try {
+    data = await fs.readFile(file);
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  if (data.length > 24 && data.readUInt32BE(0) === 0x89504e47) {
+    return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+  }
+  if (data.length > 4 && data.readUInt16BE(0) === 0xffd8) {
+    // Walk the JPEG segments to the frame header, which holds the size.
+    let offset = 2;
+    while (offset + 9 < data.length && data[offset] === 0xff) {
+      const marker = data[offset + 1];
+      const frame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (frame) return { width: data.readUInt16BE(offset + 7), height: data.readUInt16BE(offset + 5) };
+      offset += 2 + data.readUInt16BE(offset + 2);
+    }
+  }
+  return null;
 }
 
 async function buildLauncherDemo() {
@@ -428,9 +521,14 @@ async function validateDist(version) {
   const allDistPaths = new Set(files.map((file) => path.relative(distRoot, file).split(path.sep).join("/")));
   const textByDistPath = new Map();
 
+  const htmlByDistPath = new Map();
   for (const htmlFile of htmlFiles) {
-    const html = await fs.readFile(htmlFile, "utf8");
-    validateLocalLinks(htmlFile, html, allDistPaths);
+    htmlByDistPath.set(path.relative(distRoot, htmlFile).split(path.sep).join("/"), await fs.readFile(htmlFile, "utf8"));
+  }
+  const idsByDistPath = new Map([...htmlByDistPath].map(([rel, html]) => [rel, new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]))]));
+  for (const htmlFile of htmlFiles) {
+    const rel = path.relative(distRoot, htmlFile).split(path.sep).join("/");
+    validateLocalLinks(htmlFile, htmlByDistPath.get(rel), allDistPaths, idsByDistPath);
   }
 
   const textFiles = files.filter((file) => /\.(html|css|js|sh|ps1|txt|xml)$/.test(file) || path.basename(file) === "CNAME");
@@ -471,16 +569,22 @@ async function collectFiles(dir) {
   return files;
 }
 
-function validateLocalLinks(htmlFile, html, allDistPaths) {
-  const pageUrl = urlForOutput(path.relative(distRoot, htmlFile).split(path.sep).join("/"));
+function validateLocalLinks(htmlFile, html, allDistPaths, idsByDistPath) {
+  const pagePath = path.relative(distRoot, htmlFile).split(path.sep).join("/");
+  const pageUrl = urlForOutput(pagePath);
   const attrPattern = /\b(?:href|src)="([^"]+)"/g;
   for (const match of html.matchAll(attrPattern)) {
     validatePublicLink(htmlFile, match[1]);
     const target = normalizeLink(pageUrl, match[1]);
-    if (!target) continue;
-    const distPath = distPathForUrl(target);
-    if (!allDistPaths.has(distPath)) {
+    const distPath = target ? distPathForUrl(target) : pagePath;
+    if (target && !allDistPaths.has(distPath)) {
       throw new Error(`${path.relative(repoRoot, htmlFile)} links to missing ${match[1]}`);
+    }
+    // A fragment on a page of this site must name an id that page has, so a
+    // section that moves cannot leave a link pointing at nothing.
+    const fragment = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(match[1]) ? "" : decodeURIComponent(match[1].split("#")[1] ?? "");
+    if (fragment && idsByDistPath.has(distPath) && !idsByDistPath.get(distPath).has(fragment)) {
+      throw new Error(`${path.relative(repoRoot, htmlFile)} links to missing anchor ${match[1]}`);
     }
   }
 }

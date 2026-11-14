@@ -1,97 +1,187 @@
+<figure class="inline-shot" id="editor-walkthrough">
+  <div class="shot-placeholder-frame" data-shot="editor-open" data-shot-kind="clip">clip to capture<small>a workspace terminal runs cs open notes/plan.md; the note opens rendered in a tab beside it; typing "## Next steps" becomes a heading as it is typed</small></div>
+  <figcaption>A Markdown file opened from a terminal, rendered as you type.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Write Markdown that renders as you type, and switch to its source when you need the syntax.</li>
+    <li>Link files with <code>[[</code>, mention people with <code>@@</code>, tag with <code>#</code>, and insert dates with <code>@today</code>.</li>
+    <li>Paste or drop images into a note. They are saved beside it.</li>
+    <li>Edit any text file in the source editor. Files stay ordinary files on disk.</li>
+    <li>Leave saving to the editor: it saves as you pause, and asks when another program changed the file.</li>
+    <li>Jump through a long document with the outline, and see a file's links and backlinks in Details.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="open-edit">
   <h2><a class="heading-anchor" href="#open-edit">Open and edit</a></h2>
-<p>Open a file from the file browser, a search result, a link, or <code>cs open path/to/file</code>. Markdown opens with live rendering. Source files, configuration files, and other text open in the source editor; they remain ordinary files on disk.</p>
-<p>Use <strong>Source mode</strong>, in the command launcher, to switch a supported document between its source and rendered view. The default shortcut is <code>Cmd+E</code> on macOS or <code>Ctrl+E</code> elsewhere. JSON has a structured view, and CSV/TSV files have a table view.</p><figure class="inline-shot"><img src="/assets/manual/workspace-editor.png" alt="A repository file browser beside the Markdown editor showing a document and diagram" loading="lazy" /><figcaption>A workspace with its file browser and Markdown editor.</figcaption></figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>From</th><th>How</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The file browser</td><td>Double-click a file, or select it and press <kbd>Enter</kbd>.</td></tr>
+        <tr><td>A terminal</td><td><code>cs open path/to/file</code> opens it in the same window.</td></tr>
+        <tr><td>Search, or a document</td><td>Choose a result, or follow a link.</td></tr>
+        <tr><td>Outside chan</td><td><code>chan-edit FILE</code>; see <a href="/manual/standalone/#commands">Standalone commands</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>The file</th><th>Opens as</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Markdown</td><td>Rendered as you edit, diagrams included.</td></tr>
+        <tr><td>JSON, CSV, TSV</td><td>A tree or a table; see <a href="/manual/previews/#json-csv">JSON and CSV</a>.</td></tr>
+        <tr><td><code>.excalidraw</code></td><td>A drawing canvas; see <a href="/manual/previews/#diagrams">Diagrams</a>.</td></tr>
+        <tr><td>Images, audio, video, PDF</td><td>A viewer, when opened from the file browser.</td></tr>
+        <tr><td>Any other text</td><td>The source editor.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>Source mode</strong> switches a file between its rendered view and its text.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>macOS</th><th>Windows, Linux</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Source mode</td><td><kbd>Cmd+E</kbd></td><td><kbd>Ctrl+E</kbd></td></tr>
+        <tr><td>Bold, italic</td><td><kbd>Cmd+B</kbd> <kbd>Cmd+I</kbd></td><td><kbd>Ctrl+B</kbd> <kbd>Ctrl+I</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="manual-block" id="saving">
   <h2><a class="heading-anchor" href="#saving">Saving</a></h2>
-<p>The editor saves a file shortly after you stop typing. When another program changed the file since the tab read it, the save stops and asks first: <strong>External edit detected</strong> offers <strong>Reload</strong>, which takes the file as it is on disk and discards the tab's unsaved edits, <strong>Overwrite</strong>, which writes the tab's text over it, and <strong>Cancel</strong>, which keeps the edits in the tab.</p>
-<p>When the file is deleted or moved while it is open, the tab shows <strong>File moved or deleted</strong>. Edits the tab had not saved yet stay in it, and the tab offers only choices that keep them: <strong>Save here</strong> writes them back to the same path, recreating the file and any folder that went with it; <strong>Find</strong> searches the workspace for a line of the file, to find where it went; <strong>Close</strong> asks before it discards them. A tab with nothing unsaved offers <strong>Re-open</strong>, which reads the file again or lets you pick where it moved in Files, and <strong>Re-open there</strong> when one file of the same name was found elsewhere.</p>
+  <p>The editor saves a file shortly after you stop typing. Two states stop the save and ask you.</p>
+  <h3 id="external-edit"><a class="heading-anchor" href="#external-edit">External edit detected</a></h3>
+  <p>Another program changed the file since the tab read it.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="editor-external-edit" data-shot-kind="still">screenshot to capture<small>the External edit detected dialog over a Markdown tab, with Cancel, Overwrite and Reload</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Choice</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Reload</strong></td><td>Takes the file as it is on disk and discards the tab's unsaved edits.</td></tr>
+        <tr><td><strong>Overwrite</strong></td><td>Writes the tab's text over the file.</td></tr>
+        <tr><td><strong>Cancel</strong></td><td>Keeps the edits in the tab, unsaved.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3 id="moved-or-deleted"><a class="heading-anchor" href="#moved-or-deleted">File moved or deleted</a></h3>
+  <p>The file went away while it was open. Unsaved edits stay in the tab, and every choice keeps them.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="editor-moved" data-shot-kind="still">screenshot to capture<small>a tab with unsaved edits whose file was deleted in a terminal: File moved or deleted, the path, Save here, Find and Close</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Choice</th><th>Offered</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Save here</strong></td><td>With unsaved edits</td><td>Writes them to the same path, recreating the file and its folders.</td></tr>
+        <tr><td><strong>Re-open</strong></td><td>With nothing unsaved</td><td>Reads the file again, or lets you pick where it went.</td></tr>
+        <tr><td><strong>Re-open there</strong></td><td>With nothing unsaved, when one file of that name turned up elsewhere</td><td>Opens that file.</td></tr>
+        <tr><td><strong>Find</strong></td><td>Always</td><td>Searches the workspace for a line of the file.</td></tr>
+        <tr><td><strong>Close</strong></td><td>Always</td><td>Closes the tab, asking before it discards edits.</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="manual-block" id="editor">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#editor">Editor</a></h2>
+  <h2><a class="heading-anchor" href="#editor">Write Markdown</a></h2>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="editor-habits" data-shot-kind="clip">clip to capture<small>in a note, type [[ and pick a file, @@ja and pick a contact, then @today and Space: a link, a mention and a date pill appear</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Type</th><th>You get</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>[[</code></td><td>A picker of the workspace's files. It writes <code>[[file]]</code>.</td></tr>
+        <tr><td><code>[[file#</code></td><td>A picker of that file's headings.</td></tr>
+        <tr><td><code>@name</code></td><td>A contact picker. It writes a link to the contact's note.</td></tr>
+        <tr><td><code>@@name</code></td><td>A contact picker. It writes an <code>@@name</code> mention, which the graph ties to the contact.</td></tr>
+        <tr><td><code>#</code></td><td>A picker of the tags already in the workspace.</td></tr>
+        <tr><td><code>![</code></td><td>An image picker. It writes <code>![](path)</code>.</td></tr>
+        <tr><td><code>@today</code>, then <kbd>Space</kbd></td><td>Today's date, as a date pill.</td></tr>
+        <tr><td><code>@date</code>, then <kbd>Space</kbd></td><td>The same, with a calendar to pick another day or format.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <p>Chan has an embedded source code editor that renders Markdown live, diagrams included: fence a code block with <code>mermaid</code> to render a Mermaid diagram, or <code>mermaid-to-excalidraw</code> to render the same Mermaid source in Excalidraw style. <code>.excalidraw</code> files open directly on a drawing canvas.</p>
-  <p>Key habits in Markdown files:</p>
   <ul>
-    <li>Type <code>@today</code> or <code>@date</code> and press Space. <code>@today</code> inserts today's date as a pill; <code>@date</code> also opens a calendar to pick another day or format.</li>
-    <li>Type <code>@name</code> to search your contacts, or <code>@@name</code> to commit a mention pill that links into the graph.</li>
-    <li>Type <code>[[</code> to autocomplete links to files in the workspace; <code>[[file#</code> autocompletes headings inside the file.</li>
-    <li>Use <code>![](media)</code> to embed media inline, including SVG images and <code>.excalidraw</code> drawings.</li>
-    <li>Paste an image from the clipboard, or drop image files from your file manager, to save them in the note's folder and embed them at the caret or where you drop them.</li>
+    <li><code>![](path)</code> embeds media inline, SVG images and <code>.excalidraw</code> drawings included.</li>
+    <li>Paste an image, or drop image files from your file manager, to save them in the note's folder and embed them at the caret or the drop.</li>
   </ul>
-  <h3 id="frontmatter"><a class="heading-anchor" href="#frontmatter">Special frontmatter</a></h3>
-  <p>Chan recognizes a <code>chan:</code> block in Markdown frontmatter. <code>kind: contact</code> turns the file into a Contact, a distinct node in the graph that mentions resolve against; the optional <code>aliases</code> list is what <code>@@alias</code> mentions match:</p>
+  <h3 id="frontmatter"><a class="heading-anchor" href="#frontmatter">Contacts and other kinds</a></h3>
+  <p>A <code>chan:</code> block in a note's frontmatter says what the note is. <code>kind: contact</code> makes it a contact: its own kind of node in the graph, and what <code>@</code> and <code>@@</code> find. The optional <code>aliases</code> are the names <code>@@</code> mentions match.</p>
   <pre><code>---
 aliases: [jq, jdoe]
 chan:
   kind: contact
 ---</code></pre>
-  <h3 id="slides"><a class="heading-anchor" href="#slides">Slide decks</a></h3>
-  <p><code>kind: slides</code> turns the file into a slide deck. A page break starts the next slide, and the page break is <code>&lt;hr class="chan-page-break"&gt;</code> alone on a line: type <code>@pagebreak</code> on an empty line and press Space, and the editor rewrites the line to that marker. The macro expands as you type, so a <code>@pagebreak</code> that reaches a file any other way stays plain text. The <code>slides:</code> block is optional: <code>aspect_ratio</code> takes <code>"16:9"</code> or <code>"4:3"</code>, and <code>zoom_factor</code> scales the slide content (a number, default 2, or a percentage like <code>"150%"</code>):</p>
-  <pre><code>---
-chan:
-  kind: slides
-  slides:
-    aspect_ratio: "16:9"
-    zoom_factor: 2
----</code></pre>
-  <figure class="inline-shot">
-    <img src="/assets/manual/slides-editing.png" alt="A slide deck open in the editor: the outline sidebar with the Preview slide deck and Present slide deck buttons, the slides frontmatter, a mermaid-to-excalidraw fence, and a Page break marker between slides" />
-    <figcaption>Editing slides is just Markdown. The outline lists each slide, under the Preview slide deck and Present slide deck buttons.</figcaption>
-  </figure>
-  <figure class="inline-shot">
-    <img src="/assets/manual/slides-preview.png" alt="The rendered slide preview: a full slide with an Excalidraw-style diagram, previous and next arrows, and a slide counter" />
-    <figcaption>The rendered deck in preview. Present slide deck runs it as a fullscreen presentation.</figcaption>
-  </figure>
-</section>
-
-<section class="manual-block" id="diagrams">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#diagrams">Diagrams</a></h2>
-  </div>
-  <p>Chan's editor supports both <code>mermaid</code> and <code>mermaid-to-excalidraw</code> code blocks, plus it has Excalidraw embedded. You can open <code>.excalidraw</code> files via the file browser or <code>cs open {path}</code> in a workspace.</p>
-  <figure class="inline-shot">
-    <img src="/assets/manual/diagrams-board.png" alt="A .excalidraw file open on the embedded Excalidraw canvas beside two terminal tabs: a hand-drawn tree of chan's tab kinds with the full drawing toolbar" />
-    <figcaption>An .excalidraw file on the embedded Excalidraw canvas, in a tab next to the terminals.</figcaption>
-  </figure>
-</section>
-
-<section class="manual-block" id="previews">
-  <h2><a class="heading-anchor" href="#previews">Markdown, slides, and JSON previews</a></h2>
-<p>Markdown renders headings, links, images, tables, and diagrams while you edit. Switch to source when you need the underlying syntax. For slide decks, use <strong>Preview slide deck</strong> to check the deck and <strong>Present slide deck</strong> to present it fullscreen; the default shortcuts are <code>Cmd+Enter</code> and <code>Cmd+Shift+Enter</code> on macOS, or <code>Ctrl+Enter</code> and <code>Ctrl+Shift+Enter</code> elsewhere.</p>
-<p>Open a <code>.json</code> file to inspect its expandable objects and arrays in the structured view. Switch to source to edit the JSON text. Other text files use the source editor without a document preview.</p>
+  <p><code>kind: slides</code> makes a note a slide deck; see <a href="/manual/previews/#slides">Slide decks</a>.</p>
 </section>
 
 <section class="manual-block" id="details-outline">
   <h2><a class="heading-anchor" href="#details-outline">Details and outline</a></h2>
-<p>Use the editor's <strong>Details</strong> control to inspect a file's size and modified time in any file window. Workspace windows also show indexed information such as links and backlinks. For Markdown, show the <strong>Outline</strong> to navigate headings without scrolling through the whole document. Selecting a heading jumps to that position in either the rendered editor or source view.</p>
-</section>
-
-<section class="manual-block" id="export">
-  <h2><a class="heading-anchor" href="#export">Export to PDF</a></h2>
-<p>From a workspace terminal, export a Markdown document or slide deck through an open workspace window:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs export notes/design.md</b></code>
-    {{copyButton}}
+  <p>Each of these is an on/off row in the <a href="/manual/command-launcher/#scopes">command launcher's</a> Editor scope.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Row</th><th>Shows</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Outline</strong></td><td>The file's headings. Choose one to jump to it, in the rendered or the source view.</td></tr>
+        <tr><td><strong>Details</strong></td><td>The file's size and modified time. In a workspace window, also its links and backlinks.</td></tr>
+        <tr><td><strong>Style toolbar</strong></td><td>Formatting buttons over a Markdown file.</td></tr>
+        <tr><td><strong>Source mode</strong></td><td>The file's text in place of its rendered view.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs export decks/kickoff.md --out out/kickoff.pdf</b></code>
-    {{copyButton}}
-  </div><p>The default output replaces the source extension with <code>.pdf</code>. Documents export as portrait pages; slide decks export one slide per landscape page. Images, Mermaid diagrams, and Excalidraw embeds render into the PDF. A connected workspace window must stay open to render the export; the resulting file is written back to the workspace, including on a devserver.</p>
-<p>Use <code>cs download out/kickoff.pdf</code> to save the exported file onto the machine viewing the window.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/web/packages/workspace-app/src/editor/design.md">the editor design</a> describes document sessions, save authority, previews and export.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A save that fails shows <strong>Not saved:</strong> and the reason at the top of the tab.</li>
+      <li>A draft that was discarded or saved elsewhere reads <strong>This draft no longer exists</strong> and offers only <strong>Close</strong>.</li>
+      <li><code>@today</code>, <code>@date</code>, and <code>@pagebreak</code> expand on <kbd>Space</kbd> or <kbd>Enter</kbd> as you type in the rendered editor; written into a file any other way, they stay plain text.</li>
+      <li>Typed inside code, inline or fenced, a trigger stays text.</li>
+      <li>A written date such as <code>2026-07-23</code> or <code>13 April 2024</code> also shows as a date pill.</li>
+      <li>A mention holds only letters, digits, <code>_</code>, and <code>-</code>, so an alias with a space never matches.</li>
+      <li><strong>Import contacts</strong>, in the file browser, and <code>chan workspace contacts import csv</code> write one contact note per row of a Google Contacts CSV.</li>
+      <li><kbd>Ctrl+E</kbd> in a focused terminal stays the shell's end of line; Source mode acts on the active file tab.</li>
+      <li>The outline is offered for a file with headings, and the style toolbar for Markdown.</li>
+    </ul>
+  </details>
 </section>
 
-<section class="manual-block" id="editor-walkthrough">
-  <h2><a class="heading-anchor" href="#editor-walkthrough">Open the editor from a terminal</a></h2>
-  <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/open-editor.jpg" aria-label="Opening a file in the editor from a Chan terminal.">
-      <source src="/assets/home/videos/open-editor.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/open-editor.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Opening a file in the editor from a Chan terminal.</figcaption>
-  </figure>
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/previews/"><strong>Previews, slides and export</strong><span>Present a deck, draw diagrams, and export to PDF.</span></a>
+    <a class="next-card" href="/manual/files/"><strong>File browser</strong><span>Browse, move, upload, and download files.</span></a>
+    <a class="next-card" href="/manual/graph/"><strong>Graph</strong><span>See the links, tags, and mentions between your notes.</span></a>
+  </div>
+</section>
+
+<section class="manual-block" id="moved">
+  <h2><a class="heading-anchor" href="#moved">Moved</a></h2>
+  <ul class="moved-list">
+    <li id="slides"><a href="/manual/previews/#slides">Slide decks</a></li>
+    <li id="diagrams"><a href="/manual/previews/#diagrams">Diagrams</a></li>
+    <li id="previews"><a href="/manual/previews/#previews">Markdown, slides, and JSON previews</a></li>
+    <li id="export"><a href="/manual/previews/#export">Export to PDF</a></li>
+  </ul>
 </section>

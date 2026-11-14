@@ -2347,7 +2347,7 @@ describe("pane state", () => {
   // (Removed: "pane mode Team Work terminals share the draft title allocator".
   // The pane-mode Team Work bubble spawn (paneModeOpenTeamWorkTerminal) was
   // removed when the Team Work bubble was decoupled from arbitrary terminals -
-  // it now renders only on a team LEAD terminal via the Cmd+P workflow. The
+  // it now renders only on a team LEAD terminal via the New team workflow. The
   // draft-title-allocator behavior stays covered by the regular pane-mode
   // terminal test above.)
 
@@ -2547,7 +2547,7 @@ describe("pane state", () => {
 
   test("createTeamWorkLeadTerminal spawns fresh in the active pane even when a terminal exists elsewhere", () => {
     // A pre-existing terminal elsewhere in the tab list is left
-    // untouched. Cmd+P always opens a fresh Team Work terminal
+    // untouched. New team always opens a fresh Team Work terminal
     // instead of switching to it.
     const doc = fileTab({ id: "doc-1", path: "notes/x.md" });
     const terminal: TerminalTab = {

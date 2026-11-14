@@ -6358,7 +6358,7 @@ fn main() {
 
 /// Build and install the application menu.
 ///
-/// The View submenu carries Toggle Launcher (Cmd+P) and the Window submenu
+/// The View submenu carries Computers (Cmd+P) and the Window submenu
 /// New Window / Open in Browser plus the dynamic open and hidden window
 /// tail. There is no Settings menu item: the Settings chord is owned by
 /// the SPA keymap so user assignments can replace the built-in Comma
@@ -6379,14 +6379,14 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     // About / Exit are macOS-implicit.
     #[cfg(target_os = "macos")]
     let menu = {
-        // View ▸ Toggle Launcher, Cmd+P. The one global menubar routes it
+        // View > Computers, Cmd+P. The one global menubar routes it
         // by the focused window (`launcher_panel::toggle_for_menu`): an
         // SPA window shows or hides its launcher, and with nothing to host
         // it a standalone terminal opens. A window's own webview gets Cmd+P
         // first: WKWebView hands a Command chord to the menubar only when the
         // page left its default, so the workspace app never cancels Cmd+P,
         // not even behind a full-window cover (its state/menubarChords.ts).
-        let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
+        let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Computers")
             .accelerator("CmdOrCtrl+P")
             .build(app)?;
         // New Window opens another window of the FOCUSED window's
@@ -6596,7 +6596,7 @@ pub(crate) fn menu_window<'a>(
 /// the launcher key bridge's chords there (launcher_panel.rs). Those two
 /// routes pass the window they act for as `invoked_for`, since the launcher
 /// holds the keyboard there and no window reports the focus; the items that
-/// act on one window (Toggle Launcher, Close Window) act on it, and on the
+/// act on one window (Computers, Close Window) act on it, and on the
 /// focused window when it is `None`, as from a menubar.
 pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str, invoked_for: Option<&str>) {
     // Dynamic Window-menu entries (buried windows) carry their
@@ -6720,7 +6720,7 @@ impl LauncherMenu {
 
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
-/// implements on GTK), View (Toggle Launcher), Window (New Window, Open
+/// implements on GTK), View (Computers), Window (New Window, Open
 /// in Browser, then the dynamic tail `rebuild_window_menu` stamps). A
 /// window wears this bar only while its launcher shows (attached with
 /// `Window::set_menu` by launcher_panel.rs; there is no app-wide default),
@@ -6796,14 +6796,13 @@ pub(crate) fn launcher_submenu(
         }
         LauncherMenu::Edit => submenu.cut().copy().paste().select_all().build(),
         LauncherMenu::View => {
-            // View > Toggle Launcher, Ctrl+Shift+P: the bar shows only with
+            // View > Computers, Ctrl+Shift+P: the bar shows only with
             // the launcher, so from the bar the item hides it (plain Ctrl+P
             // stays a readline chord in a focused shell, which is why
             // KEY_BRIDGE_JS claims the same Ctrl+Shift+P form to show it).
-            let toggle_launcher =
-                MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
-                    .accelerator("CmdOrCtrl+Shift+P")
-                    .build(app)?;
+            let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Computers")
+                .accelerator("CmdOrCtrl+Shift+P")
+                .build(app)?;
             submenu.item(&toggle_launcher).build()
         }
         LauncherMenu::Window => {

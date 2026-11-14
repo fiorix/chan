@@ -36,11 +36,11 @@ forget PATH`, including --on and the live-terminal refusal.
 
 With --on TARGET the same verb reaches a workspace on a REGISTERED
 remote devserver through the desktop app: TARGET is the devserver's
-URL or launcher label as `chan devserver ls` shows it, PATH is the
-workspace's path on that machine, and the devserver unmounts it and
-keeps it registered there. The desktop resolves both and refuses
-ambiguity; a devserver that is registered but not connected points at
-`chan devserver connect`.
+URL or its label on the Computers screen, as `chan devserver ls` shows
+it, PATH is the workspace's path on that machine, and the devserver
+unmounts it and keeps it registered there. The desktop resolves both
+and refuses ambiguity; a devserver that is registered but not connected
+points at `chan devserver connect`.
 
 This is a library command, not a window command: it needs no chan
 terminal and no workspace window.
@@ -96,8 +96,8 @@ drops the workspace's registry entry in `~/.chan/config.toml` and the
 whole `~/.chan/workspaces/<key>/` metadata directory, trash included.
 The workspace directory and its files are never touched. On a devserver
 or desktop host the removal is also pushed into that host's own
-library, so the workspace stops coming back in the launcher after a
-restart.
+library, so the workspace stops coming back on the Computers screen
+after a restart.
 
 A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. So does a host
@@ -129,11 +129,12 @@ directory; otherwise the resolved lookup applies. Other paths name
 the workspace they resolve to. `chan close` uses the resolved path.
 
 With --on TARGET the verb reaches a workspace on a REGISTERED remote
-devserver through the desktop app: TARGET is the devserver's URL or
-launcher label as `chan devserver ls` shows it, PATH is the workspace's
-path on that machine, and the devserver unmounts it and drops its own
-registration; your local registry is untouched, and so are the files on
-that machine. The live-terminal refusal is the devserver's own.
+devserver through the desktop app: TARGET is the devserver's URL or its
+label on the Computers screen, as `chan devserver ls` shows it, PATH is
+the workspace's path on that machine, and the devserver unmounts it and
+drops its own registration; your local registry is untouched, and so
+are the files on that machine. The live-terminal refusal is the
+devserver's own.
 
 This is a library command, not a window command: it needs no chan
 terminal and no workspace window.
@@ -204,7 +205,7 @@ and set; the HTTP config API continues to call that owner `terminal.*`.
 TOML, or JSON with --json. With a key it prints that one value.
 `chan config set` takes either `key=value` or `key value`, validates the
 value, saves the file, and echoes back `key = value`. An unknown key is
-an error on both sides, pointing you back at `chan config get`.
+an error on both sides, and the error lists every settable key.
 
 A running chan server watches that directory, so an edit made here
 reloads into open windows without a restart.
@@ -252,8 +253,10 @@ change up from its watch on that directory and pushes it to open
 windows. `get` writes nothing.
 
 CAVEATS:
-`editor.shortcuts` is a map collection. Get can print it, but set
-refuses with the supported edit route: Settings or PATCH /api/config.
+`editor.shortcuts` and `server.terminal.profiles` are collections. Get
+prints them, but set refuses each with its edit route: Settings or PATCH
+/api/config for shortcuts, server.toml or Settings > Terminal for
+profiles.
 An empty value is refused rather than stored, so a typo cannot silently
 wipe a preference.
 editor.date_format is stored verbatim without validation; an id the
@@ -311,12 +314,12 @@ background daemon (pidfile + flock) and works under `run` or a
 management verb. `systemd` and `launchd` are OS-backed and need a
 management verb.
 
-The same noun's client side manages the desktop launcher's registry
-of REMOTE devservers: `register URL` adds one to the launcher
+The same noun's client side manages the registry of REMOTE devservers
+that the desktop's Computers screen lists: `register URL` adds one
 without dialing it, `ls` lists the rows with their connection state,
 `connect` / `disconnect` drive the dial from the CLI (sign-in and
-trust prompts stay in the launcher), and `forget` removes a row, the
-undo of register. These verbs need the chan desktop app running on
+trust prompts stay on the Computers screen), and `forget` removes a row,
+the undo of register. These verbs need the chan desktop app running on
 this machine. A connected devserver's WORKSPACES are managed by the
 workspace lifecycle verbs with --on TARGET (`chan workspace serve`,
 `chan close`, `chan workspace forget`), where TARGET is the URL or
@@ -486,6 +489,7 @@ Choose one of several local devservers explicitly:
 Mount a workspace on a registered, connected remote devserver:
   chan serve /srv/notes --on lab
   # served /srv/notes on devserver lab (mounted at /notes-1a2b3c).
+  # Open it from the Computers screen.
 
 SIDE EFFECTS:
 Creates the workspace root when missing, and the standalone path
@@ -547,23 +551,30 @@ window.
 
 /// `chan ps` examples, side effects, and caveats.
 pub(crate) const CHAN_PS_AFTER: &str = r#"EXAMPLES:
-What is being served right now:
+What is being served right now. Each row prints on one line, wider than
+this help, so it is shown here in two halves:
   chan ps
-  # STATE    BY                PID  WORKSPACE
-  # served   devserver      184223  /home/you/notes
-  # served   standalone      91044  /home/you/site
-  # free     -                   -  /home/you/archive
+  # STATE    BY                PID  READY       GEN      PASS
+  # served   devserver      184223  ready       3        -
+  # served   standalone      91044  -           -        -
+  # free     -                   -  -           -        -
+  # ACTION     INDEXER   QUEUE  WORKSPACE
+  # -          idle          0  /home/you/notes
+  # -          -             -  /home/you/site
+  # -          -             -  /home/you/archive
 
-Machine-readable, one object per registered workspace:
+Machine-readable, one object per registered workspace (here only the
+standalone row of the table above):
   chan ps --json
   # {
   #   "workspaces": [
   #     {
-  #       "path": "/home/you/notes",
+  #       "path": "/home/you/site",
   #       "served": true,
-  #       "served_by": "devserver",
-  #       "pid": 184223,
-  #       "since": "2026-07-19T10:02:11.512983421+00:00"
+  #       "served_by": "standalone",
+  #       "pid": 91044,
+  #       "since": "2026-07-19T10:02:11.512983421+00:00",
+  #       "activity": null
   #     }
   #   ]
   # }
@@ -573,14 +584,19 @@ Ask about one workspace before acting on it:
     | select(.path == "/home/you/notes") | .served_by'
 
 SIDE EFFECTS:
-None. Read-only, output on stdout. It does connect to each live
-holder's control socket to ask what kind of server it is.
+None on disk; output goes to stdout. It connects to each live holder's
+control socket to ask what kind of server it is. When the local
+devserver serves a listed workspace, it reads that devserver's bearer
+from its config, GETs /api/devserver/workspaces, and GETs each such
+workspace's /api/index/status and /api/health.
 
 CAVEATS:
 Only REGISTERED workspaces are listed; with none registered it prints
-"(no workspaces registered)". A free row serializes `served_by`, `pid`
-and `since` as null, and `since` appears only in --json (the table
-carries STATE, BY, PID and WORKSPACE).
+"(no workspaces registered)". A free row serializes `served_by`, `pid`,
+`since` and `activity` as null, and `since` appears only in --json.
+Only a workspace the local devserver serves fills READY through QUEUE
+(`activity` in --json); every other row shows `-` there, never 0. STATE
+reads `degraded` when that devserver reports a root it cannot use.
 
 SEE ALSO:
 `chan serve` to serve a workspace, `chan close` to stop serving one, `chan
@@ -609,7 +625,7 @@ wildcard bind is reached on loopback, and the read never goes through a
 proxy.
 
 --url reads any chan server by a URL chan printed for it: a devserver's
-launcher URL, a `chan serve` URL, or a tenant's. The bearer is --token,
+launch URL, a `chan serve` URL, or a tenant's. The bearer is --token,
 else CHAN_METRICS_TOKEN, else the URL's ?t= token, and never the local
 devserver's. CHAN_METRICS_TOKEN applies only beside --url.
 
@@ -830,11 +846,12 @@ would meet the same lock. Other failed handoffs fall through to a
 standalone server.
 
 --on TARGET serves PATH on a REGISTERED remote devserver instead: TARGET
-is the devserver's URL or launcher label as `chan devserver ls` shows
-it, PATH is a path on that machine, and the desktop resolves both and
-refuses ambiguity. It is a different flag from --devserver by design
-(one flag, one object kind): a port-shaped --on and a label-shaped
---devserver are both refused with a pointer at the other.
+is the devserver's URL or its label on the Computers screen, as `chan
+devserver ls` shows it, PATH is a path on that machine, and the desktop
+resolves both and refuses ambiguity. It is a different flag from
+--devserver by design (one flag, one object kind): a port-shaped --on
+and a label-shaped --devserver are both refused with a pointer at the
+other.
 
 The standalone server binds 127.0.0.1:8787 by default (::1 with -6),
 prints "chan is ready:" and the tokened URL on stderr, and opens the
@@ -848,8 +865,8 @@ vcs-parent` marker on stderr, because the repository root is almost
 always the better workspace root. --here serves the subdirectory
 verbatim.
 
-serve takes a PATH only. A remote devserver is registered with the
-desktop launcher by `chan devserver register URL`; a URL passed here is
+serve takes a PATH only. A remote devserver is registered on the
+Computers screen by `chan devserver register URL`; a URL passed here is
 refused with that pointer rather than read as a relative directory.
 "#;
 
@@ -966,31 +983,43 @@ EXAMPLES:
 const SERVE_LAUNCHER: &str = r#"Inside the window, everything chan can do is one chord away. The command
 launcher is Cmd+K on the macOS desktop app and Ctrl+Alt+K everywhere
 else (web, Linux, Windows). On the desktop app, Cmd+P
-(Ctrl+Shift+P on Windows and Linux) is View > Toggle Launcher, the
-Computers screen. Team Work has no chord of its own: New team in the
-command launcher or a pane's menu opens it in a workspace window.
+(Ctrl+Shift+P on Windows and Linux) is View > Computers, which shows or
+hides the Computers screen. Team Work has no chord of its own: New team
+in the command launcher or a pane's menu opens it in a workspace window.
 
-In a workspace or terminal window the contextual list is empty until you
-type. Typing filters and ranks commands from the focused tab, pane, window,
-and the library serving that window. The scope orbs browse those catalogs
-directly; Computers opens its action branches without requiring a query.
-The Computers SPA searches its authorized aggregate library instead.
+In a workspace or terminal window the launcher opens on a list, not an
+empty box: up to five recent commands, then the focused app's commands,
+the pane's (New tab, Tab, Pane), the window's, the workspace's, a
+Settings summary and the ways into Computers, each under its heading.
+Typing filters and ranks the commands and settings of every scope, and
+this machine's workspaces and windows, into one list; commands that
+cannot run here follow it, a few at most, each with its reason. The
+scope orbs (the focused app, Pane, Window, Workspace, Settings,
+Computers) narrow the list to one scope; Workspace shows only in a
+workspace window, and Computers opens its action branches without
+requiring a query. The Computers SPA searches its authorized aggregate
+library instead.
 
-Apps you can spawn from it:
+Apps you can spawn from it (Pane > New tab):
 
   New terminal        a shell tab
   New team            a Team Work group of agent terminals
   New draft           a markdown file in the editor
-  New file browser    the workspace file tree
   New graph           the project link graph
-  New dashboard       workspace status, indexing status, about
-  New diagram         an Excalidraw canvas (workspace windows only)
-  New slide deck      a deck (workspace windows only)
+  New file browser    the file tree
+  New dashboard       metrics, workspace and search status, about
+  New slide deck      a deck
+  New diagram         an Excalidraw canvas
 
-Command categories: Global, Workspace, Search, Apps, Tabs, Panes,
-Editor, File Browser, Terminal, Dashboard, Graph. The surface categories
-(Editor, File Browser, Terminal, Dashboard, Graph) list the commands of
-the focused tab's kind.
+New team and New graph need a workspace window. New file browser also
+works in a standalone terminal window whose server serves a filesystem,
+and New draft, New slide deck and New diagram in one whose server also
+keeps drafts.
+
+Every command also has a category (Global, Workspace, Search, Apps, Tabs,
+Panes, Editor, File Browser, Terminal, Dashboard, Graph): typing one in
+the launcher matches its commands, and Settings > Keyboard Shortcuts
+lists the commands under their categories, with a chord per platform.
 "#;
 
 /// One line of `chan --help`. Kept separate from the Cargo description,
@@ -1036,16 +1065,21 @@ that tells them apart: workspace-only commands simply refuse in a
 standalone terminal, and say so.
 
   A WORKSPACE WINDOW -- the one you want.
-    Unlocks the command launcher, the built-in apps, tabs and panes, and
-    the workspace-only `cs` commands: open, graph, search, export, and
-    terminal team. This is where work belongs.
+    Adds what needs a workspace: search, the graph, Team Work, and the
+    workspace-only `cs` commands: graph, search, export, terminal team,
+    session handover and takeover, and `cs open` of a chan://graph
+    link. This is where work belongs.
 
   A STANDALONE TERMINAL -- no workspace behind it. PTYs start in $HOME.
-    Fully automatable: every `cs terminal` and `cs pane` command works,
-    so scripting it is supported and expected. It is the right place to
-    manage the chan library -- `chan serve`, `chan close`, `chan
-    workspace forget`, `chan ps` -- and the wrong place for heavy
-    work, because none of the workspace surface exists there.
+    Fully automatable: every `cs pane` command and every `cs terminal`
+    command but team works (terminal new PATH needs a host that serves
+    a filesystem), so scripting it is supported and expected. It has
+    the command launcher, tabs, panes and a Dashboard, and when its
+    host serves a filesystem, the file browser and the editor over it.
+    It is the right place to manage the chan library -- `chan serve`,
+    `chan close`, `chan workspace forget`, `chan ps` -- and the wrong
+    place for heavy work, because search, the graph and Team Work need
+    a workspace.
 
 Run a workspace-only command in a standalone terminal and it says so:
   cs <cmd> is only available in a workspace window; this is a

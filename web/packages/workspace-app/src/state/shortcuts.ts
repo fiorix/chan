@@ -257,8 +257,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // macOS, Ctrl+Alt+W on Linux / Windows (via `osChord`; Ctrl+Shift+W is
   // tab close there). There is no in-page web chord:
   // on the web a browser tab close IS the discard. chan-desktop binds the
-  // native chord and maps the OS close button here when a devserver is NOT
-  // connected (when connected the button buries the window instead, serve.rs).
+  // native chord. The OS close button does not map here: on a live window it
+  // prompts Hide / Close / Cancel (`app.window.confirmClose`, serve.rs).
   // Drives the window-discard path (an explicit DELETE of the saved window
   // blob), distinct from the tab-close chords (Cmd+W on macOS, Ctrl+Shift+W
   // on the Linux / Windows desktop via `osChord`, Ctrl+D everywhere).
@@ -267,13 +267,13 @@ export const SHORTCUTS: readonly Shortcut[] = [
     label: "Close window",
     native: "Mod+Shift+W",
     group: "App",
-    note: "discard an empty / terminal window; buries when devserver-connected",
+    note: "discard this window and its terminal sessions",
     escapeTerminal: true,
   },
   // The explicit "hide this window" action: the close-confirm overlay's Hide
   // answer without the prompt. Buries the window via the desktop IPC --
-  // sessions stay warm, the record persists hidden and reopens from the
-  // launcher. Desktop-only like Close window: the bury IPC is an explicit
+  // sessions stay warm, the record persists hidden and reopens from
+  // Computers. Desktop-only like Close window: the bury IPC is an explicit
   // no-op in a plain browser, so no web chord is minted. The stored Mod
   // renders Cmd+Shift+H on macOS and Ctrl+Shift+H on Linux / Windows.
   {
@@ -281,7 +281,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
     label: "Hide window",
     native: "Mod+Shift+H",
     group: "App",
-    note: "bury this window; reopen it from the launcher",
+    note: "bury this window; reopen it from Computers",
     escapeTerminal: true,
   },
   {
@@ -458,7 +458,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // App.svelte's onWindowKey; the terminal right-click menu mirrors it and
   // reads its label via `chordFor`. Cmd+Shift+P on macOS; Ctrl+Alt+P on every
   // other surface (Linux / Windows desktop and browsers): the Win / Super key
-  // is ruled out, and Ctrl+Shift+P is the desktop's Toggle Launcher (the
+  // is ruled out, and Ctrl+Shift+P is the desktop's View > Computers (the
   // off-mac twin of macOS Cmd+P), which the key bridge claims before the page.
   // The registry stores the macOS form.
   {
@@ -590,7 +590,7 @@ export function osChord(
   if (s.id === TERMINAL_FIND_ID && os !== "mac") return "Mod+Shift+F";
   if (s.id === TERMINAL_PASTE_ID && os !== "mac") return "Mod+Shift+V";
   // Rich Prompt: Cmd+Shift+P on macOS. Off macOS the Win / Super key is ruled
-  // out and Ctrl+Shift+P is the desktop's Toggle Launcher, so native and web
+  // out and Ctrl+Shift+P is the desktop's View > Computers, so native and web
   // both take Ctrl+Alt+P.
   if (s.id === RICH_PROMPT_ID && os !== "mac") return "Ctrl+Alt+P";
   // Group broadcast: macOS desktop only. Off macOS Ctrl+Shift+I is the

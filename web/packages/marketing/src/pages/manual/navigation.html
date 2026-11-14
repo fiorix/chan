@@ -1,76 +1,178 @@
-<section class="manual-block" id="windows">
-  <h2><a class="heading-anchor" href="#windows">Windows and the Computers screen</a></h2>
-<p>The <strong>Computers</strong> screen lists this machine and your devservers, with their workspaces and windows. Open it over any desktop window with <strong>View → Toggle Launcher</strong> or <code>Cmd+P</code> on macOS, or <code>Ctrl+Shift+P</code> on Windows and Linux, where the menu bar shows only while the screen is open. Press the shortcut again or <code>Esc</code> to return to the window. From there, open a standalone terminal for shell work, or a workspace window for the editor, graph, search, and other project tools. Each workspace can have several windows with its own arrangement of panes and tabs.</p>
-<p>Return to Computers to reopen a hidden window or create another one. A hidden window keeps its work running; closing its terminal tabs ends those sessions. Remote sessions can keep running while your desktop is disconnected.</p>
-<p>The screen is a carousel: <strong>All windows</strong> first, then <strong>This machine</strong>, a card per devserver, and <strong>Add devserver</strong> last. Press <code>g</code> or click the screen's title to flip to <strong>Gateways</strong>, which has the same carousel for the gateways you connect through (see <a href="/manual/devserver/#gateways">Connect through a gateway</a>). Both screens work from the keyboard:</p>
-  <ul>
-    <li><code>Up</code> and <code>Down</code> select a row on the front card.</li>
-    <li><code>Left</code> and <code>Right</code> walk the selected row's controls; past its first or last control they turn to the previous or next card. <code>Shift+Left</code> and <code>Shift+Right</code> turn the cards directly.</li>
-    <li><code>Enter</code> runs the row's main action, such as focusing a window. <code>Tab</code> moves through the front card's controls.</li>
-    <li><code>o</code> activates the selected row's on/off control: connect or disconnect a devserver or gateway, turn a workspace on or off, or detach a tmux connection. While a gateway is connecting, it cancels.</li>
-    <li><code>t</code> opens a terminal on This machine or a connected devserver.</li>
-    <li><code>w</code> opens another window of a ready workspace.</li>
-    <li><code>h</code> shows or hides a window, including from the All windows card.</li>
-    <li><code>g</code> flips between Computers and Gateways, and <code>Esc</code> closes the screen.</li>
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="navigation-split-drag" data-shot-kind="clip">clip to capture<small>one terminal: Cmd+/ splits right, a tab dragged to the new pane's bottom edge splits it again, Ctrl+` flips that pane to side B and back</small></div>
+  <figcaption>Split a pane, drag a tab to a pane's edge, and flip a pane between its two sides.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Split a pane right or down, and move between panes from the keyboard.</li>
+    <li>Keep two sets of tabs in one pane, on sides A and B, and flip between them.</li>
+    <li>Drag a tab to another pane, to a pane's edge to split it, or to another window of the same workspace.</li>
+    <li>Jump to any pane, side, or tab from the pane map.</li>
+    <li>Rearrange a whole window with Hybrid Nav, then keep the result or throw it away.</li>
+    <li>Hide a window with its terminals still running, or close it.</li>
   </ul>
-<p>The letters act on the selected row and leave forms, window-title editing, dialogs, and command search alone. Shift or uppercase letters work the same way; Cmd, Ctrl, and Alt combinations keep their usual behavior. The hint line under the cards lists the letters.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/web/packages/launcher/design.md">the launcher design</a> describes the Computers screen and the three places it is served from.</p>
 </section>
 
 <section class="manual-block" id="panes">
   <h2><a class="heading-anchor" href="#panes">Panes, tabs, and sides</a></h2>
-<p>A window contains panes; each pane holds tabs for terminals, files, and other apps. Use the pane menu or these default shortcuts to arrange them:</p>
-  <ul>
-    <li>Split a pane with <code>Cmd+/</code> (split right) or <code>Cmd+Shift+/</code> (split down) on macOS, <code>Ctrl+Alt+/</code> and <code>Ctrl+Alt+?</code> on Windows, Linux, and web. Both work with a terminal focused and also live in the command launcher; <code>Ctrl+/</code> stays with the shell. In a window that shows a tmux window the split goes to tmux, and the new pane lands where tmux puts it (see <a href="/manual/terminal/#tmux-control-mode">tmux control mode</a>).</li>
-    <li>Move to the previous or next pane with <code>Cmd+[</code> and <code>Cmd+]</code> on macOS, <code>Alt+[</code> and <code>Alt+]</code> on Windows, Linux, and web. They work with a terminal focused too; <code>Ctrl+[</code> and <code>Ctrl+]</code> stay with the shell.</li>
-    <li>Drag tabs across panes to rearrange them.</li>
-    <li>On the macOS and Windows desktop, <strong>Settings → Global → Title bar tabs</strong> puts the active pane's tabs in the window's title bar, beside the window buttons, and the other panes draw no tab strip. On Windows the minimize, maximize and close buttons sit at the right end of the bar. The button at the left of the bar, a small map of the window's panes, lists every pane, its sides and their tabs; pick one to go to it. <code>Cmd+Shift+A</code> on macOS, <code>Ctrl+Shift+A</code> on Windows and Linux, opens the same list in any window.</li>
-    <li>With tabs in the title bar, the bar also shows the window's title, the one the title bar would otherwise show: an arrow, the machine, the workspace and the window's name, such as <code>↓ local / chan Window 1 [my own title]</code> for a workspace on this machine, <code>↑ geekom / chan Window 1</code> for a devserver's, or <code>↓ local Terminal Window 1</code> for a terminal window, and it follows a rename. While the window has no tabs the title sits beside the pane map button; when the first tab opens it moves to the right end of the bar, left of the A/B button, and it moves back when the last tab closes. There it shows whole while the tabs leave it room; as more tabs open it gives way to them, down to the width of about two tabs, and only then do the tabs scroll and fade out toward it. A title cut short ends in an ellipsis, shows whole as a tooltip, and rolls to its end and back while the pointer is over it. Privacy mode shows the generated name alone, such as <code>Window 2</code>. In a tmux window, whose panes have no tabs, the bar shows the window's title at its right end and a <code>tmux</code> badge in place of the A/B button; the pane map button lists each pane by the command it runs.</li>
-    <li>In that list a terminal's row shows, beside the tab's name, what runs in the terminal: <code>bash</code> at a prompt, <code>vim</code> while vim is open, or the title the program in front set. The tab's name does not change, the filter matches names only, and privacy mode shows <em>Hidden</em> in its place (see <a href="/manual/terminal/#program-reading">what the pane tree shows for a terminal</a>).</li>
-    <li>Every pane has two sides, A and B. The A/B button in the pane's top bar flips between them (<code>Ctrl+`</code>), so one pane can hold two sets of tabs. A tmux window's panes have no sides, since each shows one tmux pane (see <a href="/manual/terminal/#tmux-control-mode">tmux control mode</a>).</li>
-    <li>Close a tab with <code>Cmd+W</code> on macOS, <code>Ctrl+Shift+W</code> on Windows and Linux, or <code>Ctrl+D</code> on any platform.</li>
-    <li>Close a window with <code>Cmd+Shift+W</code> on macOS, <code>Ctrl+Alt+W</code> on Windows and Linux. On web, close the browser tab.</li>
-    <li>If a window refuses to close, the hidden side of a pane still has tabs: the A/B button flashes to show you where they are. Flip and close them first.</li>
-    <li>Clicking the [X] close button in your window manager offers to hide the window (everything keeps running) or close it.</li>
-    <li>Find text in a terminal's scrollback with <code>Cmd+F</code> on macOS, <code>Ctrl+Shift+F</code> on Windows and Linux, in a browser too. <code>Enter</code> and <code>Shift+Enter</code> step through the matches (see <a href="/manual/terminal/#find">Find in a terminal</a>).</li>
-  </ul>
+  <p>A window holds panes, and a pane holds tabs: terminals, editors, file browsers, and other apps. Every pane has two sides, A and B, each with its own tabs. The A/B button in the pane's top bar flips between them, and the pane menu beside it opens new tabs, Hybrid Nav, and Close pane.</p>
+  <p>The Browser column is chan in a web browser; Same there means the desktop's key for your system.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Action</th><th>macOS</th><th>Windows, Linux</th><th>Browser</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Split right</td><td><kbd>Cmd+/</kbd></td><td><kbd>Ctrl+Alt+/</kbd></td><td><kbd>Ctrl+Alt+/</kbd></td></tr>
+        <tr><td>Split down</td><td><kbd>Cmd+Shift+/</kbd></td><td><kbd>Ctrl+Alt+?</kbd></td><td><kbd>Ctrl+Alt+?</kbd></td></tr>
+        <tr><td>Previous pane, next pane</td><td><kbd>Cmd+[</kbd> <kbd>Cmd+]</kbd></td><td><kbd>Alt+[</kbd> <kbd>Alt+]</kbd></td><td><kbd>Alt+[</kbd> <kbd>Alt+]</kbd></td></tr>
+        <tr><td>Flip to the other side</td><td><kbd>Ctrl+`</kbd></td><td><kbd>Ctrl+`</kbd></td><td><kbd>Ctrl+`</kbd></td></tr>
+        <tr><td>Previous tab, next tab</td><td><kbd>Cmd+Shift+[</kbd> <kbd>Cmd+Shift+]</kbd></td><td><kbd>Ctrl+Shift+[</kbd> <kbd>Ctrl+Shift+]</kbd></td><td><kbd>Alt+Shift+[</kbd> <kbd>Alt+Shift+]</kbd></td></tr>
+        <tr><td>Go to tab 1 to 9</td><td><kbd>Cmd+1</kbd> to <kbd>Cmd+9</kbd></td><td><kbd>Ctrl+1</kbd> to <kbd>Ctrl+9</kbd></td><td><kbd>Ctrl+Alt+1</kbd> to <kbd>Ctrl+Alt+9</kbd></td></tr>
+        <tr><td>Show panes and tabs (the pane map)</td><td><kbd>Cmd+Shift+A</kbd></td><td><kbd>Ctrl+Shift+A</kbd></td><td>Same</td></tr>
+        <tr><td>Close tab</td><td><kbd>Cmd+W</kbd></td><td><kbd>Ctrl+Shift+W</kbd></td><td><kbd>Ctrl+D</kbd></td></tr>
+        <tr><td>Reopen closed tab</td><td><kbd>Cmd+Shift+T</kbd></td><td><kbd>Ctrl+Alt+Shift+T</kbd></td><td><kbd>Ctrl+Alt+Shift+T</kbd></td></tr>
+        <tr><td>Hide window</td><td><kbd>Cmd+Shift+H</kbd></td><td><kbd>Ctrl+Shift+H</kbd></td><td>None</td></tr>
+        <tr><td>Close window</td><td><kbd>Cmd+Shift+W</kbd></td><td><kbd>Ctrl+Alt+W</kbd></td><td>Close the browser tab</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="drag">
+  <h2><a class="heading-anchor" href="#drag">Drag tabs</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Drop the tab on</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Another pane's tab strip, or the middle of a pane</td><td>The tab moves there.</td></tr>
+        <tr><td>A band along a pane's edge</td><td>The pane splits, and the tab gets the new half.</td></tr>
+        <tr><td>A pane in another Chan Desktop window of the same workspace</td><td>The tab moves to that window. A terminal keeps running.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="title-bar">
+  <h2><a class="heading-anchor" href="#title-bar">Tabs in the title bar</a></h2>
   <figure class="inline-shot">
-    <img src="/assets/manual/terminal-panes.png" alt="A terminal window split into two panes; a cs terminal survey command in the left pane drives a Pick-your-choice prompt in the right pane" />
-    <figcaption>A terminal window split into two panes. Each pane's top bar carries the A/B side toggle and the hamburger menu.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="navigation-title-bar" data-shot-kind="mac-still">screenshot to capture<small>a macOS window with two panes, the active pane's tabs in the title bar, and the pane map open under its button listing each pane, sides A and B, and their tabs</small></div>
+    <figcaption>The pane map lists every pane, side, and tab of the window.</figcaption>
+  </figure>
+  <p>On the macOS and Windows desktop, the active pane's tabs sit in the window's title bar, and the other panes draw no tab strip. Turn this off in <strong>Settings → Global → Title bar tabs</strong>.</p>
+  <ul>
+    <li>The pane map button, at the left of the bar, lists every pane, its sides, and their tabs. Type to filter by tab name, then pick a tab with the arrows and <kbd>Enter</kbd>, or click it.</li>
+    <li><kbd>Cmd+Shift+A</kbd> on macOS, <kbd>Ctrl+Shift+A</kbd> elsewhere, opens the same list in any window, a browser's included.</li>
+    <li>A terminal's row also shows what runs in it, such as <code>bash</code> or <code>vim</code> (see <a href="/manual/terminal/#program-reading">what the pane map shows for a terminal</a>).</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="close">
+  <h2><a class="heading-anchor" href="#close">Close, hide, and reopen</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You do</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Close tab</td><td>The tab closes. A terminal that is still running asks first, and its program ends with the tab.</td></tr>
+        <tr><td>Reopen closed tab</td><td>The last closed tab comes back where it was, up to 20 per window. A terminal comes back as a new session.</td></tr>
+        <tr><td>Hide window</td><td>The window goes, and its tabs and terminals keep running. Show it again from the Computers screen.</td></tr>
+        <tr><td>Close window</td><td>The window closes with its tabs, and its terminals end.</td></tr>
+        <tr><td>Click the window's own close button</td><td>A prompt asks: <strong>Hide</strong>, <strong>Close</strong>, or <strong>Cancel</strong>. An empty window closes at once.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="navigation-close-prompt" data-shot-kind="still">screenshot to capture<small>the "close this window?" prompt over a workspace window with terminals, showing Hide, Close, and Cancel</small></div>
   </figure>
 </section>
 
 <section class="manual-block" id="hybrid-nav">
   <h2><a class="heading-anchor" href="#hybrid-nav">Hybrid Nav</a></h2>
-  <p>Open <strong>Hybrid Nav</strong> from a pane menu or the command launcher, or press <code>Cmd+.</code> on macOS and <code>Ctrl+.</code> elsewhere. Use arrow keys to move focus, <code>/</code> to split right, <code>?</code> to split down, <code>t</code> to add a terminal, and <code>b</code> to add a Dashboard. Press <code>h</code> for the full key reference. Changes are staged until <code>Enter</code> commits them; <code>Esc</code> discards them.</p>
   <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/hybrid-nav.jpg" aria-label="Arrange split panes and move between terminals with Hybrid Nav.">
-      <source src="/assets/home/videos/hybrid-nav.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/hybrid-nav.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Arrange split panes and move between terminals with Hybrid Nav.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="navigation-hybrid-nav" data-shot-kind="clip">clip to capture<small>Cmd+. on a one-pane window: / splits right, t stages a terminal, ] moves the divider, h shows the key list, Enter commits</small></div>
+    <figcaption>Hybrid Nav shows each change as a draft until you commit it.</figcaption>
   </figure>
+  <p>Hybrid Nav arranges a window from the keyboard. Press <kbd>Cmd+.</kbd> on macOS or <kbd>Ctrl+.</kbd> elsewhere, or pick <strong>Hybrid Nav</strong> from the pane menu or the command launcher. Changes show in place as a draft: <kbd>Enter</kbd> keeps them, and <kbd>Esc</kbd> throws them away.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Key</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Up</kbd> <kbd>Down</kbd> <kbd>Left</kbd> <kbd>Right</kbd></td><td>Move the focus to the pane that way.</td></tr>
+        <tr><td><kbd>w</kbd> <kbd>a</kbd> <kbd>s</kbd> <kbd>d</kbd></td><td>Swap the focused pane with its neighbour above, left, below, or right.</td></tr>
+        <tr><td><kbd>/</kbd> <kbd>?</kbd></td><td>Split right, split down.</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd> <kbd>-</kbd> <kbd>=</kbd></td><td>Move the divider left, right, up, or down.</td></tr>
+        <tr><td><kbd>0</kbd></td><td>Equalize panes.</td></tr>
+        <tr><td><kbd>t</kbd></td><td>Stage a terminal in the focused pane. Each press adds one.</td></tr>
+        <tr><td><kbd>f</kbd> <kbd>g</kbd> <kbd>b</kbd></td><td>Stage a file browser, a graph, or a dashboard.</td></tr>
+        <tr><td><kbd>n</kbd> <kbd>e</kbd></td><td>Stage a new draft or an Excalidraw drawing.</td></tr>
+        <tr><td><kbd>&lt;</kbd> <kbd>&gt;</kbd></td><td>Commit, then show or hide the right or left file browser dock.</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Flip the focused pane to its other side.</td></tr>
+        <tr><td><kbd>h</kbd></td><td>Show or hide the key list.</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>Commit the draft.</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Discard the draft.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>With a terminal focused, the split, pane, and tab keys above still reach chan. <kbd>Ctrl+/</kbd>, <kbd>Ctrl+[</kbd>, and <kbd>Ctrl+]</kbd> stay with the shell.</li>
+      <li><kbd>Ctrl+D</kbd> also closes a tab that is not a terminal, on every system. In a terminal it is the shell's end of input; on a terminal whose program has ended it closes the tab.</li>
+      <li>In an empty pane, Close tab and Close window close the pane first. If the pane's other side still holds tabs, the pane flips to them and the A/B button flashes instead.</li>
+      <li>On the desktop, closing the last tab of a standalone terminal window closes the window.</li>
+      <li>Only a tab from the same window splits a pane at its edge; a tab from another window joins the pane as a tab.</li>
+      <li>Tabs move between windows of one workspace, or between standalone terminal windows of one machine, and never between the two kinds.</li>
+      <li>A tmux window's panes have no sides and take no dropped tabs (see <a href="/manual/tmux/">tmux control mode</a>).</li>
+      <li>With tabs in the title bar, the bar also shows the window's title, such as <code>↓ local / chan Window 1</code>, or <code>↑ geekom / chan Window 1</code> for a devserver's window. It sits beside the pane map button while the window has no tabs, and left of the A/B button once one opens.</li>
+      <li>As tabs fill the bar, the title shrinks to about two tabs' width before the tabs start to scroll. A cut title ends in an ellipsis, shows whole as a tooltip, and scrolls to its end while you point at it.</li>
+      <li>Privacy mode shows only the generated name, such as <code>Window 2</code>. A tmux window shows its title at the right end and a <code>tmux</code> badge in place of the A/B button.</li>
+      <li>On Windows the bar draws minimize, maximize, and close at its right end.</li>
+      <li>When a tab out of view reports a status such as done or blocked, the pane map button shows the most urgent one (see <a href="/manual/cs/#status">program status</a>).</li>
+      <li>The close prompt starts on <strong>Cancel</strong>, and <kbd>Esc</kbd> cancels. If the desktop refuses a hide or a close, the prompt stays up and says why.</li>
+      <li>The Hybrid Nav key list shows only the keys this window can use, and each key in it is also a button.</li>
+      <li>If another window or client changes the layout while Hybrid Nav is open, the draft goes stale, and only <kbd>Esc</kbd> and <kbd>h</kbd> answer.</li>
+      <li>In a tmux window, Hybrid Nav previews splits and sizes and asks tmux for them on <kbd>Enter</kbd>. It stages no tabs and swaps no panes there.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="windows">
+  <h2><a class="heading-anchor" href="#windows">Windows and the Computers screen</a></h2>
+  <p>The Computers screen lists this machine, your devservers, and every window on them, shown or hidden. It has a page of its own.</p>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/computers/"><strong>Computers screen</strong><span>Open windows, show hidden ones, and drive the screen from the keyboard.</span></a>
+  </div>
 </section>
 
 <section class="manual-block" id="command-launcher">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#command-launcher">The command launcher</a></h2>
+  <h2><a class="heading-anchor" href="#command-launcher">The command launcher</a></h2>
+  <p>Press <kbd>Cmd+K</kbd> on the macOS desktop, or <kbd>Ctrl+Alt+K</kbd> on Windows, Linux, and web, for one searchable list of every command, setting, and window. It has a page of its own.</p>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/command-launcher/"><strong>Command launcher</strong><span>Open it, search, switch scopes, and change settings in place.</span></a>
   </div>
-  <p>Press <code>Cmd+K</code> on macOS desktop (<code>Ctrl+Alt+K</code> on Windows, Linux, and web) to open the command launcher, or pick <strong>Command launcher</strong> from the pane's hamburger menu, a terminal's or an editor's right-click menu, or the right-click menu of an empty pane or of the empty stretch of a pane's tab strip, which also offers <strong>Reload window</strong> and, on the desktop, <strong>Open Inspector</strong>. The opening list is in sections: the commands you ran last, the active app's commands, then <strong>New tab</strong>, <strong>Tab</strong>, <strong>Pane</strong>, <strong>Window</strong>, <strong>Workspace</strong>, <strong>Settings</strong>, and <strong>Computers</strong>. Each row shows its keyboard shortcut, and an on/off row such as <strong>Details</strong> shows its state. Type to search commands, settings, and windows at once, with words in any order: <code>dark</code> finds <strong>Theme: Dark</strong>. A command that cannot run where you are is listed last, dimmed, with the reason.</p>
-  <p><code>Up</code> and <code>Down</code> move through the rows and <code>Enter</code> runs the selected one. <code>Right</code> opens a row that holds more, such as a choice's options or a window's other actions, and <code>Esc</code> goes back one level, then closes the launcher. Pressing the launcher's shortcut again closes it from any level. An on/off row or an option applies in place and leaves the launcher open; any other command closes it. Press <code>?</code> on an empty search for the full key list.</p>
-  <p>Press <code>Tab</code>, or click a scope beside the search field, to see one part in full. The first scope is the active app's: Terminal, Editor, Files, Graph, or Dashboard. Then come Pane, Window, Workspace, Settings, and Computers. <strong>Settings</strong> lists every setting under its section: an on/off setting or a choice changes in place, and any other row opens Settings on that field. <strong>Computers</strong> reaches everything on the machine the window belongs to, this machine or a devserver: open a terminal window or a window of any of its workspaces, and focus, show, hide, or close any of its windows, without opening the Computers screen. A workspace that is off is listed dimmed; turn it on from the Computers screen. In Chan Desktop the list ends with <strong>All computers...</strong>, which shows that screen. A <code>tmux -CC</code> connection's windows are listed with the rest; detach or end the connection from its card on the Computers screen.</p>
-  <figure class="inline-shot">
-    <img src="/assets/manual/command-launcher-terminal.png" alt="The command launcher with the Terminal scope selected, listing the active terminal's commands with their state and shortcuts" loading="lazy" />
-    <figcaption>The Terminal scope lists the active terminal's commands. Captured in a sample workspace.</figcaption>
-  </figure>
-  <figure class="inline-shot">
-    <img src="/assets/manual/command-launcher-workspace.png" alt="The command launcher with the Pane scope selected, listing New tab rows such as dashboard, draft, file browser, graph, and team above the Tab and Pane sections" loading="lazy" />
-    <figcaption>The Pane scope lists the apps a new tab can open, then tab and pane actions. Captured in a sample workspace.</figcaption>
-  </figure>
 </section>
 
 <section class="manual-block" id="shortcuts">
   <h2><a class="heading-anchor" href="#shortcuts">Find and change shortcuts</a></h2>
-<p>Commands display the shortcut for the platform you are using. Open <strong>Settings → Keyboard Shortcuts</strong> to see or customize bindings. The shortcuts in this manual are defaults; use the command launcher if you have changed them. A shortcut saved for a command that Chan no longer has is removed when a window loads, and the status line says how many were dropped.</p>
-<p>On Windows, AltGr is the same as <code>Ctrl+Alt</code>. Where your keyboard layout's AltGr types a character on a key, such as AltGr+S on Polish, <code>Ctrl+Alt</code> with that key types the character instead of running its shortcut; reassign that shortcut in <strong>Settings → Keyboard Shortcuts</strong>.</p>
+  <p>Every default key is listed on the keyboard shortcuts page, with how to change one in <strong>Settings → Keyboard Shortcuts</strong>.</p>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/shortcuts/#customize"><strong>Change a shortcut</strong><span>Assign keys per system, settle conflicts, and reset to the default.</span></a>
+  </div>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/terminal/"><strong>Terminal basics</strong><span>Tabs, find, copy and paste, and broadcast in a terminal.</span></a>
+    <a class="next-card" href="/manual/cs/#pane"><strong>Script panes</strong><span>Split, focus, and close panes from a terminal with <code>cs pane</code>.</span></a>
+    <a class="next-card" href="/manual/shortcuts/"><strong>Keyboard shortcuts</strong><span>Every default key on macOS, Windows, Linux, and in a browser.</span></a>
+  </div>
 </section>

@@ -1,0 +1,63 @@
+<section class="manual-block" id="enrol">
+  <h2><a class="heading-anchor" href="#enrol">Let yourself in</a></h2>
+  <p>A new gateway lets nobody sign in. Two flags are off for every account until you grant them: <code>oauth_login</code> lets an account sign in, and <code>share_workspaces</code> shows its Devservers tab. Grant both to your own email, the one your sign-in provider account uses. As root, load the admin credentials the setup script wrote, then:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>#</span><b data-copy-value>set -a; . /etc/chan-gateway/admin.env; set +a
+chan-gateway-admin user create --email you@example.com
+chan-gateway-admin flag grant oauth_login you@example.com
+chan-gateway-admin flag grant share_workspaces you@example.com</b></code>
+    {{copyButton}}
+  </div>
+  <p>Open <code>https://gw.example.com</code> and sign in. The account page has three tabs:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Tab</th><th>Holds</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Profile</strong></td><td>Your username and your account.</td></tr>
+        <tr><td><strong>Tokens</strong></td><td>Access tokens, one for each devserver.</td></tr>
+        <tr><td><strong>Devservers</strong></td><td>Your devservers and their shares, and the devservers shared with you.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="username">
+  <h2><a class="heading-anchor" href="#username">Set your username</a></h2>
+  <p>Your username starts as a placeholder, and it is part of every devserver address. Change it in the Profile tab before you share anything: renames are limited to four, and each one disconnects your devservers.</p>
+</section>
+
+<section class="manual-block" id="access">
+  <h2><a class="heading-anchor" href="#access">Who can sign in</a></h2>
+  <p>With the admin credentials loaded, each of these is one <code>chan-gateway-admin</code> command:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>You want to</th><th>Run</th></tr></thead>
+      <tbody>
+        <tr><td>Let one person in</td><td><code>user create --email bob@example.com</code>, then <code>flag grant oauth_login bob@example.com</code></td></tr>
+        <tr><td>Show their Devservers tab</td><td><code>flag grant share_workspaces bob@example.com</code></td></tr>
+        <tr><td>Let in anyone with an account at your sign-in provider</td><td><code>flag create oauth_login --default-on</code></td></tr>
+        <tr><td>Keep one person out while the default is on</td><td><code>flag grant oauth_login bob@example.com --disabled</code></td></tr>
+        <tr><td>See whose access differs from the default</td><td><code>flag overrides oauth_login</code></td></tr>
+        <tr><td>Return a person to the default</td><td><code>flag revoke oauth_login bob@example.com</code></td></tr>
+        <tr><td>Block an account</td><td><code>user block bob@example.com --reason "..."</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A refused sign-in still creates the account, so a grant by email also works once the person has tried to sign in.</li>
+      <li>identity enforces only <code>oauth_login</code>. <code>share_workspaces</code> shows or hides the Devservers tab and nothing more.</li>
+      <li>A block revokes every token of the account and refuses its sign-ins. <code>user unblock</code> lets it sign in again; its tokens stay revoked.</li>
+      <li>An account is found by its uuid, its email, or its username, tried in that order.</li>
+      <li>More commands, with <code>--json</code> and the exit codes, are on <a href="/gateway/operate/">Operate</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/publish/"><strong>Publish a devserver</strong><span>Dial a devserver in, open it, and share it.</span></a>
+  </div>
+</section>

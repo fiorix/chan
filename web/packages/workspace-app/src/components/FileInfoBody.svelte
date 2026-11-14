@@ -529,13 +529,11 @@
 
   const uploadTitle = $derived(
     entry?.is_dir
-      ? "Upload adds the selected file to this directory. You can also drop files onto File Browser rows."
+      ? "Upload adds the selected file to this directory."
       : "Upload replaces this file. Text-class files reject non-UTF-8 bytes.",
   );
   const downloadTitle = $derived(
-    entry?.is_dir
-      ? "Download this directory as a tar archive. You can also drag rows out of the File Browser where supported."
-      : "Download this file. You can also drag rows out of the File Browser where supported.",
+    entry?.is_dir ? "Download this directory as a tar archive." : "Download this file.",
   );
 
   /// Action model for the pill + dropdown. Applicability (which

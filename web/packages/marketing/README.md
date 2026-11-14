@@ -1,6 +1,6 @@
 # @chan/marketing
 
-Source for the public `chan.app` static site: the home and install pages, the user manual, the animation credits, the installers and the release metadata. A member of the `./web` npm-workspaces monorepo that no binary embeds: it takes no part in `cargo build` or `cargo test` and deploys to `chan.app` through the release and pages workflows. The publishable artifact is generated into `dist/`; do not publish the source tree directly.
+Source for the public `chan.app` static site: the home and install pages, the user manual, the gateway operator pages, the animation credits, the installers and the release metadata. A member of the `./web` npm-workspaces monorepo that no binary embeds: it takes no part in `cargo build` or `cargo test` and deploys to `chan.app` through the release and pages workflows. The publishable artifact is generated into `dist/`; do not publish the source tree directly.
 
 ## Layout
 
@@ -15,8 +15,8 @@ web/packages/marketing/
 +-- src/
 |   +-- install.sh              public Unix CLI installer source
 |   +-- install.ps1             public Windows CLI installer source
-|   +-- pages/                  home, devserver, gateway, install, manual (and manual/*), animations
-|   +-- manual-pages.json       manual section order, titles, slugs
+|   +-- pages/                  home, devserver, gateway, install, manual (and manual/*), gateway-docs/*, animations
+|   +-- docs.json               documentation sets: groups, page order, titles, slugs
 |   +-- animation-credits.json  public attribution and original references
 |   +-- AnimationGallery.svelte live empty-pane animation preview
 |   +-- animation-gallery.ts    entry: mounts the gallery on /animations/
@@ -27,6 +27,7 @@ web/packages/marketing/
 |   +-- site-motion.ts          shared homepage morph and site wave background
 |   +-- home.css                homepage and shared landing-page layouts
 |   +-- guides.css              devserver and gateway guide layouts
+|   +-- manual.css              documentation layout and page components
 |   `-- templates/
 |       +-- base.html           the page shell
 |       `-- demo-embed.html     the isolated devserver-form demo document
@@ -49,16 +50,16 @@ npm run check
 
 The build and check gate:
 
-- renders `/`, `/devserver/`, `/gateway/`, `/install/`, `/manual/` and its section pages, `/animations/`, `/install.sh` and `/install.ps1`
+- renders `/`, `/devserver/`, `/gateway/` and its operator pages, `/install/`, `/manual/` and its section pages, `/animations/`, `/install.sh` and `/install.ps1`
 - writes `CNAME` for `chan.app`
 - copies static assets into `dist/`
-- fails on missing required inputs and on broken local links
+- fails on missing required inputs, on broken local links, and on a link whose fragment names no id on the page it points at
 - fails if generated pages infer GitHub release asset URLs instead of using the runtime release metadata hooks
 - fails if removed installer references or stale public copy reappear in generated output
 - dry-runs `/dl/**` release metadata generation from a local fixture and the collection of uploaded release assets into the metadata manifest
 - builds the embedded launcher demo and the animation gallery (see below)
 - checks the animation gallery's types, interactions and credit coverage against the workspace catalog
-- serves `dist/` on loopback and smokes the public routes, including every manual section's navigation, active state, previous and next links, and section anchors
+- serves `dist/` on loopback and smokes the public routes, including every documentation page's grouped navigation, active state, previous and next links, section anchors, and media sizes
 
 ## Preview
 
@@ -75,23 +76,27 @@ The homepage opens with a compact hero and the interactive Computers preview, fo
 
 `site-motion.ts` mounts `HomeAtmosphere.svelte` once per site page. The homepage moves the workspace's Beaded Torus geometry into Dotted Waves as the Computers section enters the viewport; other pages start with the settled waves. The shared canvas runner owns frame pacing, visibility and cleanup; reduced motion shows a static wave, and unavailable WebGL falls back to canvas waves. `site-motion.js` and `site-motion.css` load through the shared template, separately from the animation gallery. `home.css` owns the landing-page layouts. Page content and links remain usable without JavaScript.
 
-The remote access guides at `/devserver/` and `/gateway/` share `guides.css` and static, responsive block diagrams. The devserver guide covers ssh and Eternal Terminal connections, file transfer, desktop port forwarding and workspace collaboration; the gateway guide covers managed environments, OAuth2, the control plane and self-hosting, with links to the source design and deployment documentation. These pages load the shared wave background without a launcher bundle.
+The remote access guides at `/devserver/` and `/gateway/` share `guides.css` and static, responsive block diagrams. The devserver guide covers ssh and Eternal Terminal connections, file transfer, desktop port forwarding and workspace collaboration, and links into the manual's Remote pages; the gateway guide covers managed environments, OAuth2, the control plane and self-hosting, and links into the gateway operator pages and the source design documentation. These pages load the shared wave background without a launcher bundle.
 
 ## Embedded demo
 
 The site runs the launcher SPA frontend-only, with no backend, so the homepage and the manual show a live Computers screen instead of a screenshot. The animations page embeds the workspace app's empty-pane welcome component; none of these pages mounts the workspace app or connects to a chan server.
 
 - `/` lazy-loads the populated Computers preview in an isolated document at `/demo/computers/`.
-- `/manual/install/` loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed. `/manual/devserver/` embeds the devserver form in an isolated document under `/manual/demo/devserver/`. Other manual pages do not load the launcher bundle.
+- `/manual/install/` loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed. `/manual/connect/` embeds the devserver form in an isolated document under `/manual/demo/devserver/`. Other manual pages do not load the launcher bundle.
 - The launcher is mounted without an `onOpenWindow` hook, so clicking a window row opens nothing.
 
 `scripts/build.mjs` produces `launcher-demo.{js,css}` and `animation-gallery.{js,css}` under `dist/assets/`, served from `base: "/assets/"`, and scopes the launcher's global CSS to `.launcher-demo-frame` so it can never restyle the marketing page.
 
 ## Manual
 
-`src/manual-pages.json` defines the manual's section order, titles, descriptions and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous and next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript. The manual covers the Linux default terminal, the devserver and its control terminal, the devserver under systemd (restarts and upgrades that keep terminals, metrics, and systemd-report), chan in a browser without the desktop, hosting a gateway, terminal commands, editor screenshots and walkthroughs, workspace indexing and search, collaboration and client sessions, and extensions; the overview links to these chapters. Step-by-step pages mark sample terminal output with `pre.sample-output`, apart from the copyable `command-copy` blocks, and set tips and warnings apart with `aside.doc-note` (add `warning` for a warning).
+`src/docs.json` defines the documentation sets: the manual at `/manual/` and the gateway operator pages at `/gateway/<page>/`. A set has a base path, a sidebar label, the folder holding its pages, groups of pages and, when the generator renders its root, the overview page's source; a page has a slug, a title, a description and, where it mounts the launcher demo, `"head": "launcher-demo"`. The order of the groups and of the pages in them is the reading order: the sidebar lists the pages under their group headings, and previous and next follow it. Slugs are flat (`/manual/tmux/`), so a page can change group without changing its URL. The generator wraps each page with the sidebar, a breadcrumb naming its group, an index of its linked headings (a rail beside the page on a wide screen, a block under the title otherwise), and previous and next links. It also gives each local image, and each video with a local poster, its intrinsic width and height. Keep section headings as self-links so the page index and shareable anchors agree. All content and navigation work without JavaScript; on a narrow screen the sidebar folds into one row that opens the full list. The smoke check reads its routes from `docs.json`.
 
-The product videos sit beside their manual topics: terminal commands, terminal write and scrollback, and the clipboard in Terminal; Hybrid Nav in Navigation; opening the editor in Editor; graph navigation in Graph; and the empty-workspace animation in Screensavers. Videos use native controls, `preload="none"` and still-frame JPEG posters under `assets/manual/video-posters/`, and play only when requested. The three `assets/home/team-*.png` screenshots form an expandable team example. No page links `home-hero.png`, `team-work-fleet.png` or `team-work-spawn.png` under `assets/`.
+The manual's pages are `src/pages/manual.html` (the overview) and `src/pages/manual/`, in six groups: Start, Terminal, Workspace, Desktop, Remote and Reference. The gateway operator pages are `src/pages/gateway-docs/`, for the person who runs a gateway; the set has no generated root, so its sidebar title links to the `/gateway/` guide, and the manual keeps the user's side at `/manual/gateway/`.
+
+A page follows one shape, built from the components in `manual.css`: an opening figure, `ul.can-do` for what the reader can do, `ol.doc-steps` for a flow, `table.manual-table` (inside `.manual-table-wrap`) for keys, verbs and outcomes, `details.doc-details` for edge cases and limits, and `.next-cards` for where to go next. A page aims at about 450 words outside its tables and details, with no paragraph over 60. Keys are `kbd` elements, one per chord. A figure's `figcaption` sits under its media; a window grab that brings its own chrome and shadow gets no frame, and a clip, or an image with the class `framed`, gets the one the site draws. A `video` with `data-loop` plays muted while it is in view and keeps its native controls without JavaScript or with reduced motion. `figure.doc-diagram` is a drawn diagram of two machines, the routes between them and what sits under both. A `.shot-placeholder-frame` with a `data-shot` id and a `data-shot-kind` (`clip`, `still` or `mac-still`) holds the spot of a capture that is still to be made, with one line saying what it shows. A section that moved to a page of its own keeps its id on the old page: as a short section with a card to the new page, or as an item of the closing `ul.moved-list`. Step-by-step pages mark sample terminal output with `pre.sample-output`, apart from the copyable `command-copy` blocks, and set tips and warnings apart with `aside.doc-note` (add `warning` for a warning).
+
+Three screenshots are in use: `command-launcher-terminal.png` and `command-launcher-workspace.png` on the command launcher page and `slides-editing.png` on the previews page. Every other figure is a capture placeholder. The other files under `assets/manual/` and `assets/home/` show a UI the product no longer has and no page links them.
 
 ## Animation credits and previews
 

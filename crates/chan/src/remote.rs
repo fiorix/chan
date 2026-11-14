@@ -51,10 +51,11 @@ pub(super) async fn cmd_devserver_register(
     use chan_server::handoff::Outcome;
     match chan_server::handoff::try_open_devserver(&url, name.as_deref(), script.as_deref()).await {
         Outcome::HandedOff => {
-            // Registered, not connected: point the user at the launcher's
-            // Connect button. Labelled by --name when given, else the URL.
+            // Registered, not connected: point the user at the Computers
+            // screen's Connect button. Labelled by --name when given, else
+            // the URL.
             let label = name.as_deref().unwrap_or(&url);
-            println!("registered \"{label}\". Open it from the launcher.");
+            println!("registered \"{label}\". Open it from the Computers screen.");
             Ok(())
         }
         Outcome::VersionSkew {
@@ -93,7 +94,7 @@ async fn devserver_control(
         }
         DevserverControlOutcome::NoReply { budget } => anyhow::bail!(
             "chan-desktop accepted the request but did not answer within {}s; the operation may \
-             still be running. Check `chan devserver ls` and the launcher.",
+             still be running. Check `chan devserver ls` and the Computers screen.",
             budget.as_secs()
         ),
         DevserverControlOutcome::Reply(Response::VersionSkew {
@@ -176,7 +177,9 @@ pub(super) async fn cmd_devserver_connect(target: String) -> Result<()> {
     .await?;
     match resp {
         Response::DevserverConnectStarted { .. } => {
-            println!("connecting {target}. Watch the launcher for sign-in or trust prompts.");
+            println!(
+                "connecting {target}. Watch the Computers screen for sign-in or trust prompts."
+            );
             Ok(())
         }
         _ => anyhow::bail!("unexpected reply from chan-desktop"),
@@ -246,7 +249,7 @@ pub(super) async fn cmd_workspace_serve_remote(path: Option<String>, target: &st
         Response::RemoteWorkspaceServed { prefix, .. } => {
             println!(
                 "served {path} on devserver {target} (mounted at {prefix}). Open it from the \
-                 launcher."
+                 Computers screen."
             );
             Ok(())
         }

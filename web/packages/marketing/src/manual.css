@@ -1,0 +1,176 @@
+/* Documentation pages: a grouped sidebar, the page at a reading measure, and
+   an "On this page" rail. Prose rules reach direct children of a section only,
+   so the launcher demo embedded in a page keeps its own styles. */
+.manual-page .site-shell { max-width: 1280px; padding: 0 40px 56px; }
+.manual-page :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 4px; }
+.manual-layout { display: grid; grid-template-columns: 208px minmax(0, 1fr); gap: 48px; padding-top: 40px; }
+
+.manual-skip { position: absolute; left: -10000px; }
+.manual-skip:focus { left: 24px; z-index: 10; background: var(--bg); padding: 12px; }
+
+/* Sidebar. */
+.manual-nav { align-self: start; position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; padding-bottom: 24px; font-size: 14px; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+.manual-nav-title { display: block; margin-bottom: 4px; color: var(--fg); font-size: 15px; font-weight: 700; text-decoration: none; }
+.manual-nav-toggle, .manual-nav-current { display: none; }
+.manual-nav-heading { margin: 22px 0 8px; color: var(--subtle); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.manual-nav ol { list-style: none; margin: 0; padding: 0; }
+.manual-nav li a { display: block; margin-left: -1px; padding: 6px 12px; border-left: 1px solid var(--rule); color: var(--muted); line-height: 1.4; text-decoration: none; }
+.manual-nav li a:hover { color: var(--fg); border-left-color: var(--border-strong); }
+.manual-nav li a[aria-current="page"] { border-left-color: var(--accent); background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 9%, transparent), transparent); color: var(--fg); }
+
+/* The page: content in the first column, the page index in the rail. */
+.manual-content { display: grid; grid-template-columns: minmax(0, 1fr) 184px; column-gap: 48px; align-content: start; min-width: 0; }
+.manual-content > * { grid-column: 1; min-width: 0; }
+.manual-content.no-toc { grid-template-columns: minmax(0, 1fr); }
+.manual-content :is(section, h3, [id]) { scroll-margin-top: 24px; }
+.manual-content :is(p, li) { overflow-wrap: anywhere; }
+.manual-content :is(th, td) { overflow-wrap: break-word; }
+
+.manual-content .page-head { padding: 0 0 34px; }
+.manual-content .manual-eyebrow { display: flex; gap: 9px; margin: 0 0 18px; color: var(--accent); font: 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+.manual-eyebrow a { color: var(--subtle); text-decoration: none; }
+.manual-eyebrow a:hover { color: var(--fg); }
+.manual-eyebrow span { color: var(--faint); }
+.manual-content .page-head h1 { margin: 0 0 18px; font-size: clamp(2.1rem, 4.2vw, 3.1rem); font-weight: 700; letter-spacing: 0; line-height: 1.08; }
+.manual-content .page-head .manual-lede { max-width: 60ch; margin: 0; color: var(--muted); font-size: 1.12rem; line-height: 1.65; }
+
+.manual-toc { font-size: 13px; }
+.manual-content > .manual-toc { grid-column: 2; grid-row: 1 / span 400; align-self: start; position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.manual-toc strong { display: block; margin-bottom: 12px; color: var(--subtle); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.manual-toc ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--rule); }
+.manual-toc li a { display: block; margin-left: -1px; padding: 5px 0 5px 14px; border-left: 1px solid transparent; color: var(--muted); line-height: 1.45; text-decoration: none; }
+.manual-toc li.toc-sub a { padding-left: 26px; color: var(--subtle); }
+.manual-toc li a:hover, .manual-toc li a.active { color: var(--fg); }
+.manual-toc li a.active { border-left-color: var(--accent); }
+.manual-toc code { border: 0; background: none; padding: 0; font-size: .95em; }
+
+/* Sections. */
+.manual-page .manual-block { padding: 40px 0 16px; line-height: 1.7; }
+.manual-page .manual-block h2 { margin: 0 0 16px; font-size: 1.7rem; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
+.manual-page .manual-block > h3 { margin: 30px 0 8px; font-size: 1.16rem; line-height: 1.35; }
+.manual-page .manual-block > * { max-width: none; }
+.manual-page .manual-block > :is(p, ul, ol, dl, h2, h3, .section-heading, .doc-note, .command-copy, pre) { max-width: 68ch; }
+.manual-page .manual-block > p { margin: 0 0 16px; }
+.manual-page .manual-block > :is(ul, ol):not([class]) { margin: 0 0 16px; padding-left: 22px; }
+.manual-block .heading-anchor code { font-size: .88em; }
+
+/* Keys read as keys. */
+.manual-block kbd:not(.launcher-demo-frame *) { display: inline-block; padding: 0 6px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface-raised); color: var(--fg); font: .78em/1.65 var(--mono); white-space: nowrap; }
+
+/* What a reader can do with the feature: the first thing under the title. */
+.can-do { display: grid; gap: 10px; list-style: none; margin: 4px 0 20px; padding: 0; }
+.manual-block .can-do li { position: relative; margin: 0; padding-left: 28px; color: var(--text); }
+.can-do li::before { content: "\2192"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
+
+/* A flow, one numbered step per state change. */
+.doc-steps { list-style: none; counter-reset: doc-step; margin: 20px 0; padding: 0; }
+.manual-block .doc-steps > li { counter-increment: doc-step; display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 16px; margin: 0; padding: 20px 0; border-top: 1px solid var(--rule); }
+.doc-steps > li::before { content: counter(doc-step, decimal-leading-zero); color: var(--subtle); font: 11px/2.4 var(--mono); }
+.doc-steps > li > * { grid-column: 2; min-width: 0; }
+.doc-steps h3 { margin: 0 0 6px; color: var(--fg); font-size: 1.05rem; line-height: 1.5; }
+.doc-steps p { margin: 0 0 12px; }
+.doc-steps > li > :last-child { margin-bottom: 0; }
+
+/* Edge cases and limits, out of the way until wanted. */
+.doc-details { margin: 26px 0; border: 1px solid var(--rule); border-radius: 8px; background: color-mix(in srgb, var(--panel) 75%, transparent); }
+.doc-details > summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 18px; color: var(--text); cursor: pointer; font-weight: 600; list-style: none; }
+.doc-details > summary::-webkit-details-marker { display: none; }
+.doc-details > summary::after { content: "+"; color: var(--subtle); font: 16px var(--mono); }
+.doc-details[open] > summary::after { content: "\2212"; }
+.doc-details[open] > summary { border-bottom: 1px solid var(--rule); }
+.doc-details > :not(summary) { margin: 14px 18px; }
+.doc-details ul { padding-left: 20px; font-size: .94rem; }
+
+/* Tables: keys, verbs and outcomes. */
+.manual-page .manual-table-wrap { margin: 20px 0 24px; border: 1px solid var(--rule); border-radius: 8px; background: color-mix(in srgb, var(--surface) 80%, transparent); }
+.manual-page .manual-table { font-size: .92rem; line-height: 1.6; }
+.manual-page .manual-table th { padding: 11px 16px; color: var(--subtle); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.manual-page .manual-table td { padding: 11px 16px; }
+.manual-page .manual-table tr:last-child td { border-bottom: 0; }
+.manual-page .manual-table td:first-child { color: var(--text); }
+.manual-page .manual-table td:first-child a { color: inherit; text-underline-offset: 3px; }
+.manual-page .manual-table :is(th, td):first-child { min-width: 10.5em; }
+
+/* Figures: the caption sits under the media. A window grab brings its own
+   chrome and shadow and gets no frame; a clip, or a capture of a window's
+   inside marked `framed`, gets the frame the site draws. */
+.manual-page .manual-block .inline-shot, .manual-content > .inline-shot { margin: 26px 0; overflow: visible; border: 0; background: none; box-shadow: none; }
+.manual-content > .inline-shot { margin: 0 0 12px; }
+.manual-page .inline-shot :is(img, video) { height: auto; }
+.manual-page .inline-shot :is(.framed, video, .shot-placeholder-frame) { border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 20px 70px color-mix(in srgb, black 33%, transparent); }
+.manual-page .inline-shot video { aspect-ratio: auto; }
+.manual-page .inline-shot img + img { margin-top: 16px; }
+.manual-page .inline-shot figcaption { padding: 12px 2px 0; border: 0; color: var(--subtle); font: 11px/1.7 var(--mono); }
+.manual-page .shot-placeholder-frame { flex-direction: column; gap: 8px; padding: 24px; border-style: dashed; box-shadow: none; text-align: center; }
+.shot-placeholder-frame small { color: var(--faint); font: 10px/1.6 var(--mono); letter-spacing: .04em; text-transform: none; }
+
+/* A drawn diagram: two machines, the routes between them, and what sits
+   under both. A library inside a machine is a dashed box. */
+.doc-diagram { margin: 26px 0; padding: 22px; border: 1px solid var(--rule); border-radius: 10px; background: radial-gradient(ellipse at top, color-mix(in srgb, var(--surface-raised) 31%, transparent), transparent 65%), var(--surface); }
+.doc-diagram figcaption { margin-top: 16px; color: var(--subtle); font: 11px/1.7 var(--mono); }
+.dg-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(112px, auto) minmax(0, 1fr); align-items: stretch; }
+.dg-node { display: flex; flex-direction: column; gap: 6px; padding: 16px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--panel); }
+.dg-node > small, .dg-inner > small { color: var(--subtle); font: 9px/1.6 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.dg-node > strong { color: var(--fg); font-size: 16px; line-height: 1.3; }
+.dg-node > span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.dg-inner { margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 5px; background: var(--surface); }
+.dg-inner ul { list-style: none; margin: 4px 0 0; padding: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+.dg-links { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 14px; color: var(--muted); font: 10px/1.7 var(--mono); text-align: center; }
+.dg-links::after { content: "\2192"; color: var(--muted); font-size: 22px; line-height: 1.2; }
+.dg-below { display: flex; justify-content: space-between; padding: 10px 16px; color: var(--subtle); font: 10px/1.7 var(--mono); }
+
+/* Old anchors of sections that moved to another page. */
+.manual-block .moved-list { display: grid; gap: 4px; list-style: none; margin: 0; padding: 0; font-size: .92rem; }
+.manual-block .moved-list li { margin: 0; }
+
+/* Where to go next. */
+.next-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin: 8px 0 24px; }
+.next-card, .manual-chapter { display: grid; align-content: start; gap: 6px; padding: 18px 20px; border: 1px solid var(--rule); border-radius: 8px; background: color-mix(in srgb, var(--surface) 85%, transparent); text-decoration: none; transition: border-color .15s, background .15s; }
+.next-card:hover, .manual-chapter:hover { border-color: var(--border-strong); background: var(--panel); }
+.next-card strong, .manual-chapter strong { color: var(--fg); font-size: 1rem; line-height: 1.4; }
+.next-card span, .manual-chapter span { color: var(--subtle); font-size: .88rem; line-height: 1.6; }
+.next-card strong::after { content: " \2192"; color: var(--subtle); }
+
+/* The overview's chapter cards, one grid per group. */
+.manual-chapter-group { padding: 28px 0 8px; border-top: 1px solid var(--rule); }
+.manual-chapter-group .section-label { margin: 0 0 16px; letter-spacing: .08em; text-transform: uppercase; }
+.manual-chapters { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+
+.manual-pagination { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 40px; padding: 28px 0 40px; border-top: 1px solid var(--rule); }
+.manual-pagination a { padding: 16px 20px; border: 1px solid var(--rule); border-radius: 8px; color: var(--fg); font-weight: 600; text-decoration: none; transition: border-color .15s; }
+.manual-pagination a:hover { border-color: var(--border-strong); }
+.manual-pagination a:last-child { text-align: right; }
+.manual-pagination span { display: block; margin-bottom: 6px; color: var(--subtle); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+
+/* Below the rail's width the page index sits under the title. */
+@media (max-width: 1180px) {
+  .manual-content { grid-template-columns: minmax(0, 1fr); }
+  .manual-content > .manual-toc { grid-column: 1; grid-row: auto; position: static; max-height: none; margin-bottom: 24px; padding: 16px 18px; border: 1px solid var(--rule); border-radius: 8px; }
+  .manual-toc ul { border-left: 0; columns: 2; column-gap: 32px; }
+  .manual-toc li { break-inside: avoid; }
+  .manual-toc li a { padding-left: 0; }
+  .manual-toc li.toc-sub a { padding-left: 12px; }
+}
+
+/* On a narrow screen the sidebar folds into one row that names the page and
+   opens the full list. */
+@media (max-width: 900px) {
+  .manual-page .site-shell { padding-inline: 20px; }
+  .dg-row { grid-template-columns: minmax(0, 1fr); }
+  .dg-links { padding: 12px 0; }
+  .dg-links::after { content: "\2193"; }
+  .manual-layout { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-top: 20px; }
+  .manual-nav { position: static; max-height: none; overflow: visible; padding-bottom: 0; }
+  .manual-nav-title { display: none; }
+  .manual-nav-current { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); color: var(--fg); cursor: pointer; font-weight: 600; }
+  .manual-nav-current span { color: var(--subtle); font: 10px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .manual-nav-current::after { content: "+"; margin-left: auto; color: var(--subtle); font: 16px var(--mono); }
+  .manual-nav-toggle { display: block; position: absolute; opacity: 0; pointer-events: none; }
+  .manual-nav-toggle:focus-visible + .manual-nav-current { outline: 2px solid var(--accent-2); outline-offset: 4px; }
+  .manual-nav-toggle:checked + .manual-nav-current::after { content: "\2212"; }
+  .manual-nav-groups { display: none; padding: 0 4px 8px; }
+  .manual-nav-toggle:checked ~ .manual-nav-groups { display: block; }
+  .manual-toc ul { columns: 1; }
+  .manual-pagination { grid-template-columns: minmax(0, 1fr); }
+  .manual-pagination a:last-child { text-align: left; }
+}

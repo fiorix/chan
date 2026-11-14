@@ -83,12 +83,12 @@ describe("the way from a window to every computer", () => {
 
   test("in a browser the launcher lists no such row", async () => {
     await search("all computers");
-    // The window's own library has loaded once its New terminal window row
+    // The window's own library has loaded once its New standalone terminal row
     // can be found, so the row's absence is not a list still loading.
     const input = document.querySelector<HTMLInputElement>(".deck-input")!;
-    input.value = "new terminal window";
+    input.value = "new standalone terminal";
     input.dispatchEvent(new InputEvent("input", { bubbles: true, data: input.value }));
-    await vi.waitFor(() => expect(titled("New terminal window")).toBeDefined());
+    await vi.waitFor(() => expect(titled("New standalone terminal")).toBeDefined());
 
     input.value = "all computers";
     input.dispatchEvent(new InputEvent("input", { bubbles: true, data: input.value }));

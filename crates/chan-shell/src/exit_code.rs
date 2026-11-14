@@ -12,15 +12,18 @@
 //! OLDER devserver, which derived the chord from the target's spawn command
 //! and refused when that named no agent.
 //!
-//! A bounded blocking request that gets no reply within its window exits
-//! [`CONTROL_TIMEOUT`] (124): a `cs terminal survey` whose `--timeout`
-//! elapsed, or a `cs copy` / `cs paste` whose clipboard round-trip got no
-//! window reply. The server answers such a request with
-//! `ControlResponse::Timeout`; [`crate::control::send_control_request`] turns
-//! that into a [`ControlTimeout`], and the command's dispatch edge downcasts
-//! it, prints the elapsed-window line, and exits with [`CONTROL_TIMEOUT`],
-//! so a caller can tell "no answer in time" apart from a real error (exit 1)
-//! and from a delivered reply (exit 0).
+//! A bounded blocking request whose window elapses is answered with
+//! `ControlResponse::Timeout`, which the first-response mapping that every
+//! request path in [`crate::control`] shares turns into a [`ControlTimeout`].
+//! Four commands exit [`CONTROL_TIMEOUT`]
+//! (124) on it: a `cs terminal survey` whose `--timeout` elapsed, a `cs copy`
+//! / `cs paste` whose clipboard round-trip got no window reply, and a
+//! `cs tunnel` no listener acknowledged in time. Their dispatch edges
+//! downcast it, print the elapsed-window line, and exit with
+//! [`CONTROL_TIMEOUT`], so a caller can tell "no answer in time" apart from a
+//! real error (exit 1) and from a delivered reply (exit 0). `cs export`,
+//! `cs session self` and `cs session handover` get the same typed timeout
+//! but do not downcast it, so theirs exits 1 like any other error.
 
 use std::error::Error;
 use std::fmt;
@@ -52,12 +55,11 @@ impl fmt::Display for ControlSubmitRefused {
 
 impl Error for ControlSubmitRefused {}
 
-/// A control request the server answered with `ControlResponse::Timeout` (a
-/// blocking `cs terminal survey` whose `--timeout` window elapsed, or a
-/// `cs copy` / `cs paste` clipboard round-trip nothing replied to). Carried
-/// as an `anyhow` error so the dispatch edge can downcast it to a distinct
-/// exit code instead of the generic exit-1 failure path. The message is the
-/// server's elapsed-window line (e.g. `no reply within 600s`).
+/// A control request the server answered with `ControlResponse::Timeout`, or
+/// an export the client stopped waiting for. Carried as an `anyhow` error so
+/// a dispatch edge can downcast it to a distinct exit code instead of the
+/// generic exit-1 failure path; the edges that do are listed in the module
+/// doc. The message is the elapsed-window line (e.g. `no reply within 600s`).
 #[derive(Debug)]
 pub(crate) struct ControlTimeout {
     pub(crate) message: String,

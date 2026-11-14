@@ -1,0 +1,274 @@
+{
+  "sets": [
+    {
+      "id": "manual",
+      "label": "Manual",
+      "title": "Chan manual",
+      "base": "/manual/",
+      "index": "pages/manual.html",
+      "source": "pages/manual",
+      "groups": [
+        {
+          "title": "Start",
+          "pages": [
+            {
+              "slug": "",
+              "title": "Overview",
+              "description": "The layers of chan, from a terminal to devservers and gateways, and where each is taught."
+            },
+            {
+              "slug": "install",
+              "title": "Install and first run",
+              "description": "Install Chan Desktop, open the Computers screen, and make a first terminal and workspace.",
+              "head": "launcher-demo"
+            },
+            {
+              "slug": "concepts",
+              "title": "Concepts",
+              "description": "Workspaces, libraries, windows, the Computers screen, devservers and gateways, and how each layer builds on the one before."
+            }
+          ]
+        },
+        {
+          "title": "Terminal",
+          "pages": [
+            {
+              "slug": "terminal",
+              "title": "Terminal basics",
+              "description": "Terminal tabs and names, find in scrollback, copy and paste, group broadcast, and what each terminal runs."
+            },
+            {
+              "slug": "navigation",
+              "title": "Windows, panes and tabs",
+              "description": "Split a window into panes, keep two sides of tabs in each, drag tabs, and rearrange the layout with Hybrid Nav."
+            },
+            {
+              "slug": "command-launcher",
+              "title": "Command launcher",
+              "description": "Run any command, change a setting, or reach any window from one searchable list."
+            },
+            {
+              "slug": "prompt",
+              "title": "Rich Prompt and drafts",
+              "description": "Write long Markdown prompts with images for the agent in a terminal, and keep notes as drafts outside your project."
+            },
+            {
+              "slug": "cs",
+              "title": "Script it with cs",
+              "description": "Drive the window and its terminals from a shell: open files, write to and read terminals, report status, and arrange panes."
+            },
+            {
+              "slug": "tmux",
+              "title": "tmux control mode",
+              "description": "Run tmux -CC in a chan terminal, locally or over ssh, and work with its windows and panes as Chan windows and panes."
+            },
+            {
+              "slug": "teams",
+              "title": "Agent teams",
+              "description": "Start a lead and worker agents in named terminals from a dialog or cs, and give agents the workspace over MCP."
+            }
+          ]
+        },
+        {
+          "title": "Workspace",
+          "pages": [
+            {
+              "slug": "workspaces",
+              "title": "Workspaces and chan serve",
+              "description": "Register a directory as a workspace, choose where chan serve runs it, turn it on or off, and list, close, or forget it."
+            },
+            {
+              "slug": "editor",
+              "title": "Editor",
+              "description": "Open and edit files, write Markdown with links, mentions, tags and dates, and handle saves that conflict with other programs."
+            },
+            {
+              "slug": "previews",
+              "title": "Previews, slides and export",
+              "description": "Preview and present slide decks, draw Mermaid and Excalidraw diagrams, view JSON and CSV, and export to PDF."
+            },
+            {
+              "slug": "files",
+              "title": "File browser",
+              "description": "Browse and manage files from the keyboard, upload and download them, and read code reports with COCOMO estimates."
+            },
+            {
+              "slug": "search",
+              "title": "Search",
+              "description": "Find content, files, tags and contacts in a workspace, and query or walk its graph from a terminal with cs search."
+            },
+            {
+              "slug": "graph",
+              "title": "Graph",
+              "description": "Explore a workspace's tree with its links, tags and mentions, open directories in place, and use depth to see more."
+            },
+            {
+              "slug": "dashboard",
+              "title": "Dashboard and index",
+              "description": "Watch the serving process's metrics, read workspace facts, follow indexing, and turn on semantic search."
+            },
+            {
+              "slug": "extensions",
+              "title": "Extensions",
+              "description": "Add your own web apps as tabs, configure their declarations, and build one that drives chan through cs."
+            }
+          ]
+        },
+        {
+          "title": "Desktop",
+          "pages": [
+            {
+              "slug": "computers",
+              "title": "Computers screen",
+              "description": "See every machine and window in one place, open terminals and workspaces, and show or hide windows from the keyboard."
+            },
+            {
+              "slug": "standalone",
+              "title": "Standalone terminal, files and editor",
+              "description": "A window with no workspace, the chan-term, chan-files and chan-edit commands, and Chan Desktop as a default app."
+            },
+            {
+              "slug": "settings",
+              "title": "Settings",
+              "description": "Every Settings section, the defaults worth knowing, chan config from a shell, and what privacy mode hides."
+            },
+            {
+              "slug": "screensavers",
+              "title": "Screen lock and animations",
+              "description": "Lock a workspace window after idle time or at once, with an optional PIN, and play animations in an empty pane."
+            }
+          ]
+        },
+        {
+          "title": "Remote",
+          "pages": [
+            {
+              "slug": "remote",
+              "title": "Remote overview",
+              "description": "Compare the routes to a devserver: a browser, a direct address, ssh, Eternal Terminal, Lima or WSL, and a gateway."
+            },
+            {
+              "slug": "devserver",
+              "title": "Run a devserver",
+              "description": "Install chan on another machine, run its devserver as a service, and manage its token and metrics."
+            },
+            {
+              "slug": "systemd",
+              "title": "systemd integration",
+              "description": "Run the devserver as a systemd user service on Linux, restart or upgrade it without losing terminals, and report it to systemd-report."
+            },
+            {
+              "slug": "connect",
+              "title": "Connect from Chan Desktop",
+              "description": "Add a devserver with its connect script, use the control terminal, recover from dropped connections, and open remote windows."
+            },
+            {
+              "slug": "browser",
+              "title": "Chan in a browser",
+              "description": "Serve a workspace or a devserver to any browser with the chan binary alone, and keep windows running behind closed tabs."
+            },
+            {
+              "slug": "remote-tools",
+              "title": "Tunnels, transfers and clipboard",
+              "description": "Forward ports from a devserver, upload and download files, and copy and paste across machines with cs."
+            },
+            {
+              "slug": "collaboration",
+              "title": "Collaboration",
+              "description": "Share a workspace between windows and people, manage connected clients with cs session, and hand over session leadership."
+            },
+            {
+              "slug": "gateway",
+              "title": "Connect to a gateway",
+              "description": "Add a self-hosted gateway to Chan Desktop, sign in, open and share devservers, and reach it through WireGuard."
+            }
+          ]
+        },
+        {
+          "title": "Reference",
+          "pages": [
+            {
+              "slug": "shortcuts",
+              "title": "Keyboard shortcuts",
+              "description": "Every default key on macOS, Windows, Linux and in a browser, and how to change one."
+            },
+            {
+              "slug": "commands",
+              "title": "Commands",
+              "description": "Every chan command and subcommand, the chan serve flags no other page covers, and the other names of the chan binary."
+            },
+            {
+              "slug": "troubleshooting",
+              "title": "Troubleshooting",
+              "description": "What a message or a stuck window means, its likely cause and its fix: Chan Desktop, devservers, cs, chan serve, tmux and Linux defaults."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gateway",
+      "label": "Gateway",
+      "title": "Chan gateway",
+      "base": "/gateway/",
+      "source": "pages/gateway-docs",
+      "groups": [
+        {
+          "title": "Set up",
+          "pages": [
+            {
+              "slug": "plan",
+              "title": "Plan and prerequisites",
+              "description": "What a gateway runs, and the server, DNS records, certificate and OAuth app it needs before you install."
+            },
+            {
+              "slug": "install",
+              "title": "Install",
+              "description": "Create the gateway's Postgres database and install the service packages on an Ubuntu server."
+            },
+            {
+              "slug": "configure",
+              "title": "Configure",
+              "description": "Run the setup script, apply the database schema, and start the gateway services."
+            },
+            {
+              "slug": "edge",
+              "title": "The edge proxy",
+              "description": "Put nginx in front of the gateway to terminate TLS and route sign-in, tunnels and devserver pages."
+            }
+          ]
+        },
+        {
+          "title": "Use",
+          "pages": [
+            {
+              "slug": "accounts",
+              "title": "Accounts and sign-in",
+              "description": "Let yourself in, set your username, and choose who else may sign in to the gateway."
+            },
+            {
+              "slug": "publish",
+              "title": "Publish a devserver",
+              "description": "Dial a devserver in with an access token, open it in a browser or Chan Desktop, and share it."
+            },
+            {
+              "slug": "wireguard",
+              "title": "WireGuard",
+              "description": "Let Chan Desktop reach the proxy nodes through WireGuard, with keys the gateway enrolls at sign-in."
+            }
+          ]
+        },
+        {
+          "title": "Run",
+          "pages": [
+            {
+              "slug": "operate",
+              "title": "Operate",
+              "description": "Run the gateway day to day: the admin CLI, more proxy nodes, upgrades, health checks and logs."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

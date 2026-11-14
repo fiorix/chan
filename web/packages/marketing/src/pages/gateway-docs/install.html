@@ -1,0 +1,46 @@
+<section class="manual-block" id="install">
+  <h2><a class="heading-anchor" href="#install">Database and packages</a></h2>
+  <ol class="doc-steps">
+    <li>
+      <h3>Install the system packages</h3>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>sudo apt install nginx postgresql git</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Create the database and its owner</h3>
+      <p>The setup script uses the owner to create a restricted role for each service, which takes a superuser. Keep the password for <a href="/gateway/configure/">Configure</a>.</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>sudo -u postgres createuser --superuser --pwprompt chan
+sudo -u postgres createdb --owner=chan --template=template0 --locale=C.UTF-8 chan_gateway</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Install the gateway packages</h3>
+      <p>Download this release's packages from the <a href="/install/#server">install page</a> or with the GitHub CLI, and install the five services. On an ARM server, use <code>arm64</code> in place of <code>amd64</code>.</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>gh release download v{{version}} --repo fiorix/chan --pattern 'chan-gateway-*_amd64.deb'
+sudo apt install ./chan-gateway-profile_*.deb ./chan-gateway-identity_*.deb \
+  ./chan-gateway-devserver-control_*.deb ./chan-gateway-devserver-proxy_*.deb \
+  ./chan-gateway-admin_*.deb</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+  </ol>
+  <p>Each service gets its own system user and a systemd unit, installed but not started. All gateway services run the same release: the profile package requires the identity package of its own version.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The database needs a UTF-8 locale: profile folds email addresses with PostgreSQL's <code>lower()</code>, which folds only ASCII under a <code>C</code> or <code>POSIX</code> locale.</li>
+      <li>Each package ships its own env file under <code>/etc/chan-gateway/</code>, which the setup script fills in.</li>
+      <li>The identity package also installs <code>chan-gateway-migrate</code>, the one-shot unit that applies the database schema.</li>
+      <li>The sixth package, <code>chan-gateway-wireguard-agent</code>, goes on each proxy node that offers WireGuard. See <a href="/gateway/wireguard/">WireGuard</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/configure/"><strong>Configure</strong><span>Generate the credentials and start the services.</span></a>
+  </div>
+</section>

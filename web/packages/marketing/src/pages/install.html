@@ -34,7 +34,7 @@
       </div>
     </div>
     <p class="minor">If an update's published macOS minimum is above the version running on your Mac, the updater refuses it and keeps the installed app. Update macOS before installing that update.</p>
-    <p class="minor">Finder lists Chan in a Markdown file's Open With menu, and it can be made the <a href="/manual/install/#open-from-finder">default app for Markdown files</a>.</p>
+    <p class="minor">Finder lists Chan in a Markdown file's Open With menu, and it can be made the <a href="/manual/standalone/#open-from-finder">default app for Markdown files</a>.</p>
   </div>
 
   <div class="download-group">
@@ -57,7 +57,7 @@
       </div>
     </div>
     <h4 class="package-heading">Distribution packages</h4>
-    <p class="minor">Install <code>chan-desktop</code>, or <code>chan-desktop-bin</code> on Arch. It includes the desktop app and the <code>chan</code> and <code>cs</code> commands, and can be your <a href="/manual/install/#default-terminal">default terminal</a> through xdg-terminal-exec.</p>
+    <p class="minor">Install <code>chan-desktop</code>, or <code>chan-desktop-bin</code> on Arch. It includes the desktop app and the <code>chan</code> and <code>cs</code> commands, and can be your <a href="/manual/standalone/#default-terminal">default terminal</a> through xdg-terminal-exec.</p>
     <div class="package-grid">
       <article class="package-card">
         <h4>Nix</h4>
@@ -96,6 +96,25 @@ sudo dnf install chan-desktop</b></code>
         <p class="minor">On Omarchy, use <code>yay -S chan-desktop-bin</code>. To build from source instead, install <code>chan-desktop</code>. Either one replaces the other, and the headless <code>chan</code> package, when installed.</p>
       </article>
     </div>
+  </div>
+  <div class="download-group" id="freebsd-desktop">
+    <h3>FreeBSD <span class="group-note">from source</span></h3>
+    <p class="minor">Chan Desktop builds from source on FreeBSD; there is no package to download. Install the toolkit and the build tools:</p>
+    <div class="command-copy" data-copy-block>
+      <code><span>#</span><b data-copy-value>pkg install git rust npm gmake pkgconf webkit2-gtk_41</b></code>
+      {{copyButton}}
+    </div>
+    <p class="minor">Then, as your user, build the web bundles and the desktop from a chan checkout:</p>
+    <div class="command-copy" data-copy-block>
+      <code><span>$</span><b data-copy-value>git clone https://github.com/fiorix/chan &amp;&amp; cd chan</b></code>
+      {{copyButton}}
+    </div>
+    <div class="command-copy" data-copy-block>
+      <code><span>$</span><b data-copy-value>gmake web &amp;&amp; cargo build --release -p chan-desktop</b></code>
+      {{copyButton}}
+    </div>
+    <p class="minor">The web bundles' build tools ship native code for FreeBSD on amd64 only. On arm64, run <code>make web</code> in a checkout on a Linux or macOS machine, copy its <code>web/dist</code> and <code>web-launcher/dist</code> into the FreeBSD checkout, and run only the <code>cargo build</code>.</p>
+    <p class="minor">Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
   </div>
 </section>
 

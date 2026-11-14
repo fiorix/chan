@@ -1,0 +1,160 @@
+<section class="manual-block" id="symptoms">
+  <h2><a class="heading-anchor" href="#symptoms">Find the symptom</a></h2>
+  <p>Messages are quoted as chan shows them, or as they begin. Upper-case words such as PATH stand for your own values.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>You see</th><th>Likely cause</th><th>Fix</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Starting Chan Desktop again opens no second copy</td><td>One copy runs per user account. The running one comes forward instead.</td><td><a href="#desktop">Chan Desktop</a></td></tr>
+        <tr><td><strong>Chan is not responding</strong></td><td>A running copy holds the app and does not answer.</td><td><a href="#desktop">Chan Desktop</a></td></tr>
+        <tr><td><strong>Chan is still shutting down</strong></td><td>A copy that is quitting has not exited after 20 seconds.</td><td><a href="#desktop">Chan Desktop</a></td></tr>
+        <tr><td>A window you hid is nowhere on screen</td><td>Hidden windows keep running, listed on the Computers screen.</td><td><a href="#windows">Windows</a></td></tr>
+        <tr><td>Close tab or Close window flips a pane and flashes its A/B button</td><td>The pane is empty on this side, and its other side holds tabs.</td><td><a href="#windows">Windows</a></td></tr>
+        <tr><td>A browser tab covered by <strong>hidden by the session leader</strong> or <strong>closed by the session leader</strong></td><td>The session leader's page hid or closed that window.</td><td><a href="#windows">Windows</a></td></tr>
+        <tr><td>A browser tab covered by <strong>client session detached</strong></td><td><code>cs session detach</code> disconnected that client.</td><td><a href="/manual/collaboration/#client-sessions">Collaboration</a></td></tr>
+        <tr><td>Dimmed window buttons in a browser: <strong>The session leader manages this workspace's windows</strong></td><td>This page is a follower.</td><td><a href="/manual/collaboration/#leadership">Collaboration</a></td></tr>
+        <tr><td><strong>Open window</strong> opens nothing in a browser</td><td>The browser blocked the pop-up.</td><td><a href="/manual/browser/#hide">Allow pop-ups</a></td></tr>
+        <tr><td>A devserver's windows show <code>reconnecting to the chan server</code></td><td>The connection dropped while the connect script still runs.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td>The devserver's windows close, and its control terminal ends with <code>process exited (N); press Ctrl+D to close this tab</code></td><td>The connect script failed, as ssh does when the network goes.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td>Connect is dimmed: <strong>Close the control terminal to reconnect</strong></td><td>The dead control terminal of the last connection is still open.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td>A devserver's icon turns red: <strong>Connection lost</strong></td><td>Its window feed went silent, as after the computer sleeps, or its script exited.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td><code>devserver HOST:PORT did not come up in time</code></td><td>Nothing answered at the Address for about 30 seconds.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td><code>devserver speaks management protocol N but this desktop speaks M; update whichever is older</code></td><td>Chan Desktop and the devserver speak different management protocols.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td>After <code>chan devserver rotate-token</code>, a browser tab, or a devserver added with a token in its Address, no longer connects</td><td>The devserver dropped the old token at once.</td><td><a href="#devserver">Devserver</a></td></tr>
+        <tr><td><code>not running inside a chan session; this needs $CHAN_WINDOW_ID</code>, or <code>$CHAN_CONTROL_SOCKET</code></td><td>The shell is not a chan terminal, such as an ssh session.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>the chan window or server that spawned this terminal is no longer running</code></td><td>The window or server that started the terminal has exited, as after a restart.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>this chan terminal has no CHAN_CONTROL_SOCKET</code></td><td>Its server started without a control socket.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>cs NAME is only available in a workspace window; this is a standalone terminal.</code></td><td>The command needs a workspace.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>no live terminal session matched</code></td><td>No terminal has that <code>--tab-name</code> or <code>--tab-group</code>.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>no reply from the window (is it open in a browser?)</code></td><td>The window did not answer in 5 seconds, as when its browser tab is closed.</td><td><a href="#cs">cs</a></td></tr>
+        <tr><td><code>error: workspace 'PATH' is inside a Git repository at 'ROOT'.</code>, or Mercurial or Subversion</td><td>chan serves a repository from its root.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>the workspace is held by another process</code>, or <code>This workspace is open in another chan process. Quit it and try again.</code></td><td>Another chan process serves the workspace.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td>A lock in place of a workspace's power button: <strong>Workspace is open in another Chan process</strong></td><td>Another chan process serves the workspace.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>port 8787 is already in use</code></td><td>Another process, perhaps your devserver, listens on the default port.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>refusing to close PATH: N live terminal(s)</code></td><td>Chan Desktop or a devserver serves the workspace, and its terminals run.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>workspace is still releasing; retry</code>, exit status 75</td><td>The workspace is off and its cleanup still runs.</td><td><a href="/manual/workspaces/#list">Run it again later</a></td></tr>
+        <tr><td><code>--no-settings is enforced only by a server this command binds</code></td><td>The serve would hand the workspace to Chan Desktop or a devserver.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>multiple local devservers are live and no unique target was found</code></td><td>Several of your devservers run.</td><td><a href="#serve">chan serve</a></td></tr>
+        <tr><td><code>tmux -CC</code> adds no card to the Computers screen</td><td>tmux control mode is off, as it is by default.</td><td><a href="#tmux">tmux</a></td></tr>
+        <tr><td><code>[chan] tmux X.Y is older than 3.2; detached</code></td><td>chan needs tmux 3.2 or newer.</td><td><a href="#tmux">tmux</a></td></tr>
+        <tr><td><code>[chan] tmux control mode denied: no answer</code></td><td>Nobody answered the banner in 60 seconds.</td><td><a href="#tmux">tmux</a></td></tr>
+        <tr><td><code>xdg-terminal-exec --print-id</code> does not print <code>chan-term.desktop</code></td><td>Another list or entry comes first.</td><td><a href="#default-apps">Default apps</a></td></tr>
+        <tr><td><code>xdg-open</code> opens Markdown files or folders in another app</td><td>Another default holds the type.</td><td><a href="#default-apps">Default apps</a></td></tr>
+        <tr><td><code>chan-desktop is not running; start it and run chan-files again</code>, or <code>chan-edit</code> or <code>chan-term</code></td><td>The names of the <code>chan</code> command-line packages cannot start Chan Desktop.</td><td><a href="#default-apps">Default apps</a></td></tr>
+        <tr><td><code>this session has no display</code></td><td>The command ran over SSH or with no display.</td><td><a href="#default-apps">Default apps</a></td></tr>
+        <tr><td>The terminal's find bar reads <code>? of N</code></td><td>No match is selected, as after a resize or heavy output.</td><td><a href="/manual/terminal/#find">Find</a></td></tr>
+        <tr><td>Files dragged from another app onto the file browser do nothing</td><td>The file browser takes no files from outside.</td><td><a href="/manual/files/#transfers">Use Upload</a></td></tr>
+        <tr><td><strong>External edit detected</strong></td><td>Another program changed the open file.</td><td><a href="/manual/editor/#external-edit">Editor</a></td></tr>
+        <tr><td><strong>File moved or deleted</strong></td><td>The open file went away.</td><td><a href="/manual/editor/#moved-or-deleted">Editor</a></td></tr>
+        <tr><td>On Windows, a <kbd>Ctrl+Alt</kbd> shortcut types a character</td><td>Your layout's AltGr, which is <kbd>Ctrl+Alt</kbd>, types one on that key.</td><td><a href="/manual/shortcuts/#customize">Assign another key</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="desktop">
+  <h2><a class="heading-anchor" href="#desktop">Chan Desktop does not open</a></h2>
+  <ul>
+    <li>A second start brings the running copy forward: its last focused window, or a new standalone terminal when none shows.</li>
+    <li><strong>Chan is not responding</strong>: quit the running copy, or end its <code>chan-desktop</code> process (Force Quit on macOS, Task Manager on Windows), then start again.</li>
+    <li><strong>Chan is still shutting down</strong>: wait for that copy to exit, or end its process, then start again.</li>
+  </ul>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>While the running copy is still starting, a second start opens nothing more: its windows are on their way.</li>
+      <li>Each Windows account runs a copy of its own.</li>
+      <li>On Windows a start waits up to 30 seconds for a copy that is still starting.</li>
+      <li>Started from a terminal, a start that fails prints the reason there instead of showing a dialog, and exits with status 1.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="windows">
+  <h2><a class="heading-anchor" href="#windows">Windows you cannot find or close</a></h2>
+  <ul>
+    <li>Show a hidden window from its row on the <a href="/manual/computers/#windows">Computers screen</a>, with <kbd>h</kbd> or its eye.</li>
+    <li>With every window hidden, start Chan Desktop again, or click its Dock icon on macOS: a standalone terminal opens.</li>
+    <li>A pane that flips instead of closing has tabs on its other side: close those too.</li>
+    <li>Only the session leader shows a window it hid or closed. Ask for leadership with <a href="/manual/collaboration/#leadership"><code>cs session handover</code></a>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="devserver">
+  <h2><a class="heading-anchor" href="#devserver">Devserver connections</a></h2>
+  <ul>
+    <li><strong>Reconnecting</strong>: wait, or press <strong>Reconnect</strong> to run the script again, or <strong>Abandon</strong>.</li>
+    <li><strong>Process exited</strong>: read why in the control terminal, close it with <kbd>Ctrl+D</kbd>, and connect again.</li>
+    <li><strong>Connection lost</strong>: press <kbd>o</kbd> on the card to disconnect, then again to connect.</li>
+    <li><strong>Did not come up in time</strong>: check that the Address matches the local end of the script's tunnel, as in the <a href="/manual/connect/#recipes">recipes</a>.</li>
+    <li><strong>Protocol or token</strong>: update the older side. After <code>rotate-token</code>, open the URL <code>chan devserver status</code> prints, or paste it into the devserver's Address.</li>
+  </ul>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>An ssh tunnel dies when the laptop sleeps or the network changes; Eternal Terminal reconnects across both.</li>
+      <li>To update a devserver, run <code>chan upgrade</code>, then <code>chan devserver restart</code>, on its machine.</li>
+      <li>A connected devserver's settings are read-only: disconnect before you edit its Address.</li>
+      <li>A devserver with no token in its Address reads the new one from its connect script at the next connect.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="cs">
+  <h2><a class="heading-anchor" href="#cs">cs refuses</a></h2>
+  <ul>
+    <li>Run <code>cs</code> in a chan terminal. Over ssh only <code>cs terminal status</code> and <code>cs dump-skill</code> work.</li>
+    <li><strong>No longer running</strong> or <strong>no CHAN_CONTROL_SOCKET</strong>: open a new terminal. If that fails too, the server's start-up log says why.</li>
+    <li><strong>Standalone terminal</strong>: open the directory with <code>chan open PATH</code> and run the command in that window.</li>
+    <li><strong>No match</strong>: <code>cs terminal list</code> shows every terminal's name and group.</li>
+    <li><strong>No reply</strong>: show the window from Computers, or name another with <code>--window</code>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="serve">
+  <h2><a class="heading-anchor" href="#serve">chan serve and chan open</a></h2>
+  <ul>
+    <li><strong>Inside a repository</strong>: serve the root the message names, or add <code>--here</code>.</li>
+    <li><strong>Held by another process</strong>: <code>chan ps</code> names what serves it, and <code>chan close PATH</code> stops it. When your devserver holds it, <code>chan serve --devserver PATH</code> registers it there.</li>
+    <li><strong>Port in use</strong>: add <code>--port 9000</code>, or <code>--devserver=8787</code> when your devserver holds the port.</li>
+    <li><strong>Live terminals</strong>: close them first. <strong><code>--no-settings</code></strong>: add <code>--standalone</code>. <strong>Several devservers</strong>: add <code>--devserver=PORT</code>.</li>
+  </ul>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A foreground <code>chan devserver run</code> shares <code>~/.chan</code> with Chan Desktop, so a workspace Chan Desktop serves shows there as Locked. Give it its own <code>CHAN_HOME</code>.</li>
+      <li>The repository refusal exits with status 70 and prints both commands to run.</li>
+      <li>A <code>chan serve</code> in the foreground also stops with <kbd>Ctrl+C</kbd>.</li>
+      <li>Closing a workspace with live terminals has no override.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="tmux">
+  <h2><a class="heading-anchor" href="#tmux">tmux control mode</a></h2>
+  <ul>
+    <li>Turn it on in <strong>Settings → Terminal → tmux control mode (tmux -CC)</strong>, or with <code>chan config set terminal.tmux.enabled true</code>.</li>
+    <li>Use tmux 3.2 or newer where <code>tmux -CC</code> runs.</li>
+    <li>Answer the banner within 60 seconds, or trust the program in front, such as <code>ssh</code>, with <a href="/manual/tmux/#setup"><code>terminal.tmux.trust</code></a>.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="default-apps">
+  <h2><a class="heading-anchor" href="#default-apps">Default apps on Linux</a></h2>
+  <ul>
+    <li>A list named for your desktop, such as <code>~/.config/hyprland-xdg-terminals.list</code>, comes before <code>xdg-terminals.list</code>.</li>
+    <li>The AppImage cannot be the default terminal: install the Arch, Ubuntu, Fedora or Nix package.</li>
+    <li><code>xdg-mime query default text/markdown</code> names the app in effect, and <code>xdg-mime default</code> changes it.</li>
+    <li>The <code>chan</code> package's <code>chan-term</code>, <code>chan-files</code> and <code>chan-edit</code> need Chan Desktop running and a display.</li>
+  </ul>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>xdg-utils 1.1 reads only <code>~/.config/mimeapps.list</code>.</li>
+      <li>With <code>CHAN_NO_DESKTOP_HANDOFF</code> set, these commands open nothing and say so; unset it.</li>
+      <li>The full setup is in <a href="/manual/standalone/#default-terminal">Default terminal</a> and <a href="/manual/standalone/#default-file-browser">File browser and Markdown editor</a>.</li>
+    </ul>
+  </details>
+</section>

@@ -1,0 +1,198 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="standalone-window" data-shot-kind="clip">clip to capture<small>a standalone terminal window: cs open ~ opens the home directory in a file browser tab beside the shell, then a double click on a .md file opens it in the editor</small></div>
+  <figcaption>A standalone terminal with the machine's files and an editor beside the shell.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Open a shell in a window with no workspace behind it.</li>
+    <li>Browse and edit any file on the machine beside your terminals.</li>
+    <li>Open a directory or a file in Chan Desktop from any shell.</li>
+    <li>Make Chan Desktop your default terminal, file browser or Markdown editor on Linux.</li>
+    <li>Open Markdown files in Chan Desktop from Finder.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="what">
+  <h2><a class="heading-anchor" href="#what">What a standalone terminal is</a></h2>
+  <p>A standalone terminal is a window with no workspace behind it, titled <code>Terminal Window 1</code>, <code>Terminal Window 2</code> and so on. Its shell starts in your home directory. Open one with <strong>New terminal</strong> on the <a href="/manual/computers/">Computers screen</a> or <strong>New standalone terminal</strong> in the command launcher.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th></th><th>Standalone terminal</th><th>Workspace window</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Terminals, panes, tabs and <code>cs</code></td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>File browser and editor</td><td>Over the whole machine, starting at your home directory</td><td>Over the workspace</td></tr>
+        <tr><td>Dashboard</td><td>Metrics and About</td><td>Metrics, Workspace, Search and About</td></tr>
+        <tr><td>Search, graph and agent teams</td><td>No</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>On Windows a standalone terminal has terminals only, with no file browser or editor.</li>
+      <li>The file browser never deletes or moves <code>/</code> or your home directory, deletes only files and empty directories, and lists symlinks without opening, copying, moving or deleting them.</li>
+      <li><code>cs search</code>, <code>cs graph</code>, <code>cs export</code>, <code>cs terminal team</code> and <code>cs session</code> handover and takeover say they need a workspace window. To open a directory as a workspace, run <code>chan serve PATH</code>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="commands">
+  <h2><a class="heading-anchor" href="#commands">chan-term, chan-files and chan-edit</a></h2>
+  <p>Three commands open Chan Desktop windows from a shell. They are names of the one <code>chan</code> binary, which Chan Desktop installs beside <code>chan</code> and <code>cs</code>; on Windows it installs only <code>chan</code> and <code>cs</code>.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>Opens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan-term</code></td><td>A terminal window: your shell, here or in <code>--dir</code>, or the command after <code>-e</code> in a window of its own. See <a href="/manual/standalone/#default-terminal">Default terminal on Linux</a>.</td></tr>
+        <tr><td><code>chan-files ~/notes</code></td><td>The directory in a standalone terminal window's file browser.</td></tr>
+        <tr><td><code>chan-edit notes.md</code></td><td>The file in a standalone terminal window's editor. A missing text file is created empty.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Both follow <code>cs open</code>'s rule: a directory opens in the file browser, a text file in the editor, and any other file is shown in its directory. With no path they open the current directory.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Run from</th><th>The path opens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A chan terminal</td><td>Where <code>cs open</code> sends it: on the desktop for a desktop terminal, on the devserver for a devserver's terminal.</td></tr>
+        <tr><td>Any other shell, or a desktop entry</td><td>In a standalone terminal window of the running Chan Desktop, which Chan Desktop's own copies start when it is not running.</td></tr>
+        <tr><td>An SSH login, a session with no display, or with <code>CHAN_NO_DESKTOP_HANDOFF</code> set</td><td>Nowhere. The command says why and exits 1.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A path that cannot be opened is reported, the rest still open, and the exit status is 1.</li>
+      <li>The running Chan Desktop has five seconds to answer each path. A path it leaves unanswered is reported, and the paths after it are not sent.</li>
+      <li>A <code>file://</code> URI is read as the path it names.</li>
+      <li>The <code>chan</code> command-line packages carry these names too, but cannot start Chan Desktop: with none running, <code>chan-files</code> and <code>chan-edit</code> say so and exit 1.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="default-terminal">
+  <h2><a class="heading-anchor" href="#default-terminal">Default terminal on Linux</a></h2>
+  <p>Linux desktops that open terminals through <a href="https://github.com/Vladimir-csp/xdg-terminal-exec">xdg-terminal-exec</a>, such as Omarchy, can open them in Chan Desktop: the terminal key binding, TUIs and installer scripts alike. The Arch, Ubuntu, Fedora and Nix packages install the <code>chan-term.desktop</code> entry this needs.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Put Chan Desktop first</h3>
+      <p>xdg-terminal-exec runs the first valid entry in <code>~/.config/xdg-terminals.list</code>. This replaces the list; add other terminals on the lines below it to keep a fallback.</p>
+      <div class="command-copy" data-copy-block>
+        <code><span>$</span><b data-copy-value>echo chan-term.desktop &gt; ~/.config/xdg-terminals.list</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Check the choice</h3>
+      <p>This prints <code>chan-term.desktop</code>:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-terminal-exec --print-id</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Open a shell, then a program</h3>
+      <p>A shell in your home directory, then <code>top</code> in a window of its own:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-terminal-exec --dir="$HOME"</b></code>{{copyButton}}</div>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-terminal-exec --app-id=TUI.float -e top</b></code>{{copyButton}}</div>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>chan-term</code> launch</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>No command, like Omarchy's Super+Return</td><td>Your shell, in <code>--dir</code> or the current directory, in a new terminal window of the running Chan Desktop. The window is not restored at the next launch. With Chan Desktop not running, the launch starts it.</td></tr>
+        <tr><td><code>-e CMD ARGS...</code> or <code>-- CMD ARGS...</code></td><td>The command in a window and process of its own, apart from a running Chan Desktop. <code>chan-term</code> exits with the command's status, or with 127 and no window when the command is not on your <code>PATH</code>.</td></tr>
+        <tr><td><code>--hold</code></td><td>Keeps that window open after the command exits, until you close it.</td></tr>
+        <tr><td><code>--app-id=ID</code></td><td>Sets the window's Wayland app id, or its X11 class, for compositor rules; Omarchy floats <code>TUI.float</code>. The launch gets a process of its own.</td></tr>
+        <tr><td><code>--title=TITLE</code></td><td>Sets a fixed window title. The launch gets a process of its own.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The entry stays out of the application menu.</li>
+      <li>The AppImage carries the entry only inside the image, where xdg-terminal-exec does not look, so the AppImage cannot be chosen.</li>
+      <li>A list named for your desktop, such as <code>~/.config/hyprland-xdg-terminals.list</code>, takes precedence when it exists.</li>
+      <li>Over SSH, or with <code>CHAN_NO_DESKTOP_HANDOFF</code> set, a launch with no command opens nothing and says why.</li>
+      <li>A <code>--dir</code> that is not a directory falls back to your home directory.</li>
+      <li>The options also work directly: <code>chan-term [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]</code>, and <code>chan-term --help</code> describes them.</li>
+      <li>The <code>chan-term</code> of the <code>chan</code> command-line packages cannot open a window of its own: it opens your shell in the running Chan Desktop, starts none, and refuses a command, <code>--hold</code>, <code>--app-id</code> and <code>--title</code>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="default-file-browser">
+  <h2><a class="heading-anchor" href="#default-file-browser">File browser and Markdown editor on Linux</a></h2>
+  <p>Chan Desktop can be what <code>xdg-open</code> and your file manager's Open With use for a directory, opened in a standalone terminal window's file browser, or a Markdown file, opened in its editor. The Arch, Ubuntu, Fedora and Nix packages install <code>chan-files.desktop</code> and <code>chan-edit.desktop</code>, which set no default by themselves.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Choose Chan Desktop</h3>
+      <p>As the Markdown editor, the file browser, or both:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-mime default chan-edit.desktop text/markdown</b></code>{{copyButton}}</div>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-mime default chan-files.desktop inode/directory</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Check the choice</h3>
+      <p>This prints <code>chan-edit.desktop</code>. Then <code>xdg-open notes.md</code> opens the note in Chan Desktop, starting it when it is not running.</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>xdg-mime query default text/markdown</b></code>{{copyButton}}</div>
+    </li>
+  </ol>
+  <p>To go back, run <code>xdg-mime default</code> with the entry you used before.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The entries stay out of the application menu.</li>
+      <li>A desktop that already names an application for the exact type keeps it until you choose another.</li>
+      <li>Where nothing names one, the first registered application is used, and that can be Chan Desktop. GNOME's text editors declare plain text, which Markdown is a kind of, so on a stock GNOME a <code>.md</code> file opens in Chan Desktop once it is installed.</li>
+      <li>A window manager whose <code>xdg-open</code> finds no default for directories can pick Chan Desktop as the file browser.</li>
+      <li>xdg-utils 1.1 reads only <code>~/.config/mimeapps.list</code>; xdg-utils 1.2 also reads the system defaults lists.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="open-from-finder">
+  <h2><a class="heading-anchor" href="#open-from-finder">Open Markdown files from Finder</a></h2>
+  <p>On macOS, Chan Desktop is listed as an editor of Markdown files (<code>.md</code> and <code>.markdown</code>) without becoming the app that opens them.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="standalone-open-with" data-shot-kind="mac-still">screenshot to capture<small>Finder, a Control-click on notes.md, the Open With submenu with Chan in it</small></div>
+  </figure>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>Do</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Open one file in Chan Desktop</td><td>Control-click it in Finder and choose <strong>Open With → Chan</strong>.</td></tr>
+        <tr><td>Open every Markdown file in Chan Desktop</td><td>Select one in Finder, choose <strong>File → Get Info</strong> (<kbd>Cmd+I</kbd>), pick <strong>Chan</strong> under <strong>Open with</strong>, and click <strong>Change All...</strong>.</td></tr>
+        <tr><td>Open one from Terminal</td><td><code>open notes.md</code> once Chan Desktop is the default; <code>open -a Chan notes.md</code> or <code>chan-edit notes.md</code> whatever the default is.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The file opens as <code>cs open notes.md</code> opens it: in the editor of a standalone terminal window, one already open or a new one, brought to the front.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>A file opened while Chan Desktop is not running starts it, and opens once the windows of the last session are back, in a window of its own beside them.</li>
+      <li>Several files opened at once open in one window.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/files/"><strong>File browser</strong><span>Browse, transfer and inspect files.</span></a>
+    <a class="next-card" href="/manual/editor/"><strong>Editor</strong><span>Edit and preview Markdown, with diagrams and slides.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>Drive the window a terminal runs in from its shell.</span></a>
+  </div>
+</section>

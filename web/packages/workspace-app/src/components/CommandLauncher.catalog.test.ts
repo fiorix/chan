@@ -331,7 +331,7 @@ describe("browsing", () => {
     ]);
     // The list ends with the ways into this machine's tree, not the tree.
     expect(rows().slice(-3).map((r) => [r.textContent, r.dataset.kind, r.dataset.breadcrumb])).toEqual([
-      ["New terminal window", "action", "Computers"],
+      ["New standalone terminal", "action", "Computers"],
       ["Workspaces", "branch", "Computers"],
       ["Windows", "branch", "Computers"],
     ]);
@@ -341,7 +341,7 @@ describe("browsing", () => {
   test("a type this machine holds none of has no row among the ways in", async () => {
     // The snapshot lists a workspace and no window.
     await open();
-    expect(computerRows().map((r) => r.textContent)).toEqual(["New terminal window", "Workspaces"]);
+    expect(computerRows().map((r) => r.textContent)).toEqual(["New standalone terminal", "Workspaces"]);
   });
 
   test("no way in is listed before the library answers, and none inside a scope", async () => {
@@ -395,7 +395,7 @@ describe("browsing", () => {
     await click("Windows");
     expect(launcherDraft.path).toEqual(["type:windows"]);
     expect(crumbs()).toBe("Computers > Windows");
-    expect(outline()).toEqual(["This machine: Window 1", "New: New terminal window"]);
+    expect(outline()).toEqual(["This machine: Window 1", "New: New standalone terminal"]);
     expect(row("Window 1").dataset).toMatchObject({ subtitle: "Project A", expandable: "true" });
   });
 
@@ -414,7 +414,7 @@ describe("browsing", () => {
     await scope("computers");
     expect(rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`)).toEqual([
       "Workspaces: Project A",
-      "New: New terminal window",
+      "New: New standalone terminal",
     ]);
     expect(crumbs()).toBe("Computers");
   });
@@ -424,14 +424,14 @@ describe("browsing", () => {
     expect(titles().filter((title) => title.startsWith("Quux probe"))).toEqual([]);
   });
 
-  test("New terminal window runs at once, on this machine", async () => {
+  test("New standalone terminal runs at once, on this machine", async () => {
     vi.spyOn(window, "open").mockImplementation(
       () => ({ close: vi.fn(), focus: vi.fn(), closed: false, document: document.implementation.createHTMLDocument(), location: { href: "about:blank" } }) as unknown as Window,
     );
     await open();
-    expect(row("New terminal window").dataset.kind).toBe("action");
-    expect(row("New terminal window").dataset.breadcrumb).toBe("Computers");
-    await click("New terminal window");
+    expect(row("New standalone terminal").dataset.kind).toBe("action");
+    expect(row("New standalone terminal").dataset.breadcrumb).toBe("Computers");
+    await click("New standalone terminal");
     expect(fake.run).toHaveBeenCalledExactlyOnceWith({ action: "new_terminal" });
   });
 
@@ -459,7 +459,7 @@ describe("browsing", () => {
     await click("This machine");
     expect(crumbs()).toBe("Computers > This machine");
     expect(rows().map((candidate) => `${candidate.dataset.section}: ${candidate.textContent}`)).toEqual([
-      "Actions: New terminal window",
+      "Actions: New standalone terminal",
       "Workspaces: Project A",
     ]);
   });
@@ -742,7 +742,7 @@ describe("a typed query", () => {
     expect(row("Reload window").dataset.section).toBe("");
     expect(row("Reload window").dataset.breadcrumb).toBe("Window");
     await type("terminal");
-    expect(titles()).toEqual(expect.arrayContaining(["New terminal", "Restart terminal", "New terminal window"]));
+    expect(titles()).toEqual(expect.arrayContaining(["New terminal", "Restart terminal", "New standalone terminal"]));
     expect(sections()).toEqual([""]);
   });
 });

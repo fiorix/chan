@@ -17,11 +17,76 @@
 })();
 
 (function () {
-  const nav = document.querySelector(".manual-nav ol");
+  // Keep the active page in view when the sidebar scrolls on its own.
+  const nav = document.querySelector(".manual-nav");
   const current = nav?.querySelector('[aria-current="page"]');
-  if (!nav || !current || nav.scrollWidth <= nav.clientWidth) return;
-  // Keep the active chapter visible in the mobile navigation strip.
-  nav.scrollLeft = current.getBoundingClientRect().left - nav.getBoundingClientRect().left - 12;
+  if (!nav || !current || nav.scrollHeight <= nav.clientHeight) return;
+  nav.scrollTop = current.offsetTop - nav.clientHeight / 2;
+})();
+
+(function () {
+  // Mark the section being read in the "On this page" index.
+  const links = Array.from(document.querySelectorAll(".manual-toc a[href^='#']"));
+  if (links.length === 0 || !("IntersectionObserver" in window)) return;
+  const byId = new Map(links.map((link) => [decodeURIComponent(link.hash.slice(1)), link]));
+  const targets = Array.from(byId.keys(), (id) => document.getElementById(id)).filter(Boolean);
+  const visible = new Set();
+  const mark = () => {
+    // The section nearest the top of the viewport wins; above the first one
+    // nothing is marked, past the last one it stays.
+    const passed = targets.filter((el) => el.getBoundingClientRect().top < window.innerHeight * 0.3);
+    const active = targets.find((el) => visible.has(el)) ?? passed[passed.length - 1];
+    links.forEach((link) => link.classList.toggle("active", !!active && byId.get(active.id) === link));
+  };
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => (entry.isIntersecting ? visible.add(entry.target) : visible.delete(entry.target)));
+      mark();
+    },
+    { rootMargin: "0px 0px -70% 0px" },
+  );
+  targets.forEach((el) => observer.observe(el));
+})();
+
+(function () {
+  // A clip marked data-loop plays muted while it is in view and pauses when
+  // it leaves. Without JavaScript, or with reduced motion, it keeps its
+  // native controls and plays only when asked.
+  const clips = Array.from(document.querySelectorAll("video[data-loop]"));
+  if (clips.length === 0 || !("IntersectionObserver" in window)) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach(({ target, isIntersecting }) => {
+        if (isIntersecting && !target.dataset.paused) target.play().catch(() => {});
+        else target.pause();
+      });
+    },
+    { threshold: 0.6 },
+  );
+  clips.forEach((clip) => {
+    clip.muted = true;
+    clip.loop = true;
+    clip.playsInline = true;
+    clip.controls = false;
+    clip.tabIndex = 0;
+    const toggle = () => {
+      if (clip.paused) {
+        delete clip.dataset.paused;
+        clip.play().catch(() => {});
+      } else {
+        clip.dataset.paused = "true";
+        clip.pause();
+      }
+    };
+    clip.addEventListener("click", toggle);
+    clip.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggle();
+    });
+    observer.observe(clip);
+  });
 })();
 
 (function () {

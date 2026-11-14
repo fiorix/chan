@@ -241,7 +241,7 @@
         type="button"
         disabled={!canActOnTenant(w.prefix)}
         title={!canActOnTenant(w.prefix)
-          ? "Only the tenant leader can show or hide this window"
+          ? "Only the session leader can show or hide this window"
           : w.hidden
             ? "Show window"
             : "Hide window"}

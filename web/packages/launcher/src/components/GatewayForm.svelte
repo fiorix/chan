@@ -223,10 +223,11 @@
       onkeydown={onFieldKey} />
     </PrivateField>
     <span class="field-hint">
-      A wg-quick peer file, readable only by you (<code>chmod 600</code>). The gateway is then
-      reached through an in-process WireGuard tunnel; the file takes effect as soon as it is
-      saved, and changing the path restarts that gateway's tunnel. A generated WireGuard key
-      fills this field at sign-in.
+      A wg-quick peer file you write yourself, readable only by you (<code>chmod 600</code>).
+      The gateway is then reached through an in-process WireGuard tunnel; the file takes effect
+      as soon as it is saved, and changing the path restarts that gateway's tunnel. A generated
+      WireGuard key does not use this field: the sign-in that enrolls the key clears it, and
+      setting a file here replaces the enrollment.
     </span>
   </label>
 

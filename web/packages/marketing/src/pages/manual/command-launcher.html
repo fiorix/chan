@@ -1,0 +1,95 @@
+<figure class="inline-shot">
+  <img src="/assets/manual/command-launcher-terminal.png" alt="The command launcher with the Terminal scope selected, listing the active terminal's commands with their state and shortcuts" />
+  <figcaption>The Terminal scope lists the active terminal's commands. Captured in a sample workspace.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Run any command from the keyboard. Each row shows its shortcut, so the list also teaches them.</li>
+    <li>Search commands, settings, and windows at once, with words in any order: <code>dark</code> finds <strong>Theme: Dark</strong>.</li>
+    <li>Change a setting in place. An on/off row or an option applies at once and leaves the launcher open.</li>
+    <li>Reach any window on this machine or a devserver without opening the Computers screen.</li>
+    <li>See why a command cannot run where you are: it is listed last, dimmed, with the reason.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="open">
+  <h2><a class="heading-anchor" href="#open">Open it</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>From</th><th>How</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Keyboard, macOS desktop</td><td><kbd>Cmd+K</kbd></td></tr>
+        <tr><td>Keyboard, Windows, Linux, and web</td><td><kbd>Ctrl+Alt+K</kbd></td></tr>
+        <tr><td>Pane menu</td><td><strong>Command launcher</strong></td></tr>
+        <tr><td>Right-click menu</td><td><strong>Command launcher</strong>, on a terminal, an editor, an empty pane, or the empty stretch of a pane's tab strip</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The opening list is in sections: the commands you ran last, the active app's commands, then <strong>New tab</strong>, <strong>Tab</strong>, <strong>Pane</strong>, <strong>Window</strong>, <strong>Workspace</strong>, <strong>Settings</strong>, and <strong>Computers</strong>. Type to search all of them.</p>
+</section>
+
+<section class="manual-block" id="keys">
+  <h2><a class="heading-anchor" href="#keys">Keys</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Key</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Up</kbd> <kbd>Down</kbd></td><td>Move through the rows.</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>Run the selected row. An on/off row or an option applies in place; any other command closes the launcher.</td></tr>
+        <tr><td><kbd>Right</kbd></td><td>Open a row that holds more, such as a choice's options or a window's other actions.</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Go back one level, then close the launcher.</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Switch to the next scope.</td></tr>
+        <tr><td><kbd>?</kbd></td><td>On an empty search, show the full key list.</td></tr>
+        <tr><td>The launcher's shortcut</td><td>Close it from any level.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="scopes">
+  <h2><a class="heading-anchor" href="#scopes">Scopes</a></h2>
+  <p>Press <kbd>Tab</kbd>, or click a scope beside the search field, to see one part in full.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Scope</th><th>Lists</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Terminal, Editor, Files, Graph, or Dashboard</td><td>The active app's commands. This scope comes first and follows the tab you are in.</td></tr>
+        <tr><td>Pane</td><td>The apps a new tab can open, then tab and pane actions.</td></tr>
+        <tr><td>Window, Workspace</td><td>Actions on the window and on the workspace it shows.</td></tr>
+        <tr><td>Settings</td><td>Every setting under its section. An on/off setting or a choice changes in place; any other row opens Settings on that field.</td></tr>
+        <tr><td>Computers</td><td>Everything on the machine the window belongs to, this machine or a devserver: open a terminal window or a window of any of its workspaces, and focus, show, hide, or close any of its windows.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <img src="/assets/manual/command-launcher-workspace.png" alt="The command launcher with the Pane scope selected, listing New tab rows such as dashboard, draft, file browser, graph, and team above the Tab and Pane sections" loading="lazy" />
+    <figcaption>The Pane scope lists the apps a new tab can open, then tab and pane actions. Captured in a sample workspace.</figcaption>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>An on/off row such as <strong>Details</strong> shows its state.</li>
+      <li>In the Computers scope a workspace that is off is listed dimmed; turn it on from the Computers screen.</li>
+      <li>In Chan Desktop the Computers scope ends with <strong>All computers...</strong>, which shows the Computers screen.</li>
+      <li>A <code>tmux -CC</code> connection's windows are listed with the rest. Detach or end the connection from its card on the Computers screen.</li>
+      <li>The right-click menu of an empty pane, or of the empty stretch of a tab strip, also offers <strong>Reload window</strong> and, on the desktop, <strong>Open Inspector</strong>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/navigation/#panes"><strong>Panes, tabs, and sides</strong><span>Split a window and move between its panes.</span></a>
+    <a class="next-card" href="/manual/navigation/#shortcuts"><strong>Shortcuts</strong><span>See every binding and change the ones you want.</span></a>
+    <a class="next-card" href="/manual/computers/"><strong>Computers</strong><span>Every window on this machine and your devservers.</span></a>
+  </div>
+</section>

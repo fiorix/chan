@@ -1,18 +1,92 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="screensavers-lock" data-shot-kind="clip">clip to capture<small>Lock screen now from the command launcher; the Matrix lock covers the window while a terminal behind it keeps printing; a key shows the PIN card, the PIN and Enter unlock</small></div>
+  <figcaption>The screen lock covers a workspace window until you enter its PIN.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Lock a workspace window after a stretch without input, or at once.</li>
+    <li>Ask for a PIN to unlock it, or let a key or click unlock it.</li>
+    <li>Choose a Default or a Matrix lock screen.</li>
+    <li>Watch an animation in an empty workspace, and step through the animations from the keyboard.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="screen-lock">
   <h2><a class="heading-anchor" href="#screen-lock">Idle screen lock</a></h2>
-<p>Open <strong>Settings → This workspace</strong> to configure screen lock. Idle locking is off by default. When enabled, the default timeout is five minutes; choose the timeout, a Default or Matrix theme, and an optional PIN.</p>
-<p>The lock covers the workspace window while terminals keep running. With a PIN set, enter it to unlock. Without a PIN, dismiss the cover to return to the workspace. This is a workspace screen lock; use your operating system's lock to protect the rest of the computer.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Turn it on</h3>
+      <p>In <strong>Settings → This workspace → Screen lock</strong>, switch it <strong>On</strong>. It is off by default.</p>
+    </li>
+    <li>
+      <h3>Set the timeout</h3>
+      <p><strong>Inactivity timeout (seconds)</strong> is 300 by default, from 10 to 3600.</p>
+    </li>
+    <li>
+      <h3>Set a PIN, if you want one</h3>
+      <p><strong>Set PIN</strong> asks for it twice; <strong>Change PIN</strong> replaces it, and <strong>Clear PIN</strong> removes it.</p>
+    </li>
+    <li>
+      <h3>Choose a theme and try it</h3>
+      <p><strong>Theme</strong> is Default or Matrix. <strong>Test</strong> locks the window at once.</p>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>When</th><th>Then</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The window has no input for the timeout</td><td>It locks.</td></tr>
+        <tr><td>You run <strong>Lock screen now</strong> from the command launcher</td><td>It locks at once.</td></tr>
+        <tr><td>It is locked</td><td>The first key or click shows the lock card.</td></tr>
+        <tr><td>The card asks for a PIN</td><td>Type it and press <kbd>Enter</kbd> or <strong>Unlock</strong>. A wrong PIN shakes the card and clears it.</td></tr>
+        <tr><td>The workspace has no PIN</td><td>The next key or click unlocks it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <aside class="doc-note warning"><strong>The lock covers this window only.</strong> Terminals keep running behind it, and other windows and clients with the workspace's token still reach its sessions. Use your operating system's lock to protect the computer.</aside>
 </section>
 
 <section class="manual-block" id="empty-workspace">
   <h2><a class="heading-anchor" href="#empty-workspace">Animations in an empty workspace</a></h2>
-<p>When a workspace has a single pane and no tabs on either side, chan can display an animation in the empty pane. These animations accompany an empty workspace; the idle screen lock is configured separately.</p>
-<p>Visit <a href="/animations/">Workspace animations and credits</a> to try the animations, switch themes, and follow the original authors and references. The page uses the same animation components as the workspace and includes the Matrix screen-lock attribution.</p>
+  <p>A workspace window with one pane and no tabs on either side shows the chan mark, then an animation. Click the pane to give it the keyboard:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Key</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Right</kbd> <kbd>Left</kbd></td><td>Next or previous animation.</td></tr>
+        <tr><td><kbd>Up</kbd> <kbd>Down</kbd></td><td>Faster or slower.</td></tr>
+        <tr><td><kbd>?</kbd></td><td>A random animation.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><a href="/animations/">Workspace animations and credits</a> plays each animation, switches themes, and links to the original authors and references, including the Matrix screen lock's.</p>
   <figure class="inline-shot">
-    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/workspace-animation.jpg" aria-label="Animations in an empty Chan workspace.">
-      <source src="/assets/home/videos/workspace-animation.mp4" type="video/mp4" />
-      <a href="/assets/home/videos/workspace-animation.mp4">Watch the video.</a>
-    </video>
-    <figcaption>Animations in an empty Chan workspace.</figcaption>
+    <div class="shot-placeholder-frame" data-shot="screensavers-empty-pane" data-shot-kind="clip">clip to capture<small>a workspace window with one empty pane: the chan mark fades, an animation starts, Right steps to the next one and Up speeds it up</small></div>
   </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The screen lock is a setting of each workspace; a standalone terminal has none.</li>
+      <li>With a PIN set, <kbd>Esc</kbd> and a click on the lock screen do not unlock it.</li>
+      <li>Wrong PINs are not rate-limited. The lock keeps a passer-by out of the window; it does not secure the workspace.</li>
+      <li>The animations are separate from the screen lock and need no setting.</li>
+      <li>Which animations play depends on the graphics the window can use.</li>
+      <li>A window with more than one pane, or a pane with tabs on its hidden side, shows only the chan mark.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/settings/"><strong>Settings</strong><span>Every section, the defaults, and privacy mode.</span></a>
+    <a class="next-card" href="/animations/"><strong>Animations</strong><span>Try each animation and read its credits.</span></a>
+    <a class="next-card" href="/manual/workspaces/"><strong>Workspaces</strong><span>Serve a directory and turn it on and off.</span></a>
+  </div>
 </section>

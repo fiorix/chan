@@ -1,28 +1,112 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="extensions-new-tab" data-shot-kind="clip">clip to capture<small>the command launcher's New tab section lists an installed extension by name; Enter opens its tab beside a terminal, and the extension's own UI loads</small></div>
+  <figcaption>An extension opens from New tab, like the built-in apps.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Add a tool of your own as a tab, written in any language that can serve a web app.</li>
+    <li>Open it from <strong>New tab</strong> in the command launcher, on this machine or a devserver, over the same connection as the rest of the workspace.</li>
+    <li>Run its commands from the command launcher, and bind them to shortcuts.</li>
+    <li>Let its backend drive chan through <code>cs</code>.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="extension-tabs">
   <h2><a class="heading-anchor" href="#extension-tabs">Your tools as tabs</a></h2>
-  <p>Extensions add applications to Chan as sandboxed tabs. An extension is a separate program serving a local web app, written in any language. Chan starts it, proxies its traffic through the existing connection, and adds an entry under <strong>New tab</strong> in the command launcher.</p>
-  <p>The application runs on the machine serving Chan, including a devserver. Its tab works over the same ssh or gateway connection as the rest of the workspace.</p>
+  <ul>
+    <li>An extension is a separate program serving a local web app. chan starts it, passes its traffic through chan's own connection, and lists it under <strong>New tab</strong>.</li>
+    <li>It runs on the machine serving the workspace, a devserver included. Its tab works over ssh or a gateway, like the rest of the workspace.</li>
+    <li>The tab is sandboxed: it cannot read the window's page, storage or token. The program itself has the access of any program you run.</li>
+    <li>An extension tab needs a workspace window.</li>
+  </ul>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>In the tab's menu or the command launcher</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Reload extension</strong></td><td>Loads the tab again.</td></tr>
+        <tr><td><strong>Present extension</strong></td><td>Gives the tab the whole window, for an extension that asks for it. <strong>Restore</strong> brings it back.</td></tr>
+        <tr><td>The extension's own commands</td><td>Listed under its name while its tab is focused. Bind them in <a href="/manual/shortcuts/#customize">Keyboard Shortcuts</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="manual-block" id="examples">
   <h2><a class="heading-anchor" href="#examples">Extensions to try</a></h2>
-  <ul>
-    <li><a href="https://github.com/fiorix/chan-ext-doom"><strong>chan-ext-doom</strong></a>: play DOOM inside a Chan tab.</li>
-    <li><a href="https://github.com/fiorix/chan-ext-mobile-chat"><strong>chan-ext-mobile-chat</strong></a>: chat with and steer your agents from a phone.</li>
-    <li><a href="https://github.com/fiorix/chan-ext-strudel"><strong>chan-ext-strudel</strong></a>: live-code music with Strudel in a Chan tab, with patterns and settings kept on the devserver.</li>
-  </ul>
-  <p>Each repository includes source code and installation instructions.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Extension</th><th>What it is</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><a href="https://github.com/fiorix/chan-ext-doom"><strong>chan-ext-doom</strong></a></td><td>DOOM in a tab.</td></tr>
+        <tr><td><a href="https://github.com/fiorix/chan-ext-mobile-chat"><strong>chan-ext-mobile-chat</strong></a></td><td>Chat with your agents and steer them from a phone.</td></tr>
+        <tr><td><a href="https://github.com/fiorix/chan-ext-strudel"><strong>chan-ext-strudel</strong></a></td><td>Live-code music with Strudel, with patterns and settings kept on the devserver.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Each repository has the source and installation instructions.</p>
 </section>
 
 <section class="manual-block" id="configure">
   <h2><a class="heading-anchor" href="#configure">Configure an extension</a></h2>
-  <p>Follow the extension's installation instructions. Its declaration lives at <code>&lt;chan-home&gt;/extensions/&lt;id&gt;.toml</code>, normally under <code>~/.chan/extensions/</code>, and specifies the name, command, arguments, and host capabilities. Restart the serving Chan process after installing or changing a declaration, then open the extension from <strong>New tab</strong> in the command launcher.</p>
-  <p>Chan stops all extensions together when it shuts down. Extension supervisors share a three-second grace period, so installing more extensions does not add a separate shutdown wait for each one.</p>
-  <p>Declarations run local programs as your user. The tab is sandboxed from Chan's browser state; the extension process has the same machine access as other programs you run.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Install it</h3>
+      <p>Follow the extension's own instructions. Its installer writes a declaration to <code>&lt;chan-home&gt;/extensions/&lt;id&gt;.toml</code>, normally under <code>~/.chan/extensions/</code>.</p>
+    </li>
+    <li>
+      <h3>Check the declaration</h3>
+      <p>It names the tab, the command to run, its arguments, and the host capabilities it asks for.</p>
+      <pre><code>name = "Echo test"
+command = "/absolute/path/to/chan/target/debug/examples/echo-extension"
+args = []
+capabilities = []</code></pre>
+    </li>
+    <li>
+      <h3>Restart the serving process</h3>
+      <p>Restart the chan process that serves the workspace, such as Chan Desktop or the devserver, after installing or changing a declaration.</p>
+    </li>
+    <li>
+      <h3>Open it</h3>
+      <p>Run its name from <strong>New tab</strong> in the command launcher.</p>
+    </li>
+  </ol>
+  <aside class="doc-note warning"><strong>A declaration runs a program as your user.</strong> Treat every file in the extensions directory with the care you give a shell profile.</aside>
 </section>
 
 <section class="manual-block" id="build">
   <h2><a class="heading-anchor" href="#build">Build your own</a></h2>
-  <p>Serve a loopback web application, publish Chan's startup handshake, and connect the frontend through the host bridge. The bridge carries declared commands, keyboard shortcuts, and optional session context or presentation controls. A backend can drive Chan through <code>cs</code>, using the same commands available in your terminal.</p>
-  <p>The <a href="https://github.com/fiorix/chan/blob/main/docs/extensions.md">extension authoring guide</a> covers the handshake, sandbox, lifecycle, and working examples. The <a href="https://github.com/fiorix/chan/blob/main/docs/config-reference.md">configuration reference</a> documents declaration fields.</p>
+  <ol>
+    <li>Serve a web app on loopback, from any language.</li>
+    <li>Print chan's startup handshake on stdout.</li>
+    <li>Write a declaration and restart the serving process.</li>
+    <li>Connect the frontend through the host bridge, which carries declared commands, keyboard shortcuts, and, if asked for, session context or presentation.</li>
+    <li>Drive chan from the backend with <code>cs</code>, the same commands you run in a terminal.</li>
+  </ol>
+  <p>The <a href="https://github.com/fiorix/chan/blob/main/docs/extensions.md">extension authoring guide</a> covers the handshake, the sandbox, the lifecycle and a working example. The <a href="https://github.com/fiorix/chan/blob/main/docs/config-reference.md">configuration reference</a> lists the declaration's fields.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>chan starts each extension once per serving process, so a devserver with many workspaces runs one copy.</li>
+      <li>A declaration that does not parse, or a program that fails to start or to hand-shake, is logged and skipped. chan still starts.</li>
+      <li>An extension that exits stays down until the serving process restarts; its tab says it is unavailable.</li>
+      <li>chan stops every extension together when it shuts down. They share one three-second grace period, so more extensions do not add more waiting.</li>
+      <li>An extension inherits the serving process's environment and <code>PATH</code>. For a devserver run as a service, run <code>chan devserver restart</code> from a plain shell that has the <code>PATH</code> the extension needs.</li>
+      <li>chan has no marketplace and no installer: each extension's repository ships its own.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/command-launcher/"><strong>Command launcher</strong><span>Open extensions and run their commands.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>The commands an extension's backend can run.</span></a>
+    <a class="next-card" href="/manual/devserver/"><strong>Run a devserver</strong><span>Serve extensions from another machine.</span></a>
+  </div>
 </section>

@@ -520,7 +520,7 @@
     },
     scopes: COMPUTERS_SCOPES,
     // `New terminal` is this deck's word for a terminal tab.
-    terminalTitle: "New terminal window",
+    terminalTitle: "New standalone terminal",
   };
 
   /// The Computers tree where the launcher stands: the page a Computers path

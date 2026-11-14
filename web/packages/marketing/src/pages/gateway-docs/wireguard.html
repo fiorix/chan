@@ -1,0 +1,176 @@
+<section class="manual-block" id="wireguard">
+  <h2><a class="heading-anchor" href="#wireguard">WireGuard enrollment</a></h2>
+  <p>A gateway can carry Chan Desktop's connections to its proxy nodes inside WireGuard. The gateway enrolls the desktop's key at sign-in, and the desktop runs the tunnels in its own process: no key to hand over, no VPN client to install. It is optional, with three parts:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Part</th><th>Where</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td>A WireGuard interface and the agent</td><td>Each proxy node</td><td>The node terminates WireGuard itself, with a key of its own. The agent keeps the interface's peers equal to the gateway's enrolled keys.</td></tr>
+        <tr><td>The list of nodes</td><td><code>identity.env</code></td><td>Tells desktops each node's key and endpoint.</td></tr>
+        <tr><td>An address pool</td><td><code>profile.env</code></td><td>Gives each enrolled key its tunnel address.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>No node forwards for another: a desktop runs one tunnel per node, carrying only that node's names. Sign-in at <code>gw.example.com</code> never needs a tunnel.</p>
+</section>
+
+<section class="manual-block" id="setup">
+  <h2><a class="heading-anchor" href="#setup">Turn it on</a></h2>
+  <aside class="doc-note warning">
+    <strong>Edit the files; do not rerun the setup script</strong>
+    <p>A run of <code>configure.sh</code> writes every file again, with new credentials and signing keys. On a running gateway, add these lines by hand; on a new server, see <a href="#setup-script">With the setup script</a>.</p>
+  </aside>
+  <ol class="doc-steps">
+    <li>
+      <h3>Bring up the interface on the node</h3>
+      <p>Install the agent package, which brings in <code>wireguard-tools</code>, and bring the interface up:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>sudo apt install ./chan-gateway-wireguard-agent_*.deb
+sudo install -d -m 700 /etc/wireguard
+sudo sh -c 'umask 077; wg genkey &gt; /etc/wireguard/chan-tunnel.key'
+sudo ip link add wg0 type wireguard
+sudo wg set wg0 listen-port 51820 private-key /etc/wireguard/chan-tunnel.key
+sudo ip address add 10.7.0.1/24 dev wg0
+sudo ip link set wg0 up
+sudo wg show wg0 public-key</b></code>
+        {{copyButton}}
+      </div>
+      <p>The last command prints the interface's public key, for the next step. Open UDP port 51820 to the desktops. The interface lasts until a reboot: make it part of the server's network configuration.</p>
+    </li>
+    <li>
+      <h3>Set the pool and list the nodes</h3>
+      <p>Add the pool to <code>/etc/chan-gateway/profile.env</code>:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code data-copy-value>WIREGUARD_POOL_V4=10.7.0.0/24</code>
+        {{copyButton}}
+      </div>
+      <p>Add the list to <code>/etc/chan-gateway/identity.env</code>, with the key from step 1:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code data-copy-value>WIREGUARD_INGRESSES=p1=&lt;public key&gt;@p1.proxy.example.com:51820
+WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+WIREGUARD_ALLOWED_IPS=10.7.0.1/32</code>
+        {{copyButton}}
+      </div>
+      <div class="manual-table-wrap">
+        <table class="manual-table">
+          <thead><tr><th>Variable</th><th>Holds</th></tr></thead>
+          <tbody>
+            <tr><td><code>WIREGUARD_POOL_V4</code></td><td>The pool enrolled desktops take their tunnel addresses from. Each key takes one address for the whole gateway, whatever the number of nodes, so a <code>/24</code> holds 253 keys.</td></tr>
+            <tr><td><code>WIREGUARD_INGRESSES</code></td><td>One <code>id=public_key@endpoint</code> entry per node, with <code>;</code> between entries, written without quotes. The id is the node id you gave the setup script, <code>p1</code>. The endpoint is the name or address, and the UDP port, where desktops reach the interface.</td></tr>
+            <tr><td><code>WIREGUARD_INGRESS_ADDRESSES</code></td><td>The tunnel address, where a node answers inside the tunnel. Every node uses the same one, each with a key of its own.</td></tr>
+            <tr><td><code>WIREGUARD_ALLOWED_IPS</code></td><td>What a desktop sends into a tunnel: the tunnel address alone.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </li>
+    <li>
+      <h3>Point the agent at identity</h3>
+      <p>Fill in <code>/etc/chan-gateway/wireguard-agent.env</code>, with the token copied from <code>identity.env</code>:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code data-copy-value>IDENTITY_URL=http://127.0.0.1:7004
+WIREGUARD_AGENT_TOKEN=&lt;WIREGUARD_AGENT_TOKEN from identity.env&gt;
+WIREGUARD_AGENT_HOST_ID=p1
+WIREGUARD_INTERFACE=wg0</code>
+        {{copyButton}}
+      </div>
+      <p>Restart profile and identity so they read the new lines, and start the agent:</p>
+      <div class="command-copy multiline" data-copy-block>
+        <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-profile chan-gateway-identity
+sudo systemctl enable --now chan-gateway-wireguard-agent</b></code>
+        {{copyButton}}
+      </div>
+    </li>
+    <li>
+      <h3>Check it</h3>
+      <p>The discovery document, <code>https://gw.example.com/.well-known/chan-gateway</code>, has a <code>wireguard</code> entry: that is how desktops learn they can enroll. Once a desktop enrolls, as in <a href="/manual/gateway/#wireguard">Connect to a gateway</a>, <code>sudo wg show wg0</code> lists it as a peer within seconds.</p>
+    </li>
+  </ol>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>p1.proxy.example.com</code> needs a DNS record of its own, since the wildcard record does not cover the name itself.</li>
+      <li>The agent logs to its journal: <code>journalctl -u chan-gateway-wireguard-agent -f</code>.</li>
+      <li>After a reboot, once the interface is back, the agent puts the enrolled desktops back on it.</li>
+      <li>identity works out each node's names from its id: the node's name and every name under it, which are the addresses of the devservers on that node. The id must be the node's real id.</li>
+      <li>The three identity lines go together: identity does not start with only some of them.</li>
+      <li>identity also does not start while <code>WIREGUARD_HOST_ID</code>, <code>WIREGUARD_ENDPOINT</code>, <code>WIREGUARD_PUBLIC_KEY</code> or <code>WIREGUARD_HOSTS</code> is set. The list replaces all four.</li>
+      <li>The tunnel address must not be one the pool hands out. profile never hands out a pool's first two addresses, here <code>10.7.0.0</code> and <code>10.7.0.1</code>; list any other tunnel address in <code>WIREGUARD_POOL_RESERVED</code>. Nothing checks this for you.</li>
+      <li><code>WIREGUARD_PERSISTENT_KEEPALIVE</code> in <code>identity.env</code> is optional, in seconds: 25 by default, <code>0</code> for none. Set without the three lines, it stops identity from starting.</li>
+      <li>In a file a shell sources, put the list in single quotes: a shell ends an assignment at the first <code>;</code>.</li>
+      <li>An IPv6 pool is <code>WIREGUARD_POOL_V6</code> in <code>profile.env</code>, with the IPv6 tunnel address and its <code>/128</code> added to the two identity lines.</li>
+      <li>The <a href="/gateway/edge/">edge configuration</a> listens on every address, the tunnel address included. An edge that names its listen addresses needs this one added.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="setup-script">
+  <h2><a class="heading-anchor" href="#setup-script">With the setup script</a></h2>
+  <p>On a new server, install the agent package and bring the interface up before you run <code>configure.sh</code>, then answer:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        <tr><td>Kernel WireGuard interface for the agent</td><td>Enter, for <code>wg0</code></td></tr>
+        <tr><td>WireGuard ingresses</td><td>The list: <code>p1=&lt;public key&gt;@p1.proxy.example.com:51820</code></td></tr>
+        <tr><td>WireGuard address pool</td><td>Enter, for <code>10.7.0.0/24</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The script takes the pool's first address, <code>10.7.0.1</code>, as the tunnel address, and writes the four lines above and the agent's file.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Run over a gateway that enrolls, the script first shows the list the old files hold, as a line to paste at <strong>WireGuard ingresses</strong>. An empty answer there turns enrollment off.</li>
+      <li><strong>WireGuard address pool</strong> offers the pool the old files hold; Enter keeps it. With another pool, enrolled desktops keep their old addresses, and every node's interface needs the new one.</li>
+      <li>It names each WireGuard setting it does not carry over, such as an IPv6 pool or the keepalive. Those stay in the backup it keeps of each file.</li>
+      <li>The script asks no IPv6 question: an IPv6 pool stays a hand edit.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="keys">
+  <h2><a class="heading-anchor" href="#keys">When a key leaves</a></h2>
+  <p>An enrolled key lives as long as the sign-in token that enrolled it. When the token is revoked or expires, or the account is blocked, the key leaves every node at its agent's next check, every five seconds by default, and the desktop's tunnels stop carrying traffic.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>identity refuses an agent whose <code>WIREGUARD_AGENT_HOST_ID</code> is not an id in its list. That agent keeps the keys it has, revoked ones included, until the id is in the list or the interface is taken down.</li>
+      <li>Both sides log a warning about it: the agent in its own journal, and identity, naming the id, in <code>journalctl -u chan-gateway-identity</code>.</li>
+      <li>profile keeps a denied key's address for five minutes by default, <code>WIREGUARD_RELEASE_GRACE_MINUTES</code> in <code>profile.env</code>, before handing it out again.</li>
+      <li>The agent changes only the peers it added. A peer you add to the interface by hand stays.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="nodes">
+  <h2><a class="heading-anchor" href="#nodes">More nodes</a></h2>
+  <p>Give each proxy node an interface and an agent of its own:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Setting</th><th>On each node</th></tr></thead>
+      <tbody>
+        <tr><td>Private key</td><td>Its own</td></tr>
+        <tr><td>Tunnel address</td><td>The same, <code>10.7.0.1</code></td></tr>
+        <tr><td><code>WIREGUARD_AGENT_HOST_ID</code></td><td>The node's own id</td></tr>
+        <tr><td><code>WIREGUARD_AGENT_TOKEN</code></td><td>The same, from <code>identity.env</code></td></tr>
+        <tr><td><code>IDENTITY_URL</code></td><td>identity's internal listener, as that node's proxy reaches it</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Add each node's entry to <code>WIREGUARD_INGRESSES</code> and restart identity; profile does not change. A desktop follows the list at its next connect, with no new sign-in. To retire a node, remove its entry, stop its agent, and take its interface down.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Every node accepts every enrolled key.</li>
+      <li>A WireGuard file written by hand, as in the <a href="/gateway/#wireguard">gateway guide</a>, remains the way for a gateway that does not enroll, and for a devserver's own tunnel.</li>
+      <li>An enrolled desktop keeps its key in one file of its own and writes no WireGuard file; its tunnels come from the gateway's list.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/operate/"><strong>Operate</strong><span>The admin CLI, more nodes, upgrades, health and logs.</span></a>
+  </div>
+</section>

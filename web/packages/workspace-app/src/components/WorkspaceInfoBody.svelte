@@ -102,10 +102,8 @@
     fileOps.downloadPathWithProgress("", true);
   }
 
-  const uploadTitle =
-    "Upload adds the selected file to this directory. You can also drop files onto File Browser rows.";
-  const downloadTitle =
-    "Download this directory as a tar archive. You can also drag rows out of the File Browser where supported.";
+  const uploadTitle = "Upload adds the selected file to this directory.";
+  const downloadTitle = "Download this directory as a tar archive.";
 
   /// The open primary action for the workspace root. Mirrors
   /// FileInfoBody's openDirInBrowser: prefer the host's onReveal (the graph

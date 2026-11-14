@@ -1,0 +1,119 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="remote-tools-tunnel" data-shot-kind="clip">clip to capture<small>a devserver window split in two panes: <code>cs tunnel 8080</code> holding in one, <code>python -m http.server 8080</code> serving in the other; then the desktop's own browser opens <code>http://127.0.0.1:8080</code> and lists the remote directory</small></div>
+  <figcaption>A web server on the devserver, opened in this machine's browser through <code>cs tunnel</code>.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Open a server running on the devserver in this machine's browser, with <code>cs tunnel</code>.</li>
+    <li>Pull a file or a directory off the devserver with <code>cs download</code>.</li>
+    <li>Push files from this machine into any directory there with <code>cs upload</code>.</li>
+    <li>Copy output on the devserver and paste it into any app here, or the other way round.</li>
+    <li>Move text and images between two devservers through your clipboard.</li>
+  </ul>
+  <p>These are <code>cs</code> commands: run them in a chan terminal, and they act through the window that shows it. On a devserver the terminal runs there while the window, its clipboard and its downloads are here.</p>
+</section>
+
+<section class="manual-block" id="tunnel">
+  <h2><a class="heading-anchor" href="#tunnel">Forward a port: cs tunnel</a></h2>
+  <ol class="doc-steps">
+    <li>
+      <h3>Start the tunnel</h3>
+      <p>In a devserver terminal, run this and leave it running:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs tunnel 8080</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Serve something</h3>
+      <p>In another pane on the devserver, serve the current directory with Python 3:</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>python -m http.server 8080 --bind 127.0.0.1 --directory .</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Open it here</h3>
+      <p>Open <code>http://127.0.0.1:8080</code> in your desktop's browser. <kbd>Ctrl+C</kbd> in the tunnel pane closes the forward.</p>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>cs tunnel</code></th><th>Forwards</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>3000</code></td><td>This machine's <code>127.0.0.1:3000</code> to port 3000 on the devserver.</td></tr>
+        <tr><td><code>8080:3000</code></td><td><code>127.0.0.1:8080</code> here to port 3000 there.</td></tr>
+        <tr><td><code>5901 8080:3000</code></td><td>Two tunnels in one command. <kbd>Ctrl+C</kbd> closes both.</td></tr>
+        <tr><td><code>8000-8003</code></td><td>Four tunnels, each to the same port there.</td></tr>
+        <tr><td><code>0:3000-3002</code></td><td>Three tunnels. This machine picks a free port for each, and the command prints them.</td></tr>
+        <tr><td><code>0.0.0.0:8080:3000</code></td><td>Port 8080 on every interface here, with a warning: anyone on this machine's network reaches port 3000 there.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>It needs Chan Desktop showing the window, and a devserver terminal: a browser cannot listen on your machine, and a terminal of this machine refuses. Through a gateway, only the devserver owner's Chan Desktop can open one.</p>
+</section>
+
+<section class="manual-block" id="transfers">
+  <h2><a class="heading-anchor" href="#transfers">Move files: cs upload and cs download</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs download FILE</code></td><td>The file downloads to this machine, through the browser's or Chan Desktop's download.</td></tr>
+        <tr><td><code>cs download DIR</code></td><td>The directory downloads as <code>DIR.tar</code>, built as it streams. <code>.</code> is the current directory.</td></tr>
+        <tr><td><code>cs upload DIR</code></td><td>A file picker opens here, and the files you choose land in <code>DIR</code> on the devserver. A file path means its folder.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Paths are on the terminal's machine; the files come from, and land on, the machine viewing the window. Any path your user can reach works, in a workspace window or a standalone terminal. Both commands show progress in the window's transfer bubble, with Cancel.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="remote-tools-transfer" data-shot-kind="still">screenshot to capture<small>a devserver terminal after <code>cs download build</code>: the window's transfer bubble with <code>build.tar</code>, its progress and Cancel</small></div>
+    <figcaption>A download in progress: the bytes come off the devserver to this machine.</figcaption>
+  </figure>
+  <p>The file browser's <strong>Upload</strong> and <strong>Download</strong> do the same with the mouse: see <a href="/manual/files/#transfers">File browser</a>.</p>
+</section>
+
+<section class="manual-block" id="clipboard">
+  <h2><a class="heading-anchor" href="#clipboard">Share the clipboard: cs copy and cs paste</a></h2>
+  <p>The clipboard is the one of the machine viewing the window, not of the machine running the shell. Copy on a devserver and paste into any app here; copy here and paste there; copy on one devserver and paste on another.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs copy &lt; photo.jpg</code></td><td>Puts stdin on the clipboard as text, HTML or an image. An image arrives as PNG.</td></tr>
+        <tr><td><code>git log --oneline -20 | cs copy</code></td><td>Copies text, ready to paste into any app here.</td></tr>
+        <tr><td><code>printf '&lt;b&gt;bold&lt;/b&gt;' | cs copy --html</code></td><td>Copies rich text, with a plain-text fallback.</td></tr>
+        <tr><td><code>cs paste &gt; shot.png</code></td><td>Writes the clipboard to stdout as raw bytes: an image if there is one, else text.</td></tr>
+        <tr><td><code>cs paste --text</code>, <code>--html</code>, <code>--image</code></td><td>Takes that one form, and fails if the clipboard does not hold it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Copy and paste keys, and selecting text in a terminal, are on <a href="/manual/terminal/#copy-paste">Terminal basics</a>.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>cs tunnel</code> runs for the tunnels' whole life, and exits when Chan Desktop disconnects or the window closes.</li>
+      <li>A tunnel group is all or nothing: a port this machine cannot bind fails the command and closes the others. With no listener after 10 seconds it exits 124.</li>
+      <li>A devserver holds at most 32 live tunnels across its terminals: <code>server.tunnel.max_live</code> in <code>server.toml</code>.</li>
+      <li>Tunnels carry TCP only. A standalone <code>chan serve</code> hosts none.</li>
+      <li><code>cs upload</code> and <code>cs download</code> return once the window has the request. Progress and errors show in the window, not the terminal.</li>
+      <li>An upload never overwrites: a name that already exists in the destination is refused.</li>
+      <li>In a browser, the upload picker may need a click: <strong>Choose files</strong> appears in the window.</li>
+      <li>Dragging files from your desktop onto a devserver window's terminal or file browser transfers nothing; use <code>cs upload</code>.</li>
+      <li><code>cs copy</code> and <code>cs paste</code> wait for the window. A browser may ask for permission, or show a paste card whose <strong>Paste</strong> button gives the click it needs. They give up after 30 seconds and exit 124.</li>
+      <li>Clipboard contents are capped at 32 MB.</li>
+      <li>Redirect <code>cs paste</code> rather than printing it to the terminal: clipboard text can carry escape sequences.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/connect/"><strong>Connect from Chan Desktop</strong><span>Add a devserver and open its windows.</span></a>
+    <a class="next-card" href="/manual/files/#transfers"><strong>File browser transfers</strong><span>Upload and download from the file browser.</span></a>
+    <a class="next-card" href="/manual/cs/"><strong>Script it with cs</strong><span>Every <code>cs</code> command, and where it works.</span></a>
+  </div>
+</section>

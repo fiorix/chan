@@ -111,7 +111,7 @@ fn fake_desktop(req: Request) -> Response {
             if target == "dup" =>
         {
             Response::Error {
-                message: "\"dup\" matches more than one registered devserver:\n  dup  http://a:8787\n  dup  http://b:8787\nName the one you mean by URL, or remove the duplicate row in the launcher.".into(),
+                message: "\"dup\" matches more than one registered devserver:\n  dup  http://a:8787\n  dup  http://b:8787\nName the one you mean by URL, or remove the duplicate row on the Computers screen.".into(),
             }
         }
         Request::ServeRemoteWorkspace { target, .. }

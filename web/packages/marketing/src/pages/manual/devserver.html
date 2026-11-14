@@ -1,128 +1,160 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="devserver-start" data-shot-kind="clip">clip to capture<small>a terminal on a fresh Linux machine: the curl installer finishes, <code>~/.local/bin/chan devserver start</code> returns, then <code>chan devserver status</code> prints the service state and the URL with its token</small></div>
+  <figcaption>Install chan on the remote machine, start the devserver as a service, and print its URL.</figcaption>
+</figure>
+
 <section class="manual-block" id="devserver">
-  <div class="section-heading">
-    <h2><a class="heading-anchor" href="#devserver">Chan Devserver</a></h2>
+  <h2><a class="heading-anchor" href="#devserver">A devserver</a></h2>
+  <p>A devserver is chan running headless on another machine, in a VM, or beside your desktop. It holds terminals, windows and workspaces, and keeps them running while no one is connected.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Your computer</th><th>Run the devserver</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>macOS</td><td>In a Lima VM, or on a remote machine over ssh.</td></tr>
+        <tr><td>Windows</td><td>Natively with the x64 CLI, in WSL, or on a remote machine over ssh.</td></tr>
+        <tr><td>Linux</td><td>On the same machine with its own chan home, in a Docker container, or on a remote machine over ssh.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <p>The devserver runs <code>chan</code> on another machine for remote development. It can also run locally with a separate <code>CHAN_HOME</code> to isolate its state. Chan Desktop connects to the devserver as the client shell; sessions, window layouts, and terminals all live on the devserver.</p>
-  <p>For visual connection examples, see the <a href="/devserver/#connect">ssh and Eternal Terminal guide</a>. For managed access on your own domain, see the <a href="/gateway/">gateway guide</a> and <a href="/manual/gateway/">Host a gateway</a>. To use a devserver from a browser instead of Chan Desktop, see <a href="/manual/browser/#devserver">Chan in a browser</a>.</p>
-  <p>Pick where to run it:</p>
-  <ul>
-    <li>On macOS: a lima-vm, or a remote machine via ssh.</li>
-    <li>On Windows: the native x64 standalone CLI, a WSL sandbox, or a remote machine via ssh.</li>
-    <li>On Linux: an isolated devserver on the same machine (all platforms support <code>CHAN_HOME=/path</code>), a <a href="/install/">docker container</a>, or a remote machine via ssh.</li>
+</section>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Install chan on a headless machine with one command.</li>
+    <li>Run the devserver as a service that comes back at login or boot, or in the foreground.</li>
+    <li>Print its URL and token, and rotate the token if it leaks.</li>
+    <li>Read what the running devserver costs: CPU, memory, traffic and disk.</li>
   </ul>
-  <h3 id="install-server"><a class="heading-anchor" href="#install-server">Install on the host</a></h3>
-  <p>On macOS, Linux, or FreeBSD, install chan:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>
-    {{copyButton}}
-  </div>
-  <p>On native Windows x64, run this from PowerShell:</p>
-  <div class="command-copy" data-copy-block>
-    <code><span>PS&gt;</span><b data-copy-value>irm https://chan.app/install.ps1 | iex</b></code>
-    {{copyButton}}
-  </div>
-  <p>The Unix installer writes <code>~/.local/bin/chan</code> and the symlink <code>cs -&gt; chan</code>. The Windows installer writes <code>chan.exe</code>, <code>cs.cmd</code>, and a Git Bash <code>cs</code> shim under <code>%LOCALAPPDATA%\chan-cli\bin</code> and adds it to your user PATH.</p>
-  <h3 id="start-server"><a class="heading-anchor" href="#start-server">Start the devserver</a></h3>
-  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>~/.local/bin/chan devserver start</b></code>
-    {{copyButton}}
-  </div>
-  <p class="minor">In a new native Windows terminal, use <code>chan devserver start</code>.</p>
-  <p>This installs the devserver as a background service listening on <code>localhost:8787</code>, using the default service manager for your platform:</p>
+</section>
+
+<section class="manual-block" id="install-server">
+  <h2><a class="heading-anchor" href="#install-server">Install chan on the machine</a></h2>
+  <p>On macOS or Linux:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>curl -fsSL https://chan.app/install.sh | sh</b></code>{{copyButton}}</div>
+  <p>On FreeBSD:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>fetch -o - https://chan.app/install.sh | sh</b></code>{{copyButton}}</div>
+  <p>On Windows x64, from PowerShell:</p>
+  <div class="command-copy" data-copy-block><code><span>PS&gt;</span><b data-copy-value>irm https://chan.app/install.ps1 | iex</b></code>{{copyButton}}</div>
   <ul>
-    <li>On Linux it uses systemd: a user-scoped service that survives logout once linger is on (chan enables it, or asks you to run <code>sudo loginctl enable-linger</code>).</li>
-    <li>On macOS it uses launchd: the service runs while you are logged in.</li>
-    <li>On Windows it uses chan's own daemon mode, which works on all platforms.</li>
-    <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The actions are <code>start</code>, <code>stop</code>, <code>status</code>, <code>restart</code>, <code>join</code>, and <code>rotate-token</code>; <code>--service</code> goes after the action.</li>
-    <li><code>chan devserver rotate-token</code> mints a new token and prints it with the new URL, for a token you suspect has leaked. A running devserver drops the old token at once, so reopen any browser tab that used the old URL. Tokens also rotate by themselves at the first start after they turn 30 days old.</li>
-    <li><code>chan devserver run</code> runs in the foreground.</li>
-    <li><code>chan devserver ls</code>, <code>connect</code>, <code>disconnect</code>, and <code>forget</code> manage the desktop's connections to remote devservers. A connected devserver's workspaces are managed from a terminal on your desktop too: <code>chan workspace serve /path --on NAME</code>, <code>chan close /path --on NAME</code>, and <code>chan workspace forget /path --on NAME</code>, where NAME is the devserver's label or URL as <code>chan devserver ls</code> shows it and the path is on that machine.</li>
+    <li>The Unix installer writes <code>~/.local/bin/chan</code> and links <code>cs</code> to it.</li>
+    <li>The Windows installer adds <code>%LOCALAPPDATA%\chan-cli\bin</code> to your PATH.</li>
+    <li>Packages for Nix, Homebrew, Ubuntu, Fedora and Arch, and a Docker image, are on the <a href="/install/">install page</a>. Install <code>chan</code>, not <code>chan-desktop</code>, on a headless machine.</li>
   </ul>
-  <p>On Linux, <a href="/manual/systemd/">systemd integration</a> covers the service in depth: restarting and upgrading the devserver without closing its terminals. On any platform, <code>chan metrics</code> on the devserver's machine prints what the running devserver is doing; see <a href="/manual/systemd/#metrics">Watch the devserver</a>.</p>
-  <p>Local workspace activity, token rotation, and <code>chan metrics</code> use the bind address and port recorded in the launchd plist on macOS or the systemd unit elsewhere, falling back to the last recorded port on loopback. The CLI's local devserver calls, including terminal drain and health checks, bypass environment and system proxies and do not follow HTTP redirects. They need no <code>NO_PROXY</code> exception for loopback. On Linux, calls carrying a token check that every listener at the selected address belongs to your user, trying the last recorded port if the service's pinned address has no listener of yours. An explicit <code>chan metrics --url</code> and <code>chan upgrade</code> keep the user's proxy settings.</p>
-  <h3 id="connect"><a class="heading-anchor" href="#connect">Connect from the main window</a></h3>
-  <p>Now add the devserver to Chan Desktop:</p>
-  <ol>
-    <li>Open the Computers screen (<code>Cmd+P</code> on macOS, <code>Ctrl+Shift+P</code> on Windows and Linux), turn to the last card, and click <strong>Add devserver</strong>.</li>
-    <li>Fill in Name, Address, and Connect script. Examples:
-      <ul>
-        <li>lima-vm from macOS:
-          <ul>
-            <li>Address: <code>localhost:8787</code></li>
-            <li>Script: <code>limactl shell default ~/.local/bin/chan devserver join</code></li>
-          </ul>
-        </li>
-        <li>WSL from Windows:
-          <ul>
-            <li>Address: <code>localhost:8787</code></li>
-            <li>Script: <code>wsl ~/.local/bin/chan devserver join</code></li>
-          </ul>
-        </li>
-        <li>Remote machine via ssh:
-          <ul>
-            <li>Address: <code>localhost:9901</code></li>
-            <li>Script: <code>ssh -L localhost:9901:127.0.0.1:8787 user@host '~/.local/bin/chan devserver join --port 8787'</code></li>
-          </ul>
-        </li>
-      </ul>
-    </li>
-    <li>Optionally tick <strong>Auto-hide control terminal on success</strong> so the terminal running the connect script hides itself once connected.</li>
-    <li>Click <strong>Add devserver</strong>. The new devserver's card comes to the front; click its header's on/off connection control, or select the header and press <code>o</code>.</li>
-  </ol>
-  <figure class="launcher-manual">
-    <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
-    <figcaption>The Add devserver card, turned over to its form. This is a live mock too: fill it in, add, and connect.</figcaption>
-  </figure>
-  <h3 id="control-terminal"><a class="heading-anchor" href="#control-terminal">The control terminal</a></h3>
-  <p>Connecting opens a window titled <code>Control Terminal - NAME</code> that runs the connect script in a real terminal on your desktop, through your login shell. If ssh asks to accept a host key or for a password, answer it there. On the remote side, <code>join</code> prints the devserver's address and token:</p>
+</section>
+
+<section class="manual-block" id="start-server">
+  <h2><a class="heading-anchor" href="#start-server">Start and stop it</a></h2>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>~/.local/bin/chan devserver start</b></code>{{copyButton}}</div>
+  <p>This installs the devserver as a background service on <code>127.0.0.1:8787</code> and returns. On Windows, open a new terminal and run <code>chan devserver start</code>.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>chan devserver</code></th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>run</code></td><td>Runs in this terminal until <kbd>Ctrl+C</kbd>.</td></tr>
+        <tr><td><code>start</code></td><td>Installs the service, enables it at login or boot, and starts it. Safe to run again.</td></tr>
+        <tr><td><code>stop</code></td><td>Stops the service and disables it, so it does not come back at the next login or boot. Its terminals end.</td></tr>
+        <tr><td><code>restart</code></td><td>Restarts the service on the current chan binary, at the same address.</td></tr>
+        <tr><td><code>status</code></td><td>Prints the service's state and, in a terminal, its URL with the token.</td></tr>
+        <tr><td><code>join</code>, <code>rotate-token</code></td><td>See <a href="#token">The token</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>System</th><th>The service runs under</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Linux</td><td>systemd, as a user service. It survives logout once lingering is on: chan turns it on, or asks you to run <code>sudo loginctl enable-linger</code>. <a href="/manual/systemd/">systemd integration</a> covers restarts and upgrades that keep every terminal running.</td></tr>
+        <tr><td>macOS</td><td>launchd, as a user agent that runs while you are logged in.</td></tr>
+        <tr><td>Windows, FreeBSD</td><td>chan's own background daemon.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>To choose another, put <code>--service=chan</code>, <code>systemd</code>, <code>launchd</code> or <code>none</code> after the action. <code>--bind</code> and <code>--port</code> change the address.</p>
+  <aside class="doc-note warning">
+    <strong>Listening on the network</strong>
+    <p><code>--bind 0.0.0.0</code> listens on every interface. A devserver speaks plain HTTP behind its token, with no TLS, so bind it only on a network you trust and reach it over ssh everywhere else.</p>
+  </aside>
+</section>
+
+<section class="manual-block" id="token">
+  <h2><a class="heading-anchor" href="#token">The token</a></h2>
+  <p>Every request to a devserver carries its bearer token, kept in <code>~/.chan/devserver/config.json</code> and the same across restarts. <code>run</code>, <code>start</code> and <code>join</code> print it with the URL:</p>
   <pre class="sample-output"><code>chan devserver: listening on http://127.0.0.1:8787/?t=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u
 CHAN_DEVSERVER_TOKEN=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
-  <p>Chan Desktop reads the token from the control terminal, so you never copy it, and a rotated token is picked up on the next connect. Then it reaches the devserver through the tunnel and the card turns connected. A devserver's first start opens one terminal window, which appears as a native window titled with the remote host's name.</p>
-  <p>The control terminal stays open while the script runs: it <em>is</em> the connection. With <strong>Auto-hide control terminal on success</strong> ticked it hides itself once the connection is up; show it again from its row, <strong>Control terminal</strong>, the first one on the devserver's card.</p>
-  <aside class="doc-note warning">
-    <strong>Closing the control terminal disconnects</strong>
-    <p>Closing it while connected asks <strong>Hide</strong> or <strong>Close</strong>. Hide keeps the connection; Close ends the script, and with it the connection and the devserver's windows on your desktop. Everything keeps running on the devserver.</p>
-  </aside>
-  <h3 id="disconnect"><a class="heading-anchor" href="#disconnect">Disconnect and dropped connections</a></h3>
-  <p><strong>Disconnect</strong> (<code>o</code> on the card) ends the connect script and closes the devserver's windows on your desktop. Everything on the devserver keeps running: terminals, programs, workspaces, and window layouts. Connect again and every shown window reopens where it was. Chan Desktop does not connect devservers by itself when it starts.</p>
-  <p>When something goes wrong, the control terminal is where to look:</p>
-  <ul>
-    <li><strong>The tunnel is interrupted</strong> while the script still runs: the devserver's windows show <code>reconnecting to the chan server</code> and keep trying. <strong>Reconnect</strong> runs the connect script again; <strong>Abandon</strong> disconnects.</li>
-    <li><strong>The script exits with an error</strong>, for example when ssh loses the connection: the devserver's windows close, and the control terminal stays open with the script's last words and <code>process exited (255); press Ctrl+D to close this tab</code>. Its row on the card flashes for attention. Read why, close it, and connect again.</li>
-  </ul>
-  <p>An ssh tunnel dies with the network, when you close the laptop lid or change Wi-Fi. <a href="https://eternalterminal.dev/">Eternal Terminal</a> reconnects across those interruptions: its <code>et --tunnel 9901:8787 --command '~/.local/bin/chan devserver join --port 8787' user@host</code> is the same forward as ssh's <code>-L</code>. The <a href="/devserver/#connect">connection guide</a> has both scripts side by side.</p>
-  <p>The same actions work from a terminal on your desktop: <code>chan devserver ls</code>, <code>chan devserver connect NAME</code>, and <code>chan devserver disconnect NAME</code>.</p>
-  <h3 id="gateways"><a class="heading-anchor" href="#gateways">Connect through a gateway</a></h3>
-  <p>A gateway is a set of services you host yourself; it is not an online service. It reaches your devservers, and devservers shared with you, through its tunnel instead of a connect script. Press <code>g</code> on the Computers screen, or click its title, to flip to the <strong>Gateways</strong> screen, then:</p>
-  <ol>
-    <li>Turn to the <strong>Add gateway</strong> card and enter the gateway's URL (<code>https://...</code>) and an optional name.</li>
-    <li>Click the gateway card's on/off connection control, or select its header and press <code>o</code>, then sign in in your browser. One sign-in covers the whole account.</li>
-    <li>Flip back to Computers with <code>g</code>: the gateway's devservers are listed there, each marked "via" the gateway.</li>
-  </ol>
-  <h3 id="wireguard"><a class="heading-anchor" href="#wireguard">Reach a gateway through WireGuard</a></h3>
-  <p>Chan can run a userspace WireGuard peer inside the devserver or desktop process to reach a gateway behind a WireGuard peer. It creates no OS network interface or host routes and needs no root privileges or separate VPN client.</p>
-  <p>On the devserver, supply the gateway PAT through <code>CHAN_TUNNEL_TOKEN</code> and point <code>--tunnel-wireguard</code> (or <code>CHAN_TUNNEL_WIREGUARD</code>) at the local wg-quick file:</p>
-  <div class="command-copy multiline" data-copy-block>
-    <code><span>$</span><b data-copy-value>chan devserver run \
-  --tunnel-url https://proxy.example.com/v1/tunnel \
-  --tunnel-wireguard /absolute/path/to/devserver.conf</b></code>
-    {{copyButton}}
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>Use it to</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>chan devserver status</code></td><td>Print the URL with the token, to open the devserver <a href="/manual/browser/#devserver">in a browser</a>. Add <code>--url</code> to print it through a pipe.</td></tr>
+        <tr><td><code>chan devserver join</code></td><td>Start the service if it is down, print the token, and stay attached until <kbd>Ctrl+C</kbd>, which leaves the service running. Connect scripts use it: Chan Desktop reads the token line, so you never copy it.</td></tr>
+        <tr><td><code>chan devserver rotate-token</code></td><td>Mint a new token when you suspect a leak, and print it with the new URL. A running devserver drops the old token at once.</td></tr>
+      </tbody>
+    </table>
   </div>
-  <p>The tunnel URL's destination must be inside the peer's <code>AllowedIPs</code>. An <code>http://</code> ingress inside WireGuard is also accepted: WireGuard pins the peer's key and encrypts the connection. The gateway token is still required.</p>
-  <p>On the desktop, add or edit a gateway in the launcher and set <strong>WireGuard file</strong> to its local wg-quick file. Use an absolute path or one starting with <code>~/</code>. The file is validated when you save and takes effect as soon as it is saved: changing the path starts the new tunnel, and clearing it ends the old one. To re-read a file edited in place, clear the field, save, and set it again.</p>
-  <p>Both clients read the same wg-quick subset:</p>
-  <ul>
-    <li>One <code>[Interface]</code>: required <code>PrivateKey</code> and <code>Address</code>, optional <code>MTU</code>.</li>
-    <li>Exactly one <code>[Peer]</code>: required <code>PublicKey</code>, <code>Endpoint</code> (host or IP address with a port), and <code>AllowedIPs</code>; optional <code>PresharedKey</code> and <code>PersistentKeepalive</code>.</li>
-    <li><code>DNS</code>, <code>Table</code>, <code>FwMark</code>, <code>ListenPort</code>, <code>PreUp</code>, <code>PostUp</code>, <code>PreDown</code>, <code>PostDown</code>, <code>SaveConfig</code>, unknown keys, and additional peers are refused.</li>
+  <p>A token also rotates by itself at the first start after it turns 30 days old. After a rotation, reopen browser tabs at the new URL; a connect script picks the new token up at the next connect.</p>
+</section>
+
+<section class="manual-block" id="metrics">
+  <h2><a class="heading-anchor" href="#metrics">See what it costs</a></h2>
+  <p><code>chan metrics</code>, on the devserver's machine, prints the running devserver's own readings, the ones on the <a href="/manual/dashboard/#metrics">Dashboard's Metrics slide</a>: version and uptime, CPU, memory and I/O, chan's traffic, transfers and tunnels, and the size of the chan home. It never starts a devserver.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th><code>chan metrics</code></th><th>Prints</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>(no flag)</td><td>The readings, once.</td></tr>
+        <tr><td><code>--json</code></td><td>One JSON document. <code>--history</code> adds the samples the devserver keeps.</td></tr>
+        <tr><td><code>--watch</code></td><td>The readings again about once a second, until <kbd>Ctrl+C</kbd>.</td></tr>
+        <tr><td><code>--url URL</code></td><td>The readings of another chan server, by a URL it printed, such as the one from <code>chan serve</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>chan metrics --help</code> has examples, and <a href="https://github.com/fiorix/chan/blob/main/docs/metrics.md">docs/metrics.md</a> is the reference.</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>restart</code> and <code>join</code> without <code>--bind</code> or <code>--port</code> keep the running service's address.</li>
+      <li><code>--service=none</code> works only with <code>run</code>; <code>systemd</code> and <code>launchd</code> need one of the other actions.</li>
+      <li>On a Linux machine with no systemd, the default choice fails and points at <code>--service=chan</code>.</li>
+      <li>For a second, isolated devserver on one machine, give it its own <code>CHAN_HOME</code>, a <code>--port</code> and a private <code>XDG_RUNTIME_DIR</code>. <code>CHAN_HOME</code> takes the place of <code>~/.chan</code>, token and workspace list included.</li>
+      <li>A foreground devserver with the default environment shares <code>~/.chan</code> with Chan Desktop, and a workspace the desktop serves shows as Locked.</li>
+      <li><code>status</code> builds the URL from the token on disk; a devserver still running with another token refuses it.</li>
+      <li>With no devserver running, <code>rotate-token</code> rewrites the token on disk, and a devserver running elsewhere keeps the old one until it restarts.</li>
+      <li>A URL with a LAN address leaves its token readable in the terminal that printed it.</li>
+      <li>A reading the platform cannot give prints as n/a, never as zero.</li>
+      <li>The Windows installer writes <code>chan.exe</code>, <code>cs.cmd</code> and a Git Bash <code>cs</code> into that folder.</li>
+      <li>The CLI's calls to its own devserver skip HTTP proxies and need no <code>NO_PROXY</code> entry; on Linux, a call that carries the token first checks that the listener is yours.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/connect/"><strong>Connect from Chan Desktop</strong><span>Add the devserver with its connect script and open its windows.</span></a>
+    <a class="next-card" href="/manual/browser/#devserver"><strong>Chan in a browser</strong><span>Open the devserver's URL and use it from any browser.</span></a>
+    <a class="next-card" href="/manual/remote/#routes"><strong>Which route</strong><span>Compare ssh, Eternal Terminal, a direct address and a gateway.</span></a>
+  </div>
+</section>
+
+<section class="manual-block" id="moved">
+  <h2><a class="heading-anchor" href="#moved">Moved</a></h2>
+  <ul class="moved-list">
+    <li id="connect"><a href="/manual/connect/#add">Connect from the main window</a></li>
+    <li id="control-terminal"><a href="/manual/connect/#control-terminal">The control terminal</a></li>
+    <li id="disconnect"><a href="/manual/connect/#disconnect">Disconnect and dropped connections</a></li>
+    <li id="remote-workspaces"><a href="/manual/connect/#remote-workspaces">Open remote terminals and workspaces</a></li>
+    <li id="gateways"><a href="/manual/gateway/#add">Connect through a gateway</a></li>
+    <li id="wireguard"><a href="/gateway/publish/#dial-wireguard">Reach a gateway through WireGuard</a>, and <a href="/manual/gateway/#wireguard">from Chan Desktop</a></li>
   </ul>
-  <p>On Unix, the file must have no group or other permission bits; use <code>chmod 600 /absolute/path/to/devserver.conf</code>. Windows ACLs are not checked by this reader; restrict access to the file yourself because it contains the private key.</p>
-  <p class="minor">See the <a href="/gateway/#wireguard">gateway guide</a> for the desktop connection and the <a href="https://github.com/fiorix/chan/blob/main/crates/chan-wireguard/design.md">chan-wireguard design</a> for the implementation.</p>
-  <h3 id="remote-workspaces"><a class="heading-anchor" href="#remote-workspaces">Open remote terminals and workspaces</a></h3>
-  <p>A connected devserver's card offers <strong>New terminal</strong> (<code>t</code>). Its registered workspaces appear on the card; open a workspace window from its row with <strong>New window</strong> (<code>w</code>). The command launcher's Computers scope does the same from any window on that devserver.</p>
-  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan open {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
-  <p>The clipboard and file transfer work across the connection too: see <a href="/manual/terminal/#copy-paste">Copy and paste freely</a> and <a href="/manual/terminal/#download-upload">Download and upload freely</a> on the Terminal page.</p>
-  <p>To inspect connected clients and manage workspace leadership, see <a href="/manual/collaboration/">Collaboration &amp; sessions</a>.</p>
-  <p>On a Linux devserver run as the systemd service, a restart or an upgrade of the devserver keeps every terminal running, so your agents continue working; see <a href="/manual/systemd/#restart">Restart without losing terminals</a>.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/design.md#runtime-shapes">design.md</a> describes the devserver over a TCP tunnel and through a gateway, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the gateway you host.</p>
 </section>

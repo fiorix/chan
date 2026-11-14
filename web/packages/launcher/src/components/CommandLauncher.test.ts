@@ -595,7 +595,7 @@ describe("Computers command deck", () => {
     const held = item("Window 1 [held elsewhere]");
     expect([held.disabled, held.subtitle]).toEqual([
       true,
-      "Only the tenant leader can show or hide this window",
+      "Only the session leader can show or hide this window",
     ]);
     result("Window 1 [held elsewhere]").click();
     await settle();

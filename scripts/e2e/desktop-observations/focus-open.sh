@@ -333,7 +333,7 @@ sleep 5
 # The desktop's own Hide, on the lone window row of a workspace's card in
 # the desktop's launcher page: expand the card, then click the button.
 desktop_hide_step() {
-    node "$HERE/inspect.mjs" "$INSPECTOR" eval "Chan Launcher" "(() => {
+    node "$HERE/inspect.mjs" "$INSPECTOR" eval "Computers - Chan" "(() => {
   const card = [...document.querySelectorAll('.ws-card')].find((c) => (c.querySelector('.ws-head .row-name')?.textContent ?? '').includes('$1'));
   if (!card) return 'no card';
   const chevron = card.querySelector('button.chevron[aria-expanded=\"false\"]');

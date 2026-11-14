@@ -16,6 +16,8 @@ const viewports = {
   desktop: { width: 1280, height: 800 },
   phone: { width: 390, height: 844, isMobile: true, deviceScaleFactor: 1 },
 };
+// The manual page that embeds the Add devserver form demo in an iframe.
+const framedRoute = "/manual/connect/";
 let failed = 0;
 
 function result(name, expected, actual, pass) {
@@ -48,7 +50,7 @@ function serve() {
 }
 
 async function ready(page, route) {
-  if (route.startsWith("/manual/devserver/")) {
+  if (route.startsWith(framedRoute)) {
     await page.waitForFunction(() => !!document.querySelector("iframe.launcher-demo-embed")?.contentDocument?.querySelector('.modal[role="dialog"]'), { timeout: 12000 });
   } else if (route.startsWith("/manual/install/")) {
     await page.waitForFunction(() => !!document.querySelector("#launcher-demo.mounted .launcher-demo-frame"), { timeout: 12000 });
@@ -83,7 +85,7 @@ async function check(name, body) {
 }
 
 async function readerOpen(browser, origin, route, viewport) {
-  const framed = route === "/manual/devserver/";
+  const framed = route === framedRoute;
   const page = await open(browser, origin, route, viewport, !framed);
   try {
     if (framed) {
@@ -137,18 +139,10 @@ async function readerOpen(browser, origin, route, viewport) {
 async function main() {
   if (distOption >= 0 && !args[distOption + 1]) throw new Error("--dist needs a path");
   await access(path.join(dist, "index.html"));
-  const manualRoutes = [];
-  for (const entry of await readdir(path.join(dist, "manual"), { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === "demo") continue;
-    try {
-      await access(path.join(dist, "manual", entry.name, "index.html"));
-      manualRoutes.push(`/manual/${entry.name}/`);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-  }
-  manualRoutes.sort();
-  if (!manualRoutes.includes("/manual/devserver/") || !manualRoutes.includes("/manual/install/")) throw new Error("built manual inventory lacks required pages");
+  const { sets } = JSON.parse(await readFile(path.join(root, "web/packages/marketing/src/docs.json"), "utf8"));
+  const manualRoutes = sets.flatMap((set) => set.groups.flatMap((group) => group.pages.map((page) => `${set.base}${page.slug ? `${page.slug}/` : ""}`)));
+  for (const route of manualRoutes) await access(path.join(dist, route.slice(1), "index.html"));
+  if (!manualRoutes.includes(framedRoute) || !manualRoutes.includes("/manual/install/")) throw new Error("built manual inventory lacks required pages");
   const chrome = await chromePath();
   await access(chrome);
   const require = createRequire(path.join(root, "scripts/e2e/browser-smoke/package.json"));
@@ -167,8 +161,8 @@ async function main() {
     console.log(JSON.stringify({ manualRoutes }));
 
     for (const [label, viewport] of Object.entries(viewports)) {
-      await check(`${label} Devserver without fragment`, async () => {
-        const page = await open(browser, origin, "/manual/devserver/", viewport, label !== "phone");
+      await check(`${label} Connect without fragment`, async () => {
+        const page = await open(browser, origin, framedRoute, viewport, label !== "phone");
         try {
           if (label === "phone") {
             try {
@@ -181,15 +175,15 @@ async function main() {
           return { expected: "scrollY=0", actual, pass: actual.y === 0 };
         } finally { await page.close(); }
       });
-      await check(`${label} Devserver fragment`, async () => {
-        const page = await open(browser, origin, "/manual/devserver/#remote-workspaces", viewport);
+      await check(`${label} Connect fragment`, async () => {
+        const page = await open(browser, origin, `${framedRoute}#remote-workspaces`, viewport);
         try {
           const actual = await page.evaluate(() => ({ top: document.getElementById("remote-workspaces")?.getBoundingClientRect().top, height: innerHeight, y: scrollY }));
           return { expected: "heading inside viewport", actual, pass: actual.top >= -1 && actual.top < actual.height };
         } finally { await page.close(); }
       });
-      await check(`${label} Devserver fragment exact`, async () => {
-        const page = await open(browser, origin, "/manual/devserver/#remote-workspaces", viewport);
+      await check(`${label} Connect fragment exact`, async () => {
+        const page = await open(browser, origin, `${framedRoute}#remote-workspaces`, viewport);
         try {
           const actual = await page.evaluate(() => {
             const heading = document.getElementById("remote-workspaces");
@@ -200,10 +194,10 @@ async function main() {
           return { expected: "heading within 2 px of its own fragment landing", actual, pass: Math.abs(actual.top - actual.ownLandingTop) <= 2 };
         } finally { await page.close(); }
       });
-      for (const [route, name] of [["/manual/install/", "Install"], ["/manual/devserver/", "Devserver"]]) {
+      for (const [route, name] of [["/manual/install/", "Install"], [framedRoute, "Connect"]]) {
         await check(`${label} ${name} reader-opened dialog`, () => readerOpen(browser, origin, route, viewport));
       }
-      for (const route of [...manualRoutes.filter((route) => route !== "/manual/devserver/"), "/animations/"]) {
+      for (const route of [...manualRoutes.filter((route) => route !== framedRoute), "/animations/"]) {
         await check(`${label} ${route} control`, async () => {
           const page = await open(browser, origin, route, viewport);
           try {
@@ -214,8 +208,8 @@ async function main() {
       }
     }
 
-    await check("phone scroll toward lazy Devserver demo", async () => {
-      const page = await open(browser, origin, "/manual/devserver/", viewports.phone, false);
+    await check("phone scroll toward lazy Connect demo", async () => {
+      const page = await open(browser, origin, framedRoute, viewports.phone, false);
       try {
         const set = await page.evaluate(() => {
           const frame = document.querySelector("iframe.launcher-demo-embed");
@@ -225,14 +219,14 @@ async function main() {
           return { requested, y: scrollY, frameTop: frame.getBoundingClientRect().top, height: innerHeight };
         });
         if (set.frameTop <= set.height) throw new Error(`frame must remain outside viewport: ${JSON.stringify(set)}`);
-        await ready(page, "/manual/devserver/");
+        await ready(page, framedRoute);
         const actual = { set, after: await page.evaluate(() => scrollY) };
         return { expected: "scrollY remains at the set offset within 2 px after the lazy frame mounts", actual, pass: Math.abs(actual.after - set.y) <= 2 };
       } finally { await page.close(); }
     });
 
-    if (mode === "verify") await check("Devserver dialog keyboard entry", async () => {
-      const page = await open(browser, origin, "/manual/devserver/", viewports.desktop);
+    if (mode === "verify") await check("Connect dialog keyboard entry", async () => {
+      const page = await open(browser, origin, framedRoute, viewports.desktop);
       try {
         await page.evaluate(() => document.querySelector("iframe.launcher-demo-embed").scrollIntoView({ block: "center", behavior: "instant" }));
         const frame = await (await page.$("iframe.launcher-demo-embed")).contentFrame();
@@ -244,11 +238,26 @@ async function main() {
           };
         });
 
-        await page.focus("#connect a.heading-anchor");
+        // Mark the page's last control before the frame and its first one
+        // after it, so Tab and Shift+Tab step into the frame from each side.
+        await page.evaluate(() => {
+          const frame = document.querySelector("iframe.launcher-demo-embed");
+          const controls = [...document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')]
+            .filter((el) => el !== frame && el.getClientRects().length > 0);
+          const before = controls.filter((el) => frame.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING).at(-1);
+          const after = controls.find((el) => frame.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+          if (!before || !after) throw new Error("no control on one side of the frame");
+          before.dataset.frameNeighbour = "before";
+          after.dataset.frameNeighbour = "after";
+        });
+        const beforeFrame = '[data-frame-neighbour="before"]';
+        const afterFrame = '[data-frame-neighbour="after"]';
+
+        await page.focus(beforeFrame);
         await page.keyboard.press("Tab");
         const forward = await focused();
 
-        await page.focus("#remote-workspaces a.heading-anchor");
+        await page.focus(afterFrame);
         await page.keyboard.down("Shift");
         await page.keyboard.press("Tab");
         await page.keyboard.up("Shift");
@@ -256,7 +265,7 @@ async function main() {
 
         await page.keyboard.press("Escape");
         await frame.waitForFunction(() => !document.querySelector('.modal[role="dialog"]'), { timeout: 5000 });
-        await page.focus("#connect a.heading-anchor");
+        await page.focus(beforeFrame);
         const afterEscape = [];
         for (let index = 0; index < 7; index += 1) {
           await page.keyboard.press("Tab");
@@ -292,8 +301,8 @@ async function main() {
       } finally { await page.close(); }
     });
 
-    if (mode === "verify") await check("Devserver pointer and keyboard interaction", async () => {
-      const page = await open(browser, origin, "/manual/devserver/", viewports.desktop);
+    if (mode === "verify") await check("Connect pointer and keyboard interaction", async () => {
+      const page = await open(browser, origin, framedRoute, viewports.desktop);
       try {
         const initial = await page.evaluate(() => ({ y: scrollY, parentActive: document.activeElement?.tagName }));
         await page.evaluate(() => document.querySelector("iframe.launcher-demo-embed").scrollIntoView({ block: "center", behavior: "instant" }));

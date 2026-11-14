@@ -502,7 +502,7 @@ describe("contextual command deck", () => {
     // No tab is focused, so no app's commands are listed: the editor's and
     // the file browser's wait for their tab. This machine closes the list
     // with the ways into its tree.
-    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
+    expect(titles(target)).toEqual(["Search", "New standalone terminal", "Workspaces", "Windows"]);
     expect([...target.querySelectorAll(".deck-scope")].map((orb) => orb.getAttribute("aria-label"))).toEqual([
       "App scope", "Pane scope", "Window scope", "Workspace scope", "Settings scope", "Computers scope",
     ]);
@@ -744,7 +744,7 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     await typeQuery(target, "shell");
-    expect(titles(target)[0]).toBe("New terminal window");
+    expect(titles(target)[0]).toBe("New standalone terminal");
     await key(target, "Enter");
     await flush();
 
@@ -763,7 +763,7 @@ describe("contextual command deck", () => {
     // The scope lists them as the Computers screen does: objects first, each
     // under its type, and a new terminal window that runs at once.
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New"]);
-    expect(titles(target)).toEqual(["Project A", "Control terminal", CAPTIONED, "New terminal window"]);
+    expect(titles(target)).toEqual(["Project A", "Control terminal", CAPTIONED, "New standalone terminal"]);
     expect(valueOf(target, "Project A")).toBe("on");
     expect(secondLine(target, CAPTIONED)).toBe("Project A");
 
@@ -775,7 +775,7 @@ describe("contextual command deck", () => {
 
     await key(target, "ArrowLeft");
     expect(launcherDraft.path).toEqual([]);
-    expect(titles(target)).toContain("New terminal window");
+    expect(titles(target)).toContain("New standalone terminal");
   });
 
   test("a workspace's row opens a new window of it, in one step", async () => {
@@ -888,7 +888,7 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     await openComputers(target);
-    expect(titles(target)).toEqual(["Project A", "Control terminal", CAPTIONED, "New terminal window"]);
+    expect(titles(target)).toEqual(["Project A", "Control terminal", CAPTIONED, "New standalone terminal"]);
     expect(valueOf(target, "Control terminal")).toBe("");
     expect(valueOf(target, CAPTIONED)).toBe("hidden");
   });
@@ -1561,7 +1561,7 @@ describe("contextual command deck", () => {
     await key(target, "ArrowLeft");
     expect(launcherDraft.path).toEqual([]);
     expect(launcherDraft.scope).toBe("computers");
-    expect(titles(target)).toContain("New terminal window");
+    expect(titles(target)).toContain("New standalone terminal");
   });
 
   test("falls back to the list when that window closes elsewhere", async () => {
@@ -1578,7 +1578,7 @@ describe("contextual command deck", () => {
     await new Promise((resolve) => setTimeout(resolve, 2600));
     await flush();
     expect(launcherDraft.path).toEqual([]);
-    expect(titles(target)).toEqual(["Project A", "Control terminal", "New terminal window"]);
+    expect(titles(target)).toEqual(["Project A", "Control terminal", "New standalone terminal"]);
     expect(launcherDraft.contextChanged).toBe(true);
   });
 
@@ -1612,7 +1612,7 @@ describe("contextual command deck", () => {
     const target = openLauncher();
     await flush();
     expect(launcherDraft.path).toEqual([]);
-    expect(titles(target)).toEqual(["Project A", "Control terminal", "New terminal window"]);
+    expect(titles(target)).toEqual(["Project A", "Control terminal", "New standalone terminal"]);
     expect(launcherDraft.contextChanged).toBe(true);
   });
 
@@ -1767,14 +1767,14 @@ describe("contextual command deck", () => {
     expect(launcherDraft.path).toEqual([]);
     expect(launcherPanel.open, "Escape left the branch, not the launcher").toBe(true);
     expect(launcherDraft.scope).toBeNull();
-    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
+    expect(titles(target)).toEqual(["Search", "New standalone terminal", "Workspaces", "Windows"]);
 
     // Right enters a branch as Enter does, and Backspace leaves it.
     await selectRow(target, "Windows");
     await key(target, "ArrowRight");
     expect(launcherDraft.path).toEqual(["type:windows"]);
     expect(crumbs(target)).toEqual(["Computers", "Windows"]);
-    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New terminal window"]);
+    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New standalone terminal"]);
     await key(target, "Backspace");
     expect(launcherDraft.path).toEqual([]);
     expect(launcherPanel.open).toBe(true);
@@ -1788,7 +1788,7 @@ describe("contextual command deck", () => {
     await flush();
     expect(launcherDraft.path).toEqual(["type:windows"]);
     expect(crumbs(target)).toEqual(["Computers", "Windows"]);
-    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New terminal window"]);
+    expect(titles(target)).toEqual(["Control terminal", CAPTIONED, "New standalone terminal"]);
     expect(launcherDraft.contextChanged, "nothing moved under the reader").toBe(false);
   });
 });
@@ -1809,13 +1809,13 @@ describe("the way to every computer", () => {
     await flush();
     // The list of every scope ends with it too, a fourth row under Computers.
     expect(titles(target)).toEqual([
-      "Search", "New terminal window", "Workspaces", "Windows", "All computers...",
+      "Search", "New standalone terminal", "Workspaces", "Windows", "All computers...",
     ]);
     expect(sectionTitles(target)).toEqual(["Window", "Computers"]);
     await openComputers(target);
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New", "Chan Desktop"]);
     expect(titles(target)).toEqual([
-      "Project A", "Control terminal", CAPTIONED, "New terminal window", "All computers...",
+      "Project A", "Control terminal", CAPTIONED, "New standalone terminal", "All computers...",
     ]);
     // A page lists one object, and no way out of the library.
     await openPage(target, "Project A");
@@ -1838,7 +1838,7 @@ describe("the way to every computer", () => {
   test("a window whose app has no such screen lists no such row", async () => {
     const target = openLauncher();
     await flush();
-    expect(titles(target)).toEqual(["Search", "New terminal window", "Workspaces", "Windows"]);
+    expect(titles(target)).toEqual(["Search", "New standalone terminal", "Workspaces", "Windows"]);
     await openComputers(target);
     expect(sectionTitles(target)).toEqual(["Workspaces", "Windows", "New"]);
     await typeQuery(target, "geekom");

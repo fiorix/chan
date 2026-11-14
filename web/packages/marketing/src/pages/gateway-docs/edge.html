@@ -1,0 +1,133 @@
+<section class="manual-block" id="edge">
+  <h2><a class="heading-anchor" href="#edge">The nginx configuration</a></h2>
+  <p>nginx terminates TLS and routes each kind of traffic to its listener:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Traffic</th><th>Arrives at</th><th>Goes to</th></tr></thead>
+      <tbody>
+        <tr><td>Sign-in and accounts</td><td><code>gw.example.com</code></td><td>identity, <code>127.0.0.1:7000</code></td></tr>
+        <tr><td>Devservers' tunnels, long-lived HTTP/2 streams</td><td><code>proxy.example.com/v1/tunnel</code></td><td>The proxy's tunnel listener, <code>127.0.0.1:7100</code>, as h2c</td></tr>
+        <tr><td>Proxy health and readiness</td><td><code>proxy.example.com</code></td><td>The proxy, <code>127.0.0.1:7002</code></td></tr>
+        <tr><td>Devserver pages and WebSockets</td><td><code>*.p1.proxy.example.com</code></td><td>The proxy, <code>127.0.0.1:7002</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Save this as <code>/etc/nginx/sites-available/chan-gateway</code>, with your domain in place of <code>example.com</code>:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code data-copy-value>map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name gw.example.com proxy.example.com *.p1.proxy.example.com;
+    return 301 https://$host$request_uri;
+}
+
+# Sign-in, accounts, and desktop discovery.
+server {
+    listen 443 ssl http2;
+    server_name gw.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:7000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Tunnel ingress and proxy health/readiness.
+server {
+    listen 443 ssl http2;
+    server_name proxy.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+    client_max_body_size 0;
+
+    # A tunnel is one request that lasts as long as the devserver.
+    location /v1/tunnel {
+        grpc_pass grpc://127.0.0.1:7100;
+        client_body_timeout 1h;
+        grpc_read_timeout 1h;
+        grpc_send_timeout 1h;
+        grpc_socket_keepalive on;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:7002;
+        proxy_set_header Host $host;
+    }
+}
+
+# One origin per devserver: pages, terminals, and file transfers.
+server {
+    listen 443 ssl http2;
+    server_name *.p1.proxy.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://127.0.0.1:7002;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}</code>
+    {{copyButton}}
+  </div>
+  <p>Enable it and reload nginx:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo ln -s /etc/nginx/sites-available/chan-gateway /etc/nginx/sites-enabled/
+sudo nginx -t &amp;&amp; sudo systemctl reload nginx</b></code>
+    {{copyButton}}
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>The proxy routes on the <code>Host</code> header, so the edge passes it through unchanged.</li>
+      <li>nginx ends a request body idle for 60 seconds by default, and a tunnel is idle whenever nobody uses its devserver. Without the raised <code>client_body_timeout</code>, a devserver dials again about once a minute.</li>
+      <li>A low <code>grpc_read_timeout</code> ends a quiet tunnel with a <code>504</code> and an <code>upstream timed out</code> line in nginx's error log.</li>
+      <li>This configuration listens on every address of the server. With <a href="/gateway/wireguard/">WireGuard</a>, an edge that names its listen addresses also needs the tunnel address, <code>10.7.0.1</code>.</li>
+      <li>Each further proxy node runs an edge like this one for its own wildcard. See <a href="/gateway/operate/#nodes">More proxy nodes</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="private">
+  <h2><a class="heading-anchor" href="#private">What stays private</a></h2>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Listener</th><th>Port</th><th>Through the edge</th></tr></thead>
+      <tbody>
+        <tr><td>identity, public</td><td><code>7000</code></td><td>Yes, as <code>gw.example.com</code></td></tr>
+        <tr><td>devserver-proxy, pages and health</td><td><code>7002</code></td><td>Yes</td></tr>
+        <tr><td>devserver-proxy, tunnels</td><td><code>7100</code></td><td>Yes, at <code>/v1/tunnel</code> only</td></tr>
+        <tr><td>identity, internal</td><td><code>7004</code></td><td>Never</td></tr>
+        <tr><td>profile</td><td><code>7001</code></td><td>Never</td></tr>
+        <tr><td>devserver-control, admin</td><td><code>7003</code></td><td>Never</td></tr>
+        <tr><td>devserver-control, proxy sessions</td><td><code>7101</code></td><td>Never</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <aside class="doc-note warning">
+    <strong>Never publish the internal ports</strong>
+    <p>Ports 7004, 7001, 7003 and 7101 carry the services' own credentials. Keep them on loopback, where the setup script binds them.</p>
+  </aside>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/gateway/accounts/"><strong>Accounts and sign-in</strong><span>Let yourself in and choose who else may sign in.</span></a>
+  </div>
+</section>

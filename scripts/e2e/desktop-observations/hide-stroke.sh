@@ -139,7 +139,7 @@ run_arm() {
     xid="$(workspace_xid)"
     xdotool windowactivate --sync "$xid" 2>/dev/null || true
     sleep 0.3
-    step="$(node "$HERE/hide-flush-step.mjs" --inspector "$INSPECTOR" --page "$PAGE" --witness-page "Chan Launcher" \
+    step="$(node "$HERE/hide-flush-step.mjs" --inspector "$INSPECTOR" --page "$PAGE" --witness-page "Computers - Chan" \
         --xid "$xid" --marker "$STROKE" --note-file "$WS/$board" --stroke 500,300 \
         --mode "$mode" --window "$CHAN_WINDOW_ID" --chan "$CHAN_BIN" --desktop-pid "$OBS_DESKTOP_PID" "${extra[@]}")" \
         || obs_log "$arm: the timed step reported a problem: $step"

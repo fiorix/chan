@@ -612,7 +612,7 @@ export type TerminalTab = {
   /// help; the replay would only re-establish a still-recent negotiation).
   keyboardProtocol?: TerminalKeyboardProtocolState;
   /// Set iff this is a Team Work LEAD terminal with the spawn-agents dialog
-  /// open over it (Cmd+P, pre-Bootstrap). Holds the live config draft so a
+  /// open over it (New team, pre-Bootstrap). Holds the live config draft so a
   /// window reload reopens the dialog over the restored lead terminal with
   /// exactly what the user was editing. Seeded in `createTeamWorkLeadTerminal`,
   /// mirrored from the dialog on every edit, cleared on Bootstrap (the terminal
@@ -1788,7 +1788,7 @@ export function setTerminalBroadcastBySession(sessionId: string, on: boolean): v
 }
 
 /// Team Work lead-terminal factory. Spawns a fresh (normal) terminal in the
-/// active pane and returns it. The Cmd+P flow uses the returned handle so the
+/// active pane and returns it. The New team flow uses the returned handle so the
 /// Team dialog can delete the just-spawned terminal if the user cancels before
 /// committing; the orchestrator delivers the lead's identity prompt through the
 /// write queue (the lead is a normal terminal - no bubble).

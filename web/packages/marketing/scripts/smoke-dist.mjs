@@ -10,6 +10,7 @@ import { JSDOM } from "jsdom";
 const scriptPath = fileURLToPath(import.meta.url);
 const siteRoot = path.resolve(path.dirname(scriptPath), "..");
 const distRoot = path.join(siteRoot, "dist");
+const docsPath = path.join(siteRoot, "src", "docs.json");
 
 const checks = [
   { path: "/product/", status: 404 },
@@ -52,7 +53,7 @@ const checks = [
   { path: "/assets/animation-gallery.css", status: 200 },
   { path: "/manual/install/", status: 200, includes: 'id="launcher-demo"' },
   { path: "/manual/install/", status: 200, includes: 'src="/assets/launcher-demo.js"' },
-  { path: "/manual/devserver/", status: 200, includes: 'src="/manual/demo/devserver/"' },
+  { path: "/manual/connect/", status: 200, includes: 'src="/manual/demo/devserver/"' },
   { path: "/manual/demo/devserver/", status: 200, includes: 'data-variant="devserver"' },
   { path: "/install/", status: 200, includes: "Install Chan" },
   { path: "/install/", status: 200, before: ['id="desktop"', 'id="server"'] },
@@ -63,14 +64,14 @@ const checks = [
   { path: "/install/", status: 200, includes: "ppa:fiorix/chan" },
   { path: "/install/", status: 200, includes: "dnf copr enable fiorix/chan" },
   { path: "/install/", status: 200, includes: "paru -S chan-desktop-bin</b>" },
-  { path: "/install/", status: 200, includes: 'href="/manual/install/#default-terminal"' },
-  { path: "/manual/install/", status: 200, includes: 'id="default-terminal"' },
-  { path: "/manual/install/", status: 200, includes: "chan-term.desktop &gt; ~/.config/xdg-terminals.list</b>" },
+  { path: "/install/", status: 200, includes: 'href="/manual/standalone/#default-terminal"' },
+  { path: "/manual/standalone/", status: 200, includes: 'id="default-terminal"' },
+  { path: "/manual/standalone/", status: 200, includes: "chan-term.desktop &gt; ~/.config/xdg-terminals.list</b>" },
   { path: "/install/", status: 200, includes: "sudo apt install chan</b>" },
   { path: "/install/", status: 200, includes: "sudo dnf install chan</b>" },
   { path: "/install/", status: 200, includes: "paru -S chan</b>" },
-  { path: "/install/", status: 200, includes: 'href="/manual/install/#open-from-finder"' },
-  { path: "/manual/install/", status: 200, includes: 'id="open-from-finder"' },
+  { path: "/install/", status: 200, includes: 'href="/manual/standalone/#open-from-finder"' },
+  { path: "/manual/standalone/", status: 200, includes: 'id="open-from-finder"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-macos-arm64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-windows-x64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-linux-x64"' },
@@ -98,16 +99,22 @@ async function main() {
     for (const check of checks) {
       await runCheck(port, check);
     }
-    await checkManual(port);
+    const { sets } = JSON.parse(await fs.readFile(docsPath, "utf8"));
+    for (const set of sets) await checkDocSet(port, set);
   } finally {
     await close(server);
   }
   console.log(`smoked marketing dist routes on 127.0.0.1:${port}`);
 }
 
-async function checkManual(port) {
-  const sections = ["", "install", "navigation", "devserver", "systemd", "browser", "gateway", "terminal", "editor", "files", "graph", "dashboard", "search", "collaboration", "extensions", "settings", "screensavers"];
-  const routes = sections.map((slug) => `/manual/${slug ? `${slug}/` : ""}`);
+// Every page of a documentation set, in the reading order docs.json gives:
+// the sidebar lists them all in that order under their groups, one is marked
+// current, previous and next follow the order, and the content is there
+// without JavaScript.
+async function checkDocSet(port, set) {
+  const pages = set.groups.flatMap((group) => group.pages);
+  const routes = pages.map((page) => `${set.base}${page.slug ? `${page.slug}/` : ""}`);
+  const withLauncher = new Set(pages.filter((page) => page.head === "launcher-demo").map((page) => routes[pages.indexOf(page)]));
   const documents = new Map();
   try {
     for (const route of routes) {
@@ -123,9 +130,10 @@ async function checkManual(port) {
       assert.equal(doc.querySelectorAll("h1").length, 1, `${route}: one page title`);
       const ids = [...doc.querySelectorAll("[id]")].map((el) => el.id);
       assert.equal(new Set(ids).size, ids.length, `${route}: unique anchors`);
-      const nav = doc.querySelector('nav[aria-label="Manual sections"]');
-      assert.ok(nav, `${route}: manual navigation`);
+      const nav = doc.querySelector(`nav[aria-label="${set.label} sections"]`);
+      assert.ok(nav, `${route}: section navigation`);
       assert.deepEqual([...nav.querySelectorAll("li a")].map((a) => a.getAttribute("href")), routes, `${route}: section order`);
+      assert.deepEqual([...nav.querySelectorAll(".manual-nav-heading")].map((el) => el.textContent), set.groups.map((group) => group.title), `${route}: section groups`);
       const active = nav.querySelectorAll('[aria-current="page"]');
       assert.equal(active.length, 1, `${route}: one active section`);
       assert.equal(active[0].getAttribute("href"), route, `${route}: correct active section`);
@@ -133,8 +141,9 @@ async function checkManual(port) {
       assert.equal(doc.querySelector('[rel="prev"]')?.getAttribute("href"), routes[index - 1], `${route}: previous section`);
       assert.equal(doc.querySelector('[rel="next"]')?.getAttribute("href"), routes[index + 1], `${route}: next section`);
       assert.ok(doc.querySelector("#manual-content .manual-block p"), `${route}: static content without JavaScript`);
-      if (route !== "/manual/install/") {
-        assert.equal(doc.querySelector('script[src="/assets/launcher-demo.js"]'), null, `${route}: no unused launcher bundle`);
+      assert.equal(!!doc.querySelector('script[src="/assets/launcher-demo.js"]'), withLauncher.has(route), `${route}: the launcher bundle loads only where the page mounts it`);
+      for (const media of doc.querySelectorAll("#manual-content img[src^='/assets/'], #manual-content video[poster^='/assets/']")) {
+        assert.ok(media.getAttribute("width") && media.getAttribute("height"), `${route}: ${media.getAttribute("src") ?? media.getAttribute("poster")} has no intrinsic size`);
       }
     }
     for (const [route, dom] of documents) {

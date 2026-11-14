@@ -785,10 +785,10 @@
     openBrowserInActivePane({ select });
     scheduleSessionSave();
   }
-  /// Team Work entry: instantiates the Lead Terminal (fresh terminal with
-  /// the markdown editor armed) then opens the Spawn-agents dialog over it.
-  /// The dialog owns Cancel (deletes the lead tab) and Bootstrap. The
-  /// pane-mode "P" key spawns a plain Team Work terminal without the dialog.
+  /// Team Work entry, the New team command's: instantiates the Lead Terminal
+  /// (fresh terminal with the markdown editor armed) then opens the
+  /// Spawn-agents dialog over it. The dialog owns Cancel (deletes the lead
+  /// tab) and Bootstrap.
   function spawnTeamWorkFromContext(): void {
     // Team Work needs a workspace (the lead terminal arms the markdown
     // editor + drafts dir), so it is a workspace-window spawn only.
@@ -832,19 +832,18 @@
 
   /// App-level keyboard shortcuts. Layout follows VS Code where possible.
   ///
-  /// Context-aware spawn chords (each resolves focused surface context):
-  ///   Cmd+T          -> Terminal (native; Cmd+Alt+T on web Mac)
-  ///   Cmd+O          -> File Browser (native; Cmd+Alt+O on web Mac)
-  ///   Team Work has no direct chord: `Mod+. p` (Hybrid Nav) or the
-  ///   hamburger. On chan-desktop the menubar owns Cmd+P (Toggle Launcher).
-  ///   Cmd+Shift+M    -> Graph (native + web)
-  ///   Mod+. t/o/p/m  -> universal aliases via Hybrid Nav
+  /// Context-aware spawn chord (resolves focused surface context):
+  ///   Cmd+T          -> Terminal (macOS desktop; Ctrl+Shift+T elsewhere)
+  ///   File Browser, Graph and Team Work have no chord: their commands run
+  ///   from the launcher and the pane menu's Apps rows. On chan-desktop the
+  ///   menubar owns Cmd+P (View > Computers).
+  ///   Mod+. t/f/g/b/n/e -> stage a terminal, file browser, graph,
+  ///   dashboard, draft or Excalidraw via Hybrid Nav
   ///
   /// Other app chords:
   ///   Cmd/Ctrl+,             -> Settings
   ///   Cmd+Shift+S            -> Search on macOS
   ///   Ctrl+Alt+S             -> Search on Linux / Windows
-  ///   Cmd+. L                -> Lock screen
   ///   Alt+Shift+[ / ]        -> previous / next tab  (web fallback)
   ///   Ctrl+Alt+1..9          -> jump to tab N        (web fallback)
   ///   Ctrl+Alt+/             -> split pane right     (web fallback)
@@ -872,7 +871,7 @@
       // window for another (mac-relevant only; a harmless no-op elsewhere).
       if (e.code === "Backquote") return;
       // chan-desktop's macOS menubar acts on the window or the app for these
-      // (Toggle Launcher, New Window, Hide, Minimize, Quit), and WKWebView
+      // (Computers, New Window, Hide, Minimize, Quit), and WKWebView
       // hands the menubar only a key the page did not cancel. Keep the
       // default so the Computers launcher opens over a reconnecting window;
       // stop the key here so nothing in the app acts on it.
@@ -1183,7 +1182,7 @@
     // the focused pane's active terminal only. No-op when the focused tab is
     // not a terminal. Cmd+Shift+P on macOS; Ctrl+Alt+P off macOS on both the
     // desktop webview and the browser (the Win/Super key is ruled out, and
-    // Ctrl+Shift+P is the desktop's Toggle Launcher). Keep in sync with
+    // Ctrl+Shift+P is the desktop's View > Computers). Keep in sync with
     // osChord's RICH_PROMPT_ID branch. Also on the terminal right-click row and
     // the launcher entry.
     if (shortcutLetter(e) === "P") {
@@ -1644,9 +1643,9 @@
       case "app.slides.new":
         void createSlidesAndOpen();
         return;
-      // Plain Cmd+L is deliberately not claimed by App.svelte so the
-      // browser location bar keeps working; lock is only via this command
-      // or Hybrid Nav `L`.
+      // Lock screen now has no built-in chord: plain Cmd+L stays with the
+      // browser's location bar. The launcher row and a chord the user
+      // assigns in Settings both dispatch here.
       case "app.screensaver.lock":
         lockNow();
         return;
@@ -1701,12 +1700,12 @@
         return;
       }
       // Explicit "close this window" (native Ctrl+Alt+W off-mac via
-      // KEY_BRIDGE_JS, Cmd+Shift+W on macOS,
-      // and the OS close button when a devserver is NOT connected). Discard
-      // intent: delete this window's saved blob now -- the server reaps its
-      // terminal sessions -- then ask the host to close the window. Distinct
-      // from a bury (connected close button), which keeps the blob so the
-      // window can be re-surfaced.
+      // KEY_BRIDGE_JS, Cmd+Shift+W on macOS). The OS close button never
+      // lands here: it prompts through `app.window.confirmClose` below.
+      // Discard intent: delete this window's saved blob now -- the server
+      // reaps its terminal sessions -- then ask the host to close the window.
+      // Distinct from a bury (Hide), which keeps the blob so the window can be
+      // re-surfaced.
       case "app.window.close":
         if (closeActiveEmptyPane()) return;
         void flushAndCloseWindow({ discard: () => discardWindowSession() });
@@ -1947,7 +1946,7 @@
 <!-- Team Work Spawn-agents dialog, mounted at App root so its
      `position: fixed` backdrop is never clipped by a pane's
      `overflow: hidden` stacking context. Renders only when a request
-     is pending (set by the Cmd+P lead-terminal flow); the dialog
+     is pending (set by the New team lead-terminal flow); the dialog
      closes itself on Bootstrap / Cancel / Escape / backdrop click and
      owns deleting the lead tab on Cancel. -->
 {#if teamDialogState.request}

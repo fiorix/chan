@@ -1,0 +1,254 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="cs-drive-terminal" data-shot-kind="clip">clip to capture<small>two panes; in the left terminal run cs terminal new --tab-name build, then cs terminal write --tab-name build with make test; the build tab runs it on the right; cs terminal scrollback prints its last lines on the left</small></div>
+  <figcaption>One terminal opens a named terminal, runs a command in it, and reads its output.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Open files, terminals and panes from a script.</li>
+    <li>Type into other terminals by name or group, and read their output.</li>
+    <li>Show a program's progress, or that it needs you, on its tab.</li>
+    <li>Read terminals and panes as Markdown or JSON.</li>
+  </ul>
+</section>
+
+<section class="manual-block" id="verbs">
+  <h2><a class="heading-anchor" href="#verbs">Commands</a></h2>
+  <p><code>cs</code>, also <code>chan shell</code>, drives the chan window and terminals it runs in. A prefix that names one command is enough: <code>cs te l</code> is <code>cs terminal list</code>. Add <code>--help</code> to any command for its flags and examples.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th><th>More</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs open [PATH]</code></td><td>Opens a text file in the editor, a directory in the file browser (the current one by default), any other file selected in the file browser, or a <code>chan://graph</code> link.</td><td><a href="/manual/editor/#open-edit">Editor</a></td></tr>
+        <tr><td><code>cs graph [PATH]</code></td><td>Opens the workspace graph, focused on a path.</td><td><a href="/manual/graph/#open-graph">Graph</a></td></tr>
+        <tr><td><code>cs dashboard</code></td><td>Opens a Dashboard tab.</td><td><a href="/manual/dashboard/#dashboard">Dashboard</a></td></tr>
+        <tr><td><code>cs search QUERY</code></td><td>Searches, browses and traverses the workspace.</td><td><a href="/manual/search/#terminal-search">Search</a></td></tr>
+        <tr><td><code>cs export PATH</code></td><td>Renders a workspace file to PDF.</td><td><a href="/manual/previews/#export">Export</a></td></tr>
+        <tr><td><code>cs terminal</code></td><td>Opens, writes to, reads, restarts and closes terminals; reports program status; asks a question; starts a team.</td><td><a href="#terminal">Below</a></td></tr>
+        <tr><td><code>cs pane</code></td><td>Lists and changes the window's panes.</td><td><a href="#pane">Below</a></td></tr>
+        <tr><td><code>cs window</code></td><td><code>list</code> shows every window of this machine or devserver; <code>new</code> opens one; <code>open ID</code>, <code>hide ID</code> and <code>rm ID</code> show, hide or delete one.</td><td></td></tr>
+        <tr><td><code>cs session</code></td><td>Lists and detaches the clients viewing this server; hands over session leadership.</td><td><a href="/manual/collaboration/#client-sessions">Collaboration</a></td></tr>
+        <tr><td><code>cs copy</code>, <code>cs paste</code></td><td>Pipe into and out of the clipboard of the machine viewing the window.</td><td><a href="/manual/terminal/#copy-paste">Copy and paste</a></td></tr>
+        <tr><td><code>cs upload DIR</code>, <code>cs download PATH</code></td><td>Upload into a directory through a picker; download a file, or a directory as a tar.</td><td><a href="/manual/remote-tools/#transfers">Transfers</a></td></tr>
+        <tr><td><code>cs tunnel SPEC</code></td><td>Forwards ports on the desktop's machine to ports on this one.</td><td><a href="/manual/remote-tools/#tunnel">Tunnels</a></td></tr>
+        <tr><td><code>cs dump-skill</code></td><td>Prints chan's manual for agents, offline: <code>--list</code> for its topics, <code>--topic SLUG</code> for one.</td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="where">
+  <h2><a class="heading-anchor" href="#where">Where cs works</a></h2>
+  <p><code>cs</code> works in every chan terminal, workspace or standalone, on the desktop, in a browser or on a devserver. It acts on the window it runs in, found from variables chan sets, and reads paths from the shell's directory on the terminal's machine.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Needs</th><th>Commands</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Any chan terminal</td><td><code>terminal</code> (but <code>team</code>), <code>pane</code>, <code>dashboard</code>, <code>copy</code>, <code>paste</code>, <code>upload</code>, <code>download</code>, <code>window list</code> and <code>rm</code>, <code>session list</code>, <code>info</code>, <code>self</code> and <code>detach</code></td></tr>
+        <tr><td>A workspace, or a standalone terminal whose machine serves files</td><td><code>open</code> of a path, <code>terminal new PATH</code></td></tr>
+        <tr><td>A workspace</td><td><code>graph</code>, <code>search</code>, <code>export</code>, <code>terminal team</code>, <code>session handover</code> and <code>takeover</code>, <code>open</code> of a <code>chan://graph</code> link</td></tr>
+        <tr><td>Chan Desktop viewing the window</td><td><code>window new</code>, <code>open</code> and <code>hide</code>; <code>tunnel</code>, from a devserver or the desktop's own terminals</td></tr>
+        <tr><td>Nothing: any terminal, over ssh too</td><td><code>terminal status</code>, <code>dump-skill</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Variable</th><th>Holds</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>CHAN</code></td><td><code>1</code> in every chan terminal.</td></tr>
+        <tr><td><code>CHAN_CONTROL_SOCKET</code></td><td>The server <code>cs</code> talks to.</td></tr>
+        <tr><td><code>CHAN_WINDOW_ID</code></td><td>The window <code>cs</code> acts on. <code>--window</code> overrides it for the commands that open a tab and for <code>cs pane</code>.</td></tr>
+        <tr><td><code>CHAN_TAB_NAME</code>, <code>CHAN_TAB_GROUP</code></td><td>This terminal's name, when it has one, and its group, <code>default</code> unless set.</td></tr>
+        <tr><td><code>CHAN_SESSION_ID</code></td><td>This terminal, kept across a restart.</td></tr>
+        <tr><td><code>CHAN_WORKSPACE_PATH</code>, <code>CHAN_WORKSPACE_NAME</code></td><td>The workspace root and its name, or <code>$HOME</code> with no workspace.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>No variable tells a workspace from a standalone terminal; a workspace command refusing is the test:</p>
+  <pre><code>cs search --limit 1 x &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo workspace || echo standalone</code></pre>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Outside a chan terminal, a window command refuses: <em>not running inside a chan session; this needs $CHAN_WINDOW_ID</em>.</li>
+      <li>When the server that started the terminal has gone, <code>cs</code> says <em>the chan window or server that spawned this terminal is no longer running</em>.</li>
+      <li>When a devserver comes back on another socket, <code>cs</code> looks for the one devserver serving this workspace and uses it.</li>
+      <li>chan sets these variables; read them, do not set them.</li>
+      <li>In an ssh session opened from a chan terminal, only <code>cs terminal status</code> and <code>cs dump-skill</code> work, where <code>cs</code> is installed.</li>
+      <li>A workspace command in a standalone terminal refuses with <em>this is a standalone terminal</em>.</li>
+      <li><code>cs window rm</code> deletes a window and its saved layout, and refuses one with running terminals unless you add <code>--force</code>; a devserver's window removed from a desktop terminal gets no such check. <code>hide</code> keeps a window to reopen.</li>
+      <li><code>cs window list</code> is empty under a standalone <code>chan serve</code>, which keeps no windows.</li>
+      <li><code>se</code> matches both search and session, and <code>t</code> both terminal and tunnel, so neither is accepted as a prefix.</li>
+      <li><code>-v</code>, <code>-vv</code> and <code>-vvv</code> raise logging.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="terminal">
+  <h2><a class="heading-anchor" href="#terminal">cs terminal</a></h2>
+  <p>Commands select terminals by name and group across the whole server, whichever window holds them. <code>--tab-name</code> matches every terminal with that name, <code>--tab-group</code> every terminal of the group, and both together match terminals with both.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Open a named terminal</h3>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal new --tab-name build</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Run a command in it</h3>
+      <p>No newline is added, so end with <code>\n</code> to run the command.</p>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal write --tab-name build $'make test\n'</b></code>{{copyButton}}</div>
+    </li>
+    <li>
+      <h3>Read what it printed</h3>
+      <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal scrollback --tab-name build | tail -20</b></code>{{copyButton}}</div>
+    </li>
+  </ol>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>Example</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>new</code></td><td><code>cs terminal new src --tab-name build --tab-group ci</code></td><td>Opens a terminal tab in this window, in a directory, with a name and group. <code>--command</code> runs a program instead of the shell.</td></tr>
+        <tr><td><code>write</code></td><td><code>cs terminal write --tab-group ci $'git pull\n'</code></td><td>Queues text for every match, delivered when each goes quiet. <code>--submit AGENT</code> also submits it to an agent; <code>--stdin</code> reads the text.</td></tr>
+        <tr><td><code>list</code></td><td><code>cs terminal list --json | jq -r '.groups.ci[].name'</code></td><td>Lists live terminals by group, with window, pane, agent, program status, queue and directory.</td></tr>
+        <tr><td><code>scrollback</code></td><td><code>cs terminal scrollback --tab-name build &gt; build.log</code></td><td>Prints one terminal's recent output, escape sequences included.</td></tr>
+        <tr><td><code>restart</code></td><td><code>cs terminal restart --tab-name build</code></td><td>Starts the terminal again with the same name, group and window. <code>--command</code> and <code>--env</code> change what runs.</td></tr>
+        <tr><td><code>close</code></td><td><code>cs terminal close --tab-group ci</code></td><td>Ends the terminals and frees their names.</td></tr>
+        <tr><td><code>survey</code></td><td><code>cs terminal survey --tab-name lead --option Merge --option Wait "Tests pass. Merge?"</code></td><td>Shows the question over that terminal's window and prints the answer chosen.</td></tr>
+        <tr><td><code>status</code></td><td><code>cs terminal status done --msg "Tests passed"</code></td><td>Reports program status. See <a href="#status">Program status</a>.</td></tr>
+        <tr><td><code>team</code></td><td><code>cs terminal team load teams/review</code></td><td>Starts a team of agents. See <a href="/manual/teams/#commands">Agent teams</a>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>write</code>, <code>restart</code> and <code>close</code> need <code>--tab-name</code> or <code>--tab-group</code>, so a forgotten filter cannot reach every terminal. <code>scrollback</code> takes a name that matches exactly one terminal.</li>
+      <li>Matching nothing is an error: <em>no live terminal session matched</em>.</li>
+      <li>Names need not be unique. <code>write</code>, <code>restart</code> and <code>close</code> reach every terminal with the name.</li>
+      <li><code>write</code> refuses more than 4096 bytes rather than cutting it. Put long text in a file and send its path.</li>
+      <li>Each terminal queues up to 100 entries. A restart drops what is still queued.</li>
+      <li><code>--submit</code> sends the submit key of the agent you name: <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code> or <code>opencode</code>. One agent per command, so write to a group of mixed agents one terminal at a time. <code>cs terminal list</code> shows each terminal's agent.</li>
+      <li><code>restart</code> and <code>close</code> ask no confirmation. <code>close</code> hangs up the terminal's program, kills it if it still runs shortly after, and fails if it outlives a 5-second wait.</li>
+      <li>A process that ignores the hangup or left the terminal, such as a <code>nohup</code> job, keeps running after <code>close</code>.</li>
+      <li><code>scrollback</code> keeps a bounded tail of the output. Send it to a file or a pager, not to a live terminal, which would replay its escape sequences.</li>
+      <li><code>new</code> queues the tab and returns; the tab appears a moment later. <code>--pane</code> and <code>--side</code> place it, and <code>--env KEY=VALUE</code> adds to its environment.</li>
+      <li><code>survey</code> takes up to four <code>--option</code> values and waits until someone answers, picks <strong>[F]</strong> to follow up later, or dismisses it. After 600 seconds, or <code>--timeout</code>, it gives up and exits 124.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="status">
+  <h2><a class="heading-anchor" href="#status">Program status</a></h2>
+  <p>Programs report that they are working, blocked, done or failed with OSC 7501, the <a href="https://www.superlogical.com/rex/docs/build/program-status">Program Status Protocol</a> Superlogical specifies for Rex and other terminals. chan marks the tab, and <strong>Details</strong> in the tab's right-click menu lists each report. It is on by default, in <strong>Settings → Terminal → Program status (OSC 7501)</strong>. From a script:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal status working --id build --app cargo --progress 40</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs terminal status done --id build --msg "Tests passed"</b></code>{{copyButton}}</div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Report</th><th>In the tab</th><th>In Details</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>working</code></td><td>The terminal icon's prompt with a cursor being typed; with <code>--progress</code>, a pie in a ring that fills to the percentage.</td><td>Working, with its progress.</td></tr>
+        <tr><td><code>blocked</code></td><td>An amber mark after the name: a shield for <code>--kind permission</code>, a question mark for <code>question</code>, a key for <code>auth</code>, a pause sign with no kind. It shows even while its tab is in front.</td><td>Blocked, with its kind.</td></tr>
+        <tr><td><code>done</code></td><td>A green check while unseen.</td><td>Done, seen or not.</td></tr>
+        <tr><td><code>error</code></td><td>A red exclamation mark while unseen.</td><td>Error, seen or not.</td></tr>
+        <tr><td><code>idle</code></td><td>No mark.</td><td>Idle.</td></tr>
+        <tr><td><code>clear</code></td><td>The cleared records' marks go.</td><td>The cleared records go.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="cs-status-marks" data-shot-kind="still">screenshot to capture<small>a tab strip with four terminals: a pie at 40%, an amber shield, a green check and a red exclamation mark; Details open on the blocked one</small></div>
+  </figure>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>--kind</code> applies to <code>blocked</code> only, and <code>--progress</code>, a whole number from 0 to 100, to <code>working</code> and <code>blocked</code>.</li>
+      <li>Hover a mark to read the report's state, kind, progress, app, title and message.</li>
+      <li>With several reports standing, the tab shows one mark: blocked over error, error over done, then the latest.</li>
+      <li>A done or error report is seen when it arrives while its tab is in front, or when its tab comes to the front. A seen report keeps no mark and stays in Details.</li>
+      <li>So a report typed at the prompt of the tab in front shows no mark. To watch one, run <code>(sleep 5; cs terminal status done --msg Passed) &amp;</code> and switch to another tab within five seconds.</li>
+      <li><strong>Details</strong> is also in the command launcher.</li>
+      <li>Each report replaces its record, optional fields included. <code>--id</code> gives a subprocess a record of its own instead of replacing its parent's. <code>clear --id build</code> removes that record and its children; <code>clear</code> with no <code>--id</code> removes them all.</li>
+      <li><code>done</code> and <code>error</code> stay until replaced or cleared. <code>working</code>, <code>blocked</code> and <code>idle</code> end with the program that held the terminal when the report arrived, or at the shell's next prompt.</li>
+      <li><code>--sleep N</code> writes once and waits N seconds, up to 86400, so you can look at a passing state from an interactive shell. <kbd>Ctrl+C</kbd> ends the wait and writes nothing more.</li>
+      <li>The report goes to the terminal itself, so it works over ssh in any terminal that supports OSC 7501. With output redirected and no terminal, <code>cs</code> sends it through chan instead.</li>
+      <li>A title holds up to 192 bytes and a message up to 2048.</li>
+      <li><code>cs terminal list --json</code> carries every record and its text, marked or not.</li>
+      <li>chan marks a terminal the same way while a <code>cs terminal survey</code>, <code>cs export</code> or <code>cs tunnel</code> started there waits.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="pane">
+  <h2><a class="heading-anchor" href="#pane">cs pane</a></h2>
+  <p>Each pane has two sides, A and B, each a strip of tabs. <code>cs pane</code> changes the window it runs in, or the one given by <code>--window</code> or holding the <code>--tab-name</code> terminal. Changes show at once and survive a reload.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>cs pane list</code></td><td>Lists every pane and both its sides. Plain <code>cs pane</code> does the same.</td></tr>
+        <tr><td><code>cs pane new right|bottom [--pane P]</code></td><td>Splits the active pane, or P, and prints the new pane's id.</td></tr>
+        <tr><td><code>cs pane focus P [--side a|b]</code></td><td>Selects a pane, and one of its sides.</td></tr>
+        <tr><td><code>cs pane resize DELTA [--pane P]</code></td><td>Grows the pane in its split by DELTA, from -1.0 to 1.0. A negative DELTA shrinks it.</td></tr>
+        <tr><td><code>cs pane equalize [--pane P]</code></td><td>Sets the pane's nearest split to 50/50.</td></tr>
+        <tr><td><code>cs pane swap OTHER [--pane P]</code></td><td>Swaps everything in two panes, both sides.</td></tr>
+        <tr><td><code>cs pane close [P] [--force]</code></td><td>Closes the active pane, or P.</td></tr>
+        <tr><td><code>cs pane close-tab [--pane P] [--tab T] [--force]</code></td><td>Closes one tab, the pane's active one by default.</td></tr>
+        <tr><td><code>cs pane close-all [--force]</code></td><td>Closes every tab in every pane.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>To put a named terminal in a new pane, keep the id <code>new</code> prints:</p>
+  <pre><code>right=$(cs pane new right)
+cs terminal new --pane "$right" --side a --tab-name runner</code></pre>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li><code>cs open</code>, <code>cs graph</code>, <code>cs dashboard</code> and <code>cs terminal team</code> take the same <code>--window</code>, <code>--pane</code> and <code>--side</code>.</li>
+      <li>Pane ids look like <code>pane-4</code> and hold only while the window is open. Read them from <code>cs pane list</code>.</li>
+      <li>Without <code>--force</code>, a close stops at unsaved files and running terminals, prints them, and exits non-zero. No dialog asks.</li>
+      <li>Closing the last pane clears its tabs: a window always keeps one pane.</li>
+      <li>In a standalone terminal window, <code>new</code> opens a terminal in the new pane.</li>
+      <li>Each call waits up to 5 seconds for the window, and fails with <em>no reply from the window (is it open in a browser?)</em> when it does not answer.</li>
+      <li>A <code>--tab-name</code> held in two windows is refused, not guessed.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="output">
+  <h2><a class="heading-anchor" href="#output">Output and exit codes</a></h2>
+  <p>Lists print Markdown. <code>terminal list</code>, <code>pane</code>, <code>window list</code>, <code>session</code> and <code>search</code> take <code>--json</code>, and <code>--pretty</code> to indent it. Results go to stdout, such as a new pane's id or a survey's answer; confirmations such as <code>queued at position 1</code> go to stderr.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Exit</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>Done, or queued to a live window. A queued tab or message arrives a moment later.</td></tr>
+        <tr><td><code>1</code></td><td>Failed: refused, nothing matched, or a close blocked by unsaved work.</td></tr>
+        <tr><td><code>124</code></td><td>Nothing answered in time, as when a survey, a copy or paste, or a tunnel waits too long.</td></tr>
+        <tr><td><code>69</code></td><td>Only from an older devserver, which could refuse a <code>--submit</code>. The text was still queued.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/teams/"><strong>Agent teams</strong><span>A lead and workers in named terminals, driven through cs.</span></a>
+    <a class="next-card" href="/manual/remote-tools/"><strong>Tunnels, transfers and clipboard</strong><span>Move files, ports and the clipboard between machines.</span></a>
+    <a class="next-card" href="/manual/terminal/"><strong>Terminal basics</strong><span>Tabs, find, copy and paste, and group broadcast.</span></a>
+  </div>
+</section>

@@ -1,8 +1,9 @@
 // Team Work bootstrap orchestrator.
 //
 // Lead-first flow: the Team Work Lead terminal ALREADY EXISTS when this
-// runs (App.svelte created it at Cmd+P via `createTeamWorkLeadTerminal`,
-// and the dialog handed us its tab + pane id). Bootstrap:
+// runs (App.svelte created it for the New team command via
+// `createTeamWorkLeadTerminal`, and the dialog handed us its tab + pane
+// id). Bootstrap:
 //
 //   1. Save/update the team config inside the workspace at the
 //      dialog's `{teamDir}/config.toml`.
@@ -290,7 +291,7 @@ export function identityPrompt(
 }
 
 /// Launch the lead agent by spawning a FRESH session running the agent
-/// into the lead's pane and dropping the Cmd+P placeholder shell - the
+/// into the lead's pane and dropping the New team placeholder shell - the
 /// SAME spawn+mount path the workers use (one create path, TEAM-CONSOLIDATE).
 ///
 /// We do NOT restart the placeholder in place. The orchestrator's
@@ -336,7 +337,7 @@ async function launchLead(
     group,
   });
   if (!tab) throw new Error("failed to open the lead terminal");
-  // Drop the Cmd+P placeholder shell + its session. Force-close so no
+  // Drop the New team placeholder shell + its session. Force-close so no
   // confirm modal blocks the bootstrap; done AFTER opening the fresh lead
   // so the lead pane is never momentarily empty.
   await closeTab(ctx.leadPaneId, ctx.leadTabId, { force: true });
@@ -426,7 +427,7 @@ export async function runTeamBootstrap(
   const group = resolveTeamGroup(config.tabGroup);
 
   // 2a. Launch the LEAD FIRST: spawn a fresh agent session into the
-  //     lead's pane and drop the Cmd+P placeholder (same path as workers).
+  //     lead's pane and drop the New team placeholder (same path as workers).
   const leadTab = await launchLead(ctx, leadEntry, group);
 
   // 2b. Resolve real estate + spawn the workers into new tabs.

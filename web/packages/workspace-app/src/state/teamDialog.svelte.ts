@@ -5,7 +5,7 @@
 // panes are overflow-hidden; Hybrid Nav adds a filter to non-focused
 // panes - any of those can clip a position:fixed dialog).
 //
-// Cmd+P / the Hybrid menu first creates the Team Work Lead terminal
+// The New team command first creates the Team Work Lead terminal
 // (the terminal with the embedded editor), THEN opens this dialog over
 // it. The dialog carries the lead tab + pane id so:
 //   * Cancel/dismiss deletes that exact lead terminal tab + restores
@@ -208,9 +208,9 @@ export interface TeamDialogConfig {
   brief: string;
 }
 
-/// The dialog request object. App.svelte creates the Team Work Lead
-/// terminal at Cmd+P FIRST, then opens the dialog passing that exact
-/// tab + pane id. Cancel deletes `{leadPaneId, leadTabId}`; Bootstrap
+/// The dialog request object. For the New team command App.svelte creates
+/// the Team Work Lead terminal FIRST, then opens the dialog passing that
+/// exact tab + pane id. Cancel deletes `{leadPaneId, leadTabId}`; Bootstrap
 /// runs the lead-first orchestrator against it.
 export interface TeamDialogRequest {
   leadTabId: string;

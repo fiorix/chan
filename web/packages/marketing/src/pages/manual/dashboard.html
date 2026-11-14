@@ -1,27 +1,156 @@
+<figure class="inline-shot">
+  <div class="shot-placeholder-frame" data-shot="dashboard-carousel" data-shot-kind="clip">clip to capture<small>New dashboard opens on Metrics with its graphs filling in; the carousel steps to Workspace, Search with the indexing graph, and About; the pointer rests on it and the rotation pauses</small></div>
+  <figcaption>A Dashboard tab rotates through Metrics, Workspace, Search and About.</figcaption>
+</figure>
+
+<section class="manual-block" id="can-do">
+  <h2><a class="heading-anchor" href="#can-do">What you can do</a></h2>
+  <ul class="can-do">
+    <li>Watch the chan process that serves the window: CPU, memory, network, disk I/O and file transfers over the last ten minutes.</li>
+    <li>Read a workspace's size, file kinds, code report and contacts.</li>
+    <li>Follow indexing directory by directory.</li>
+    <li>Choose which slides show, and stop the rotation.</li>
+    <li>Turn on semantic search, and choose what the index leaves out.</li>
+  </ul>
+</section>
+
 <section class="manual-block" id="dashboard">
   <h2><a class="heading-anchor" href="#dashboard">Read the dashboard</a></h2>
-<p>Run <strong>New dashboard</strong> from the command launcher or the pane menu, or <code>cs dashboard</code> from a terminal; in <a href="/manual/navigation/#hybrid-nav">Hybrid Nav</a>, <code>b</code> stages one. Its carousel opens on <strong>Metrics</strong>, the first slide, followed by <strong>Workspace</strong> with workspace information and reports, <strong>Search</strong> with the indexing view, and <strong>About</strong> with the version and project credits. A terminal window has no workspace, so its Dashboard has Metrics and About. A control terminal and a tmux window's panes draw no tab strip and take no Dashboard.</p>
-<p>Use the arrows to change cards and the pause control to stop rotation. Hovering or focusing the carousel pauses it while you read. From a terminal, <code>cs dashboard --carousel-off</code> opens it without automatic rotation.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Open it from</th><th>How</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Command launcher or pane menu</td><td><strong>New dashboard</strong>, or <kbd>b</kbd> in <a href="/manual/navigation/#hybrid-nav">Hybrid Nav</a></td></tr>
+        <tr><td>A terminal</td><td><code>cs dashboard</code></td></tr>
+        <tr><td>The status bar, while indexing</td><td>The indexing pill, which opens it on Search</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Slide</th><th>Shows</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Metrics</td><td>The chan process serving the window. See <a href="#metrics">below</a>.</td></tr>
+        <tr><td>Workspace</td><td>The root path, files, subdirectories, size and last change; file kinds; the code report by language; contacts.</td></tr>
+        <tr><td>Search</td><td>The indexing graph: each directory as indexed, indexing or pending.</td></tr>
+        <tr><td>About</td><td>The chan version and build, links to chan.app and the source, and credits.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A standalone terminal's Dashboard has Metrics and About only.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>To</th><th>Do</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Change slides</td><td>The arrows or the dots, or <strong>Next slide</strong>, <strong>Previous slide</strong> and <strong>Go to slide</strong> in the command launcher.</td></tr>
+        <tr><td>Pause while you read</td><td>Rest the pointer on it, or focus it.</td></tr>
+        <tr><td>Stop the rotation</td><td>The pause button. <strong>Settings → Global → Dashboard auto-rotate</strong> stops it in every Dashboard.</td></tr>
+        <tr><td>Hide a slide</td><td>Right-click the Dashboard and uncheck it, or use <strong>Shown slides</strong> in the command launcher.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs dashboard --carousel-off</b></code>{{copyButton}}</div>
+  <p><code>--carousel-off</code> opens a Dashboard that does not rotate.</p>
 </section>
 
 <section class="manual-block" id="metrics">
   <h2><a class="heading-anchor" href="#metrics">Watch the server process</a></h2>
-<p><strong>Metrics</strong> shows the chan process that serves the window: Chan Desktop for its own local windows, the devserver for a devserver's windows, and <code>chan serve</code> for the workspace it serves. Its header names the host, the process id, and the chan version and build. Six graphs cover the last ten minutes: CPU, where 100% is one logical core, resident memory, the network receive rate with the send rate beside it, the I/O read and write rates, and running file transfers. Below them, <strong>Channels &amp; tunnels</strong> counts the gateway tunnels, reverse listeners, and the HTTP/2, yamux, and reverse TCP channels in use, and <strong>Storage</strong> gives the size of the chan home, <code>~/.chan</code> unless <code>CHAN_HOME</code> names another directory, with its file count.</p>
-<p>The readings are the server process's own. The shells, agents, and other programs it started are not counted, and the network figures are chan's own traffic, not the machine's. The process samples itself once a second and keeps the last ten minutes in memory, whether or not a Dashboard is open, so a Dashboard opened later shows the minutes before it. The chan home is measured only while someone is reading, once a minute. While the first sample is pending, the cards stay in place with <code>n/a</code> readings and a waiting message. A reading the platform cannot give reads <code>n/a</code>.</p>
-<p>If a storage scan fails, the card shows <strong>Storage scan failed</strong> with the reason. When a scan has completed before, its totals and scan time stay visible, with a note that the card is showing the last completed total. If no scan has completed, the sizes and file count read <code>n/a</code> and the time reads <strong>Scan pending</strong>. A failed scan does not turn an unknown size into zero.</p>
-<p>With privacy mode on, the slide hides the host name, the chan home path, and storage scan errors that may name files, each behind its own reveal button; see <a href="/manual/settings/#settings">Open settings</a>. From a shell, <code>chan metrics</code> prints the same readings; see <a href="/manual/systemd/#metrics">Watch the devserver</a>.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/docs/metrics.md">docs/metrics.md</a> says what each reading counts, what each platform reports, and how to read the metrics over HTTP.</p>
+  <p>Metrics shows the chan process that serves the window: Chan Desktop for its own windows, the devserver for a devserver's windows, and <code>chan serve</code> for the workspace it serves. The readings are that process's own; the shells, agents and other programs it started are not counted.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Card</th><th>Reads</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Header</td><td>The host, the process id, the chan version and build, and the uptime.</td></tr>
+        <tr><td>CPU</td><td>Percent, where 100% is one logical core.</td></tr>
+        <tr><td>Memory</td><td>Resident memory.</td></tr>
+        <tr><td>Network</td><td>chan's own receive rate, with the send rate beside it. Not the machine's traffic.</td></tr>
+        <tr><td>I/O read, I/O write</td><td>The rates, with the totals.</td></tr>
+        <tr><td>File transfers</td><td>Running transfers, the queue and the workers.</td></tr>
+        <tr><td>Channels &amp; tunnels</td><td>Gateway tunnels, reverse listeners, and the HTTP/2, yamux and reverse TCP channels in use.</td></tr>
+        <tr><td>Storage</td><td>The size and file count of the chan home: <code>~/.chan</code>, or the directory <code>CHAN_HOME</code> names.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>With <a href="/manual/settings/#privacy">privacy mode</a> on, the host name, the chan home path and storage scan errors each hide behind a reveal button. <code>chan metrics</code> prints the same readings in a shell; see <a href="/manual/devserver/#metrics">Run a devserver</a>.</p>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="dashboard-metrics" data-shot-kind="still">screenshot to capture<small>the Metrics slide of a devserver's window after a few minutes of use: the six graph cards, Channels &amp; tunnels and Storage</small></div>
+  </figure>
 </section>
 
 <section class="manual-block" id="index">
   <h2><a class="heading-anchor" href="#index">Follow the index</a></h2>
-<p>Each workspace maintains its own index, kept separately from the project files. The index makes workspace content searchable and supplies document relationships to the graph. The dashboard's indexing view shows directory progress: indexed, indexing, or pending. While indexing is underway, a search may not yet include every file.</p>
-<p>Open <strong>Settings → This workspace</strong> for index controls, excluded directories, code reports, and semantic search. The index follows included workspace files as they change; chan respects ignore rules and configured exclusions. Drafts enter the project index only after you save them into the workspace.</p>
-  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/crates/chan-workspace/design.md">crates/chan-workspace/design.md</a> describes the index, the graph and where chan keeps them.</p>
+  <p>Each workspace has its own index, kept under the chan home, not in the workspace. It makes content <a href="/manual/search/">searchable</a>, gives <a href="/manual/graph/">the graph</a> its links, tags and mentions, and follows the files as they change.</p>
+  <ul>
+    <li>The Search slide draws the directories as a graph: green when indexed, pulsing orange while indexing, grey while pending. Click a directory for its Details.</li>
+    <li>While the index works, a pill in the status bar says so. Click it to open the Search slide.</li>
+    <li>A draft enters the index once you save it into the workspace.</li>
+  </ul>
+  <p><strong>Settings → This workspace</strong> holds the index controls:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Setting</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Index</td><td>Shows the index's state, and <strong>Rebuild index</strong> builds it again.</td></tr>
+        <tr><td>Semantic search, Embedding model</td><td>See <a href="#semantic-search">below</a>.</td></tr>
+        <tr><td>Excluded directories</td><td>Directory names to leave out at any depth, added to the global exclusion list.</td></tr>
+        <tr><td>chan-reports</td><td>Code reports: languages and line counts. On by default.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>Settings → Search → Search indexing</strong> sets how hard the indexer works: Conservative, Balanced (the default) or Aggressive.</p>
 </section>
 
 <section class="manual-block" id="semantic-search">
   <h2><a class="heading-anchor" href="#semantic-search">Semantic search</a></h2>
-<p>Lexical search is available by default. Semantic search is optional and off by default; enable it in <strong>Settings → This workspace</strong>, select a model, and allow the model download and embedding work to finish. Settings → Search controls the indexer's resource profile: Conservative, Balanced, or Aggressive.</p>
-<p>Code reports are enabled by default and maintained separately from semantic embeddings. Check indexing and report status here when a search, graph, or file report is missing information.</p>
+  <p>Search ranks content by its words. Semantic search, off by default, adds a ranking by meaning to it.</p>
+  <ol class="doc-steps">
+    <li>
+      <h3>Choose a model</h3>
+      <p>In <strong>Settings → This workspace</strong>, pick one under <strong>Embedding model</strong>, or keep the default.</p>
+    </li>
+    <li>
+      <h3>Turn it on</h3>
+      <p>Turn on <strong>Enable semantic search (Hybrid mode)</strong>. chan downloads the model first when it is not on disk.</p>
+    </li>
+    <li>
+      <h3>Let it finish</h3>
+      <p>The index embeds the workspace's content. The status bar counts what it has embedded until it is done.</p>
+    </li>
+  </ol>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>When a search, the graph or a file report is missing something, check the Search slide and <strong>Settings → This workspace</strong>.</li>
+      <li>The index skips what ignore rules and excluded directories leave out. Code reports are kept apart from the embeddings.</li>
+      <li><code>cs dashboard --carousel-index</code> picks the first slide: 3 Metrics, 0 Workspace, 1 Search, 2 About.</li>
+      <li>The process samples itself once a second and keeps the last ten minutes, whether or not a Dashboard is open, so a Dashboard opened later shows the minutes before it.</li>
+      <li>The chan home is measured once a minute, and only while someone reads the metrics.</li>
+      <li>Until the first sample arrives, the cards read <code>n/a</code> with a waiting message. A reading the platform cannot give reads <code>n/a</code>.</li>
+      <li>A failed storage scan reads <strong>Storage scan failed</strong> with the reason. The last completed total stays, marked as such; with none, the sizes read <code>n/a</code> and the time <strong>Scan pending</strong>.</li>
+      <li>The slides rotate every 5 seconds, and not while their tab is hidden. One slide always stays shown.</li>
+      <li><code>--carousel-off</code> belongs to the one tab; other Dashboards keep rotating.</li>
+      <li>A control terminal and a tmux window's panes draw no tab strip and take no Dashboard.</li>
+      <li>The default embedding model is <code>BAAI/bge-small-en-v1.5</code>. In the command launcher, <strong>Semantic search</strong> asks before it downloads a model.</li>
+      <li>A chan built without the embedding model says so under Semantic search and offers lexical search only.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="manual-block" id="next">
+  <h2><a class="heading-anchor" href="#next">Next</a></h2>
+  <div class="next-cards">
+    <a class="next-card" href="/manual/search/"><strong>Search</strong><span>Find content and names in the index.</span></a>
+    <a class="next-card" href="/manual/devserver/#metrics"><strong>Run a devserver</strong><span>Read the same metrics with <code>chan metrics</code>.</span></a>
+    <a class="next-card" href="/manual/settings/"><strong>Settings</strong><span>Every section, the defaults, and privacy mode.</span></a>
+  </div>
 </section>
