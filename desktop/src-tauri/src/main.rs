@@ -8082,6 +8082,7 @@ fn raise_new_terminal_window(app: tauri::AppHandle, state: Arc<AppState>, label:
                         hide_pending = state.silent_hides.lock().unwrap().contains(&label),
                         record_present = record.is_some(),
                         record_hidden = ?record.as_ref().map(|record| record.hidden),
+                        shown = record.as_ref().is_some_and(|record| window_watcher::should_show(record, &last_window::put_away(&state))),
                         reason = "request expired or window no longer shown",
                         "requested terminal raise callback refused",
                     );

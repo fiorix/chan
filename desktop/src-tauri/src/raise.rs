@@ -716,8 +716,7 @@ mod tests {
             &[
                 "tokio::time::Instant::now() >= deadline",
                 "!requested_terminal_is_shown(&state, &label)",
-                "return;",
-                "if let Some(window) = app.get_webview_window(&label)",
+                "                }\n                return;\n            }\n            if let Some(window) = app.get_webview_window(&label)",
                 "raise::raise_window(&window)",
             ],
         );
