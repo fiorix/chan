@@ -135,9 +135,15 @@ async function closeDetails(page) {
   await page.waitForFunction(() => !document.querySelector(".slide-indexing aside.inspector"), { timeout: 5_000 });
 }
 
-/// An observed settle window that expires is a delayed reading; a window
-/// that never starts is the defect this leg must still be able to find.
+/// Allow 100 ms for observing the class after the 500 ms timer starts.
+/// Earlier clearing is a defect; a later read cannot rule out delivery lag.
 function expiredDetails(reading) {
+  const last = reading.after ?? reading.before;
+  if (typeof last.enteredAt === "number" && last.readAt - last.enteredAt < 400) {
+    const error = new Error(`DETAILS_SETTLE_ENDED_EARLY: Details' settle window cleared before its duration: ${JSON.stringify(reading)}`);
+    error.code = "DETAILS_SETTLE_ENDED_EARLY";
+    return error;
+  }
   const error = new Error(`ENVIRONMENT_DETAILS_SETTLE_ELAPSED: Details' observed settle window cleared before the second click reached it: ${JSON.stringify(reading)}`);
   error.code = "ENVIRONMENT_DETAILS_SETTLE_ELAPSED";
   return error;
@@ -204,7 +210,7 @@ export async function pressTwice(page, at, underDetails = false) {
     throw error;
   } finally {
     if (underDetails) await page.evaluate(() => {
-      window.__smokeDetailsPress.stop();
+      window.__smokeDetailsPress?.stop();
       delete window.__smokeDetailsPress;
     });
   }
