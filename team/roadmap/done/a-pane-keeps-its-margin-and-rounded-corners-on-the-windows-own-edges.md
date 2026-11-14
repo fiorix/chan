@@ -1,6 +1,8 @@
 # A pane keeps its margin and rounded corners on the window's own edges
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built and merged into the integration branch, not yet in a release.
+Status: shipped in [v0.130.0](../../release/release-v0.130.0.md): a pane draws no margin and square corners on the window's own edges, a window's only pane drops its border there, a terminal's grid keeps a 2px inset on an edge side and 8px toward another pane, and a see-through window's backdrop takes each corner's own radius (`v0130/flush-window-edges`, `71bf3ec5c` and `d9d3045fa`, merged as `342dbe791` with no review, on the owner's word). Browser check 225 also passed in a guest's Chrome, in the 220 to 226 pack the pane-focus build ran at its rebased tip `8e99b9001`, and the integration gates ran its unit tests. Not exercised by anyone: an xterm.js terminal and a transparent window.
+
+Record before the release: accepted for v0.130.0 by the owner on 2026-11-13; built and merged into the integration branch, not yet in a release.
 
 Record: built by the owner on 2026-11-13 on the branch `v0130/flush-window-edges` (`71bf3ec5c`, `d9d3045fa`, over the v0.129.0 tag) and taken as v0.130.0's first merge (`342dbe791`) on his word, with no review before it ("no need; if there are problems we should catch on gates later"). He scoped v0.130.0 the same day as "the systemd and flush-window-edges, plus ghostty/terminal bug fixes", and asked for this row after the merge ("c. sure").
 

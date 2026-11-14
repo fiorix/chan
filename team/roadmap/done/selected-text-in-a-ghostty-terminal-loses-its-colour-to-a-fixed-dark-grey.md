@@ -1,6 +1,8 @@
 # Selected text in a ghostty terminal loses its colour to a fixed dark grey
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/ghostty-selection-colour` (`ff332e005`) and merged into the integration branch (`1c5025724`), not yet in a release; the section "Built 2026-11-14" holds the evidence. Owed: acceptance 3 on chan-desktop.
+Status: shipped in [v0.130.0](../../release/release-v0.130.0.md): selected text in a ghostty terminal keeps its own colour over the selection background, and a theme that names a selection foreground still draws in it (`ff332e005` on `v0130/ghostty-selection-colour`, merged as `1c5025724`). Read by tests over the real widget and core and by the pixel harness in a guest, where only the three selection patterns changed. Acceptance 3, the owner's reading on chan-desktop under the dark and the light theme, had not been taken when the cut was ordered on 2026-11-14 and comes after the tag, on his word ("2. after"); the light theme was not observed anywhere.
+
+Record before the release: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/ghostty-selection-colour` (`ff332e005`) and merged into the integration branch (`1c5025724`), not yet in a release; the section "Built 2026-11-14" holds the evidence. Owed: acceptance 3 on chan-desktop.
 
 Record: found by the widened terminal pixel oracle on 2026-11-12 and left as it was through the renderer's rework: "Selected text is drawn in `#1e1e1e`, the renderer's default selection foreground, because chan's theme names none." (`dev/v0129/row-notes.md`, "ghosttyng: findings from the widened pixel oracle", item 3). Listed again as a candidate when this release's rows were drafted from v0.129.0's notes, 2026-11-13. The owner, on that list: "let's add all as small fixes to v0.130".
 

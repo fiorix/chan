@@ -2,7 +2,7 @@
 
 Status: accepted for v0.131.0 by the owner on 2026-11-13 ("yes" to a row); needs a reading before a fix.
 
-Record: observed on 2026-11-13 while building browser check 226 of the [pane-focus keyboard](../v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) row, in a guest's Chrome against the guest's own server, on both terminal backends; the cause is not read.
+Record: observed on 2026-11-13 while building browser check 226 of the [pane-focus keyboard](../done/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) row, in a guest's Chrome against the guest's own server, on both terminal backends; the cause is not read.
 
 ## What is there now
 

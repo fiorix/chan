@@ -1,6 +1,8 @@
 # A ghostty terminal opening in a background pane takes the keyboard for a moment
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13 ("get its own row"); built on 2026-11-14 on the branch `v0130/ghostty-open-without-focus`, merged into the integration branch (`ff45ca8ee`), not yet in a release; the section "Built" holds the evidence.
+Status: shipped in [v0.130.0](../../release/release-v0.130.0.md): a ghostty terminal's `open()` takes no focus, so a terminal that opens in a background pane moves no focus and an edit in progress elsewhere keeps the keyboard, and a terminal in the focused pane takes it as before (`5224882a6` and browser check 227 on `v0130/ghostty-open-without-focus`, merged as `ff45ca8ee`). Read in a guest's Chrome through a window opened again from its session: failing at the base, where a half-typed CSV draft was written to its file, and passing 5 of 5 with the fix. `cs terminal new --pane` keeps moving pane focus to the pane it opens in, on the owner's word ("leave as is yes"). Not observed: chan-desktop's engines and Firefox; the team, inactive-tab and still-loading paths rest on reading.
+
+Record before the release: accepted for v0.130.0 by the owner on 2026-11-13 ("get its own row"); built on 2026-11-14 on the branch `v0130/ghostty-open-without-focus`, merged into the integration branch (`ff45ca8ee`), not yet in a release; the section "Built" holds the evidence.
 
 Record: found by the review of the [pane-focus keyboard](moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) build on 2026-11-13, by reading; not observed in a running window.
 
