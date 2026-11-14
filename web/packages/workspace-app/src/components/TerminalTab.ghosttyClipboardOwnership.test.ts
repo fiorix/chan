@@ -1,13 +1,12 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
-import { mount, tick, unmount } from "svelte";
+import { tick, unmount } from "svelte";
 import { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
   module: null as WebAssembly.Module | null,
-  terminals: [] as unknown[],
+  terminals: [] as GhosttyTerminal[],
 }));
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -16,33 +15,24 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
-vi.mock("../terminal/backend", async (original) => {
-  const actual = await original<typeof import("../terminal/backend")>();
-  const { Terminal } = await import("@chan/ghostty-web-ng");
-  return { ...actual, loadGhosttyKit: async () => actual.ghosttyKitFrom(runtime.module!, {
-    Terminal: class extends Terminal {
-      constructor(options: ConstructorParameters<typeof Terminal>[0]) {
-        super(options);
-        runtime.terminals.push(this);
-      }
-    },
-  }) };
+vi.mock("../terminal/backend", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../terminal/backend")>();
+  const { recordingKit } = await import("../__tests__/ghosttyTab");
+  return { ...actual, loadGhosttyKit: async () => recordingKit(runtime, actual.ghosttyKitFrom) };
 });
-vi.mock("../terminal/ghosttyCompat", async (original) => ({
-  ...(await original<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
+  ...(await import("../__tests__/ghosttyTab")).ghosttyCompatStubs(),
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
+import {
+  attachGhostty, compileGhosttyCore, ghosttyClearSelection, ghosttySelect, ghosttySelection,
+  installSoftwareCanvas, mountGhostty,
+} from "../__tests__/ghosttyTab";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
-  attach, installTerminalDom, output, receive, resetTerminals,
-  seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
+  installTerminalDom, output, resetTerminals, seatTerminals, sentFrames, terminalTab,
 } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { showSurvey, surveyState } from "../state/survey.svelte";
@@ -51,20 +41,16 @@ installTerminalDom();
 
 const RENDERER_TEXT = "old terminal output";
 const writeText = vi.fn(async (_text: string) => {});
-let component: ReturnType<typeof mount> | undefined;
+let component: Record<string, unknown> | undefined;
 
 beforeAll(async () => {
-  runtime.module = await WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
+  await compileGhosttyCore(runtime);
 });
 
 beforeEach(() => {
   runtime.terminals.length = 0;
   writeText.mockClear();
-  vi.stubGlobal("requestAnimationFrame", () => 0);
-  vi.stubGlobal("cancelAnimationFrame", () => {});
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    return new SoftwareCanvasContext(this, 8) as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  installSoftwareCanvas();
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, secret_masking: false }));
 });
@@ -85,23 +71,15 @@ afterEach(async () => {
 
 async function attached() {
   const [tab] = seatTerminals([terminalTab()]);
-  const target = document.createElement("div");
-  document.body.append(target);
-  component = mount(TerminalTab, { target, props: {
-    tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true,
-  } });
-  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
-  const term = runtime.terminals[0] as GhosttyTerminal;
+  const opened = mountGhostty(TerminalTab, tab!);
+  component = opened.component;
+  const { target } = opened;
+  const { term, socket, host } = await attachGhostty(runtime, opened);
   expect(term).toBeInstanceOf(GhosttyTerminal);
-  const socket = TerminalSocket.all[0]!;
-  await attach(socket);
-  await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(socket, RENDERER_TEXT + "\r\n");
-  term.select(0, 0, RENDERER_TEXT.length);
-  expect(term.getSelection()).toBe(RENDERER_TEXT);
+  ghosttySelect(term, 0, 0, RENDERER_TEXT.length);
+  expect(ghosttySelection(term)).toBe(RENDERER_TEXT);
   socket.sent.length = 0;
-  const host = target.querySelector<HTMLElement>(".terminal-host")!;
-  expect(host.querySelector("canvas")).not.toBeNull();
   return { tab: tab!, target, term, socket, host };
 }
 
@@ -123,8 +101,8 @@ describe.each([
 
   test.each([true, false])("selected survey text keeps native copy with a renderer selection: %s", async (selected) => {
     const { tab, target, term, socket } = await attached();
-    if (!selected) term.clearSelection();
-    expect(term.getSelection()).toBe(selected ? RENDERER_TEXT : "");
+    if (!selected) ghosttyClearSelection(term);
+    expect(ghosttySelection(term)).toBe(selected ? RENDERER_TEXT : "");
     showSurvey({ surveyId: "copy-ownership", title: null, bodyMarkdown: "Copy this survey text", options: ["OK"] }, tab.id);
     await tick();
     const card = target.querySelector<HTMLElement>(".survey-card")!;
@@ -157,7 +135,7 @@ describe.each([
     expect(document.activeElement).toBe(input);
     expect(input.selectionStart).toBe(0);
     expect(input.selectionEnd).toBe(4);
-    expect(term.getSelection(), "the renderer still has a competing selection").toBe(RENDERER_TEXT);
+    expect(ghosttySelection(term), "the renderer still has a competing selection").toBe(RENDERER_TEXT);
 
     const event = copy(input, chord);
     await tick();

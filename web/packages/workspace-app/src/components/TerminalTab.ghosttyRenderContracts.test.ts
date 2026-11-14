@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
 import type { Terminal } from "@chan/ghostty-web-ng";
 import { VtCells, VtTerminal } from "@chan/ghostty-web-ng/vt";
-import { flushSync, mount, tick, unmount } from "svelte";
+import { flushSync, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
 
 const ghostty = vi.hoisted(() => ({
@@ -20,31 +19,21 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const widget = await import("@chan/ghostty-web-ng");
-  class RecordedTerminal extends widget.Terminal {
-    constructor(...args: ConstructorParameters<typeof widget.Terminal>) {
-      super(...args);
-      ghostty.terminals.push(this);
-    }
-  }
-  return { ...actual, loadGhosttyKit: async () => {
-    ghostty.events.push("kit-load");
-    return actual.ghosttyKitFrom(ghostty.module!, { Terminal: RecordedTerminal });
-  } };
+  const { recordingKit } = await import("../__tests__/ghosttyTab");
+  return { ...actual, loadGhosttyKit: async () => recordingKit(ghostty, actual.ghosttyKitFrom) };
 });
 vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
+  ...(await import("../__tests__/ghosttyTab")).ghosttyCompatStubs(),
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
+import {
+  compileGhosttyCore, ghosttyCore, ghosttyCursorColor, ghosttyFontFamily,
+  installSoftwareCanvas, mountGhostty,
+} from "../__tests__/ghosttyTab";
 import type { TerminalCustomColors } from "../api/types";
 import { terminalPreferences } from "../__tests__/standalone";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import {
   attach,
   installTerminalDom,
@@ -53,7 +42,6 @@ import {
   resetTerminals,
   seatTerminals,
   terminalTab,
-  TERMINAL_PANE,
   TerminalSocket,
 } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
@@ -62,24 +50,15 @@ installTerminalDom();
 
 const mounted: Array<Record<string, unknown>> = [];
 const startTheme = ui.theme;
-let contexts: WeakMap<HTMLCanvasElement, SoftwareCanvasContext>;
-let frames: FrameRequestCallback[] = [];
+let canvas: ReturnType<typeof installSoftwareCanvas>;
 
 beforeAll(async () => {
-  ghostty.module = await WebAssembly.compile(readFileSync("../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm"));
+  await compileGhosttyCore(ghostty);
 });
 
 beforeEach(() => {
   ghostty.events.length = 0;
-  contexts = new WeakMap<HTMLCanvasElement, SoftwareCanvasContext>();
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    let context = contexts.get(this);
-    if (!context) contexts.set(this, (context = new SoftwareCanvasContext(this, 8)));
-    return context as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
-  frames = [];
-  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
-  vi.stubGlobal("cancelAnimationFrame", () => {});
+  canvas = installSoftwareCanvas();
   vi.mocked(document.fonts.load).mockReset().mockResolvedValue([{} as FontFace]);
   ui.theme = "dark";
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
@@ -96,25 +75,17 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-function mountGhostty(): HTMLElement {
+function mountGhosttyTab(): HTMLElement {
   const [tab] = seatTerminals([terminalTab()]);
-  const target = document.createElement("div");
-  document.body.append(target);
-  mounted.push(mount(TerminalTab, {
-    target,
-    props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: false },
-  }));
+  const { target, component } = mountGhostty(TerminalTab, tab!, { focused: false });
+  mounted.push(component);
   return target;
-}
-
-function frame(): void {
-  for (const callback of frames.splice(0)) callback(performance.now());
 }
 
 test("waits for the bundled face before constructing or opening the Ghostty widget", async () => {
   let loaded!: (faces: FontFace[]) => void;
   vi.mocked(document.fonts.load).mockImplementationOnce(() => new Promise<FontFace[]>((resolve) => (loaded = resolve)));
-  const target = mountGhostty();
+  const target = mountGhosttyTab();
   await vi.waitFor(() => expect(document.fonts.load).toHaveBeenCalled());
   await tick();
   const beforeFont = { widgets: ghostty.terminals.length, canvas: target.querySelector("canvas") };
@@ -128,22 +99,22 @@ test("waits for the bundled face before constructing or opening the Ghostty widg
   expect(beforeFont.widgets, "no widget is measured while the font is loading").toBe(0);
   expect(beforeFont.canvas, "the renderer has not opened").toBeNull();
   const term = ghostty.terminals[0]!;
-  expect(term.wasmTerm).toBeInstanceOf(VtTerminal);
+  expect(ghosttyCore(term)).toBeInstanceOf(VtTerminal);
   expect(target.querySelector("canvas"), "the real widget opened after the font loaded").not.toBeNull();
-  expect(term.options.fontFamily).toContain("Source Code Pro");
+  expect(ghosttyFontFamily(term)).toContain("Source Code Pro");
 });
 
 test("live custom colors reach Ghostty's core, next painted frame and terminal body", async () => {
-  const target = mountGhostty();
+  const target = mountGhosttyTab();
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
   const term = ghostty.terminals[0]!;
   const socket = TerminalSocket.all[0]!;
   await attach(socket);
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   await output(socket, "\x1b[31mR\x1b[0mD");
-  frame();
+  canvas.frame();
   const body = target.querySelector<HTMLElement>(".terminal-tab")!;
-  const core = term.wasmTerm;
+  const core = ghosttyCore(term);
   expect(core).toBeInstanceOf(VtTerminal);
   const colors = () => {
     const cells = new VtCells();
@@ -162,7 +133,7 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
     }));
     flushSync();
     await tick();
-    frame();
+    canvas.frame();
 
     expect(ghostty.terminals, "the live widget is reused").toHaveLength(1);
     expect(colors()).toEqual({
@@ -170,9 +141,9 @@ test("live custom colors reach Ghostty's core, next painted frame and terminal b
       foreground: Number.parseInt(custom.foreground.slice(1), 16),
       background: Number.parseInt(custom.background.slice(1), 16),
     });
-    expect(term.options.theme.cursor).toBe(custom.cursor);
+    expect(ghosttyCursorColor(term)).toBe(custom.cursor);
     expect(body.style.getPropertyValue("--terminal-background"), "the body and scrollbar share the canvas background").toBe(custom.background);
-    const context = contexts.get(target.querySelector("canvas")!)!;
+    const context = canvas.context(target);
     const rgb = Number.parseInt(custom.background.slice(1), 16);
     expect(context.pixelAt(4, 20), "an empty row is repainted in the new background").toEqual({
       r: (rgb >> 16) & 255, g: (rgb >> 8) & 255, b: rgb & 255, a: 1,

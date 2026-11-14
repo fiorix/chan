@@ -3,9 +3,8 @@
 // Session boundaries and mouse input through the real widget and vendored
 // core. The socket records the PTY wire; the software canvas serves jsdom.
 
-import { readFileSync } from "node:fs";
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { mount, unmount } from "svelte";
+import { unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 const ghostty = vi.hoisted(() => ({
@@ -21,31 +20,21 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const widget = await import("@chan/ghostty-web-ng");
-  class RecordedTerminal extends widget.Terminal {
-    constructor(...args: ConstructorParameters<typeof widget.Terminal>) {
-      super(...args);
-      ghostty.terminals.push(this);
-    }
-  }
-  return {
-    ...actual,
-    loadGhosttyKit: async () => actual.ghosttyKitFrom(ghostty.module!, { Terminal: RecordedTerminal }),
-  };
+  const { recordingKit } = await import("../__tests__/ghosttyTab");
+  return { ...actual, loadGhosttyKit: async () => recordingKit(ghostty, actual.ghosttyKitFrom) };
 });
 vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
-  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
+  ...(await import("../__tests__/ghosttyTab")).ghosttyCompatStubs(),
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
+import {
+  attachGhostty, compileGhosttyCore, ghosttyAlternateScreen, ghosttyCellMetrics,
+  ghosttyLineText, ghosttyMode, ghosttyMouseTracking, installSoftwareCanvas, mountGhostty,
+} from "../__tests__/ghosttyTab";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { terminalPreferences } from "../__tests__/standalone";
-import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import {
   attach,
   installTerminalDom,
@@ -54,14 +43,12 @@ import {
   resetTerminals,
   seatTerminals,
   sentFrames,
-  TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
 } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 
-const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const SESSION = "sess-ghostty";
 const mounted = new Set<Record<string, unknown>>();
 const cleanups: Array<() => void> = [];
@@ -69,16 +56,12 @@ const cleanups: Array<() => void> = [];
 installTerminalDom();
 
 beforeAll(async () => {
-  ghostty.module = await WebAssembly.compile(readFileSync(VENDORED));
+  await compileGhosttyCore(ghostty);
 });
 
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
-    return new SoftwareCanvasContext(this, 8) as unknown as CanvasRenderingContext2D;
-  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
-  vi.stubGlobal("requestAnimationFrame", () => 0);
-  vi.stubGlobal("cancelAnimationFrame", () => {});
+  installSoftwareCanvas();
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
 });
 
@@ -95,21 +78,10 @@ afterEach(async () => {
 });
 
 async function openGhostty(tab: TerminalTabState, ready = true) {
-  const target = document.createElement("div");
-  document.body.append(target);
-  const before = TerminalSocket.all.length;
-  const component = mount(TerminalTab, {
-    target,
-    props: { tab, paneId: TERMINAL_PANE, side: "a", active: true, focused: true },
-  });
-  mounted.add(component);
-  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(before + 1));
-  const socket = TerminalSocket.all.at(-1)!;
-  await attach(socket, { id: SESSION });
-  if (ready) await receive(socket, { type: "ready", cols: 80, rows: 24 });
-  const host = target.querySelector<HTMLElement>(".terminal-host")!;
-  expect(host.querySelector("canvas")).not.toBeNull();
-  return { component, host, socket, term: ghostty.terminals.at(-1)! };
+  const opened = mountGhostty(TerminalTab, tab);
+  mounted.add(opened.component);
+  const attached = await attachGhostty(ghostty, opened, { sessionId: SESSION, ready });
+  return { component: opened.component, ...attached };
 }
 
 async function reconnect(socket: TerminalSocket, id: string, replayBytes = 0) {
@@ -160,18 +132,18 @@ describe("a Ghostty tab reconnecting to a session", () => {
       const [tab] = seatTerminals([terminalTab()]);
       const { socket, term } = await openGhostty(tab!);
       await output(socket, `\x1b[?${mode}h`);
-      expect(term.getMode(mode), "the program enabled the mode in the core").toBe(true);
-      if (mode === 1049) expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+      expect(ghosttyMode(term, mode), "the program enabled the mode in the core").toBe(true);
+      if (mode === 1049) expect(ghosttyAlternateScreen(term)).toBe(true);
 
       const resumed = await reconnect(socket, SESSION);
       await receive(resumed, { type: "ready", cols: 80, rows: 24 });
-      expect(term.getMode(mode), "the same program still owns its mode").toBe(true);
-      if (mode === 1049) expect(term.wasmTerm!.isAlternateScreen()).toBe(true);
+      expect(ghosttyMode(term, mode), "the same program still owns its mode").toBe(true);
+      if (mode === 1049) expect(ghosttyAlternateScreen(term)).toBe(true);
 
       const replaced = await reconnect(resumed, "sess-fresh");
       await receive(replaced, { type: "ready", cols: 80, rows: 24 });
-      expect(term.getMode(mode), "the fresh shell inherits no dead program's mode").toBe(false);
-      if (mode === 1049) expect(term.wasmTerm!.isAlternateScreen()).toBe(false);
+      expect(ghosttyMode(term, mode), "the fresh shell inherits no dead program's mode").toBe(false);
+      if (mode === 1049) expect(ghosttyAlternateScreen(term)).toBe(false);
       expect(ghostty.terminals).toEqual([term]);
     },
   );
@@ -188,9 +160,9 @@ describe("mouse events encoded by the Ghostty input handler", () => {
     const { host, socket, term } = await openGhostty(tab!);
     term.resize(220, 24);
     await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    expect(term.hasMouseTracking()).toBe(true);
+    expect(ghosttyMouseTracking(term)).toBe(true);
     socket.sent.splice(0);
-    const { width, height } = term.renderer!.getMetrics();
+    const { width, height } = ghosttyCellMetrics(term);
     for (const type of ["mousedown", "mouseup"]) {
       host.dispatchEvent(
         new MouseEvent(type, {
@@ -220,13 +192,13 @@ describe("a mouse filter holding an unfinished control sequence", () => {
     const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
     const { socket, term } = await openGhostty(tab!, false);
     await output(socket, "old\x1b[?100");
-    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe("old");
+    expect(ghosttyLineText(term, 0)).toBe("old");
 
     const next = await reconnect(socket, SESSION);
     await receive(next, { type: "ready", cols: 80, rows: 24 });
     await output(next, "0hNEW");
-    expect(term.buffer.active.getLine(0)?.translateToString(true)).toBe("old0hNEW");
-    expect(term.hasMouseTracking()).toBe(false);
+    expect(ghosttyLineText(term, 0)).toBe("old0hNEW");
+    expect(ghosttyMouseTracking(term)).toBe(false);
   });
 
   test("drops the partial tail when the same tab mounts a new widget", async () => {
@@ -239,7 +211,7 @@ describe("a mouse filter holding an unfinished control sequence", () => {
     const second = await openGhostty(tab!);
     await output(second.socket, "0hNEW");
     expect(second.term).not.toBe(first.term);
-    expect(second.term.buffer.active.getLine(0)?.translateToString(true)).toBe("0hNEW");
-    expect(second.term.hasMouseTracking()).toBe(false);
+    expect(ghosttyLineText(second.term, 0)).toBe("0hNEW");
+    expect(ghosttyMouseTracking(second.term)).toBe(false);
   });
 });
