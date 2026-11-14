@@ -3,7 +3,9 @@
 //! confirmation (`serve::on_close_requested`), an open Window menu row
 //! (`show_window` in `main.rs`), a window list or `cs window open` request or
 //! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
-//! for an existing window (`open_about_window` in `main.rs`). These call
+//! for an existing window (`open_about_window` in `main.rs`), and a requested
+//! terminal once its watcher builds it (`raise_new_terminal_window` in
+//! `main.rs`). These call
 //! [`raise_window`] and nothing else does, so no path takes focus that nobody
 //! asked for.
 //!
@@ -234,6 +236,38 @@ fn after_look(minimized: Option<bool>, visible: Option<bool>, waited: Duration) 
     }
 }
 
+/// A requested window's current eligibility and native build state.
+pub(crate) enum WindowReady {
+    Waiting,
+    Ready,
+    Cancelled,
+}
+
+/// Wait for a requested native build, without polling or retaining a request
+/// after its deadline. The build's completion and library changes share `change`.
+pub(crate) async fn wait_for_requested_window(
+    change: &tokio::sync::Notify,
+    deadline: tokio::time::Instant,
+    mut probe: impl FnMut() -> WindowReady,
+) -> bool {
+    loop {
+        let notified = change.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        match probe() {
+            WindowReady::Ready => return true,
+            WindowReady::Cancelled => return false,
+            WindowReady::Waiting => {}
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +355,92 @@ mod tests {
                 assert_eq!(after_look(minimized, visible, waited), Look::Gone);
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_requested_window_already_built_is_ready_without_a_notification() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Ready
+            })
+            .await
+        );
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_native_completion_during_the_probe_is_not_lost() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                if probes == 1 {
+                    change.notify_waiters();
+                    WindowReady::Waiting
+                } else {
+                    WindowReady::Ready
+                }
+            })
+            .await
+        );
+        assert_eq!(probes, 2);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_request_stops_without_waiting_or_retrying() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            !wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Cancelled
+            })
+            .await
+        );
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_native_window_expires_without_polling() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        let ready = tokio::time::timeout(
+            Duration::from_secs(4),
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Waiting
+            }),
+        )
+        .await
+        .expect("the wait must be bounded");
+        assert!(!ready);
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_request_cannot_take_a_ready_window() {
+        let change = tokio::sync::Notify::new();
+        let mut probes = 0;
+        assert!(
+            !wait_for_requested_window(&change, tokio::time::Instant::now(), || {
+                probes += 1;
+                WindowReady::Ready
+            })
+            .await
+        );
+        assert_eq!(probes, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -549,6 +669,100 @@ mod tests {
         }
     }
 
+    #[test]
+    fn requested_terminal_opens_raise_only_the_new_native_window() {
+        let main = production(include_str!("main.rs"));
+        let handoff = main
+            .split_once("Request::OpenTerminal { cwd, .. } => {")
+            .unwrap()
+            .1;
+        let handoff = handoff.split_once("Request::Activate { .. }").unwrap().0;
+        in_order(
+            handoff,
+            &[
+                "serve::spawn_throwaway_terminal_window(",
+                "Ok(label) => {",
+                "raise_new_terminal_window(app.clone(), state, label);",
+                "Response::TerminalOpened",
+            ],
+        );
+        let explicit = body(main, "\nfn spawn_terminal_window(");
+        in_order(
+            explicit,
+            &[
+                "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
+                "Ok(label) => raise_new_terminal_window(app_for_task, state, label)",
+            ],
+        );
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        in_order(
+            requested,
+            &[
+                "raise::wait_for_requested_window(",
+                "requested_terminal_is_shown(&state, &label)",
+                "app.get_webview_window(&label).is_some()",
+                ".await",
+                "if !ready {\n            return;\n        }",
+                "dispatch.run_on_main_thread(move || {",
+            ],
+        );
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        in_order(
+            callback,
+            &[
+                "tokio::time::Instant::now() >= deadline",
+                "!requested_terminal_is_shown(&state, &label)",
+                "return;",
+                "if let Some(window) = app.get_webview_window(&label)",
+                "raise::raise_window(&window)",
+            ],
+        );
+        assert!(callback.contains(concat!(
+            "if tokio::time::Instant::now() >= deadline\n",
+            "                || !requested_terminal_is_shown(&state, &label)\n",
+            "            {\n                return;\n            }",
+        )));
+        assert_eq!(requested.matches("raise::raise_window(").count(), 1);
+        assert_eq!(main.matches("raise_new_terminal_window(").count(), 3);
+        for boot in [
+            body(main, "\nasync fn ensure_boot_window("),
+            production(include_str!("launch_paths.rs")),
+        ] {
+            assert!(!boot.contains("raise_new_terminal_window("));
+        }
+    }
+
+    #[test]
+    fn a_requested_terminal_raise_uses_the_live_local_visibility_rule() {
+        let main = production(include_str!("main.rs"));
+        let eligibility = body(main, "\nfn requested_terminal_is_shown(");
+        assert!(eligibility.contains(concat!(
+            "if state\n        .shutdown_started\n",
+            "        .load(std::sync::atomic::Ordering::SeqCst)\n",
+            "        || state\n            .local_watcher_view()\n",
+            "            .is_some_and(|view| view.is_buried(label))\n",
+            "    {\n        return false;\n    }",
+        )));
+        in_order(
+            eligibility,
+            &[
+                ".shutdown_started",
+                ".load(std::sync::atomic::Ordering::SeqCst)",
+                ".local_watcher_view()",
+                ".is_some_and(|view| view.is_buried(label))",
+                "return false;",
+                "let Some(embedded) = state.embedded() else {",
+                "let put_away = last_window::put_away(state);",
+                "embedded.local_window_records().iter().any(|record| {",
+                "window_watcher::native_label(record) == label",
+                "&& window_watcher::should_show(record, &put_away)",
+            ],
+        );
+    }
+
     /// Every direct caller is an explicit request to bring a window forward.
     /// Count all mentions so an import cannot bypass the module-path pin.
     #[test]
@@ -556,11 +770,22 @@ mod tests {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut calls = BTreeMap::new();
         let mut directories = vec![src.clone()];
+        let mut visited = std::collections::HashSet::new();
         while let Some(directory) = directories.pop() {
+            if !visited.insert(
+                directory
+                    .canonicalize()
+                    .expect("a source directory resolves"),
+            ) {
+                continue;
+            }
             for entry in std::fs::read_dir(directory).expect("the crate's sources are readable") {
                 let entry = entry.expect("a source entry");
                 let path = entry.path();
-                if entry.file_type().expect("a source entry's type").is_dir() {
+                if path == src.join("testdata") {
+                    continue;
+                }
+                if path.is_dir() {
                     directories.push(path);
                     continue;
                 }
@@ -588,7 +813,7 @@ mod tests {
         assert_eq!(
             calls,
             BTreeMap::from([
-                ("main.rs".to_string(), 5),
+                ("main.rs".to_string(), 6),
                 ("serve.rs".to_string(), 1),
                 ("single_instance.rs".to_string(), 1),
             ])

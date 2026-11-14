@@ -319,7 +319,7 @@ pub trait NativeSurface {
 /// back on re-tokens it and the reconcile reopens it at the same window_id (the
 /// SPA restores its tabs). Discard is the library op (the record leaves the
 /// snapshot entirely).
-fn should_show(record: &WindowRecord, buried: &HashSet<String>) -> bool {
+pub(crate) fn should_show(record: &WindowRecord, buried: &HashSet<String>) -> bool {
     record.persisted
         && record.origin.is_native()
         && !record.hidden
