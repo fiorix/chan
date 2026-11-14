@@ -201,11 +201,15 @@ export default {
           await ctx.shot(`229-${backend}-failure`).catch(() => {});
         } finally {
           result.records = fixture.records;
-          await fixture.send("stop").catch(() => {});
-          await fixture.close();
+          // Flush the log without exiting: terminal close selects a live
+          // session, so stopping the fixture first races that selection.
+          result.cleanup = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
+            failures.push(`${backend}: could not flush fixture: ${error.message}`);
+          });
           if (opened) await cs(["close", "--tab-name", name]).catch((error) => {
             failures.push(`${backend}: could not close owned terminal: ${error.message}`);
           });
+          await fixture.close();
           writeFileSync(join(ctx.outDir, `229-${backend}.json`), JSON.stringify(result, null, 2) + "\n");
         }
       }
