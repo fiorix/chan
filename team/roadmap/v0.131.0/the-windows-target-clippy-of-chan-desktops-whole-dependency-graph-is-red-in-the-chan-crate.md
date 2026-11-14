@@ -31,3 +31,13 @@ Read at `342dbe791`:
 2. The gate's Windows-target lint step, reaching the chan crate, red on the code without the change on that one finding and green with it.
 3. `cargo test -p chan` green, `devserver_verb_maps_every_server_side_subcommand` among them; the Linux clippy and rustdoc steps green.
 4. On the Windows VM (`dev/vm/windows.sh`) at the candidate, `cargo clippy -p chan-desktop --all-targets -- -D warnings`, the form without `--no-deps`, rc 0.
+
+## Built, 2026-11-14
+
+`devserver_verb` returns the client-side action in a box, and its caller unboxes it at the same dispatch match. The error stays small on Windows without a lint allowance; verbs, flags and dispatch are unchanged. `check-windows-test-target` keeps `CHAN_WINDOWS_TEST_CRATES` and the native Windows test selection unchanged, and removes `--no-deps` from its desktop pass. That pass lints the workspace crates in chan-desktop's dependency graph, including chan's library; Cargo still caps registry dependency lints. The gate skill describes the coverage and excludes chan's tests from both Windows arms.
+
+At base `23ee2e97b3b5d1eb50ccc78a3a4cc90cf2bda660`, the Linux guest's whole-graph Windows GNU clippy exited 101 on `result_large_err` at `devserver.rs:98`. Applying only the gate argument removal to that base made `make check-windows-test-target` exit 2 on the same finding; its non-desktop pass was green, and no other finding appeared. Evidence: `dev/v0131-team/evidence/Ops131/J9/step2/step2-clippy-base.log`, `step2.rc`, and `J9/step3/step3-gate-red.log`, `step3.rc`, `step3-makefile.diff`.
+
+On committed fix `74bbd907b08bf647676185f44dc0b3dfbc80a68d`, both the whole-graph Windows GNU clippy command and the unmodified gate target exited 0, with no further finding past chan (`dev/v0131-team/evidence/Ops131/J13/windows/step1.log`, `step1.rc`, `step2.log`, `step2.rc`). The same Linux guest built both real frontend bundles, then passed `cargo fmt --check`, chan's all-targets clippy, rustdoc with warnings denied, and `cargo test --locked -p chan`: 595 passed, 0 failed, 1 ignored. `devserver_verb_maps_every_server_side_subcommand` passed. Each command and exit status is in `dev/v0131-team/evidence/Ops131/J13/native/step3.log` through `step7.log` and the corresponding `.rc` files; `step7-summary.txt` lists the test totals.
+
+Acceptance 4, native whole-graph clippy on the Windows VM, has not yet run for this change. Ops131 runs it at the candidate. No user-visible behavior, server contract or state owner changed, so the manual and subsystem design descriptions remain applicable.

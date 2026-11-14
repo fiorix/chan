@@ -95,7 +95,7 @@ enum DevserverVerb {
 /// whole in the `Err`, so the caller dispatches them itself.
 fn devserver_verb(
     action: DevserverAction,
-) -> Result<(DevserverServeArgs, DevserverVerb), DevserverAction> {
+) -> Result<(DevserverServeArgs, DevserverVerb), Box<DevserverAction>> {
     use DevserverAction as A;
     Ok(match action {
         A::Run { args } => (args, DevserverVerb::Run),
@@ -109,7 +109,7 @@ fn devserver_verb(
         | A::Ls { .. }
         | A::Connect { .. }
         | A::Disconnect { .. }
-        | A::Forget { .. }) => return Err(client_side),
+        | A::Forget { .. }) => return Err(Box::new(client_side)),
     })
 }
 
@@ -212,22 +212,26 @@ pub(super) async fn cmd_devserver_action(action: DevserverAction, verbose: bool)
     };
     let (args, verb) = match devserver_verb(action) {
         Ok(server_side) => server_side,
-        Err(A::Register { url, name, script }) => {
-            return cmd_devserver_register(url, name, script).await;
+        Err(client_side) => {
+            return match *client_side {
+                A::Register { url, name, script } => {
+                    cmd_devserver_register(url, name, script).await
+                }
+                A::Ls { json } => cmd_devserver_ls(json).await,
+                A::Connect { target } => cmd_devserver_connect(target).await,
+                A::Disconnect { target } => cmd_devserver_disconnect(target).await,
+                A::Forget { target, force } => cmd_devserver_forget(target, force).await,
+                A::Run { .. }
+                | A::Start { .. }
+                | A::Stop { .. }
+                | A::Restart { .. }
+                | A::Status { .. }
+                | A::Join { .. }
+                | A::RotateToken { .. } => {
+                    unreachable!("devserver_verb maps every server-side verb")
+                }
+            };
         }
-        Err(A::Ls { json }) => return cmd_devserver_ls(json).await,
-        Err(A::Connect { target }) => return cmd_devserver_connect(target).await,
-        Err(A::Disconnect { target }) => return cmd_devserver_disconnect(target).await,
-        Err(A::Forget { target, force }) => return cmd_devserver_forget(target, force).await,
-        Err(
-            A::Run { .. }
-            | A::Start { .. }
-            | A::Stop { .. }
-            | A::Restart { .. }
-            | A::Status { .. }
-            | A::Join { .. }
-            | A::RotateToken { .. },
-        ) => unreachable!("devserver_verb maps every server-side verb"),
     };
     cmd_devserver(args, verb, verbose, show_url).await
 }
@@ -894,9 +898,10 @@ mod tests {
             assert!(args.no_tunnel, "{spelling}");
         }
 
-        let client_side = devserver_verb(parse(&["chan", "devserver", "ls", "--json"]));
+        let client_side =
+            devserver_verb(parse(&["chan", "devserver", "ls", "--json"])).unwrap_err();
         assert!(
-            matches!(client_side, Err(DevserverAction::Ls { json: true })),
+            matches!(*client_side, DevserverAction::Ls { json: true }),
             "{client_side:?}"
         );
     }

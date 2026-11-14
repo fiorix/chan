@@ -513,8 +513,9 @@ test-symlink-tmpdir: ## Run CLI, library, server and workspace tests with a nonc
 
 .PHONY: check-windows-test-target
 # The desktop also lints production targets: test-only references can hide
-# dead platform-gated code. Tauri validates the bundled CLI without linking it.
-check-windows-test-target: ## Lint Windows tests and all desktop targets for Windows GNU.
+# dead platform-gated code. Its dependencies include the CLI's own code.
+# Tauri validates the bundled CLI without linking it.
+check-windows-test-target: ## Lint Windows tests and the desktop dependency graph for Windows GNU.
 	@set -eu; \
 		if ! command -v rustup >/dev/null 2>&1 || \
 			! installed="$$(rustup target list --installed)" || \
@@ -537,7 +538,7 @@ check-windows-test-target: ## Lint Windows tests and all desktop targets for Win
 		RUSTFLAGS="-D warnings" $(CARGO) clippy --tests --target x86_64-pc-windows-gnu \
 			$(foreach crate,$(filter-out chan-desktop,$(CHAN_WINDOWS_TEST_CRATES)),-p $(crate)) --no-deps -- -D warnings; \
 		RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets --target x86_64-pc-windows-gnu \
-			-p chan-desktop --no-deps -- -D warnings
+			-p chan-desktop -- -D warnings
 
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.
