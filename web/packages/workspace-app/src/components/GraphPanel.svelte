@@ -1448,6 +1448,9 @@
       // An opened directory the spine has not read (it was not there when
       // the tab read the tree) is read once the same patch brings it.
       if (spineHoldsChildren(dir) || drawsChildren(dir)) dirs.add(dir);
+      // A different directory can take this path while its parent still
+      // lists it as a directory, so its held children need a fresh level.
+      if (spineHoldsChildren(path)) dirs.add(path);
     }
     return named ? dirs : null;
   }

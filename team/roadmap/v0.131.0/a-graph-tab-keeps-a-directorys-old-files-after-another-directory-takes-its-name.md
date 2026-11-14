@@ -25,3 +25,11 @@ Read at `342dbe791`, in `web/packages/workspace-app/src/components/GraphPanel.sv
 
 1. Workspace app tests over the graph panel with the fs-graph stub (`web/packages/workspace-app/src/__tests__/graphPanel.ts`), the sequence above: drawing from the spine alone, and with a shared graph laid over that holds `releases/v2/new.md` and `releases/v3/old.md`; in both `releases/v2/new.md` is drawn and `releases/v2/old.md` is not. Red on the code without the change.
 2. A browser check in a guest that runs the sequence in a real workspace with the tab's directories opened and reads the drawn nodes after the change, before any reload.
+
+## Built, 2026-11-14
+
+A change naming a directory whose children the spine holds now reads that level again as well as its parent. The same rule refreshes a previously opened directory while it is closed, without reading a directory whose children were never held. The existing whole-fetch bound is unchanged. The manual's graph page and the workspace app's design document describe the refresh.
+
+The five mounted regressions in `GraphPanel.rename.test.ts` cover the replacement with the spine alone and a current shared graph, an unopened directory, a held directory closed across the rename, and the exact whole-fetch threshold. The first run at the base failed both stale-child cases and the threshold case; the restored implementation passes all 184 graph-panel and shared-graph tests. Four mutations fail: omitting the named level, reading every named path, reading only opened directories, and allowing an equal-cost patch. Full command outputs and restoration hashes are under `dev/v0131-team/evidence/Web131/graphrename/` (`unit-base-red.log`, `graph-tests-green.log`, and `mutation-*.log`).
+
+Browser check 228 performs the real directory renames in a workspace and reads the selected directory's painted canvas labels without reloading. It delays actual index-apply notifications until after the assertion, since their child-file paths could repair a stale rename patch, and allows the real shared graph response once the index holds the final tree. It records requests, watcher frames, actual graph responses, and before/after screenshots. Guest base/tip results and the committed frontend gate are pending; this row is not yet ready for acceptance.
