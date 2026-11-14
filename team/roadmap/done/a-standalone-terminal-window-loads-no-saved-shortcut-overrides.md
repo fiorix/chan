@@ -1,6 +1,8 @@
 # A standalone terminal window loads no saved shortcut overrides
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/terminal-window-shortcuts`, merged into the integration branch (`ca652452a`), not yet in a release; the section "Built" holds the evidence.
+Status: shipped in [v0.130.0](../../release/release-v0.130.0.md): a standalone terminal window loads the saved shortcut overrides at boot and after every `config_changed`, and drops a saved chord for a retired command id, with nothing else of a workspace window's preferences (`45f1ba8a5` on `v0130/terminal-window-shortcuts`, merged as `ca652452a`). Acceptance 2 was read on chan-desktop under WebKitGTK in a Linux guest on both terminal backends, passing with the fix and failing with the base web bundle. The owner's macOS reading (Cmd chords, the `macos` slot) had not been taken when the cut was ordered on 2026-11-14 and comes after the tag, on his word ("2. after"); WKWebView and WebView2 were not observed.
+
+Record before the release: accepted for v0.130.0 by the owner on 2026-11-13; built on 2026-11-14 on the branch `v0130/terminal-window-shortcuts`, merged into the integration branch (`ca652452a`), not yet in a release; the section "Built" holds the evidence.
 
 Record: left as built for the owner by the command deck's lanes, their point 6: "A standalone terminal window loads no saved shortcut overrides. This is the same on main." The owner: "it should, let's add an item for next version" (`dev/command-launcher-revamp/handoff.md`, "For the owner to decide"; quoted in the [command launcher row](../done/the-command-launcher-is-one-flat-list-behind-dead-keys.md)).
 

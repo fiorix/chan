@@ -22,7 +22,7 @@ Read at `342dbe791`. The review ran at `8d7f321d3`; the two commits since that t
 ## Boundaries
 
 - The workspace app's record of the surface the commands act on (`browserFocus`, `fbActivateInstance` and `browserSelection` in `store.svelte.ts`), the commands' reading of it (`state/commands/browser.ts`), and the surface's activation (`FileBrowserSurface.svelte`, `Pane.svelte`).
-- [The pane-focus row](../v0.130.0/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) has a file browser tab take the keyboard when its pane becomes the focused one. A tree that takes focus runs `onfocusin`, so that change moves the surface for the paths of contract 1 too, by reading; it leaves contract 2, and its tests pin the keyboard, not the surface. This row's tests pin the surface whichever change lands first.
+- [The pane-focus row](../done/moving-pane-focus-to-a-file-browser-leaves-the-keyboard-in-the-terminal.md) has a file browser tab take the keyboard when its pane becomes the focused one. A tree that takes focus runs `onfocusin`, so that change moves the surface for the paths of contract 1 too, by reading; it leaves contract 2, and its tests pin the keyboard, not the surface. This row's tests pin the surface whichever change lands first.
 - Not here: the folder `New` and `Paste` choose on a surface, and a selected directory under a collapsed parent counting as a file there ([the New and Paste row](the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md)); whether the view commands (Details, Select multiple, Hidden files, Keyboard shortcuts, Expand all, Collapse all) follow a focused dock; offering the commands while a dock is focused and the focused pane holds no file browser.
 
 ## Acceptance
