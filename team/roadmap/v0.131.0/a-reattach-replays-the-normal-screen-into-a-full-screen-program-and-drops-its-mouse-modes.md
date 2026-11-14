@@ -31,3 +31,11 @@ Read at `9d7b56c45`.
 2. One mutation per guard (the order of transitions, each recognised form, each tracked mode) turns a test red.
 3. A browser check in a guest, on both backends: a shell prints normal-screen text, then a `printf` enters the alternate screen with `\e[?1047h` and draws; a reload reattaches and the view holds no normal-screen text. And a program that sets 1015 and echoes what it reads: after a reload's reattach, a click reaches it in the urxvt encoding.
 4. `crates/chan-library/design.md` says which forms the tracker reads and which modes the prelude re-asserts.
+
+## Ruling on acceptance 3, 2026-11-14
+
+Found while drafting the browser check: neither of chan's terminal backends encodes clicks in the urxvt form. ghostty-web's input handler chooses SGR (1006) or X10 only (`web/packages/ghostty-web-ng/lib/input-handler.ts`, around 788 to 809), and xterm.js 6 logs DECSET and DECRST 1015 as unsupported (`@xterm/xterm/src/common/InputHandler.ts`, around 1947 and 2175); `terminal/mouseModeFilter.ts` records the same. So a urxvt click after a reattach cannot pass on either backend, whatever the server sends. The lead's ruling, inside the row's purpose:
+
+- Contract 3 stays as written: the server re-asserts every mode the program left on, 1015 included, since that is the server's state to keep and a client that encodes it gets it.
+- Acceptance 3's mouse arm becomes two parts: the reattach prelude, read from the socket's frames in the browser check, carries each tracked mode the program set (1015 among them); and a click after a reload reaches the program in the encoding of a newly tracked mode that backend does honour, on each backend that honours one (the build names which, from the backend's source, and says so for a backend that honours none).
+- That neither backend encodes 1015 is recorded here, not built: it predates this row, and modern programs ask for SGR.
