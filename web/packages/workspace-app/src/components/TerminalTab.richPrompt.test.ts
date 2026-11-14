@@ -128,54 +128,88 @@ describe("the prompt sink", () => {
 
   // The team dialog's bootstrap spawns the lead, opens its terminal and sends
   // the identity prompt through that terminal's prompt sink. The server reads
-  // an omitted agent as claude, so the frame names the lead's agent, and
-  // "none" for a lead chan does not recognise as an agent: no submit chord.
-  for (const [command, env, agent] of [
-    ["codex", "", "codex"],
-    ["bash", "", "none"],
-    ["aider --model test", "", "none"],
-    ["claude", "CHAN_AGENT=none", "none"],
+  // an omitted agent as claude, so the frame names the lead's agent.
+  async function bootstrapTeamAndMountLead(command: string, env: string) {
+    seatTerminals([terminalTab({ id: "placeholder" })]);
+    await runTeamBootstrap(
+      {
+        hostName: "Neo",
+        configMode: "new",
+        teamDir: "team",
+        tabGroup: "team",
+        size: 2,
+        autoPrefix: true,
+        mcpEnv: false,
+        members: [
+          { name: "Lead", command, env, isLead: true },
+          { name: "Worker", command: "claude", env: "", isLead: false },
+        ],
+        realEstate: { kind: "tabs" },
+        brief: "",
+      },
+      { leadTabId: "placeholder", leadPaneId: TERMINAL_PANE },
+    );
+    const lead = allTerminalTabs().find((t) => t.title === "@@Lead")!;
+    await mountTerminal(TerminalTab, lead);
+    return { lead, socket: TerminalSocket.all.at(-1)! };
+  }
+
+  async function withTeamApi(run: () => Promise<void>): Promise<void> {
+    const root = workspace.info;
+    workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
+    const write = vi.spyOn(api, "writeTeamConfig").mockResolvedValue(undefined);
+    const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
+      session: `session-${request.name}`,
+      tab_label: request.name ?? "",
+    }));
+    try {
+      await run();
+    } finally {
+      write.mockRestore();
+      spawn.mockRestore();
+      workspace.info = root;
+    }
+  }
+
+  for (const [command, agent] of [
+    ["codex", "codex"],
+    ["claude --resume", "claude"],
   ] as const) {
-    test(`a team lead running ${command}${env ? ` with ${env}` : ""} gets its identity prompt with agent ${agent}`, async () => {
-      const root = workspace.info;
-      workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
-      const write = vi.spyOn(api, "writeTeamConfig").mockResolvedValue(undefined);
-      const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
-        session: `session-${request.name}`,
-        tab_label: request.name ?? "",
-      }));
-      try {
-        seatTerminals([terminalTab({ id: "placeholder" })]);
-        await runTeamBootstrap(
-          {
-            hostName: "Neo",
-            configMode: "new",
-            teamDir: "team",
-            tabGroup: "team",
-            size: 2,
-            autoPrefix: true,
-            mcpEnv: false,
-            members: [
-              { name: "Lead", command, env, isLead: true },
-              { name: "Worker", command: "claude", env: "", isLead: false },
-            ],
-            realEstate: { kind: "tabs" },
-            brief: "",
-          },
-          { leadTabId: "placeholder", leadPaneId: TERMINAL_PANE },
-        );
-        const lead = allTerminalTabs().find((t) => t.title === "@@Lead")!;
-        await mountTerminal(TerminalTab, lead);
-        const socket = TerminalSocket.all.at(-1)!;
+    test(`a team lead running ${command} gets its identity prompt with agent ${agent}`, async () => {
+      await withTeamApi(async () => {
+        const { socket } = await bootstrapTeamAndMountLead(command, "");
         const prompts = () => sentFrames(socket).filter((f) => f.type === "prompt");
         await vi.waitFor(() => expect(prompts()).toHaveLength(1), { timeout: 5000, interval: 50 });
         expect(prompts()[0]!.agent).toBe(agent);
         expect(prompts()[0]!.data).toContain("/ws/team/bootstrap.md");
-      } finally {
-        write.mockRestore();
-        spawn.mockRestore();
-        workspace.info = root;
-      }
+      });
+    });
+  }
+
+  // A lead chan does not recognise as an agent has no compose box: text sent
+  // to it lands at a shell prompt, and each line runs as a command the user
+  // never typed. The bootstrap sends it nothing. The orchestrator retries a
+  // send every 250 ms until the lead's socket takes it, so the window below
+  // spans several retries after the socket opened.
+  for (const [command, env] of [
+    ["bash", ""],
+    ["aider --model test", ""],
+    ["claude", "CHAN_AGENT=none"],
+  ] as const) {
+    test(`a team lead running ${command}${env ? ` with ${env}` : ""} is sent nothing`, async () => {
+      await withTeamApi(async () => {
+        const { lead, socket } = await bootstrapTeamAndMountLead(command, env);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        const written = sentFrames(socket).filter((f) =>
+          ["prompt", "input", "broadcast-input"].includes(f.type as string),
+        );
+        expect(written).toEqual([]);
+        // The lead's sink was live all along, so a send would have landed.
+        expect(sendPromptToTerminal(lead.id, "probe", "none")).toBe(true);
+        expect(sentFrames(socket).filter((f) => f.type === "prompt")).toEqual([
+          { type: "prompt", data: "probe", agent: "none" },
+        ]);
+      });
     });
   }
 });

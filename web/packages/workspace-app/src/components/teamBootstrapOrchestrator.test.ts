@@ -16,6 +16,7 @@ import {
   type LeafNode,
   type TerminalTab,
 } from "../state/tabs.svelte";
+import { setNotifyHandler } from "../state/notify.svelte";
 import { workspace } from "../state/workspace.svelte";
 
 // The orchestrator refuses to start a team whose workspace root it does not
@@ -227,14 +228,10 @@ describe("runTeamBootstrap: lead-first flow", () => {
     // The lead is a normal terminal: its identity prompt reaches the terminal's
     // prompt sink, retried until the freshly spawned lead's socket connects,
     // with the agent the lead's command names so the prompt is submitted with
-    // that agent's chord. A lead chan does not recognise as an agent names
-    // "none", which the server answers with no chord; an omitted agent would
-    // be read as claude.
+    // that agent's chord; an omitted agent would be read as claude.
     for (const [command, env, agent] of [
       ["opencode --model test", "", "opencode"],
-      ["bash", "CHAN_AGENT=none", "none"],
-      ["bash", "", "none"],
-      ["aider --model test", "", "none"],
+      ["bash", "CHAN_AGENT=codex", "codex"],
     ] as const) {
       resetLayoutWithLead(leadTerminalTab());
       mockApi();
@@ -254,6 +251,48 @@ describe("runTeamBootstrap: lead-first flow", () => {
       }
       expect(delivered[0]!.agent, command).toBe(agent);
       expect(delivered[0]!.text, command).toContain("bootstrap.md");
+    }
+  });
+
+  test("sends a lead that is not an agent nothing and says so in the status line", async () => {
+    // A shell, a program chan does not know, or CHAN_AGENT=none has no
+    // compose box: the prompt's lines would run as shell commands. The
+    // orchestrator retries a send every 250 ms, so the wait below spans
+    // several retries with the lead's sink taking whatever reaches it.
+    const notices: string[] = [];
+    setNotifyHandler((message) => notices.push(message));
+    try {
+      for (const [command, env] of [
+        ["bash", ""],
+        ["aider --model test", ""],
+        ["claude", "CHAN_AGENT=none"],
+      ] as const) {
+        resetLayoutWithLead(leadTerminalTab());
+        mockApi();
+        notices.length = 0;
+        const config = tabsConfig();
+        config.members[0] = { ...config.members[0], command, env };
+        const delivered: string[] = [];
+        let unregister = () => {};
+        try {
+          await runTeamBootstrap(config, { leadTabId: "lead-tab", leadPaneId: "pane-test" });
+          unregister = registerTerminalPromptSink(leadFromLayout().id, (text) => {
+            delivered.push(text);
+            return true;
+          });
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        } finally {
+          unregister();
+        }
+        expect(delivered, command).toEqual([]);
+        expect(notices, command).toEqual([
+          'Team "new-team-1" bootstrapped; @@Lead is not an agent chan knows, so it was sent no prompt.',
+        ]);
+      }
+    } finally {
+      // With no handler the bus warns on the console; keep that for the
+      // tests after this one.
+      setNotifyHandler((message) => console.warn(message));
     }
   });
 
