@@ -2,9 +2,10 @@
 //
 // Every status-bar section a person cannot answer has a close. A close hides
 // that section until its content changes: a new index state or run, a
-// different error, a new warning, a new transfer or upload request, a changed
-// roster. Hybrid Nav has none; Esc and Enter end it. When every showing
-// section is closed the bar leaves, chevron included.
+// different error, a new warning, a new transfer or upload request, a new
+// window in the roster or a change in what the session badge reads. Hybrid
+// Nav has none; Esc and Enter end it. When every showing section is closed
+// the bar leaves, chevron included.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";
@@ -29,6 +30,7 @@ afterEach(() => {
   transfers.items = [];
   paneMode.active = false;
   sessionState.participants = [];
+  sessionState.leader = null;
   workspaceWarningsDialog.warnings = [];
   ui.status = null;
   ui.statusKind = null;
@@ -164,6 +166,24 @@ test("the session role badge hides until the roster changes", () => {
   sessionState.participants = [...sessionState.participants, participant("follower", "remote-2")];
   flushSync();
   expect(shown("session role"), "a new arrival shows the badge").toBe(true);
+});
+
+test("the hidden session role badge returns when this window's reading flips", () => {
+  const participant = (role: "leader" | "follower", window_id: string): SessionParticipant =>
+    ({ window_id, name: null, role, status: "live" });
+  sessionState.participants = [participant("leader", sessionWindowId()), participant("follower", "remote-1")];
+  sessionState.leader = sessionWindowId();
+  mountBar();
+  expect(target.querySelector('[aria-label="session role"]')?.textContent?.trim()).toBe("leader");
+  close("hide session role");
+  expect(shown("session role")).toBe(false);
+
+  // A handover to the gateway window: the same rows with the same origin
+  // roles, but this window no longer holds the slot.
+  sessionState.leader = "remote-1";
+  flushSync();
+  expect(shown("session role"), "the changed reading shows the badge").toBe(true);
+  expect(target.querySelector('[aria-label="session role"]')?.textContent?.trim()).toBe("follower");
 });
 
 test("Hybrid Nav offers no close", () => {

@@ -100,7 +100,8 @@ CHAN_DEVSERVER_TOKEN=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
       </tbody>
     </table>
   </div>
-  <p>A token also rotates by itself at the first start after it turns 30 days old. After a rotation, reopen browser tabs at the new URL; a connect script picks the new token up at the next connect.</p>
+  <p>A token also rotates by itself at the first start after it turns 30 days old. After a rotation, open the Computers screen at the new URL; a connect script picks the new token up at the next connect.</p>
+  <p>The devserver's token opens its Computers screen. A workspace window's URL carries that workspace's own token, which <code>chan serve</code> mints and keeps with the workspace: a rotation does not replace it, so such a tab keeps working and such a URL stays valid.</p>
 </section>
 
 <section class="manual-block" id="metrics">

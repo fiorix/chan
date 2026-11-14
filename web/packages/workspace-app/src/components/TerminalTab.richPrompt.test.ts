@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
 // How a terminal carries its Rich Prompt: the prompt sink that sends `prompt`
-// frames, the queue and delivery frames that drive the tab's badge and the
-// pending card, the draft's cleanup on close, and the doors that open the
-// composer. A TerminalTab is mounted over the stand-in xterm and socket; the
+// frames (a team lead's identity prompt among them), the queue and delivery
+// frames that drive the tab's badge and the pending card, the draft's cleanup
+// on close, and the doors that open the composer. A TerminalTab is mounted over the stand-in xterm and socket; the
 // window's drafts capability is stubbed so a test can take it away.
 
 import { mount, tick, unmount } from "svelte";
@@ -57,6 +57,7 @@ import {
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import {
+  allTerminalTabs,
   beginPendingPrompt,
   closeTab,
   layout,
@@ -65,6 +66,9 @@ import {
   type LeafNode,
   type TerminalTab as TerminalTabState,
 } from "../state/tabs.svelte";
+import { runTeamBootstrap } from "../state/teamOrchestrator.svelte";
+import { workspace } from "../state/workspace.svelte";
+import type { WorkspaceInfo } from "../api/types";
 import { ownershipWarnings } from "../__tests__/svelteWarnings";
 import {
   attach,
@@ -121,6 +125,59 @@ describe("the prompt sink", () => {
       { type: "prompt", data: "plain" },
     ]);
   });
+
+  // The team dialog's bootstrap spawns the lead, opens its terminal and sends
+  // the identity prompt through that terminal's prompt sink. The server reads
+  // an omitted agent as claude, so the frame names the lead's agent, and
+  // "none" for a lead chan does not recognise as an agent: no submit chord.
+  for (const [command, env, agent] of [
+    ["codex", "", "codex"],
+    ["bash", "", "none"],
+    ["aider --model test", "", "none"],
+    ["claude", "CHAN_AGENT=none", "none"],
+  ] as const) {
+    test(`a team lead running ${command}${env ? ` with ${env}` : ""} gets its identity prompt with agent ${agent}`, async () => {
+      const root = workspace.info;
+      workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
+      const write = vi.spyOn(api, "writeTeamConfig").mockResolvedValue(undefined);
+      const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
+        session: `session-${request.name}`,
+        tab_label: request.name ?? "",
+      }));
+      try {
+        seatTerminals([terminalTab({ id: "placeholder" })]);
+        await runTeamBootstrap(
+          {
+            hostName: "Neo",
+            configMode: "new",
+            teamDir: "team",
+            tabGroup: "team",
+            size: 2,
+            autoPrefix: true,
+            mcpEnv: false,
+            members: [
+              { name: "Lead", command, env, isLead: true },
+              { name: "Worker", command: "claude", env: "", isLead: false },
+            ],
+            realEstate: { kind: "tabs" },
+            brief: "",
+          },
+          { leadTabId: "placeholder", leadPaneId: TERMINAL_PANE },
+        );
+        const lead = allTerminalTabs().find((t) => t.title === "@@Lead")!;
+        await mountTerminal(TerminalTab, lead);
+        const socket = TerminalSocket.all.at(-1)!;
+        const prompts = () => sentFrames(socket).filter((f) => f.type === "prompt");
+        await vi.waitFor(() => expect(prompts()).toHaveLength(1), { timeout: 5000, interval: 50 });
+        expect(prompts()[0]!.agent).toBe(agent);
+        expect(prompts()[0]!.data).toContain("/ws/team/bootstrap.md");
+      } finally {
+        write.mockRestore();
+        spawn.mockRestore();
+        workspace.info = root;
+      }
+    });
+  }
 });
 
 describe("the queue frames", () => {

@@ -139,8 +139,9 @@ impl MiniWorkspace {
     }
 
     /// One-level listing: every ordinary UTF-8 entry including dotfiles
-    /// and control dirs; symlinks visible, special nodes omitted,
-    /// non-UTF-8 names skipped with a server-side warning.
+    /// and control dirs; symlinks visible, special nodes and atomic-write
+    /// temporaries omitted, non-UTF-8 names skipped with a server-side
+    /// warning.
     pub fn list(&self, rel: &str) -> Result<Vec<DirEntry>> {
         let rel = self.wire_dir(rel)?;
         let rel = rel.as_str();
@@ -1124,11 +1125,10 @@ mod tests {
             "{error:?}"
         );
         assert!(!root.join("copy.bin").exists(), "no destination");
-        let mut names: Vec<String> = mini
-            .list("")
+        // Read the directory itself: listings hide the writer's temporaries.
+        let mut names: Vec<String> = stdfs::read_dir(&root)
             .unwrap()
-            .into_iter()
-            .map(|entry| entry.name)
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
         assert_eq!(

@@ -1,5 +1,5 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="browser-serve" data-shot-kind="clip">clip to capture<small>a terminal runs chan serve --standalone ./notes; the browser opens on the printed URL; a terminal tab opens in the workspace window</small></div>
+  <div class="shot-placeholder-frame" data-shot="browser-serve" data-shot-kind="clip">clip to capture<small>a terminal runs chan serve --standalone ./notes; the browser opens on the printed URL, a workspace window with one empty pane; New terminal from the pane menu opens a terminal tab in it</small></div>
   <figcaption>One workspace, served by the chan binary alone, in a browser tab.</figcaption>
 </figure>
 
@@ -188,7 +188,7 @@ served   standalone      41873  -           -        -          -          -    
       <li>If port 8787 is taken on your side of an ssh forward, forward another, such as <code>-L 9901:127.0.0.1:8787</code>, and change the port in the URL to match.</li>
       <li>A terminal window's Dashboard shows the metrics and About only.</li>
       <li>In a browser the Computers screen has no All windows or Add devserver card, and no keyboard letters.</li>
-      <li><code>chan devserver rotate-token</code> replaces a devserver's token at once; reopen any tab that used the old URL. The token also rotates on its own at the first cold start after it turns 30 days old.</li>
+      <li><code>chan devserver rotate-token</code> replaces a devserver's token at once; open its Computers screen again at the new URL. A workspace window's tab holds the workspace's own token and keeps working. The token also rotates on its own at the first cold start after it turns 30 days old.</li>
       <li>A standalone server's token is kept under <code>~/.chan</code>.</li>
       <li>On Windows, a Chan Desktop that is still starting cannot take a workspace; <code>chan serve</code> says so and serves it itself.</li>
       <li>A <code>chan</code> installed apart from Chan Desktop may not find a Chan Desktop of another release, and then serves the workspace itself. The <code>chan</code> that Chan Desktop installs is always of its release.</li>

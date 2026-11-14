@@ -182,7 +182,7 @@ The outer server router owns a metrics runtime shared by its launcher and all te
 | Workspace registry, index, graph, reports, trash, drafts, window layouts | chan-workspace, under the chan home |
 | Window records, terminal sessions, scrollback, tmux connections, client sessions | chan-library, in memory, with window records persisted |
 | Workspace bearer tokens, server and editor preferences, extension declarations | chan-server, under the chan home, secrets at mode 0600 |
-| Devserver token and enabled workspace set | the devserver's config under the chan home |
+| Devserver token, its shared terminal tenant's token, enabled workspace set | the devserver's state under the chan home, tokens at mode 0600 |
 | Desktop config: devservers, gateways, window placement, viewer privacy | chan-desktop, under the chan home |
 | Browser viewer privacy | localStorage per origin; individual reveals in sessionStorage per tab |
 | Launcher screen and badge positions | sessionStorage per browser tab or native launcher webview |

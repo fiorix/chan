@@ -123,12 +123,16 @@ pub enum ParticipantState {
     Gone,
 }
 
-/// A participant's DISPLAY role, derived from the socket's ORIGIN: a
-/// local-origin `/ws` (the loopback bind or an `ssh -L` forward to it) reads
-/// `Leader`, a tunnel `/ws` reads `Follower`. This is separate from the single
-/// designated-owner slot ([`SessionRegistry::leader`]) that handover routing
-/// and the launcher gate consume; a remote holding the fallback owner slot
-/// still reads `Follower` here.
+/// A participant's ORIGIN role, fixed by its socket: a local-origin `/ws` (the
+/// loopback bind or an `ssh -L` forward to it) is `Leader`, a tunnel `/ws` is
+/// `Follower`. It is not leadership. The single designated-owner slot
+/// ([`SessionRegistry::leader`], [`WhoamiInfo::is_leader`]) is what handover
+/// routing, the launcher gate and the status bar's session badge read, so a
+/// local window without the slot is still `Leader` here and a remote holding
+/// it is still `Follower`. The workspace app reads the origin role to decide
+/// when the badge shows (two or more rows, one of them remote) and whether an
+/// emptied gateway window holds back its layout delete, never for what the
+/// badge says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -190,8 +194,8 @@ pub struct WhoamiInfo {
     pub role: Role,
     pub status: ParticipantState,
     /// Whether this window holds the designated-owner slot, as opposed to the
-    /// origin-derived display `role` (a remote fallback owner reads follower
-    /// but leads).
+    /// origin `role`: a local window without the slot has role `leader` and
+    /// does not lead, and a remote holding it has role `follower` and leads.
     pub is_leader: bool,
     /// `Display Name <email>` from the gateway assertion; absent for a
     /// loopback participant (or an identity with neither half).
@@ -230,8 +234,8 @@ struct Participant {
     default_name: String,
     /// Whether this window's `/ws` arrived local-origin (no `TunnelOrigin`: the
     /// loopback bind or an `ssh -L` forward to it). Fixed at first insert; a
-    /// reload overlap keeps the original, mirroring `disconnected_at`. Drives
-    /// the display role and biases the designated-owner election local-first.
+    /// reload overlap keeps the original, mirroring `disconnected_at`. Fixes
+    /// the origin [`Role`] and biases the designated-owner election local-first.
     local: bool,
     /// Live `/ws` socket count for this window (reload overlap can exceed 1).
     sockets: usize,
@@ -268,9 +272,9 @@ impl Participant {
         self.default_name.clone()
     }
 
-    /// The display role, derived from origin and independent of the single
-    /// designated-owner slot: a local window reads Leader, a tunnel window
-    /// reads Follower, even the remote holding the fallback owner slot.
+    /// The origin role (see [`Role`]), independent of the designated-owner
+    /// slot: a local window is Leader and a tunnel window Follower, whichever
+    /// of them holds the slot.
     fn role(&self) -> Role {
         if self.local {
             Role::Leader
@@ -390,7 +394,7 @@ impl SessionRegistry {
 
     /// Register one live `/ws` socket for `window_id` and return the RAII guard
     /// that releases it. `local` marks a local-origin socket (see [`Role`]); it
-    /// is stored on first insert and fixes this window's display role and its
+    /// is stored on first insert and fixes this window's origin role and its
     /// weight in the designated-owner election. `identity` is the gateway
     /// identity of a tunnel socket, also stored on first insert. A socket
     /// arriving for a participant in its grace window re-lives it (a reload)

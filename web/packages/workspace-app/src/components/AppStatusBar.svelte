@@ -98,14 +98,14 @@
     statusVisible && !statusActionVisible && !isTransientStatus(),
   );
   const paneModeVisible = $derived(paneMode.active);
-  // Session role: shown only when the roster is genuinely SPLIT by origin --
-  // at least one local window AND at least one remote one. A row's `role` on
-  // the /ws roster is its origin (a local socket reads leader, a tunnel socket
-  // follower), so a sole user's all-local roster (standalone terminals,
-  // workspace windows) stays quiet and the badge appears once a gateway
-  // browser joins.
+  // Session role: shown only when the roster has two or more windows and at
+  // least one of them is remote. A row's `role` on the /ws roster is its
+  // origin (a local socket reads leader, a tunnel socket follower), so a sole
+  // user's all-local roster (standalone terminals, workspace windows) and a
+  // lone gateway window stay quiet, and the badge appears once a second
+  // window shares a session that a gateway window is in.
   const roleVisible = $derived(
-    sessionState.participants.some((p) => p.role === "leader") &&
+    sessionState.participants.length >= 2 &&
       sessionState.participants.some((p) => p.role === "follower"),
   );
   // The badge names who leads, not where this window connects from: the
@@ -140,8 +140,14 @@
       // The warnings themselves, not the status line they share: a
       // confirmation that replaces the line for a moment changes neither.
       warnings: warningKeys.length ? warningKeys : warningsLabel === null ? [] : [warningsLabel],
+      // The rows decide when the badge shows; its text reads the leader
+      // slot, which a handover or takeover moves without touching a row,
+      // so this window's own reading is a token of its own.
       role: roleVisible
-        ? sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`).sort()
+        ? [
+            ...sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`),
+            `self\u0000${role}`,
+          ].sort()
         : [],
     };
   });
@@ -353,7 +359,7 @@
               <span class="dot"></span>
               {role}
             </span>
-            {@render closeButton("role", "hide session role", "Hide until someone joins or leaves")}
+            {@render closeButton("role", "hide session role", "Hide until a new window joins or this window's role changes")}
           </span>
         {/if}
       </div>

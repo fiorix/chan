@@ -198,7 +198,8 @@ pub struct WorkspaceContentHit {
     pub heading: String,
     /// Starting line of the retained chunk.
     pub start_line: u64,
-    /// Search preview text.
+    /// Search preview text, in the raw-text format of
+    /// [`Hit::snippet`](crate::Hit::snippet).
     pub snippet: String,
     /// Ranking score from the selected search mode.
     pub score: f32,

@@ -2234,8 +2234,10 @@
   /// (the raw keystroke path bypasses the queue). Returns whether the WS was
   /// open so the orchestrator can retry a freshly-spawned lead. `agent` picks
   /// the encoding (claude CSI, codex/opencode bracketed paste + CR, gemini
-  /// and muse split CR); omitted defaults to claude server-side. A Rich Prompt is its
-  /// own agent turn: the notification batcher never folds it into a batch.
+  /// and muse split CR); omitted defaults to claude server-side, and a name
+  /// the server does not know as an agent ("none") gets no chord. A Rich
+  /// Prompt is its own agent turn: the notification batcher never folds it
+  /// into a batch.
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   function sendPrompt(data: string, agent?: string, id?: string): boolean {

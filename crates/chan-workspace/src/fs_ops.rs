@@ -1289,8 +1289,9 @@ pub fn resolve_safe_strict_canon(
 }
 
 /// Whether a component belongs to the reserved atomic-write namespace.
-/// Reserved files and directory subtrees are hidden from indexing and watch
-/// events, including leftovers from an interrupted writer.
+/// Reserved files and directory subtrees are hidden from one-level
+/// listings, indexing and watch events, including leftovers from an
+/// interrupted writer.
 pub fn is_atomic_write_temp_name(name: &str) -> bool {
     name.starts_with(atomic_write_temp::PREFIX)
 }

@@ -34,7 +34,7 @@ import {
   terminalTabGroup,
   type TerminalTab,
 } from "./tabs.svelte";
-import type { TeamDialogConfig, TeamMemberDraft } from "./teamDialog.svelte";
+import type { AgentTarget, TeamDialogConfig, TeamMemberDraft } from "./teamDialog.svelte";
 import { agentForMember, defaultTabGroupFromPath } from "./teamDialog.svelte";
 import { workspace } from "./workspace.svelte";
 
@@ -348,12 +348,12 @@ async function launchLead(
 /// the write queue (the prompt frame). The lead's WS may not be open the instant
 /// we ask, so retry until the send goes out; the lead typically connects within
 /// ~1s, we poll up to ~10s, then warn rather than silently strand the lead. The
-/// server enqueues + drains the prompt (with the agent's submit chord) when the
-/// agent is idle - the same path every other prompt takes.
+/// server enqueues + drains the prompt (with the agent's submit chord, none for
+/// "none") when the agent is idle - the same path every other prompt takes.
 async function deliverLeadIdentity(
   tabId: string,
   text: string,
-  agent?: string,
+  agent: AgentTarget,
 ): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (sendPromptToTerminal(tabId, text, agent)) return;
@@ -413,8 +413,10 @@ export async function runTeamBootstrap(
   //    special-file refusal (see api.writeTeamConfig). A non-empty brief
   //    folds verbatim into the generated bootstrap.md (server-side); the
   //    brief is not part of config.toml, so it travels as a separate arg.
+  //    Load shows no brief field and keeps the team's existing bootstrap.md,
+  //    which may carry the brief it was created with or hand edits.
   const brief = config.brief.trim() ? config.brief : undefined;
-  await api.writeTeamConfig(config.teamDir, wire, brief);
+  await api.writeTeamConfig(config.teamDir, wire, brief, config.configMode === "load");
 
   const leadEntry = wire.members.find((m) => m.is_lead);
   if (!leadEntry) throw new Error("config has no lead member");
@@ -473,23 +475,20 @@ export async function runTeamBootstrap(
   // identity prompt through the write queue - the same prompt-frame path every
   // terminal uses - with the lead's agent so the server appends the right
   // submit chord (claude CSI; agy/codex/kimi/opencode bracketed paste + CR; gemini
-  // and muse CR in a later write; a shell lead "none" gets no chord). The freshly-spawned
+  // and muse CR in a later write). The freshly-spawned
   // lead's WS may not be open yet, so retry until
   // the send goes out (the server then enqueues + drains when the agent is
   // idle). This is what makes the lead read bootstrap.md + drive the workers.
   // Derive the lead's submit agent from its DIALOG command (+ a CHAN_AGENT
   // env override), the same algorithm the server uses (SubmitAgent::derive);
-  // the wire carries command and env instead. A shell lead derives "none"
-  // and gets no submit chord (undefined).
+  // the wire carries command and env instead. A lead that derives no agent (a
+  // shell, or a program chan does not know) is sent "none": the server reads
+  // an omitted agent as claude, and a name it does not know as no chord.
   const leadDraft = config.members.find((m) => m.isLead);
   const leadAgent = leadDraft
     ? agentForMember(leadDraft.command, leadDraft.env)
     : "none";
-  void deliverLeadIdentity(
-    leadTab.id,
-    prompt,
-    leadAgent === "none" ? undefined : leadAgent,
-  );
+  void deliverLeadIdentity(leadTab.id, prompt, leadAgent);
 
   // Restore focus to the lead's pane.
   setActivePane(ctx.leadPaneId);

@@ -1,5 +1,5 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="collaboration-coedit" data-shot-kind="clip">clip to capture<small>two browser windows side by side on one workspace and one Markdown file; typing in one shows the edit and a named caret in the other, and the file tab shows its collaborator count</small></div>
+  <div class="shot-placeholder-frame" data-shot="collaboration-coedit" data-shot-kind="clip">clip to capture<small>two browser windows side by side on one workspace and one Markdown file; typing in one shows the edit and a named caret in the other, and each window's file tab shows 1, the other window</small></div>
   <figcaption>Two windows on one workspace: the server merges their edits and shows where each one is.</figcaption>
 </figure>
 
@@ -35,7 +35,7 @@
       </thead>
       <tbody>
         <tr><td>Terminals</td><td>Every client that shows a window sees the same running shells in it, with their scrollback.</td></tr>
-        <tr><td>Documents</td><td>Edits merge as they are typed. Each peer's selection and caret show with a name flag, and the file's tab shows how many collaborators are in it.</td></tr>
+        <tr><td>Documents</td><td>Edits merge as they are typed. Each peer's selection and caret show with a name flag, and the file's tab counts the other windows that have it open.</td></tr>
         <tr><td>Drawings</td><td>Changes to an <code>.excalidraw</code> canvas merge the same way.</td></tr>
         <tr><td>Presence</td><td>Every participant's name, and which window is the <a href="#leadership">session leader</a>.</td></tr>
       </tbody>
@@ -53,7 +53,7 @@
       </thead>
       <tbody>
         <tr><td><code>cs session list</code></td><td>Lists the server's clients across its workspace and terminal windows: id, name, status, and how many windows and terminals each holds.</td></tr>
-        <tr><td><code>cs session self</code></td><td>Shows your client and, in a workspace window, your participant: name, role, and status.</td></tr>
+        <tr><td><code>cs session self</code></td><td>Shows your client and, in a workspace window, your participant: name, status, <code>role</code>, and <code>is_leader</code>. <code>role</code> is where the window connects from: <code>leader</code> on the serving machine, <code>follower</code> through a gateway. <code>is_leader</code> is <code>true</code> in the window that leads.</td></tr>
         <tr><td><code>cs session self --name "laptop"</code></td><td>Names your client and your workspace participant at once. <code>--reset</code> restores the defaults.</td></tr>
         <tr><td><code>cs session info CLIENT_ID</code></td><td>Shows one client's windows, terminals, and connections. The id comes from <code>list</code>.</td></tr>
         <tr><td><code>cs session detach CLIENT_ID</code></td><td>Disconnects that client. Shared terminals, running programs, and saved layouts stay.</td></tr>
@@ -67,10 +67,10 @@
   <h2><a class="heading-anchor" href="#leadership">Session leader and followers</a></h2>
   <p>Each served workspace has one session leader window; every other window on it is a follower.</p>
   <ul>
-    <li>The leader is the first window to connect on the serving machine itself, directly or through an ssh forward. A window that comes in through a gateway leads only while no such window is connected.</li>
+    <li>The leader is the first window to connect on the serving machine itself, directly or through an ssh forward. A window that comes in through a gateway leads when no such window is connected, or after a handover or takeover, until a new window on the machine joins.</li>
     <li>In a browser, only the leader's Computers page shows, hides, and opens the workspace's windows. On a follower's page those buttons are dimmed.</li>
-    <li>A window the leader hides or closes shows a cover saying so, with a line to reopen it from Computers.</li>
-    <li>When windows on the machine and windows through a gateway share a workspace, each status bar shows <strong>leader</strong> in the leader's window and <strong>follower</strong> in every other.</li>
+    <li>A window the leader hides shows a cover saying so, with a line to reopen it from Computers. A window the leader closes is gone with its terminals, and its cover says it cannot be reopened.</li>
+    <li>When two or more windows share a workspace and at least one of them comes through a gateway, each status bar shows <strong>leader</strong> in the leader's window and <strong>follower</strong> in every other.</li>
   </ul>
   <p>From a workspace terminal, ask for leadership or take it:</p>
   <div class="manual-table-wrap">
@@ -95,10 +95,10 @@
       <li>When several clients share the window a terminal belongs to, <code>cs session self</code> asks you to pick yours: each shows an <strong>Identify this client</strong> card. Scripts pass <code>--id CLIENT_ID</code> instead.</li>
       <li>A name is 1 to 64 characters, and no two live clients, or participants of one workspace, can share it, whatever the case.</li>
       <li>A participant's default name is a generated one, or the name and email of the account a gateway signed it in with.</li>
-      <li>A window from a gateway that leads because no local window is connected gives leadership back when one joins.</li>
+      <li>When a new window joins on the serving machine while a gateway window leads, leadership goes to the first-joined window there that is still connected.</li>
       <li><code>--json</code>, with <code>--pretty</code>, prints <code>list</code>, <code>info</code>, and <code>self</code> for scripts.</li>
       <li><code>handover --to WINDOW</code> asks for leadership on behalf of another window, and <code>--timeout 60</code> waits longer. Only one handover can be pending.</li>
-      <li>A wait that runs out exits with status 124.</li>
+      <li>A wait that runs out fails like any other error, with exit status 1.</li>
       <li>A disconnected leader cannot answer a handover; use <code>takeover</code>.</li>
       <li>A page reload keeps a window's place. A leader that stays gone for about 30 seconds is replaced the same way the first leader was chosen.</li>
       <li><code>handover</code> and <code>takeover</code> need a workspace terminal; the other commands also work in a standalone terminal, which has no participant.</li>

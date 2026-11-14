@@ -166,7 +166,7 @@ flowchart LR
       <li>A standalone terminal refuses <code>cs export</code>; it needs a workspace window.</li>
       <li>On a devserver, <code>cs export</code> writes the PDF there; <code>cs download</code> brings it to your machine. See <a href="/manual/remote-tools/#transfers">Transfers</a>.</li>
       <li><code>cs export</code> replaces an existing file at the output path without asking.</li>
-      <li>It gives up, with exit status 124, after 90 seconds without a finished page or 15 minutes in all.</li>
+      <li>It gives up, with exit status 1, after 90 seconds without a finished page or 15 minutes in all.</li>
     </ul>
   </details>
 </section>

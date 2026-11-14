@@ -1,5 +1,5 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="systemd-restart" data-shot-kind="clip">clip to capture<small>a Linux devserver's terminal window with <code>top</code> running; in an ssh terminal beside it, <code>chan devserver restart</code> runs; the window greys under "reconnecting to the chan server", comes back by itself, and the same <code>top</code> is still updating</small></div>
+  <div class="shot-placeholder-frame" data-shot="systemd-restart" data-shot-kind="clip">clip to capture<small>a terminal in a Linux devserver's workspace window running <code>top</code>; in an ssh terminal beside it, <code>chan devserver restart</code> runs; the terminal reads "session ended (parked)", the window reloads by itself, and the same <code>top</code>, with the same process id, is still updating</small></div>
   <figcaption>A devserver restarted under systemd: the window reconnects, and the program in its terminal never stops.</figcaption>
 </figure>
 
@@ -94,9 +94,11 @@ WantedBy=default.target</code></pre>
   </div>
   <p>Only the devserver process restarts. The shells and their programs keep running with the same process ids, and the devserver rebuilds each terminal with its scrollback and screen.</p>
   <ul>
-    <li>Open windows show <code>reconnecting to the chan server</code>, then come back by themselves.</li>
+    <li>Each terminal reads <code>session ended (parked)</code> while the devserver is away. A restart that takes more than about half a second also greys the window under <code>reconnecting to the chan server</code>.</li>
+    <li>Chan Desktop windows, and a browser's workspace and standalone terminal windows, then reload by themselves and reattach to the same shells.</li>
+    <li>After <code>chan devserver rotate-token</code>, the next restart gives standalone terminal windows a new token too, as does a restart that rotates a token older than 30 days. A browser tab of one then reads <code>missing or invalid token</code>: open the devserver's <a href="/manual/browser/#computers">Computers screen</a> at the new URL and open the window again from its row. Its terminals are still there.</li>
     <li>Chan Desktop stays connected over ssh or Eternal Terminal when the devserver is back within 30 seconds.</li>
-    <li>A coding agent mid-turn keeps working, and so does <code>cs</code> in the shells that carried on.</li>
+    <li>A coding agent mid-turn keeps working, and so does <code>cs</code> in the shells that carried on. A <code>cs tunnel</code> running at the restart ends.</li>
   </ul>
   <div class="manual-table-wrap">
     <table class="manual-table">
@@ -145,7 +147,7 @@ WantedBy=default.target</code></pre>
     {{copyButton}}
   </div>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="systemd-metrics-restarted" data-shot-kind="still">screenshot to capture<small>the Metrics slide of a devserver's window a few seconds after <code>chan devserver restart</code>: the header with the version, build, a process id that differs from before and an uptime of a few seconds, and graphs holding only those seconds</small></div>
+    <div class="shot-placeholder-frame" data-shot="systemd-metrics-restarted" data-shot-kind="still">screenshot to capture<small>the Metrics slide of a devserver's workspace window a few seconds after <code>chan devserver restart</code>: the header with the version, build, the restarted process's id and an uptime of a few seconds, and graphs holding only those seconds</small></div>
     <figcaption>After a restart: a new process, fresh graphs.</figcaption>
   </figure>
   <p>A failed read ends <code>chan metrics --watch</code>, so it rides out a restart only when the devserver answers again within about a second. The flags are in <a href="/manual/devserver/#metrics">See what it costs</a>.</p>

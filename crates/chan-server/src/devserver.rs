@@ -17,7 +17,9 @@
 //!   of binding a second server, so the devserver owns the single-writer flock.
 //!
 //! What was mounted survives a restart: the enabled workspace roots and the
-//! devserver bearer token persist in `~/.chan/devserver/config.json` (0600).
+//! devserver bearer token persist in `~/.chan/devserver/config.json` (0600),
+//! and the shared terminal tenant's bearer in `~/.chan/devserver/terminal-token`
+//! (0600), replaced whenever the devserver bearer is minted or rotated.
 //! Per-window pane/tab layout is NOT persisted here; each tenant is a full
 //! workspace mount that already stores its own SPA session per window, so a
 //! reconnecting client re-hydrates its panes from the tenant. Under the Linux
@@ -296,6 +298,34 @@ impl DevserverStore {
         crate::atomic_file::write(&self.path, &bytes, Some(0o600))
     }
 
+    /// The shared terminal tenant's persisted bearer token (mode 0600),
+    /// beside the config whose devserver token it rotates with. A desktop
+    /// host on the same chan home keeps no such file, so a token from one
+    /// host's terminal windows never opens the other's.
+    fn terminal_token_path(&self) -> PathBuf {
+        self.path.with_file_name("terminal-token")
+    }
+
+    /// Replace the shared terminal tenant's persisted token. Every new
+    /// devserver token comes with one, so a terminal window URL that leaked
+    /// beside the old bearer stops authorizing at the next start, when the
+    /// tenant reads the file again.
+    fn replace_terminal_token(&self) -> std::io::Result<()> {
+        crate::auth::replace_token_at(&self.terminal_token_path()).map(drop)
+    }
+
+    /// [`replace_terminal_token`](Self::replace_terminal_token) for the
+    /// paths that already hold a new devserver token and keep going.
+    fn replace_terminal_token_or_warn(&self) {
+        if let Err(error) = self.replace_terminal_token() {
+            tracing::warn!(
+                path = %self.terminal_token_path().display(),
+                %error,
+                "could not replace the terminal tenant token; the next start serves the previous one"
+            );
+        }
+    }
+
     #[cfg(test)]
     fn save_with_pre_persist_hook(
         &self,
@@ -378,17 +408,25 @@ pub fn persisted_devserver_token() -> Option<String> {
 }
 
 /// Rotate the persisted devserver bearer token WITHOUT a running server:
-/// re-mint, stamp the mint time, and save through the same atomic 0600
-/// store. Returns the new token, or `None` when no config with a token
-/// exists (nothing to rotate). The CLI verb uses this as its no-server
-/// fallback; a devserver somehow still running elsewhere keeps accepting
-/// its in-memory token until it restarts, which the caller must say.
+/// replace the shared terminal tenant's token file, then re-mint, stamp the
+/// mint time, and save through the same atomic 0600 store. Returns the new
+/// token, or `None` when no config with a token exists (nothing to rotate).
+/// The CLI verb uses this as its no-server fallback; a devserver somehow
+/// still running elsewhere keeps accepting its in-memory tokens until it
+/// restarts, which the caller must say.
 pub fn rotate_persisted_devserver_token() -> std::io::Result<Option<String>> {
-    let store = DevserverStore::at(devserver_config_path());
+    rotate_persisted_devserver_token_in(&DevserverStore::at(devserver_config_path()))
+}
+
+/// [`rotate_persisted_devserver_token`] over `store`. The terminal token goes
+/// first, so a failure leaves the devserver token as it was and the caller
+/// reports a rotation that did not happen.
+fn rotate_persisted_devserver_token_in(store: &DevserverStore) -> std::io::Result<Option<String>> {
     let mut cfg = store.load();
     if cfg.devserver_token.is_empty() {
         return Ok(None);
     }
+    store.replace_terminal_token()?;
     cfg.devserver_token = random_token();
     cfg.token_minted_at = unix_now_secs();
     store.save(&cfg)?;
@@ -2480,7 +2518,9 @@ impl DevserverState {
     /// Re-mint the bearer token: swap the value in the shared cell (the
     /// management gate and the launcher bundle's gates all read it), stamp
     /// the mint time, and persist through the 0600 store. The old bearer
-    /// stops authorizing on the next request.
+    /// stops authorizing on the next request. The shared terminal tenant's
+    /// persisted token is replaced too; the running tenant keeps serving the
+    /// token it was built with until the next start.
     fn rotate_token(&self) -> String {
         self.rotate_token_with_pre_mint_hook(random_token(), unix_now_secs(), || {})
     }
@@ -2499,6 +2539,7 @@ impl DevserverState {
         pre_mint();
         self.token_minted_at.store(minted_at, Ordering::Relaxed);
         self.persist_state_locked();
+        self.store.replace_terminal_token_or_warn();
         token
     }
 
@@ -2902,16 +2943,19 @@ impl DevserverState {
     /// against. The desktop does this via `embedded.rs`; the devserver must
     /// too: a Terminal window with an empty token fails the desktop watcher's
     /// `should_show` and vanishes on reconnect. `Some(dir)` persists each
-    /// window's pane layout. One shared tenant per library, so this is called
-    /// once at startup.
+    /// window's pane layout. Its bearer persists in the store's terminal
+    /// token file, so a browser page on a terminal window keeps its token
+    /// across a restart, as one on a workspace window does. One shared
+    /// tenant per library, so this is called once at startup.
     async fn mount_shared_terminal_tenant(&self) -> Result<(), Error> {
         self.host
-            .open_terminal_session(
+            .open_terminal_session_with_token_file(
                 tenant_config(self.addr, DEVSERVER_SHARED_TERMINAL_PREFIX),
                 devserver_terminals_dir(),
                 // Drafts root under the devserver state dir, NOT the shared
                 // chan home: a same-machine desktop host has its own store.
                 Some(devserver_state_dir()),
+                Some(self.store.terminal_token_path()),
             )
             .await?;
         Ok(())
@@ -3184,6 +3228,22 @@ fn resolve_boot_token(persisted: &mut PersistedConfig, now: u64) -> BootToken {
     BootToken::Kept
 }
 
+/// [`resolve_boot_token`], and when the start mints or rotates the devserver
+/// token, the shared terminal tenant's persisted token with it: the 30-day
+/// bound covers every bearer the devserver persists. Runs before the tenant
+/// mounts, which reads the file.
+fn resolve_boot_tokens(
+    store: &DevserverStore,
+    persisted: &mut PersistedConfig,
+    now: u64,
+) -> BootToken {
+    let boot = resolve_boot_token(persisted, now);
+    if boot != BootToken::Kept {
+        store.replace_terminal_token_or_warn();
+    }
+    boot
+}
+
 /// The tasks `run_devserver` keeps for the whole serve loop, both started
 /// before route exposure and both ended by the shutdown signal.
 struct ServeLifetimeTasks {
@@ -3229,7 +3289,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
 
     let store = DevserverStore::at(devserver_config_path());
     let mut persisted = store.load_for_start();
-    if resolve_boot_token(&mut persisted, unix_now_secs()) == BootToken::RotatedByAge {
+    if resolve_boot_tokens(&store, &mut persisted, unix_now_secs()) == BootToken::RotatedByAge {
         eprintln!(
             "chan devserver: NOTE: bearer token was older than {} days; rotated -- \
              reopen any browser tab that used the old ?t= URL",
@@ -4988,6 +5048,7 @@ mod tests {
                     cwd,
                     session_dir,
                     drafts_store_root,
+                    token_file,
                 } = options;
                 let artifacts = crate::build_tenant_app(
                     crate::TenantBuild {
@@ -4997,6 +5058,7 @@ mod tests {
                             session_dir,
                             drafts_store_root,
                             cwd,
+                            token_file,
                         },
                         desktop,
                         unserve,
@@ -6862,6 +6924,88 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "config must stay 0600 across rotation");
         }
+    }
+
+    /// Every start that mints or rotates the devserver token replaces the
+    /// shared terminal tenant's token before the tenant reads it; a start
+    /// that keeps the devserver token keeps the terminal token too.
+    #[test]
+    fn a_boot_that_renews_the_devserver_token_renews_the_terminal_token() {
+        let home = tempfile::tempdir().expect("home");
+        let store = DevserverStore::at(home.path().join("devserver").join("config.json"));
+        let token_file = store.terminal_token_path();
+        let read = || std::fs::read_to_string(&token_file).expect("terminal token file");
+        let day = 86_400u64;
+        let now = 100 * day;
+
+        let mut first = PersistedConfig::default();
+        assert_eq!(
+            resolve_boot_tokens(&store, &mut first, now),
+            BootToken::Minted
+        );
+        let minted = read();
+
+        let mut recent = PersistedConfig {
+            devserver_token: "keep".into(),
+            token_minted_at: now - 10 * day,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_boot_tokens(&store, &mut recent, now),
+            BootToken::Kept
+        );
+        assert_eq!(
+            read(),
+            minted,
+            "a kept devserver token keeps the terminal token"
+        );
+
+        let mut old = PersistedConfig {
+            devserver_token: "stale".into(),
+            token_minted_at: now - 31 * day,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_boot_tokens(&store, &mut old, now),
+            BootToken::RotatedByAge
+        );
+        assert_ne!(
+            read(),
+            minted,
+            "the 30-day rotation covers the terminal token"
+        );
+    }
+
+    /// `rotate-token` with no devserver running replaces the terminal token
+    /// file with the devserver token, and touches nothing without a token.
+    #[test]
+    fn offline_rotation_replaces_the_terminal_token() {
+        let home = tempfile::tempdir().expect("home");
+        let store = DevserverStore::at(home.path().join("devserver").join("config.json"));
+        let token_file = store.terminal_token_path();
+        assert_eq!(rotate_persisted_devserver_token_in(&store).unwrap(), None);
+        assert!(!token_file.exists());
+
+        store
+            .save(&PersistedConfig {
+                devserver_token: "before".into(),
+                token_minted_at: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let before = crate::auth::load_or_create_token_at(&token_file).unwrap();
+        let rotated = rotate_persisted_devserver_token_in(&store)
+            .unwrap()
+            .expect("a token to rotate");
+        assert_ne!(rotated, "before");
+        assert_eq!(store.load().devserver_token, rotated);
+        let after = std::fs::read_to_string(&token_file).unwrap();
+        assert_ne!(
+            after, before,
+            "the terminal token rotates with the devserver token"
+        );
+        #[cfg(unix)]
+        assert_owner_only(&token_file);
     }
 
     mod refusal_envelopes {
@@ -19959,6 +20103,108 @@ mod tests {
         );
     }
 
+    /// One devserver start against `home` as `run_devserver` makes it: the
+    /// window registry beside the config, then the shared terminal tenant.
+    async fn start_with_shared_terminal(home: &Path) -> Arc<DevserverState> {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(
+                home.join("devserver").join("windows.json"),
+            )),
+            "lib-test".into(),
+        );
+        state
+            .mount_shared_terminal_tenant()
+            .await
+            .expect("mount shared terminal tenant");
+        state
+    }
+
+    /// The token the window feed hands a browser for `window_id`.
+    fn feed_token(state: &DevserverState, window_id: &str) -> String {
+        state
+            .host
+            .assemble_window_records()
+            .into_iter()
+            .find(|record| record.window_id == window_id)
+            .expect("terminal window row")
+            .token
+    }
+
+    #[cfg(unix)]
+    fn assert_owner_only(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .expect("token file metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{} is owner-only", path.display());
+    }
+
+    /// A browser tab on a terminal window holds the token it was opened with
+    /// and never asks for another, so a restart must serve the same token, and
+    /// only a rotation of the devserver bearer may replace it.
+    #[tokio::test]
+    async fn shared_terminal_tenant_token_survives_a_restart_until_a_rotation() {
+        let home = tempfile::tempdir().expect("home");
+        let token_file = home.path().join("devserver").join("terminal-token");
+
+        let first = start_with_shared_terminal(home.path()).await;
+        let window = first
+            .host
+            .ensure_first_open_terminal()
+            .expect("first open")
+            .expect("fresh devserver mints one terminal");
+        let opened_with = feed_token(&first, &window.window_id);
+        assert!(!opened_with.is_empty());
+        first
+            .host
+            .shutdown_all()
+            .await
+            .expect("shut down first start");
+        drop(first);
+
+        let second = start_with_shared_terminal(home.path()).await;
+        assert_eq!(
+            feed_token(&second, &window.window_id),
+            opened_with,
+            "a restart serves the token the browser tab holds"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&token_file).expect("token file"),
+            opened_with
+        );
+        #[cfg(unix)]
+        assert_owner_only(&token_file);
+
+        // A rotation replaces the persisted token at once; the running tenant
+        // keeps serving its own until the next start.
+        second.rotate_token();
+        let rotated = std::fs::read_to_string(&token_file).expect("rotated token file");
+        assert_ne!(rotated, opened_with, "a rotation replaces the token");
+        #[cfg(unix)]
+        assert_owner_only(&token_file);
+        assert_eq!(feed_token(&second, &window.window_id), opened_with);
+        second
+            .host
+            .shutdown_all()
+            .await
+            .expect("shut down second start");
+        drop(second);
+
+        let third = start_with_shared_terminal(home.path()).await;
+        assert_eq!(
+            feed_token(&third, &window.window_id),
+            rotated,
+            "the start after a rotation serves the new token"
+        );
+        third
+            .host
+            .shutdown_all()
+            .await
+            .expect("shut down third start");
+    }
+
     #[tokio::test]
     async fn tunnel_origin_requires_a_valid_gateway_assertion() {
         use tower::ServiceExt;
@@ -22226,13 +22472,14 @@ mod tests {
         }
     }
 
-    // The session-role seam keys on `TunnelOrigin`: a request entering the
-    // tunnel clone carries it and reads as a Follower (`local == false`), while
-    // a loopback request does not and reads as a Leader (`local == true`).
-    // `ws_upgrade` reads the same `Option<Extension<TunnelOrigin>>` extractor and
-    // computes `let local = origin.is_none();`. A full `/ws` upgrade over a live
-    // tunnel is a host-smoke item; this pins the marker->local mapping the role
-    // derivation depends on at the route level, headless.
+    // A participant's origin role keys on `TunnelOrigin`: a request entering
+    // the tunnel clone carries it and is a Follower (`local == false`), while
+    // a loopback request does not and is a Leader (`local == true`). It is not
+    // the leader slot. `ws_upgrade` reads the same
+    // `Option<Extension<TunnelOrigin>>` extractor and computes
+    // `let local = origin.is_none();`. A full `/ws` upgrade over a live
+    // tunnel is a host-smoke item; this pins the marker->local mapping the
+    // origin role depends on at the route level, headless.
     #[tokio::test]
     async fn tunnel_origin_marks_ws_remote_loopback_local() {
         use axum::body::to_bytes;

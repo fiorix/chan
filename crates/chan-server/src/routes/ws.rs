@@ -192,8 +192,9 @@ pub async fn ws_upgrade(
     // `TunnelOrigin` request-extension marker; the loopback bind (and an
     // `ssh -L` forward to it) never does, nor does the desktop embedded server.
     // The `Option` extractor yields `None` on absence rather than 500ing, so
-    // absence means a local-origin socket. This is the session-role seam: a
-    // local socket reads Leader, a tunnel socket reads Follower.
+    // absence means a local-origin socket. This fixes the participant's origin
+    // role (`session_presence::Role`): a local socket is Leader, a tunnel
+    // socket Follower. Leadership is the registry's separate leader slot.
     origin: Option<axum::Extension<crate::TunnelOrigin>>,
     ws: WebSocketUpgrade,
 ) -> Response {

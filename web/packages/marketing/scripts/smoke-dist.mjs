@@ -141,6 +141,12 @@ async function checkDocSet(port, set) {
       assert.equal(doc.querySelector('[rel="prev"]')?.getAttribute("href"), routes[index - 1], `${route}: previous section`);
       assert.equal(doc.querySelector('[rel="next"]')?.getAttribute("href"), routes[index + 1], `${route}: next section`);
       assert.ok(doc.querySelector("#manual-content .manual-block p"), `${route}: static content without JavaScript`);
+      if (process.env.CHAN_SITE_PLACEHOLDERS !== "1") {
+        assert.equal(doc.querySelector("[data-shot]"), null, `${route}: no capture placeholder in a published page`);
+        for (const figure of doc.querySelectorAll("#manual-content figure")) {
+          assert.ok(figure.querySelector("img, video, iframe, .dg-row, .launcher-demo-wrap"), `${route}: a figure with nothing in it`);
+        }
+      }
       assert.equal(!!doc.querySelector('script[src="/assets/launcher-demo.js"]'), withLauncher.has(route), `${route}: the launcher bundle loads only where the page mounts it`);
       for (const media of doc.querySelectorAll("#manual-content img[src^='/assets/'], #manual-content video[poster^='/assets/']")) {
         assert.ok(media.getAttribute("width") && media.getAttribute("height"), `${route}: ${media.getAttribute("src") ?? media.getAttribute("poster")} has no intrinsic size`);

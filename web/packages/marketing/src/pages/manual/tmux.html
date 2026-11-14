@@ -83,7 +83,7 @@ trust = ["ssh", "et"]</code></pre>
       <tbody>
         <tr><td><code>tmux -CC on this machine</code></td><td>In a terminal of this machine.</td></tr>
         <tr><td><code>tmux -CC on</code> and the devserver's name</td><td>In a devserver's terminal.</td></tr>
-        <tr><td><code>tmux -CC from ssh geekom</code></td><td>Behind another program, here <code>ssh geekom</code>.</td></tr>
+        <tr><td><code>tmux -CC from</code> and the command that reached it, such as <code>tmux -CC from ssh -t user@host tmux -CC new -A -s dev</code></td><td>Behind another program, here ssh.</td></tr>
       </tbody>
     </table>
   </div>

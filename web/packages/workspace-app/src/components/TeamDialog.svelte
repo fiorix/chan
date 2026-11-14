@@ -187,9 +187,9 @@
 
   /// Load mode: on team-dir entry, read + validate the team's
   /// config.toml via the backend. On success, prepopulate the form
-  /// from the loaded config (the user is now in a pre-populated New
-  /// form, still editable). On failure, surface the 400 message
-  /// inline.
+  /// from the loaded config (still editable; Bootstrap re-saves it and
+  /// keeps the team's bootstrap.md). On failure, surface the 400
+  /// message inline.
   async function validateAndLoad(): Promise<void> {
     loadError = null;
     loadedConfig = null;

@@ -128,11 +128,13 @@ async function main() {
     for (const [index, page] of set.pages.entries()) {
       const template = await fs.readFile(path.join(srcRoot, page.slug ? path.join(set.source, `${page.slug}.html`) : set.index), "utf8");
       const content = await addIntrinsicSizes(
-        fillTemplate(template, {
-          version,
-          ...sharedTemplateValues,
-          manualChapters: renderDocChapters(set),
-        }),
+        stripCapturePlaceholders(
+          fillTemplate(template, {
+            version,
+            ...sharedTemplateValues,
+            manualChapters: renderDocChapters(set),
+          }),
+        ),
       );
       if (page.head && !docHeads[page.head]) throw new Error(`docs.json: unknown head "${page.head}" on ${docUrl(set, page)}`);
       await writePage(
@@ -337,6 +339,21 @@ ${content}
     </nav>
   </article>
 </div>`;
+}
+
+// A figure whose capture is still to be made holds a placeholder that says
+// what to shoot. The published page leaves such a figure out, caption
+// included; CHAN_SITE_PLACEHOLDERS=1 keeps them for a draft preview.
+const keepCapturePlaceholders = process.env.CHAN_SITE_PLACEHOLDERS === "1";
+
+function stripCapturePlaceholders(html) {
+  if (keepCapturePlaceholders) return html;
+  // A figure's id is an anchor other pages and old links may name, so it
+  // stays on the page when the figure goes.
+  return html.replace(
+    /[ \t]*<figure class="inline-shot"(?: id="([^"]+)")?>\s*<div class="shot-placeholder-frame" data-shot="[^"]+"[^>]*>[\s\S]*?<\/div>\s*(?:<figcaption>[\s\S]*?<\/figcaption>\s*)?<\/figure>\n?/g,
+    (_figure, id) => (id ? `<span id="${id}"></span>\n` : ""),
+  );
 }
 
 // Give each local image, and each video with a local poster, its intrinsic
@@ -545,6 +562,12 @@ async function validateDist(version) {
       rel.startsWith("assets/") && /\.(js|css)$/.test(rel) && !rel.startsWith("assets/site.");
     if (!bundledAsset) {
       validateNoStalePublicCopy(file, text);
+    }
+  }
+
+  if (!keepCapturePlaceholders) {
+    for (const [rel, html] of htmlByDistPath) {
+      if (html.includes("data-shot=")) throw new Error(`${rel} publishes a capture placeholder`);
     }
   }
 

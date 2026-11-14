@@ -5175,8 +5175,10 @@ mod write_tests {
         ));
         assert!(!root.path().join("too-large.bin").exists());
         assert!(!self_writes.should_suppress("too-large.bin"));
-        assert!(
-            workspace.list("").unwrap().is_empty(),
+        // Read the directory itself: listings hide the writer's temporaries.
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
             "the rejected atomic upload must remove its temp"
         );
     }
@@ -5216,7 +5218,7 @@ mod write_tests {
         assert!(consumer.await.unwrap().is_err());
         assert_eq!(workspace.read("same.bin").unwrap(), b"old");
         assert!(!self_writes.should_suppress("same.bin"));
-        assert_eq!(workspace.list("").unwrap().len(), 1);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]

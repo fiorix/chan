@@ -1,5 +1,5 @@
 <figure class="inline-shot">
-  <div class="shot-placeholder-frame" data-shot="teams-bootstrap" data-shot-kind="clip">clip to capture<small>New team from the pane menu, a lead and two workers set in the Spawn agents dialog, Bootstrap, then three named terminals start and the lead reads its prompt</small></div>
+  <div class="shot-placeholder-frame" data-shot="teams-bootstrap" data-shot-kind="clip">clip to capture<small>New team from the pane menu, a lead and two workers set in the Spawn agents dialog, Bootstrap, then three named terminals start; the lead receives its prompt naming the workers and bootstrap.md, and the workers wait</small></div>
   <figcaption>A lead and two workers, each in a named terminal, started from one dialog.</figcaption>
 </figure>
 
@@ -25,11 +25,11 @@
     </li>
     <li>
       <h3>Name yourself and the team</h3>
-      <p>Names get an <code>@@</code> prefix unless you clear <strong>Auto-prefix</strong>. Pick <strong>New</strong> and a team directory, such as <code>teams/review</code>, or <strong>Load</strong> for a saved team. An optional brief reaches every member.</p>
+      <p>Names get an <code>@@</code> prefix unless you clear <strong>Auto-prefix</strong>. Pick <strong>New</strong> and a team directory, such as <code>teams/review</code>, or <strong>Load</strong> for a saved team. With <strong>New</strong>, an optional brief goes into the team's <code>bootstrap.md</code>.</p>
     </li>
     <li>
       <h3>Add the members</h3>
-      <p>Pick 1 to 9 agents. Give each a name and a command such as <code>claude</code>, and mark one <strong>Lead</strong>.</p>
+      <p>Pick 1 to 9 agents. Give each a name and a command such as <code>claude</code>, and mark one <strong>Lead</strong>. Run an agent chan recognises as the lead, one listed under <a href="#config"><code>command</code></a>, or name it in the lead's <code>CHAN_AGENT</code>.</p>
     </li>
     <li>
       <h3>Lay them out</h3>
@@ -40,7 +40,7 @@
     </li>
     <li>
       <h3>Bootstrap</h3>
-      <p>chan saves the team, starts the lead, then the workers, and points the lead at the team's <code>bootstrap.md</code>.</p>
+      <p>chan saves the team, starts the lead, then the workers. Only the lead gets a first prompt, submitted the way its agent expects: it names the workers and points at the team's <code>bootstrap.md</code>. The workers wait for the lead to hand them tasks.</p>
     </li>
   </ol>
 </section>
@@ -87,7 +87,7 @@ command = "codex"</code></pre>
         <tr><td><code>mcp_env</code></td><td><code>true</code> gives members the <a href="#mcp">MCP variables</a>. Off by default.</td></tr>
         <tr><td><code>[[members]]</code></td><td>One to nine, exactly one with <code>is_lead = true</code>.</td></tr>
         <tr><td><code>handle</code></td><td>The member's tab name and <code>$CHAN_TAB_NAME</code>.</td></tr>
-        <tr><td><code>command</code></td><td>What the terminal runs. The agent is read from it: <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, or <code>opencode</code>. Anything else is a plain shell member.</td></tr>
+        <tr><td><code>command</code></td><td>What the terminal runs. The agent is read from it: <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, or <code>opencode</code>. Anything else is a plain shell member, which <code>cs terminal team</code> sends no first prompt.</td></tr>
         <tr><td><code>env</code></td><td>Extra environment, such as <code>{ CHAN_AGENT = "gemini" }</code> for a wrapper script whose name says nothing. <code>none</code> or <code>shell</code> forces a shell member.</td></tr>
         <tr><td><code>position</code></td><td><code>{ row = 0, col = 1 }</code>, the member's cell in a pane grid of at most nine panes. Without positions the team stacks as tabs.</td></tr>
       </tbody>
@@ -145,8 +145,8 @@ command = "codex"</code></pre>
     <ul>
       <li>Every member's process comes from <code>bootstrap.md</code>: the lead hands out work and reaches you with <code>cs terminal survey</code>, and workers do not contact you directly.</li>
       <li>Bootstrapping from the dialog turns group broadcast off in every terminal; turn it on yourself when you want it.</li>
-      <li>Each agent gets its first prompt once its terminal is ready. A member not ready within 15 seconds is named and gets no prompt, and the command exits non-zero.</li>
-      <li>A member whose command fails to start is reported, and the rest of the team still starts.</li>
+      <li><code>cs terminal team</code> sends every agent member its own first prompt once the agent is ready for input: the lead's says to hand out the work, a worker's to wait for the lead. A member not ready within 15 seconds is named and gets no prompt, and the command exits non-zero.</li>
+      <li>A member whose command fails to start is reported, and the rest of the team still starts. From the dialog, a lead that fails to start stops the bootstrap.</li>
       <li>A grid layout needs a window with a single pane. Close the other panes, pass <code>--tabs</code>, or name a pane with <code>--pane</code>.</li>
       <li><code>--submit</code> encodes one agent per command, so a group of mixed agents needs one write per agent.</li>
       <li>Writes are queued and delivered when the terminal goes quiet, at most 4096 bytes each. Put longer text in a file and send its path.</li>
