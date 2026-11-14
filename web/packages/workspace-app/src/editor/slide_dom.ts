@@ -141,7 +141,7 @@ export function editorTokens(
 }
 
 export function renderSlideMarkdown(markdown: string): string {
-  return renderMarkdown(preserveExtraBlankLines(markdown));
+  return renderMarkdown(preserveExtraBlankLines(markdown), { wikilinks: true });
 }
 
 function preserveExtraBlankLines(markdown: string): string {

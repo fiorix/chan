@@ -30,6 +30,13 @@ import { draftClientPath } from "../api/fileIdentity";
 
 const MARK = String.fromCharCode(0);
 
+test("Copy as HTML leaves wikilinks as authored", () => {
+  const source = "[[note]] [[note|alias]]";
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml(source, "notes/doc.md", "/ws");
+  expect(root.querySelector("p")?.textContent).toBe(source);
+});
+
 const ctx: ChanClipboardContext = {
   getCurrentPath: () => "notes/foo.md",
   getUploadDir: () => "notes",

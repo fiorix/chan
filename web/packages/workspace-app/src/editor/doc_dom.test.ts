@@ -30,6 +30,17 @@ afterEach(() => {
 });
 
 describe("buildDocDom", () => {
+  test("printable documents render wikilink labels", async () => {
+    const { content, completion } = buildDocDom({
+      markdown: "[[note]] [[note|alias]]",
+      path: "notes/doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+    await completion;
+    expect(content.querySelector("p")?.textContent).toBe("note alias");
+  });
+
   test("renders markdown into a scoped, width-fixed container", () => {
     const { root, content } = buildDocDom({
       markdown: "# Title\n\nbody text\n",

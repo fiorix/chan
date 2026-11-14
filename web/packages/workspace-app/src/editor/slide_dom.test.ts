@@ -50,6 +50,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+test("slide Markdown renders wikilink labels", () => {
+  const root = document.createElement("div");
+  root.innerHTML = renderSlideMarkdown("[[note]] [[note|alias]]");
+  expect(root.querySelector("p")?.textContent).toBe("note alias");
+});
+
 function mount(html: string): HTMLElement {
   const root = document.createElement("div");
   root.innerHTML = html;
