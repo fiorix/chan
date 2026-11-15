@@ -61,7 +61,8 @@ async function traceTerminalSockets(page) {
     const parsed = new URL(url);
     if (parsed.pathname !== "/api/terminal/ws") return;
     // Never retain the URL, bearer token, command or environment query.
-    const connection = { session: parsed.searchParams.get("session"), frames: [] };
+    const connection = { session: parsed.searchParams.get("session"),
+      since: parsed.searchParams.get("since"), generation: parsed.searchParams.get("generation"), frames: [] };
     requests.set(requestId, connection);
     connections.push(connection);
   });
@@ -94,7 +95,8 @@ async function prelude(trace, name, start = 0) {
       const readyIndex = connection.frames.findIndex((frame, index) => index > sessionIndex && frame.type === "ready");
       if (readyIndex < 0) continue;
       const frames = connection.frames.slice(sessionIndex, readyIndex + 1);
-      return { session: frames[0], ready: frames.at(-1), frames,
+      return { request: { session: connection.session, since: connection.since, generation: connection.generation },
+        session: frames[0], ready: frames.at(-1), frames,
         binary: Buffer.concat(frames.filter((frame) => frame.binary !== undefined)
           .map((frame) => Buffer.from(frame.binary, "base64"))).toString("latin1") };
     }
@@ -307,10 +309,23 @@ async function pixelClickBytes(page, fixture, row, ready) {
     expectedHex: Buffer.from(expected).toString("hex") };
 }
 
-async function reloadSame(ctx, page, cs, trace, row, name, before) {
+async function reloadSame(ctx, page, cs, trace, row, name, before, fullReplay = false) {
   await waitSaved(ctx, row.window, name, before.session.id);
   const connectionStart = trace.connections.length;
-  await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+  let hook;
+  try {
+    if (fullReplay) {
+      // Unload captures the old view again. Remove only its snapshot in the
+      // new document, before the component can select that resume cursor.
+      hook = await page.evaluateOnNewDocument((sessionId, origin) => {
+        if (window.top !== window || location.origin !== origin) return;
+        localStorage.removeItem(`chan:term-snapshot:${sessionId}`);
+      }, before.session.id, new URL(ctx.serverUrl).origin);
+    }
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+  } finally {
+    if (hook) await page.removeScriptToEvaluateOnNewDocument(hook.identifier);
+  }
   await page.waitForSelector(".pane", { timeout: 20_000 });
   await ctx.waitWindowLive(row.window);
   const after = await prelude(trace, name, connectionStart);
@@ -385,9 +400,11 @@ export default {
               assert.ok(result.initialVisible.includes(initial), "the alternate-screen draw is visible before reload");
               assert.ok(!result.initialVisible.includes(normal), "the initial alternate screen excludes normal text");
               await ctx.shot(`270-${backend}-1047-before`);
-              const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before);
+              const restored = await reloadSame(ctx, page, cs, trace, row, name, result.before, true);
               row = restored.row;
               result.after = restored.prelude;
+              assert.equal(result.after.request.session, result.before.session.id, "the reload request attaches the same PTY");
+              assert.equal(result.after.request.since, "0", "full replay requires an explicit since=0 request");
               const live = `AFTER270_${backend}`;
               result.restoredParserReply = await parsedOutput(fixture, `\x1b[H${live}`);
               result.restoredVisible = await copyVisible(page, row, backend, result.selectionCopies);
