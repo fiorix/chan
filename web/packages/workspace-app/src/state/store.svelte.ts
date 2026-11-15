@@ -7211,6 +7211,7 @@ export const fileOps = {
     try {
       await api.create(path, false, "");
       await settleCreated();
+      revealAndSelect(path, selection);
       await openInActivePane(path, { landAtTop: true });
     } catch (e) {
       ui.status =

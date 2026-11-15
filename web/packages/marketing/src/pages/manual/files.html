@@ -37,6 +37,7 @@
   </ul>
   <p>In a workspace window the browser shows the workspace, with its unfinished documents in a <strong>Drafts</strong> group above the files; see <a href="/manual/prompt/#drafts">Drafts</a>. In a standalone terminal's window it shows the machine's filesystem.</p>
   <p>The command launcher's file actions, including <strong>Open</strong>, <strong>Copy path</strong>, <strong>Rename or move</strong>, and <strong>Upload</strong>, use the Files tab you activate or the docked browser you last click or focus. Choosing a Files tab by its label, switching panes, or committing a selection in Hybrid Nav makes that tab the target; clicking back in its pane does too. Each browser keeps its own selection. With nothing selected there, actions that need a selection stay unavailable.</p>
+  <p><strong>New file or directory</strong> from the browser toolbar or menu, <strong>Paste</strong>, and <strong>Upload</strong> from that menu all follow one folder rule, also used by the command launcher. A list uses the folder it shows, even with a folder selected. A tree uses the selected folder, or the selected file's folder; with nothing selected, it uses the workspace root, or your home folder in a standalone terminal's window. New without a file browser target uses that same default. Newly created or pasted entries and uploaded files are revealed through their parent folders. A folder's own right-click <strong>New file or directory</strong> row starts inside that folder.</p>
 </section>
 
 <section class="manual-block" id="keyboard">
@@ -77,7 +78,7 @@
       <tbody>
         <tr><td><strong>Upload</strong>, from the file browser's menu or the command launcher</td><td>Uploads into the folder a Files tab shows. In a dock: into the selected folder, or the selected file's folder; with nothing selected, the workspace root, or your home folder in a standalone terminal's window.</td></tr>
         <tr><td><strong>Upload</strong> in a folder's Details</td><td>Uploads into that folder.</td></tr>
-        <tr><td><strong>Upload</strong> on a file, in its right-click menu or its Details</td><td>Replaces that file.</td></tr>
+        <tr><td><strong>Upload</strong> on a file, in its right-click menu</td><td>Replaces that file.</td></tr>
         <tr><td><strong>Download</strong></td><td>Sends a file as it is, and a folder as a tar archive. Folder archives and copies leave out chan's reserved <code>.chan-write-*</code> temporary files and folders. A standalone terminal's folder archive keeps other entries, including <code>.git</code>.</td></tr>
       </tbody>
     </table>
