@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openFileTab, selectFile } from "../lib/files.mjs";
 import { pdfPageRasters } from "../lib/pdf.mjs";
@@ -35,6 +35,9 @@ async function openEditor(page, path, pane) {
 }
 
 async function exportPdf(ctx, path, pane) {
+  const filename = path.split("/").at(-1).replace(/\.md$/, ".pdf");
+  const target = join(ctx.downloadDir, filename);
+  rmSync(target, { force: true });
   await selectFile(ctx.page, path, { details: true, scope: pane });
   const details = `${pane} aside[aria-label="Details"]`;
   await ctx.page.waitForSelector(`${details} .pill-caret`, { visible: true });
@@ -47,8 +50,7 @@ async function exportPdf(ctx, path, pane) {
     return Boolean(item);
   }, details);
   assert(clicked, "Export to PDF action absent");
-  const filename = path.split("/").at(-1).replace(/\.md$/, ".pdf");
-  const bytes = await ctx.pollFile(join(ctx.downloadDir, filename), 90_000);
+  const bytes = await ctx.pollFile(target, 90_000);
   writeFileSync(join(ctx.outDir, filename), bytes);
   return { bytes, rasters: await pdfPageRasters(bytes), filename };
 }
@@ -100,15 +102,15 @@ export default {
       "wiki-probe-deck.md": FRONT + BODY,
       "wiki-probe-deck-reference.md": FRONT + PLAIN,
     };
-    mkdirSync(join(ctx.workspaceDir, DIRECTORY));
-    for (const [name, text] of Object.entries(fixtures)) {
-      writeFileSync(join(ctx.workspaceDir, DIRECTORY, name), text);
-    }
-
     const faults = [];
     const evidence = { editor: [], slide: [], exports: {}, artifacts: [] };
-    const pane = await focusedPane(ctx.page);
+    const directory = join(ctx.workspaceDir, DIRECTORY);
+    mkdirSync(directory);
     try {
+      for (const [name, text] of Object.entries(fixtures)) {
+        writeFileSync(join(directory, name), text);
+      }
+      const pane = await focusedPane(ctx.page);
       const editor = await openEditor(ctx.page, `${DIRECTORY}/wiki-probe-note.md`, pane);
       await ctx.page.keyboard.down("Control");
       await ctx.page.keyboard.press("End");
@@ -179,6 +181,7 @@ export default {
       error.smokeDetails = { ...evidence, faults };
       throw error;
     } finally {
+      rmSync(directory, { recursive: true, force: true });
       writeFileSync(join(ctx.outDir, "wikirender.json"),
         JSON.stringify({ evidence, faults }, null, 2) + "\n");
     }
