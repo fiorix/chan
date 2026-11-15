@@ -1,6 +1,6 @@
 # The team dialog's Load rewrites a hand-edited config
 
-Status: accepted for v0.131.0 by the owner on 2026-11-15, by survey on the round's second batch of candidates ("Take all my recommendations", item 1 of `dev/v0131-team/reports/owner-candidates-2.md`); not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-15, by survey on the round's second batch of candidates ("Take all my recommendations", item 1 of `dev/v0131-team/reports/owner-candidates-2.md`); built, reviewed and merged into `v0131/int` on 2026-11-15. Closed.
 
 Record: found by the teamload row's review (note 3) and again by the round's documentation audit (item 8). The teamload row stopped `cs terminal team load --script` from rewriting `config.toml`; the dialog's Load is the same loss by another route.
 
@@ -62,3 +62,12 @@ J204 reused J194's two product trees and binaries with only the repaired probe s
 The probe's input helper uses the repository's `count: 3` click option, checks both selection bounds before Backspace, checks that deletion emptied the field, and checks the exact typed value before Tab. The directory and edited-host inputs share this helper. Failure diagnostics retain the directory value and selection, active element, load error and resolved config path. `dev/v0131-team/evidence/Core131/dialogload31/input43/` records a page-shaped isolated model: the original helper fails exact replacement (exit 1), the repair passes all 12 cases (exit 0), and five mutations of the click option, either selection bound, clearing guard and typed-value guard fail (exit 1 each). Mutations run on copies; the probe's source remains unchanged. Selection and keyboard effects are simulated, so this proves the helper's assertions and sequencing, not Chromium's input behavior or the product contract. Browser acceptance still requires the bounded base, tip and pair rerun on J194's retained products.
 
 A terminal created as the Team dialog opens can take focus from the dialog's field; check 276 waits for that terminal to settle and retains a focus trace, while the product question is with the owner.
+
+## Merged, 2026-11-15
+
+The row's range (`cbb4fb821..e2539d2ec`) was accepted by nine Fable reads (`dev/v0131-team/reviews/review-dialogload-1a.md`, `-1b.md` and `-2.md` to `-7.md`: the build, three product fix rounds and four rounds of check 276) and merged into `v0131/int`. The browser comparison is J211, on the products J194 built (base `cbb4fb821`, tip `eb4293d69`) with check 276 at `e2539d2ec`: at the base the unchanged Load rewrote `config.toml` (the check failed at "unchanged Load rewrote config.toml bytes", the other two legs passing); at the tip and in the pair with check 216 every leg passed, the unchanged Load keeping the file byte for byte with its comment, custom key and order. The two later product fixes (the snapshot follows its directory, `eb4293d69`; the run works from a snapshot of the submitted form, `12795f700`) sit in paths check 276 does not drive and are proven by their mounted tests, red first. Check 276 needed four harness repairs before it could read the product: the mode helper compared against the page's `window.name`, the input helper passed `clickCount` where puppeteer takes `count`, and the terminal the dialog creates took the field's focus as it started; the check now waits for that terminal to settle.
+
+Open, not built here:
+
+- The route trusts the client's `keep_config` with no comparison of its own; a server-side modeled-equality check would keep a hand edit made after Load from launching a stale roster.
+- A terminal created as the Team dialog opens takes keyboard focus from the dialog's field when it finishes starting (the terminal refocus guard yields only to a survey or the Computers launcher); the product question is with the owner.

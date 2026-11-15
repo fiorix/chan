@@ -58,7 +58,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a diagram's clicks land off][diagclick] | merged | owner |
 | [a reattach replays into a TUI][altreplay] | not started | build |
 | [a stale read reverts a preference][prefstale] | merged | closed |
-| [the dialog's Load rewrites the config][dialogload] | not started | build |
+| [the dialog's Load rewrites the config][dialogload] | merged | closed |
 | [the gateway page says this computer][gwwording] | merged | closed |
 
 [ghosttyng]: v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
