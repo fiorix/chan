@@ -27,7 +27,6 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [New and Paste choose two folders][newpaste] | merged | closed |
 | [a warm chan-term leaves Chan behind][warmterm] | merged | owner |
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
@@ -58,11 +57,11 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [cs window new returns too early][winrace] | partly built | build |
 | [a diagram's clicks land off][diagclick] | merged | owner |
 | [a reattach replays into a TUI][altreplay] | not started | build |
-| [a stale read reverts a preference][prefstale] | not started | build |
+| [a stale read reverts a preference][prefstale] | merged | closed |
 | [the dialog's Load rewrites the config][dialogload] | not started | build |
 | [the gateway page says this computer][gwwording] | merged | closed |
 
-[ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[ghosttyng]: v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.132.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [newpaste]: v0.131.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
 [warmterm]: v0.131.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
@@ -102,13 +101,14 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 
 ### v0.132.0
 
-Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with its part 4 tasks 2 to 6 and parts 5 and 6 at v0.131.0's close.
+Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [a fast stream loses output][streamlag] | partly built | build |
 | [AppImage children get its environment][appenv] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 
 ## Completed
 
