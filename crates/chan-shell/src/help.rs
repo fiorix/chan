@@ -1973,7 +1973,7 @@ SIDE EFFECTS:
   exit non-zero.
   If a minted window does not connect within ten seconds, `new`
   prints no id on stdout, names it in the error on stderr, and
-  exits 1. The window record remains and may connect later.
+  exits 124. The window record remains and may connect later.
 
 CAUTIONS:
   `rm` is destructive and has no undo: the saved layout is gone, so

@@ -30,12 +30,6 @@ obs_start_display
 obs_start_desktop
 obs_log "desktop build: $(grep -m1 -o 'build[^ ]*git-[0-9a-f]*[^ ]*' "$OBS_WORK/desktop.log" | sed 's/\x1b\[[0-9;]*m//g' || echo unknown)"
 
-WS="$OBS_WORK/ws"
-mkdir -p "$WS"
-workspace_xid() { obs_x_local_window_titled "$WS"; }
-chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
-obs_wait 60 "the native workspace window" workspace_xid
-
 # windows <socket>: the registry's windows, one "<window id> <kind> <status>"
 # per line. A record carries its tenant's token, so the records are parsed
 # here and never logged.
@@ -63,6 +57,15 @@ socket_of() {
     done
     return 1
 }
+
+# The handoff socket opens before asynchronous boot mints its terminal.
+# Serving a workspace first can suppress that boot terminal entirely.
+obs_wait 60 "a connected standalone terminal before workspace handoff" socket_of terminal
+WS="$OBS_WORK/ws"
+mkdir -p "$WS"
+workspace_xid() { obs_x_local_window_titled "$WS"; }
+chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
+obs_wait 60 "the native workspace window" workspace_xid
 
 # arm <kind> <socket>: one `cs window new` through that tenant's socket.
 ARM_FAULTS=()

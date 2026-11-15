@@ -77,7 +77,7 @@
   <pre><code>cs search --limit 1 x &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo workspace || echo standalone</code></pre>
   <p>In a desktop workspace terminal, open a second window and use its id immediately:</p>
   <pre><code>w=$(cs window new) &amp;&amp; cs open README.md --window "$w"</code></pre>
-  <p><code>new</code> waits up to ten seconds after the desktop creates the window record for the new window to connect. If it does not, the command prints no id on stdout and exits 1 with an error naming the window; the record remains and may connect later. A successful reply confirms the connection, not operating-system focus. A terminal served by a devserver refuses <code>window new</code>, <code>open</code> and <code>hide</code> even when the desktop views it.</p>
+  <p><code>new</code> waits up to ten seconds after the desktop creates the window record for the new window to connect. If it does not, the command prints no id on stdout and exits 124 with an error naming the window; the record remains and may connect later. A successful reply confirms the connection, not operating-system focus. A terminal served by a devserver refuses <code>window new</code>, <code>open</code> and <code>hide</code> even when the desktop views it.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
@@ -244,7 +244,7 @@ cs terminal new --pane "$right" --side a --tab-name runner</code></pre>
       <tbody>
         <tr><td><code>0</code></td><td>Done, or queued to a live window. A queued tab or message arrives a moment later.</td></tr>
         <tr><td><code>1</code></td><td>Failed: refused, nothing matched, or a close blocked by unsaved work.</td></tr>
-        <tr><td><code>124</code></td><td>Nothing answered in time: a survey, a copy or paste, or a tunnel waited too long. An <code>export</code>, <code>session</code> or <code>window new</code> wait that runs out exits 1.</td></tr>
+        <tr><td><code>124</code></td><td>Nothing answered in time: a survey, a copy or paste, a tunnel, or <code>window new</code> waited too long. An <code>export</code> or <code>session</code> wait that runs out exits 1.</td></tr>
         <tr><td><code>69</code></td><td>Only from an older devserver, which could refuse a <code>--submit</code>. The text was still queued.</td></tr>
       </tbody>
     </table>

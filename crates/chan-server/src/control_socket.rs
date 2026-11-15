@@ -3986,18 +3986,21 @@ async fn handle_window_new(
     // same predicate the next --window command uses without replacing it.
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
     loop {
-        // A delayed poll must not accept a connection first observed past the bound.
-        if tokio::time::Instant::now() >= deadline {
+        let connected = require_connected_window(session_registry, &window_id).is_ok();
+        let observed_at = tokio::time::Instant::now();
+        // Readiness wins at the deadline, but a later observation cannot extend it.
+        if connected && observed_at <= deadline {
+            return ControlResponse::Ok { message: window_id };
+        }
+        if observed_at >= deadline {
             return ControlResponse::Timeout {
                 message: format!(
-                    "timed out waiting for window {window_id:?} to connect after 10 seconds"
+                    "timed out waiting for window {window_id:?} to connect after {} seconds",
+                    CONNECT_TIMEOUT.as_secs()
                 ),
             };
         }
-        if require_connected_window(session_registry, &window_id).is_ok() {
-            return ControlResponse::Ok { message: window_id };
-        }
-        let next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
+        let next_poll = observed_at + POLL_INTERVAL;
         tokio::time::sleep_until(next_poll.min(deadline)).await;
     }
 }
@@ -9730,6 +9733,29 @@ mod tests {
             other => {
                 panic!("an unconnected minted window must fail after ten seconds, got {other:?}")
             }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_accepts_a_connection_observed_at_its_deadline() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-at-deadline".into()))
+            .expect("desktop mint reply");
+        assert!(futures::poll!(request.as_mut()).is_pending());
+
+        // The earlier probe is ready, but its first poll observes the exact deadline.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let _live = ctx.session_registry.join("w-at-deadline", true, None).guard;
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Ok { message }) => {
+                assert_eq!(message, "w-at-deadline");
+            }
+            other => panic!(
+                "a connection observed at the deadline must take precedence over timeout, got {other:?}"
+            ),
         }
     }
 
