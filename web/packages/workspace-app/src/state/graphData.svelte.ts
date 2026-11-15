@@ -52,7 +52,6 @@ let changeEpoch = 0;
 // later goes on after it.
 let settleSeq = 0;
 
-
 /// Fetch the graph if we don't already have it. Idempotent;
 /// concurrent callers share a single network round-trip. After a
 /// successful fetch (or a cached hit) the promise resolves; on
@@ -67,8 +66,8 @@ export function ensureGraphLoaded(): Promise<void> {
 /// One stream of `/api/graph`. Over a complete view it is a refresh, which
 /// keeps that view on screen and replaces it once, when the answer completes,
 /// or keeps it and sets `error` when the stream fails. Otherwise it is a first
-/// load, which publishes at most once per animation frame; one that fails keeps what it
-/// streamed, so a surface's drop effect does not start it again.
+/// load, which publishes at most once per animation frame; one that fails keeps
+/// the last published frame, so a surface's drop effect does not start it again.
 function loadGraph(): Promise<void> {
   const mode = graphData.view !== null && !graphData.partial ? "refresh" : "first";
   const seq = ++inflightSeq;

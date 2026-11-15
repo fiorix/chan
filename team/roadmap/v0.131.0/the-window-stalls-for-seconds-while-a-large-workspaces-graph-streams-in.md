@@ -1,6 +1,6 @@
 # The window stalls for seconds while a large workspace's graph streams in
 
-Status: accepted for v0.131.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-13; built on 2026-11-15, in review.
 
 Record: measured on 2026-11-12 by v0.129.0's graph fix rounds: on the Linux 6.12 tree, after a branch switch to `v6.12`, the longest main-thread task was 3,123 ms (`dev/v0129/evidence/graphfix/r3-checkout-after/run.log`, line 4). The second independent review traced it by reading, with no profile, to the shared graph's reload (`dev/v0129/reviews/review-graphfix-2.md`, "The 3.1 s main-thread task, by reading"). Left open in the shipped [graph row](../done/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md) ("Open") and in `dev/v0129/row-notes.md`, "Graph work: follow-ups from the second review". At v0.130.0's planning the owner placed the later group of rows, this one among them, in v0.131.0: "yes v0.131" (`dev/v0130/status.md`).
 

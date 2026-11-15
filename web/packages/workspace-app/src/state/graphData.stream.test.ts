@@ -241,7 +241,6 @@ test("an obsolete stream callback cannot overwrite its replacement", async () =>
   }
 });
 
-
 test("metadata and batches keep the watchdog alive without any animation frames", async () => {
   vi.useFakeTimers();
   const source = stream();
