@@ -36,3 +36,7 @@ Committed-tip gateway formatting, clippy, identity rustdoc and the database-free
 ## Merged, 2026-11-15
 
 The range `cbb4fb821..842e0a21b` was accepted by a Fable reviewer (`dev/v0131-team/reviews/review-gwwording-1.md`, notes only) and merged into `v0131/int`. Its gates ran green in a guest (job J176: the identity crate's tests and docs, the profile build and the marketing check). The page now names "the local machine" in its heading, title, body, WireGuard sentence and callback line. The review found two other user-visible strings outside this row (the launcher's Computers loading line and the desktop token label's hostname fallback); they are candidates for the owner. The gateway's deploy stays the owner's.
+
+## The two in-app strings, 2026-11-15
+
+Alex ruled on the two strings the review found, by survey: "Change both now". The launcher's Computers loading line reads "Connecting to the local machine..." and the desktop token label's hostname fallback reads "chan-desktop @ local machine". The range `0cba461d7..628d299b4` was accepted by a Fable reviewer (`dev/v0131-team/reviews/review-localwording-1.md`, notes only) and merged into `v0131/int`. The launcher tests failed on the old text and pass on the new (185 tests); chan-desktop's gates, its Windows-target clippy included, ran green in a guest (job J214). No test reaches the hostname fallback arm, since the hostname read is not injectable. The Computers card keeps its "This machine" title.
