@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WL-17: a workspace root whose mount flaps under a live devserver.
+# A workspace root whose mount flaps under a live devserver.
 #
 # Proves the transient-transport contract end to end against a REAL FUSE
 # mount: a mounted workspace whose filesystem dies reports `unavailable`

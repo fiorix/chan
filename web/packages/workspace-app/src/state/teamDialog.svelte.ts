@@ -208,7 +208,7 @@ export interface TeamDialogConfig {
   brief: string;
   /// Immutable snapshot of the form populated by a successful Load. Carried
   /// with the session draft so reopening the dialog keeps the same baseline.
-  /// A draft without a snapshot compares against a fresh config read.
+  /// A Load-mode draft without a snapshot compares against a fresh config read.
   loadedConfigSnapshot?: string;
 }
 
