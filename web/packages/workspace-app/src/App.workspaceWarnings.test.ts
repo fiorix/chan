@@ -206,17 +206,13 @@ describe("draft warnings follow the list", () => {
     vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [extra] });
     await refreshDrafts();
     vi.mocked(api.workspace).mockClear();
-    vi.useFakeTimers();
-    try {
-      onWatchEvent({ type: "watch", event: { kind: "Modified", path: "README.md" } });
-      await vi.advanceTimersByTimeAsync(250);
-      await settle();
 
-      expect(api.workspace, "the file event refreshed the payload").toHaveBeenCalledTimes(1);
-      expect(workspaceWarningsDialog.warnings, "a workspace refresh preserves the list-only warning").toEqual([extra]);
-    } finally {
-      vi.useRealTimers();
-    }
+    onWatchEvent({ type: "watch", event: { kind: "Modified", path: "README.md" } });
+    // The event may join the real timer armed by the socket's startup read.
+    await vi.waitFor(() => expect(api.workspace, "the file event refreshed the payload").toHaveBeenCalledTimes(1));
+    await settle();
+
+    expect(workspaceWarningsDialog.warnings, "a workspace refresh preserves the list-only warning").toEqual([extra]);
   });
 
   test("a dismissal after a list shows no stale payload entry", async () => {

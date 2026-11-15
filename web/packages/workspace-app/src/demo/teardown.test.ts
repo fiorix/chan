@@ -10,7 +10,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { api, sessionWindowId } from "../api/client";
 import { chanFetch } from "../api/transport";
-import { __testResetSessionDiscarded, __testSetBootstrapHydrated, onWatchEvent } from "../state/store.svelte";
+import { __testResetSessionDiscarded, __testSetBootstrapHydrated, onWatchEvent, scheduleWorkspaceRefresh, teardown } from "../state/store.svelte";
 import KindChip from "../components/KindChip.svelte";
 import type { MockWorkspaceData } from "./data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "./install";
@@ -88,5 +88,43 @@ describe("the demo app teardown", () => {
     await vi.advanceTimersByTimeAsync(250);
 
     expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([false, true])("a released workspace refresh can be armed by the next frame (settle rejects=%s)", async (rejects) => {
+    installDemoWorkspace(demoData());
+    const workspace = vi.spyOn(api, "workspace");
+    const timers = trackTimers();
+    scheduleWorkspaceRefresh();
+
+    const failure = new Error("the settle timed out");
+    const result = teardownDemoApp({
+      mounted: [], timers,
+      settle: () => rejects ? Promise.reject(failure) : Promise.resolve(),
+    });
+    if (rejects) await expect(result).rejects.toBe(failure);
+    else await result;
+    expect(workspace, "teardown cancels the pending read").not.toHaveBeenCalled();
+
+    installDemoWorkspace(demoData());
+    vi.useFakeTimers();
+    onWatchEvent({ kind: "config_changed" });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(workspace, "the next fixture can refresh its own preferences").toHaveBeenCalledTimes(1);
+  });
+
+  test("store teardown cancels a pending workspace read and permits another refresh", async () => {
+    installDemoWorkspace(demoData());
+    const workspace = vi.spyOn(api, "workspace");
+    vi.useFakeTimers();
+    scheduleWorkspaceRefresh();
+
+    teardown();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(workspace, "the released store must not refresh").not.toHaveBeenCalled();
+
+    scheduleWorkspaceRefresh();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(workspace, "a later refresh is not blocked by the canceled handle").toHaveBeenCalledTimes(1);
   });
 });

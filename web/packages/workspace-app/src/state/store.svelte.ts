@@ -3749,6 +3749,11 @@ export function scheduleWorkspaceRefresh(): void {
   }, 250);
 }
 
+export function stopWorkspaceRefresh(): void {
+  if (workspaceRefreshTimer !== null) clearTimeout(workspaceRefreshTimer);
+  workspaceRefreshTimer = null;
+}
+
 // ---- URL hash bridge for layout + UI persistence ------------------------
 //
 // The `s` key carries the pane/tab layout, including graph and browser
@@ -4712,6 +4717,7 @@ export function teardown(): void {
   rootReconciliation = null;
   rootReconcileRerun = false;
   stopIndexStatusPoller();
+  stopWorkspaceRefresh();
 }
 
 // ---- search-index status poller -----------------------------------------
