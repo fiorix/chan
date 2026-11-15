@@ -666,8 +666,11 @@ type BacklinksStreamOptions = {
 type GraphStreamOptions = {
   signal?: AbortSignal;
   onMeta?: (meta: Extract<GraphStreamEvent, { type: "meta" }>) => void;
-  onNodes?: (nodes: GraphViewNode[], view: GraphView) => void;
-  onEdges?: (edges: GraphViewEdge[], view: GraphView) => void;
+  /// Every wire event, including metadata and completion; allocates no view.
+  onProgress?: () => void;
+  /// Immutable partial snapshots, at most once per animation frame.
+  /// Omit when only the completed return value is needed.
+  onView?: (view: GraphView) => void;
   onDone?: (view: GraphView) => void;
 };
 
@@ -1425,39 +1428,61 @@ const calls = {
     });
     const edgeKey = (e: GraphViewEdge): string =>
       `${e.source}\u0000${e.target}\u0000${e.kind}\u0000${e.rank ?? ""}`;
-    await readNdjsonStream<GraphStreamEvent>(
-      `/api/graph?${params.toString()}`,
-      {
-        signal: streamOpts.signal,
-        onEvent(event) {
-          if (event.type === "meta") {
-            streamOpts.onMeta?.(event);
-            return;
-          }
-          if (event.type === "nodes") {
-            for (const node of event.nodes) nodesById.set(node.id, node);
-            streamOpts.onNodes?.(event.nodes, view());
-            return;
-          }
-          if (event.type === "edges") {
-            for (const edge of event.edges) edgesByKey.set(edgeKey(edge), edge);
-            streamOpts.onEdges?.(event.edges, view());
-            return;
-          }
-          if (event.type === "done") {
-            done = true;
-            streamOpts.onDone?.(view());
-            return;
-          }
-          if (event.type === "error") {
-            throw new ApiError(0, event.error);
-          }
-          throw new Error(`unknown graph stream event: ${String((event as { type?: unknown }).type)}`);
+    let frame: number | null = null;
+    const cancelView = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+    };
+    const scheduleView = () => {
+      if (!streamOpts.onView || frame !== null || done) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        streamOpts.onView?.(view());
+      });
+    };
+    streamOpts.signal?.addEventListener("abort", cancelView, { once: true });
+    try {
+      await readNdjsonStream<GraphStreamEvent>(
+        `/api/graph?${params.toString()}`,
+        {
+          signal: streamOpts.signal,
+          onEvent(event) {
+            streamOpts.signal?.throwIfAborted();
+            streamOpts.onProgress?.();
+            if (event.type === "meta") {
+              streamOpts.onMeta?.(event);
+              return;
+            }
+            if (event.type === "nodes") {
+              for (const node of event.nodes) nodesById.set(node.id, node);
+              scheduleView();
+              return;
+            }
+            if (event.type === "edges") {
+              for (const edge of event.edges) edgesByKey.set(edgeKey(edge), edge);
+              scheduleView();
+              return;
+            }
+            if (event.type === "done") {
+              done = true;
+              cancelView();
+              return;
+            }
+            if (event.type === "error") {
+              throw new ApiError(0, event.error);
+            }
+            throw new Error(`unknown graph stream event: ${String((event as { type?: unknown }).type)}`);
+          },
         },
-      },
-    );
-    if (!done) throw new Error("graph stream ended before done");
-    return view();
+      );
+      if (!done) throw new Error("graph stream ended before done");
+      const completed = view();
+      streamOpts.onDone?.(completed);
+      return completed;
+    } finally {
+      cancelView();
+      streamOpts.signal?.removeEventListener("abort", cancelView);
+    }
   },
   /// Language graph payload: language nodes connected to directory nodes.
   languageGraph: (opts: { depth?: number; language?: string } = {}) => {

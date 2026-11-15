@@ -848,13 +848,13 @@ describe("relationship streaming", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(body, { status: 200 }));
-    const partialNodeCounts: number[] = [];
+    const completeViews: Awaited<ReturnType<typeof api.graphStream>>[] = [];
 
     const graph = await api.graphStream(
       { scope: "file", path: "a.md", depth: 1 },
       {
-        onNodes(_nodes, view) {
-          partialNodeCounts.push(view.nodes.length);
+        onDone(view) {
+          completeViews.push(view);
         },
       },
     );
@@ -866,7 +866,8 @@ describe("relationship streaming", () => {
       { kind: "file", id: "file:a.md", label: "A", path: "a.md" },
     ]);
     expect(graph.edges).toHaveLength(1);
-    expect(partialNodeCounts).toEqual([1, 1]);
+    expect(completeViews).toEqual([graph]);
+    expect(completeViews[0]).toBe(graph);
   });
 });
 

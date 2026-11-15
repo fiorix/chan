@@ -52,12 +52,6 @@ let changeEpoch = 0;
 // later goes on after it.
 let settleSeq = 0;
 
-function publishGraphView(view: GraphView): void {
-  graphData.view = {
-    nodes: [...view.nodes],
-    edges: [...view.edges],
-  };
-}
 
 /// Fetch the graph if we don't already have it. Idempotent;
 /// concurrent callers share a single network round-trip. After a
@@ -73,7 +67,7 @@ export function ensureGraphLoaded(): Promise<void> {
 /// One stream of `/api/graph`. Over a complete view it is a refresh, which
 /// keeps that view on screen and replaces it once, when the answer completes,
 /// or keeps it and sets `error` when the stream fails. Otherwise it is a first
-/// load, which publishes the view as it streams; one that fails keeps what it
+/// load, which publishes at most once per animation frame; one that fails keeps what it
 /// streamed, so a surface's drop effect does not start it again.
 function loadGraph(): Promise<void> {
   const mode = graphData.view !== null && !graphData.partial ? "refresh" : "first";
@@ -103,25 +97,17 @@ function loadGraph(): Promise<void> {
         {},
         {
           signal: abort.signal,
+          onProgress: progress,
           onMeta(meta) {
-            progress();
             if (seq !== inflightSeq) return;
             gated = meta.gated === true;
           },
-          // graphStream passes the view it has accumulated so far.
-          onNodes(_nodes, view) {
-            progress();
-            if (seq !== inflightSeq || mode === "refresh") return;
-            publishGraphView(view);
-          },
-          onEdges(_edges, view) {
-            progress();
-            if (seq !== inflightSeq || mode === "refresh") return;
-            publishGraphView(view);
-          },
-          onDone() {
-            progress();
-          },
+          // A refresh needs only the completed snapshot. With no observer,
+          // the stream accumulates its batches without materializing views.
+          onView: mode === "first" ? (view) => {
+            if (seq !== inflightSeq) return;
+            graphData.view = view;
+          } : undefined,
         },
       );
       // A load an invalidate dropped publishes nothing over the drop.
