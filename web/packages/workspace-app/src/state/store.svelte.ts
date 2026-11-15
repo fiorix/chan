@@ -4816,7 +4816,6 @@ export function teardown(): void {
   rootReconciliation = null;
   rootReconcileRerun = false;
   stopIndexStatusPoller();
-  stopWorkspaceRefresh();
 }
 
 // ---- search-index status poller -----------------------------------------
