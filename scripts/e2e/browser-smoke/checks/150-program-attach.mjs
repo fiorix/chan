@@ -194,7 +194,7 @@ export default {
         tab.page.on("response", onSourceResponse);
         try {
           const coViewSelection = await second.evaluate((names) => {
-            const tabs = [...document.querySelectorAll(".tabs .tab")];
+            const tabs = [...document.querySelectorAll('.tabs .tab > [role="tab"]')];
             const next = tabs.find((node) => names.includes(node.querySelector(".path")?.textContent?.trim()) &&
               node.getAttribute("aria-selected") !== "true");
             if (!next) throw new Error("co-viewer has no inactive terminal tab to select");
@@ -203,7 +203,7 @@ export default {
             next.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
             return name;
           }, [tab.subject, tab.front]);
-          await second.waitForFunction((name) => [...document.querySelectorAll(".tabs .tab")].some((node) =>
+          await second.waitForFunction((name) => [...document.querySelectorAll('.tabs .tab > [role="tab"]')].some((node) =>
             node.querySelector(".path")?.textContent?.trim() === name &&
             node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, coViewSelection);
           await second.close();

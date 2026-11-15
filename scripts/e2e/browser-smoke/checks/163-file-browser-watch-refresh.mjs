@@ -334,8 +334,8 @@ export default {
 
       await (await row(page, TAB, folder)).click();
       await command(page, "app.dashboard.open");
-      await page.waitForFunction(() => ![...document.querySelectorAll('[role="tab"][aria-selected="true"]')]
-        .some((tab) => (tab.getAttribute("title") ?? "").startsWith("File Browser")), { timeout: 10_000 });
+      await page.waitForFunction(() => ![...document.querySelectorAll('.tab > [role="tab"][aria-selected="true"]')]
+        .some((tab) => (tab.closest(".tab").getAttribute("title") ?? "").startsWith("File Browser")), { timeout: 10_000 });
       const hiddenFrameAt = frames.length;
       const hiddenListAt = listings.length;
       const hiddenStart = Date.now();

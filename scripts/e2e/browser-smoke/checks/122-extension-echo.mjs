@@ -168,7 +168,7 @@ export default {
       await frame.click("#echo-input");
       await pressChord(page, ["Control", "Shift"], "KeyT");
       await page.waitForSelector(".terminal-tab.active", { timeout: 30_000 });
-      const echoShortcutTab = await page.waitForSelector('[role="tab"][title="Echo test (echo)"]');
+      const echoShortcutTab = await page.waitForSelector('.tab[title="Echo test (echo)"] > [role="tab"]');
       await echoShortcutTab.click();
       const afterShortcut = await frame.$eval("#echo-output", (node) => node.textContent);
       if (afterShortcut !== "hello extensions") {
@@ -178,20 +178,20 @@ export default {
       await runLauncherCommand(page, "New dashboard");
       await page.waitForFunction(
         () =>
-          [...document.querySelectorAll('[role="tab"]')].some(
-            (tab) => tab.getAttribute("title") === "Dashboard" && tab.getAttribute("aria-selected") === "true",
+          [...document.querySelectorAll('.tab > [role="tab"]')].some(
+            (tab) => tab.closest(".tab").getAttribute("title") === "Dashboard" && tab.getAttribute("aria-selected") === "true",
           ),
       );
       if ((await page.$$('iframe[title="Echo test"]')).length !== 1) {
         throw new Error("extension iframe unmounted while inactive");
       }
-      const echoTab = await page.waitForSelector('[role="tab"][title="Echo test (echo)"]');
+      const echoTab = await page.waitForSelector('.tab[title="Echo test (echo)"] > [role="tab"]');
       await echoTab.click();
       await page.waitForFunction(
         () =>
-          [...document.querySelectorAll('[role="tab"]')].some(
+          [...document.querySelectorAll('.tab > [role="tab"]')].some(
             (tab) =>
-              tab.getAttribute("title") === "Echo test (echo)" &&
+              tab.closest(".tab").getAttribute("title") === "Echo test (echo)" &&
               tab.getAttribute("aria-selected") === "true",
           ),
       );
