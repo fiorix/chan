@@ -887,7 +887,7 @@ fn render_consent_html(
     let expires_phrase = humanize_expires(params.expires_in_secs);
     // The loopback port the result is delivered to, parsed from the
     // already-validated redirect_uri. A user who did not just start a
-    // sign-in from an app on this computer sees a request they did not
+    // sign-in from an app on the local machine sees a request they did not
     // begin.
     let port = Url::parse(&params.redirect_uri)
         .ok()
@@ -925,7 +925,7 @@ fn render_consent_html(
             };
             (
                 rows,
-                format!("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with {enrolled_with}.</p>\n    "),
+                format!("<p class=\"muted\">Approving also enrolls the local machine's WireGuard key with {enrolled_with}.</p>\n    "),
             )
         }
         _ => (String::new(), String::new()),
@@ -933,15 +933,15 @@ fn render_consent_html(
     let body = format!(
         r#"
     <span class="mark" aria-hidden="true"></span>
-    <h1>Authorize an app on this computer?</h1>
-    <p class="muted">An application running on this computer is requesting access. It identifies itself by the label below. chan cannot verify who it is.</p>
+    <h1>Authorize an app on the local machine?</h1>
+    <p class="muted">An application running on the local machine is requesting access. It identifies itself by the label below. chan cannot verify who it is.</p>
     <p class="muted">Signed in as <strong>{display}</strong>.</p>
     {account_blurb}<div class="details">
       <div class="row"><span class="k">Calls itself</span><span class="v">{label}</span></div>
       <div class="row"><span class="k">Scopes</span><span class="v">{scopes}</span></div>
       <div class="row"><span class="k">Expires in</span><span class="v">{expires_phrase}</span></div>
 {wireguard_rows}    </div>
-    {wireguard_blurb}<p class="muted small">It will receive the result on this computer at 127.0.0.1, port {port}.</p>
+    {wireguard_blurb}<p class="muted small">It will receive the result on the local machine at 127.0.0.1, port {port}.</p>
     <form method="post" action="/desktop/authorize/confirm">
       <input type="hidden" name="csrf" value="{csrf}">
       <button class="btn" type="submit" name="action" value="deny">Cancel</button>
@@ -956,7 +956,7 @@ fn render_consent_html(
         csrf = pages::html_escape(csrf),
     );
     pages::render(&pages::Page {
-        title: "Authorize an app on this computer",
+        title: "Authorize an app on the local machine",
         head_extra: "",
         body: &body,
     })
@@ -1412,7 +1412,7 @@ mod tests {
         assert!(html.contains("No token was issued."), "{html}");
     }
 
-    // --- consent page (finding-3 copy) ---
+    // --- consent page ---
 
     #[test]
     fn consent_html_includes_required_fields_and_no_unescaped_input() {
@@ -1433,9 +1433,9 @@ mod tests {
             avatar_url: None,
         };
         let html = render_consent_html(&p, &user, "csrf-token", &[]);
-        // The finding-3 copy: an untrusted local app, unverifiable.
+        // The requester supplies its own label, not a verified identity.
         assert!(
-            html.contains("<h1>Authorize an app on this computer?</h1>"),
+            html.contains("<h1>Authorize an app on the local machine?</h1>"),
             "{html}"
         );
         assert!(html.contains("chan cannot verify who it is."), "{html}");
@@ -1459,6 +1459,35 @@ mod tests {
         assert!(!html.contains(r#"type="radio""#), "{html}");
         // A tunnel-scoped request renders no account blurb.
         assert!(!html.contains("account-level access"), "{html}");
+    }
+
+    #[test]
+    fn consent_html_title_names_the_local_machine() {
+        let html = render_consent_html(&params(), &consent_user(), "csrf-token", &[]);
+        assert!(
+            html.contains("<title>Authorize an app on the local machine</title>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn consent_html_application_names_the_local_machine() {
+        let html = render_consent_html(&params(), &consent_user(), "csrf-token", &[]);
+        assert!(
+            html.contains("An application running on the local machine is requesting access."),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn consent_html_callback_names_the_local_machine() {
+        let html = render_consent_html(&params(), &consent_user(), "csrf-token", &[]);
+        assert!(
+            html.contains(
+                "It will receive the result on the local machine at 127.0.0.1, port 54321."
+            ),
+            "{html}"
+        );
     }
 
     #[test]
@@ -1501,7 +1530,7 @@ mod tests {
         assert_eq!(humanize_expires(30 * 86_400), "30 days");
     }
 
-    fn wireguard_consent_user() -> User {
+    fn consent_user() -> User {
         User {
             id: Uuid::nil(),
             email: "u@example.com".into(),
@@ -1585,7 +1614,7 @@ mod tests {
         params.wireguard_public_key = Some("<key & 'quoted'>".into());
         let html = render_consent_html(
             &params,
-            &wireguard_consent_user(),
+            &consent_user(),
             "csrf-token",
             &[consent_ingress("<id\">", "<endpoint&>:51820")],
         );
@@ -1596,7 +1625,7 @@ mod tests {
             consent_ingress_rows(&html),
             ["&lt;id&quot;&gt; at &lt;endpoint&amp;&gt;:51820"]
         );
-        assert!(html.contains("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's WireGuard ingress listed above; revoking the token removes it.</p>"));
+        assert!(html.contains("<p class=\"muted\">Approving also enrolls the local machine's WireGuard key with the gateway's WireGuard ingress listed above; revoking the token removes it.</p>"));
         for raw in ["<key", "<id", "<endpoint"] {
             assert!(!html.contains(raw), "{raw}");
         }
@@ -1611,8 +1640,7 @@ mod tests {
             consent_ingress("p1", "[2001:db8::1]:51821"),
             consent_ingress("p3", "p2.proxy.example.test:51820"),
         ];
-        let html =
-            render_consent_html(&params, &wireguard_consent_user(), "csrf-token", &ingresses);
+        let html = render_consent_html(&params, &consent_user(), "csrf-token", &ingresses);
         assert_eq!(
             consent_ingress_rows(&html),
             [
@@ -1621,7 +1649,7 @@ mod tests {
                 "p3 at p2.proxy.example.test:51820",
             ]
         );
-        assert!(html.contains("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's 3 WireGuard ingresses listed above; revoking the token removes it from all of them.</p>"));
+        assert!(html.contains("<p class=\"muted\">Approving also enrolls the local machine's WireGuard key with the gateway's 3 WireGuard ingresses listed above; revoking the token removes it from all of them.</p>"));
         // The rows sit inside the details block, after the key's row.
         let details = &html[html.find(r#"<div class="details">"#).unwrap()..];
         let details = &details[..details.find("    </div>\n").unwrap()];
@@ -1636,19 +1664,14 @@ mod tests {
         let body: String =
             serde_json::from_str(include_str!("../tests/fixtures/desktop-consent.json")).unwrap();
         let expected = pages::render(&pages::Page {
-            title: "Authorize an app on this computer",
+            title: "Authorize an app on the local machine",
             head_extra: "",
             body: &body,
         });
         let offered = [consent_ingress("p1", "wg.example.test:51820")];
         for ingresses in [&[][..], &offered[..]] {
             assert_eq!(
-                render_consent_html(
-                    &params(),
-                    &wireguard_consent_user(),
-                    "csrf-token",
-                    ingresses
-                ),
+                render_consent_html(&params(), &consent_user(), "csrf-token", ingresses),
                 expected
             );
         }
@@ -1657,7 +1680,7 @@ mod tests {
         let mut with_key = params();
         with_key.wireguard_public_key = Some("key".into());
         assert_eq!(
-            render_consent_html(&with_key, &wireguard_consent_user(), "csrf-token", &[]),
+            render_consent_html(&with_key, &consent_user(), "csrf-token", &[]),
             expected
         );
     }

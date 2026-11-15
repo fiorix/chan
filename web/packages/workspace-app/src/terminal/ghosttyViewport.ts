@@ -1,11 +1,7 @@
-/// Single owner for every Chan-initiated Ghostty viewport mutation on the
-/// primary buffer: PTY writes that must not yank a user-anchored viewport,
-/// the calibrated macOS pixel-scroll path, and find scrolling to a match.
-/// ghostty-web is constructed with smoothScrollDuration 0 so its wheel
-/// handler applies synchronously and no private animation target can
-/// outlive a write-side restore; the controller's restore therefore sticks.
-/// It is also where a reader of the core hears of every change to what the
-/// terminal holds (`observeChanges`).
+import type { TerminalChange, TerminalViewport } from "@chan/ghostty-web-ng";
+
+/// Chan-specific wheel calibration and the view queries used by find.
+/// The widget owns output following and publishes every parsed change.
 
 /// Compatibility constant, not a preference: macOS trackpads deliver pixel
 /// deltas that Ghostty converts to roughly twice xterm.js's travel on the
@@ -29,19 +25,13 @@ export function ghosttyHistoryRows(offset: number): number {
 
 export type GhosttyViewportTerminal = {
   readonly rows: number;
-  getViewportY(): number;
+  readonly viewport: TerminalViewport;
   getScrollbackLength(): number;
-  scrollLines(amount: number): void;
-  scrollToLine(line: number): void;
   write(data: string | Uint8Array): void;
-  /// ghostty-web's resize event: it fires once the core has the new grid,
-  /// before ghostty-web repaints it, whoever called `resize`.
-  onResize(listener: (size: { cols: number; rows: number }) => void): { dispose(): void };
+  onChange(listener: (change: TerminalChange) => void): { dispose(): void };
 };
 
-/// A change to what the terminal holds: output written, or the grid
-/// resized, which reflows the screen and its history.
-export type GhosttyChange = "write" | "resize";
+export type GhosttyChange = TerminalChange["kind"];
 
 export type GhosttyWheelEvent = Pick<WheelEvent, "deltaY" | "deltaMode">;
 
@@ -56,80 +46,24 @@ export type GhosttyViewportContext = {
 };
 
 export class GhosttyViewportController {
-  private readonly changeObservers = new Set<(change: GhosttyChange) => void>();
-
   constructor(
     private readonly terminal: GhosttyViewportTerminal,
     private readonly context: GhosttyViewportContext,
-  ) {
-    // Lives as long as the terminal, whose disposal ends the subscription.
-    terminal.onResize(() => this.notify("resize"));
-  }
+  ) {}
 
-  /// Calls `observer` after every change to what the terminal holds, so a
-  /// reader of the core that keeps state across changes (find's search)
-  /// learns of them without a hook of its own: each write through `write`,
-  /// the one path chan's writes to the terminal take (PTY output and the
-  /// lines chan prints itself), and each resize, heard from ghostty-web's
-  /// own resize event so that no caller can resize around it. A resize is
-  /// reported before ghostty-web repaints the new grid, so an observer can
-  /// move a mark off rows the reflow gave other text before they are drawn.
-  /// Returns the call that stops it.
+  /// The widget delivers changes before painting, including writes made by
+  /// callers outside this adapter. The returned function ends the subscription.
   observeChanges(observer: (change: GhosttyChange) => void): () => void {
-    this.changeObservers.add(observer);
-    return () => {
-      this.changeObservers.delete(observer);
-    };
+    const subscription = this.terminal.onChange(({ kind }) => observer(kind));
+    return () => subscription.dispose();
   }
 
-  /// ghostty-web calls scrollToBottom() after every write whenever the
-  /// viewport is away from the bottom. Restore a user's scrolled viewport
-  /// immediately after the synchronous WASM write, advancing the distance
-  /// from bottom as new scrollback lines are appended. A viewport at the
-  /// bottom keeps following output natively. One less than a row back shows
-  /// no history row: it follows output too, and gets back the fraction its
-  /// gesture gathered, so the next wheel delta adds to it and a slow scroll
-  /// leaves the bottom under streaming output once it reaches a row. Writes
-  /// never feed the wheel path, so programmatic output cannot masquerade as
-  /// user scroll input.
   write(data: string | Uint8Array): void {
-    const viewportBefore = this.terminal.getViewportY();
-    if (viewportBefore <= 0) {
-      this.terminal.write(data);
-    } else if (ghosttyHistoryRows(viewportBefore) === 0) {
-      this.terminal.write(data);
-      this.terminal.scrollToLine(viewportBefore);
-    } else {
-      const scrollbackBefore = this.terminal.getScrollbackLength();
-      this.terminal.write(data);
-      const scrollbackAfter = this.terminal.getScrollbackLength();
-      const appendedLines = Math.max(0, scrollbackAfter - scrollbackBefore);
-      this.terminal.scrollToLine(
-        Math.min(scrollbackAfter, viewportBefore + appendedLines),
-      );
-    }
-    this.notify("write");
+    this.terminal.write(data);
   }
 
-  private notify(change: GhosttyChange): void {
-    for (const observer of this.changeObservers) observer(change);
-  }
-
-  /// Bring absolute row `row` into view: 0 is the oldest history row and the
-  /// active rows follow, the numbering of ghostty-web's selection anchors. A
-  /// row already on screen leaves the viewport where it is; any other is
-  /// centred, clamped to the buffer. ghostty-web's viewport offset counts
-  /// the lines scrolled back from the bottom, so screen row `row -
-  /// scrollback + ghosttyHistoryRows(offset)` shows `row`, and
-  /// `scrollToLine` sets that offset, although its doc comment describes a
-  /// line counted from the top. The alternate screen has no history: its
-  /// scrollback length is 0, its rows are its own, and the offset clamps to
-  /// 0.
   reveal(row: number): void {
-    if (this.shows(row)) return;
-    const scrollback = this.terminal.getScrollbackLength();
-    const centred = scrollback - row + Math.floor(this.terminal.rows / 2);
-    this.terminal.scrollToLine(Math.max(0, Math.min(scrollback, centred)));
+    this.terminal.viewport.reveal(row, "center");
   }
 
   /// Whether absolute row `row`, numbered as `reveal` numbers it, is on the
@@ -138,7 +72,7 @@ export class GhosttyViewportController {
   /// count, though the core still holds the old grid until the resize
   /// reaches it, so a reader of the grid as it was passes the old count.
   shows(row: number, rows = this.terminal.rows): boolean {
-    const onScreen = row - this.terminal.getScrollbackLength() + ghosttyHistoryRows(this.terminal.getViewportY());
+    const onScreen = row - this.terminal.getScrollbackLength() + ghosttyHistoryRows(this.terminal.viewport.offset);
     return onScreen >= 0 && onScreen < rows;
   }
 
@@ -162,7 +96,7 @@ export class GhosttyViewportController {
     if (!Number.isFinite(cellHeight) || cellHeight <= 0) return false;
 
     const rows = (e.deltaY * GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR) / cellHeight;
-    if (rows !== 0) this.terminal.scrollLines(rows);
+    if (rows !== 0) this.terminal.viewport.scrollBy(-rows);
     return true;
   }
 }

@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { api } from "../api/client";
   import {
+    bumpTabFocusPulse,
     clearTeamWorkPending,
     closeTab,
     setTeamWorkPendingConfig,
@@ -20,6 +21,7 @@
     resizeTeamMembers,
     autoAssignSlots,
     switchRealEstate,
+    teamConfigSnapshot,
     TEAM_MAX_SIZE,
     TEAM_MIN_SIZE,
     type GridShape,
@@ -179,6 +181,7 @@
   /// refresh the directory autocomplete, and clear any stale load
   /// result so the surfaced config never lags the typed path.
   function onTeamDirInput(value: string): void {
+    delete config.loadedConfigSnapshot;
     syncTabGroupToPath();
     void refreshDirSuggestions(value);
     loadError = null;
@@ -187,7 +190,7 @@
 
   /// Load mode: on team-dir entry, read + validate the team's
   /// config.toml via the backend. On success, prepopulate the form
-  /// from the loaded config (still editable; Bootstrap re-saves it and
+  /// from the loaded config (still editable; Bootstrap saves edits and
   /// keeps the team's bootstrap.md). On failure, surface the 400
   /// message inline.
   async function validateAndLoad(): Promise<void> {
@@ -204,13 +207,14 @@
     busy = true;
     try {
       const wire = await api.readTeamConfig(path);
-      const loaded = wireToDialog(wire, path);
-      config = resizeTeamMembers(loaded);
+      const loaded = resizeTeamMembers(wireToDialog(wire, path));
+      config = { ...loaded, loadedConfigSnapshot: teamConfigSnapshot(loaded) };
       loadedConfig = {
         teamName: wire.team_name,
         memberCount: wire.members.length,
       };
     } catch (err) {
+      delete config.loadedConfigSnapshot;
       loadError = (err as Error).message ?? String(err);
     } finally {
       busy = false;
@@ -298,6 +302,9 @@
       clearTeamWorkPending(request);
       scheduleSessionSave();
       closeTeamDialog();
+      // Startup focus yields to the dialog, so request it after releasing
+      // the keyboard even when the active pane and tab did not change.
+      bumpTabFocusPulse();
     } catch (err) {
       // A config write with no answer may have landed: the chain has stopped
       // before any spawn, and the tree, where the server writes the config
@@ -326,12 +333,8 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && !busy) {
-      // Capture phase + stopPropagation: New team opens this dialog OVER a
-      // freshly-spawned lead terminal whose xterm (and the Team Work
-      // compose box) grabs focus, so a bubble-phase Escape was consumed
-      // by the terminal before reaching the window. Listening in capture
-      // runs this first, and stopPropagation keeps the keystroke out of
-      // the terminal behind the modal.
+      // The modal owns Escape before any terminal or compose-box handler;
+      // stopPropagation keeps its dismissal out of the underlying surface.
       e.preventDefault();
       e.stopPropagation();
       onCancel();

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
+
+const TERMINAL_SURFACE = `${TERMINAL_SURFACES.xterm}, ${TERMINAL_SURFACES.ghostty}`;
 
 export default {
   name: "terminal-details",
@@ -27,7 +30,7 @@ export default {
       const url = new URL(ctx.serverUrl);
       url.hash = "s=" + encodeURIComponent(JSON.stringify({ k: "l", f: 1, t: [{ k: "t", n: "Details smoke", a: 1 }] }));
       await page.goto(url.href, { waitUntil: "networkidle0" });
-      await page.waitForSelector('.terminal-host canvas');
+      await page.waitForSelector(TERMINAL_SURFACE);
       await page.click('.tab.active', { button: 'right' });
       await page.waitForSelector('.terminal-tab-menu-bubble');
       const labels = await page.$$eval('.terminal-tab-menu-bubble .mbtn-label', els => els.map(el => el.textContent.trim()));
@@ -66,7 +69,7 @@ export default {
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.terminal-main aside.inspector'));
       await page.reload({ waitUntil: 'networkidle0' });
-      await page.waitForSelector('.terminal-host canvas');
+      await page.waitForSelector(TERMINAL_SURFACE);
       assert.equal(await page.$('.terminal-main aside.inspector'), null);
       assert.deepEqual(errors, []);
       return { pass: true, detail: 'Terminal Details is always available under its new menu label, uses the right floating frame, shows real queued messages in FIFO order, removes cancelled messages and preserves open/closed state through reload.' };

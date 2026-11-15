@@ -49,6 +49,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB_G = "SmokeGhostty98";
@@ -248,9 +249,11 @@ export default {
         }
         await sleep(100);
       }
-      const layout = await page.evaluate((backend) => {
+      const layout = await page.evaluate(({ backend, surfaces }) => {
         const host = document.querySelector(".terminal-tab .terminal-host");
-        const canvas = host?.querySelector("canvas");
+        const canvas = document.querySelector(backend === "ghostty"
+          ? `.terminal-tab ${surfaces.ghostty}`
+          : `.terminal-tab ${surfaces.xterm} canvas`);
         if (!(host instanceof HTMLElement)) {
           throw new Error(`${backend} fit probe: terminal host missing`);
         }
@@ -267,7 +270,7 @@ export default {
           },
           canvasWidth: canvas?.getBoundingClientRect().width ?? null,
         };
-      }, backend);
+      }, { backend, surfaces: TERMINAL_SURFACES });
       const socketUrl = terminalSocketUrls
         .slice(socketStart)
         .find(
@@ -325,10 +328,10 @@ export default {
     /// at host+5 silently selects nothing. Same role as 97's
     /// .xterm-screen box.
     async function screenBox() {
-      const canvas = await page.$(".terminal-tab .terminal-host canvas");
-      if (!canvas) throw new Error(".terminal-host canvas missing");
+      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
+      if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
       const box = await canvas.boundingBox();
-      if (!box) throw new Error(".terminal-host canvas has no bounding box");
+      if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
       return box;
     }
 
@@ -560,7 +563,7 @@ export default {
       await page.evaluate(() => performance.clearResourceTimings());
       const ghosttyResizeStart = resizeFrames.length;
       const ghosttySocketStart = terminalSocketUrls.length;
-      await openTerminal(TAB_G, ".terminal-host canvas");
+      await openTerminal(TAB_G, TERMINAL_SURFACES.ghostty);
       // The lazy loader fetched the wasm asset (vite emits it hashed as
       // ghostty-vt-*.wasm) -- the definitive proof the backend is real,
       // not a silent xterm fallback.
@@ -572,7 +575,8 @@ export default {
         { timeout: 60_000 },
       );
       if (
-        await page.evaluate(() => !!document.querySelector(".terminal-tab .xterm"))
+        await page.evaluate((selector) => !!document.querySelector(selector),
+          `.terminal-tab ${TERMINAL_SURFACES.xterm}`)
       ) {
         throw new Error(
           "ghostty leg: xterm DOM present under terminal.ghostty=true -- " +
@@ -687,7 +691,7 @@ export default {
       // The SPA learns of the flip via config_changed; the NEW terminal's
       // spawn-time read must see it (mirrors 97's settle).
       await sleep(2_000);
-      await openTerminal(TAB_G, ".terminal-host canvas");
+      await openTerminal(TAB_G, TERMINAL_SURFACES.ghostty);
       await cs([
         "write",
         "--tab-name",
@@ -742,7 +746,7 @@ export default {
       await sleep(2_000);
       const xtermResizeStart = resizeFrames.length;
       const xtermSocketStart = terminalSocketUrls.length;
-      await openTerminal(TAB_X, ".terminal.xterm .xterm-screen");
+      await openTerminal(TAB_X, TERMINAL_SURFACES.xterm);
       const xtermFit = await terminalFitSnapshot(
         "xterm",
         TAB_X,

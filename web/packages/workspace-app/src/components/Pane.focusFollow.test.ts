@@ -285,7 +285,7 @@ describe("the tab strip", () => {
     expect(activeTab()?.id, "press keeps the old terminal selected").toBe(first.id);
     expect(tabFocusPulse.value, "press defers the focus pulse").toBe(pulse);
     expect(marked.terminalActivity, "the mark stays until the matching release").toBe(true);
-    secondTab.focus();
+    secondTab.querySelector<HTMLElement>('[role="tab"]')!.focus();
     press(secondTab, "mouseup");
     expect(marked.terminalActivity, "the matching release clears the mark synchronously").toBeUndefined();
     await settle();
@@ -300,7 +300,7 @@ describe("the tab strip", () => {
     const before = focusMessages(first.id).length;
     press(tab, "mousedown");
     await settle();
-    tab.focus();
+    tab.querySelector<HTMLElement>('[role="tab"]')!.focus();
     press(tab, "mouseup");
     await settle();
     expect(focusMessages(first.id).slice(before), "active-tab click sends one true and no false").toEqual([true]);
@@ -479,6 +479,43 @@ describe("the tab strip", () => {
     expect(tabFocusPulse.value).toBeGreaterThan(pulse);
   });
 
+  test.each([
+    { part: "padding", button: 1 }, { part: "padding", button: 2 },
+    { part: "label", button: 1 }, { part: "label", button: 2 },
+  ])("a $part press with button $button returns focus to the selected terminal without a widget retry", async ({ part, button }) => {
+    xterm.textareaFocus = true;
+    const first = terminalTab({ id: "term-first" });
+    const second = terminalTab({ id: "term-second" });
+    const { target } = await mountPane([first, second]);
+    const tab = stripTab(target, 1);
+    const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
+    const pressed = part === "padding" ? tab : label;
+    const input = target.querySelector<HTMLTextAreaElement>(`[data-terminal-tab-id="${second.id}"] textarea`);
+    expect(input, "the selected terminal has a real DOM focus target").not.toBeNull();
+
+    press(pressed, "mousedown", button);
+    await tick();
+    await tick();
+    expect(activeTab()?.id, "non-primary selection happens on press").toBe(second.id);
+    expect(document.activeElement, "selection first sends focus to the terminal").toBe(input);
+
+    // jsdom omits the native mouse-focus default after the press handlers.
+    // The stand-in xterm only focuses synchronously, with no backup timer.
+    pressed.focus();
+    expect(document.activeElement).toBe(pressed);
+    const focusLabel = vi.spyOn(label, "focus");
+    try {
+      await settle();
+      expect(focusLabel, "the deferred path waits for the surface instead of briefly focusing the label").not.toHaveBeenCalled();
+      expect(document.activeElement, "the deferred press path restores the terminal's keyboard").toBe(input);
+      press(pressed, "mouseup", button);
+      await settle();
+      expect(document.activeElement, "non-primary release keeps surface focus").toBe(input);
+    } finally {
+      focusLabel.mockRestore();
+    }
+  });
+
   test("an inactive pane does not focus its current terminal before the held tab's release", async () => {
     const current = terminalTab({ id: "term-current" });
     const pressed = terminalTab({ id: "term-pressed" });
@@ -503,7 +540,7 @@ describe("the tab strip", () => {
     selectNextTabInActivePane();
     await settle();
     const tab = stripTab(target, 1);
-    tab.focus();
+    tab.querySelector<HTMLElement>('[role="tab"]')!.focus();
 
     press(tab, "mousedown");
     await settle();
@@ -516,11 +553,12 @@ describe("the tab strip", () => {
     press(tab, "mousedown");
     await settle();
     // The browser's default action for the press focuses the tab itself.
-    tab.focus();
+    const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
+    label.focus();
 
     press(tab, "mouseup", 2);
     await settle();
-    expect(document.activeElement, "a right release leaves focus where it is").toBe(tab);
+    expect(document.activeElement, "a right release leaves focus where it is").toBe(label);
 
     press(tab, "mouseup");
     await settle();

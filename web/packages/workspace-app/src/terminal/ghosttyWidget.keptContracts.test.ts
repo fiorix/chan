@@ -78,7 +78,7 @@ describe("the widget's links through its registered providers", () => {
     screen.term.write("\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\\r\n" + "line\r\n".repeat(ROWS));
     const history = screen.term.getScrollbackLength();
     expect(history).toBeGreaterThan(0);
-    screen.term.scrollToLine(history);
+    screen.term.viewport.scrollTo(history);
     expect(screen.term.getViewportY()).toBe(history);
     screen.click(1, 0);
     await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://e.x/a", "_blank", "noopener,noreferrer"));

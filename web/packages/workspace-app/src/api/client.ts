@@ -666,8 +666,11 @@ type BacklinksStreamOptions = {
 type GraphStreamOptions = {
   signal?: AbortSignal;
   onMeta?: (meta: Extract<GraphStreamEvent, { type: "meta" }>) => void;
-  onNodes?: (nodes: GraphViewNode[], view: GraphView) => void;
-  onEdges?: (edges: GraphViewEdge[], view: GraphView) => void;
+  /// Every wire event, including metadata and completion; allocates no view.
+  onProgress?: () => void;
+  /// Immutable partial snapshots, at most once per animation frame.
+  /// Omit when only the completed return value is needed.
+  onView?: (view: GraphView) => void;
   onDone?: (view: GraphView) => void;
 };
 
@@ -1425,39 +1428,61 @@ const calls = {
     });
     const edgeKey = (e: GraphViewEdge): string =>
       `${e.source}\u0000${e.target}\u0000${e.kind}\u0000${e.rank ?? ""}`;
-    await readNdjsonStream<GraphStreamEvent>(
-      `/api/graph?${params.toString()}`,
-      {
-        signal: streamOpts.signal,
-        onEvent(event) {
-          if (event.type === "meta") {
-            streamOpts.onMeta?.(event);
-            return;
-          }
-          if (event.type === "nodes") {
-            for (const node of event.nodes) nodesById.set(node.id, node);
-            streamOpts.onNodes?.(event.nodes, view());
-            return;
-          }
-          if (event.type === "edges") {
-            for (const edge of event.edges) edgesByKey.set(edgeKey(edge), edge);
-            streamOpts.onEdges?.(event.edges, view());
-            return;
-          }
-          if (event.type === "done") {
-            done = true;
-            streamOpts.onDone?.(view());
-            return;
-          }
-          if (event.type === "error") {
-            throw new ApiError(0, event.error);
-          }
-          throw new Error(`unknown graph stream event: ${String((event as { type?: unknown }).type)}`);
+    let frame: number | null = null;
+    const cancelView = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+    };
+    const scheduleView = () => {
+      if (!streamOpts.onView || frame !== null || done) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        streamOpts.onView?.(view());
+      });
+    };
+    streamOpts.signal?.addEventListener("abort", cancelView, { once: true });
+    try {
+      await readNdjsonStream<GraphStreamEvent>(
+        `/api/graph?${params.toString()}`,
+        {
+          signal: streamOpts.signal,
+          onEvent(event) {
+            streamOpts.signal?.throwIfAborted();
+            streamOpts.onProgress?.();
+            if (event.type === "meta") {
+              streamOpts.onMeta?.(event);
+              return;
+            }
+            if (event.type === "nodes") {
+              for (const node of event.nodes) nodesById.set(node.id, node);
+              scheduleView();
+              return;
+            }
+            if (event.type === "edges") {
+              for (const edge of event.edges) edgesByKey.set(edgeKey(edge), edge);
+              scheduleView();
+              return;
+            }
+            if (event.type === "done") {
+              done = true;
+              cancelView();
+              return;
+            }
+            if (event.type === "error") {
+              throw new ApiError(0, event.error);
+            }
+            throw new Error(`unknown graph stream event: ${String((event as { type?: unknown }).type)}`);
+          },
         },
-      },
-    );
-    if (!done) throw new Error("graph stream ended before done");
-    return view();
+      );
+      if (!done) throw new Error("graph stream ended before done");
+      const completed = view();
+      streamOpts.onDone?.(completed);
+      return completed;
+    } finally {
+      cancelView();
+      streamOpts.signal?.removeEventListener("abort", cancelView);
+    }
   },
   /// Language graph payload: language nodes connected to directory nodes.
   languageGraph: (opts: { depth?: number; language?: string } = {}) => {
@@ -1663,8 +1688,8 @@ const calls = {
   /// tasks/journals/followups dirs on write
   /// (see crates/chan-server/src/routes/team_config.rs).
   /// `readTeamConfig` backs the Load auto-validate (400 on
-  /// missing / invalid TOML); `writeTeamConfig` re-saves the
-  /// (possibly edited) config on Bootstrap.
+  /// missing / invalid TOML); `writeTeamConfig` saves the config on Bootstrap
+  /// unless an unchanged Load asks to preserve the existing file.
   readTeamConfig: (dir: string) =>
     req<TeamConfigWire>("POST", "/api/team-config/read", { dir }),
   /// `briefContent`, when set, is folded VERBATIM into the generated
@@ -1673,18 +1698,21 @@ const calls = {
   /// reads the file client-side, mirroring the CLI's `--brief`. It is not part
   /// of config.toml, so it travels as a sibling field. `keepBootstrap` leaves
   /// an existing bootstrap.md as it is (a Load's re-save); the server then
-  /// generates one only where none exists.
+  /// generates one only where none exists. `keepConfig` does the same for
+  /// config.toml when the loaded form is unchanged.
   writeTeamConfig: (
     dir: string,
     config: TeamConfigWire,
     briefContent?: string,
     keepBootstrap = false,
+    keepConfig = false,
   ) =>
     mutate<void>("POST", "/api/team-config/write", {
       dir,
       config,
       brief_content: briefContent,
       ...(keepBootstrap ? { keep_bootstrap: true } : {}),
+      ...(keepConfig ? { keep_config: true } : {}),
     }),
 
   /// Reply to a survey raised by `cs terminal survey`. The blocked CLI is

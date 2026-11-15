@@ -51,7 +51,7 @@ async function openTerminal(options: { smoothScrollDuration?: number } = { smoot
   viewport.write(Array.from({ length: 40 }, (_, row) => `history ${row}\r\n`).join(""));
   viewport.write("prompt> ");
   expect(term.getScrollbackLength()).toBeGreaterThan(HISTORY_OFFSET);
-  term.scrollToLine(HISTORY_OFFSET);
+  term.viewport.scrollTo(HISTORY_OFFSET);
   expect(term.getViewportY()).toBe(HISTORY_OFFSET);
   const sent: Array<{ data: string; viewport: number }> = [];
   term.onData((data) => sent.push({ data, viewport: term.getViewportY() }));

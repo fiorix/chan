@@ -17,7 +17,7 @@
 // terminal is the only member of a group of its own, read back from the
 // server's roster before the toggle.
 
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
@@ -218,9 +218,7 @@ export default {
         opened.push(name);
         await waitSoleMember(page, token, name, name, `${engine}: before Group broadcast`);
         // The keyboard starts in the terminal the way a user's does: by a click.
-        await page.click(engine === "ghostty"
-          ? ".terminal-tab.active .terminal-host canvas"
-          : ".terminal-tab.active .terminal.xterm .xterm-screen");
+        await page.click(`.terminal-tab.active ${TERMINAL_SURFACES[engine]}`);
         await waitForTerminalKeyboard(page, `${engine}: after the click`);
         await typeLine(page, `printf 'BEFORE_%s_OK\\n' ${engine}`);
         await waitForScrollback(cs, name, `BEFORE_${engine}_OK`, `${engine}: typed before the launcher`);

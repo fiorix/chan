@@ -34,6 +34,7 @@ import {
 } from "../lib/pane-strip.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
+import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const ESC = "1b";
@@ -42,7 +43,6 @@ const TERMINAL = ".pane .terminal-tab.active";
 const TERMINAL_MENU = ".terminal-tab-menu-bubble";
 const EDITOR = ".editor-tab.active .cm-content";
 const EDITOR_MENU = ".tab-menu-bubble";
-const ENGINE = { xterm: ".terminal.xterm .xterm-screen", ghostty: ".terminal-host canvas" };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

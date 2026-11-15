@@ -2,7 +2,7 @@
 Description=chan devserver metrics for systemd-report
 
 [Socket]
-ListenStream=%t/systemd/report/io.chan.Devserver
+ListenStream=%t/systemd/report/app.chan.Devserver
 FileDescriptorName=varlink
 SocketMode=0600
 Accept=yes

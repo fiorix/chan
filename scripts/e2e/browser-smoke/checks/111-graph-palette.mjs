@@ -377,7 +377,7 @@ export default {
           new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
         );
       });
-      const freshFilesTab = await page.waitForSelector('[role="tab"][aria-selected="true"][title="File Browser"]', { timeout: 15_000 });
+      const freshFilesTab = await page.waitForSelector('.tab[title="File Browser"] > [role="tab"][aria-selected="true"]', { timeout: 15_000 });
       await freshFilesTab.click();
       if (!(await contactRowVisible(15_000))) {
         throw new Error("respawned file browser never showed the contact row");

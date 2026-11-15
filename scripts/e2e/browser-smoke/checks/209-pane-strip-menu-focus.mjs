@@ -13,12 +13,12 @@ import {
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const TERMINAL = ".pane .terminal-tab.active";
 const MENU = ".hamburger-menu";
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
-const ENGINE = { xterm: ".terminal.xterm .xterm-screen", ghostty: ".terminal-host canvas" };
 const TYPED = "78";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

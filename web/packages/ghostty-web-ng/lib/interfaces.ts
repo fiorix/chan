@@ -55,6 +55,24 @@ export interface IDisposable {
 
 export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 
+/** A parsed write or a completed grid resize, delivered before painting. */
+export type TerminalChange = { kind: 'write' | 'resize' };
+
+export interface TerminalViewport {
+  /** Rows back from the bottom; fractions accumulate between pixel-wheel events. */
+  readonly offset: number;
+  /** Offsets below one row follow output while retaining their fraction. */
+  readonly followOutput: 'at-bottom';
+  /** Set the bottom-relative offset, clamped to retained history. */
+  scrollTo(offset: number): void;
+  /** Add rows to the offset: positive moves toward older output. */
+  scrollBy(rows: number): void;
+  /** Return to live output and cancel pending smooth scrolling. */
+  scrollToBottom(): void;
+  /** Reveal an absolute buffer row; leave a visible row in place. */
+  reveal(row: number, align?: 'start' | 'center' | 'end'): void;
+}
+
 /**
  * Keyboard event with key and DOM event
  */

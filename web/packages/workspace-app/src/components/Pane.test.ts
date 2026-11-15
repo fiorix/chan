@@ -208,7 +208,8 @@ describe("Pane terminal tab activity marker", () => {
     expect(tabs[1]?.getAttribute("aria-selected")).toBe("false");
     expect(
       tabs[0]
-        ?.querySelector<HTMLButtonElement>(".close")
+        ?.closest(".tab")
+        ?.querySelector<HTMLButtonElement>(":scope > .close")
         ?.getAttribute("aria-label"),
     ).toBe("close Active");
   });

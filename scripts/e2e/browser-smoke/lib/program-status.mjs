@@ -78,7 +78,7 @@ export async function runPtyPython(ctx, tab, label, source) {
 
 export async function openProgramInspector(tab) {
   await tab.focusSubject();
-  const tabs = await tab.page.$$('div[role="tab"]');
+  const tabs = await tab.page.$$('.tab > [role="tab"]');
   const subject = await Promise.all(tabs.map(async (node) =>
     (await node.$eval(".path", (path) => path.textContent?.trim()).catch(() => null)) === tab.subject ? node : null));
   const target = subject.find(Boolean);
@@ -125,7 +125,7 @@ export function installProgramStatusRecord() {
     },
   });
   function mark() {
-    const tab = [...document.querySelectorAll('[role="tab"]')].find(
+    const tab = [...document.querySelectorAll('.tab > [role="tab"]')].find(
       (node) => node.querySelector(".path")?.textContent?.trim() === trace.subject,
     );
     if (!tab) return null;
@@ -141,7 +141,7 @@ export function installProgramStatusRecord() {
       attentionLabel: attention?.querySelector('[role="img"]')?.getAttribute("aria-label") ??
         attention?.querySelector(".activity")?.getAttribute("aria-label") ?? null,
       attentionTitle: attention?.querySelector('[role="img"]')?.getAttribute("title") ?? null,
-      tabTitle: tab.getAttribute("title"),
+      tabTitle: tab.closest(".tab").getAttribute("title"),
       ring: ring?.getAttribute("stroke-dasharray") ?? null,
       pathLength: ring?.getAttribute("pathLength") ?? null,
       shapeClass: icon?.getAttribute("class") ?? null,
@@ -192,7 +192,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
         commandError = error;
       }
       try {
-        await page.waitForFunction((target) => ![...document.querySelectorAll('div[role="tab"]')]
+        await page.waitForFunction((target) => ![...document.querySelectorAll('.tab > [role="tab"]')]
           .some((node) => node.querySelector(".path")?.textContent?.trim() === target),
         { timeout: Math.max(1, Math.min(60_000, deadline - Date.now())) }, name);
         return;
@@ -209,7 +209,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
     for (const backend of ["xterm", "ghostty"]) {
       if (backend === "ghostty") {
         // Preferences refresh in the live page; a reload can restore closed tabs from a pending save.
-        const stale = await page.evaluate((names) => [...document.querySelectorAll('div[role="tab"]')]
+        const stale = await page.evaluate((names) => [...document.querySelectorAll('.tab > [role="tab"]')]
           .map((node) => node.querySelector(".path")?.textContent?.trim())
           .filter((name) => names.includes(name)), [`Status${slug}xtermS`, `Status${slug}xtermF`]);
         assert.deepEqual(stale, [], "xterm tabs closed before changing backend");
@@ -273,11 +273,11 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
             throw new Error(`${backend} ${label} absent; last=${JSON.stringify(latest)}`);
           },
           async focus(name) {
-            const tabs = await page.$$('div[role="tab"]');
+            const tabs = await page.$$('.tab > [role="tab"]');
             for (const tab of tabs) {
               if (await tab.$eval(".path", (node) => node.textContent?.trim()).catch(() => null) === name) {
                 await tab.click();
-                await page.waitForFunction((target) => [...document.querySelectorAll('div[role="tab"]')].some(
+                await page.waitForFunction((target) => [...document.querySelectorAll('.tab > [role="tab"]')].some(
                   (node) => node.querySelector(".path")?.textContent?.trim() === target &&
                     node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, name);
                 return;

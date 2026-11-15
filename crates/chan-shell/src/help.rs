@@ -1699,11 +1699,11 @@ submit.
 CHAN_AGENT is read from the TARGET session's spawn environment
 (it overrides the command sniff there); CHAN_MODE is read by
 nothing. Chord templates resolve where the derivation runs, in
-the SERVER's environment: env CHAN_SUBMIT_<AGENT>, then the
-server's <config>/chan/submit.toml, then the built-in default. A
-CHAN_SUBMIT_* value in the WRITER's environment has no effect.
-Discover a target's agent with cs terminal list (the agent
-column, null/- for a shell session).
+the SERVER's environment: env CHAN_SUBMIT_<AGENT>, then submit.toml
+in the server's chan home (CHAN_HOME, default ~/.chan), then the
+built-in default. A CHAN_SUBMIT_* value in the WRITER's environment
+has no effect. Discover a target's agent with cs terminal list
+(the agent column, null/- for a shell session).
 "#;
 
 /// `cs terminal write` examples, side effects, and caveats.

@@ -36,6 +36,7 @@ import {
   refreshTree,
   refreshWorkspace,
   scheduleSessionSave,
+  teardown,
 } from "../state/store.svelte";
 
 class TestResizeObserver {
@@ -162,6 +163,7 @@ describe("a File-Browser inspector resize", () => {
       const written = [...params.values()].find((v) => v.includes('"iw"'));
       expect(written, "the layout in the hash carries the width").toContain(`"iw":${before + 60}`);
     } finally {
+      teardown();
       uninstallDemoWorkspace();
       timers.release();
     }
@@ -198,6 +200,7 @@ describe("the File-Browser tab's own view state", () => {
       await settle();
       expect(paneWidths.browser, "the shared width is not the drag target").toBe(shared);
     } finally {
+      teardown();
       uninstallDemoWorkspace();
       timers.release();
     }
@@ -228,6 +231,7 @@ describe("the File-Browser tab's own view state", () => {
       const params = new URLSearchParams(window.location.hash.slice(1));
       expect([...params.values()].some((v) => v.includes('"notes"')), "the layout in the hash").toBe(true);
     } finally {
+      teardown();
       uninstallDemoWorkspace();
       timers.release();
     }

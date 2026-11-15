@@ -1,0 +1,51 @@
+{
+  "engine": "2.52.6",
+  "arms": [
+    {
+      "arm": "select-live",
+      "kind": "live",
+      "operation": "select",
+      "status": "fault",
+      "error": "select-live: action changed the wrong tabs, sessions or dialog"
+    },
+    {
+      "arm": "select-file",
+      "kind": "file",
+      "operation": "select",
+      "status": "fault",
+      "error": "select-file: action changed the wrong tabs, sessions or dialog"
+    },
+    {
+      "arm": "select-ended",
+      "kind": "ended",
+      "operation": "select",
+      "status": "fault",
+      "error": "select-ended: action changed the wrong tabs, sessions or dialog"
+    },
+    {
+      "arm": "close-live",
+      "kind": "live",
+      "operation": "close",
+      "status": "unavailable",
+      "error": "close-live-action: wanted exactly one showing accessible target"
+    },
+    {
+      "arm": "close-file",
+      "kind": "file",
+      "operation": "close",
+      "status": "unavailable",
+      "error": "close-file-action: wanted exactly one showing accessible target"
+    },
+    {
+      "arm": "close-ended",
+      "kind": "ended",
+      "operation": "close",
+      "status": "unavailable",
+      "error": "close-ended-action: wanted exactly one showing accessible target"
+    }
+  ],
+  "errors": [],
+  "started": "2026-11-15T07:11:27.322Z",
+  "finished": "2026-11-15T07:11:58.223Z",
+  "exit": 2
+}

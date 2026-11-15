@@ -188,8 +188,7 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
               depth: number;
               gated?: true;
             }) => void;
-            onNodes?: (n: GraphViewNode[], view: GraphView) => void;
-            onEdges?: (e: GraphViewEdge[], view: GraphView) => void;
+            onView?: (view: GraphView) => void;
           } = {},
         ) => {
           graphServer.graphStreamCalls += 1;
@@ -203,11 +202,9 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
             depth: 6,
             ...(graphServer.gated ? { gated: true as const } : {}),
           });
-          // One batch of each, with the view accumulated so far beside it,
-          // as graphStream passes them.
+          // One animation frame publishes the accumulated batches.
           const { nodes, edges } = graphServer.view;
-          opts.onNodes?.(nodes, { nodes: [...nodes], edges: [] });
-          opts.onEdges?.(edges, { nodes: [...nodes], edges: [...edges] });
+          opts.onView?.({ nodes: [...nodes], edges: [...edges] });
           return graphServer.view;
         },
       ),

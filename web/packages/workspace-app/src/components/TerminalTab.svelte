@@ -254,12 +254,10 @@
     focused: boolean;
   } = $props();
 
-  // A survey is modal over this terminal, and the Computers launcher shown
-  // over the window holds the keyboard in its own webview: a refocus under
-  // either would take it (refocusRefused). Centralizing the guard keeps
-  // every refocus path out, the mount and the pane focus included; once the
-  // survey clears or the launcher hides, the same calls legitimately restore
-  // the terminal.
+  // Modal dialogs, a survey over this terminal and the Computers launcher
+  // own the keyboard. Centralizing their guard keeps every refocus path
+  // from taking it, the mount and pane focus included; once those owners
+  // release it, the same calls legitimately restore the terminal.
   function focusTerminal(): void {
     if (refocusRefused(tab.id)) return;
     term?.focus();
@@ -1010,7 +1008,7 @@
       ) {
         owner.blur();
       }
-      // focusTerminal carries the remaining survey-overlay ownership guard.
+      // focusTerminal carries the remaining dialog and survey ownership guards.
       focusTerminal();
     });
   }
@@ -1247,12 +1245,8 @@
         fontSize: rendererFontSize,
         ghostty: ghosttyInstance,
         scrollback: scrollbackLines,
-        // Ghostty's default 100ms smooth scroll keeps a private animation
-        // target that scrollToBottom() (called on every write away from
-        // the bottom) never syncs; a write interleaved with a gesture then
-        // resumes toward the stale target. Zero makes every viewport move
-        // synchronous, matching xterm.js, so the controller's write-side
-        // restore is the final word.
+        // Synchronous scrolling matches xterm.js and lets calibrated pixel
+        // gestures accumulate directly in the widget's fractional viewport.
         smoothScrollDuration: 0,
         theme: terminalTheme(),
       });
@@ -1303,8 +1297,8 @@
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
       ghosttyStatusGuard = new GhosttyStatusGuard();
-      // The viewport controller owns PTY-write reconciliation and the
-      // calibrated macOS pixel-scroll claim for this terminal instance.
+      // The widget owns output following; the adapter calibrates macOS
+      // pixel travel and gives find the current view.
       const viewport = new GhosttyViewportController(ghosttyTerm, {
         os: currentOS,
         hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),

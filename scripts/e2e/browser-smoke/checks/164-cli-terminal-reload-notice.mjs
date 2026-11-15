@@ -355,7 +355,7 @@ async function openHeldSessionTab(ctx, page, windowId, name, mode, details) {
 async function closeNamedSessions(ctx, page, windowId, name) {
   // Closing the UI tab cancels pending attachment even before its session reaches the roster, and unmounting stops its socket from redialing.
   for (;;) {
-    const handle = await page.evaluateHandle((name) => [...document.querySelectorAll('[role="tablist"] [role="tab"]')].find((tab) => {
+    const handle = await page.evaluateHandle((name) => [...document.querySelectorAll('[role="tablist"] .tab > [role="tab"]')].map((tab) => tab.closest(".tab")).find((tab) => {
       const title = tab.getAttribute("title") ?? "";
       return title === name || title.startsWith(`${name}: `) || title.startsWith(`${name}-`);
     }) ?? null, name);

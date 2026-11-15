@@ -356,6 +356,26 @@ describe("focus when the launcher closes", () => {
     control.remove();
   });
 
+  test("a run that settles while a modal temporarily leaves focus on the body moves no focus", async () => {
+    const target = await openFromOrigin();
+    await runFromLauncher(target, "Wait on window");
+    void uiPrompt("Name");
+    await flush();
+    const field = document.querySelector<HTMLInputElement>('[role="dialog"][aria-modal="true"] input')!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(field));
+    field.blur();
+    expect(document.activeElement).toBe(document.body);
+    const pulses = tabFocusPulse.value;
+    const focus = vi.spyOn(origin, "focus");
+
+    held!.resolve();
+    await flush();
+
+    expect(promptState.open, "the modal still owns the keyboard").toBe(true);
+    expect(focus, "the completed run does not restore its opener under the modal").not.toHaveBeenCalled();
+    expect(tabFocusPulse.value).toBe(pulses);
+  });
+
   test("a run that settles under the Computers launcher shown over the window moves no focus", async () => {
     const target = await openFromOrigin();
     const pulses = tabFocusPulse.value;

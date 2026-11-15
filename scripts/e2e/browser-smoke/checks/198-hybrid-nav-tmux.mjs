@@ -23,9 +23,11 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchWindows, goto, killChild, openRow, poll, spawnDevserver, wait } from "../lib/launcher-devserver.mjs";
+import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
 const SOCKET = "chan-smoke-198";
 const SESSION = "smoke198";
+const TERMINAL_SCREEN = Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", ");
 /// Long enough for a request, tmux's answer and the page's apply.
 const SETTLE_MS = 2_000;
 
@@ -68,19 +70,19 @@ async function popupFrom(page, action, label) {
 /// What the tmux page shows: Hybrid Nav, its stale warning and previews, each
 /// pane's side and whether its active terminal has a box, and the cheatsheet.
 const pageState = (page) =>
-  page.evaluate(() => ({
+  page.evaluate((selector) => ({
     paneMode: !!document.querySelector(".app.pane-mode"),
     stale: !!document.querySelector(".pane-mode-stale-warning"),
     previews: [...document.querySelectorAll(".pane-mode-preview")].map((el) => el.textContent.replace(/\s+/g, " ").trim()),
     sides: [...document.querySelectorAll(".pane-card-inner")].map((el) => el.getAttribute("data-side-label")),
     panes: [...document.querySelectorAll(".pane")].map((pane) => {
-      const box = pane.querySelector(".terminal-tab.active .terminal.xterm .xterm-screen, .terminal-tab.active .terminal-host canvas")?.getBoundingClientRect();
+      const box = pane.querySelector(selector)?.getBoundingClientRect();
       return !!box && box.width > 0 && box.height > 0;
     }),
     terminals: document.querySelectorAll(".terminal-tab").length,
     help: [...document.querySelectorAll(".pane-mode-help [aria-label]")].map((el) => el.getAttribute("aria-label")),
     status: document.querySelector(".status-msg")?.textContent ?? null,
-  }));
+  }), TERMINAL_SCREEN);
 
 /// Drag the page's one vertical divider `dx` pixels with the mouse; answers
 /// its value (the left pane's share, in percent) before and after.
@@ -133,9 +135,8 @@ export default {
       await launcher.waitForSelector('button[aria-label="New local terminal"]', { timeout: 30_000 });
       const source = await popupFrom(launcher, () => launcher.click('button[aria-label="New local terminal"]'), "New local terminal");
       pages.push(source);
-      const screen = ".terminal-tab.active .terminal.xterm .xterm-screen, .terminal-tab.active .terminal-host canvas";
-      await source.waitForSelector(screen, { visible: true, timeout: 60_000 });
-      await source.click(screen);
+      await source.waitForSelector(TERMINAL_SCREEN, { visible: true, timeout: 60_000 });
+      await source.click(TERMINAL_SCREEN);
       step("tmux -CC");
       await source.keyboard.type(`tmux -L ${SOCKET} -f /dev/null -CC new-session -s ${SESSION}\n`);
       const tmuxWindow = await poll("the tmux window's record", async () => {

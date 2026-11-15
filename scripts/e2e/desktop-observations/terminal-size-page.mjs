@@ -1,13 +1,13 @@
 // Used only at driver polls in the control arm: no socket wrapper,
 // per-send layout read or interval sampler runs in the page.
-export function unobservedViews({ name, tabId }) {
+export function unobservedViews({ name, tabId, surfaces }) {
   return [...document.querySelectorAll("[data-terminal-tab-id]")].flatMap((tab) => {
     const id = tab.getAttribute("data-terminal-tab-id");
     if (id !== tabId) return [];
     const host = tab.querySelector(".terminal-host");
     const pane = tab.closest(".pane");
-    const xterm = host?.querySelector(".xterm-screen");
-    const screen = xterm ?? host?.querySelector("canvas");
+    const xterm = tab.querySelector(surfaces.xterm);
+    const screen = xterm ?? tab.querySelector(surfaces.ghostty);
     const box = (element) => {
       if (!element) return null;
       const { x, y, width, height } = element.getBoundingClientRect();
@@ -22,7 +22,7 @@ export function unobservedViews({ name, tabId }) {
 
 // Installed before the app. Retain only terminal identity and geometry, never
 // the socket URL, spawn environment, input bytes or authentication fields.
-export function installSizeObserver() {
+export function installSizeObserver(surfaces) {
   const NativeSocket = window.WebSocket;
   const sockets = new Map();
   const records = [];
@@ -39,8 +39,8 @@ export function installSizeObserver() {
     const tab = document.querySelector(`[data-terminal-tab-id="${CSS.escape(entry.tab)}"]`);
     const pane = tab?.closest(".pane");
     const host = tab?.querySelector(".terminal-host");
-    const screen = host?.querySelector(".xterm-screen") ?? host?.querySelector("canvas");
-    const xterm = host?.querySelector(".xterm-screen");
+    const xterm = tab?.querySelector(surfaces.xterm);
+    const screen = xterm ?? tab?.querySelector(surfaces.ghostty);
     const scrollbar = host?.querySelector(".xterm .scrollbar.vertical");
     const style = host ? getComputedStyle(host) : null;
     const padding = style ? {

@@ -307,7 +307,7 @@ describe("ghostty fractional and queued viewport movement", () => {
   test("output advances the live screen and retains a half-row scroll fraction", async () => {
     const { term, socket } = await scrolled("ghostty");
     if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
-    term.scrollToLine(0.5);
+    term.viewport.scrollTo(0.5);
     const scrollback = term.getScrollbackLength();
     await output(socket, "background output\r\n");
     expect(term.getScrollbackLength()).toBe(scrollback + 1);
@@ -323,7 +323,7 @@ describe("ghostty fractional and queued viewport movement", () => {
   ] as const)("%s clears a half-row scroll fraction before sending", async (kind, bytes) => {
     const { term, socket, host, target, inputHistory } = await scrolled("ghostty");
     if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
-    term.scrollToLine(0.5);
+    term.viewport.scrollTo(0.5);
     expect(term.getViewportY()).toBe(0.5);
     if (kind === "typed text") key(host, { key: "a", code: "KeyA", keyCode: 65 });
     if (kind === "arrow") key(host, { key: "ArrowUp", code: "ArrowUp", keyCode: 38 });
