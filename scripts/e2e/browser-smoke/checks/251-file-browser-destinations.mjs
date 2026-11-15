@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileRow, navigateFiles, selectFile } from "../lib/files.mjs";
+import { request, token } from "../lib/drafts.mjs";
 import { fetchWindows, goto, killChild, mask, poll, spawnDevserver } from "../lib/launcher-devserver.mjs";
 
 const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
@@ -45,8 +46,36 @@ async function clickMenuRow(page, menu, title) {
   await handle.dispose();
 }
 
-async function surfaceAction(page, scope, title) {
-  await page.click(`${scope} .browser-toolbar button[aria-label="Menu"]`);
+async function surfaceAction(page, scope, title, observations) {
+  const selector = `${scope} .browser-toolbar button[aria-label="Menu"]`;
+  const hit = () => page.$eval(selector, (button) => {
+    const rect = button.getBoundingClientRect();
+    const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      button: button.contains(target),
+      status: Boolean(target?.closest(".app-statusbar")),
+      tag: target?.tagName ?? null,
+      label: target?.closest("button")?.getAttribute("aria-label") ?? null,
+    };
+  });
+  const before = await hit();
+  observations.push({ kind: "surface-menu-hit", scope, title, before });
+  // The collapsed status chip still covers the rightmost toolbar button.
+  // Close its sections through their control before the native menu click.
+  if (before.status) {
+    const close = await page.$('.app-statusbar button[aria-label="close all status"]');
+    if (close) { await close.click(); await close.dispose(); }
+    await page.waitForFunction((selector) => {
+      const button = document.querySelector(selector);
+      if (!button) return false;
+      const rect = button.getBoundingClientRect();
+      return button.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+    }, { timeout: 15_000 }, selector);
+  }
+  const after = await hit();
+  observations.push({ kind: "surface-menu-ready", scope, title, after });
+  assert.equal(after.button, true, `${scope}: Menu receives its native click`);
+  await page.click(selector);
   await clickMenuRow(page, '.hamburger-menu[role="menu"]', title);
 }
 
@@ -83,15 +112,42 @@ async function closeDetails(page) {
   }
 }
 
-async function setDock(page, side, wanted) {
+async function readDocks(page, authToken) {
+  return page.evaluate(async (authToken) => {
+    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
+    const headers = authToken ? { authorization: `Bearer ${authToken}` } : {};
+    const response = await fetch(`${prefix}/api/config`, { headers });
+    if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+    const config = await response.json();
+    return { revision: config.revision, docks: config.preferences.browser_side_panes };
+  }, authToken);
+}
+
+async function setDock(page, side, wanted, authToken) {
+  const current = await readDocks(page, authToken);
+  // Server-owned setup avoids an optimistic dock toggle racing a workspace
+  // snapshot. The page learns the saved preference through its own refresh.
+  await page.evaluate(async ({ authToken, current, side, wanted }) => {
+    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
+    const headers = { "content-type": "application/json" };
+    if (authToken) headers.authorization = `Bearer ${authToken}`;
+    const response = await fetch(`${prefix}/api/config`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expected_revision: current.revision,
+        preferences: { browser_side_panes: { ...current.docks, [side]: wanted } },
+      }),
+    });
+    if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status} ${await response.text()}`);
+  }, { authToken, current, side, wanted });
+  await poll(`${side} dock preference saved as ${wanted}`, async () =>
+    (await readDocks(page, authToken)).docks[side] === wanted);
   const selector = `aside[aria-label="${side} file browser"]`;
-  if (Boolean(await page.$(selector)) !== wanted) {
-    await launcher(page, `${side === "left" ? "Left" : "Right"} file browser dock`, true);
-  }
   await page.waitForSelector(selector, wanted ? { visible: true } : { hidden: true });
 }
 
-async function selectTarget(page, root, directory, view, selected) {
+async function selectTarget(page, root, directory, view, selected, authToken) {
   const path = `${directory}/${selected === "directory" ? "sub" : "anchor.txt"}`;
   const scope = view === "list" ? LIST : DOCK;
   if (view === "list") {
@@ -102,7 +158,7 @@ async function selectTarget(page, root, directory, view, selected) {
     await row.click();
     await row.dispose();
   } else {
-    await setDock(page, "left", true);
+    await setDock(page, "left", true, authToken);
     await expandParents(page, root, path);
     const row = treeRow(root, path);
     await page.waitForSelector(row, { visible: true });
@@ -140,7 +196,7 @@ async function readNew(ctx, page, label, action, expected, suffix = null) {
   return value;
 }
 
-async function upload(ctx, page, label, action, destination, observations) {
+async function upload(ctx, page, label, action, destination, observations, landings = null) {
   const source = join(ctx.outDir, `${label}.txt`);
   const contents = `upload ${label}\n`;
   writeFileSync(source, contents);
@@ -149,8 +205,9 @@ async function upload(ctx, page, label, action, destination, observations) {
   const result = await opened;
   if (result.error) throw result.error;
   const multiple = result.chooser.isMultiple();
-  await result.chooser.accept([source]);
   const target = join(destination, basename(source));
+  landings?.push(target);
+  await result.chooser.accept([source]);
   await poll(`${label}: upload reaches ${target}`, () => existsSync(target) && readFileSync(target, "utf8") === contents);
   await settleUpload(page, basename(source), label, observations);
   observations.push({ label, kind: "upload", target, multiple });
@@ -197,13 +254,11 @@ export default {
   async run(ctx) {
     const { page } = ctx;
     const prefix = `destinations-${Date.now()}`;
-    const directory = `${prefix}/target`;
+    const directory = `${prefix}/destination`;
     const fixture = join(ctx.workspaceDir, prefix);
     const observations = [];
-    const originalDocks = {
-      left: Boolean(await page.$('aside[aria-label="left file browser"]')),
-      right: Boolean(await page.$('aside[aria-label="right file browser"]')),
-    };
+    const authToken = token(ctx);
+    const { docks: originalDocks } = await readDocks(page, authToken);
     const originalStatusCollapsed = Boolean(await page.$('.app-statusbar.collapsed'));
     let standalone = null;
     let standalonePage = null;
@@ -214,9 +269,9 @@ export default {
     const standaloneLanded = [];
     const workspaceLanded = [];
     try {
-      mkdirSync(join(fixture, "target", "sub"), { recursive: true });
+      mkdirSync(join(ctx.workspaceDir, directory, "sub"), { recursive: true });
       mkdirSync(join(fixture, "sources"));
-      writeFileSync(join(fixture, "target", "anchor.txt"), "selected file\n");
+      writeFileSync(join(ctx.workspaceDir, directory, "anchor.txt"), "selected file\n");
       for (const view of ["list", "tree"]) {
         for (const selected of ["none", "directory", "file"]) {
           for (const route of ["row", "launcher"]) {
@@ -225,11 +280,20 @@ export default {
           }
         }
       }
+      // Parent listings omit configured build/dependency directories. The
+      // fixture must remain visible when a different list view is active.
+      const parentListing = await request(ctx, `/api/fs?dir=${encodeURIComponent(prefix)}`);
+      const directListing = await request(ctx, `/api/fs?dir=${encodeURIComponent(directory)}`);
+      observations.push({ label: "fixture-listings", directory, parent: parentListing, direct: directListing });
+      assert.equal(parentListing.status, 200, "fixture parent listing is available");
+      assert.equal(directListing.status, 200, "fixture destination listing is available");
+      assert.ok(Array.isArray(parentListing.json) && parentListing.json.some((entry) => entry.path === directory && entry.is_dir),
+        "fixture destination appears in its parent's API listing");
       await page.setViewport({ width: 1440, height: 1000 });
       await page.reload({ waitUntil: "domcontentloaded" });
       await page.waitForSelector(".pane");
-      await setDock(page, "left", false);
-      await setDock(page, "right", false);
+      await setDock(page, "left", false, authToken);
+      await setDock(page, "right", false, authToken);
       assert.equal(await page.$(".browser"), null, "fresh window has no file browser surface");
       observations.push({ label: "no-surface-new", value: await readNew(ctx, page, "no-surface", () => launcher(page, NEW), "") });
 
@@ -238,12 +302,11 @@ export default {
           const dest = view === "list" ? directory : selected === "none" ? "" : selected === "directory" ? `${directory}/sub` : directory;
           for (const route of ["row", "launcher"]) {
             const label = `${view}-${selected}-${route}`;
-            let scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected);
-            const action = (title) => route === "launcher" ? launcher(page, title) : surfaceAction(page, scope, title);
+            let scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected, authToken);
+            const action = (title) => route === "launcher" ? launcher(page, title) : surfaceAction(page, scope, title, observations);
             observations.push({ label, kind: "new", value: await readNew(ctx, page, label, () => action(NEW), dest) });
-            scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected);
-            const uploaded = await upload(ctx, page, `${prefix}-${label}-upload`, () => action("Upload"), join(ctx.workspaceDir, dest), observations);
-            workspaceLanded.push(uploaded);
+            scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected, authToken);
+            const uploaded = await upload(ctx, page, `${prefix}-${label}-upload`, () => action("Upload"), join(ctx.workspaceDir, dest), observations, workspaceLanded);
             if (view === "tree" && selected === "directory") {
               await page.waitForSelector(treeRow(ctx.workspaceDir, `${dest}/${basename(uploaded)}`), { visible: true });
             }
@@ -252,7 +315,7 @@ export default {
             const sourcePath = `${prefix}/sources/${sourceName}`;
             await selectFile(page, sourcePath);
             await launcher(page, "Copy");
-            scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected);
+            scope = await selectTarget(page, ctx.workspaceDir, directory, view, selected, authToken);
             if (route === "launcher") await launcher(page, "Paste");
             else if (selected === "none") {
               await page.keyboard.down("Control");
@@ -278,8 +341,8 @@ export default {
         }
       }
 
-      await selectTarget(page, ctx.workspaceDir, directory, "tree", "directory");
-      await readNew(ctx, page, "nested-directory", () => surfaceAction(page, DOCK, NEW), `${directory}/sub`, "nested/deeper/");
+      await selectTarget(page, ctx.workspaceDir, directory, "tree", "directory", authToken);
+      await readNew(ctx, page, "nested-directory", () => surfaceAction(page, DOCK, NEW, observations), `${directory}/sub`, "nested/deeper/");
       await poll("nested directory is created", () => existsSync(join(ctx.workspaceDir, directory, "sub/nested/deeper")));
       await page.waitForSelector(treeRow(ctx.workspaceDir, `${directory}/sub/nested/deeper`), { visible: true });
       for (const path of [prefix, directory, `${directory}/sub`, `${directory}/sub/nested`]) {
@@ -289,7 +352,7 @@ export default {
       await ctx.shot("nested-directory-landed");
 
       // Entry Upload keeps its directory/replacement meaning even in a list.
-      await selectTarget(page, ctx.workspaceDir, directory, "list", "directory");
+      await selectTarget(page, ctx.workspaceDir, directory, "list", "directory", authToken);
       let row = await fileRow(page, "sub");
       await upload(ctx, page, "entry-directory-upload", () => entryAction(page, row, "Upload"), join(ctx.workspaceDir, directory, "sub"), observations);
       await row.dispose();
@@ -300,7 +363,7 @@ export default {
         await clickMenuRow(page, `${details} .action-menu`, "Upload");
       }, join(ctx.workspaceDir, directory, "sub"), observations);
       await closeDetails(page);
-      await selectTarget(page, ctx.workspaceDir, directory, "list", "file");
+      await selectTarget(page, ctx.workspaceDir, directory, "list", "file", authToken);
       row = await fileRow(page, "anchor.txt");
       const replacement = join(ctx.outDir, `${prefix}-replacement.txt`);
       writeFileSync(replacement, "replacement contents\n");
@@ -347,18 +410,30 @@ export default {
       // The catalog's browser commands require an active Files tab even when
       // their recorded target is a dock. Keep that tab active behind the dock.
       await navigateFiles(standalonePage, homeWire);
-      await setDock(standalonePage, "left", true);
+      // Standalone config refreshes do not mirror dock visibility. Its native
+      // command sets the local state as well as persisting the preference.
+      if (!await standalonePage.$('aside[aria-label="left file browser"]')) {
+        await launcher(standalonePage, "Left file browser dock", true);
+      }
+      await poll("standalone left dock preference saved", async () =>
+        (await readDocks(standalonePage, terminal.token)).docks.left === true);
+      await standalonePage.waitForSelector(DOCK, { visible: true });
       for (const route of ["row", "launcher"]) {
         const label = `standalone-empty-${route}`;
         await expandParents(standalonePage, "/", `${homeWire}/${prefix}/anchor.txt`);
-        await standalonePage.click(`${treeRow("/", `${homeWire}/${prefix}/anchor.txt`)} .row-icon`);
+        // Expansion is visible before its asynchronous child listing lands.
+        const anchor = `${treeRow("/", `${homeWire}/${prefix}/anchor.txt`)} .row-icon`;
+        await standalonePage.waitForSelector(anchor, { visible: true });
+        await standalonePage.click(anchor);
         await launcher(standalonePage, "Clear selection");
         await standalonePage.focus(`${DOCK} .tree`);
-        const action = (title) => route === "launcher" ? launcher(standalonePage, title) : surfaceAction(standalonePage, DOCK, title);
+        const action = (title) => route === "launcher" ? launcher(standalonePage, title) : surfaceAction(standalonePage, DOCK, title, observations);
         observations.push({ label, kind: "new", value: await readNew(ctx, standalonePage, label, () => action(NEW), homeWire) });
-        standaloneLanded.push(await upload(ctx, standalonePage, `${prefix}-${label}-upload`, () => action("Upload"), home, observations));
+        await upload(ctx, standalonePage, `${prefix}-${label}-upload`, () => action("Upload"), home, observations, standaloneLanded);
         const sourceName = `${prefix}-${route}-paste.txt`;
-        await standalonePage.click(`${treeRow("/", `${homeWire}/${prefix}/${sourceName}`)} .row-icon`);
+        const source = `${treeRow("/", `${homeWire}/${prefix}/${sourceName}`)} .row-icon`;
+        await standalonePage.waitForSelector(source, { visible: true });
+        await standalonePage.click(source);
         await launcher(standalonePage, "Copy");
         await launcher(standalonePage, "Clear selection");
         await standalonePage.focus(`${DOCK} .tree`);
@@ -371,7 +446,7 @@ export default {
         const landed = join(home, sourceName);
         standaloneLanded.push(landed);
         await poll(`${label}: Paste reaches home`, () => existsSync(landed) && readFileSync(landed, "utf8") === `standalone ${route}\n`);
-        await selectedPath(standalonePage, DOCK, landed);
+        await selectedPath(standalonePage, DOCK, `${homeWire}/${sourceName}`);
         observations.push({ label, kind: "paste", route: route === "row" ? "keyboard" : route, target: landed });
       }
       await ctx.shot("standalone-empty-tree", standalonePage);
@@ -397,8 +472,8 @@ export default {
       for (const path of workspaceLanded) await cleanup("remove workspace landing", () => rmSync(path, { force: true }));
       await cleanup("remove workspace fixture", () => rmSync(fixture, { recursive: true, force: true }));
       await cleanup("dismiss active overlay", () => page.keyboard.press("Escape"));
-      await cleanup("restore left dock", () => setDock(page, "left", originalDocks.left));
-      await cleanup("restore right dock", () => setDock(page, "right", originalDocks.right));
+      await cleanup("restore left dock", () => setDock(page, "left", originalDocks.left, authToken));
+      await cleanup("restore right dock", () => setDock(page, "right", originalDocks.right, authToken));
       await cleanup("restore status presentation", async () => {
         const control = await page.$(`.app-statusbar button[title="${originalStatusCollapsed ? "hide status" : "show status"}"]`);
         if (control) { await control.click(); await control.dispose(); }
