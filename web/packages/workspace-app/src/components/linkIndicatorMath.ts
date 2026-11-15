@@ -5,8 +5,16 @@ import type { LinkState } from "../state/linkHealth.svelte";
 /// while either placement surfaces an unhealthy link on any window.
 export type LinkIndicatorPlacement = "tab-bar" | "status";
 
-/// The tab-bar label reserves enough character width for "reconnecting".
-export const LINK_INDICATOR_LABEL_CH = 13;
+/// The tab-bar reserves a stable width within each labeled link state.
+export const LINK_INDICATOR_SLOW_LABEL_CH = 7;
+export const LINK_INDICATOR_STALLED_DOWN_LABEL_CH = 12;
+
+/// Recovering `slow` keeps its slot so jitter cannot resize the tab strip.
+export function linkIndicatorLabelCh(state: LinkState): number {
+  return state === "slow" ? LINK_INDICATOR_SLOW_LABEL_CH
+    : state === "stalled" || state === "down" ? LINK_INDICATOR_STALLED_DOWN_LABEL_CH
+    : 0;
+}
 
 /// Whether the indicator occupies space in its parent.
 export function linkIndicatorShown(placement: LinkIndicatorPlacement, state: LinkState, remote: boolean): boolean {

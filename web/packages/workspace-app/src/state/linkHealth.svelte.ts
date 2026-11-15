@@ -7,6 +7,7 @@
 import { windowLibraryId, type WsStatus } from "../api/client";
 import { isTauriDesktop } from "../api/desktop";
 import {
+  LINK_OK_RTT_MS,
   createLinkProbe,
   type LinkProbe,
   type LinkProbeState,
@@ -125,16 +126,20 @@ export function formatLinkMs(ms: number): string {
 }
 
 /// A link state in words, empty for the states that need none. A `slow` link
-/// is named by its round-trip time, which is at least as long as the ping now
-/// waiting has waited; a `stalled` one by that wait, in whole seconds.
+/// is named by its round-trip time or pending wait only while either is at or above
+/// the recovery threshold; a `stalled` one by that wait, in whole seconds.
 export function linkLabel(state: LinkState, rttMs: number | null, waitMs: number): string {
   switch (state) {
     case "down":
       return "reconnecting";
     case "stalled":
       return `stalled ${Math.floor(waitMs / 1000)} s`;
-    case "slow":
-      return formatLinkMs(Math.max(rttMs ?? 0, waitMs));
+    case "slow": {
+      const ms = Math.max(rttMs ?? 0, waitMs);
+      return ms < LINK_OK_RTT_MS
+        ? ""
+        : formatLinkMs(ms);
+    }
     default:
       return "";
   }

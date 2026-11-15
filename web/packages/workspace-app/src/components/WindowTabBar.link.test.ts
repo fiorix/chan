@@ -17,7 +17,6 @@ import { NO_TITLEBAR_CHROME, windowTabBar } from "../state/windowTabBar.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { overlayStack, ui } from "../state/store.svelte";
 import { closePaneTree, openPaneTree, paneTree } from "../state/paneTree.svelte";
-import { LINK_INDICATOR_LABEL_CH } from "./linkIndicatorMath";
 
 type DesktopWindow = Window & { __TAURI_INTERNALS__?: unknown };
 
@@ -81,6 +80,16 @@ test("local bar is quiet while healthy and shows a slow link", async () => {
   expect(bar.querySelector(".link-indicator")?.textContent).toContain("850 ms");
 });
 
+test("recovering link keeps an empty 7ch label slot in the bar", async () => {
+  linkHealth.state = "slow";
+  linkHealth.rttMs = 26;
+  const bar = await render();
+  const button = bar.querySelector<HTMLButtonElement>(".link-indicator")!;
+  expect(button.querySelector(".glyph")).not.toBeNull();
+  expect(button.querySelector(".label")?.textContent).toBe("");
+  expect(button.style.getPropertyValue("--link-indicator-label-width")).toBe("7ch");
+});
+
 test("Windows controls stay in their layer to the right of the indicator and inset", async () => {
   windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true };
   const bar = await render();
@@ -119,7 +128,7 @@ test("reconnecting cover keeps one indicator and a title in the draggable band",
   expect(bar.querySelector(".covered-band")?.textContent).toContain("Work Window 2");
   expect(bar.querySelector<HTMLElement>(".covered-band")?.style.left).toBe("78px");
   expect(bar.querySelector<HTMLElement>(".covered-band")?.style.right).toBe("calc(50px + var(--link-indicator-label-width))");
-  expect(bar.querySelector<HTMLElement>(".covered-band")?.style.getPropertyValue("--link-indicator-label-width")).toBe(`${LINK_INDICATOR_LABEL_CH}ch`);
+  expect(bar.querySelector<HTMLElement>(".covered-band")?.style.getPropertyValue("--link-indicator-label-width")).toBe("12ch");
   expect(bar.querySelectorAll(".link-indicator")).toHaveLength(1);
   expect(bar.querySelector(".link-indicator")?.textContent).toContain("reconnecting");
 });

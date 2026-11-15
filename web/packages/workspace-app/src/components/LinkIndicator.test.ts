@@ -11,7 +11,6 @@ vi.mock("../state/linkHealth.svelte", async (importOriginal) => ({
 }));
 
 import LinkIndicator from "./LinkIndicator.svelte";
-import { LINK_INDICATOR_LABEL_CH } from "./linkIndicatorMath";
 import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
 import { setCoverBlocking } from "../state/store.svelte";
 
@@ -89,6 +88,17 @@ test("remote unhealthy faces show a label and accessible state", async () => {
   expect(button()?.getAttribute("aria-label")).toBe("Connection reconnecting");
 });
 
+test.each(["tab-bar", "status"] as const)("%s recovering face keeps only the warning glyph and names recovery", async (placement) => {
+  await state("slow", 26);
+  await render(placement);
+  expect(button()?.getAttribute("data-state")).toBe("slow");
+  if (placement === "tab-bar") expect(button()?.querySelector(".label")?.textContent).toBe("");
+  else expect(button()?.querySelector(".label")).toBeNull();
+  expect(button()?.textContent?.trim()).toBe("");
+  expect(button()?.title).toBe("Connection recovering");
+  expect(button()?.getAttribute("aria-label")).toBe("Connection recovering");
+});
+
 test("local tab bar is absent while healthy or unknown and appears when slow", async () => {
   host.remote = false;
   await render();
@@ -119,16 +129,78 @@ test("placement marks the tab-bar label for reserved width and leaves status nat
   expect(button()?.dataset.placement).toBe("status");
 });
 
-test("tab-bar label reserves 13ch for reconnecting", () => {
+test("only the tab-bar label reads its per-state reserved width", () => {
   // jsdom lays nothing out, so the tab-bar label's fixed width is a source contract.
   const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
-  expect(LINK_INDICATOR_LABEL_CH).toBe(13);
   expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*var\(--link-indicator-label-width\);/);
+  expect(source).not.toMatch(/\.link-indicator\.status\s+\.label\s*\{[^}]*\bmin-width:/);
 });
 
-test("tab-bar button carries the shared character width used by its label", async () => {
+test.each([
+  ["slow", 850, 0, "7ch"],
+  ["stalled", 850, 8_100, "12ch"],
+  ["down", 850, 0, "12ch"],
+] as const)("%s tab-bar label carries its state reserve", async (next, rtt, wait, width) => {
+  await state(next, rtt, wait);
   await render();
-  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(`${LINK_INDICATOR_LABEL_CH}ch`);
+  expect(button()?.querySelector(".label")).not.toBeNull();
+  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(width);
+});
+
+test.each([
+  ["unknown", null],
+  ["ok", null],
+] as const)("%s tab-bar face without a label carries no width reserve", async (next, rtt) => {
+  await state(next, rtt);
+  await render();
+  expect(button()?.querySelector(".label")).toBeNull();
+  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+});
+
+test("recovering slow keeps an empty tab-bar label span and its 7ch reserve", async () => {
+  await state("slow", 26);
+  await render();
+  expect(button()?.querySelector(".label")?.textContent).toBe("");
+  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("7ch");
+});
+
+test("slow jitter around 300 ms changes the text without changing the tab-bar reserve", async () => {
+  await render();
+  for (const rtt of [299, 301, 298, 850]) {
+    await state("slow", rtt);
+    expect(button()?.querySelector(".label")?.textContent).toBe(rtt < 300 ? "" : `${rtt} ms`);
+    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("7ch");
+  }
+});
+
+test("status placement keeps natural label width in every unhealthy state", async () => {
+  await render("status");
+  for (const next of ["slow", "stalled", "down"] as const) {
+    await state(next, 850, 8_100);
+    expect(button()?.querySelector(".label")).not.toBeNull();
+    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+  }
+});
+
+test("recovering status face drops its empty label span", async () => {
+  await state("slow", 26);
+  await render("status");
+  expect(button()?.querySelector(".label")).toBeNull();
+  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+});
+
+test("counting within slow and stalled keeps each tab-bar reserve stable", async () => {
+  await render();
+  for (const [next, rtt, wait, width] of [
+    ["slow", 850, 0, "7ch"],
+    ["slow", 12_400, 0, "7ch"],
+    ["stalled", 850, 9_100, "12ch"],
+    ["stalled", 850, 10_100, "12ch"],
+    ["stalled", 850, 44_100, "12ch"],
+  ] as const) {
+    await state(next, rtt, wait);
+    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(width);
+  }
 });
 
 test("stalled label follows the health ticker's wait while closed", async () => {

@@ -66,6 +66,14 @@ test("link alone controls the bar for each unhealthy state and stays quiet while
   }
 });
 
+test("recovering link leaves a glyph-only status pill section", () => {
+  linkHealth.rttMs = 26;
+  state("slow");
+  render();
+  expect(section()?.querySelector(".link-indicator .glyph")).not.toBeNull();
+  expect(section()?.querySelector(".link-indicator .label")).toBeNull();
+});
+
 test("a window tab bar removes the status link section", () => {
   state("slow");
   render();

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { linkAge, linkFigures, linkIndicatorShown, linkSparkline, linkStateAge } from "./linkIndicatorMath";
+import { linkAge, linkFigures, linkIndicatorLabelCh, linkIndicatorShown, linkSparkline, linkStateAge } from "./linkIndicatorMath";
 
 for (const [placement, remote, state, expected] of [
   ["tab-bar", false, "unknown", false],
@@ -27,6 +27,16 @@ for (const [placement, remote, state, expected] of [
     expect(linkIndicatorShown(placement, state, remote)).toBe(expected);
   });
 }
+
+test.each([
+  ["slow", 7],
+  ["stalled", 12],
+  ["down", 12],
+  ["ok", 0],
+  ["unknown", 0],
+] as const)("%s reserves %s characters", (state, width) => {
+  expect(linkIndicatorLabelCh(state)).toBe(width);
+});
 
 describe("link figures", () => {
   test("uses answered samples for latest, odd median and worst", () => {
