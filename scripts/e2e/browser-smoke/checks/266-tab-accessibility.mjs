@@ -34,7 +34,7 @@ function installProbe() {
       const outer = event.target?.closest?.(".tabs .tab");
       if (!event.target?.closest?.(".tabs")) return;
       const reading = { type, trusted: event.isTrusted, key: event.key, button: event.button,
-        label: outer?.querySelector(".path")?.textContent.trim(), target: event.target.className,
+        label: outer?.querySelector(".path")?.textContent.trim(), target: event.target.className, targetIsOuter: event.target === outer,
         x: event.clientX, y: event.clientY, dropEffect: event.dataTransfer?.dropEffect };
       probe.events.push(reading);
       setTimeout(() => { reading.defaultPrevented = event.defaultPrevented; }, 0);
@@ -73,7 +73,13 @@ async function state(page) {
         const close = outer.querySelector("button.close");
         return { label: outer.querySelector(".path")?.textContent.trim(), selected: role?.getAttribute("aria-selected") === "true",
           active: outer.classList.contains("active"), closeName: close?.getAttribute("aria-label"), closeInsideRole: !!role?.contains(close),
-          rect: box(outer), labelRect: box(role), closeRect: box(close), inTitleBar: !!outer.closest(".tabs.in-bar") };
+          rect: box(outer), labelRect: box(role), closeRect: box(close), inTitleBar: !!outer.closest(".tabs.in-bar"),
+          labelFocused: document.activeElement === role, closeFocused: document.activeElement === close,
+          labelFocusVisible: !!role?.matches(":focus-visible"), closeFocusVisible: !!close?.matches(":focus-visible"),
+          labelOutlineOffset: role ? getComputedStyle(role).outlineOffset : null,
+          labelOutlineStyle: role ? getComputedStyle(role).outlineStyle : null,
+          labelOutlineWidth: role ? getComputedStyle(role).outlineWidth : null,
+          closeOpacity: close ? getComputedStyle(close).opacity : null, hovered: outer.matches(":hover") };
       }),
       dialogs: [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(showing).map((node) => ({
         name: node.getAttribute("aria-label") ?? (node.getAttribute("aria-labelledby") ?? "").split(/\s+/).map((id) => document.getElementById(id)?.textContent.trim() ?? "").join(" "),
@@ -224,8 +230,26 @@ function preserved(before, after, label, mode) {
   requireProduct(JSON.stringify(names(after)) === JSON.stringify(names(before)), `${mode} changed the tab set`);
   const selected = after.tabs.find((tab) => tab.label === label);
   requireProduct(selected?.selected && selected.active, `${mode} did not select ${label}`);
-  const menu = mode === "right" ? ["tab menu", "terminal tab settings"] : [];
+  const menu = mode === "right" || mode === "padding-right" ? ["tab menu", "terminal tab settings"] : [];
   requireProduct(after.dialogs.every((dialog) => menu.includes(dialog.name)), `${mode} opened a dialog: ${JSON.stringify(after.dialogs)}`);
+}
+
+async function paddingPoint(page, label) {
+  const handle = await element(page, label, "role");
+  try { await handle.hover(); } finally { await handle.dispose(); }
+  // Read the padding after the strip's 260 ms hover transform settles.
+  await sleep(300);
+  const tab = (await state(page)).tabs.find((row) => row.label === label);
+  assert.ok(tab?.rect && tab.labelRect, "instrument: tab and label have measured boxes");
+  const gap = tab.labelRect.x - tab.rect.x;
+  assert.ok(gap >= 2, "instrument: the tab has exposed left padding");
+  const point = { x: tab.rect.x + gap / 2, y: tab.rect.y + tab.rect.height / 2 };
+  await page.mouse.move(point.x, point.y);
+  assert.ok(await page.evaluate(({ point, label, selector }) => {
+    const target = document.elementFromPoint(point.x, point.y);
+    return target?.matches(selector) && target.querySelector(".path")?.textContent.trim() === label;
+  }, { point, label, selector: TAB }), "instrument: pointer hits the outer tab's padding, not its label or close button");
+  return point;
 }
 
 async function activation(ctx, f, kind, mode) {
@@ -254,61 +278,72 @@ async function activation(ctx, f, kind, mode) {
           for (const type of ["mousedown", "mouseup", "click"]) target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
         });
       } finally { await role.dispose(); }
-    } else if (mode === "drag") {
+    } else if (mode === "drag" || mode === "padding-drag") {
       const handle = await element(f.page, label);
       const from = await handle.boundingBox();
       await handle.dispose();
       assert.ok(from, "instrument: inner label has a pointer target");
       const control = arm.before.tabs.find((tab) => tab.label === f.labels.control).rect;
       // Stay inside the control when its insertion marker shifts the row.
-      const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
-      const target = { x: control.x + control.width / 4, y: control.y + control.height / 2 };
+      const padding = mode === "padding-drag";
+      const start = padding ? await paddingPoint(f.page, label) : { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+      const target = { x: control.x + control.width * (padding ? 0.75 : 0.25), y: control.y + control.height / 2 };
+      if (padding) assert.ok(arm.before.tabs.findIndex((tab) => tab.label === label) < arm.before.tabs.findIndex((tab) => tab.label === f.labels.control),
+        "instrument: padding drag starts before its control target and must reorder");
       arm.drag = { start, target };
       await f.page.setDragInterception(true);
       try {
-        const data = await withTimeout(f.page.mouse.drag(start, target), 15_000, "native inner-label drag");
+        const data = await withTimeout(f.page.mouse.drag(start, target), 15_000, `native ${mode}`);
         arm.drag.types = (data.items ?? []).map((item) => item.mimeType);
         assert.ok(arm.drag.types.includes("application/x-md-tab"), "instrument: the native drag carries the app's tab payload");
         await f.page.mouse.dragEnter(target, data);
         await f.page.mouse.dragOver(target, data);
-        await poll("trusted dragover accepted on the control tab", async () => f.page.evaluate(({ target, control, eventStart }) => {
+        await poll("trusted dragover accepted on the control tab", async () => f.page.evaluate(({ target, control, eventStart, padding }) => {
           const hit = document.elementFromPoint(target.x, target.y)?.closest(".tab");
           return hit?.querySelector(".path")?.textContent.trim() === control &&
-            hit.previousElementSibling?.classList.contains("drop-bar") &&
+            (padding ? hit.nextElementSibling : hit.previousElementSibling)?.classList.contains("drop-bar") &&
             window.__tab266.events.slice(eventStart).some((event) => event.type === "dragover" &&
               event.trusted && event.defaultPrevented && event.label === control);
-        }, { target, control: f.labels.control, eventStart }));
+        }, { target, control: f.labels.control, eventStart, padding }));
         arm.drag.hover = await state(f.page);
-        arm.hoverShot = await ctx.shot(`${kind}-drag-hover`, f.page);
+        arm.hoverShot = await ctx.shot(`${kind}-${mode}-hover`, f.page);
         await f.page.mouse.drop(target, data);
       } finally {
         try { await f.page.mouse.up(); }
         finally { await f.page.setDragInterception(false); }
       }
-    } else if (mode === "held-pointer" || mode === "right") {
+    } else if (["held-pointer", "right", "padding-held", "padding-right"].includes(mode)) {
       const handle = await element(f.page, label);
       const from = await handle.boundingBox();
       await handle.dispose();
       assert.ok(from, "instrument: inner label has a pointer target");
-      await f.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-      const button = mode === "right" ? "right" : "left";
+      const padding = mode.startsWith("padding-");
+      const right = mode === "right" || mode === "padding-right";
+      if (padding) arm.padding = await paddingPoint(f.page, label);
+      else await f.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+      const button = right ? "right" : "left";
       await f.page.mouse.down({ button });
       try {
-        if (mode === "right") {
+        if (right) {
           arm.held = await snapshot(f);
           preserved(arm.before, arm.held, label, mode);
           preserveSessions(arm.before, arm.held, "right mousedown");
-        } else if (mode === "held-pointer") {
+          if (padding) requireProduct(arm.held.tabs.find((tab) => tab.label === label)?.labelFocused,
+            "right padding press did not keep focus on the tab label");
+        } else {
           const until = Date.now() + 500;
           arm.heldSamples = [];
           do {
             arm.held = await state(f.page);
             requireProduct(arm.held.tabs.find((tab) => tab.label === f.labels.control)?.selected, "terminal mousedown selected before release");
             requireProduct(arm.held.dialogs.length === 0, "terminal mousedown opened a dialog");
+            if (padding) requireProduct(arm.held.tabs.find((tab) => tab.label === label)?.labelFocused,
+              "held padding press did not keep focus on the tab label");
             arm.heldSamples.push({ at: Date.now(), tabs: arm.held.tabs, dialogs: arm.held.dialogs });
             await sleep(50);
           } while (Date.now() < until);
         }
+        if (padding) arm.heldShot = await ctx.shot(`${kind}-${mode}-held`, f.page);
       } finally { await f.page.mouse.up({ button }); }
     } else await click(f.page, label);
     const deadline = Date.now() + 5_000;
@@ -332,10 +367,19 @@ async function activation(ctx, f, kind, mode) {
     requireProduct(arm.after.panes.activePaneId === arm.after.panes.panes[0].id, `${mode} did not focus the subject pane`);
     const events = arm.after.events.slice(eventStart);
     if (!arm.synthetic) assert.ok(events.some((event) => event.trusted && event.label === label), "instrument: trusted input reached the subject");
-    if (mode === "right") requireProduct(arm.after.dialogs.some((dialog) => ["tab menu", "terminal tab settings"].includes(dialog.name)), "right press did not open the tab menu");
-    if (mode === "drag") {
+    if (mode === "right" || mode === "padding-right") requireProduct(arm.after.dialogs.some((dialog) => ["tab menu", "terminal tab settings"].includes(dialog.name)), "right press did not open the tab menu");
+    if (mode.startsWith("padding-")) {
+      const press = events.find((event) => event.type === "mousedown" && event.trusted && event.label === label);
+      assert.ok(press?.targetIsOuter, "instrument: native mousedown reached the outer padding");
+      requireProduct(press.defaultPrevented === false, "padding mousedown prevented the native focus or drag default");
+      if (mode === "padding-right") requireProduct(arm.after.tabs.find((tab) => tab.label === label)?.labelFocused,
+        "right padding menu did not retain label focus");
+    }
+    if (mode === "drag" || mode === "padding-drag") {
       assert.ok(["dragstart", "dragend", "drop"].every((type) => events.some((event) => event.type === type && event.trusted)), "instrument: trusted drag started, dropped and ended");
-      requireProduct(arm.after.tabs[0].label === label, "inner-label drag did not reorder before the control tab");
+      if (mode === "drag") requireProduct(arm.after.tabs[0].label === label, "inner-label drag did not reorder before the control tab");
+      else requireProduct(arm.after.tabs.findIndex((tab) => tab.label === label) ===
+        arm.after.tabs.findIndex((tab) => tab.label === f.labels.control) + 1, "padding drag did not reorder after the control tab");
     }
     arm.status = "passed";
   } catch (error) {
@@ -345,6 +389,62 @@ async function activation(ctx, f, kind, mode) {
   } finally {
     arm.afterShot = await ctx.shot(`${kind}-${mode}-after`, f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
     await f.page.keyboard.press("Escape").catch(() => {});
+  }
+  return arm;
+}
+
+async function keyboardFocusStyles(ctx, f) {
+  const arm = { kind: "live", mode: "keyboard-focus-styles", status: "incomplete" };
+  const label = f.labels.live;
+  try {
+    await click(f.page, f.labels.control);
+    await f.page.mouse.move(1500, 950);
+    arm.before = await snapshot(f);
+    const index = arm.before.tabs.findIndex((tab) => tab.label === label);
+    assert.ok(index > 0 && arm.before.tabs[index - 1].label === f.labels.control,
+      "instrument: the inactive subject follows the control in keyboard order");
+    assert.ok(!arm.before.tabs[index].selected && !arm.before.tabs[index].hovered,
+      "instrument: focus styles are read on an inactive, unhovered tab");
+    const eventStart = arm.before.events.length;
+    const controlClose = await element(f.page, f.labels.control, "close");
+    try { await controlClose.focus(); } finally { await controlClose.dispose(); }
+    await f.page.keyboard.press("Tab");
+    arm.label = await snapshot(f);
+    const focusedLabel = arm.label.tabs.find((tab) => tab.label === label);
+    requireProduct(focusedLabel?.labelFocused && focusedLabel.labelFocusVisible, "Tab did not visibly focus the inactive label");
+    requireProduct(!focusedLabel.selected && !focusedLabel.hovered, "label focus selected or hovered the subject");
+    arm.labelShot = await ctx.shot("live-label-keyboard-focus", f.page);
+    await f.page.keyboard.press("Tab");
+    const deadline = Date.now() + 2_000;
+    arm.closeFocusSamples = [];
+    do {
+      const tab = (await state(f.page)).tabs.find((row) => row.label === label);
+      arm.closeFocusSamples.push({ at: Date.now(), tab });
+      if (tab?.closeFocused && tab.closeFocusVisible && Number(tab.closeOpacity) === 1) break;
+      await sleep(50);
+    } while (Date.now() < deadline);
+    arm.after = await snapshot(f);
+    const focusedClose = arm.after.tabs.find((tab) => tab.label === label);
+    arm.styleChecks = {
+      labelOffsetOutline: Number.parseFloat(focusedLabel.labelOutlineOffset) > 0 && Number.parseFloat(focusedLabel.labelOutlineWidth) > 0 &&
+        focusedLabel.labelOutlineStyle !== "none",
+      inactiveCloseVisible: !!focusedClose?.closeFocused && focusedClose.closeFocusVisible && Number(focusedClose.closeOpacity) === 1,
+    };
+    requireProduct(!focusedClose?.selected && !focusedClose?.hovered, "close focus selected or hovered the subject");
+    requireProduct(JSON.stringify(names(arm.after)) === JSON.stringify(names(arm.before)) && arm.after.dialogs.length === 0,
+      "keyboard focus changed tabs or opened a dialog");
+    preserveSessions(arm.before, arm.after, "keyboard focus");
+    assert.equal(arm.after.events.slice(eventStart).filter((event) => event.type === "keydown" && event.key === "Tab" && event.trusted).length, 2,
+      "instrument: both focus steps came from actual Tab keys");
+    requireProduct(Object.values(arm.styleChecks).every(Boolean),
+      `keyboard focus style failed: ${Object.entries(arm.styleChecks).filter(([, held]) => !held).map(([name]) => name).join(", ")}`);
+    arm.status = "passed";
+  } catch (error) {
+    arm.status = error.message.startsWith("PRODUCT_TAB_ACTION:") ? "observed" : "incomplete";
+    arm.error = mask(error.message);
+    arm.after = await snapshot(f).catch((cause) => ({ error: mask(cause.message) }));
+  } finally {
+    arm.afterShot = await ctx.shot("live-close-keyboard-focus", f.page).catch((error) => { arm.screenshotError = mask(error.message); arm.status = "incomplete"; });
   }
   return arm;
 }
@@ -410,7 +510,7 @@ async function closeControl(ctx, f, kind) {
 export default {
   name: "tab-accessibility",
   async run(ctx) {
-    const evidence = { engine: "Chrome", nativeAccessibility: "not exercised", fixtures: [], arms: [], status: "incomplete" };
+    const evidence = { engine: "Chrome", nativeAccessibility: "not exercised", fixtures: [], arms: [], supplementalArms: [], status: "incomplete" };
     try {
       assert.ok(ctx.controlSocket, "instrument: real control socket is available");
       for (const kind of ["live", "file", "ended"]) for (const closing of [false, true]) {
@@ -430,6 +530,12 @@ export default {
             const modes = [kind === "live" ? "held-pointer" : "pointer", "Enter", "Space",
               ...(kind === "live" ? ["right", "drag"] : kind === "file" ? ["right"] : []), "synthetic-webkit"];
             for (const mode of modes) evidence.arms.push(await activation(ctx, f, kind, mode));
+            if (kind === "live") {
+              for (const mode of ["padding-held", "padding-right", "padding-drag"]) {
+                evidence.supplementalArms.push(await activation(ctx, f, kind, mode));
+              }
+              evidence.supplementalArms.push(await keyboardFocusStyles(ctx, f));
+            }
           }
           report.pageErrors = f.pageErrors;
         } catch (error) { report.setupError = mask(error.message); }
@@ -438,12 +544,12 @@ export default {
           delete report.fixture;
         }
       }
-      evidence.status = evidence.arms.length === 18 && evidence.arms.every((arm) => arm.status === "passed") &&
-        evidence.fixtures.every((report) => !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length) ? "passed" : "failed";
+      evidence.status = evidence.arms.length === 18 && evidence.supplementalArms.length === 4 &&
+        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.status === "passed") && evidence.fixtures.every((report) => !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length) ? "passed" : "failed";
     } catch (error) { evidence.error = mask(error.message); }
     finally { writeFileSync(join(ctx.outDir, "tab266-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`); }
     assert.equal(evidence.status, "passed", `tab-accessibility: ${JSON.stringify({
-      error: evidence.error, arms: evidence.arms.filter((arm) => arm.status !== "passed").map(({ kind, mode, status, error }) => ({ kind, mode, status, error })),
+      error: evidence.error, arms: [...evidence.arms, ...evidence.supplementalArms].filter((arm) => arm.status !== "passed").map(({ kind, mode, status, error }) => ({ kind, mode, status, error })),
       fixtures: evidence.fixtures.map(({ kind, closing, setupError, cleanupErrors, pageErrors }) => ({ kind, closing, setupError, cleanupErrors, pageErrors })),
     })}`);
     return evidence;

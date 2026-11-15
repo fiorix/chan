@@ -4,11 +4,12 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import Pane from "./Pane.svelte";
+import paneSource from "./Pane.svelte?raw";
 import { stubAppEnvironment } from "../__tests__/app";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 import { api } from "../api/client";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { persistStateToHash } from "../state/store.svelte";
+import { persistStateToHash, setCoverBlocking } from "../state/store.svelte";
 import { cancelPaneMode, enterPaneMode, layout, paneMode, type LeafNode, type Tab } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -24,6 +25,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  setCoverBlocking("reconnect", false);
   if (confirmState.open) resolveConfirm(false);
   await settle();
   for (const component of mounted.splice(0)) await unmount(component);
@@ -159,6 +161,30 @@ describe("tab accessibility activation", () => {
 });
 
 describe("tab label keyboard ownership", () => {
+  test.each(["cover", "modal"])("leaves keys to the window guard under a %s", async (blocker) => {
+    const element = await renderTab(terminalTab({ id: "blocked-tab", title: "Blocked" }));
+    element.focus();
+    if (blocker === "cover") setCoverBlocking("reconnect", true);
+    else confirmState.open = true;
+    const received = vi.fn();
+    document.addEventListener("keydown", received);
+    try {
+      for (const key of ["Enter", " "]) {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        element.dispatchEvent(event);
+        await settle();
+        expect(pane().activeTabId, "a covered tab cannot select itself").toBe(KEPT);
+        expect(layout.activePaneId, "a covered tab cannot take pane focus").toBe(OTHER);
+        expect(event.defaultPrevented, "the window guard receives the original key").toBe(false);
+      }
+      expect(received).toHaveBeenCalledTimes(2);
+    } finally {
+      document.removeEventListener("keydown", received);
+      setCoverBlocking("reconnect", false);
+      if (blocker === "modal") resolveConfirm(false);
+    }
+  });
+
   test.each([
     { key: "Enter", ctrlKey: true },
     { key: " ", ctrlKey: true },
@@ -209,5 +235,86 @@ describe("tab label keyboard ownership", () => {
     } finally {
       document.removeEventListener("keydown", received);
     }
+  });
+});
+
+describe("tab focus affordances", () => {
+  // jsdom omits the browser's mousedown focus default. Apply it after the
+  // handler so this also catches a focus() call undone by the default.
+  function mouseDown(target: HTMLElement, button: number): MouseEvent {
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button });
+    target.dispatchEvent(event);
+    if (!event.defaultPrevented) {
+      const focusable = target.closest<HTMLElement>("button, input, textarea, select, a[href], [tabindex]");
+      if (focusable) focusable.focus();
+      else (document.activeElement as HTMLElement | null)?.blur();
+    }
+    return event;
+  }
+
+  test.each([0, 2])("pressing terminal pill padding with button %s focuses its label without cancelling drag", async (button) => {
+    const tab = terminalTab({ id: "padding-tab", title: "Padding" });
+    const element = await renderTab(tab);
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const before = document.createElement("button");
+    document.body.append(before);
+    before.focus();
+    const event = mouseDown(outer, button);
+    expect(event.defaultPrevented, "the native drag may start on the pill").toBe(false);
+    expect(document.activeElement, "padding routes native focus to the label").toBe(element);
+    expect(outer.tabIndex, "padding adds no keyboard tab stop").toBe(-1);
+    expect(pane().activeTabId).toBe(button === 0 ? KEPT : tab.id);
+    outer.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button }));
+    await settle();
+    expectSelectedAndOpen(tab);
+  });
+
+  test("focusing the close control keeps focus on that control", async () => {
+    const element = await renderTab(terminalTab({ id: "close-focus", title: "Close focus" }));
+    const close = element.closest(".tab")!.querySelector<HTMLButtonElement>("button.close")!;
+    mouseDown(close, 0);
+    expect(document.activeElement).toBe(close);
+    expect(pane().activeTabId).toBe(KEPT);
+  });
+
+  test("stale Hybrid Nav does not forward programmatic padding focus", async () => {
+    const element = await renderTab(terminalTab({ id: "stale-padding", title: "Stale" }), { preview: true, stale: true });
+    const outer = element.closest<HTMLElement>(".tab")!;
+    outer.focus();
+    expect(document.activeElement).toBe(outer);
+    expect(pane().activeTabId).toBe(KEPT);
+    expect(paneMode.draft?.nodes[PANE]).toMatchObject({ activeTabId: KEPT });
+  });
+
+  function installStyles(): HTMLStyleElement {
+    const style = document.createElement("style");
+    // jsdom has no keyboard modality. Substitute only the pseudo-class;
+    // the component's own selectors and declarations still drive the style.
+    style.textContent = paneSource.match(/<style>([\s\S]*)<\/style>/)![1]
+      .replaceAll(":focus-visible", "[data-test-focus-visible]");
+    document.head.append(style);
+    return style;
+  }
+
+  test("the label's visible focus ring clears its content", async () => {
+    const element = await renderTab(terminalTab({ id: "ring-tab", title: "Ring" }));
+    const style = installStyles();
+    try {
+      element.focus();
+      element.setAttribute("data-test-focus-visible", "");
+      expect(parseFloat(getComputedStyle(element).outlineOffset)).toBeGreaterThan(0);
+    } finally { style.remove(); }
+  });
+
+  test("a keyboard-focused close button is visible on an inactive tab", async () => {
+    const element = await renderTab(terminalTab({ id: "visible-close", title: "Visible close" }));
+    const close = element.closest(".tab")!.querySelector<HTMLButtonElement>("button.close")!;
+    const style = installStyles();
+    try {
+      expect(getComputedStyle(close).opacity, "the inactive close starts hidden").toBe("0");
+      close.focus();
+      close.setAttribute("data-test-focus-visible", "");
+      expect(getComputedStyle(close).opacity, "keyboard focus reveals the close action").toBe("1");
+    } finally { style.remove(); }
   });
 });

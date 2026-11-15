@@ -1,0 +1,45 @@
+{
+  "engine": "2.52.6",
+  "arms": [
+    {
+      "arm": "select-live",
+      "kind": "live",
+      "operation": "select",
+      "status": "held"
+    },
+    {
+      "arm": "select-file",
+      "kind": "file",
+      "operation": "select",
+      "status": "held"
+    },
+    {
+      "arm": "select-ended",
+      "kind": "ended",
+      "operation": "select",
+      "status": "held"
+    },
+    {
+      "arm": "close-live",
+      "kind": "live",
+      "operation": "close",
+      "status": "held"
+    },
+    {
+      "arm": "close-file",
+      "kind": "file",
+      "operation": "close",
+      "status": "held"
+    },
+    {
+      "arm": "close-ended",
+      "kind": "ended",
+      "operation": "close",
+      "status": "held"
+    }
+  ],
+  "errors": [],
+  "started": "2026-11-15T12:29:46.657Z",
+  "finished": "2026-11-15T12:30:33.541Z",
+  "exit": 0
+}

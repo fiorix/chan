@@ -100,6 +100,7 @@
   import GraphPanel from "./GraphPanel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
+    appInputBlocked,
     browserSidePanes,
     fbActivateInstance,
     currentPreferences,
@@ -1584,6 +1585,12 @@
         class:active={t.id === visibleActiveTabId}
         class:staged={paneModeStagedSet.has(t.id)}
         class:stale={paneMode.stale && paneModeStagedSet.has(t.id)}
+        tabindex="-1"
+        onfocusin={(e) => {
+          if (paneMode.stale || e.target !== e.currentTarget) return;
+          // Padding takes native mouse focus without cancelling dragstart.
+          e.currentTarget.querySelector<HTMLElement>(".tab-label")?.focus({ preventScroll: true });
+        }}
         onmousedown={(e) => {
           if (paneMode.stale) return;
           if (t.kind === "terminal" && e.button === 0) {
@@ -1641,6 +1648,7 @@
           aria-selected={t.id === visibleActiveTabId}
           aria-disabled={paneMode.stale}
           onkeydown={(e) => {
+            if (appInputBlocked() || modalDialogOpen()) return;
             if (paneMode.active || e.ctrlKey || e.metaKey || e.altKey || (e.key !== "Enter" && e.key !== " ")) return;
             e.preventDefault();
             e.stopPropagation();
@@ -2610,6 +2618,7 @@
     min-width: 0;
     border-radius: inherit;
   }
+  .tab-label:focus-visible { outline-offset: 3px; }
   .tab:hover {
     color: var(--text);
     transform: scale(1.04);
@@ -2677,9 +2686,7 @@
   @keyframes tab-spin {
     to { transform: rotate(360deg); }
   }
-  /* Close button stays invisible until the row is hovered or the
-     tab is active; matches iTerm / Chrome's behavior so the strip
-     reads cleanly with many tabs open. */
+  /* Keyboard focus reveals the close action even on an inactive tab. */
   .tab .close {
     background: none;
     border: 0;
@@ -2693,6 +2700,7 @@
     flex-shrink: 0;
   }
   .tab:hover .close,
+  .tab .close:focus-visible,
   .tab.active .close { opacity: 1; }
   .tab.staged-editor .close { opacity: 1; }
   .tab .close:hover { color: var(--text); }

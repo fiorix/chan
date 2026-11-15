@@ -375,8 +375,8 @@ async function main() {
     }
   }
   const states = [...result.arms, ...result.errors].map((row) => row.status);
-  const code = states.includes("incomplete") ? 3 : states.includes("unavailable") ? 2 :
-    result.arms.length !== 6 ? 3 : states.includes("fault") ? 10 : 0;
+  const code = states.includes("fault") ? 10 : states.includes("incomplete") ? 3 :
+    states.includes("unavailable") ? 2 : result.arms.length !== 6 ? 3 : 0;
   result.finished = new Date().toISOString();
   result.exit = code;
   save("axclose-results.json", result);
