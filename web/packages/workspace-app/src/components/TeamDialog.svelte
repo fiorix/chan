@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { api } from "../api/client";
   import {
+    bumpTabFocusPulse,
     clearTeamWorkPending,
     closeTab,
     setTeamWorkPendingConfig,
@@ -301,6 +302,9 @@
       clearTeamWorkPending(request);
       scheduleSessionSave();
       closeTeamDialog();
+      // Startup focus yields to the dialog, so request it after releasing
+      // the keyboard even when the active pane and tab did not change.
+      bumpTabFocusPulse();
     } catch (err) {
       // A config write with no answer may have landed: the chain has stopped
       // before any spawn, and the tree, where the server writes the config
@@ -329,12 +333,8 @@
 
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && !busy) {
-      // Capture phase + stopPropagation: New team opens this dialog OVER a
-      // freshly-spawned lead terminal whose xterm (and the Team Work
-      // compose box) grabs focus, so a bubble-phase Escape was consumed
-      // by the terminal before reaching the window. Listening in capture
-      // runs this first, and stopPropagation keeps the keystroke out of
-      // the terminal behind the modal.
+      // The modal owns Escape before any terminal or compose-box handler;
+      // stopPropagation keeps its dismissal out of the underlying surface.
       e.preventDefault();
       e.stopPropagation();
       onCancel();

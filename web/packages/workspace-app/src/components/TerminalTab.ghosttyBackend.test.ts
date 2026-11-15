@@ -805,8 +805,8 @@ describe("a ghostty terminal under the Team dialog", () => {
     ghostty.record.events.splice(0);
     try {
       bumpTabFocusPulse();
-      // The pulse blurs the prior surface synchronously; the terminal's
-      // queued focus must still yield while the dialog owns the keyboard.
+      // These body assertions identify the pulse's own synchronous blur,
+      // not the behavior under test. The terminal must leave focus unclaimed.
       expect(document.activeElement, "the pulse relinquishes the field before notifying tabs").toBe(document.body);
       await tick();
       await new Promise((resolve) => setTimeout(resolve, 20));

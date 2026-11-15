@@ -15,6 +15,7 @@ import type { SurveySpec } from "../api/client";
 import { terminalPreferences } from "../__tests__/standalone";
 import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
+import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import { __testSetStandalonePreferences, dismissCliReloadNotice, persistStateToHash } from "../state/store.svelte";
 import {
   bumpTabFocusPulse,
@@ -801,6 +802,25 @@ describe("TerminalTab and the app around it", () => {
     await tick();
     await Promise.resolve();
     expect(terminalFocuses()).toBe(1);
+  });
+
+  test("an xterm finishing its mount leaves the keyboard in the Team dialog's field", async () => {
+    xterm.textareaFocus = true;
+    const [tab] = seatTerminals([terminalTab()]);
+    const field = document.createElement("input");
+    document.body.append(field);
+    openTeamDialog({ leadTabId: tab.id, leadPaneId: "pane-1" });
+    field.focus();
+    try {
+      const { target } = await renderTerminal(tab, true);
+      expect(target.querySelector("textarea"), "xterm has finished opening its input").not.toBeNull();
+      await tick();
+      expect(document.activeElement, "the modal field keeps focus after xterm startup").toBe(field);
+      expect(terminalFocuses(), "startup does not ask xterm to take focus under a modal").toBe(0);
+    } finally {
+      closeTeamDialog();
+      field.remove();
+    }
   });
 
   test("a clicked link opens through the external-link path", async () => {
