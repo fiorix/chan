@@ -22,6 +22,7 @@
 // also syncs the value live across open windows.
 
 import { api } from "../api/client";
+import { beginPreferenceWrite } from "../api/preferenceWrite";
 
 const CSS_VAR = "--chan-page-max-width";
 
@@ -66,13 +67,27 @@ function clampRatio(r: number): number {
 /// mid-drag.
 const PERSIST_DEBOUNCE_MS = 400;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
-function schedulePersistRatio(): void {
+let finishPendingRatio: (() => void) | null = null;
+
+/// Cancel an unqueued drag when its workspace is disposed. Releasing the
+/// pending edit lets later workspace reads proceed without sending the drag.
+export function cancelPageWidthPersist(): void {
   if (persistTimer != null) clearTimeout(persistTimer);
+  persistTimer = null;
+  finishPendingRatio?.();
+  finishPendingRatio = null;
+}
+
+function schedulePersistRatio(): void {
+  cancelPageWidthPersist();
+  finishPendingRatio = beginPreferenceWrite();
   persistTimer = setTimeout(() => {
     persistTimer = null;
     api.setPageWidthRatio(pageWidth.ratio).catch((e) => {
       console.warn("chan: failed to persist page-width", e);
     });
+    finishPendingRatio?.();
+    finishPendingRatio = null;
   }, PERSIST_DEBOUNCE_MS);
 }
 

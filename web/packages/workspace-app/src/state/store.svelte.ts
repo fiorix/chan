@@ -191,12 +191,17 @@ import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
-import { updateGlobalConfigSerial } from "./configWrite";
+import {
+  beginPreferenceWrite,
+  preferenceWriteGeneration,
+  updateGlobalConfigSerial,
+  waitForPreferenceWrites,
+} from "./configWrite";
 import {
   hydrateOverrides,
   registerOverridePersist,
 } from "./keymapOverrides.svelte";
-import { hydratePageWidthFromPrefs } from "./pageWidth.svelte";
+import { cancelPageWidthPersist, hydratePageWidthFromPrefs } from "./pageWidth.svelte";
 import { fbWatchResyncAll } from "./fbWatch.svelte";
 import { drafts, noteDraftBorn, onDraftsListed, refreshDrafts } from "./drafts.svelte";
 import { reportUncertainOutcome, uncertainOutcomeText } from "./mutationReport";
@@ -979,11 +984,21 @@ export function __testSetStandalonePreferences(prefs: Preferences | null): void 
 /// saved shortcuts, which the chord resolver and the key dispatch read from
 /// the override table, dropping a retired command's row as they load.
 async function refreshStandalonePreferences(): Promise<void> {
+  const epoch = workspaceReadEpoch;
   try {
-    const prefs = (await api.config()).preferences;
-    standalonePreferences.current = prefs;
-    applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
-    hydrateOverrides(prefs.shortcuts);
+    for (;;) {
+      const generation = await waitForPreferenceWrites();
+      if (epoch !== workspaceReadEpoch) return;
+      const prefs = (await api.config()).preferences;
+      if (epoch !== workspaceReadEpoch) return;
+      // Hydrating an old table can erase an optimistic binding before its
+      // reset is clicked. A no-op write may emit no frame to refresh again.
+      if (generation !== preferenceWriteGeneration()) continue;
+      standalonePreferences.current = prefs;
+      applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
+      hydrateOverrides(prefs.shortcuts);
+      return;
+    }
   } catch {
     // Left as-is rather than cleared: a failed refresh should not throw away
     // preferences that are already applied and still correct.
@@ -3110,7 +3125,17 @@ export async function bootstrap(): Promise<void> {
     return;
   }
   try {
-    const info = await workspaceWithRetry();
+    const epoch = workspaceReadEpoch;
+    let info: WorkspaceInfo;
+    for (;;) {
+      const generation = await waitForPreferenceWrites();
+      if (epoch !== workspaceReadEpoch) return;
+      info = await workspaceWithRetry();
+      if (epoch !== workspaceReadEpoch) return;
+      // Bootstrap has no served preferences to retain. Read again rather
+      // than publish a snapshot invalidated by a local write during boot.
+      if (generation === preferenceWriteGeneration()) break;
+    }
     workspace.info = info;
     applyServerPreferences();
     surfaceWorkspaceWarnings(info);
@@ -3719,10 +3744,26 @@ export async function noteDraftCreated(path: string): Promise<void> {
   }
 }
 
+let workspaceReadEpoch = 0;
+
 export async function refreshWorkspace(): Promise<void> {
+  const epoch = workspaceReadEpoch;
+  const generation = await waitForPreferenceWrites();
+  if (epoch !== workspaceReadEpoch) return;
   const info = await api.workspace();
-  workspace.info = info;
-  applyServerPreferences();
+  if (epoch !== workspaceReadEpoch) return;
+  if (generation === preferenceWriteGeneration()) {
+    workspace.info = info;
+    applyServerPreferences();
+  } else {
+    // Keep the served object's identity: Settings holds optimistic writes
+    // over it until a fresh server record replaces it. Metadata still moves.
+    if (workspace.info) {
+      workspace.info = { ...info, preferences: workspace.info.preferences };
+    }
+    // No-op writes emit no watcher frame to request the fresh record.
+    scheduleWorkspaceRefresh();
+  }
   surfaceWorkspaceWarnings(info);
 }
 
@@ -3751,6 +3792,7 @@ export function scheduleWorkspaceRefresh(): void {
 }
 
 export function stopWorkspaceRefresh(): void {
+  workspaceReadEpoch += 1;
   if (workspaceRefreshTimer !== null) clearTimeout(workspaceRefreshTimer);
   workspaceRefreshTimer = null;
 }
@@ -4756,6 +4798,9 @@ export function installSessionFlushHook(): void {
 }
 
 export function teardown(): void {
+  stopWorkspaceRefresh();
+  cancelPaneWidthPersist();
+  cancelPageWidthPersist();
   invalidateWatchRelists();
   cancelGraphRefresh();
   treeListingsOut.clear();
@@ -4771,7 +4816,6 @@ export function teardown(): void {
   rootReconciliation = null;
   rootReconcileRerun = false;
   stopIndexStatusPoller();
-  stopWorkspaceRefresh();
 }
 
 // ---- search-index status poller -----------------------------------------
@@ -5625,13 +5669,22 @@ export async function fbClipboardPaste(destDir: string): Promise<string[]> {
 }
 
 let widthsPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let finishPendingWidths: (() => void) | null = null;
 const PANE_WIDTHS_DEBOUNCE_MS = 200;
+
+function cancelPaneWidthPersist(): void {
+  if (widthsPersistTimer !== null) clearTimeout(widthsPersistTimer);
+  widthsPersistTimer = null;
+  finishPendingWidths?.();
+  finishPendingWidths = null;
+}
 
 /// Persist the current widths. Called by ResizeHandle's onChange on
 /// every drag tick; debounced so a sweep across the screen lands as
 /// one PATCH instead of dozens.
 export function persistPaneWidths(): void {
-  if (widthsPersistTimer) clearTimeout(widthsPersistTimer);
+  cancelPaneWidthPersist();
+  finishPendingWidths = beginPreferenceWrite();
   widthsPersistTimer = setTimeout(() => {
     widthsPersistTimer = null;
     const snapshot = {
@@ -5655,6 +5708,8 @@ export function persistPaneWidths(): void {
       }
       return { pane_widths: snapshot };
     });
+    finishPendingWidths?.();
+    finishPendingWidths = null;
   }, PANE_WIDTHS_DEBOUNCE_MS);
 }
 

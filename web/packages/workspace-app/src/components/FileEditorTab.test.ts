@@ -43,6 +43,7 @@ import {
   refreshTree,
   refreshWorkspace,
   searchPanel,
+  teardown,
   ui,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
@@ -319,6 +320,7 @@ afterEach(async () => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
   await settle(2);
+  teardown();
   uninstallDemoWorkspace();
   timers.release();
   vi.restoreAllMocks();
