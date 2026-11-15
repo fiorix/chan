@@ -15,16 +15,19 @@
     linkSparkline,
     linkStateAge,
     type LinkIndicatorPlacement,
+    LINK_INDICATOR_LABEL_CH,
   } from "./linkIndicatorMath";
   import { clampMenu, triggerMenuX } from "./menuClamp";
   import { menuEscape } from "./menuEscape";
   import { portal } from "./portal";
+  import { appInputBlocked } from "../state/store.svelte";
 
   let { placement }: { placement: LinkIndicatorPlacement } = $props();
 
   // The window's transport identity is fixed for this component's lifetime.
   const remote = linkIsRemote();
   const visible = $derived(linkIndicatorShown(placement, linkHealth.state, remote));
+  const blocked = $derived(appInputBlocked());
   const label = $derived(linkLabel(linkHealth.state, linkHealth.rttMs, linkHealth.waitMs));
   const name = $derived.by(() => {
     switch (linkHealth.state) {
@@ -67,6 +70,7 @@
   }
 
   function toggle(): void {
+    if (blocked) return;
     if (open) {
       open = false;
       return;
@@ -81,7 +85,7 @@
   // A local link can turn healthy while the bubble is open. Close it so a
   // later slow spell cannot restore a stale open state.
   $effect(() => {
-    if (!visible) open = false;
+    if (!visible || blocked) open = false;
   });
 
   $effect(() => {
@@ -115,6 +119,8 @@
     title={name}
     aria-controls={popoverId}
     aria-expanded={open}
+    aria-disabled={blocked}
+    style:--link-indicator-label-width={`${LINK_INDICATOR_LABEL_CH}ch`}
     onmousedown={(event) => event.preventDefault()}
     onclick={toggle}
   >
@@ -160,14 +166,15 @@
     white-space: nowrap;
     cursor: pointer;
   }
-  .link-indicator:hover { background: var(--hover-bg); }
-  .link-indicator.status:hover { background: transparent; text-decoration: underline; text-underline-offset: 2px; }
+  .link-indicator[aria-disabled="true"] { cursor: default; }
+  .link-indicator:not([aria-disabled="true"]):hover { background: var(--hover-bg); }
+  .link-indicator.status:not([aria-disabled="true"]):hover { background: transparent; text-decoration: underline; text-underline-offset: 2px; }
   .link-indicator:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   .link-indicator[data-state="unknown"] { opacity: 0.6; }
   .link-indicator[data-state="slow"] { color: var(--warn-text); }
   .link-indicator[data-state="stalled"], .link-indicator[data-state="down"] { color: var(--danger-text); }
   .link-indicator.status { height: auto; padding: 0; }
-  .link-indicator[data-placement="tab-bar"] .label { display: inline-block; min-width: 13ch; text-align: left; }
+  .link-indicator[data-placement="tab-bar"] .label { display: inline-block; min-width: var(--link-indicator-label-width); text-align: left; }
   .glyph { width: 16px; height: 16px; flex: none; }
   .link-popover {
     position: fixed;
