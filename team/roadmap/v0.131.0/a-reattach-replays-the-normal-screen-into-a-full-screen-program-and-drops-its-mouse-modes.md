@@ -1,6 +1,6 @@
 # A reattach replays the normal screen into a full-screen program and drops its mouse modes
 
-Status: found by the v0.131.0 round's terminal regression audit and accepted for v0.131.0 by the owner on 2026-11-14 ("Take all my recommendations", answering `dev/v0131-team/reports/owner-candidates-1.md`, item 1); not started.
+Status: found by the v0.131.0 round's terminal regression audit and accepted for v0.131.0 by the owner on 2026-11-14 ("Take all my recommendations", answering `dev/v0131-team/reports/owner-candidates-1.md`, item 1); server implementation verified; browser acceptance pending.
 
 Record: entries T005 and T007 of the round's terminal regression list (`dev/v0131-team/terminal-regressions.md`). Red Rust probes at `fa22e73ac` showed both as live defects (`dev/v0131-team/evidence/Core131/termregress-server/initial/probes.rs`, log `initial/tests.log`, hashes `initial/source.sha256`; `dev/v0131-team/followups/followup-Core131-Lead131-8.md`).
 
@@ -31,3 +31,25 @@ Read at `9d7b56c45`.
 2. One mutation per guard (the order of transitions, each recognised form, each tracked mode) turns a test red.
 3. A browser check in a guest, on both backends: a shell prints normal-screen text, then a `printf` enters the alternate screen with `\e[?1047h` and draws; a reload reattaches and the view holds no normal-screen text. And a program that sets 1015 and echoes what it reads: after a reload's reattach, a click reaches it in the urxvt encoding.
 4. `crates/chan-library/design.md` says which forms the tracker reads and which modes the prelude re-asserts.
+
+## Ruling on acceptance 3, 2026-11-14
+
+Found while drafting the browser check: neither of chan's terminal backends encodes clicks in the urxvt form. ghostty-web's input handler chooses SGR (1006) or X10 only (`web/packages/ghostty-web-ng/lib/input-handler.ts`, around 788 to 809), and xterm.js 6 logs DECSET and DECRST 1015 as unsupported (`@xterm/xterm/src/common/InputHandler.ts`, around 1947 and 2175); `terminal/mouseModeFilter.ts` records the same. So a urxvt click after a reattach cannot pass on either backend, whatever the server sends. The lead's ruling, inside the row's purpose:
+
+- Contract 3 stays as written: the server re-asserts every mode the program left on, 1015 included, since that is the server's state to keep and a client that encodes it gets it.
+- Acceptance 3's mouse arm becomes two parts: the reattach prelude, read from the socket's frames in the browser check, carries each tracked mode the program set (1015 among them); and a click after a reload reaches the program in the encoding of a newly tracked mode that backend does honour, on each backend that honours one (the build names which, from the backend's source, and says so for a backend that honours none).
+- That neither backend encodes 1015 is recorded here, not built: it predates this row, and modern programs ask for SGR.
+
+## Server implementation, 2026-11-14
+
+Commit `434c1412e18419c3af5ff613542a6971c7e5ad14`, from base `5775af2ca6bc51d7b6c7fb07640a7b2e3ebd1b63`, uses one bounded private-mode scanner for both trackers. Alternate-screen selection follows the last 47, 1047 or 1049 transition, including grouped and split sequences. The prelude tracks the five additional mouse modes and preserves numeric order and rendering-mode exclusions. Five reserved flags carry the added modes across fd-store restoration without changing the fixed ring header or its version; the original seven slots retain their meanings.
+
+The server evidence is in `dev/v0131-team/evidence/Core131/altreplay/`: `red.log` has 25 intended assertion failures and three passing controls at the base; `mutations-1/summary.json` records 25 assertion reds and 25 restored greens; `ring-compat.log` records actual old/new writer-reader compatibility in both directions. The committed scoped gate in `gate/` passed fmt, library all-target clippy, rustdoc and 573 terminal-session tests, with the existing host-profile printing test ignored. `dev/v0131-team/followups/followup-Core131-Lead131-13.md` identifies exact commands, hashes and limits. These are server proofs, not browser acceptance.
+
+Check `scripts/e2e/browser-smoke/checks/270-alt-replay.mjs` prepares the guest reading: visible alternate-screen output and the actual 1047 reattach wire on both backends; all twelve tracked modes in the reattach prelude on both; and a trusted click reaching the raw PTY in 1016 pixel encoding before and after reload on xterm.js. Its installed xterm.js 6 source selects `SGR_PIXELS` for 1016. Ghostty's input binding chooses SGR cells or X10 from mode 1006 and recognises tracking modes 1000, 1002 and 1003; none of the five added modes has an input implementation there, so its new-mode reading is wire-only. Guest acceptance, the terminal regression suite on both backends and the two row reviews remain open.
+
+## Browser selection setup, 2026-11-15
+
+The J146 base run stopped before the xterm 1047 reload: its Shift-first drag left the clipboard sentinel unchanged. The other four arms reached the expected base defects, but the five-arm judge refused the incomplete xterm receipt; no tip or mutation ran. The pinned xterm.js 6.0.0 SelectionService control confirms that alternate-buffer activation clears the anchor, Shift-first cannot create one while selection is enabled, and an ordinary drag creates a selection. Three mutations of that control fail at their intended assertions. This is a source control, not a browser verdict.
+
+Check 270 uses an ordinary drag in its 1047 arms, which enable no mouse reporting. It records bounded copy and focus receipts before and after explicitly focusing the owned textarea. The clipboard observer waits for drag and diagnostic writes to settle and requires a completed native write from the current phase, so an earlier copy cannot satisfy the post-focus sentinel. A pre-focus sentinel is diagnostic because focus routing and an empty selection can both explain it; the post-focus copy remains required. A successful diagnostic copy can itself refocus the terminal, which the receipt distinguishes from the explicit focus call. The visible-grid, sentinel, before/after marker, wire, cleanup and five-arm completeness guards remain. One bounded base, tip, six-mutation/restoration and 97+270 pair run is pending through Ops131; unexpected setup failures stop the sequence.
