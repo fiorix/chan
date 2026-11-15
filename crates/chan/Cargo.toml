@@ -60,10 +60,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Self-upgrade flow (`chan upgrade` + the probe in `chan serve`).
-# reqwest is workspace-shared so we inherit rustls + the same
-# *_PROXY env-var handling install.sh expects. `rustls-tls`: the
-# self-upgrade trusts reqwest's bundled roots; an explicit metrics URL
-# takes chan-tls's config instead (src/http_client.rs).
+# reqwest is workspace-shared, with the same *_PROXY handling install.sh
+# expects. The self-upgrade and explicit metrics URL clients take chan-tls's
+# config; local devserver calls use HTTP without a proxy.
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Pulled in for `chan config get`: dumps the editor preferences as
@@ -71,9 +70,9 @@ serde_json = { workspace = true }
 # Writes go through chan-server's existing store helpers (see
 # `EditorPrefs::save`); we never roll our own tempfile + rename here.
 toml = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
-# The trust decision of `chan metrics --url`, shared with the desktop and the
-# devserver's tunnel dial.
+reqwest = { workspace = true, features = ["stream"] }
+# The trust decision of self-update and `chan metrics --url`, shared with
+# the desktop and the devserver's tunnel dial.
 chan-tls = { workspace = true }
 sha2 = { workspace = true }
 rustix = { workspace = true }
@@ -94,8 +93,8 @@ zip = { workspace = true }
 static_vcruntime = "3.0"
 
 [dev-dependencies]
-# The recorded config and the ClientHello sink that show the metrics URL
-# client takes the shared config.
+# The recorded config and ClientHello sink verify the metrics and updater
+# clients' shared config and HTTP/1.1 ALPN.
 chan-tls = { workspace = true, features = ["test-support"] }
 rustix = { workspace = true, features = ["pty"] }
 tempfile = { workspace = true }
