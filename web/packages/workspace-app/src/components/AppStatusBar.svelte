@@ -263,7 +263,7 @@
 {/snippet}
 
 {#if anyVisible}
-  <div class="app-statusbar" class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
+  <div class="app-statusbar" data-app-status-pill class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
         {#if connectionShown}
