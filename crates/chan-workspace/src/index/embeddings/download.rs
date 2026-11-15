@@ -477,7 +477,7 @@ fn publish_blob(
     let name = blob
         .file_name()
         .ok_or_else(|| io::Error::other("blob has no filename"))?;
-    let relative = Path::new("../../blobs").join(name);
+    let relative = Path::new("..").join("..").join("blobs").join(name);
     match symlink(&relative, pointer) {
         Ok(()) => Ok(()),
         Err(error) if symlink_unavailable(&error) => std::fs::rename(blob, pointer),
@@ -510,12 +510,23 @@ fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
 fn publish_ref(repo: &Path, commit: &str) -> io::Result<()> {
     let refs = repo.join("refs");
     std::fs::create_dir_all(&refs)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&refs)?;
+    // Normal file attributes survive std's rename; tempfile's persist clears
+    // its temporary attribute but cannot replace an open reader on Windows.
+    let mut temporary = tempfile::Builder::new().make_in(&refs, |path| {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    })?;
     temporary.write_all(commit.as_bytes())?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist(refs.join("main"))
-        .map_err(|error| error.error)?;
+    let mut temporary = temporary.into_temp_path();
+    std::fs::rename(&temporary, refs.join("main"))?;
+    temporary.disable_cleanup(true);
     Ok(())
 }
 

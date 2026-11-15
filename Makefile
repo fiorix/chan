@@ -88,6 +88,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::cache_reference_cannot_escape_the_snapshot_directory \
 	index::embeddings::download::tests::invalid_model_and_filename_are_refused_before_any_request_or_write \
 	index::embeddings::download::tests::existing_snapshot_bypasses_symlink_publication \
+	index::embeddings::download::tests::snapshot_link_target_uses_native_separators \
 	index::embeddings::download::tests::symlink_refusal_renames_into_a_cache_hf_hub_can_read \
 	index::embeddings::download::tests::unsupported_symlink_renames_into_a_cache_hf_hub_can_read \
 	index::embeddings::download::tests::missing_symlink_privilege_renames_into_a_cache_hf_hub_can_read \
@@ -117,6 +118,8 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::embedder_refuses_a_retry_model_that_only_fails_its_probe \
 	index::embeddings::download::tests::embedder_retries_non_utf8_cached_config \
 	index::embeddings::download::publication_tests::reference_replacement_preserves_open_readers \
+	index::embeddings::download::publication_tests::reference_publication_failure_preserves_destination_and_cleans_temporary \
+	index::embeddings::download::publication_tests::published_reference_has_regular_file_attributes \
 	index::embeddings::download::publication_tests::blob_publication_failure_preserves_the_current_reference \
 	index::embeddings::download::tls_tests::trusted_tls_configuration_downloads_metadata_and_payload \
 	index::embeddings::download::tls_tests::untrusted_metadata_certificate_preserves_the_transport_error \

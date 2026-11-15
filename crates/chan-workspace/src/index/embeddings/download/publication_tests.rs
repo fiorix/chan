@@ -31,6 +31,61 @@ fn reference_replacement_preserves_open_readers() {
 }
 
 #[test]
+fn reference_publication_failure_preserves_destination_and_cleans_temporary() {
+    let repo = tempfile::tempdir().unwrap();
+    let reference = repo.path().join("refs/main");
+    std::fs::create_dir_all(&reference).unwrap();
+    let sentinel = reference.join("keep");
+    std::fs::write(&sentinel, OLD_COMMIT).unwrap();
+
+    publish_ref(repo.path(), NEW_COMMIT)
+        .expect_err("a directory must refuse reference replacement");
+
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), OLD_COMMIT);
+    let remaining: Vec<_> = std::fs::read_dir(repo.path().join("refs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        remaining,
+        ["main"],
+        "a failed rename must clean its temporary"
+    );
+}
+
+#[test]
+fn published_reference_has_regular_file_attributes() {
+    let repo = tempfile::tempdir().unwrap();
+    publish_ref(repo.path(), NEW_COMMIT).unwrap();
+    let reference = repo.path().join("refs/main");
+    assert_eq!(std::fs::read_to_string(&reference).unwrap(), NEW_COMMIT);
+    let metadata = std::fs::metadata(reference).unwrap();
+    assert!(metadata.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_TEMPORARY,
+        };
+        assert_eq!(
+            metadata.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY),
+            0,
+            "published references must not retain temporary or hidden attributes"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(repo.path().join("refs")).unwrap().count(),
+        1,
+        "successful publication must leave only the reference"
+    );
+}
+
+#[test]
 fn blob_publication_failure_preserves_the_current_reference() {
     const BODY: &[u8] = b"fixture model";
     let cache = tempfile::tempdir().unwrap();

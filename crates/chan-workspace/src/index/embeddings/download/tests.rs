@@ -576,6 +576,35 @@ fn existing_snapshot_bypasses_symlink_publication() {
 }
 
 #[test]
+fn snapshot_link_target_uses_native_separators() {
+    let cache = tempfile::tempdir().unwrap();
+    let blob = cache.path().join("blobs").join(ETAG);
+    let pointer = cache
+        .path()
+        .join("snapshots")
+        .join(COMMIT)
+        .join("config.json");
+    let expected: PathBuf = ["..", "..", "blobs", ETAG].into_iter().collect();
+    let mut observed = None;
+    let error = publish_blob(&blob, &pointer, |source, destination| {
+        observed = Some(source.to_owned());
+        assert_eq!(destination, pointer);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "publication stopped after inspecting the link target",
+        ))
+    })
+    .expect_err("the link callback must return its refusal");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    let observed = observed.expect("a missing snapshot must invoke the link callback");
+    assert_eq!(
+        observed.as_os_str(),
+        expected.as_os_str(),
+        "the raw link target must use the platform separator between every component"
+    );
+}
+
+#[test]
 fn symlink_refusal_renames_into_a_cache_hf_hub_can_read() {
     assert_symlink_fallback(std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
@@ -609,10 +638,11 @@ fn assert_symlink_fallback(error: std::io::Error) {
     std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
     std::fs::create_dir_all(pointer.parent().unwrap()).unwrap();
     std::fs::write(&blob, BODY).unwrap();
+    let expected: PathBuf = ["..", "..", "blobs", ETAG].into_iter().collect();
     publish_blob(&blob, &pointer, |source, destination| {
         assert_eq!(
-            source,
-            Path::new("../../blobs").join(ETAG),
+            source.as_os_str(),
+            expected.as_os_str(),
             "snapshot links must resolve to the cache blob two directories above"
         );
         assert_eq!(destination, pointer);
@@ -1413,6 +1443,17 @@ fn a_complete_blob_is_published_without_another_payload() {
     let path = client
         .get("fixture/model", "config.json")
         .expect("a complete cached blob must publish without another payload request");
+    let published = std::fs::symlink_metadata(&path).unwrap();
+    if published.file_type().is_symlink() {
+        let target = std::fs::read_link(&path).unwrap();
+        println!("blob-publication arm=symlink target={target:?}");
+    } else {
+        assert!(
+            published.is_file(),
+            "the fallback must publish a regular file"
+        );
+        println!("blob-publication arm=rename-fallback");
+    }
     assert_eq!(std::fs::read(&path).unwrap(), BODY);
     assert_eq!(server.requests.lock().unwrap().len(), 1);
     assert_eq!(
@@ -1549,12 +1590,12 @@ fn embedder_refuses_a_retry_model_that_only_fails_its_probe() {
         "the original cached model must fail before inference"
     );
     assert!(server.requests.lock().unwrap().is_empty());
+    let result =
+        super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client);
     assert!(
-        matches!(
-            super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client),
-            Err(EmbedError::Candle(_))
-        ),
-        "a replacement that loads but fails inference must not open successfully"
+        matches!(&result, Err(EmbedError::Candle(_))),
+        "a replacement that loads but fails inference must return Candle; got {:?}",
+        result.as_ref().map(|_| ())
     );
 
     assert!(
