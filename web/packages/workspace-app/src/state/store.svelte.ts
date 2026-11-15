@@ -191,7 +191,11 @@ import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
-import { updateGlobalConfigSerial } from "./configWrite";
+import {
+  preferenceWriteGeneration,
+  updateGlobalConfigSerial,
+  waitForPreferenceWrites,
+} from "./configWrite";
 import {
   hydrateOverrides,
   registerOverridePersist,
@@ -3101,7 +3105,17 @@ export async function bootstrap(): Promise<void> {
     return;
   }
   try {
-    const info = await workspaceWithRetry();
+    const epoch = workspaceReadEpoch;
+    let info: WorkspaceInfo;
+    for (;;) {
+      const generation = await waitForPreferenceWrites();
+      if (epoch !== workspaceReadEpoch) return;
+      info = await workspaceWithRetry();
+      if (epoch !== workspaceReadEpoch) return;
+      // Bootstrap has no served preferences to retain. Read again rather
+      // than publish a snapshot invalidated by a local write during boot.
+      if (generation === preferenceWriteGeneration()) break;
+    }
     workspace.info = info;
     applyServerPreferences();
     surfaceWorkspaceWarnings(info);
@@ -3710,10 +3724,26 @@ export async function noteDraftCreated(path: string): Promise<void> {
   }
 }
 
+let workspaceReadEpoch = 0;
+
 export async function refreshWorkspace(): Promise<void> {
+  const epoch = workspaceReadEpoch;
+  const generation = await waitForPreferenceWrites();
+  if (epoch !== workspaceReadEpoch) return;
   const info = await api.workspace();
-  workspace.info = info;
-  applyServerPreferences();
+  if (epoch !== workspaceReadEpoch) return;
+  if (generation === preferenceWriteGeneration()) {
+    workspace.info = info;
+    applyServerPreferences();
+  } else {
+    // Keep the served object's identity: Settings holds optimistic writes
+    // over it until a fresh server record replaces it. Metadata still moves.
+    if (workspace.info) {
+      workspace.info = { ...info, preferences: workspace.info.preferences };
+    }
+    // No-op writes emit no watcher frame to request the fresh record.
+    scheduleWorkspaceRefresh();
+  }
   surfaceWorkspaceWarnings(info);
 }
 
@@ -3739,6 +3769,12 @@ export function scheduleWorkspaceRefresh(): void {
     // api.workspace() never escapes as an unhandled promise rejection.
     refreshWorkspace().catch(() => {});
   }, 250);
+}
+
+export function stopWorkspaceRefresh(): void {
+  workspaceReadEpoch += 1;
+  if (workspaceRefreshTimer !== null) clearTimeout(workspaceRefreshTimer);
+  workspaceRefreshTimer = null;
 }
 
 // ---- URL hash bridge for layout + UI persistence ------------------------
@@ -4742,6 +4778,7 @@ export function installSessionFlushHook(): void {
 }
 
 export function teardown(): void {
+  stopWorkspaceRefresh();
   invalidateWatchRelists();
   cancelGraphRefresh();
   treeListingsOut.clear();

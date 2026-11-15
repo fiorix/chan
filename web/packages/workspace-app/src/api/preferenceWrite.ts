@@ -14,6 +14,22 @@ export type PreferencesMutation = (
 
 const MAX_CONFLICT_RETRIES = 3;
 let configWriteInflight: Promise<void> = Promise.resolve();
+let writeGeneration = 0;
+
+export function preferenceWriteGeneration(): number {
+  return writeGeneration;
+}
+
+/// A read must follow every queued write, including writes added while it
+/// waits. Return the token with that check so the caller's continuation
+/// cannot mistake a newly enqueued write for one that already settled.
+export async function waitForPreferenceWrites(): Promise<number> {
+  for (;;) {
+    const pending = configWriteInflight;
+    await pending;
+    if (pending === configWriteInflight) return writeGeneration;
+  }
+}
 
 function isConfigConflict(value: unknown): value is ConfigConflict {
   if (!value || typeof value !== "object") return false;
@@ -56,6 +72,9 @@ async function updateWithRetry(mutate: PreferencesMutation): Promise<void> {
 export function updateGlobalConfigSerial(
   mutate: PreferencesMutation,
 ): Promise<void> {
+  // Invalidate reads at enqueue, including a mutation that later finds the
+  // server already holds its value and sends no PATCH or config_changed.
+  writeGeneration += 1;
   const result = configWriteInflight
     .catch(() => {})
     .then(() => updateWithRetry(mutate));
