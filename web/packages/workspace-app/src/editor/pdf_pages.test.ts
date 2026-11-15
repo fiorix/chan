@@ -45,6 +45,25 @@ describe("docPageGeometry", () => {
 describe("paginateDocBlocks", () => {
   const PAGE = 1000;
 
+  test("a pulled heading stays above the first oversized image slice without a gap page", () => {
+    const blocks = [
+      block(0, 580),
+      block(604.61, 604.61, { pageBreak: true }),
+      block(626, 676, { heading: true }),
+      block(698, 1930),
+    ];
+    const height = docPageGeometry().pageContentHeightPx;
+    const windows = paginateDocBlocks(blocks, height);
+    expect(windows.filter((window) => !blocks.some((block) =>
+      !block.pageBreak && block.bottom > window.startPx && block.top < window.endPx,
+    ))).toEqual([]);
+    expect(windows).toEqual([
+      { startPx: 0, endPx: 604.61 },
+      { startPx: 604.61, endPx: 604.61 + height },
+      { startPx: 604.61 + height, endPx: 1930 },
+    ]);
+  });
+
   test.each(capturedRects.themes)(
     "$theme: a break before an oversized block keeps its gap with content",
     ({ blocks }) => {
@@ -152,39 +171,32 @@ describe("paginateDocBlocks", () => {
   });
 
   test.each([
-    { name: "heading", rect: block(230, 280, { heading: true }) },
-    { name: "paragraph", rect: block(230, 280) },
-    { name: "ordinary rule", rect: block(230, 232) },
-    { name: "authored spacer", rect: block(230, 280) },
-  ])("keeps a $name page before an oversized image", ({ rect }) => {
+    { name: "paragraph", rect: block(230, 280), image: block(300, 1550) },
+    { name: "ordinary rule", rect: block(230, 232), image: block(300, 1550) },
+    { name: "authored spacer", rect: block(230, 940), image: block(960, 2210) },
+  ])("keeps a $name page before an oversized image", ({ rect, image }) => {
     expect(paginateDocBlocks([
       block(0, 200),
       block(210, 210, { pageBreak: true }),
       rect,
-      block(300, 1550),
-    ], PAGE)).toEqual(rect.heading ? [
+      image,
+    ], PAGE)).toEqual([
       { startPx: 0, endPx: 210 },
-      { startPx: 210, endPx: 230 },
-      { startPx: 230, endPx: 300 },
-      { startPx: 300, endPx: 1300 },
-      { startPx: 1300, endPx: 1550 },
-    ] : [
-      { startPx: 0, endPx: 210 },
-      { startPx: 210, endPx: 300 },
-      { startPx: 300, endPx: 1300 },
-      { startPx: 1300, endPx: 1550 },
+      { startPx: 210, endPx: image.top },
+      { startPx: image.top, endPx: image.top + PAGE },
+      { startPx: image.top + PAGE, endPx: image.bottom },
     ]);
   });
 
-  test("a fitting block after a break moves whole despite its leading space", () => {
+  test("leading space stays with a fitting block even when it must split", () => {
     expect(paginateDocBlocks([
       block(0, 200),
       block(210, 210, { pageBreak: true }),
       block(250, 1230),
     ], PAGE)).toEqual([
       { startPx: 0, endPx: 210 },
-      { startPx: 210, endPx: 250 },
-      { startPx: 250, endPx: 1230 },
+      { startPx: 210, endPx: 1210 },
+      { startPx: 1210, endPx: 1230 },
     ]);
   });
 

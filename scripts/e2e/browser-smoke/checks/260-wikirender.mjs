@@ -150,6 +150,13 @@ function inspectDocument(capture, rasters) {
   }
 }
 
+function imageMarkerBoxes(rasters, colours) {
+  return Object.fromEntries(Object.entries(colours).map(([name, colour]) => {
+    const tolerance = name === "tallBody" || name === "boundaryLower" ? 2 : 12;
+    return [name, rasters.map((raster) => colourBox(raster, colour, tolerance))];
+  }));
+}
+
 async function inspectFixtures(ctx, directory, evidence, faults) {
   cpSync(join(ctx.repoRoot, "scripts/e2e/browser-smoke/fixtures/pdfexport"),
     join(directory, "pdfexport"), { recursive: true });
@@ -186,8 +193,7 @@ async function inspectFixtures(ctx, directory, evidence, faults) {
             await saveRaster(ctx, raster, png);
             evidence.artifacts.push(png);
           }
-          record.colours = Object.fromEntries(Object.entries(colours).map(([name, colour]) =>
-            [name, rendered.rasters.map((raster) => colourBox(raster, colour, 12))]));
+          record.colours = imageMarkerBoxes(rendered.rasters, colours);
           for (const [name, boxes] of Object.entries(record.colours)) {
             assert(boxes.some((box) => box && box.count > 100), `${theme} ${kind}: missing image marker ${name}`);
           }

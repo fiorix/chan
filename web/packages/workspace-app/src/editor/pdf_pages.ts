@@ -107,11 +107,14 @@ export function paginateDocBlocks(
 ): DocPageWindow[] {
   const windows: DocPageWindow[] = [];
   let start = 0;
-  let contentBottom = 0;
   const push = (end: number) => {
     if (end > start) windows.push({ startPx: start, endPx: end });
     start = end;
   };
+  const containsContent = (end: number) => blocks.some((block) =>
+    !block.pageBreak && block.bottom > block.top &&
+    block.bottom > start && block.top < end,
+  );
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!;
@@ -122,11 +125,8 @@ export function paginateDocBlocks(
       continue;
     }
     while (block.bottom - start > pageHeightPx) {
-      const breakGap = blocks[i - 1]?.pageBreak && contentBottom <= start &&
-        block.bottom - block.top > pageHeightPx && block.top < start + pageHeightPx;
-      if (block.top <= start || breakGap) {
-        // Keep a break's trailing space with an oversized block, rather
-        // than giving the space its own page. Content before it stays put.
+      if (block.top <= start) {
+        // The block itself spans past a full page: hard-cut inside it.
         push(start + pageHeightPx);
         continue;
       }
@@ -143,9 +143,12 @@ export function paginateDocBlocks(
         push(start + pageHeightPx);
         continue;
       }
+      // A pulled heading or leading margin must not turn a reachable
+      // content page into a gap-only page. Explicit breaks remain explicit.
+      const pageEnd = start + pageHeightPx;
+      if (!containsContent(cut) && containsContent(pageEnd)) cut = pageEnd;
       push(cut);
     }
-    contentBottom = Math.max(contentBottom, block.bottom);
   }
 
   const lastBottom = blocks.length
