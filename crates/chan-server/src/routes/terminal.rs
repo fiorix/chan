@@ -3877,6 +3877,62 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn collector_with_replay_and_closed_stream() -> (Arc<AppState>, AttachHandle) {
+        let state = crate::state::test_support::make_test_state(false);
+        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let id = spawned.id();
+        assert!(state
+            .terminal_sessions
+            .inject_output(id, b"before attach\n"));
+        let mut attached = state
+            .terminal_sessions
+            .attach(id, None)
+            .expect("attach captures the retained output");
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+
+        // A short-lived command can close its live stream before a collector
+        // starts; its retained output must still be consumed exactly once.
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        drop(sender);
+        attached.rx = receiver;
+        (state, attached)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_until_keeps_replay_when_the_live_stream_is_closed() {
+        let _gate = pty_test_lock();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
+
+        let output = collect_until(&mut session, "not emitted", PROBE_BUDGET).await;
+
+        assert_eq!(output, "before attach\n");
+        assert!(session.replay.is_empty(), "replay is consumed, not copied");
+        assert_eq!(
+            collect_until(&mut session, "not emitted", PROBE_BUDGET).await,
+            "",
+            "a second collector must not deliver the same replay again"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_until_idle_keeps_replay_when_the_live_stream_is_closed() {
+        let _gate = pty_test_lock();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
+
+        let output = collect_until_idle(&mut session, PROBE_BUDGET, Duration::from_secs(1)).await;
+
+        assert_eq!(output, "before attach\n");
+        assert!(session.replay.is_empty(), "replay is consumed, not copied");
+        assert_eq!(
+            collect_until_idle(&mut session, PROBE_BUDGET, Duration::from_secs(1)).await,
+            "",
+            "a second collector must not deliver the same replay again"
+        );
+    }
+
     /// Type `script` into an already-spawned test terminal and return
     /// ONLY the output between its `__<family>_BEGIN__` and
     /// `__<family>_END__` markers (PROBE_BUDGET cap).

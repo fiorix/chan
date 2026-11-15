@@ -6176,21 +6176,24 @@ fn main() {
                                     },
                                     Err(message) => Response::Error { message },
                                 },
-                                Request::OpenTerminal { cwd, .. } => {
+                                Request::OpenTerminal { cwd, startup_id, .. } => {
                                     match serve::spawn_throwaway_terminal_window(
-                                        state,
+                                        Arc::clone(&state),
                                         PathBuf::from(cwd),
                                     )
                                     .await
                                     {
-                                        Ok(_) => Response::TerminalOpened {
-                                            desktop_version: CHAN_VERSION.into(),
-                                        },
+                                        Ok(label) => {
+                                            raise_new_terminal_window(app.clone(), state, label, startup_id);
+                                            Response::TerminalOpened {
+                                                desktop_version: CHAN_VERSION.into(),
+                                            }
+                                        }
                                         Err(message) => Response::Error { message },
                                     }
                                 }
-                                Request::Activate { .. } => {
-                                    single_instance::come_forward(&app, &state)
+                                Request::Activate { startup_id, .. } => {
+                                    single_instance::come_forward(&app, &state, startup_id.as_deref())
                                 }
                                 Request::OpenPath { path, .. } => {
                                     serve::open_path_in_standalone_window(state, &path).await
@@ -8007,6 +8010,10 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
 /// notice rather than blocking the menu-event / IPC thread. Mirrors how
 /// the IPC commands drive `serve::start`.
 fn spawn_terminal_window(app: &tauri::AppHandle) {
+    spawn_terminal_window_from_launch(app, None);
+}
+
+fn spawn_terminal_window_from_launch(app: &tauri::AppHandle, startup_id: Option<&str>) {
     // A default-terminal launch has no library window registry to mint into:
     // its New Window is a sibling process.
     if let Some(mode) = app.try_state::<Arc<terminal_mode::TerminalMode>>() {
@@ -8015,16 +8022,133 @@ fn spawn_terminal_window(app: &tauri::AppHandle) {
     }
     let app_for_task = app.clone();
     let state = Arc::clone(&app.state::<Arc<AppState>>());
+    let startup_id = startup_id.map(str::to_owned);
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = serve::spawn_local_terminal_window(state).await {
-            tracing::warn!(error = %e, "opening standalone terminal window failed");
-            emit_system_notice(
-                &app_for_task,
-                "error",
-                format!("Could not open terminal: {e}"),
-            );
+        match serve::spawn_local_terminal_window(Arc::clone(&state)).await {
+            Ok(id) => {
+                let label = serve::resolve_window_label(&app_for_task, &id);
+                raise_new_terminal_window(app_for_task, state, label, startup_id);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "opening standalone terminal window failed");
+                emit_system_notice(
+                    &app_for_task,
+                    "error",
+                    format!("Could not open terminal: {e}"),
+                );
+            }
         }
     });
+}
+
+/// A launch asks for focus only on its newly minted window. The watcher owns
+/// its build, so wait for the native window without holding the handoff reply.
+fn raise_new_terminal_window(
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+    label: String,
+    startup_id: Option<String>,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    tauri::async_runtime::spawn(async move {
+        let Some(embedded) = state.embedded() else {
+            return;
+        };
+        let change = embedded.library_change_notify();
+        let ready = raise::wait_for_requested_window(&change, deadline, || {
+            if !requested_terminal_is_shown(&state, &label) {
+                raise::WindowReady::Cancelled
+            } else if app.get_webview_window(&label).is_some() {
+                raise::WindowReady::Ready
+            } else {
+                raise::WindowReady::Waiting
+            }
+        })
+        .await;
+        if !ready {
+            tracing::debug!(
+                %label,
+                deadline_expired = tokio::time::Instant::now() >= deadline,
+                reason = "window was not ready before the request ended",
+                "requested terminal raise wait stopped",
+            );
+            return;
+        }
+        let dispatch = app.clone();
+        let scheduled = dispatch.run_on_main_thread(move || {
+            // A queued callback can outlive both the request and its window.
+            if tokio::time::Instant::now() >= deadline
+                || !requested_terminal_is_shown(&state, &label)
+            {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let record = state.embedded().and_then(|embedded| {
+                        embedded
+                            .local_window_records()
+                            .into_iter()
+                            .find(|record| window_watcher::native_label(record) == label)
+                    });
+                    // Snapshot fields separately so tracing cannot retain a guard
+                    // while another field takes the same lock.
+                    let deadline_expired = tokio::time::Instant::now() >= deadline;
+                    let shutdown_started = state
+                        .shutdown_started
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let hide_pending = state.silent_hides.lock().unwrap().contains(&label);
+                    let put_away = last_window::put_away(&state);
+                    let buried = state
+                        .local_watcher_view()
+                        .is_some_and(|view| view.is_buried(&label));
+                    let record_present = record.is_some();
+                    let record_hidden = record.as_ref().map(|record| record.hidden);
+                    let shown = record
+                        .as_ref()
+                        .is_some_and(|record| window_watcher::should_show(record, &put_away));
+                    tracing::debug!(
+                        %label,
+                        deadline_expired,
+                        shutdown_started,
+                        buried,
+                        hide_pending,
+                        record_present,
+                        ?record_hidden,
+                        shown,
+                        reason = "request expired or window no longer shown",
+                        "requested terminal raise callback refused",
+                    );
+                }
+                return;
+            }
+            if let Some(window) = app.get_webview_window(&label) {
+                if let Err(error) = raise::raise_window_from_launch(&window, startup_id.as_deref())
+                {
+                    tracing::warn!(%label, %error, "raising the requested terminal failed");
+                }
+            }
+        });
+        if let Err(error) = scheduled {
+            tracing::warn!(%error, "scheduling the requested terminal raise failed");
+        }
+    });
+}
+
+fn requested_terminal_is_shown(state: &AppState, label: &str) -> bool {
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || state
+            .local_watcher_view()
+            .is_some_and(|view| view.is_buried(label))
+    {
+        return false;
+    }
+    let Some(embedded) = state.embedded() else {
+        return false;
+    };
+    let put_away = last_window::put_away(state);
+    embedded.local_window_records().iter().any(|record| {
+        window_watcher::native_label(record) == label
+            && window_watcher::should_show(record, &put_away)
+    })
 }
 
 #[cfg(test)]

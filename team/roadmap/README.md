@@ -30,7 +30,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [New and Paste choose two folders][newpaste] | not started | build |
-| [a warm chan-term leaves Chan behind][warmterm] | not started | build |
+| [a warm chan-term leaves Chan behind][warmterm] | merged | owner |
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
 | [an accessibility press closes a tab][axclose] | not started | build |
 | [a PDF export is images only][pdftext] | withdrawn | closed |
@@ -41,7 +41,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a timed-out read fails the graph][graphtimeout] | not started | build |
 | [a streaming graph stalls the window][graphstall] | not started | measure |
 | [a renamed directory keeps old files][graphrename] | merged | closed |
-| [a terminal launch gets no focus][raisefocus] | not started | build |
+| [a terminal launch gets no focus][raisefocus] | merged | gate |
 | [a minimized window stays minimized][unbury] | merged | vm |
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | merged | owner |
@@ -49,17 +49,18 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [ConPTY pulls history into the screen][conpty] | not started | measure |
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
-| [a reload focuses another pane][reloadfocus] | not started | measure |
+| [a reload focuses another pane][reloadfocus] | merged | closed |
 | [a close test fails a loaded gate][closetest] | merged | closed |
 | [an edit erases another window's keys][keysmerge] | not started | build |
-| [team load overwrites the config][teamload] | not started | build |
-| [a survey takes another pane's keys][surveykeys] | not started | build |
+| [team load overwrites the config][teamload] | merged | closed |
+| [a survey takes another pane's keys][surveykeys] | merged | closed |
 | [an override sends a body raw][bracketbody] | not started | build |
-| [downloads carry write temporaries][writetemps] | not started | build |
-| [a gateway page may drop a layout][gwlayout] | not started | measure |
+| [downloads carry write temporaries][writetemps] | merged | closed |
+| [a gateway page may drop a layout][gwlayout] | merged | closed |
 | [cs window new prints a refused id][winid] | merged | gate |
-| [cs window new returns too early][winrace] | not started | build |
-| [a diagram's clicks land off][diagclick] | not started | measure |
+| [cs window new returns too early][winrace] | partly built | build |
+| [a diagram's clicks land off][diagclick] | merged | owner |
+| [a reattach replays into a TUI][altreplay] | not started | build |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
@@ -94,6 +95,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [winid]: v0.131.0/cs-window-new-prints-an-id-the-window-verbs-refuse.md
 [winrace]: v0.131.0/cs-window-new-returns-before-the-window-can-take-commands.md
 [diagclick]: v0.131.0/a-diagrams-clicks-land-off-to-the-side-of-the-pointer.md
+[altreplay]: v0.131.0/a-reattach-replays-the-normal-screen-into-a-full-screen-program-and-drops-its-mouse-modes.md
 
 ## Completed
 

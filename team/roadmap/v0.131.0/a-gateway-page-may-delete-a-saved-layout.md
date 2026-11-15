@@ -1,6 +1,6 @@
 # A gateway page may delete a saved layout
 
-Status: accepted for v0.131.0 by the owner on 2026-11-14 as a reading (`dev/v0131/decisions.md`, point 11: "as you recommend"); a fix follows only if the reading shows a difference. Not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-14 as a reading (`dev/v0131/decisions.md`, point 11: "as you recommend"); a fix follows only if the reading shows a difference. Read on 2026-11-14: no difference; closed.
 
 Record: a follow-up of v0.130.0 with no row (its release record, "Follow-ups", the manual): whether a saved layout can restore to nothing in a gateway browser page but not in a desktop page, which would make a gateway leader delete that layout on its first save, was not established. The decisions document for v0.131.0 sorted it as a reading; the owner took that recommendation.
 
@@ -23,3 +23,11 @@ Read at `f7457becb`, by reading.
 
 1. The reading's test, recorded with its result per tab kind, kept as a regression test whatever it shows.
 2. If a kind differs: the fix, with that test red at the base and green at the tip.
+
+## Built, 2026-11-14
+
+The workspace-app reading found no platform difference for the six tab kinds the session format restores (terminal, file, file browser, graph, dashboard and extension), the file kind read in both its editor and canvas (diagram) modes. Terminals were read both with a live session id and without one. Each saved payload comes from the real session writer's PUT, then boots separately through the desktop and gateway environment, the real restore path and session serializer. Both return the same complete, nonempty layout, retain the expected tab kind and leave the saved blob unchanged on the first save. No product change was needed.
+
+The retained test is `web/packages/workspace-app/src/state/store.gatewayLayout.test.ts`. Its gateway page has an origin-follower participant that holds the leader slot, so DELETE suppression cannot conceal a lost layout. Two controls explicitly empty a restored layout and verify the real session transport sends DELETE, on both surfaces. This is a Vitest bootstrap reading with mocked network/content boundaries and distinct native globals, tenant prefixes and rosters, not a browser or native engine observation.
+
+All ten cases pass. A temporary mutation that skips graph tabs during restoration makes the graph case fail because its leaf has no tab; the other nine pass. The original source hash was restored. Logs, statuses, the mutation diff and source hashes are under `dev/v0131-team/evidence/Edit131/gwlayout/` (`second-run.log`, `mutation-red.log`, `restored.log`); committed validation is recorded in `committed-test.log` and `committed-typecheck.log`. The first harness run failed before comparison because its status assertion did not handle a null status; that setup error is retained as `first-run.log` and is not evidence of a product difference. No guest or owner pass is required by this reading's acceptance; no product fix follows it.

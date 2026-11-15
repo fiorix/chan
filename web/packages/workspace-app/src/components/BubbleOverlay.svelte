@@ -24,7 +24,7 @@
     type SurveySlot,
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
-  import { tabFocusPulse } from "../state/tabs.svelte";
+  import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
 
   let {
     tabId = null,
@@ -40,17 +40,22 @@
   const active = $derived(surveyFor(slot));
   const busy = $derived(surveyBusy(slot));
 
-  // Steal focus when this slot's survey appears or its terminal becomes the
-  // visible tab. Per-terminal overlays stay mounted while hidden so a return
-  // to the same survey preserves the original focus target. The tab-focus
-  // pulse makes the re-grab explicit after every click/chord switch; the
-  // terminal's own focus paths independently refuse to run while this survey
-  // exists.
+  function ownsKeyboard(): boolean {
+    if (slot === null) return true;
+    const pane = layout.nodes[layout.activePaneId];
+    return pane?.kind === "leaf" && activeTabInPane(pane)?.id === slot;
+  }
+
+  // A visible survey owns the keyboard only in its focused pane. Retain its
+  // first return target across tab and pane switches. Read live ownership in
+  // the effect and its queued callbacks, since docking can move the terminal
+  // without remounting this overlay, and focus can move before a callback.
   let card = $state<HTMLDivElement | null>(null);
   let returnFocus: HTMLElement | null = null;
   let focusedSurveyId: string | null = null;
   $effect(() => {
     const id = active?.surveyId ?? null;
+    const eligible = ownsKeyboard();
     // Window-wide surveys are unrelated to terminal-tab rotation. Avoid
     // making their focus behavior depend on terminal pulses.
     if (slot !== null) tabFocusPulse.value;
@@ -60,16 +65,22 @@
       const target = returnFocus;
       returnFocus = null;
       queueMicrotask(() => {
-        if (!active && shown) {
+        if (!active && shown && ownsKeyboard()) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
         }
       });
       return;
     }
-    // A survey on a hidden terminal must not touch the visible tab's focus.
-    // Keep the tracked survey + return target intact for the later tab return.
-    if (!shown) return;
+    // A hidden survey must not hold the visible tab's keyboard; an unfocused
+    // one must not hold another pane's. Keep the survey and its return target
+    // intact for the later tab or pane return.
+    if (!shown || !eligible) {
+      if (focusedSurveyId && !eligible && card?.contains(document.activeElement)) {
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
+      return;
+    }
     if (!focusedSurveyId) {
       const current = document.activeElement;
       if (current instanceof HTMLElement && current !== document.body) {
@@ -84,7 +95,7 @@
     focusedSurveyId = id;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id) card?.focus({ preventScroll: true });
+      if (shown && active?.surveyId === id && ownsKeyboard()) card?.focus({ preventScroll: true });
     });
   });
 

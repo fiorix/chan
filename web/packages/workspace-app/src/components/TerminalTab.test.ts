@@ -781,6 +781,7 @@ describe("TerminalTab and the app around it", () => {
 
   test("while its survey is up, the terminal does not take focus back", async () => {
     const tab = terminalTab();
+    seatTerminals([tab]);
     await renderTerminal(tab, true);
     await tick();
     clearTerminalFocuses();

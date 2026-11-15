@@ -2,13 +2,14 @@
 //! launch coming forward (`single_instance::come_forward`), a close
 //! confirmation (`serve::on_close_requested`), an open Window menu row
 //! (`show_window` in `main.rs`), a window list or `cs window open` request or
-//! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
-//! for an existing window (`open_about_window` in `main.rs`). These call
-//! [`raise_window`] and nothing else does, so no path takes focus that nobody
-//! asked for.
+//! hidden Window menu row (`unbury_window` in `main.rs`), the About item
+//! for an existing window (`open_about_window` in `main.rs`), and a requested
+//! terminal once its watcher builds it (`raise_new_terminal_window` in
+//! `main.rs`). Only these explicit requests call [`raise_window`] or
+//! [`raise_window_from_launch`]; startup restores call neither.
 //!
-//! The raise restores the window, shows it and focuses it through Tauri, and
-//! then settles what those calls leave undone on the platform. The focus call
+//! Without an X11 launch id, the raise restores the window, shows it and
+//! focuses it through Tauri, then settles the platform's remainder. The focus call
 //! is tao's `set_focus`, which on every platform does nothing while the window
 //! reads minimized or not visible. Each platform settles that its own way:
 //!
@@ -35,10 +36,15 @@
 //!   A window that read shown needs nothing more, since `set_focus` presented
 //!   it. Waiting for visibility also covers the queued `show` of a hidden
 //!   window, which the immediate `set_focus` skips.
-//!   Whether the window manager gives a presented window the focus is its
-//!   own decision: one that prevents focus stealing weighs the request's
-//!   time, which GTK takes from the last input the app received, against
-//!   the user's last input elsewhere.
+//!   A second launch can supply a startup id through
+//!   [`raise_window_from_launch`]. On X11 the main thread applies that id
+//!   to the GTK window before raising it, then presents directly with the
+//!   id's timestamp. GTK's native presentation restores hidden or minimized
+//!   windows without tao's focus guard, so that path needs no delayed focus.
+//!   Without an id GTK uses the app's last input time. The
+//!   running desktop never reads the X server's time for a raise, and the
+//!   window manager still decides whether to grant focus. Other GTK
+//!   backends do not apply the id.
 //! - Windows: tao restores the window with `ShowWindow(SW_RESTORE)` and shows
 //!   it on the event loop's thread, setting its minimized and visible flags
 //!   in the same steps, before the focus call runs there, so `set_focus`
@@ -55,6 +61,83 @@ use tauri::{Runtime, WebviewWindow};
 /// moved on.
 const RESTORE_WAIT: Duration = Duration::from_secs(1);
 const RESTORE_POLL: Duration = Duration::from_millis(20);
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn startup_timestamp(startup_id: &str) -> Option<u32> {
+    // GTK reads the last marker with g_ascii_strtoull(base=0), then narrows
+    // it to its 32-bit X11 time. Keep the explicit present on that same time.
+    let text = startup_id
+        .rsplit_once("_TIME")?
+        .1
+        .trim_start_matches(|c: char| matches!(c, ' ' | '\t'..='\r'));
+    let negative = text.starts_with('-');
+    let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let (radix, digits) = if digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+        .is_some_and(|tail| tail.as_bytes().first().is_some_and(u8::is_ascii_hexdigit))
+    {
+        (16, &digits[2..])
+    } else if digits.starts_with('0') {
+        (8, digits)
+    } else {
+        (10, digits)
+    };
+    let end = digits
+        .bytes()
+        .take_while(|byte| char::from(*byte).is_digit(radix))
+        .count();
+    let value = u64::from_str_radix(&digits[..end], radix).ok()?;
+    let time = if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    } as u32;
+    (time != 0).then_some(time)
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn usable_startup_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 1024 && !id.contains('\0')
+}
+
+/// Raise with only the requesting launch's activation. GTK's startup id
+/// is X11-specific; other platforms keep their
+/// ordinary raise. NUL cannot be passed to GTK, and its startup notification
+/// broadcast is bounded to an id of at most 1 KiB.
+pub(crate) fn raise_window_from_launch<R: Runtime>(
+    window: &WebviewWindow<R>,
+    startup_id: Option<&str>,
+) -> tauri::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(startup_id) = startup_id.filter(|id| usable_startup_id(id)) {
+        use gtk::prelude::*;
+        let startup_id = startup_id.to_owned();
+        let target = window.clone();
+        return window.run_on_main_thread(move || {
+            let window = target;
+            match window.gtk_window() {
+                Ok(native) => {
+                    if native.display().is::<gdkx11::X11Display>() {
+                        native.set_startup_id(&startup_id);
+                        native.deiconify();
+                        // Tauri presents with the display's last input time,
+                        // which may be newer than this particular request.
+                        native.present_with_time(startup_timestamp(&startup_id).unwrap_or(0));
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "reading the requested GTK window failed"),
+            }
+            if let Err(error) = raise_window(&window) {
+                tracing::warn!(%error, "raising the launch's window failed");
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = startup_id;
+    raise_window(window)
+}
 
 /// Restore, show and focus `window`, then settle the platform's remainder
 /// (see the module comment). Fails only when Tauri cannot reach the window's
@@ -234,6 +317,38 @@ fn after_look(minimized: Option<bool>, visible: Option<bool>, waited: Duration) 
     }
 }
 
+/// A requested window's current eligibility and native build state.
+pub(crate) enum WindowReady {
+    Waiting,
+    Ready,
+    Cancelled,
+}
+
+/// Wait for a requested native build, without polling or retaining a request
+/// after its deadline. The build's completion and library changes share `change`.
+pub(crate) async fn wait_for_requested_window(
+    change: &tokio::sync::Notify,
+    deadline: tokio::time::Instant,
+    mut probe: impl FnMut() -> WindowReady,
+) -> bool {
+    loop {
+        let notified = change.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        match probe() {
+            WindowReady::Ready => return true,
+            WindowReady::Cancelled => return false,
+            WindowReady::Waiting => {}
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            return false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +415,94 @@ mod tests {
     }
 
     #[test]
+    fn launch_startup_ids_are_bounded_and_c_string_safe() {
+        assert!(!usable_startup_id(""));
+        assert!(usable_startup_id("_TIME42"));
+        assert!(usable_startup_id(&"x".repeat(1024)));
+        assert!(!usable_startup_id(&"x".repeat(1025)));
+        assert!(usable_startup_id(&"\u{e9}".repeat(512)));
+        assert!(!usable_startup_id(&"\u{e9}".repeat(513)));
+        assert!(!usable_startup_id("opaque\0_TIME42"));
+        let launch = body(
+            production(include_str!("raise.rs")),
+            "\npub(crate) fn raise_window_from_launch",
+        );
+        assert!(launch.contains("startup_id.filter(|id| usable_startup_id(id))"));
+    }
+
+    #[test]
+    fn launch_raise_applies_only_the_supplied_id_before_raising() {
+        let source = production(include_str!("raise.rs"));
+        let launch = body(source, "\npub(crate) fn raise_window_from_launch");
+        in_order(
+            launch,
+            &[
+                "if let Some(startup_id) = startup_id",
+                "window.run_on_main_thread(move || {",
+                "window.gtk_window()",
+                "native.display().is::<gdkx11::X11Display>()",
+                "native.set_startup_id(&startup_id)",
+                "native.deiconify()",
+                "native.present_with_time(startup_timestamp(&startup_id).unwrap_or(0))",
+                "return;",
+                "raise_window(&window)",
+            ],
+        );
+        assert!(launch.ends_with("\n    raise_window(window)"));
+        for forbidden in ["launch_startup_id", "SystemTime", "get_server_time"] {
+            assert!(
+                !launch.contains(forbidden),
+                "the desktop must not invent an id"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_ids_reach_existing_and_requested_terminal_windows() {
+        let main = production(include_str!("main.rs"));
+        let forward = body(
+            production(include_str!("single_instance.rs")),
+            "\npub(crate) fn come_forward(",
+        );
+        assert!(forward.contains("raise::raise_window_from_launch(&window, startup_id)"));
+        assert!(forward.contains("spawn_terminal_window_from_launch(app, startup_id)"));
+        assert!(main.contains("single_instance::come_forward(&app, &state, startup_id.as_deref())"));
+        let compact: String = main.split_whitespace().collect();
+        assert!(compact.contains("raise_new_terminal_window(app.clone(),state,label,startup_id)"));
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        assert!(
+            requested.contains("raise::raise_window_from_launch(&window, startup_id.as_deref())")
+        );
+    }
+
+    #[test]
+    fn a_launch_timestamp_is_read_from_its_id_without_using_a_newer_time() {
+        assert_eq!(startup_timestamp("_TIME123"), Some(123));
+        assert_eq!(startup_timestamp("launcher_TIME99_part_TIME42"), Some(42));
+        assert_eq!(startup_timestamp("launcher_TIME4294967295"), Some(u32::MAX));
+        for id in ["opaque-token", "", "_TIME", "_TIME0", "_TIME4294967296"] {
+            assert_eq!(startup_timestamp(id), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn launch_timestamps_follow_gtks_numeric_prefix_and_wrap_rules() {
+        for (id, expected) in [
+            ("launcher_TIME0x10", Some(16)),
+            ("launcher_TIME042suffix", Some(34)),
+            ("launcher_TIME42suffix", Some(42)),
+            ("_TIME \t+42", Some(42)),
+            ("_TIME\u{b}123", Some(123)),
+            ("_TIME-1", Some(u32::MAX)),
+            ("_TIME4294967297", Some(1)),
+            ("_TIME18446744073709551616", None),
+            ("_TIMEgarbage", None),
+        ] {
+            assert_eq!(startup_timestamp(id), expected, "{id}");
+        }
+    }
+
+    #[test]
     fn a_look_requires_a_visible_restored_window_and_bounds_the_wait() {
         for waited in [Duration::ZERO, RESTORE_WAIT * 2] {
             assert_eq!(after_look(Some(false), Some(true), waited), Look::Focus);
@@ -321,6 +524,92 @@ mod tests {
                 assert_eq!(after_look(minimized, visible, waited), Look::Gone);
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_requested_window_already_built_is_ready_without_a_notification() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Ready
+            })
+            .await
+        );
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_native_completion_during_the_probe_is_not_lost() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                if probes == 1 {
+                    change.notify_waiters();
+                    WindowReady::Waiting
+                } else {
+                    WindowReady::Ready
+                }
+            })
+            .await
+        );
+        assert_eq!(probes, 2);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_request_stops_without_waiting_or_retrying() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        assert!(
+            !wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Cancelled
+            })
+            .await
+        );
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_native_window_expires_without_polling() {
+        let change = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        let ready = tokio::time::timeout(
+            Duration::from_secs(4),
+            wait_for_requested_window(&change, start + Duration::from_secs(3), || {
+                probes += 1;
+                WindowReady::Waiting
+            }),
+        )
+        .await
+        .expect("the wait must be bounded");
+        assert!(!ready);
+        assert_eq!(probes, 1);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_request_cannot_take_a_ready_window() {
+        let change = tokio::sync::Notify::new();
+        let mut probes = 0;
+        assert!(
+            !wait_for_requested_window(&change, tokio::time::Instant::now(), || {
+                probes += 1;
+                WindowReady::Ready
+            })
+            .await
+        );
+        assert_eq!(probes, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -429,7 +718,7 @@ mod tests {
     fn the_raise_restores_shows_and_focuses_before_it_settles() {
         let raise = body(
             production(include_str!("raise.rs")),
-            "\npub(crate) fn raise_window",
+            "\npub(crate) fn raise_window<",
         );
         in_order(
             raise,
@@ -549,6 +838,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn requested_terminal_opens_raise_only_the_new_native_window() {
+        let main = production(include_str!("main.rs"));
+        let handoff = main.split_once("Request::OpenTerminal {").unwrap().1;
+        let handoff = handoff.split_once("Request::Activate {").unwrap().0;
+        in_order(
+            handoff,
+            &[
+                "serve::spawn_throwaway_terminal_window(",
+                "Ok(label) => {",
+                "raise_new_terminal_window(",
+                "Response::TerminalOpened",
+            ],
+        );
+        let wrapper = body(main, "\nfn spawn_terminal_window(");
+        assert!(wrapper.contains("spawn_terminal_window_from_launch(app, None)"));
+        let explicit = body(main, "\nfn spawn_terminal_window_from_launch(");
+        in_order(
+            explicit,
+            &[
+                "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
+                "Ok(id) => {",
+                "let label = serve::resolve_window_label(&app_for_task, &id);",
+                "raise_new_terminal_window(app_for_task, state, label, startup_id);",
+            ],
+        );
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        in_order(
+            requested,
+            &[
+                "raise::wait_for_requested_window(",
+                "requested_terminal_is_shown(&state, &label)",
+                "app.get_webview_window(&label).is_some()",
+                ".await",
+                "if !ready {",
+                "requested terminal raise wait stopped",
+                "            );\n            return;\n        }\n        let dispatch",
+                "dispatch.run_on_main_thread(move || {",
+            ],
+        );
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        in_order(
+            callback,
+            &[
+                "tokio::time::Instant::now() >= deadline",
+                "!requested_terminal_is_shown(&state, &label)",
+                "                }\n                return;\n            }\n            if let Some(window) = app.get_webview_window(&label)",
+                "raise::raise_window_from_launch(&window, startup_id.as_deref())",
+            ],
+        );
+        assert!(callback.contains(concat!(
+            "if tokio::time::Instant::now() >= deadline\n",
+            "                || !requested_terminal_is_shown(&state, &label)\n",
+            "            {\n                if tracing::enabled!(tracing::Level::DEBUG) {",
+        )));
+        assert_eq!(
+            requested
+                .matches("raise::raise_window_from_launch(")
+                .count(),
+            1
+        );
+        assert_eq!(main.matches("raise_new_terminal_window(").count(), 3);
+        for boot in [
+            body(main, "\nasync fn ensure_boot_window("),
+            production(include_str!("launch_paths.rs")),
+        ] {
+            assert!(!boot.contains("raise_new_terminal_window("));
+        }
+    }
+
+    #[test]
+    fn requested_terminal_refusal_logging_does_not_hold_locks() {
+        let main = production(include_str!("main.rs"));
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        assert_eq!(callback.matches("tracing::debug!(").count(), 1);
+        let arguments = callback.split_once("tracing::debug!(").unwrap().1;
+        let arguments = arguments.split_once("\n                    );").unwrap().0;
+        assert!(arguments.contains("\"requested terminal raise callback refused\""));
+        let arguments: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [".lock(", "put_away("] {
+            assert!(
+                !arguments.contains(call),
+                "refusal logging must snapshot {call} before the debug macro: {arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_requested_terminal_raise_uses_the_live_local_visibility_rule() {
+        let main = production(include_str!("main.rs"));
+        let eligibility = body(main, "\nfn requested_terminal_is_shown(");
+        assert!(eligibility.contains(concat!(
+            "if state\n        .shutdown_started\n",
+            "        .load(std::sync::atomic::Ordering::SeqCst)\n",
+            "        || state\n            .local_watcher_view()\n",
+            "            .is_some_and(|view| view.is_buried(label))\n",
+            "    {\n        return false;\n    }",
+        )));
+        in_order(
+            eligibility,
+            &[
+                ".shutdown_started",
+                ".load(std::sync::atomic::Ordering::SeqCst)",
+                ".local_watcher_view()",
+                ".is_some_and(|view| view.is_buried(label))",
+                "return false;",
+                "let Some(embedded) = state.embedded() else {",
+                "let put_away = last_window::put_away(state);",
+                "embedded.local_window_records().iter().any(|record| {",
+                "window_watcher::native_label(record) == label",
+                "&& window_watcher::should_show(record, &put_away)",
+            ],
+        );
+    }
+
     /// Every direct caller is an explicit request to bring a window forward.
     /// Count all mentions so an import cannot bypass the module-path pin.
     #[test]
@@ -556,11 +967,22 @@ mod tests {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut calls = BTreeMap::new();
         let mut directories = vec![src.clone()];
+        let mut visited = std::collections::HashSet::new();
         while let Some(directory) = directories.pop() {
+            if !visited.insert(
+                directory
+                    .canonicalize()
+                    .expect("a source directory resolves"),
+            ) {
+                continue;
+            }
             for entry in std::fs::read_dir(directory).expect("the crate's sources are readable") {
                 let entry = entry.expect("a source entry");
                 let path = entry.path();
-                if entry.file_type().expect("a source entry's type").is_dir() {
+                if path == src.join("testdata") {
+                    continue;
+                }
+                if path.is_dir() {
                     directories.push(path);
                     continue;
                 }
@@ -574,7 +996,10 @@ mod tests {
                 let name = relative.to_string_lossy().into_owned();
                 let source = std::fs::read_to_string(&path).expect("a source file reads");
                 let production = production(&source);
-                let by_path = production.matches("raise::raise_window(").count();
+                let by_path = production.matches("raise::raise_window(").count()
+                    + production
+                        .matches("raise::raise_window_from_launch(")
+                        .count();
                 assert_eq!(
                     production.matches("raise_window").count(),
                     by_path,
@@ -588,7 +1013,7 @@ mod tests {
         assert_eq!(
             calls,
             BTreeMap::from([
-                ("main.rs".to_string(), 5),
+                ("main.rs".to_string(), 6),
                 ("serve.rs".to_string(), 1),
                 ("single_instance.rs".to_string(), 1),
             ])

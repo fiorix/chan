@@ -46,7 +46,7 @@
 </section>
 
 <section class="manual-block" id="config">
-  <h2><a class="heading-anchor" href="#config">The team directory and team.toml</a></h2>
+  <h2><a class="heading-anchor" href="#config">The team directory and config.toml</a></h2>
   <p>A team is one directory in the workspace. The dialog and <code>cs terminal team</code> read and write the same files.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
@@ -55,7 +55,7 @@
       </thead>
       <tbody>
         <tr><td><code>config.toml</code></td><td>The team. You may edit it; it is checked again on every load.</td></tr>
-        <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. chan writes it, and hand edits are lost on the next write.</td></tr>
+        <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. Creating a new team writes it; loading a saved team keeps an existing copy.</td></tr>
         <tr><td><code>tasks/</code></td><td>One file per task, <code>task-{from}-{to}-{n}.md</code>.</td></tr>
         <tr><td><code>journals/</code></td><td>One journal per member, <code>journal-{member}.md</code>.</td></tr>
         <tr><td><code>followups/</code></td><td>Follow-ups, <code>followup-{from}-{to}-{n}.md</code>.</td></tr>
@@ -116,6 +116,7 @@ command = "codex"</code></pre>
       </tbody>
     </table>
   </div>
+  <p>Running a <code>team load --script</code> script writes <code>config.toml</code> and <code>bootstrap.md</code> only where each is missing. Existing files are kept byte for byte, including comments and hand edits. A <code>team new --script</code> script writes both files from the supplied configuration and brief.</p>
   <aside class="doc-note warning">Running <code>new</code> or <code>load</code> again starts another copy of the team in a new group. Close the running one first with <code>cs terminal close --tab-group review</code>.</aside>
   <h3 id="named-terminals"><a class="heading-anchor" href="#named-terminals">Named terminals without a team</a></h3>
   <p>Without a team, start and address named terminals directly:</p>
@@ -151,6 +152,7 @@ command = "codex"</code></pre>
       <li><code>--submit</code> encodes one agent per command, so a group of mixed agents needs one write per agent.</li>
       <li>Writes are queued and delivered when the terminal goes quiet, at most 4096 bytes each. Put longer text in a file and send its path.</li>
       <li>A survey waits 600 seconds by default, then exits 124. <strong>[F]</strong> answers that you will follow up later.</li>
+      <li>A survey over a terminal takes the keyboard when that terminal is visible in the focused pane. In another pane it stays visible and you can click an answer while typing continues in the focused pane. Returning to its pane gives the survey the keyboard.</li>
     </ul>
   </details>
 </section>
