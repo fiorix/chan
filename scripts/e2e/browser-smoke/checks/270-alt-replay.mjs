@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -111,7 +111,7 @@ async function currentRow(cs, name, id) {
 
 function screenSelector(row, backend) {
   const tab = `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-  return `${tab} ${backend === "ghostty" ? ".terminal-host canvas" : ".terminal.xterm .xterm-screen"}`;
+  return `${tab} ${TERMINAL_SURFACES[backend]}`;
 }
 
 async function screenBox(page, row, backend) {

@@ -2,6 +2,12 @@ import { readTerminalPrefs } from "./terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export const TERMINAL_SURFACES = {
+  // Xterm's WebGL canvas is nested inside its screen, not directly in the host.
+  ghostty: ".terminal-host > canvas",
+  xterm: ".terminal.xterm .xterm-screen",
+};
+
 export async function openAttachedTerminal(ctx, page, cs, windowId, name, backend, newArgs = []) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const terminal = await readTerminalPrefs(page, token);
@@ -12,9 +18,7 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
   await cs(["new", "--tab-name", name, ...newArgs]);
   const deadline = Date.now() + 60_000;
   let row = null;
-  const backendSelector = backend === "ghostty"
-    ? ".terminal-host canvas"
-    : ".terminal.xterm .xterm-screen";
+  const backendSelector = TERMINAL_SURFACES[backend];
   for (;;) {
     const listed = await cs(["list", "--json"]);
     const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
@@ -34,9 +38,9 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
       if (attached) return row;
     }
     if (Date.now() > deadline) {
-      const tabs = await page.evaluate(() => [...document.querySelectorAll(".terminal-tab")].map((tab) => {
-        const xterm = tab.querySelector(".terminal.xterm .xterm-screen");
-        const ghostty = tab.querySelector(".terminal-host canvas");
+      const tabs = await page.evaluate((surfaces) => [...document.querySelectorAll(".terminal-tab")].map((tab) => {
+        const xterm = tab.querySelector(surfaces.xterm);
+        const ghostty = tab.querySelector(surfaces.ghostty);
         const element = xterm ?? ghostty;
         const box = element?.getBoundingClientRect();
         return {
@@ -45,7 +49,7 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
           backend: xterm ? "xterm" : ghostty ? "ghostty" : "missing",
           box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
         };
-      }));
+      }), TERMINAL_SURFACES);
       await ctx.shot(`${name}-attach-failure`, page).catch(() => {});
       throw new Error(`${name}: terminal not attached: row=${JSON.stringify(row)} tabs=${JSON.stringify(tabs)}`);
     }

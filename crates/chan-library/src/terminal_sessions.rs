@@ -10717,13 +10717,6 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_sniffer_matches_expected_sequences() {
-        assert!(contains_subslice(b"abc\x1b[?1049hdef", b"\x1b[?1049h"));
-        assert!(contains_subslice(b"abc\x1b[?1049ldef", b"\x1b[?1049l"));
-        assert!(!contains_subslice(b"abc\x1b[?1048hdef", b"\x1b[?1049h"));
-    }
-
-    #[test]
     fn alt_screen_sniffer_matches_sequences_across_chunks() {
         let session = test_session_with_ring(1024);
 

@@ -59,6 +59,45 @@ fn alt_screen_1047_takes_no_normal_screen_replay() {
 }
 
 #[test]
+fn decrqm_keeps_an_enabled_alt_screen_on() {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"normal-screen sentinel\r\n\x1b[?1047hframe");
+    assert!(session.in_alt_screen.load(Ordering::Relaxed));
+
+    session.record_output(b"\x1b[?1047$p");
+
+    let attached = session.attach(Some(0));
+    assert!(
+        attached.alt_screen,
+        "DECRQM must leave the alternate-screen tracker on"
+    );
+    assert!(
+        attached.replay.is_empty(),
+        "a mode query must not expose normal-screen replay"
+    );
+}
+
+#[test]
+fn decrqm_keeps_an_enabled_mouse_mode_on() {
+    let session = test_session_with_ring(1024);
+    session.record_output(b"\x1b[?1015h");
+    assert_eq!(modes_on(&session), vec![1015]);
+
+    session.record_output(b"\x1b[?1015$p");
+
+    assert_eq!(
+        modes_on(&session),
+        vec![1015],
+        "DECRQM must leave the private-mode tracker on"
+    );
+    assert_eq!(
+        session.attach(Some(0)).mode_reassert,
+        b"\x1b[?1015h",
+        "the queried mouse mode must remain in the attach prelude"
+    );
+}
+
+#[test]
 fn a_grouped_alt_screen_takes_no_normal_screen_replay() {
     let session = test_session_with_ring(1024);
     session.record_output(b"normal-screen sentinel\r\n");
