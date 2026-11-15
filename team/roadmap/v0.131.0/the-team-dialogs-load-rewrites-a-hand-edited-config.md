@@ -71,3 +71,9 @@ Open, not built here:
 
 - The route trusts the client's `keep_config` with no comparison of its own; a server-side modeled-equality check would keep a hand edit made after Load from launching a stale roster.
 - A terminal created as the Team dialog opens takes keyboard focus from the dialog's field when it finishes starting (the terminal refocus guard yields only to a survey or the Computers launcher); the product question is with the owner.
+
+## Modal keyboard ownership, 2026-11-15
+
+The owner chose "Fix now in v0.131.0 (recommended)" for the Team dialog's terminal-startup focus theft. The shared terminal refocus guard also yields while `modalDialogOpen()` holds, covering the Team dialog, prompt and confirm dialogs, conflict dialogs and the other app-root modals. The command launcher's post-run focus return reads the same guard; the pane-tree close path already refuses modal ownership. Later ordinary focus requests are allowed after the modal closes; this does not add an automatic Team-close focus request.
+
+Mounted regressions reproduce a terminal taking the Team dialog field's DOM focus on startup and on a pane pulse, and a completed command restoring its opener under an open prompt. The startup test retains the field through the terminal's focus retry. The pulse test accounts for the pulse's intentional synchronous blur, requires the terminal to leave focus unclaimed under the modal, and verifies an ordinary pulse restores the terminal after closure. Removing each survey, Computers-launcher and modal guard arm fails its corresponding assertion. Local evidence is retained under `dev/v0131-team/evidence/Term131/dialogfocus/task50/`. Committed terminal/type gates and the tip browser reading of checks 137, 226 and 276 remain pending.

@@ -254,12 +254,10 @@
     focused: boolean;
   } = $props();
 
-  // A survey is modal over this terminal, and the Computers launcher shown
-  // over the window holds the keyboard in its own webview: a refocus under
-  // either would take it (refocusRefused). Centralizing the guard keeps
-  // every refocus path out, the mount and the pane focus included; once the
-  // survey clears or the launcher hides, the same calls legitimately restore
-  // the terminal.
+  // Modal dialogs, a survey over this terminal and the Computers launcher
+  // own the keyboard. Centralizing their guard keeps every refocus path
+  // from taking it, the mount and pane focus included; once those owners
+  // release it, the same calls legitimately restore the terminal.
   function focusTerminal(): void {
     if (refocusRefused(tab.id)) return;
     term?.focus();
@@ -1010,7 +1008,7 @@
       ) {
         owner.blur();
       }
-      // focusTerminal carries the remaining survey-overlay ownership guard.
+      // focusTerminal carries the remaining dialog and survey ownership guards.
       focusTerminal();
     });
   }

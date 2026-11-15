@@ -231,6 +231,7 @@ import { terminalPreferences } from "../__tests__/standalone";
 import { commandById } from "../state/commands";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
+import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import {
   attach,
   installTerminalDom,
@@ -769,6 +770,57 @@ describe("a ghostty terminal opening in a background pane", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(document.activeElement).toBe(target.querySelector(".terminal-host"));
     } finally {
+      field.remove();
+    }
+  });
+});
+
+describe("a ghostty terminal under the Team dialog", () => {
+  test("a focused terminal finishing its mount leaves the keyboard in the dialog's field", async () => {
+    ghostty.record.realFocus = true;
+    const field = document.createElement("input");
+    document.body.append(field);
+    openTeamDialog({ leadTabId: "term-1", leadPaneId: TERMINAL_PANE });
+    field.focus();
+    try {
+      const { target } = await mountGhostty();
+      expect(target.querySelector(".terminal-host")?.getAttribute("tabindex"), "the terminal finishes opening focusable").toBe("0");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(document.activeElement, "the modal field keeps focus after terminal startup and its focus retry").toBe(field);
+      expect(ghostty.record.events, "startup does not ask the terminal to take focus under a modal").not.toContain("focus");
+    } finally {
+      closeTeamDialog();
+      field.remove();
+    }
+  });
+
+  test("a pane focus pulse cannot focus the terminal until the dialog closes", async () => {
+    ghostty.record.realFocus = true;
+    const { target, tab } = await mountGhostty();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const field = document.createElement("input");
+    document.body.append(field);
+    openTeamDialog({ leadTabId: tab.id, leadPaneId: TERMINAL_PANE });
+    field.focus();
+    ghostty.record.events.splice(0);
+    try {
+      bumpTabFocusPulse();
+      // The pulse blurs the prior surface synchronously; the terminal's
+      // queued focus must still yield while the dialog owns the keyboard.
+      expect(document.activeElement, "the pulse relinquishes the field before notifying tabs").toBe(document.body);
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(ghostty.record.events, "the pane pulse does not ask the terminal to take focus under a modal").not.toContain("focus");
+      expect(document.activeElement, "the terminal cannot take the keyboard parked by the pulse under a modal").toBe(document.body);
+
+      closeTeamDialog();
+      bumpTabFocusPulse();
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(document.activeElement, "the ordinary pane pulse restores terminal focus after the modal closes").toBe(target.querySelector(".terminal-host"));
+      expect(ghostty.record.events, "focus resumes once the modal releases the keyboard").toContain("focus");
+    } finally {
+      closeTeamDialog();
       field.remove();
     }
   });
