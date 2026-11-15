@@ -29,7 +29,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
-| [New and Paste choose two folders][newpaste] | not started | build |
+| [New and Paste choose two folders][newpaste] | merged | closed |
 | [a warm chan-term leaves Chan behind][warmterm] | merged | owner |
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
 | [an accessibility press closes a tab][axclose] | not started | build |
@@ -54,7 +54,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [an edit erases another window's keys][keysmerge] | not started | build |
 | [team load overwrites the config][teamload] | merged | closed |
 | [a survey takes another pane's keys][surveykeys] | merged | closed |
-| [an override sends a body raw][bracketbody] | not started | build |
+| [an override sends a body raw][bracketbody] | merged | closed |
 | [downloads carry write temporaries][writetemps] | merged | closed |
 | [a gateway page may drop a layout][gwlayout] | merged | closed |
 | [cs window new prints a refused id][winid] | merged | gate |
@@ -62,6 +62,8 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a diagram's clicks land off][diagclick] | merged | owner |
 | [a reattach replays into a TUI][altreplay] | not started | build |
 | [a stale read reverts a preference][prefstale] | not started | build |
+| [the dialog's Load rewrites the config][dialogload] | not started | build |
+| [the gateway page says this computer][gwwording] | not started | build |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
@@ -98,6 +100,8 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [diagclick]: v0.131.0/a-diagrams-clicks-land-off-to-the-side-of-the-pointer.md
 [altreplay]: v0.131.0/a-reattach-replays-the-normal-screen-into-a-full-screen-program-and-drops-its-mouse-modes.md
 [prefstale]: v0.131.0/a-stale-workspace-read-reverts-a-preference-the-user-just-set.md
+[dialogload]: v0.131.0/the-team-dialogs-load-rewrites-a-hand-edited-config.md
+[gwwording]: v0.131.0/the-gateways-authorization-page-says-this-computer.md
 
 ## Completed
 

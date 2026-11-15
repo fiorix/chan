@@ -8,8 +8,8 @@ if (target) {
   const variant = target.dataset.variant;
   mount(LauncherDemo, {
     target,
-    // The mount node selects the manual's first-run/devserver embeds or
-    // the populated Computers preview, all served by the same bundle.
+    // The manual's mount nodes select the empty first-run or devserver form.
+    // Other variant values use the populated fixture.
     props: {
       variant: variant === "empty" || variant === "devserver" ? variant : "populated",
       hints: target.dataset.hints === "true",

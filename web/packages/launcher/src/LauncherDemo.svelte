@@ -48,8 +48,8 @@
     if (api.attentionDevserverId) markControlAttention(api.attentionDevserverId);
   }
 
-  // The populated hero repurposes FolderPlus into "Reset demo data"; the empty
-  // manual embeds keep the real New-workspace flow, so they register no reset.
+  // The populated fixture uses FolderPlus as "Reset demo data"; the empty
+  // manual embeds keep the New-workspace flow and register no reset.
   // svelte-ignore state_referenced_locally
   setDemoMode({ reset: variant === "populated" ? resetDemoData : null });
 
