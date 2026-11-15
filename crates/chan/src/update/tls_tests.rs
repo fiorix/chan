@@ -202,7 +202,7 @@ async fn metadata_redirect_refuses_plaintext() {
 }
 
 #[tokio::test]
-async fn archive_redirect_refuses_plaintext() {
+async fn shared_client_refuses_plaintext_redirect_for_archive_path() {
     assert_plaintext_redirect_refused("/chan.tar.gz").await;
 }
 
