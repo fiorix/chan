@@ -1761,6 +1761,7 @@
                 right: e.clientX,
                 bottom: e.clientY,
               });
+              void focusLabelWithoutSurface(e.currentTarget.closest<HTMLElement>(".tab")!, t.id);
             }}
           >{label}</span>
           {#if isDirty(t)}

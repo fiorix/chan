@@ -353,6 +353,23 @@ describe("tab focus affordances", () => {
     expectSelectedAndOpen(tab);
   });
 
+  test("a dashboard name's context menu keeps keyboard focus on its label", async () => {
+    const tab: Tab = { kind: "dashboard", id: "dashboard-name", title: "Dashboard", autoRotate: false };
+    const element = await renderTab(tab);
+    const path = element.querySelector<HTMLElement>(".path")!;
+    mouseDown(path, 2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+    expect(document.activeElement).toBe(element);
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+    path.dispatchEvent(event);
+    path.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement, "opening the name's menu retains label focus").toBe(element);
+    expectSelectedAndOpen(tab);
+  });
+
   test.each(["focus", "pane", "tab", "stale", "detach"])("the menu's no-caret fallback stands down after %s changes", async (change) => {
     const tab: Tab = { kind: "dashboard", id: `menu-${change}`, title: "Dashboard", autoRotate: false };
     const element = await renderTab(tab);
