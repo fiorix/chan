@@ -59,9 +59,11 @@ A report is a snapshot, so the families are counters and gauges, not rates: two 
 
 Example user units are in [systemd/chan-metrics.socket](systemd/chan-metrics.socket) and [systemd/chan-metrics@.service](systemd/chan-metrics@.service), and the manual's [systemd integration](https://chan.app/manual/systemd/#systemd-report) page has a block that writes them. Install them in `~/.config/systemd/user/`, set `ExecStart` to your installed chan binary, and set the same `CHAN_HOME` as the devserver if it uses a non-default home. The socket is private to the user, and each connected client has one activated process, capped at 16 connections. A connection carries any number of calls; one whose client sends no call for 60 seconds, or does not read a reply within 10 seconds, is closed. That ends its process with status 0, as the client's own close does; a frame that breaks the protocol ends it with an error.
 
+A running socket keeps its old path until it is restarted.
+
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now chan-metrics.socket
+systemctl --user enable chan-metrics.socket && systemctl --user restart chan-metrics.socket
 /usr/lib/systemd/systemd-report --user list-sources
 /usr/lib/systemd/systemd-report --user describe io.chan.Devserver
 /usr/lib/systemd/systemd-report --user metrics io.chan.Devserver
