@@ -479,6 +479,43 @@ describe("the tab strip", () => {
     expect(tabFocusPulse.value).toBeGreaterThan(pulse);
   });
 
+  test.each([
+    { part: "padding", button: 1 }, { part: "padding", button: 2 },
+    { part: "label", button: 1 }, { part: "label", button: 2 },
+  ])("a $part press with button $button returns focus to the selected terminal without a widget retry", async ({ part, button }) => {
+    xterm.textareaFocus = true;
+    const first = terminalTab({ id: "term-first" });
+    const second = terminalTab({ id: "term-second" });
+    const { target } = await mountPane([first, second]);
+    const tab = stripTab(target, 1);
+    const label = tab.querySelector<HTMLElement>('[role="tab"]')!;
+    const pressed = part === "padding" ? tab : label;
+    const input = target.querySelector<HTMLTextAreaElement>(`[data-terminal-tab-id="${second.id}"] textarea`);
+    expect(input, "the selected terminal has a real DOM focus target").not.toBeNull();
+
+    press(pressed, "mousedown", button);
+    await tick();
+    await tick();
+    expect(activeTab()?.id, "non-primary selection happens on press").toBe(second.id);
+    expect(document.activeElement, "selection first sends focus to the terminal").toBe(input);
+
+    // jsdom omits the native mouse-focus default after the press handlers.
+    // The stand-in xterm only focuses synchronously, with no backup timer.
+    pressed.focus();
+    expect(document.activeElement).toBe(pressed);
+    const focusLabel = vi.spyOn(label, "focus");
+    try {
+      await settle();
+      expect(focusLabel, "the deferred path waits for the surface instead of briefly focusing the label").not.toHaveBeenCalled();
+      expect(document.activeElement, "the deferred press path restores the terminal's keyboard").toBe(input);
+      press(pressed, "mouseup", button);
+      await settle();
+      expect(document.activeElement, "non-primary release keeps surface focus").toBe(input);
+    } finally {
+      focusLabel.mockRestore();
+    }
+  });
+
   test("an inactive pane does not focus its current terminal before the held tab's release", async () => {
     const current = terminalTab({ id: "term-current" });
     const pressed = terminalTab({ id: "term-pressed" });

@@ -252,7 +252,7 @@ describe("tab focus affordances", () => {
     return event;
   }
 
-  test.each([0, 2])("pressing terminal pill padding with button %s forwards focus after the native default", async (button) => {
+  test("a primary terminal padding press forwards focus after the native default", async () => {
     const tab = terminalTab({ id: "padding-tab", title: "Padding" });
     const element = await renderTab(tab);
     const outer = element.closest<HTMLElement>(".tab")!;
@@ -260,15 +260,15 @@ describe("tab focus affordances", () => {
     document.body.append(before);
     before.focus();
     const focusLabel = vi.spyOn(element, "focus");
-    const event = mouseDown(outer, button);
+    const event = mouseDown(outer, 0);
     expect(event.defaultPrevented, "the press keeps its native default").toBe(false);
     expect(focusLabel, "forwarding must not re-enter native mouse focus").not.toHaveBeenCalled();
     expect(document.activeElement).toBe(outer);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(document.activeElement, "padding routes native focus to the label").toBe(element);
     expect(outer.tabIndex, "padding adds no keyboard tab stop").toBe(-1);
-    expect(pane().activeTabId).toBe(button === 0 ? KEPT : tab.id);
-    outer.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button }));
+    expect(pane().activeTabId).toBe(KEPT);
+    outer.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
     await settle();
     expectSelectedAndOpen(tab);
   });
@@ -281,10 +281,10 @@ describe("tab focus affordances", () => {
     expect(pane().activeTabId).toBe(KEPT);
   });
 
-  test("stale Hybrid Nav does not forward programmatic padding focus", async () => {
+  test("stale Hybrid Nav does not forward padding press focus", async () => {
     const element = await renderTab(terminalTab({ id: "stale-padding", title: "Stale" }), { preview: true, stale: true });
     const outer = element.closest<HTMLElement>(".tab")!;
-    outer.focus();
+    mouseDown(outer, 0);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(document.activeElement).toBe(outer);
     expect(pane().activeTabId).toBe(KEPT);
@@ -306,7 +306,7 @@ describe("tab focus affordances", () => {
     const element = await renderTab(terminalTab({ id: "becomes-stale", title: "Stale later" }), { preview: true });
     const outer = element.closest<HTMLElement>(".tab")!;
     const focusLabel = vi.spyOn(element, "focus");
-    outer.focus();
+    mouseDown(outer, 0);
     focusLabel.mockClear();
     paneMode.stale = true;
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -318,11 +318,57 @@ describe("tab focus affordances", () => {
     const element = await renderTab(terminalTab({ id: "removed-focus", title: "Removed" }));
     const outer = element.closest<HTMLElement>(".tab")!;
     const focusLabel = vi.spyOn(element, "focus");
-    outer.focus();
+    mouseDown(outer, 0);
     focusLabel.mockClear();
     await unmount(mounted.pop()!);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(element.isConnected).toBe(false);
+    expect(focusLabel).not.toHaveBeenCalled();
+  });
+
+  test.each([1, 2])("button %s on padding of a surface without a focus target falls back to its label", async (button) => {
+    const tab: Tab = { kind: "dashboard", id: "no-caret", title: "Dashboard", autoRotate: false };
+    const element = await renderTab(tab);
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const event = mouseDown(outer, button);
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(outer);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+    expect(document.activeElement).toBe(element);
+    expectSelectedAndOpen(tab);
+  });
+
+  test.each(["before", "after"])("a no-caret tab keeps label focus when its menu opens %s the deferred press", async (order) => {
+    const tab: Tab = { kind: "dashboard", id: "no-caret-menu", title: "Dashboard", autoRotate: false };
+    const element = await renderTab(tab);
+    const outer = element.closest<HTMLElement>(".tab")!;
+    mouseDown(outer, 2);
+    if (order === "after") await new Promise((resolve) => setTimeout(resolve, 0));
+    outer.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    outer.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 2 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+    expect(document.activeElement).toBe(element);
+    expectSelectedAndOpen(tab);
+  });
+
+  test.each(["focus", "pane", "tab", "stale", "detach"])("the menu's no-caret fallback stands down after %s changes", async (change) => {
+    const tab: Tab = { kind: "dashboard", id: `menu-${change}`, title: "Dashboard", autoRotate: false };
+    const element = await renderTab(tab);
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const focusLabel = vi.spyOn(element, "focus");
+    outer.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    if (change === "focus") {
+      const other = document.createElement("button");
+      document.body.append(other);
+      other.focus();
+    } else if (change === "pane") layout.activePaneId = OTHER;
+    else if (change === "tab") pane().activeTabId = KEPT;
+    else if (change === "stale") paneMode.stale = true;
+    else outer.closest(".pane")!.remove();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
     expect(focusLabel).not.toHaveBeenCalled();
   });
 

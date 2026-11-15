@@ -140,7 +140,7 @@
     windowLibraryId,
   } from "../api/client";
   import { persistedPath, revivedPath } from "../api/fileIdentity";
-  import { onDestroy, onMount, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
@@ -214,6 +214,14 @@
   // tmux owns its pane's content, so its strip and drag/drop are disabled.
   const tmuxPaneHere = $derived(paneShowsTmux(pane));
   type PaneFlipAxis = "horizontal" | "vertical";
+
+  async function focusLabelWithoutSurface(outer: HTMLElement, tabId: string): Promise<void> {
+    // Let the selected surface consume its focus pulse before falling back.
+    await tick();
+    if (!outer.isConnected || paneMode.stale || activeLayout().activePaneId !== pane.id ||
+        visibleActiveTabId !== tabId || document.activeElement !== document.body) return;
+    outer.querySelector<HTMLElement>(".tab-label")?.focus({ preventScroll: true });
+  }
 
   function isVisibleTab(tab: Tab): boolean {
     return visibleTabs.some((candidate) => candidate.id === tab.id);
@@ -1586,17 +1594,23 @@
         class:staged={paneModeStagedSet.has(t.id)}
         class:stale={paneMode.stale && paneModeStagedSet.has(t.id)}
         tabindex="-1"
-        onfocusin={(e) => {
-          if (paneMode.stale || e.target !== e.currentTarget) return;
-          const outer = e.currentTarget;
-          // Let native mouse focus finish before moving it to the label.
-          setTimeout(() => {
-            if (paneMode.stale || document.activeElement !== outer) return;
-            outer.querySelector<HTMLElement>(".tab-label")?.focus({ preventScroll: true });
-          }, 0);
-        }}
         onmousedown={(e) => {
           if (paneMode.stale) return;
+          const outer = e.currentTarget;
+          const button = e.button;
+          // Native mouse focus must finish before the gesture's owner takes
+          // the keyboard. A selecting press reuses the surface focus pulse.
+          setTimeout(() => {
+            const label = outer.querySelector<HTMLElement>(".tab-label");
+            if (paneMode.stale || (document.activeElement !== outer &&
+                (button === 0 || document.activeElement !== label))) return;
+            if (button !== 0) {
+              bumpTabFocusPulse();
+              void focusLabelWithoutSurface(outer, t.id);
+            } else {
+              label?.focus({ preventScroll: true });
+            }
+          }, 0);
           if (t.kind === "terminal" && e.button === 0) {
             pendingTerminalPress = { tabId: t.id, side: visibleSide };
             return;
@@ -1637,6 +1651,7 @@
             right: e.clientX,
             bottom: e.clientY,
           });
+          void focusLabelWithoutSurface(e.currentTarget, t.id);
         }}
         title={tabTooltip(t)}
         draggable={!paneMode.stale}
