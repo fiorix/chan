@@ -21,9 +21,21 @@ async function mode(page, name) {
 }
 
 async function input(page, selector, value) {
-  await page.click(selector, { clickCount: 3 });
+  await page.click(selector, { count: 3 });
+  const selected = await page.$eval(selector, (node) => ({
+    value: node.value,
+    selectionStart: node.selectionStart,
+    selectionEnd: node.selectionEnd,
+  }));
+  if (selected.selectionStart !== 0 || selected.selectionEnd !== selected.value.length) {
+    throw new Error(`team input ${selector}: full selection failed (${selected.selectionStart}:${selected.selectionEnd}/${selected.value.length})`);
+  }
   await page.keyboard.press("Backspace");
+  const cleared = await page.$eval(selector, (node) => node.value);
+  if (cleared !== "") throw new Error(`team input ${selector}: Backspace left ${JSON.stringify(cleared)}`);
   await page.type(selector, value);
+  const typed = await page.$eval(selector, (node) => node.value);
+  if (typed !== value) throw new Error(`team input ${selector}: typed value ${JSON.stringify(typed)}, expected ${JSON.stringify(value)}`);
   await page.keyboard.press("Tab");
 }
 
@@ -134,14 +146,39 @@ export default {
         } catch (error) {
           leg.error = maskTokens(error?.stack ?? String(error));
           try {
-            const state = await page.evaluate(() => ({
-              modeButtons: [...document.querySelectorAll(".team-dialog .team-realestate-mode")]
-                .map((button) => button.textContent?.trim() ?? ""),
-              windowName: window.name,
-            }));
+            const state = await page.evaluate((dirSelector) => {
+              const describe = (node) => node ? {
+                tag: node.tagName,
+                id: node.id,
+                className: node.getAttribute("class") ?? "",
+                value: typeof node.value === "string" ? node.value : null,
+                selectionStart: node.selectionStart ?? null,
+                selectionEnd: node.selectionEnd ?? null,
+              } : null;
+              return {
+                modeButtons: [...document.querySelectorAll(".team-dialog .team-realestate-mode")]
+                  .map((button) => button.textContent?.trim() ?? ""),
+                windowName: window.name,
+                directoryInput: describe(document.querySelector(dirSelector)),
+                activeElement: describe(document.activeElement),
+                loadError: document.querySelector(".team-load-error")?.textContent?.trim() ?? "",
+                resolvedPath: document.querySelector(".team-load-file")?.textContent?.trim() ?? "",
+              };
+            }, DIR_INPUT);
+            const maskElement = (element) => element ? {
+              ...element,
+              tag: maskTokens(element.tag),
+              id: maskTokens(element.id),
+              className: maskTokens(element.className),
+              value: element.value === null ? null : maskTokens(element.value),
+            } : null;
             leg.failureState = {
               modeButtons: state.modeButtons.map((label) => maskTokens(label)),
               windowName: maskTokens(state.windowName),
+              directoryInput: maskElement(state.directoryInput),
+              activeElement: maskElement(state.activeElement),
+              loadError: maskTokens(state.loadError),
+              resolvedPath: maskTokens(state.resolvedPath),
             };
           } catch (evidenceError) {
             leg.failureStateError = maskTokens(evidenceError?.stack ?? String(evidenceError));
