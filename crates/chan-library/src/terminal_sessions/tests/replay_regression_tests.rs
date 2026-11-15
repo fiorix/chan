@@ -18,6 +18,7 @@ fn a_poisoned_backend_resolver_keeps_resolving_at_spawn_time() {
     }));
     assert!(poisoned.is_err());
     assert!(registry.terminal_backend_resolver.is_poisoned());
+    // The fallback is ghostty, so false proves the resolver is still consulted.
     assert!(!registry.spawn_config().config.terminal.ghostty);
 }
 
@@ -97,7 +98,6 @@ fn a_controller_return_after_close_does_not_publish_an_exit() {
     assert_eq!(session.ended.wait(Duration::ZERO), Some(true));
 }
 
-#[cfg(unix)]
 #[test]
 fn creating_a_named_session_reuses_an_exited_detached_sessions_name() {
     let registry = Registry::new(test_config(1024, 4, 60));
@@ -106,9 +106,13 @@ fn creating_a_named_session_reuses_an_exited_detached_sessions_name() {
     exited.record_terminal_exit(TerminalExit::Code { code: 0 }, &registry.last_exit);
     register_session(&registry, &exited);
 
-    let mut opts = opts_with_command("sleep 600");
-    opts.tab_name = Some("worker".into());
-    let created = registry.create(opts).unwrap();
+    let created = registry
+        .create(CreateOptions {
+            tab_name: Some("worker".into()),
+            mcp_env: false,
+            ..opts_with_window("win-reuse-name")
+        })
+        .unwrap();
     let actual_name = created.live_metadata().name;
     let retained_exited = registry.sessions.lock().unwrap().contains_key(&exited.id);
     registry.close_all(CloseReason::Shutdown);

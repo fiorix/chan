@@ -3878,7 +3878,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn collector_with_replay_and_closed_stream() -> AttachHandle {
+    fn collector_with_replay_and_closed_stream() -> (Arc<AppState>, AttachHandle) {
         let state = crate::state::test_support::make_test_state(false);
         let spawned = create_quiet_terminal(&state, "sleep 600");
         let id = spawned.id();
@@ -3896,14 +3896,14 @@ mod tests {
         let (sender, receiver) = tokio::sync::broadcast::channel(1);
         drop(sender);
         attached.rx = receiver;
-        attached
+        (state, attached)
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn collect_until_keeps_replay_when_the_live_stream_is_closed() {
         let _gate = pty_test_lock();
-        let mut session = collector_with_replay_and_closed_stream();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
 
         let output = collect_until(&mut session, "not emitted", PROBE_BUDGET).await;
 
@@ -3920,7 +3920,7 @@ mod tests {
     #[tokio::test]
     async fn collect_until_idle_keeps_replay_when_the_live_stream_is_closed() {
         let _gate = pty_test_lock();
-        let mut session = collector_with_replay_and_closed_stream();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
 
         let output = collect_until_idle(&mut session, PROBE_BUDGET, Duration::from_secs(1)).await;
 
