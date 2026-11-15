@@ -1,6 +1,6 @@
 # The gateway's authorization page says "this computer"
 
-Status: accepted for v0.131.0 by the owner on 2026-11-15, by survey on the round's second batch of candidates ("Take all my recommendations", item 2 of `dev/v0131-team/reports/owner-candidates-2.md`: change the product string in this release; the gateway's deploy stays the owner's); not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-15, by survey on the round's second batch of candidates ("Take all my recommendations", item 2 of `dev/v0131-team/reports/owner-candidates-2.md`: change the product string in this release; the gateway's deploy stays the owner's); built on 2026-11-15, accepted by its Fable reviewer and merged into `v0131/int`. Closed.
 
 Record: found by the site documentation review (note 3) when the manual quoted the page exactly. The owner's wording rule for chan's copy is "local machine", never "this machine" or "this computer".
 
@@ -32,3 +32,7 @@ The heading is "Authorize an app on the local machine?" and the title omits the 
 The tests applied to the unchanged renderer failed at seven intended assertions, covering the heading, title, application, callback, both WireGuard ingress forms and the snapshot (`dev/v0131-team/evidence/Desk131/gwwording-40/base-independent-red.log`, exit 101). The updated renderer passed all 40 tests in `desktop_authorize::tests` (`filtered-green.log`, exit 0). The JSON snapshot body was copied from actual renderer output and checked to differ only in its three body phrases (`tip-capture.log` and `copy-audit.json`). A repository search finds the old page quotes only in this row's original record; that historical text is preserved (`old-quotes-after.log`).
 
 Committed-tip gateway formatting, clippy, identity rustdoc and the database-free identity suite remain pending at this implementation checkpoint. No browser smoke, Postgres integration test or deployment was run. The owner retains the gateway deployment, and this row's final acceptance still requires the remaining gates and review.
+
+## Merged, 2026-11-15
+
+The range `cbb4fb821..842e0a21b` was accepted by a Fable reviewer (`dev/v0131-team/reviews/review-gwwording-1.md`, notes only) and merged into `v0131/int`. Its gates ran green in a guest (job J176: the identity crate's tests and docs, the profile build and the marketing check). The page now names "the local machine" in its heading, title, body, WireGuard sentence and callback line. The review found two other user-visible strings outside this row (the launcher's Computers loading line and the desktop token label's hostname fallback); they are candidates for the owner. The gateway's deploy stays the owner's.
