@@ -62,13 +62,37 @@ async function config(ctx, path) {
   return response.json;
 }
 
-async function installObserver(page) {
-  await page.evaluate(({ key, dock, launcher }) => {
-    const originalFetch = window.fetch;
-    const state = window[key] = {
-      armed: false, rows: [], commands: [], marks: {}, readings: [], removals: [],
-      observing: false, lastTraffic: performance.now(), pending: 0,
+async function installKeyObserver(page) {
+  return page.evaluateOnNewDocument(({ key, launcher }) => {
+    const state = window[key] = { commands: [] };
+    const element = (node) => node instanceof Element ? {
+      tag: node.tagName, id: node.id, role: node.getAttribute("role"),
+    } : null;
+    const keys = (event) => {
+      if (event.key !== "Enter") return;
+      const title = document.querySelector(`${launcher} [role="option"][aria-selected="true"] .deck-result-title`)?.textContent?.trim();
+      if (title) state.commands.push({
+        at: performance.now(), eventTimeStamp: event.timeStamp, key: event.key,
+        title, trusted: event.isTrusted, target: element(event.target),
+        activeElement: element(document.activeElement), targetFocused: event.target === document.activeElement,
+      });
     };
+    // The command handler consumes Enter at window capture; observe before
+    // application scripts register it, while its selected title still exists.
+    window.addEventListener("keydown", keys, true);
+    state.stopKeys = () => window.removeEventListener("keydown", keys, true);
+  }, { key: KEY, launcher: LAUNCHER });
+}
+
+async function installObserver(page) {
+  await page.evaluate(({ key, dock }) => {
+    const originalFetch = window.fetch;
+    const state = window[key];
+    if (!state?.stopKeys) throw new Error("pre-navigation keyboard observer missing");
+    Object.assign(state, {
+      armed: false, rows: [], marks: {}, readings: [], removals: [],
+      observing: false, lastTraffic: performance.now(), pending: 0,
+    });
     const releases = new Map();
     const mark = () => performance.now();
     const read = (why) => state.readings.push({ at: mark(), why, visible: Boolean(document.querySelector(dock)?.checkVisibility()) });
@@ -84,12 +108,6 @@ async function installObserver(page) {
       read("mutation");
     });
     mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class", "hidden"] });
-    const keys = (event) => {
-      if (event.key !== "Enter") return;
-      const title = document.querySelector(`${launcher} [role="option"][aria-selected="true"] .deck-result-title`)?.textContent?.trim();
-      if (title) state.commands.push({ at: mark(), title, trusted: event.isTrusted });
-    };
-    document.addEventListener("keydown", keys, true);
     window.fetch = async function (input, init) {
       const url = new URL(input instanceof Request ? input.url : String(input), location.href);
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -146,9 +164,8 @@ async function installObserver(page) {
       for (const release of [...releases.values()]) release();
       window.fetch = originalFetch;
       mutations.disconnect();
-      document.removeEventListener("keydown", keys, true);
     };
-  }, { key: KEY, dock: DOCK, launcher: LAUNCHER });
+  }, { key: KEY, dock: DOCK });
 }
 
 export default {
@@ -165,11 +182,13 @@ export default {
     let configPath;
     let originalDocks;
     let primary;
+    let keyObserver;
     try {
       page.setDefaultTimeout(10_000);
       await page.setViewport({ width: 1280, height: 800 });
       const url = new URL(ctx.serverUrl);
       url.searchParams.set("w", prefix);
+      keyObserver = await installKeyObserver(page);
       await page.goto(url.href, { waitUntil: "domcontentloaded" });
       await page.waitForSelector(".pane");
       configPath = await page.evaluate(() => `${document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? ""}/api/config`);
@@ -272,7 +291,9 @@ export default {
         try { await action(); }
         catch (error) { result.cleanupErrors.push(`${label}: ${errorText(error)}`); }
       };
-      await cleanup("release responses and restore fetch", () => page.evaluate((key) => window[key]?.stop(), KEY));
+      await cleanup("release responses and restore fetch", () => page.evaluate((key) => window[key]?.stop?.(), KEY));
+      await cleanup("remove keyboard observer", () => page.evaluate((key) => window[key]?.stopKeys?.(), KEY));
+      if (keyObserver) await cleanup("remove keyboard initialization script", () => page.removeScriptToEvaluateOnNewDocument(keyObserver.identifier));
       await cleanup("capture observations", async () => {
         result.observations = await page.evaluate((key) => {
           if (!window[key]) return null;
