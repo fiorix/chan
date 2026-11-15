@@ -2,6 +2,26 @@ import { readTerminalPrefs } from "./terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const SURFACES = {
+  // Xterm's WebGL canvas is nested inside its screen, not directly in the host.
+  ghostty: ".terminal-host > canvas",
+  xterm: ".terminal.xterm .xterm-screen",
+};
+
+export async function readTerminalAttachment(page, cs, backend, matchesRow) {
+  const listed = await cs(["list", "--json"]);
+  const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
+  const row = rows.find(matchesRow) ?? null;
+  const selector = row?.pane && row.tab
+    ? `.pane[data-pane-id="${row.pane}"] .terminal-tab.active[data-terminal-tab-id="${row.tab}"]`
+    : null;
+  const attached = selector ? await page.evaluate((query) => {
+    const box = document.querySelector(query)?.getBoundingClientRect();
+    return !!box && box.width > 0 && box.height > 0;
+  }, `${selector} ${SURFACES[backend]}`) : false;
+  return { row, selector, attached };
+}
+
 export async function openAttachedTerminal(ctx, page, cs, windowId, name, backend, newArgs = []) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const terminal = await readTerminalPrefs(page, token);
@@ -11,32 +31,17 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
   }
   await cs(["new", "--tab-name", name, ...newArgs]);
   const deadline = Date.now() + 60_000;
-  let row = null;
-  const backendSelector = backend === "ghostty"
-    ? ".terminal-host canvas"
-    : ".terminal.xterm .xterm-screen";
   for (;;) {
-    const listed = await cs(["list", "--json"]);
-    const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
-    row = rows.find((entry) => entry.name === name) ?? null;
     // A devserver's window roster marks an attached session "alive". A
     // standalone `chan serve` has no roster and calls the same tab "orphaned".
-    const status = row?.window_status;
-    if (row?.window === windowId && (status === "alive" || status === "orphaned") &&
-        row.pane && row.tab) {
-      const selector = `.pane[data-pane-id="${row.pane}"] ` +
-        `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${backendSelector}`;
-      const attached = await page.evaluate((query) => {
-        const element = document.querySelector(query);
-        const box = element?.getBoundingClientRect();
-        return !!box && box.width > 0 && box.height > 0;
-      }, selector);
-      if (attached) return row;
-    }
+    const { row, attached } = await readTerminalAttachment(page, cs, backend, (entry) =>
+      entry.name === name && entry.window === windowId &&
+      (entry.window_status === "alive" || entry.window_status === "orphaned"));
+    if (attached) return row;
     if (Date.now() > deadline) {
-      const tabs = await page.evaluate(() => [...document.querySelectorAll(".terminal-tab")].map((tab) => {
-        const xterm = tab.querySelector(".terminal.xterm .xterm-screen");
-        const ghostty = tab.querySelector(".terminal-host canvas");
+      const tabs = await page.evaluate((surfaces) => [...document.querySelectorAll(".terminal-tab")].map((tab) => {
+        const xterm = tab.querySelector(surfaces.xterm);
+        const ghostty = tab.querySelector(surfaces.ghostty);
         const element = xterm ?? ghostty;
         const box = element?.getBoundingClientRect();
         return {
@@ -45,7 +50,7 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
           backend: xterm ? "xterm" : ghostty ? "ghostty" : "missing",
           box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
         };
-      }));
+      }), SURFACES);
       await ctx.shot(`${name}-attach-failure`, page).catch(() => {});
       throw new Error(`${name}: terminal not attached: row=${JSON.stringify(row)} tabs=${JSON.stringify(tabs)}`);
     }

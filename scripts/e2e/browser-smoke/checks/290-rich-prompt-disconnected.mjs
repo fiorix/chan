@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { startTerminalCutProxy } from "../lib/terminal-cut-proxy.mjs";
 import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -95,23 +95,13 @@ export async function waitSaved(ctx, page, windowId, name) {
 
 export async function waitRestoredTerminal(page, cs, windowId, original, backend, timeout = 30_000) {
   const deadline = Date.now() + timeout;
-  const surface = backend === "ghostty" ? ".terminal-host canvas" : ".terminal.xterm .xterm-screen";
   let placement = null;
   for (;;) {
-    const listed = await cs(["list", "--json"]);
-    const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
-    const row = rows.find((entry) => entry.session_id === original.session_id && entry.window === windowId);
+    const { row, selector, attached } = await readTerminalAttachment(page, cs, backend, (entry) =>
+      entry.session_id === original.session_id && entry.window === windowId);
     // Session identity survives a reload; pane and tab IDs are regenerated.
     placement = row ? { session_id: row.session_id, window: row.window, pane: row.pane, tab: row.tab } : null;
-    if (placement?.pane && placement.tab) {
-      const selector = `.pane[data-pane-id="${placement.pane}"] ` +
-        `.terminal-tab.active[data-terminal-tab-id="${placement.tab}"]`;
-      const visible = await page.evaluate((query) => {
-        const box = document.querySelector(query)?.getBoundingClientRect();
-        return !!box && box.width > 0 && box.height > 0;
-      }, `${selector} ${surface}`);
-      if (visible) return { ...placement, selector };
-    }
+    if (attached) return { ...placement, selector };
     if (Date.now() >= deadline) {
       assert.fail(`restored ${backend} terminal not attached: ${JSON.stringify(placement)}`);
     }
