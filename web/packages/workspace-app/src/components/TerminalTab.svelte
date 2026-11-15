@@ -277,6 +277,9 @@
         type: "session";
         id: string;
         seq: number;
+        /// The server's PTY kind, independent of the viewing platform.
+        pty?: "conpty";
+        windows_build_number?: number;
         /// This session incarnation's epoch. A restart reuses the id but bumps
         /// it (and resets `seq`), so a cached scrollback snapshot whose
         /// generation no longer matches is discarded and the server full-replays.
@@ -365,6 +368,7 @@
   // the element to another pane drops the keyboard, and it goes back here.
   let keyboardSurface: "terminal" | "find" | "composer" = "terminal";
   let term: Terminal | GhosttyTerminal | null = null;
+  let ghosttyCore: GhosttyVt | null = null;
   // xterm.js's mark on the data the user made; null under ghostty, which has
   // no such mark and keeps the unmarked route.
   let userInput: UserInputTracker | null = null;
@@ -1257,6 +1261,7 @@
         theme: terminalTheme(),
       });
       term = ghosttyTerm;
+      ghosttyCore = ghosttyInstance;
       // Ghostty's auto-hiding scrollbar is painted onto the content without
       // clearing it (see installGhosttyOverlayScrollbar), so the columns under
       // it stay readable and there is no gutter to hold back. Reserving width
@@ -1775,6 +1780,18 @@
         terminalCwdVirtual = frame.cwd_rel ?? null;
         recoverTerminalRendererAfterHostResume();
       } else if (frame.type === "session") {
+        // Each prelude replaces the policy before replay can resize or reset
+        // the parser. An older server's absent kind restores ordinary growth.
+        if (backend === "ghostty") {
+          ghosttyCore?.setResizePullScrollback(frame.pty !== "conpty");
+        } else if (term) {
+          (term as Terminal).options.windowsPty = frame.pty === "conpty"
+            ? {
+                backend: "conpty",
+                ...(frame.windows_build_number !== undefined && { buildNumber: frame.windows_build_number }),
+              }
+            : {};
+        }
         // The session id this tab held before adopting frame.id below. A
         // frame.id that differs is a fresh shell replacing the reaped session,
         // not a same-id live resume.
@@ -2655,6 +2672,7 @@
     ghosttyFind = null;
     term?.dispose();
     term = null;
+    ghosttyCore = null;
     sawSessionControl = false;
     termWriter = null;
     ptyWrites.reset();

@@ -16,6 +16,8 @@ chan's terminal widget is derived from [ghostty-web](https://github.com/coder/gh
 
 `vt/` contains the libghostty-vt binding, the copy filter and their tests. `vt/index.ts` is the separate `./vt` export. The workspace app, its terminal tests, the binding tests and the terminal pixel harness under `scripts/e2e/terminal-pixels/` all use the vendored core, exported as `./vendor/ghostty-vt/ghostty-vt.wasm`.
 
+`GhosttyVt.setResizePullScrollback` controls whether growing a terminal pulls history into its screen. It defaults to true, updates the instance's live terminals and applies to replacement terminals after a widget reset. The app sets it from the server's session metadata: false for ConPTY, true when the PTY kind is absent. Each tab owns its own `GhosttyVt`, so the policy does not cross sessions.
+
 The widget exposes the subset chan uses rather than an xterm.js compatibility API. OSC 8 and plain URL links use the built-in providers. The app still supplies its terminal adapters for viewport control, selection, find, secret masking and theme updates. `Terminal.open()` does not take focus; the caller chooses when the terminal receives the keyboard. `blur()` releases focus from descendants, including the hidden input textarea, and cancels a pending focus retry.
 
 ## Type checking and tests

@@ -1,0 +1,83 @@
+{
+  "absent": {
+    "bytes_since_focus": 0,
+    "generation": 0,
+    "group": "default",
+    "id": "818cdeef8b98273349ec796b237cedf8",
+    "missed_bytes": 0,
+    "name": "Terminal-1",
+    "program": {
+      "command": "bash",
+      "title": null
+    },
+    "program_status": {
+      "records": [],
+      "revision": 0
+    },
+    "queue_depth": 0,
+    "queued_prompt_ids": [],
+    "replay_bytes": 0,
+    "seq": 0,
+    "spawn_group": "default",
+    "spawn_name": "Terminal-1",
+    "tmux_consent": {
+      "revision": 0
+    },
+    "type": "session"
+  },
+  "known": {
+    "bytes_since_focus": 0,
+    "generation": 0,
+    "group": "default",
+    "id": "818cdeef8b98273349ec796b237cedf8",
+    "missed_bytes": 0,
+    "name": "Terminal-1",
+    "program": {
+      "command": "bash",
+      "title": null
+    },
+    "program_status": {
+      "records": [],
+      "revision": 0
+    },
+    "pty": "conpty",
+    "queue_depth": 0,
+    "queued_prompt_ids": [],
+    "replay_bytes": 0,
+    "seq": 0,
+    "spawn_group": "default",
+    "spawn_name": "Terminal-1",
+    "tmux_consent": {
+      "revision": 0
+    },
+    "type": "session",
+    "windows_build_number": 26300
+  },
+  "unknown": {
+    "bytes_since_focus": 0,
+    "generation": 0,
+    "group": "default",
+    "id": "818cdeef8b98273349ec796b237cedf8",
+    "missed_bytes": 0,
+    "name": "Terminal-1",
+    "program": {
+      "command": "bash",
+      "title": null
+    },
+    "program_status": {
+      "records": [],
+      "revision": 0
+    },
+    "pty": "conpty",
+    "queue_depth": 0,
+    "queued_prompt_ids": [],
+    "replay_bytes": 0,
+    "seq": 0,
+    "spawn_group": "default",
+    "spawn_name": "Terminal-1",
+    "tmux_consent": {
+      "revision": 0
+    },
+    "type": "session"
+  }
+}

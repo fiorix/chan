@@ -176,7 +176,7 @@ vi.mock("../terminal/backend", async (importOriginal) => ({
         if (host) ghostty.record.hosts.push(host);
         ghostty.record.instances += 1;
         ghostty.record.events.push("instantiate");
-        return { instance: ghostty.record.instances };
+        return { instance: ghostty.record.instances, setResizePullScrollback: vi.fn() };
       },
       Terminal: ghostty.FakeGhosttyTerminal,
     };
@@ -443,7 +443,7 @@ describe("the mount", () => {
   test("the terminal is built on the wasm instance its own spawn created", async () => {
     await mountGhostty();
     expect(ghostty.record.instances).toBe(1);
-    expect(ghostty.record.terminals[0].options.ghostty).toEqual({ instance: 1 });
+    expect(ghostty.record.terminals[0].options.ghostty).toEqual({ instance: 1, setResizePullScrollback: expect.any(Function) });
   });
 
   test("a renderer without the alignment hook is kept, with a warning", async () => {

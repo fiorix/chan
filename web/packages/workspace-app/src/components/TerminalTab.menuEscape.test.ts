@@ -102,7 +102,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   }
   return {
     ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
+    loadGhosttyKit: async () => ({ instantiate: async () => ({ setResizePullScrollback: vi.fn() }), Terminal: GhosttyTerminal }),
   };
 });
 vi.mock("../terminal/ghosttyCompat", () => ({

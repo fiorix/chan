@@ -34,6 +34,7 @@ export const ABI = {
     SCROLLBACK_MAX_LINES: 29,
     MODE_DEFAULT: 34,
     MODE: 35,
+    RESIZE_PULL_SCROLLBACK: 41,
   },
   GhosttyTerminalData: {
     CURSOR_X: 3,
@@ -550,6 +551,7 @@ export type VtHost = {
 export class GhosttyVt {
   private readonly wasm: VtWasm;
   private readonly terminals = new Map<number, VtTerminal>();
+  private resizePullScrollback = true;
   readonly writePtyCallback: number;
   readonly deviceAttributesCallback: number;
 
@@ -580,8 +582,16 @@ export class GhosttyVt {
     return new VtTerminal(this.wasm, this, cols, rows, config);
   }
 
+  /// ConPTY owns the rows added on growth. Keep its policy on the instance
+  /// so a widget reset's replacement terminal uses the same resize rule.
+  setResizePullScrollback(enabled: boolean): void {
+    this.resizePullScrollback = enabled;
+    for (const terminal of this.terminals.values()) terminal.setResizePullScrollback(enabled);
+  }
+
   register(handle: number, terminal: VtTerminal): void {
     this.terminals.set(handle, terminal);
+    terminal.setResizePullScrollback(this.resizePullScrollback);
   }
 
   unregister(handle: number): void {
@@ -782,6 +792,13 @@ export class VtTerminal {
     this.stale = true;
     this.changes++;
     this.wasm.fn.ghostty_terminal_vt_write(this.handle, this.writeBuf, bytes.length);
+  }
+
+  /// Whether growth brings history back onto the primary screen.
+  setResizePullScrollback(enabled: boolean): void {
+    const value = this.scratch + SCRATCH.slot;
+    this.wasm.view().setUint8(value, enabled ? 1 : 0);
+    this.wasm.fn.ghostty_terminal_set(this.handle, ABI.GhosttyTerminalOption.RESIZE_PULL_SCROLLBACK, value);
   }
 
   resize(cols: number, rows: number): void {

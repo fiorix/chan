@@ -53,6 +53,7 @@
       <li>Renaming or regrouping a running terminal applies at once, but its shell keeps the old <code>$CHAN_TAB_NAME</code> and <code>$CHAN_TAB_GROUP</code>: the tab menu reads <em>stale env</em> and offers <strong>Restart terminal</strong>.</li>
       <li>Two terminals can share a name. A <code>cs</code> command that selects by name reaches both.</li>
       <li>On Windows, where chan finds several shells (PowerShell, cmd, Git Bash, WSL), the pane menu lists them under <strong>New terminal</strong>, and the command launcher has <strong>New terminal with profile</strong>.</li>
+      <li>For a native terminal on a Windows server, growing its pane leaves older output in scrollback and adds empty rows below the screen. This follows the terminal's server, even when you view it from another operating system.</li>
       <li>Most browsers keep <kbd>Ctrl+Shift+T</kbd> to reopen a closed tab. Use the pane menu, or bind another key in <a href="/manual/shortcuts/#customize">Keyboard shortcuts</a>.</li>
     </ul>
   </details>
