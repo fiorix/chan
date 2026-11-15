@@ -529,7 +529,7 @@ fn check_predecessor_with<C>(
 }
 
 fn claim(path: &Path) -> Lock<EndpointClaim> {
-    // A Windows claim creates a pipe instance, which registers with the
+    // A Windows claim may create its boot marker, which registers with the
     // runtime's reactor.
     match tauri::async_runtime::block_on(async { handoff::claim_endpoint_at(path) }) {
         Ok(claim) => Lock::Taken(claim),
@@ -2038,6 +2038,11 @@ mod tests {
         }
         let source = production_body("\nfn check_with(");
         assert_eq!(source.matches("handoff::launch_startup_id").count(), 1);
+        assert_eq!(
+            source.matches("activation()").count(),
+            2,
+            "only a held claim or an authenticated predecessor captures activation"
+        );
         assert!(source.contains("let startup_id = std::cell::OnceCell::new();"));
         let compact: String = source.split_whitespace().collect();
         assert!(compact.contains(
@@ -3161,13 +3166,12 @@ mod tests {
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
     }
 
-    /// A launch beside a claim pipe another account holds boots at once,
-    /// without the listener, and says why, instead of waiting for and asking
-    /// a desktop it can never reach. The test stands in for that account with
-    /// a claim pipe whose security grants LocalSystem alone.
+    /// A foreign boot marker cannot hold the account's file claim or make
+    /// a launch wait. The test stands in for that account with a pipe whose
+    /// security grants LocalSystem alone.
     #[cfg(windows)]
     #[test]
-    fn a_launch_beside_another_accounts_claim_boots_without_the_listener() {
+    fn a_launch_beside_another_accounts_claim_still_takes_the_file_claim() {
         let pipe = test_pipe("foreign-claim");
         let mut claim_pipe = pipe.as_os_str().to_owned();
         claim_pipe.push(".claim");
@@ -3192,10 +3196,8 @@ mod tests {
             },
             &[],
         );
-        assert!(
-            matches!(&startup, Startup::RunWithoutListener { why } if why.contains("another account")),
-            "{startup:?}"
-        );
+        assert!(matches!(&startup, Startup::Run(_)), "{startup:?}");
+        assert!(matches!(claim(&pipe), Lock::Held));
         assert_eq!(startup.exit_code(), None);
         assert!(
             started.elapsed() < Duration::from_secs(1),

@@ -1181,11 +1181,11 @@ impl Drop for ListenerHandle {
 /// can connect (defense in depth on top of the per-user directory). Must be
 /// called from within a tokio runtime.
 ///
-/// Claims the endpoint first and fails while a live process holds it, with
-/// the error the claim met: `AddrInUse` on unix; on Windows the claim pipe's
-/// pipe-busy error, its access-denied error for another account's claim
-/// pipe, or the listener's own when another process created the endpoint's
-/// pipe first. [`start_claimed_listener`] serves a claim taken earlier.
+/// Claims the endpoint first and returns `AddrInUse` while a live process
+/// holds its file lock on Unix or Windows. An unavailable lock or an endpoint
+/// another process reserved returns the corresponding claim or bind error.
+/// A foreign Windows boot marker does not prevent the claim.
+/// [`start_claimed_listener`] serves a claim taken earlier.
 #[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
 where
