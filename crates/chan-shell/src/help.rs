@@ -1928,7 +1928,11 @@ records, with the caption in `label`.
 The lifecycle verbs drive real windows. `new` opens one whose kind
 is derived from the calling tenant: a standalone terminal spawns
 another terminal window, a workspace spawns another window of that
-workspace. `open <id>` focuses a window, un-hiding it if it was
+workspace. `new` waits up to ten seconds after the desktop mints
+the window for its event socket to connect, then prints its id.
+The next `--window` command can use that id without a wait of its
+own. This confirms the connection, not operating-system focus.
+`open <id>` focuses a window, un-hiding it if it was
 hidden. `hide <id>` is the OS close-button behavior: terminals and
 layout stay warm and reopenable. `rm <id>` destroys the window and
 deletes its saved layout. Titles are library-owned and
@@ -1946,7 +1950,10 @@ pub(crate) const CS_WINDOW_AFTER: &str = r#"EXAMPLES:
     or offline
 
   cs window new
-    -> the new window id, printed on stdout
+    -> the connected window id, printed on stdout
+
+  w=$(cs window new) && cs open README.md --window "$w"
+    -> opens README.md in the new workspace window
 
   cs window hide win-3
     -> "hid window win-3"; bring it back with
@@ -1964,6 +1971,9 @@ SIDE EFFECTS:
   first, so a refused `rm` changes nothing. Each verb prints one
   line on stdout (`new` prints the id); failures go to stderr and
   exit non-zero.
+  If a minted window does not connect within ten seconds, `new`
+  prints no id on stdout, names it in the error on stderr, and
+  exits 1. The window record remains and may connect later.
 
 CAUTIONS:
   `rm` is destructive and has no undo: the saved layout is gone, so
@@ -1993,6 +2003,9 @@ CAVEATS:
   desktop attached they refuse with "window management requires the
   chan desktop app". `rm` still works headless, because the server
   (not the desktop) owns the registry row.
+  Viewing a devserver in the desktop does not attach the desktop's
+  window-management bridge to that server: `new`, `open` and `hide`
+  still refuse from its terminals.
   A standalone `chan serve` serve has no library window set, so
   `cs window list` is empty there.
   Subcommands infer (`cs w l`, `cs w n`, `cs w o`, `cs w r`), but

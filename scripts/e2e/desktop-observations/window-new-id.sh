@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# The id `cs window new` prints is the one `--window` takes. One disposable
+# The id `cs window new` prints must work with `--window` immediately. One disposable
 # desktop under Xvfb with one workspace handed to it. Through the control
-# socket of the workspace's tenant, and of the standalone terminals' tenant
-# when a terminal window is up, `cs window new` opens a window; the driver
-# waits until the window registry lists a new window as connected, and
-# `cs pane list --window ID` must then answer for the id that was printed.
+# socket of the workspace's tenant, and of the standalone terminals' tenant,
+# `cs window new` opens a window; the first `cs pane list --window ID` after
+# it returns must answer for the id that was printed, and that id must name
+# the new connected registry row.
 #
 #   window-new-id.sh
 #
-# A printed id that `--window` refuses while the window is connected, and
-# while `--window` takes the id the registry lists for it, is the fault. A
-# window that never connects, or a refusal of the listed id too, is
-# inconclusive. Each arm also logs how long after `cs window new` returned
-# the id first answered: a script that uses the id at once races the new
-# window's page, and that wait is its to make.
+# A refused first read is a fault even if a later read works. Both arms run
+# before observed faults are reported. Delayed reads are diagnostic only:
+# their sampled delay is an upper bound, logged as "at most". A missing
+# tenant, a window that never connects, or a refusal of both the printed
+# and listed ids throughout the diagnostic wait is inconclusive.
 #
 # Speaks for WebKitGTK only. Needs what lib.sh needs and a built chan-desktop
 # and chan with the web bundles. Exit codes are lib.sh's.
@@ -66,36 +65,49 @@ socket_of() {
 }
 
 # arm <kind> <socket>: one `cs window new` through that tenant's socket.
+ARM_FAULTS=()
 arm() {
-    local kind="$1" sock="$2" before printed listed returned first=""
+    local kind="$1" sock="$2" before printed listed returned first delay=""
     before="$(windows "$sock" | cut -d' ' -f1)"
     printed="$(CHAN_CONTROL_SOCKET="$sock" cs window new 2> "$OBS_WORK/$kind.new.err")" \
         || obs_inconclusive "$kind: cs window new failed: $(obs_masked < "$OBS_WORK/$kind.new.err")"
     returned="$(now_ms)"
-    takes "$sock" "$printed" && first=0
+    if takes "$sock" "$printed"; then first=0; delay=0; else first=$?; fi
     new_window() {
         listed="$(windows "$sock" | awk '$3 == "connected" { print $1 }' | grep -Fxv -f <(printf '%s\n' "$before") | sed -n 1p)"
         [ -n "$listed" ]
     }
     obs_wait 60 "$kind: the window registry to list the new window as connected" new_window
     new_window
+    obs_shot "$kind-connected"
+    if [ "$printed" != "$listed" ]; then
+        obs_log "$kind: cs window new printed $printed, but the new connected window is $listed (first=$first)"
+        ARM_FAULTS+=("$kind: printed $printed instead of new window $listed")
+        return 0
+    fi
     local deadline=$((SECONDS + 10))
-    while [ -z "$first" ] && [ "$SECONDS" -lt "$deadline" ]; do
-        if takes "$sock" "$printed"; then first=$(($(now_ms) - returned)); else sleep 0.1; fi
+    while [ -z "$delay" ] && [ "$SECONDS" -lt "$deadline" ]; do
+        if takes "$sock" "$printed"; then delay=$(($(now_ms) - returned)); else sleep 0.1; fi
     done
-    if [ -n "$first" ]; then
-        obs_log "$kind: PASS: cs window new printed $printed and --window took it ${first} ms after it returned (the registry lists $listed)"
+    if [ "$first" = 0 ]; then
+        obs_log "$kind: PASS: first=0: cs window new printed $printed and the first --window read took it (the registry lists $listed)"
+        return 0
+    fi
+    if [ -n "$delay" ]; then
+        obs_log "$kind: first=$first: cs window new printed $printed; --window first took it at most ${delay} ms after it returned (the registry lists $listed)"
+        ARM_FAULTS+=("$kind: first=$first for $printed")
         return 0
     fi
     takes "$sock" "$listed" \
         || obs_inconclusive "$kind: --window takes neither the printed id $printed nor the listed id $listed"
-    obs_fault "$kind: cs window new printed $printed, which --window refuses; it takes $listed, the id the registry lists for that window"
+    obs_log "$kind: first=$first: cs window new printed $printed, which --window refuses; it takes $listed, the id the registry lists for that window"
+    ARM_FAULTS+=("$kind: first=$first for $printed; --window takes only listed id $listed")
 }
 
 obs_wait 60 "a control socket that addresses the workspace window" socket_of workspace
 arm workspace "$(socket_of workspace)"
-if TERMINAL_SOCKET="$(socket_of terminal)"; then
-    arm terminal "$TERMINAL_SOCKET"
-else
-    obs_log "terminal: no standalone terminal window is up, so that arm did not run"
+obs_wait 60 "a control socket that addresses the standalone terminal window" socket_of terminal
+arm terminal "$(socket_of terminal)"
+if ((${#ARM_FAULTS[@]})); then
+    obs_fault "cs window new returned an incorrect or initially unusable id: ${ARM_FAULTS[*]}"
 fi

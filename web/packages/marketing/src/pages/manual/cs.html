@@ -29,7 +29,7 @@
         <tr><td><code>cs export PATH</code></td><td>Renders a workspace file to PDF.</td><td><a href="/manual/previews/#export">Export</a></td></tr>
         <tr><td><code>cs terminal</code></td><td>Opens, writes to, reads, restarts and closes terminals; reports program status; asks a question; starts a team.</td><td><a href="#terminal">Below</a></td></tr>
         <tr><td><code>cs pane</code></td><td>Lists and changes the window's panes.</td><td><a href="#pane">Below</a></td></tr>
-        <tr><td><code>cs window</code></td><td><code>list</code> shows every window of the local machine or devserver; <code>new</code> opens one; <code>open ID</code>, <code>hide ID</code> and <code>rm ID</code> show, hide or delete one.</td><td></td></tr>
+        <tr><td><code>cs window</code></td><td><code>list</code> shows every window of the local machine or devserver; <code>new</code> opens one and prints its id once it can take commands; <code>open ID</code>, <code>hide ID</code> and <code>rm ID</code> show, hide or delete one.</td><td></td></tr>
         <tr><td><code>cs session</code></td><td>Lists and detaches the clients viewing this server; hands over session leadership.</td><td><a href="/manual/collaboration/#client-sessions">Collaboration</a></td></tr>
         <tr><td><code>cs copy</code>, <code>cs paste</code></td><td>Pipe into and out of the clipboard of the machine viewing the window.</td><td><a href="/manual/terminal/#copy-paste">Copy and paste</a></td></tr>
         <tr><td><code>cs upload DIR</code>, <code>cs download PATH</code></td><td>Upload into a directory through a picker; download a file, or a directory as a tar.</td><td><a href="/manual/remote-tools/#transfers">Transfers</a></td></tr>
@@ -52,7 +52,8 @@
         <tr><td>Any chan terminal</td><td><code>terminal</code> (but <code>team</code>), <code>pane</code>, <code>dashboard</code>, <code>copy</code>, <code>paste</code>, <code>upload</code>, <code>download</code>, <code>window list</code> and <code>rm</code>, <code>session list</code>, <code>info</code>, <code>self</code> and <code>detach</code></td></tr>
         <tr><td>A workspace, or a standalone terminal whose machine serves files</td><td><code>open</code> of a path, <code>terminal new PATH</code></td></tr>
         <tr><td>A workspace</td><td><code>graph</code>, <code>search</code>, <code>export</code>, <code>terminal team</code>, <code>session handover</code> and <code>takeover</code>, <code>open</code> of a <code>chan://graph</code> link</td></tr>
-        <tr><td>Chan Desktop viewing the window</td><td><code>window new</code>, <code>open</code> and <code>hide</code>; <code>tunnel</code>, from a devserver or the desktop's own terminals</td></tr>
+        <tr><td>The desktop's local terminal or workspace</td><td><code>window new</code>, <code>open</code> and <code>hide</code></td></tr>
+        <tr><td>A devserver viewed in Chan Desktop</td><td><code>tunnel</code></td></tr>
         <tr><td>Nothing: any terminal, over ssh too</td><td><code>terminal status</code>, <code>dump-skill</code></td></tr>
       </tbody>
     </table>
@@ -74,6 +75,9 @@
   </div>
   <p>No variable tells a workspace from a standalone terminal; a workspace command refusing is the test:</p>
   <pre><code>cs search --limit 1 x &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo workspace || echo standalone</code></pre>
+  <p>In a desktop workspace terminal, open a second window and use its id immediately:</p>
+  <pre><code>w=$(cs window new) &amp;&amp; cs open README.md --window "$w"</code></pre>
+  <p><code>new</code> waits up to ten seconds after the desktop creates the window record for the new window to connect. If it does not, the command prints no id on stdout and exits 1 with an error naming the window; the record remains and may connect later. A successful reply confirms the connection, not operating-system focus. A terminal served by a devserver refuses <code>window new</code>, <code>open</code> and <code>hide</code> even when the desktop views it.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
@@ -240,7 +244,7 @@ cs terminal new --pane "$right" --side a --tab-name runner</code></pre>
       <tbody>
         <tr><td><code>0</code></td><td>Done, or queued to a live window. A queued tab or message arrives a moment later.</td></tr>
         <tr><td><code>1</code></td><td>Failed: refused, nothing matched, or a close blocked by unsaved work.</td></tr>
-        <tr><td><code>124</code></td><td>Nothing answered in time: a survey, a copy or paste, or a tunnel waited too long. An <code>export</code> or <code>session</code> wait that runs out exits 1.</td></tr>
+        <tr><td><code>124</code></td><td>Nothing answered in time: a survey, a copy or paste, or a tunnel waited too long. An <code>export</code>, <code>session</code> or <code>window new</code> wait that runs out exits 1.</td></tr>
         <tr><td><code>69</code></td><td>Only from an older devserver, which could refuse a <code>--submit</code>. The text was still queued.</td></tr>
       </tbody>
     </table>
