@@ -46,7 +46,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | merged | owner |
 | [a fast stream loses output][streamlag] | not started | measure |
-| [ConPTY pulls history into the screen][conpty] | not started | measure |
+| [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [another account holds the claim][winclaim] | not started | build |
 | [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | merged | closed |
