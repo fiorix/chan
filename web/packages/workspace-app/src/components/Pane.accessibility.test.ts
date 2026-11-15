@@ -252,15 +252,19 @@ describe("tab focus affordances", () => {
     return event;
   }
 
-  test.each([0, 2])("pressing terminal pill padding with button %s focuses its label without cancelling drag", async (button) => {
+  test.each([0, 2])("pressing terminal pill padding with button %s forwards focus after the native default", async (button) => {
     const tab = terminalTab({ id: "padding-tab", title: "Padding" });
     const element = await renderTab(tab);
     const outer = element.closest<HTMLElement>(".tab")!;
     const before = document.createElement("button");
     document.body.append(before);
     before.focus();
+    const focusLabel = vi.spyOn(element, "focus");
     const event = mouseDown(outer, button);
-    expect(event.defaultPrevented, "the native drag may start on the pill").toBe(false);
+    expect(event.defaultPrevented, "the press keeps its native default").toBe(false);
+    expect(focusLabel, "forwarding must not re-enter native mouse focus").not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(outer);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(document.activeElement, "padding routes native focus to the label").toBe(element);
     expect(outer.tabIndex, "padding adds no keyboard tab stop").toBe(-1);
     expect(pane().activeTabId).toBe(button === 0 ? KEPT : tab.id);
@@ -281,9 +285,45 @@ describe("tab focus affordances", () => {
     const element = await renderTab(terminalTab({ id: "stale-padding", title: "Stale" }), { preview: true, stale: true });
     const outer = element.closest<HTMLElement>(".tab")!;
     outer.focus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(document.activeElement).toBe(outer);
     expect(pane().activeTabId).toBe(KEPT);
     expect(paneMode.draft?.nodes[PANE]).toMatchObject({ activeTabId: KEPT });
+  });
+
+  test("pending padding focus leaves a newly focused close control alone", async () => {
+    const element = await renderTab(terminalTab({ id: "moved-focus", title: "Moved focus" }));
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const close = outer.querySelector<HTMLButtonElement>("button.close")!;
+    mouseDown(outer, 0);
+    close.focus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.activeElement).toBe(close);
+    expect(pane().activeTabId).toBe(KEPT);
+  });
+
+  test("pending padding focus stands down when Hybrid Nav becomes stale", async () => {
+    const element = await renderTab(terminalTab({ id: "becomes-stale", title: "Stale later" }), { preview: true });
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const focusLabel = vi.spyOn(element, "focus");
+    outer.focus();
+    focusLabel.mockClear();
+    paneMode.stale = true;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(focusLabel).not.toHaveBeenCalled();
+    expect(paneMode.draft?.nodes[PANE]).toMatchObject({ activeTabId: KEPT });
+  });
+
+  test("pending padding focus does not touch an unmounted tab", async () => {
+    const element = await renderTab(terminalTab({ id: "removed-focus", title: "Removed" }));
+    const outer = element.closest<HTMLElement>(".tab")!;
+    const focusLabel = vi.spyOn(element, "focus");
+    outer.focus();
+    focusLabel.mockClear();
+    await unmount(mounted.pop()!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(element.isConnected).toBe(false);
+    expect(focusLabel).not.toHaveBeenCalled();
   });
 
   function installStyles(): HTMLStyleElement {

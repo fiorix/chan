@@ -1588,8 +1588,12 @@
         tabindex="-1"
         onfocusin={(e) => {
           if (paneMode.stale || e.target !== e.currentTarget) return;
-          // Padding takes native mouse focus without cancelling dragstart.
-          e.currentTarget.querySelector<HTMLElement>(".tab-label")?.focus({ preventScroll: true });
+          const outer = e.currentTarget;
+          // Let native mouse focus finish before moving it to the label.
+          setTimeout(() => {
+            if (paneMode.stale || document.activeElement !== outer) return;
+            outer.querySelector<HTMLElement>(".tab-label")?.focus({ preventScroll: true });
+          }, 0);
         }}
         onmousedown={(e) => {
           if (paneMode.stale) return;

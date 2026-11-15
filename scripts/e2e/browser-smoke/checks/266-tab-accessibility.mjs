@@ -28,12 +28,36 @@ async function withTimeout(promise, ms, label) {
 // Observe native delivery and real session/exit frames, without changing the
 // application's state. Synthetic activation below is a separate control.
 function installProbe() {
-  const probe = window.__tab266 = { events: [], frames: [] };
+  const probe = window.__tab266 = { events: [], frames: [], focusEvents: [], focusEventsDropped: 0 };
+  const identify = (node) => {
+    if (!(node instanceof Element)) return null;
+    const terminal = node.closest("[data-terminal-tab-id]");
+    // Ghostty focuses its host while retaining a hidden textarea inside it.
+    const input = terminal?.querySelector(".terminal-host[tabindex]") ?? terminal?.querySelector(".terminal-host textarea");
+    return { tag: node.tagName, id: node.id, class: node.getAttribute("class"), role: node.getAttribute("role"),
+      tabLabel: node.closest(".tabs .tab")?.querySelector(".path")?.textContent.trim() ?? null,
+      terminalTabId: terminal?.getAttribute("data-terminal-tab-id") ?? null,
+      paneId: node.closest("[data-pane-id]")?.getAttribute("data-pane-id") ?? null, terminalInput: node === input };
+  };
+  probe.activeIdentity = () => identify(document.activeElement);
+  for (const type of ["focusin", "focusout", "mousedown", "mouseup", "contextmenu", "dragstart", "dragend", "drop"]) {
+    document.addEventListener(type, (event) => {
+      if (probe.focusEvents.length >= 512) { probe.focusEventsDropped += 1; return; }
+      const reading = { type, at: performance.now(), trusted: event.isTrusted, button: event.button,
+        target: identify(event.target), relatedTarget: identify(event.relatedTarget), active: probe.activeIdentity() };
+      probe.focusEvents.push(reading);
+      setTimeout(() => {
+        reading.afterTurnAt = performance.now();
+        reading.activeAfterTurn = probe.activeIdentity();
+        reading.defaultPrevented = event.defaultPrevented;
+      }, 0);
+    }, { capture: true, passive: true });
+  }
   for (const type of ["mousedown", "mouseup", "click", "keydown", "contextmenu", "dragstart", "dragover", "dragend", "drop"]) {
     document.addEventListener(type, (event) => {
       const outer = event.target?.closest?.(".tabs .tab");
       if (!event.target?.closest?.(".tabs")) return;
-      const reading = { type, trusted: event.isTrusted, key: event.key, button: event.button,
+      const reading = { type, trusted: event.isTrusted, key: event.key, shiftKey: event.shiftKey, button: event.button,
         label: outer?.querySelector(".path")?.textContent.trim(), target: event.target.className, targetIsOuter: event.target === outer,
         x: event.clientX, y: event.clientY, dropEffect: event.dataTransfer?.dropEffect };
       probe.events.push(reading);
@@ -89,6 +113,7 @@ async function state(page) {
         name: node.getAttribute("aria-label"), disabled: node.getAttribute("aria-disabled"), rect: box(node),
       })),
       events: window.__tab266.events, frames: window.__tab266.frames,
+      activeElement: window.__tab266.activeIdentity(), focusEventCount: window.__tab266.focusEvents.length,
     };
   }, TAB);
 }
@@ -179,6 +204,8 @@ async function fixture(ctx, index, report) {
   for (const kind of ["live", "ended"]) {
     const row = await openAttachedTerminal(ctx, page, (args) => result.cs(["terminal", ...args]), result.windowId, result.labels[kind], backend);
     result[`${kind}Session`] = row.session_id;
+    result[`${kind}TabId`] = row.tab;
+    result[`${kind}PaneId`] = row.pane;
   }
   await result.cs(["terminal", "write", "--tab-name", result.labels.ended, "exit 0\n"]);
   await poll("real shell exit and retained tab", async () => {
@@ -234,6 +261,14 @@ function preserved(before, after, label, mode) {
   requireProduct(after.dialogs.every((dialog) => menu.includes(dialog.name)), `${mode} opened a dialog: ${JSON.stringify(after.dialogs)}`);
 }
 
+function terminalMenuFocus(reading, expected) {
+  requireProduct(reading.dialogs.some((dialog) => ["tab menu", "terminal tab settings"].includes(dialog.name)),
+    "right padding press did not keep the terminal menu open");
+  const active = reading.activeElement;
+  requireProduct(active?.terminalInput && active.terminalTabId === expected.tabId && active.paneId === expected.paneId,
+    `right padding menu did not retain the selected terminal's input focus: ${JSON.stringify(active)}`);
+}
+
 async function paddingPoint(page, label) {
   const handle = await element(page, label, "role");
   try { await handle.hover(); } finally { await handle.dispose(); }
@@ -255,6 +290,7 @@ async function paddingPoint(page, label) {
 async function activation(ctx, f, kind, mode) {
   const arm = { kind, mode, synthetic: mode === "synthetic-webkit", status: "incomplete" };
   const label = f.labels[kind];
+  if (mode === "padding-right") arm.expectedFocus = { tabId: f[`${kind}TabId`], paneId: f[`${kind}PaneId`] };
   try {
     await click(f.page, f.labels.control);
     await poll("control tab selected", async () => (await state(f.page)).tabs.find((tab) => tab.label === f.labels.control)?.selected);
@@ -328,8 +364,7 @@ async function activation(ctx, f, kind, mode) {
           arm.held = await snapshot(f);
           preserved(arm.before, arm.held, label, mode);
           preserveSessions(arm.before, arm.held, "right mousedown");
-          if (padding) requireProduct(arm.held.tabs.find((tab) => tab.label === label)?.labelFocused,
-            "right padding press did not keep focus on the tab label");
+          if (padding) terminalMenuFocus(arm.held, arm.expectedFocus);
         } else {
           const until = Date.now() + 500;
           arm.heldSamples = [];
@@ -358,7 +393,8 @@ async function activation(ctx, f, kind, mode) {
     while (Date.now() < until) {
       const sample = await state(f.page);
       preserved(arm.before, sample, label, mode);
-      arm.holdSamples.push({ at: Date.now(), selected: label, dialogs: sample.dialogs, tabs: names(sample) });
+      if (mode === "padding-right") terminalMenuFocus(sample, arm.expectedFocus);
+      arm.holdSamples.push({ at: Date.now(), selected: label, dialogs: sample.dialogs, tabs: names(sample), activeElement: sample.activeElement });
       await sleep(50);
     }
     arm.after = await snapshot(f);
@@ -372,8 +408,7 @@ async function activation(ctx, f, kind, mode) {
       const press = events.find((event) => event.type === "mousedown" && event.trusted && event.label === label);
       assert.ok(press?.targetIsOuter, "instrument: native mousedown reached the outer padding");
       requireProduct(press.defaultPrevented === false, "padding mousedown prevented the native focus or drag default");
-      if (mode === "padding-right") requireProduct(arm.after.tabs.find((tab) => tab.label === label)?.labelFocused,
-        "right padding menu did not retain label focus");
+      if (mode === "padding-right") terminalMenuFocus(arm.after, arm.expectedFocus);
     }
     if (mode === "drag" || mode === "padding-drag") {
       assert.ok(["dragstart", "dragend", "drop"].every((type) => events.some((event) => event.type === type && event.trusted)), "instrument: trusted drag started, dropped and ended");
@@ -401,17 +436,22 @@ async function keyboardFocusStyles(ctx, f) {
     await f.page.mouse.move(1500, 950);
     arm.before = await snapshot(f);
     const index = arm.before.tabs.findIndex((tab) => tab.label === label);
-    assert.ok(index > 0 && arm.before.tabs[index - 1].label === f.labels.control,
-      "instrument: the inactive subject follows the control in keyboard order");
+    assert.ok(index >= 0, "instrument: the inactive style subject exists");
     assert.ok(!arm.before.tabs[index].selected && !arm.before.tabs[index].hovered,
       "instrument: focus styles are read on an inactive, unhovered tab");
     const eventStart = arm.before.events.length;
-    const controlClose = await element(f.page, f.labels.control, "close");
-    try { await controlClose.focus(); } finally { await controlClose.dispose(); }
-    await f.page.keyboard.press("Tab");
+    const subjectClose = await element(f.page, label, "close");
+    try {
+      await subjectClose.focus();
+      assert.ok(await subjectClose.evaluate((node) => document.activeElement === node),
+        "instrument: style setup focused the subject's close control");
+    } finally { await subjectClose.dispose(); }
+    arm.setup = await snapshot(f);
+    await f.page.keyboard.down("Shift");
+    try { await f.page.keyboard.press("Tab"); } finally { await f.page.keyboard.up("Shift"); }
     arm.label = await snapshot(f);
     const focusedLabel = arm.label.tabs.find((tab) => tab.label === label);
-    requireProduct(focusedLabel?.labelFocused && focusedLabel.labelFocusVisible, "Tab did not visibly focus the inactive label");
+    requireProduct(focusedLabel?.labelFocused && focusedLabel.labelFocusVisible, "Shift+Tab did not visibly focus the inactive label");
     requireProduct(!focusedLabel.selected && !focusedLabel.hovered, "label focus selected or hovered the subject");
     arm.labelShot = await ctx.shot("live-label-keyboard-focus", f.page);
     await f.page.keyboard.press("Tab");
@@ -434,8 +474,8 @@ async function keyboardFocusStyles(ctx, f) {
     requireProduct(JSON.stringify(names(arm.after)) === JSON.stringify(names(arm.before)) && arm.after.dialogs.length === 0,
       "keyboard focus changed tabs or opened a dialog");
     preserveSessions(arm.before, arm.after, "keyboard focus");
-    assert.equal(arm.after.events.slice(eventStart).filter((event) => event.type === "keydown" && event.key === "Tab" && event.trusted).length, 2,
-      "instrument: both focus steps came from actual Tab keys");
+    assert.deepEqual(arm.after.events.slice(eventStart).filter((event) => event.type === "keydown" && event.key === "Tab" && event.trusted)
+      .map((event) => event.shiftKey), [true, false], "instrument: focus steps came from trusted Shift+Tab and Tab");
     requireProduct(Object.values(arm.styleChecks).every(Boolean),
       `keyboard focus style failed: ${Object.entries(arm.styleChecks).filter(([, held]) => !held).map(([name]) => name).join(", ")}`);
     arm.status = "passed";
@@ -540,17 +580,25 @@ export default {
           report.pageErrors = f.pageErrors;
         } catch (error) { report.setupError = mask(error.message); }
         finally {
+          if (report.fixture?.page) {
+            report.focusTrace = await report.fixture.page.evaluate(() => ({
+              limit: 512, events: window.__tab266.focusEvents, dropped: window.__tab266.focusEventsDropped,
+            })).catch((error) => ({ error: mask(error.message) }));
+          }
           await cleanup(report.fixture, report);
           delete report.fixture;
         }
       }
       evidence.status = evidence.arms.length === 18 && evidence.supplementalArms.length === 4 &&
-        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.status === "passed") && evidence.fixtures.every((report) => !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length) ? "passed" : "failed";
+        [...evidence.arms, ...evidence.supplementalArms].every((arm) => arm.status === "passed") && evidence.fixtures.every((report) =>
+          !report.setupError && !report.cleanupErrors?.length && !report.pageErrors?.length && report.focusTrace &&
+          !report.focusTrace.error && report.focusTrace.dropped === 0) ? "passed" : "failed";
     } catch (error) { evidence.error = mask(error.message); }
     finally { writeFileSync(join(ctx.outDir, "tab266-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`); }
     assert.equal(evidence.status, "passed", `tab-accessibility: ${JSON.stringify({
       error: evidence.error, arms: [...evidence.arms, ...evidence.supplementalArms].filter((arm) => arm.status !== "passed").map(({ kind, mode, status, error }) => ({ kind, mode, status, error })),
-      fixtures: evidence.fixtures.map(({ kind, closing, setupError, cleanupErrors, pageErrors }) => ({ kind, closing, setupError, cleanupErrors, pageErrors })),
+      fixtures: evidence.fixtures.map(({ kind, closing, setupError, cleanupErrors, pageErrors, focusTrace }) => ({
+        kind, closing, setupError, cleanupErrors, pageErrors, focusTraceError: focusTrace?.error, focusTraceDropped: focusTrace?.dropped })),
     })}`);
     return evidence;
   },
