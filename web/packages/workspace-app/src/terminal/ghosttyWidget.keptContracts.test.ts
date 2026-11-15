@@ -56,7 +56,7 @@ async function openTerminal() {
 }
 
 describe("the widget's links through its registered providers", () => {
-  test("an explicit OSC8 label opens its URI through the real buffer", async () => {
+  test("the registered OSC8 provider opens an explicit label's URI through the real buffer", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     const screen = await openTerminal();
     screen.term.write("\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\ text");
@@ -64,7 +64,7 @@ describe("the widget's links through its registered providers", () => {
     await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://e.x/a", "_blank", "noopener,noreferrer"));
   });
 
-  test("a plain URL opens through the regex provider and real buffer", async () => {
+  test("the registered regex provider opens a plain URL through the real buffer", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     const screen = await openTerminal();
     screen.term.write("https://plain.example/b");
@@ -72,7 +72,7 @@ describe("the widget's links through its registered providers", () => {
     await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("https://plain.example/b", "_blank", "noopener,noreferrer"));
   });
 
-  test("an OSC8 link remains clickable after its row enters history", async () => {
+  test("the registered OSC8 provider opens a link after its row enters history", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     const screen = await openTerminal();
     screen.term.write("\x1b]8;;https://e.x/a\x1b\\link\x1b]8;;\x1b\\\r\n" + "line\r\n".repeat(ROWS));

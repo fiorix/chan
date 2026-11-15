@@ -2368,8 +2368,7 @@
   /// Keys and dropped paths bypass the widgets' own input scroll. Mouse
   /// reports and program replies keep the send path without this scroll.
   function sendTypedInput(data: string): void {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    term?.scrollToBottom();
+    if (ws?.readyState === WebSocket.OPEN) term?.scrollToBottom();
     sendUserInput(data);
   }
 

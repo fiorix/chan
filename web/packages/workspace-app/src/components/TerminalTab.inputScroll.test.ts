@@ -52,7 +52,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { sendPromptToTerminal } from "../state/tabs.svelte";
+import { registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
 import {
   attach, installTerminalDom, output, receive, resetTerminals,
   seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
@@ -100,9 +100,12 @@ function history(term: Terminal): number {
 function inputFrames(socket: TerminalSocket): unknown[] {
   return sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data);
 }
-async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false) {
+async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false, broadcast = false) {
   __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false, mouse_capture: mouseCapture }));
-  const [tab] = seatTerminals([terminalTab()]);
+  const [tab, sibling] = seatTerminals(broadcast ? [
+    terminalTab({ broadcastEnabled: true, group: "input-scroll" }),
+    terminalTab({ id: "term-sibling", broadcastEnabled: true, group: "input-scroll" }),
+  ] : [terminalTab()]);
   const target = document.createElement("div");
   document.body.append(target);
   component = mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } });
@@ -128,7 +131,7 @@ async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false) {
   });
   const host = target.querySelector<HTMLElement>(".terminal-host")!;
   const input = term instanceof GhosttyTerminal ? host : term.textarea!;
-  return { tab: tab!, target, term, socket, host, input, inputHistory, promptHistory };
+  return { tab: tab!, sibling, target, term, socket, host, input, inputHistory, promptHistory };
 }
 function key(input: HTMLElement, init: KeyboardEventInit): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
@@ -177,6 +180,35 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     expect(sentFrames(socket)).toEqual([]);
     expect(inputHistory).toEqual([]);
     expect(history(term)).toBe(7);
+  });
+
+  test.each([0, 2, 3].flatMap((readyState) =>
+    ["direct key", "dropped path"].map((kind) => ({ readyState, kind })),
+  ))("$kind reaches the same-window group while socket state $readyState preserves local history", async ({ readyState, kind }) => {
+    const { sibling, target, term, socket, input, inputHistory } = await scrolled(backend, false, true);
+    const received: Array<[string, boolean | undefined]> = [];
+    const unregister = registerTerminalInputSink(sibling!.id, (data, binary) => received.push([data, binary]));
+    try {
+      socket.readyState = readyState;
+      let bytes: string;
+      if (kind === "direct key") {
+        bytes = backend === "ghostty" ? "\r" : "\x1f";
+        key(input, backend === "ghostty"
+          ? { key: "Enter", code: "Enter", keyCode: 13 }
+          : { key: "/", code: "Slash", ctrlKey: true });
+      } else {
+        bytes = "'/tmp/group path' ";
+        runtime.paths = ["/tmp/group path"];
+        expect(drop(target).defaultPrevented).toBe(true);
+        await tick();
+      }
+      expect(sentFrames(socket), "the disconnected source has no local or cross-window frame").toEqual([]);
+      expect(inputHistory).toEqual([]);
+      expect(history(term)).toBe(7);
+      expect(received, "the same-window sibling still receives the input").toEqual([[bytes, false]]);
+    } finally {
+      unregister();
+    }
   });
 
   test.each([
