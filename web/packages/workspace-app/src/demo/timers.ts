@@ -28,10 +28,11 @@ function armedByJsdomFrameLoop(): boolean {
 }
 
 /// Track the timers and animation frames armed from now until `release`.
-/// Clearing a timer leaves the handle its module keeps, so a module that
-/// refuses to re-arm while its handle is set needs its own stop called first
+/// Clearing a timer leaves its module's handle and pending work behind, so
+/// call the module's own stop before releasing the tracked timers
 /// (the index poll's `stopIndexStatusPoller` and the session refetch's
-/// `stopSessionSyncRefetch`).
+/// `stopSessionSyncRefetch`, plus the store's `teardown` for the pane-width
+/// and page-width debounces and their pending preference edits).
 ///
 /// One limit: d3-timer binds `window.requestAnimationFrame` when its module
 /// loads, before any test runs, so the graph simulation's frame loop goes to

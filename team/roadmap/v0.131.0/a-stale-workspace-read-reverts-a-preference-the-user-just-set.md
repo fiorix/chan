@@ -46,6 +46,10 @@ At `174e40f51`, three deferred-response cases fail with the actual old widths in
 
 ## Width-edit disposal, 2026-11-15
 
-Workspace teardown invalidates its read epoch before canceling pane-width and page-width debounces. Each debounce owner clears its timer and releases its pending edit without sending the canceled value; rearming uses the same cancellation path. The mounted inspector suites call this lifecycle before removing their demo transport and timer trackers.
+Workspace teardown invalidates its read epoch before canceling pane-width and page-width debounces. Each debounce owner clears its timer and releases its pending edit without sending the canceled value; rearming uses the same cancellation path. The mounted FileBrowserSurface, GraphPanel and FileEditorTab suites call this lifecycle before removing their demo transport and timer trackers.
 
 At `2fd461c1c`, the two bounded disposal cases fail: a timer remains active, the old waiting read never settles, and a new workspace read cannot start after the timer tracker clears it. The corrected preference suite passes 27 cases. Six independent mutations produce assertion failures: omitting each teardown cancellation, omitting each timer clear, and canceling each timer without releasing its pending edit. The restored source bytes match; raw logs and commands are under `dev/v0131-team/evidence/Edit131/prefstale/disposal/`. Committed gates and browser acceptance remain pending.
+
+## Editor fixture disposal, 2026-11-15
+
+FileEditorTab uses the same store teardown before removing its demo transport and tracked timers. At `3099750e8`, running the shared-width drag followed by the pane-width drag passes the first case but times out in the next fixture's workspace refresh after 30 seconds. With cleanup, both cases pass. Removing only the teardown call reproduces that same next-fixture timeout; the fixed test source is then restored byte for byte. The timer tracker documents that pane-width and page-width debounces also require their owner's cleanup to release pending preference edits. Raw logs and commands are under `dev/v0131-team/evidence/Edit131/prefstale/editor-teardown/`; the committed full-file and full web checks remain pending.
