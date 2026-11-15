@@ -10,7 +10,7 @@
   // and reads as a live reconnecting state: a spinner + status. The auto-reconnect loop
   // runs underneath, so doing nothing heals on its own once the
   // channel returns. A devserver-backed desktop window also offers a
-  // single Abandon action to give up on a stuck remote connection.
+  // Restart connection and Abandon actions for a stuck remote connection.
 
   import { COVER_ROOT_ATTR, appInputBlocked, keyboardOwnedAbovePanes, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
@@ -25,6 +25,7 @@
   import { surveyFor } from "../state/survey.svelte";
   import { teamDialogState } from "../state/teamDialog.svelte";
   import { closeConfirmState } from "../state/closeConfirm.svelte";
+  import { linkHealth } from "../state/linkHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { onDestroy, onMount, tick } from "svelte";
 
@@ -65,7 +66,7 @@
       if (outageEpoch === actionEpoch) pendingAction = null;
       await tick();
       // Disabling the active button can drop native focus onto the body.
-      if (visible && ui.ws !== "open" && outageEpoch === actionEpoch) {
+      if (visible && !watcherOpen && outageEpoch === actionEpoch) {
         focusAfterAction = action;
         focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
       }
@@ -93,11 +94,8 @@
   /// the app appear unresponsive ("nothing clicks") with no useful
   /// signal to the user.
   ///
-  /// Once we've seen "open" once, any later transition to a
-  /// non-open state is a real disconnect that's worth surfacing -
-  /// file changes won't propagate, autosave can't reach the server,
-  /// etc. A 600 ms grace still hides the overlay through brief
-  /// reconnects.
+  /// Once we've seen "open" once, a lost watcher can surface a cover.
+  /// The outage's first loss decides its due time; a pong ends it.
   ///
   /// Done with an $effect that owns the timer rather than a $derived
   /// computing on Date.now: $derived must be pure, and recording
@@ -125,7 +123,7 @@
   onMount(() => {
     // A launcher hide is the first point at which the page may take focus back.
     const onWindowFocus = (): void => {
-      if (!deferredFocus || launcherShownOverWindow() || ui.ws !== "open") return;
+      if (!deferredFocus || launcherShownOverWindow() || !watcherOpen) return;
       const { returnTo, epoch } = deferredFocus;
       deferredFocus = null;
       restoreFocus(returnTo, epoch);
@@ -134,10 +132,11 @@
     return () => window.removeEventListener("focus", onWindowFocus);
   });
 
-  const watcherOpen = $derived(ui.ws === "open");
+  const watcherOpen = $derived(ui.ws === "open" && linkHealth.outage === null);
   const bandAvailable = $derived(windowTabBar.on && !keyboardOwnedAbovePanes());
   $effect(() => {
-    if (ui.ws === "open") {
+    const status = ui.ws;
+    if (status === "open" && watcherOpen) {
       outageEpoch += 1;
       const priorFocus = focusBeforeCover ?? deferredFocus?.returnTo ?? null;
       focusBeforeCover = null;
@@ -159,9 +158,12 @@
       visible = false;
       return;
     }
+    // Only direct status changes without the link-state bridge, as in tests,
+    // lack an outage deadline.
+    const coverAt = linkHealth.outage?.coverAt ?? Date.now();
     const show = setTimeout(() => {
       visible = true;
-    }, STARTUP_GRACE_MS);
+    }, Math.max(STARTUP_GRACE_MS, coverAt - Date.now()));
     return () => clearTimeout(show);
   });
 
@@ -230,7 +232,7 @@
   }
 
   function restoreFocus(returnTo: FocusReturn, epoch: number): void {
-    if (outageEpoch !== epoch || ui.ws !== "open") return;
+    if (outageEpoch !== epoch || !watcherOpen) return;
     if (launcherShownOverWindow()) {
       deferredFocus = { returnTo, epoch };
       return;
@@ -272,8 +274,8 @@
   const message = "reconnecting to the chan server";
 
   // Live elapsed timer + attempt counter, matching the desktop connecting
-  // screen's retry presentation. The timer runs only while the overlay is up
-  // (it resets on each disconnect); the attempt count rides `ui.wsAttempt`,
+  // screen's retry presentation. The timer displays time since the outage
+  // began; the attempt count rides `ui.wsAttempt`,
   // surfaced by the watcher transport.
   let elapsedMs = $state(0);
   $effect(() => {
@@ -281,8 +283,9 @@
       elapsedMs = 0;
       return;
     }
-    const start = Date.now();
-    elapsedMs = 0;
+    // Direct status changes without the link-state bridge have no outage start.
+    const start = linkHealth.outage?.startedAt ?? Date.now();
+    elapsedMs = Date.now() - start;
     const id = setInterval(() => {
       elapsedMs = Date.now() - start;
     }, 1000);

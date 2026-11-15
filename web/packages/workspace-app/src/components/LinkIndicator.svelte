@@ -9,7 +9,7 @@
     LINK_SPARKLINE_MISS_BOTTOM,
     LINK_SPARKLINE_MISS_TOP,
     LINK_SPARKLINE_WIDTH,
-    linkAge,
+    linkContactTime,
     linkFigures,
     linkIndicatorShown,
     linkSparkline,
@@ -113,7 +113,6 @@
   <button
     bind:this={trigger}
     class="link-indicator"
-    class:status={placement === "status"}
     data-placement={placement}
     data-state={linkHealth.state}
     type="button"
@@ -146,7 +145,7 @@
       <span>Median <strong>{fmt(figures.median)}</strong></span>
       <span>Worst <strong>{fmt(figures.worst)}</strong></span>
     </div>
-    <div class="contact">Last contact <strong>{linkAge(linkHealth.lastContactAt, now)}</strong></div>
+    <div class="contact">Last contact <strong>{linkContactTime(linkHealth.lastContactAt)}</strong></div>
   </div>
 {/if}
 
@@ -170,12 +169,12 @@
   }
   .link-indicator[aria-disabled="true"] { cursor: default; }
   .link-indicator:not([aria-disabled="true"]):hover { background: var(--hover-bg); }
-  .link-indicator.status:not([aria-disabled="true"]):hover { background: transparent; text-decoration: underline; text-underline-offset: 2px; }
+  .link-indicator[data-placement="status"]:not([aria-disabled="true"]):hover { background: transparent; text-decoration: underline; text-underline-offset: 2px; }
   .link-indicator:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   .link-indicator[data-state="unknown"] { opacity: 0.6; }
   .link-indicator[data-state="slow"] { color: var(--warn-text); }
   .link-indicator[data-state="stalled"], .link-indicator[data-state="down"] { color: var(--danger-text); }
-  .link-indicator.status { height: auto; padding: 0; }
+  .link-indicator[data-placement="status"] { height: auto; padding: 0; }
   .link-indicator[data-placement="tab-bar"] .label { display: inline-block; min-width: var(--link-indicator-label-width); text-align: left; }
   .glyph { width: 16px; height: 16px; flex: none; }
   .link-popover {

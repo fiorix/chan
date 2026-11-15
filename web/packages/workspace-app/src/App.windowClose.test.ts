@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Closing a window. The desktop host prevents an OS close (the red dot) and
-// sends `app.window.confirmClose`: while the reconnect overlay is up, or when
+// sends `app.window.confirmClose`: while the reconnect overlay is up with no open watcher, or when
 // the window holds no tab, the window closes straight away, discarding its
 // session so nothing is left recorded; any other window asks Hide / Close /
 // Cancel. A full-window cover drops every host command except this one, since
@@ -53,6 +53,7 @@ import { setTabContent, type FileTab } from "./state/tabs.svelte";
 import { resolveCloseConfirm } from "./state/closeConfirm.svelte";
 import { lockNow, screensaver } from "./state/screensaver.svelte";
 import { discardWindowSession, persistLayoutToHash, ui } from "./state/store.svelte";
+import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus } from "./state/linkHealth.svelte";
 import { TERMINAL_ONLY_COMMANDS } from "./state/windowMode";
 
 stubAppEnvironment();
@@ -88,6 +89,7 @@ describe("the desktop's close request", () => {
   });
 
   test("closes at once while the reconnect overlay is up", async () => {
+    resetLinkHealthForTests();
     ui.disconnectBlocking = true;
     await settle();
     hostCommand("app.window.confirmClose");
@@ -96,6 +98,39 @@ describe("the desktop's close request", () => {
     expect(prompt()).toBeNull();
     expect(discardWindowSession).toHaveBeenCalledWith({ reap: true });
     expect(requestCloseWindow).toHaveBeenCalledTimes(1);
+  });
+
+  test("opens and keeps the prompt while the watcher is down but uncovered", async () => {
+    resetLinkHealthForTests();
+    setLinkWatchStatus("open");
+    ui.ws = "open";
+    await settle();
+    setLinkWatchStatus("reconnecting");
+    ui.ws = "reconnecting";
+    ui.disconnectBlocking = false;
+    hostCommand("app.window.confirmClose");
+    await settle();
+    expect(linkHealth.outage).not.toBeNull();
+    expect(prompt()).not.toBeNull();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
+    resetLinkHealthForTests();
+  });
+
+  test("opens a prompt under the cover while a redialed socket is open but unanswered", async () => {
+    resetLinkHealthForTests();
+    setLinkWatchStatus("open");
+    setLinkWatchStatus("reconnecting");
+    setLinkWatchStatus("open");
+    ui.ws = "open";
+    ui.disconnectBlocking = true;
+    await settle();
+    expect(linkHealth.outage).not.toBeNull();
+    hostCommand("app.window.confirmClose");
+    await settle();
+    expect(prompt()).not.toBeNull();
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
+    resetLinkHealthForTests();
   });
 
   test("closes at once when the window holds no tab", async () => {
@@ -198,6 +233,7 @@ describe("what a window that goes leaves for the next open", () => {
   const WAYS: [string, () => Promise<void>][] = [
     ["the close-window command", async () => hostCommand("app.window.close")],
     ["the red dot while reconnecting", async () => {
+      resetLinkHealthForTests();
       ui.disconnectBlocking = true;
       hostCommand("app.window.confirmClose");
     }],

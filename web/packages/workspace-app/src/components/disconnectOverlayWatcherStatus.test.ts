@@ -4,18 +4,16 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import { COVER_ROOT_ATTR, raisedCoverKeys, ui } from "../state/store.svelte";
+import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
 
-// The watcher transport now force-closes a zombie /ws -- when the read-deadline
-// expires with no inbound frame, or when the wall-clock wake detector fires --
-// and lets the existing reconnect loop redial. This overlay needs NO change to
-// surface that: it is driven purely by the watcher status `ui.ws`, so a
-// force-close that flips `ui.ws` off "open" reads exactly like a network drop.
-// Proven by driving `ui.ws` against the UNMODIFIED overlay.
+// A watcher drop starts the cover grace. Opening a redial alone does not heal
+// the outage; its first pong does.
 
 const mounted: Array<Record<string, unknown>> = [];
 
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
+  resetLinkHealthForTests();
   document.body.innerHTML = "";
   vi.useRealTimers();
 });
@@ -27,17 +25,21 @@ function render(): HTMLElement {
   return target;
 }
 
-describe("DisconnectOverlay follows the watcher status (no change needed)", () => {
-  test("a force-close that flips ui.ws off 'open' surfaces then clears the overlay", async () => {
+describe("DisconnectOverlay follows a watcher outage", () => {
+  test("a force-close surfaces the cover and a redial pong clears it", async () => {
     vi.useFakeTimers();
+    resetLinkHealthForTests();
+    setLinkWatchStatus("open");
     ui.ws = "open"; // watcher healthy at least once this session
     const target = render();
     await tick();
     expect(target.querySelector(".overlay")).toBeNull(); // hidden while open
 
-    // The read-deadline / wake-gap force-close reconnects, flipping the watcher
-    // status. Past the 600ms startup grace, the overlay must appear -- driven by
-    // ui.ws alone, with no knowledge of the heartbeat that triggered the close.
+    watchLinkProbe.pingSent();
+    watchLinkProbe.frameReceived();
+    watchLinkProbe.pongReceived();
+    watchLinkProbe.reset();
+    setLinkWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
     ui.ws = "reconnecting";
     await tick();
     vi.advanceTimersByTime(600);
@@ -56,9 +58,14 @@ describe("DisconnectOverlay follows the watcher status (no change needed)", () =
     // the guard's exception for a cover's own text field.
     expect(overlay?.querySelectorAll("input, textarea, [contenteditable]").length).toBe(0);
 
-    // The redial's fresh socket re-opens -> ui.ws "open" -> the overlay heals on
-    // its own, no manual dismissal.
+    setLinkWatchStatus("open");
     ui.ws = "open";
+    await tick();
+    expect(linkHealth.state).toBe("down");
+    expect(target.querySelector(".overlay")).not.toBeNull();
+    watchLinkProbe.pingSent();
+    watchLinkProbe.frameReceived();
+    watchLinkProbe.pongReceived();
     await tick();
     expect(target.querySelector(".overlay")).toBeNull();
     expect(raisedCoverKeys()).not.toContain("reconnect");

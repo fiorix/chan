@@ -49,7 +49,7 @@
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
   import { sessionState } from "../state/session.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { linkHealth, linkIsRemote, type LinkState } from "../state/linkHealth.svelte";
+  import { linkHealth, type LinkState } from "../state/linkHealth.svelte";
   import { linkIndicatorShown } from "./linkIndicatorMath";
   import LinkIndicator from "./LinkIndicator.svelte";
 
@@ -88,8 +88,7 @@
   const transfersBubbleVisible = $derived(transferEntries > 0);
   const activeXfers = $derived(transfers.items.filter((t) => t.state === "active").length);
   const statusVisible = $derived(!!ui.status);
-  const linkRemote = linkIsRemote();
-  const linkVisible = $derived(!windowTabBar.on && linkIndicatorShown("status", linkHealth.state, linkRemote));
+  const linkVisible = $derived(!windowTabBar.on && linkIndicatorShown("status", linkHealth.state, false));
   /// The status as shown. Many call sites write the sentence, some with a
   /// file's path in it, so a draft's client path is rewritten here, where
   /// every one of them is read.

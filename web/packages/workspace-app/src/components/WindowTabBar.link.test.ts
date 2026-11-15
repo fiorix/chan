@@ -133,6 +133,18 @@ test("reconnecting cover keeps one indicator and a title in the draggable band",
   expect(bar.querySelector(".link-indicator")?.textContent).toContain("reconnecting");
 });
 
+test("a down link leaves the band interactive until the cover blocks", async () => {
+  linkHealth.state = "down";
+  ui.disconnectBlocking = false;
+  const bar = await render();
+  expect(bar.querySelector(".tree-button")?.classList.contains("covered")).toBe(false);
+  expect(bar.querySelector(".slot")?.classList.contains("covered")).toBe(false);
+  expect(bar.querySelector(".covered-band")).toBeNull();
+  ui.disconnectBlocking = true;
+  await tick();
+  expect(bar.querySelector(".tree-button")?.classList.contains("covered")).toBe(true);
+});
+
 test("Windows reconnecting band keeps its controls and has no launcher menus", async () => {
   (window as DesktopWindow).__TAURI_INTERNALS__ = { invoke: async () => null };
   windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true, menus: [{ id: "file", label: "File" }] };
