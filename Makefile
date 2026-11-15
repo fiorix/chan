@@ -55,7 +55,12 @@ CHAN_SERVER_WINDOWS_TESTS := \
 	handoff::tests::a_claim_pipe_this_account_cannot_open_is_no_holder \
 	handoff::tests::a_busy_claim_pipe_cannot_hold_the_file_claim \
 	handoff::tests::a_claim_pipe_alone_is_only_a_boot_marker \
+	handoff::tests::a_claim_retries_the_boot_marker_until_its_holder_releases \
 	handoff::tests::a_claim_directory_with_inherited_grants_is_unavailable \
+	handoff::tests::a_claim_lock_with_an_extra_grant_is_unavailable \
+	handoff::tests::a_claim_lock_that_is_a_directory_is_unavailable \
+	handoff::tests::a_claim_lock_that_is_a_symlink_is_unavailable \
+	handoff::tests::a_claim_directory_that_is_a_junction_is_unavailable \
 	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
 	devserver_handoff::tests::listener_round_trip_registered_pipe
 

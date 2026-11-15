@@ -462,7 +462,7 @@ fn check_with(
             |budget| tauri::async_runtime::block_on(handoff::probe_endpoint_at(path, budget)),
         );
         if let Startup::Run(claim) = &mut startup {
-            tauri::async_runtime::block_on(async { claim.refresh_boot_marker() });
+            tauri::async_runtime::block_on(claim.refresh_boot_marker());
         }
         return startup;
     }
@@ -483,6 +483,7 @@ fn check_predecessor_with<C>(
 
     let mut deadline = Instant::now() + bounds.ask;
     let mut asking = true;
+    let mut authenticated = false;
     let mut stopped = Startup::Unanswered;
     loop {
         let reading = probe(deadline.saturating_duration_since(Instant::now()));
@@ -490,12 +491,18 @@ fn check_predecessor_with<C>(
             EndpointProbe::AbsentOrForeign => return Startup::Run(claim),
             EndpointProbe::Busy => {
                 if Instant::now() >= deadline {
-                    // A busy pipe cannot authenticate its server. It must
-                    // not give a foreign squatter a veto over this launch.
-                    return Startup::Run(claim);
+                    // Busy cannot establish that a known desktop exited.
+                    // An endpoint never authenticated still cannot give a
+                    // foreign squatter a veto over this launch.
+                    return if authenticated {
+                        stopped
+                    } else {
+                        Startup::Run(claim)
+                    };
                 }
             }
             EndpointProbe::SameAccount => {
+                authenticated = true;
                 let budget = deadline.saturating_duration_since(Instant::now());
                 if budget.is_zero() {
                     return stopped;
@@ -1190,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn predecessor_busy_after_shutdown_uses_the_drain_bound_then_boots() {
+    fn predecessor_busy_after_shutdown_stops_at_the_drain_bound() {
         let mut probes = 0;
         let bounds = Bounds {
             drain: Duration::from_millis(120),
@@ -1212,8 +1219,27 @@ mod tests {
                 }
             },
         );
-        assert_eq!(startup, Startup::Run("claim"));
+        assert_eq!(startup, Startup::StillShuttingDown);
         assert!(started.elapsed() >= bounds.drain);
+    }
+
+    #[test]
+    fn predecessor_busy_after_authentication_does_not_boot_beside_it() {
+        let mut probes = 0;
+        let startup = check_predecessor_with(
+            "claim",
+            predecessor_bounds(),
+            |_| ActivateReply::NoReply,
+            |_| {
+                probes += 1;
+                if probes == 1 {
+                    handoff::EndpointProbe::SameAccount
+                } else {
+                    handoff::EndpointProbe::Busy
+                }
+            },
+        );
+        assert_eq!(startup, Startup::Unanswered);
     }
 
     /// The guard's bounds for a test that never meets a holder still booting
@@ -2392,14 +2418,70 @@ mod tests {
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
     }
 
-    /// A pipe name of one Windows test's own, so parallel tests and an
-    /// installed desktop never meet.
     #[cfg(windows)]
-    fn test_pipe(tag: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!(
+    struct TestPipe {
+        path: std::path::PathBuf,
+        lock: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl std::ops::Deref for TestPipe {
+        type Target = std::path::PathBuf;
+
+        fn deref(&self) -> &Self::Target {
+            &self.path
+        }
+    }
+
+    #[cfg(windows)]
+    impl AsRef<std::ffi::OsStr> for TestPipe {
+        fn as_ref(&self) -> &std::ffi::OsStr {
+            self.path.as_os_str()
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestPipe {
+        fn drop(&mut self) {
+            // The production guard uses the profile directory. Remove only
+            // this test's explicit endpoint file after its claim drops.
+            if let Err(error) = std::fs::remove_file(&self.lock) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    if std::thread::panicking() {
+                        eprintln!("test claim cleanup {}: {error}", self.lock.display());
+                    } else {
+                        panic!("test claim cleanup {}: {error}", self.lock.display());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A pipe name and lock-file cleanup of one Windows test's own, so
+    /// parallel tests and an installed desktop never meet.
+    #[cfg(windows)]
+    fn test_pipe(tag: &str) -> TestPipe {
+        use sha2::{Digest, Sha256};
+        use std::os::windows::ffi::OsStrExt;
+
+        let path = std::path::PathBuf::from(format!(
             r"\\.\pipe\chan-desktop-test-{tag}-{}",
             std::process::id()
-        ))
+        ));
+        let mut digest = Sha256::new();
+        for unit in path.as_os_str().encode_wide() {
+            let folded = if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+                unit + u16::from(b'a' - b'A')
+            } else {
+                unit
+            };
+            digest.update(folded.to_le_bytes());
+        }
+        let local = std::env::var_os("LOCALAPPDATA").expect("test account local profile");
+        let lock = std::path::PathBuf::from(local)
+            .join("chan/run")
+            .join(format!("endpoint-{:x}.lock", digest.finalize()));
+        TestPipe { path, lock }
     }
 
     /// The claim of `pipe`, taken inside the runtime its pipe registers with.
@@ -2494,6 +2576,112 @@ mod tests {
         assert!(
             matches!(&startup, Startup::HandedOver { version } if version == "0.130.0"),
             "{startup:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stalled_same_account_endpoint_does_not_boot_a_second_desktop() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("stalled-predecessor");
+        let _server = tauri::async_runtime::block_on(async {
+            chan_winpipe::create_owner_only(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                &pipe,
+            )
+            .unwrap()
+        });
+        let mut readings = Vec::new();
+        let startup = check_predecessor_with(
+            claimed(&pipe),
+            predecessor_bounds(),
+            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(&pipe, None, budget)),
+            |budget| {
+                let reading =
+                    tauri::async_runtime::block_on(handoff::probe_endpoint_at(&pipe, budget));
+                readings.push(reading);
+                reading
+            },
+        );
+        assert_eq!(readings.first(), Some(&handoff::EndpointProbe::SameAccount));
+        assert!(readings.contains(&handoff::EndpointProbe::Busy));
+        assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drained_predecessor_leaves_the_takeover_boot_marker() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("drained-predecessor");
+        let mut marker_name = pipe.as_os_str().to_owned();
+        marker_name.push(".claim");
+        let (server, marker) = tauri::async_runtime::block_on(async {
+            let marker = chan_winpipe::create_owner_only(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                marker_name,
+            )
+            .unwrap();
+            let server = chan_winpipe::create_owner_only(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                &pipe,
+            )
+            .unwrap();
+            (server, marker)
+        });
+        let mut task = tauri::async_runtime::spawn(async move {
+            let mut server = server;
+            loop {
+                server.connect().await.unwrap();
+                let mut stream = BufReader::new(server);
+                let mut line = String::new();
+                if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    server = stream.into_inner();
+                    server.disconnect().unwrap();
+                    continue;
+                }
+                let request: handoff::Request = serde_json::from_str(&line).unwrap();
+                assert!(matches!(request, handoff::Request::Activate { .. }));
+                let mut reply = serde_json::to_vec(&shutting_down()).unwrap();
+                reply.push(b'\n');
+                stream.get_mut().write_all(&reply).await.unwrap();
+                drop(stream);
+                drop(marker);
+                break;
+            }
+        });
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(2),
+                ask: Duration::from_secs(2),
+                release: Duration::from_secs(2),
+                drain: Duration::from_secs(2),
+            },
+            &[],
+        );
+        tauri::async_runtime::block_on(async {
+            match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+                Ok(joined) => joined.unwrap(),
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    panic!("the predecessor did not finish its shutdown reply");
+                }
+            }
+        });
+        assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+        assert!(
+            handoff::endpoint_is_booting_at(&pipe),
+            "the takeover must own a marker after the predecessor releases its pipes"
         );
     }
 

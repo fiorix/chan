@@ -177,6 +177,8 @@ FunctionEnd
     !insertmacro chanRemoveOwnedShim "chan" "# chan-desktop"
     !insertmacro chanRemoveOwnedShim "cs.cmd" ":: chan-desktop"
     !insertmacro chanRemoveOwnedShim "cs" "# chan-desktop"
+    Delete "$LOCALAPPDATA\chan\run\*.lock"
+    RMDir "$LOCALAPPDATA\chan\run"
     ; Without recursion, so a directory holding anything else stays. On the
     ; default layout the second is $INSTDIR, which the template cannot remove
     ; while the shim directory is inside it.

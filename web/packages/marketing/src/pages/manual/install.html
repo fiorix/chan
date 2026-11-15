@@ -52,7 +52,7 @@
       <li>On Windows and Linux the window's menu bar, with the same <strong>View → Computers</strong> item, shows only while the Computers screen is open.</li>
       <li>Inside a git repository <code>chan open</code> expects the repository's root; add <code>--here</code> to open a subdirectory.</li>
       <li>Quit and reopen Chan Desktop and your windows and layouts come back. Terminals on the local machine keep their layout and start fresh shells.</li>
-      <li>Starting Chan Desktop while it runs opens no second copy: the running one comes forward, and opens a terminal window when none is shown. On Windows, finish starting an older copy before opening a newer build beside it; opening the new build while the older copy is still starting can leave two copies running. The same can happen if the older copy stays busy throughout the startup check.</li>
+      <li>Starting Chan Desktop while it runs opens no second copy: the running one comes forward, and opens a terminal window when none is shown. On Windows, finish starting an older copy before opening a newer build beside it; opening the new build while the older copy is still starting can leave two copies running. The same can happen if the newer build cannot connect to the older copy during its five-second startup check because all of the older copy's handoff connections are busy.</li>
     </ul>
   </details>
 </section>
