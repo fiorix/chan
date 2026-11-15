@@ -8286,6 +8286,7 @@ fn random_session_id() -> String {
 mod tests {
     mod control_socket_env_tests;
     mod program_status_tests;
+    mod replay_regression_tests;
     mod tmux_connection_tests;
     mod tmux_gate_session_tests;
     mod tmux_pane_session_tests;
@@ -11555,7 +11556,11 @@ mod tests {
             session.detached_at.store(now, Ordering::Relaxed);
         }
         // 11s past detach > the 10s grace ⇒ reaped despite the fresh activity.
-        assert_eq!(registry.prune_idle_at(now + 11), 1);
+        assert_eq!(
+            registry.prune_idle_at(now + 11),
+            1,
+            "detach time reaps a busy orphan"
+        );
         assert_eq!(registry.len(), 0);
     }
 

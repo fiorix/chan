@@ -1241,7 +1241,6 @@
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
-        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
@@ -2227,7 +2226,10 @@
   /// into a batch.
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
+  /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
+  /// a disconnected retry leaves the reader's viewport untouched.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
     return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
   }
@@ -2366,7 +2368,7 @@
   /// Keys and dropped paths bypass the widgets' own input scroll. Mouse
   /// reports and program replies keep the send path without this scroll.
   function sendTypedInput(data: string): void {
-    term?.scrollToBottom();
+    if (ws?.readyState === WebSocket.OPEN) term?.scrollToBottom();
     sendUserInput(data);
   }
 

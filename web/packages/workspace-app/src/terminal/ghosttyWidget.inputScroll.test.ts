@@ -96,6 +96,16 @@ function wheelIntoHistory({ canvas }: OpenTerminal): void {
   }));
 }
 
+function observePaintedViewports({ term }: OpenTerminal): number[] {
+  const viewports: number[] = [];
+  const fillRect = SoftwareCanvasContext.prototype.fillRect;
+  vi.spyOn(SoftwareCanvasContext.prototype, "fillRect").mockImplementation(function (this: SoftwareCanvasContext, ...args) {
+    viewports.push(term.getViewportY());
+    fillRect.apply(this, args);
+  });
+  return viewports;
+}
+
 const INPUTS: Array<{ name: string; send(state: OpenTerminal): void; bytes: string }> = [
   { name: "a letter through the widget's input handler", send: typeLetter, bytes: "a" },
   { name: "a composition commit", send: commitComposition, bytes: "\u00e9" },
@@ -224,6 +234,53 @@ describe("the ghostty widget's input scroll", () => {
     expect(state.sent.map(({ data }) => data)).toEqual(["\x1b[0n"]);
     expect(state.sent[0].viewport, "reply emission must not reveal the live cursor").toBe(HISTORY_OFFSET);
     expect(state.term.getViewportY()).toBe(HISTORY_OFFSET);
+  });
+
+  test.each([
+    { name: "SGR", mode: "\x1b[?1006h", bytes: "\x1b[<0;1;1M" },
+    { name: "X10", mode: "\x1b[?1006l", bytes: "\x1b[M !!" },
+  ])("output after a $name mouse report never paints the bottom before history is restored", async ({ mode, bytes }) => {
+    const scheduler = queueFrames();
+    const state = await openTerminal();
+    state.viewport.write("\x1b[?1000h" + mode);
+    scheduler.advance();
+    const render = vi.spyOn(state.term.renderer!, "render");
+    const painted = observePaintedViewports(state);
+    state.canvas.dispatchEvent(new MouseEvent("mousedown", {
+      bubbles: true, cancelable: true, clientX: 1, clientY: 1, button: 0,
+    }));
+    expect(state.sent).toEqual([{ data: bytes, viewport: HISTORY_OFFSET }]);
+    state.viewport.write("\x1b[42mresponse\x1b[0m");
+    expect(state.term.getViewportY(), "the controller has restored history").toBe(HISTORY_OFFSET);
+    expect(painted, "no bottom frame may paint inside the write before that restore").toEqual([]);
+    expect(render).not.toHaveBeenCalled();
+    scheduler.advance();
+    // The render loop and scrollbar fade can both paint in one frame.
+    expect(render).toHaveBeenCalled();
+    expect(render.mock.calls.every((args) => args[2] === HISTORY_OFFSET)).toBe(true);
+    expect(painted.length, "the queued renderer still paints").toBeGreaterThan(0);
+    expect(new Set(painted)).toEqual(new Set([HISTORY_OFFSET]));
+  });
+
+  test("a mouse report between typing and its echo keeps the immediate user echo paint", async () => {
+    const scheduler = queueFrames();
+    const state = await openTerminal();
+    state.viewport.write("\x1b[?1000h\x1b[?1006h");
+    scheduler.advance();
+    typeLetter(state);
+    state.canvas.dispatchEvent(new MouseEvent("mousedown", {
+      button: 0, clientX: 1, clientY: 1, bubbles: true, cancelable: true,
+    }));
+    expect(state.sent).toEqual([
+      { data: "a", viewport: 0 },
+      { data: "\x1b[<0;1;1M", viewport: 0 },
+    ]);
+    const render = vi.spyOn(state.term.renderer!, "render");
+    const painted = observePaintedViewports(state);
+    state.viewport.write("a");
+    expect(render, "the user's echo paints before a queued frame runs").toHaveBeenCalledOnce();
+    expect(painted.length).toBeGreaterThan(0);
+    expect(new Set(painted)).toEqual(new Set([0]));
   });
 
   test.each([
