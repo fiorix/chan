@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { mount, unmount } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("./GraphCanvas.svelte", async () =>
@@ -11,10 +11,16 @@ vi.mock("../api/client", async (importOriginal) =>
     await importOriginal<typeof import("../api/client")>(),
   ),
 );
+vi.mock("../graph/canvasNodes", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../graph/canvasNodes")>();
+  return { ...actual, directoryNodeId: vi.fn(actual.directoryNodeId) };
+});
 
 import GraphPanel from "./GraphPanel.svelte";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import { request, setFetchImpl } from "../api/transport";
+import { directoryNodeId } from "../graph/canvasNodes";
 import {
   canvas,
   fsg,
@@ -89,7 +95,7 @@ function reads(path: string): number {
   return graphServer.fsGraphCalls.filter((call) => call.path === path).length;
 }
 
-async function render(expanded: Record<string, boolean> = opened): Promise<{
+async function render(expanded: Record<string, boolean> = opened, finish: () => Promise<void> = settle): Promise<{
   target: HTMLElement;
   show: (active: boolean) => void;
 }> {
@@ -109,8 +115,50 @@ async function render(expanded: Record<string, boolean> = opened): Promise<{
       get active() { return pane.activeTabId === tab.id; },
     },
   }) as Record<string, unknown>);
-  await settle();
+  await finish();
   return { target, show: (active) => { pane.activeTabId = active ? tab.id : "other-tab"; } };
+}
+
+async function flushClock(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) {
+    await tick();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  }
+}
+
+const publicationProbe = "notes/publication-probe";
+
+function probePublications(): number {
+  return vi.mocked(directoryNodeId).mock.calls.filter(([path]) => path === publicationProbe).length;
+}
+
+async function controlledRetries(lastFailure?: Error) {
+  const shared = gate();
+  graphServer.streamGate = shared.promise;
+  graphServer.fs.nodes.push(fsg.dir(publicationProbe));
+  graphServer.fs.edges.push(fsg.contains("notes", publicationProbe));
+  const dirs = ["docs", "notes", "src"];
+  const pending = new Map(dirs.map((dir) => [dir, gate()]));
+  const started: string[] = [];
+  vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+    if (!pending.has(options.path)) return fixtureRead(options);
+    if (reads(options.path) === 0) {
+      recordRead(options);
+      throw timeout(options.path);
+    }
+    const response = await fixtureRead(options);
+    started.push(options.path);
+    await pending.get(options.path)!.promise;
+    if (options.path === "src" && lastFailure !== undefined) throw lastFailure;
+    return response;
+  });
+  const { target } = await render(opened, flushClock);
+  expect(dirs.map(reads)).toEqual([1, 1, 1]);
+  shared.release();
+  await flushClock();
+  expect(started).toEqual(["docs"]);
+  return { target, dirs, pending, started };
 }
 
 function reload(): void {
@@ -136,45 +184,159 @@ function expectUsable(target: HTMLElement): void {
 }
 
 describe("the directory retry's lifetime", () => {
-  test("publishes successful retries once after the queue finishes", async () => {
-    const shared = gate();
-    graphServer.streamGate = shared.promise;
-    const dirs = ["docs", "notes", "src"];
-    const pending = new Map(dirs.map((dir) => [dir, gate()]));
-    const started: string[] = [];
-    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
-      if (!pending.has(options.path)) return fixtureRead(options);
-      if (reads(options.path) === 0) {
-        recordRead(options);
-        throw timeout(options.path);
+  test("publishes the first retry promptly and batches later reads until the final flush", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const scheduled = vi.spyOn(globalThis, "setTimeout");
+    const cleared = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const { target, dirs, pending, started } = await controlledRetries();
+      const initial = canvas.props!.nodes;
+      pending.get("docs")!.release();
+      await flushClock();
+      const first = canvas.props!.nodes;
+      expect(first, "a recovered level is published before awaiting another request").not.toBe(initial);
+      expect(visibleIds()).toContain("docs/a.md");
+      expect(started).toEqual(["docs", "notes"]);
+
+      await vi.advanceTimersByTimeAsync(200);
+      scheduled.mockClear();
+      pending.get("notes")!.release();
+      await flushClock();
+      expect(canvas.props!.nodes, "a second read inside the cadence stays buffered").toBe(first);
+      expect(started).toEqual(dirs);
+      const publications = scheduled.mock.calls.flatMap(([, delay], index) => delay === 800 ? [scheduled.mock.results[index].value] : []);
+      expect(publications, "the buffered level owns one pending publication timer").toHaveLength(1);
+      cleared.mockClear();
+      pending.get("src")!.release();
+      await flushClock();
+
+      expect(canvas.props!.nodes, "the final flush need not wait for the cadence").not.toBe(first);
+      expect(cleared, "the completed run releases its pending timer immediately").toHaveBeenCalledWith(publications[0]);
+      expect(dirs.map(reads)).toEqual([2, 2, 2]);
+      expect(visibleIds()).toEqual(expect.arrayContaining(dirs.map((dir) => `${dir}/a.md`)));
+      const finished = canvas.props!.nodes;
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushClock();
+      expect(canvas.props!.nodes, "the completed run cancels its pending publication").toBe(finished);
+      expect(target.querySelector(".spine-warning")).toBeNull();
+      expectUsable(target);
+    } finally {
+      scheduled.mockRestore();
+      cleared.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("publishes a buffered second retry by the cadence while the third request is still pending", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      const { target, pending, started } = await controlledRetries();
+      pending.get("docs")!.release();
+      await flushClock();
+      const first = canvas.props!.nodes;
+      expect(visibleIds()).toContain("docs/a.md");
+      await vi.advanceTimersByTimeAsync(200);
+      pending.get("notes")!.release();
+      await flushClock();
+      expect(started).toEqual(["docs", "notes", "src"]);
+      expect(canvas.props!.nodes).toBe(first);
+      await vi.advanceTimersByTimeAsync(799);
+      await flushClock();
+      expect(canvas.props!.nodes, "buffered work waits until the publication cadence").toBe(first);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushClock();
+
+      expect(visibleIds(), "the recovered second level does not wait for the third request").toContain("notes/a.md");
+      expect(canvas.props!.nodes).not.toBe(first);
+      expect(visibleIds()).not.toContain("src/a.md");
+      pending.get("src")!.release();
+      await flushClock();
+      expect(visibleIds()).toEqual(expect.arrayContaining(["docs/a.md", "notes/a.md", "src/a.md"]));
+      expectUsable(target);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test.each(["new generation", "destroy"] as const)("clears a pending publication timer on %s", async (transition) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const scheduled = vi.spyOn(globalThis, "setTimeout");
+    const cleared = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const { pending } = await controlledRetries();
+      pending.get("docs")!.release();
+      await flushClock();
+      await vi.advanceTimersByTimeAsync(200);
+      scheduled.mockClear();
+      pending.get("notes")!.release();
+      await flushClock();
+      const publications = scheduled.mock.calls.flatMap(([, delay], index) => delay === 800 ? [scheduled.mock.results[index].value] : []);
+      expect(publications, "the buffered level owns exactly one pending publication timer").toHaveLength(1);
+      const handle = publications[0];
+      cleared.mockClear();
+      vi.mocked(directoryNodeId).mockClear();
+      const replacement = gate();
+      if (transition === "new generation") {
+        const original = vi.mocked(api.fsGraph).getMockImplementation()!;
+        vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+          if (options.path === "") {
+            const response = await fixtureRead(options);
+            await replacement.promise;
+            return response;
+          }
+          return original(options);
+        });
+        reload();
+      } else {
+        for (const app of mounted.splice(0)) await unmount(app);
       }
-      const response = await fixtureRead(options);
-      started.push(options.path);
-      await pending.get(options.path)!.promise;
-      return response;
+      await flushClock();
+
+      expect(cleared, "the abandoned run releases its pending timer immediately").toHaveBeenCalledWith(handle);
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushClock();
+      expect(probePublications(), "an abandoned timer never normalizes its buffered directory").toBe(0);
+      pending.get("src")!.release();
+      replacement.release();
+      await flushClock();
+    } finally {
+      scheduled.mockRestore();
+      cleared.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("shortens a timeout produced by the real transport", async () => {
+    const path = "/api/fs-graph?scope=directory&path=notes&depth=1&limit=128";
+    let actual: unknown;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      setFetchImpl((_input, init) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      }));
+      const outcome = request("GET", path).then(() => null, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      actual = await outcome;
+    } finally {
+      setFetchImpl(null);
+      vi.useRealTimers();
+    }
+    expect(actual).toBeInstanceOf(ApiError);
+    const error = actual as ApiError;
+    expect(error.status).toBe(0);
+    const suffix = `: GET ${path}`;
+    expect(error.message.endsWith(suffix)).toBe(true);
+    const reason = error.message.slice(0, -suffix.length);
+    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (options.path !== "notes") return fixtureRead(options);
+      recordRead(options);
+      throw error;
     });
     const { target } = await render();
-    expect(dirs.map(reads)).toEqual([1, 1, 1]);
-    shared.release();
-    await settle();
-    expect(started).toHaveLength(1);
-    const initial = canvas.props!.nodes;
-    const observed = [initial];
-
-    for (let i = 0; i < dirs.length; i++) {
-      pending.get(started[i])!.release();
-      await settle();
-      observed.push(canvas.props!.nodes);
-      expect(started).toHaveLength(Math.min(i + 2, dirs.length));
-    }
-
-    expect.soft(observed[1], "the first retry does not publish the whole spine").toBe(initial);
-    expect.soft(observed[2], "the second retry does not publish the whole spine").toBe(initial);
-    expect.soft(new Set(observed).size, "one publication after all three reads").toBe(2);
-    expect(observed[3], "the completed queue publishes its retained levels").not.toBe(initial);
-    expect(dirs.map(reads)).toEqual([2, 2, 2]);
-    expect(visibleIds()).toEqual(expect.arrayContaining(dirs.map((dir) => `${dir}/a.md`)));
-    expect(target.querySelector(".spine-warning")).toBeNull();
+    expect(reads("notes")).toBe(2);
+    expect(warningText(target)).toBe(`Could not read directory notes: ${reason}`);
     expectUsable(target);
   });
 
@@ -465,98 +627,57 @@ describe("the directory retry's lifetime", () => {
     expectUsable(target);
   });
 
-  test("a partly successful old retry cannot replace a newer whole load", async () => {
-    const old = gate();
-    graphServer.fs.nodes.push(fsg.file("docs/old.md"));
-    graphServer.fs.edges.push(fsg.contains("docs", "docs/old.md"));
-    let attempts = 0;
-    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
-      if (options.path === "docs" && reads("docs") === 0) {
-        recordRead(options);
-        throw timeout(options.path);
-      }
-      if (options.path !== "notes") return fixtureRead(options);
-      if (++attempts === 1) {
-        recordRead(options);
-        throw timeout(options.path);
-      }
-      const response = await fixtureRead(options);
-      if (attempts === 2) await old.promise;
-      return response;
-    });
-    const { target } = await render();
-    expect(reads("docs"), "the old queue already applied one successful level").toBe(2);
-    expect(reads("notes")).toBe(2);
-    graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "docs/old.md");
-    graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "docs/old.md");
-    graphServer.fs.nodes.push(fsg.file("docs/new.md"));
-    graphServer.fs.edges.push(fsg.contains("docs", "docs/new.md"));
-    reload();
-    await settle();
-    expect(reads("notes")).toBe(3);
-    const replacementNodes = canvas.props!.nodes;
-    old.release();
-    await settle();
+  test.each(["pending", "complete"] as const)("a buffered old retry cannot publish when the replacement root is %s", async (rootState) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      graphServer.fs.nodes.push(fsg.file("notes/old.md"));
+      graphServer.fs.edges.push(fsg.contains("notes", "notes/old.md"));
+      const { target, pending } = await controlledRetries();
+      pending.get("docs")!.release();
+      await flushClock();
+      expect(visibleIds()).toContain("docs/a.md");
+      await vi.advanceTimersByTimeAsync(200);
+      pending.get("notes")!.release();
+      await flushClock();
+      expect(reads("src"), "the old queue waits on a third retry after buffering the second").toBe(2);
+      expect(visibleIds()).not.toContain("notes/old.md");
 
-    expect(canvas.props!.nodes, "the stale queue does not publish its earlier successful level").toBe(replacementNodes);
-    expect(visibleIds()).toContain("docs/new.md");
-    expect(visibleIds(), "the stale response is discarded").not.toContain("docs/old.md");
-    expect(reads("notes")).toBe(3);
-    expect(reads("")).toBe(2);
-    expect(target.querySelector(".spine-warning")).toBeNull();
-    expectUsable(target);
-  });
-
-  test("a partly successful old retry cannot publish while a newer root is pending", async () => {
-    const old = gate();
-    const replacement = gate();
-    graphServer.fs.nodes.push(fsg.file("docs/old.md"));
-    graphServer.fs.edges.push(fsg.contains("docs", "docs/old.md"));
-    let attempts = 0;
-    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
-      if (options.path === "" && reads("") === 1) {
+      graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "notes/old.md");
+      graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "notes/old.md");
+      graphServer.fs.nodes.push(fsg.file("notes/new.md"));
+      graphServer.fs.edges.push(fsg.contains("notes", "notes/new.md"));
+      const replacement = gate();
+      vi.mocked(api.fsGraph).mockImplementation(async (options) => {
         const response = await fixtureRead(options);
-        await replacement.promise;
+        if (options.path === "" && rootState === "pending") await replacement.promise;
         return response;
-      }
-      if (options.path === "docs" && reads("docs") === 0) {
-        recordRead(options);
-        throw timeout(options.path);
-      }
-      if (options.path !== "notes") return fixtureRead(options);
-      if (++attempts === 1) {
-        recordRead(options);
-        throw timeout(options.path);
-      }
-      const response = await fixtureRead(options);
-      if (attempts === 2) await old.promise;
-      return response;
-    });
-    const { target } = await render();
-    expect(reads("docs"), "the old queue already applied one successful level").toBe(2);
-    expect(reads("notes")).toBe(2);
-    graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "docs/old.md");
-    graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "docs/old.md");
-    graphServer.fs.nodes.push(fsg.file("docs/new.md"));
-    graphServer.fs.edges.push(fsg.contains("docs", "docs/new.md"));
-    reload();
-    await settle();
-    expect(reads("")).toBe(2);
-    expect(reads("notes")).toBe(3);
-    const retainedNodes = canvas.props!.nodes;
-    old.release();
-    await settle();
+      });
+      reload();
+      await flushClock();
+      expect(reads("")).toBe(2);
+      expect(reads("notes")).toBe(3);
+      if (rootState === "complete") expect(visibleIds()).toContain("notes/new.md");
+      else expect(visibleIds()).not.toContain("notes/new.md");
+      const replacementNodes = canvas.props!.nodes;
+      const replacementIds = visibleIds();
+      pending.get("src")!.release();
+      await flushClock();
 
-    expect(canvas.props!.nodes, "the old queue cannot publish while the replacement root is pending").toBe(retainedNodes);
-    expect(visibleIds()).not.toContain("docs/old.md");
-    replacement.release();
-    await settle();
+      expect(canvas.props!.nodes, "the old run cannot flush its buffered level over the replacement").toBe(replacementNodes);
+      expect(visibleIds()).toEqual(replacementIds);
+      expect(visibleIds()).not.toContain("notes/old.md");
+      replacement.release();
+      await flushClock();
 
-    expect(visibleIds()).toContain("docs/new.md");
-    expect(visibleIds()).not.toContain("docs/old.md");
-    expect(reads("")).toBe(2);
-    expect(target.querySelector(".spine-warning")).toBeNull();
-    expectUsable(target);
+      expect(visibleIds()).toContain("notes/new.md");
+      expect(visibleIds()).not.toContain("notes/old.md");
+      expect(reads("")).toBe(2);
+      expect(reads("notes")).toBe(3);
+      expect(target.querySelector(".spine-warning")).toBeNull();
+      expectUsable(target);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("a new load retries after an old retry finishes", async () => {
@@ -603,25 +724,31 @@ describe("the directory retry's lifetime", () => {
   });
 
   test("a retry reporting a missing workspace root remains fatal", async () => {
-    let attempts = 0;
     const words = "workspace root does not exist: /ws";
-    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
-      if (options.path === "docs" && reads("docs") === 0) {
-        recordRead(options);
-        throw timeout(options.path);
-      }
-      if (options.path !== "notes") return fixtureRead(options);
-      recordRead(options);
-      if (++attempts === 1) throw timeout(options.path);
-      throw new ApiError(404, words, { error: words, code: "workspace_root_missing" });
-    });
-    const { target } = await render();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      const { target, pending } = await controlledRetries(new ApiError(404, words, { error: words, code: "workspace_root_missing" }));
+      pending.get("docs")!.release();
+      await flushClock();
+      await vi.advanceTimersByTimeAsync(200);
+      pending.get("notes")!.release();
+      await flushClock();
+      vi.mocked(directoryNodeId).mockClear();
+      pending.get("src")!.release();
+      await flushClock();
 
-    expect(reads("docs"), "one retry succeeded before the later root failure").toBe(2);
-    expect(reads("notes")).toBe(2);
-    expect(target.querySelector(".placeholder.error")?.textContent).toBe(words);
-    expect(target.querySelector(".cy.dim")).not.toBeNull();
-    expect(canvas.props!.nodes).toHaveLength(0);
-    expect(target.querySelector(".spine-warning")).toBeNull();
+      expect(reads("docs"), "a retry succeeded before the later root failure").toBe(2);
+      expect(reads("notes"), "a second successful level is buffered when the root fails").toBe(2);
+      expect(target.querySelector(".placeholder.error")?.textContent).toBe(words);
+      expect(target.querySelector(".cy.dim")).not.toBeNull();
+      expect(canvas.props!.nodes).toHaveLength(0);
+      expect(probePublications(), "a fatal error skips even the hidden final publication work").toBe(0);
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushClock();
+      expect(probePublications(), "a fatal run leaves no delayed publication").toBe(0);
+      expect(target.querySelector(".spine-warning")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1349,6 +1349,7 @@
   /// (`patchSpine`) rather than fetching it again; a change made while this
   /// runs is patched once it lands.
   async function loadSpine(): Promise<void> {
+    clearSpineRetryPublication();
     const seq = ++spineSeq;
     spineLoading = true;
     spineError = null;
@@ -1562,6 +1563,13 @@
     return (error as Error).message.replace(/^(request timed out after \d+ ms): GET \/api\/fs-graph\?.*$/, "$1");
   }
 
+  let spineRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearSpineRetryPublication(): void {
+    if (spineRetryTimer !== null) clearTimeout(spineRetryTimer);
+    spineRetryTimer = null;
+  }
+
   // Retry behind patches, so a newer successful read can cancel the retry
   // before it starts. A hidden tab or a shared refresh defers pending work;
   // a request already started still belongs to this spine when it returns.
@@ -1572,16 +1580,39 @@
     spineRetryQueued = true;
     const run = async (): Promise<void> => {
       let changed = false;
+      let drawnAt = -Infinity;
+      const publish = (): void => {
+        if (!changed || seq !== spineSeq || read !== spineRead || error !== null) return;
+        publishSpine(read);
+        drawnAt = performance.now();
+        changed = false;
+      };
+      const publishWhenDue = (): void => {
+        if (!changed) return;
+        const remaining = SPINE_DRAW_MS - (performance.now() - drawnAt);
+        if (remaining <= 0) {
+          clearSpineRetryPublication();
+          publish();
+        } else if (spineRetryTimer === null) {
+          // A slow following request must not hold an already recovered level.
+          spineRetryTimer = setTimeout(() => {
+            spineRetryTimer = null;
+            publish();
+          }, remaining);
+        }
+      };
       try {
         for (const [dir, failure] of spineFailures) {
           if (seq !== spineSeq || read !== spineRead || !visible || !graphWhole || error !== null) return;
           if (failure.status !== "pending" || spineFailures.get(dir) !== failure) continue;
           setSpineFailure(dir, { ...failure, status: "running" });
+          publishWhenDue();
           try {
             const level = await fetchSpineLevel(dir, seq);
             if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
             applySpineLevel(read, dir, level);
             changed = true;
+            publishWhenDue();
           } catch (e) {
             if (seq !== spineSeq || read !== spineRead) return;
             if (isWorkspaceRootMissingError(e)) {
@@ -1592,9 +1623,10 @@
           }
         }
       } finally {
-        // Each publication lays out the whole spine. Keep completed reads
-        // together, including when visibility or a refresh ends the batch.
-        if (changed && seq === spineSeq && read === spineRead) publishSpine(read);
+        // Each publication lays out the whole spine. Flush buffered levels
+        // when the run ends, including on a hide or a shared refresh.
+        clearSpineRetryPublication();
+        publish();
         spineRetryQueued = false;
       }
     };
@@ -2048,6 +2080,7 @@
 
   onDestroy(() => {
     if (watchReloadTimer) clearTimeout(watchReloadTimer);
+    clearSpineRetryPublication();
     // A spine request still in flight publishes nothing.
     spineSeq += 1;
   });
