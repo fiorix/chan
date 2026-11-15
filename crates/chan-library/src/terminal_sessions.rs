@@ -3019,6 +3019,29 @@ impl Registry {
         Ok(session)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn create_tmux_pane_for_test(
+        &self,
+        connection: u64,
+        pane: u32,
+        size: PtySize,
+    ) -> Result<AttachHandle, CreateError> {
+        let spec = TmuxPaneSpec {
+            pane: TmuxPaneRef {
+                connection: TmuxConnectionId(connection),
+                pane: chan_tmux::PaneId(pane),
+            },
+            name: Some("stream pane".into()),
+            group: "tmux".into(),
+            window_id: Some("stream-window".into()),
+            size,
+        };
+        let (sink, _commands) = std::sync::mpsc::channel();
+        self.add_tmux_pane(spec, sink)
+            .map(|session| session.attach(None))
+    }
+
     /// Relaunch session `id` in place under the same id, applying `overrides`
     /// to its spawn options. `Ok(false)` when the id is unknown or closed, or
     /// when a concurrent operation replaced the session during the spawn;
