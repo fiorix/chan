@@ -6,10 +6,9 @@
 // its fields, `CellFlags`, the renderer's `IRenderable` and scrollback
 // provider, and the binding's readers of that format.
 //
-// Scanned: the widget's sources in `lib/` that chan builds (upstream's
-// `bun:test` files and `test-helpers.ts`, which nothing in chan runs, still
-// name them), the binding and its tests in `vt/`, and the package manifest.
-// The app scans its own sources (src/terminal/ghosttyOldFormat.test.ts).
+// Scanned: the widget's implementation in `lib/`, the binding and its tests
+// in `vt/`, and the package manifest.
+// The app scans its own sources (src/ghostty_old_format.test.ts).
 
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
@@ -32,7 +31,7 @@ const FORBIDDEN: [string, RegExp][] = [
 /// The files the scan reads, relative to the package directory vitest runs in.
 function sources(): string[] {
   const lib = readdirSync("lib", { recursive: true })
-    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "test-helpers.ts")
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
     .map((f) => `lib/${f}`);
   const vt = readdirSync("vt", { recursive: true })
     .filter((f) => f.endsWith(".ts") && f !== "oldCellFormat.test.ts")

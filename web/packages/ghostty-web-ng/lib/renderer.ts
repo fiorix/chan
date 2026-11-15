@@ -177,13 +177,6 @@ export class CanvasRenderer {
     return { width, height, baseline };
   }
 
-  /**
-   * Remeasure font metrics (call after font loads or changes)
-   */
-  public remeasureFont(): void {
-    this.metrics = this.measureFont();
-  }
-
   // ==========================================================================
   // Color Conversion
   // ==========================================================================
