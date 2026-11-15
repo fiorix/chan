@@ -6,13 +6,13 @@
   // propagating, so silently letting the user keep typing risks
   // divergence between the buffer and disk.
   //
-  // The overlay greys out the entire UI and reads as a live
-  // reconnecting state: a spinner + status. The auto-reconnect loop
+  // The overlay greys out the app, starting below an available title band,
+  // and reads as a live reconnecting state: a spinner + status. The auto-reconnect loop
   // runs underneath, so doing nothing heals on its own once the
   // channel returns. A devserver-backed desktop window also offers a
   // single Abandon action to give up on a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, setCoverBlocking, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, keyboardOwnedAbovePanes, setCoverBlocking, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -21,9 +21,10 @@
   } from "../api/desktop";
   import { errorText } from "../api/errors";
   import { launcherShownOverWindow } from "../state/focusGuard";
+  import { windowTabBar } from "../state/windowTabBar.svelte";
   import { onDestroy, tick } from "svelte";
 
-  // Recovery actions (Reconnect / Abandon) are offered only on a devserver-backed
+  // Recovery actions (Restart connection / Abandon) are offered only on a devserver-backed
   // desktop window: a stuck remote connection the user can force back or give up
   // on. windowLibraryId() is "local" for the local library; isTauriDesktop()
   // gates out the plain browser (which has no IPC and whose tab the user closes
@@ -33,23 +34,32 @@
   let abandonBtn: HTMLButtonElement | null = $state(null);
   let pendingAction = $state<"reconnect" | "abandon" | null>(null);
   let recoveryError = $state<string | null>(null);
+  // Only a button the user activated may regain focus after its IPC settles.
+  let focusAfterAction: "reconnect" | "abandon" | null = null;
+  // A late IPC completion cannot return focus during a later outage.
+  let outageEpoch = 0;
+  const restartNoteId = $props.id();
 
   async function runRecovery(
     action: "reconnect" | "abandon",
     fn: () => Promise<void>,
   ): Promise<void> {
     if (pendingAction !== null) return;
+    const actionEpoch = outageEpoch;
     pendingAction = action;
     recoveryError = null;
     try {
       await fn();
     } catch (e) {
-      recoveryError = errorText(e);
+      if (outageEpoch === actionEpoch) recoveryError = errorText(e);
     } finally {
-      pendingAction = null;
+      if (outageEpoch === actionEpoch) pendingAction = null;
       await tick();
       // Disabling the active button can drop native focus onto the body.
-      if (visible) focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
+      if (visible && ui.ws !== "open" && outageEpoch === actionEpoch) {
+        focusAfterAction = action;
+        focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
+      }
     }
   }
 
@@ -84,7 +94,10 @@
   /// computing on Date.now: $derived must be pure, and recording
   /// state transitions is a side effect.
   const STARTUP_GRACE_MS = 600;
+  // Native recovery disrupts every window; let the page's redial try first.
+  const RECOVERY_ACTION_DELAY_MS = 8_000;
   let visible = $state(false);
+  let actionsReady = $state(false);
   let hasBeenOpen = $state(false);
   let overlayEl: HTMLDivElement | null = $state(null);
 
@@ -101,12 +114,16 @@
     setCoverBlocking("reconnect", false);
   });
 
+  const watcherOpen = $derived(ui.ws === "open");
+  const bandAvailable = $derived(windowTabBar.on && !keyboardOwnedAbovePanes());
   $effect(() => {
     if (ui.ws === "open") {
+      outageEpoch += 1;
       hasBeenOpen = true;
       visible = false;
       pendingAction = null;
       recoveryError = null;
+      focusAfterAction = null;
       return;
     }
     if (!hasBeenOpen) {
@@ -115,10 +132,21 @@
       visible = false;
       return;
     }
-    const t = setTimeout(() => {
+    const show = setTimeout(() => {
       visible = true;
     }, STARTUP_GRACE_MS);
-    return () => clearTimeout(t);
+    return () => clearTimeout(show);
+  });
+
+  $effect(() => {
+    if (watcherOpen || !hasBeenOpen) {
+      actionsReady = false;
+      return;
+    }
+    const actions = setTimeout(() => {
+      actionsReady = true;
+    }, RECOVERY_ACTION_DELAY_MS);
+    return () => clearTimeout(actions);
   });
 
   /// Steal focus when the overlay appears. The backdrop's
@@ -126,8 +154,8 @@
   /// keystrokes still flow to whatever was focused before the
   /// disconnect (typically the WYSIWYG / CodeMirror surface), so a
   /// user mid-edit could keep typing into a buffer the watcher
-  /// can't observe. Park focus on the primary Reconnect button when
-  /// it's offered (else Abandon, else the overlay). Paired with the
+  /// can't observe. Park focus on the overlay until the user tabs
+  /// to an action. Paired with the
   /// keydown trap below, Tab can't leak focus back to the background.
   ///
   /// chan-desktop can show the Computers launcher over this window while the
@@ -152,7 +180,10 @@
 
   function focusCard(preferred: HTMLElement | null = null): void {
     if (launcherShownOverWindow()) return;
-    (preferred ?? reconnectBtn ?? abandonBtn ?? overlayEl)?.focus();
+    const action = focusAfterAction === "reconnect"
+      ? reconnectBtn
+      : focusAfterAction === "abandon" ? abandonBtn : null;
+    (preferred ?? action ?? overlayEl)?.focus();
   }
 
   function trapTab(e: KeyboardEvent): void {
@@ -164,7 +195,8 @@
     const controls = Array.from(overlayEl?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
     if (!controls.length) return;
     const current = controls.indexOf(document.activeElement as HTMLButtonElement);
-    controls[(current + (e.shiftKey ? controls.length - 1 : 1)) % controls.length]?.focus();
+    const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0) : (current + (e.shiftKey ? controls.length - 1 : 1)) % controls.length;
+    controls[next]?.focus();
   }
 
   // "closed" is never emitted by the transport (it pushes connecting /
@@ -212,6 +244,7 @@
 {#if visible}
   <div
     class="overlay"
+    style:top={bandAvailable ? `${windowTabBar.height}px` : "0px"}
     data-cover="reconnect"
     role="alertdialog"
     aria-modal="true"
@@ -228,15 +261,16 @@
       {#if recoveryError}
         <div class="error" role="alert"><PrivateField field="reconnect:error" label="reconnection error">{recoveryError}</PrivateField></div>
       {/if}
-      {#if canRecover}
+      {#if canRecover && actionsReady}
         <div class="actions">
           <button
             class="reconnect"
             bind:this={reconnectBtn}
+            aria-describedby={restartNoteId}
             disabled={pendingAction !== null}
             onclick={reconnect}
           >
-            {pendingAction === "reconnect" ? "Reconnecting..." : "Reconnect"}
+            {pendingAction === "reconnect" ? "Restarting..." : "Restart connection"}
           </button>
           <button
             class="abandon"
@@ -247,15 +281,15 @@
             {pendingAction === "abandon" ? "Abandoning..." : "Abandon"}
           </button>
         </div>
+        <div class="action-note" id={restartNoteId}>Restart closes and reopens this computer's windows.</div>
       {/if}
     </div>
   </div>
 {/if}
 
 <style>
-  /* Cover the entire viewport with a semi-opaque backdrop so the
-     UI underneath visibly greys out. Pointer-events on so clicks
-     don't reach controls behind. */
+  /* An available title band stays outside the cover; otherwise the inline
+     top leaves the whole viewport blocked. */
   .overlay {
     position: fixed;
     inset: 0;
@@ -326,7 +360,11 @@
     gap: 10px;
     justify-content: center;
   }
-  /* Reconnect is the primary recovery action: a filled accent button. */
+  .action-note {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  /* Restart is the primary recovery action: a filled accent button. */
   .reconnect {
     background: var(--accent, var(--link));
     color: var(--bg);

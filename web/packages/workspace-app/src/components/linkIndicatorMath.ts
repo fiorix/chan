@@ -5,6 +5,9 @@ import type { LinkState } from "../state/linkHealth.svelte";
 /// while either placement surfaces an unhealthy link on any window.
 export type LinkIndicatorPlacement = "tab-bar" | "status";
 
+/// The tab-bar label reserves enough character width for "reconnecting".
+export const LINK_INDICATOR_LABEL_CH = 13;
+
 /// Whether the indicator occupies space in its parent.
 export function linkIndicatorShown(placement: LinkIndicatorPlacement, state: LinkState, remote: boolean): boolean {
   return state === "slow" || state === "stalled" || state === "down" || (placement === "tab-bar" && remote);

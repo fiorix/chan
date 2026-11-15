@@ -16,7 +16,8 @@
   // instead, since the frameless window wears no menubar, and the window's
   // title after them. A tmux pane has no strip, so while one is active the
   // band marks the window as tmux's and names no pane: the window's title
-  // names the window.
+  // names the window. Under the reconnecting cover it keeps the title and
+  // link indicator while hiding the tree button and strip in place.
 
   import { untrack } from "svelte";
   import {
@@ -39,7 +40,7 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
-  import { ui } from "../state/store.svelte";
+  import { keyboardOwnedAbovePanes, ui } from "../state/store.svelte";
   import { activeLayout, paneShowsTmux } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
@@ -57,6 +58,7 @@
   import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
   import { privacy } from "@chan/web-shared/privacy";
   import LinkIndicator from "./LinkIndicator.svelte";
+  import { LINK_INDICATOR_LABEL_CH } from "./linkIndicatorMath";
   import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
 
   // `restored` is false until the boot has restored the window's layout:
@@ -67,6 +69,8 @@
   // Tauri's drag script starts a window drag on a direct press on an element
   // carrying the attribute, and zooms the window on a double click there.
   const drag = isTauriDesktop() ? "" : undefined;
+  // The title clears the indicator's glyph, gap, padding, margin and bar gap.
+  const COVER_LINK_FIXED_PX = 16 + 4 + 10 + 8 + 4;
 
   const viewLayout = $derived(activeLayout());
   const rects = $derived(Object.entries(paneRects(viewLayout)));
@@ -187,14 +191,16 @@
   // cycle, with a rest at each end (the keyframes below).
   const rollSeconds = $derived(Math.max(4, (titleOverflow / WINDOW_TITLE_ROLL_PX_PER_S) * 3));
 
-  // The desktop marks the page's root while the window's Computers launcher
-  // is shown over it, from before the launcher slides in until after it has
-  // slid away. The tree and the strip are hidden in place, so the strip keeps
-  // its size and the band stays the window's drag space; an open tree closes.
-  let covered = $state(launcherShownOverWindow());
+  // The desktop marks the page root while Computers is shown, from before
+  // the launcher slides in until after it slides away. The launcher and a
+  // reconnect cover below this band hide the tree and strip in place, keeping
+  // its drag space and closing an open tree.
+  let launcherCovered = $state(launcherShownOverWindow());
+  const reconnectCovered = $derived(ui.disconnectBlocking && !keyboardOwnedAbovePanes());
+  const covered = $derived(launcherCovered || reconnectCovered);
   $effect(() => {
     const read = () => {
-      covered = launcherShownOverWindow();
+      launcherCovered = launcherShownOverWindow();
     };
     const observer = new MutationObserver(read);
     observer.observe(document.documentElement, {
@@ -208,12 +214,16 @@
     if (covered) closePaneTree();
   });
 
-  // What the covered band holds: the menus the desktop lists, which only a
-  // window wearing no menubar gets, and the title of a frameless window, the
-  // one the bar shows uncovered, so privacy mode masks it here as well from
-  // the moment the page hears of it.
-  const menus = $derived(covered ? chrome.menus : []);
-  const titleShown = $derived(covered && chrome.drawControls && title !== null);
+  // Only Windows, whose frameless window wears no menubar, gets launcher
+  // menus. The covered title is the bar's own, so privacy masks it before
+  // the desktop's mask arrives. The launcher's macOS title stays native;
+  // reconnect alone draws this title beside the link state on every host.
+  const menus = $derived(launcherCovered ? chrome.menus : []);
+  const titleShown = $derived(title !== null && (launcherCovered ? chrome.drawControls : reconnectCovered));
+  const coveredBandLeft = $derived(reconnectCovered && !launcherCovered ? `${chrome.insetLeft}px` : "0px");
+  const coveredBandRight = $derived(reconnectCovered && !launcherCovered
+    ? `calc(${chrome.insetRight + 8 + COVER_LINK_FIXED_PX}px + var(--link-indicator-label-width))`
+    : `${chrome.insetRight + 8}px`);
 
   // The menu whose popup is up. The desktop answers once the menu has
   // closed, so its button stays pressed until then and another press waits.
@@ -371,15 +381,12 @@
          attribute on the element pressed. -->
     <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
-  {#if !covered}<LinkIndicator placement="tab-bar" />{/if}
+  {#if !launcherCovered}<LinkIndicator placement="tab-bar" />{/if}
   {#if menus.length > 0 || titleShown}
-    <!-- While the launcher covers the page the band belongs to the window.
-         A frameless window has no menubar and no title of its own, so the
-         band draws the launcher menubar's menus at its left, then names the
-         window, as Windows places a title, all clear of the window controls.
-         Only the menu buttons take a press, and none drags, so the rest of
-         the band stays the drag space. -->
-    <div class="covered-band" style:right={`${chrome.insetRight + 8}px`}>
+    <!-- The launcher puts Windows menubar menus and its title in the band.
+         The reconnecting cover keeps the title visible on every host, clear
+         of the indicator and window controls. The band remains drag space. -->
+    <div class="covered-band" style:left={coveredBandLeft} style:right={coveredBandRight} style:--link-indicator-label-width={`${LINK_INDICATOR_LABEL_CH}ch`}>
       {#if menus.length > 0}
         <div class="window-menus">
           {#each menus as menu (menu.id)}
@@ -658,6 +665,8 @@
     display: flex;
     align-items: center;
     min-width: 0;
+    /* The label and this reserve use the same font metrics for their ch width. */
+    font-size: 12px;
     pointer-events: none;
   }
   /* Windows 11 menubar items: text buttons, clear at rest, a wash under the

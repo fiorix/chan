@@ -52,7 +52,7 @@ describe("DisconnectOverlay follows the watcher status (no change needed)", () =
     // Its root carries the cover's name, which the window key guard reads to
     // scope the one exception it makes for a cover's own text field.
     expect(overlay?.getAttribute(COVER_ROOT_ATTR)).toBe("reconnect");
-    // Its Retry button acts on a click, so no key typed on this cover passes
+    // Its delayed recovery buttons act on a click, so no key typed on this cover passes
     // the guard's exception for a cover's own text field.
     expect(overlay?.querySelectorAll("input, textarea, [contenteditable]").length).toBe(0);
 
