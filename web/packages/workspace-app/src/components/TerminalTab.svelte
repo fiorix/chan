@@ -140,6 +140,7 @@
     routeXtermData,
     shouldForwardGeneratedTerminalInput,
     terminalMessageBytes,
+    terminalMouseReport,
   } from "../terminal/connection";
   import {
     controlSlashBytes,
@@ -239,8 +240,9 @@
   import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
-  import { createTerminalLink, terminalMouseReport } from "./terminalLink.svelte";
-  import TerminalStallStrip from "./TerminalStallStrip.svelte";
+  import { createTerminalLink } from "./terminalLink.svelte";
+  import TerminalLinkNotice from "./TerminalLinkNotice.svelte";
+  import { linkHealth } from "../state/linkHealth.svelte";
 
   let {
     tab,
@@ -403,7 +405,16 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
-  const terminalLink = createTerminalLink(() => sendPing());
+  const terminalLink = createTerminalLink(() => sendPing(), undefined, {
+    canRedial: () => status !== "exited",
+    lastContactAt: () => linkHealth.lastContactAt,
+    run: redialStalledTerminal,
+  });
+  $effect(() => {
+    const state = linkHealth.state;
+    const blocked = ui.disconnectBlocking || !active;
+    untrack(() => terminalLink.windowChanged(state, blocked));
+  });
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
   // shared from transport.ts so the two cannot drift) applied to the one SPA
@@ -662,7 +673,13 @@
 
   $effect(() => {
     const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
-      if (sendInput(data, binary) && !terminalMouseReport(data)) terminalLink.inputSent();
+      const sent = sendInput(data, binary);
+      const mouseReport = terminalMouseReport(data);
+      if (sent && mouseReport) terminalLink.inputWritten();
+      if (!mouseReport) {
+        if (sent) terminalLink.inputSent();
+        else if (status !== "exited") terminalLink.inputRefused();
+      }
     });
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
@@ -1072,12 +1089,22 @@
   // reconnect via the existing resume path (sessionId/since/generation), which
   // replays only the missed bytes -- no scrollback loss. A socket that is not
   // OPEN is already reconnecting (or intentionally closed); leave it alone.
+  // Stalled-terminal redial has its own guard and also uses the resume path.
   function recyclePtySocketAfterWake(): void {
     // The control terminal is a single-shot local runner owned by the desktop
     // exit watcher; a wake redial would mint a fresh session whose tenant
     // default re-runs the devserver connect script.
     if (ui.terminalControl) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
+      void connect();
+    }
+  }
+
+  function redialStalledTerminal(): void {
+    // The read deadline may have called close() without receiving onclose;
+    // with no user input in flight, replacing that CLOSING socket is safe.
+    if (ws && (ws.readyState === WebSocket.OPEN || (terminalLink.state.retiring && ws.readyState === WebSocket.CLOSING))) {
+      terminalLink.disconnected();
       void connect();
     }
   }
@@ -1592,6 +1619,7 @@
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(() => {
       deadlineTimer = null;
+      terminalLink.retiring();
       try {
         ws?.close();
       } catch {
@@ -2019,6 +2047,7 @@
     };
     ws.onclose = () => {
       clearLiveness();
+      if (status !== "exited" && !ui.terminalControl) terminalLink.disconnected();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
       // delivery -- fail it (bubble unlocks, keeps text, labels honestly;
@@ -2244,10 +2273,13 @@
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (id && status !== "exited") terminalLink.inputRefused();
+      return false;
+    }
     term?.scrollToBottom();
     const sent = send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
-    if (sent) terminalLink.inputSent();
+    if (sent && id) terminalLink.inputSent();
     return sent;
   }
 
@@ -2390,7 +2422,13 @@
   }
 
   function sendUserInput(data: string, binary = false, probeInput = true): void {
-    if (sendInput(data, binary) && probeInput && !terminalMouseReport(data)) terminalLink.inputSent();
+    const sent = sendInput(data, binary);
+    const mouseReport = terminalMouseReport(data);
+    if (sent && (!probeInput || mouseReport)) terminalLink.inputWritten();
+    if (probeInput && !mouseReport) {
+      if (sent) terminalLink.inputSent();
+      else if (status !== "exited") terminalLink.inputRefused();
+    }
     broadcastTerminalInput(tab, data, binary);
     // Cross-window broadcast: same-group members in OTHER windows live in the
     // shared terminal registry and are unreachable from this window's SPA, so
@@ -2719,6 +2757,7 @@
       }
       return;
     }
+    terminalLink.restartRequested();
     explicitCloseSession();
     // An open find bar searches the terminal torn down here. It closes with
     // it, as on Escape, and keeps its query for the next open: left open it
@@ -3582,7 +3621,15 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
-    <TerminalStallStrip visible={terminalLink.state.stalled && status === "connected" && !ui.disconnectBlocking} waitMs={terminalLink.state.waitMs} />
+    <TerminalLinkNotice
+      stalled={terminalLink.state.stalled && status === "connected" && active && !ui.disconnectBlocking}
+      lost={terminalLink.state.lost && status !== "exited" && active && !ui.disconnectBlocking}
+      notice={terminalLink.state.notice && status === "connected" && active && !ui.disconnectBlocking}
+      waitMs={linkHealth.state === "stalled" ? linkHealth.waitMs : terminalLink.state.waitMs}
+      {findOpen}
+      inspectorOpen={!!tab.inspectorOpen}
+      inspectorWidth={tab.inspectorWidth ?? 280}
+    />
     <TmuxConsentBanner
       question={tab.tmuxConsent?.question ?? null}
       program={terminalTabName(tab)}
