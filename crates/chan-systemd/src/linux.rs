@@ -149,10 +149,23 @@ pub fn fdstore_remove_many<'a>(names: impl IntoIterator<Item = &'a str>) {
 /// as its manager reports it (`systemctl --user show`), for a manager that
 /// exports no `$FDSTORE`. `None` when the process is in no service or the
 /// manager does not answer. It runs `systemctl` and waits for it.
-pub fn own_unit_fdstore_max() -> Option<usize> {
+/// `prepare` applies the caller's child-environment policy before execution.
+pub fn own_unit_fdstore_max(prepare: impl FnOnce(&mut std::process::Command)) -> Option<usize> {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let unit = service_unit_from_cgroup(&cgroup)?;
-    let output = std::process::Command::new("systemctl")
+    let output = fdstore_max_command(unit, prepare).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+fn fdstore_max_command(
+    unit: &str,
+    prepare: impl FnOnce(&mut std::process::Command),
+) -> std::process::Command {
+    let mut command = std::process::Command::new("systemctl");
+    command
         .args([
             "--user",
             "show",
@@ -161,13 +174,9 @@ pub fn own_unit_fdstore_max() -> Option<usize> {
             "--value",
         ])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+        .stderr(std::process::Stdio::null());
+    prepare(&mut command);
+    command
 }
 
 /// The service unit a cgroup v2 membership names: the innermost `.service`
@@ -302,6 +311,47 @@ fn own_pidfdid() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fdstore_systemctl_applies_the_callers_environment_policy() {
+        use std::ffi::OsStr;
+        let mut prepared = 0;
+        let command = super::fdstore_max_command("chan-devserver.service", |command| {
+            prepared += 1;
+            assert_eq!(command.get_program(), "systemctl");
+            command.env("PATH", "/usr/bin").env_remove("PYTHONHOME");
+        });
+        assert_eq!(prepared, 1);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--user",
+                "show",
+                "chan-devserver.service",
+                "--property=FileDescriptorStoreMax",
+                "--value"
+            ]
+        );
+        let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            env.get(OsStr::new("PATH")),
+            Some(&Some(OsStr::new("/usr/bin")))
+        );
+        assert_eq!(env.get(OsStr::new("PYTHONHOME")), Some(&None));
+    }
+
+    #[test]
+    fn fdstore_query_executes_the_prepared_command() {
+        let source = include_str!("linux.rs");
+        let body = source
+            .split_once("pub fn own_unit_fdstore_max(")
+            .expect("query")
+            .1
+            .split_once("\nfn fdstore_max_command(")
+            .expect("builder")
+            .0;
+        assert!(body.contains("fdstore_max_command(unit, prepare).output()"));
+    }
+
     #[test]
     fn the_service_unit_is_the_innermost_service_in_the_cgroup_path() {
         let cgroup =

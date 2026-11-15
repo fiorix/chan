@@ -14,6 +14,8 @@ mod handoff_registrations;
 mod last_window;
 mod launch_paths;
 mod launcher_panel;
+#[cfg(target_os = "linux")]
+mod linux_cli_env;
 mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
@@ -5596,6 +5598,15 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+#[cfg(target_os = "linux")]
+fn cli_personality_requested(arg0: &OsStr, args: Vec<std::ffi::OsString>) -> bool {
+    args.first().is_some_and(|arg| arg == "__mcp-proxy")
+        || chan_shell::invoked_as_cs(arg0)
+        || chan_shell::invoked_as_chan(arg0)
+        || chan::invoked_as_opener(arg0)
+        || (chan::term::invoked_as_term(arg0) && chan::term::is_shell_launch(args))
+}
+
 fn main() {
     // Windows: a release chan-desktop.exe is GUI-subsystem (no console). When
     // invoked as the `chan` / `cs` CLI through a shim, reattach to the parent
@@ -5611,6 +5622,15 @@ fn main() {
     // off AppImage or when launched without a shim.
     #[cfg(unix)]
     cs_install::restore_caller_cwd();
+
+    #[cfg(target_os = "linux")]
+    if let Err(error) = linux_cli_env::prepare(cli_personality_requested(
+        &chan_shell::invoked_arg0(),
+        std::env::args_os().skip(1).collect(),
+    )) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     match run_hidden_mcp_proxy_if_requested() {
         Ok(true) => return,
@@ -9268,6 +9288,85 @@ mod tests {
                 restore < at,
                 "the caller-cwd restore must run before {probe}"
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_cli_loader_is_prepared_before_any_dispatch() {
+        let source = include_str!("main.rs");
+        let main = source.split_once("\nfn main() {").unwrap().1;
+        let main = main
+            .split_once("linux_gui_stack::prefer_system_gui_stack();")
+            .unwrap()
+            .0;
+        let prepare = main
+            .find("linux_cli_env::prepare(cli_personality_requested(")
+            .expect("CLI loader preparation");
+        assert!(
+            main[prepare..main.find("run_hidden_mcp_proxy_if_requested()").unwrap()]
+                .contains("std::process::exit(1);"),
+            "preparation failure stops dispatch"
+        );
+        assert!(main.find("cs_install::restore_caller_cwd();").unwrap() < prepare);
+        for dispatch in [
+            "run_hidden_mcp_proxy_if_requested()",
+            "run_as_cs_if_requested()",
+            "run_as_chan_if_requested()",
+        ] {
+            assert!(prepare < main.find(dispatch).unwrap(), "before {dispatch}");
+        }
+        let probe = source
+            .split_once("\nfn cli_personality_requested(")
+            .expect("shared CLI probe")
+            .1;
+        let probe = probe.split_once("\n}\n").unwrap().0;
+        for predicate in [
+            "__mcp-proxy",
+            "chan_shell::invoked_as_cs",
+            "chan_shell::invoked_as_chan",
+            "chan::invoked_as_opener",
+            "chan::term::invoked_as_term",
+            "chan::term::is_shell_launch",
+        ] {
+            assert!(probe.contains(predicate), "personality {predicate}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_cli_personalities_cover_dispatch_and_exclude_gui_launches() {
+        for stem in ["cs", "chan", "chan-files", "chan-edit", "chan-term"] {
+            assert!(
+                cli_personality_requested(OsStr::new(stem), vec![]),
+                "{stem}"
+            );
+        }
+        assert!(cli_personality_requested(
+            OsStr::new("chan-desktop"),
+            vec!["__mcp-proxy".into(), "/tmp/mcp.sock".into()]
+        ));
+        assert!(cli_personality_requested(
+            OsStr::new("chan-term"),
+            vec!["--dir=/tmp/a b".into()]
+        ));
+        for args in [vec![], vec!["--version"], vec!["/tmp/note.md"]] {
+            assert!(!cli_personality_requested(
+                OsStr::new("chan-desktop"),
+                args.into_iter().map(Into::into).collect()
+            ));
+        }
+        for args in [
+            vec!["-e", "printf", "ok"],
+            vec!["--", "printf"],
+            vec!["--hold"],
+            vec!["--title=Notes"],
+            vec!["--app-id=notes"],
+        ] {
+            assert!(!cli_personality_requested(
+                OsStr::new("chan-term"),
+                args.into_iter().map(Into::into).collect()
+            ));
         }
     }
 

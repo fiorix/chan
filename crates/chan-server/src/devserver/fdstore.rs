@@ -523,10 +523,14 @@ mod linux {
             // Systemd exports the service's actual store ceiling as
             // `$FDSTORE`; older managers do not, so fall back to the value
             // the canonical unit renderer configures.
-            let store_max = resolve_store_max(
-                std::env::var("FDSTORE").ok().as_deref(),
-                chan_systemd::own_unit_fdstore_max,
-            );
+            let store_max = resolve_store_max(std::env::var("FDSTORE").ok().as_deref(), || {
+                chan_systemd::own_unit_fdstore_max(|command| {
+                    chan_library::terminal_sessions::clear_appimage_command_env(
+                        command,
+                        std::env::vars_os(),
+                    );
+                })
+            });
             Self::install_at(
                 host,
                 library_id,
@@ -1268,6 +1272,22 @@ mod linux {
     mod parker_tests {
         use super::*;
         use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[test]
+        fn fdstore_query_supplies_the_host_environment_policy() {
+            let source = include_str!("fdstore.rs");
+            let body = source
+                .split_once("pub(crate) fn install(")
+                .expect("install")
+                .1
+                .split_once("Self::install_at(")
+                .expect("install continuation")
+                .0;
+            assert!(body.contains("chan_systemd::own_unit_fdstore_max(|command|"));
+            assert!(body.contains("chan_library::terminal_sessions::clear_appimage_command_env("));
+            let compact: String = body.chars().filter(|ch| !ch.is_whitespace()).collect();
+            assert!(compact.contains("clear_appimage_command_env(command,std::env::vars_os(),)"));
+        }
 
         #[test]
         fn manifest_write_keeps_new_and_replaced_files_private() {

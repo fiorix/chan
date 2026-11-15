@@ -6,6 +6,7 @@
 //! alive until the owning chan process shuts down; failures are logged and do
 //! not prevent the workspace from opening.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -448,6 +449,26 @@ fn extension_id(path: &Path) -> Option<String> {
     Some(id.to_string())
 }
 
+fn extension_command(
+    program: &str,
+    args: &[String],
+    config_path: &Path,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(config_path.parent().unwrap_or_else(|| Path::new(".")))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    chan_library::terminal_sessions::clear_appimage_command_env(command.as_std_mut(), parent);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
 async fn start_extension(declaration: ExtensionDeclaration) -> anyhow::Result<StartedExtension> {
     let ExtensionDeclaration {
         id,
@@ -457,16 +478,7 @@ async fn start_extension(declaration: ExtensionDeclaration) -> anyhow::Result<St
         capabilities,
         config_path,
     } = declaration;
-    let mut command_builder = Command::new(&command);
-    command_builder
-        .args(&args)
-        .current_dir(config_path.parent().unwrap_or_else(|| Path::new(".")))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command_builder.process_group(0);
+    let mut command_builder = extension_command(&command, &args, &config_path, std::env::vars_os());
 
     let mut child = command_builder.spawn().with_context(|| {
         format!(
@@ -803,6 +815,135 @@ pub(crate) fn empty_catalog() -> Arc<ExtensionCatalog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn appimage_parent(user_ld: &str) -> Vec<(OsString, OsString)> {
+        // The AppRun path blocks are the terminal environment fixture's.
+        let mount = "/tmp/.mount_Chan";
+        let block = |entries: &[&str], user: &str| {
+            let entries: Vec<_> = entries
+                .iter()
+                .map(|entry| format!("{mount}/{entry}"))
+                .collect();
+            format!("{}:{user}", entries.join(":"))
+        };
+        [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+            ("ARGV0", "chan".into()),
+            ("OWD", "/home/u".into()),
+            (
+                "PATH",
+                block(
+                    &["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"],
+                    "/usr/local/bin:/usr/bin",
+                ),
+            ),
+            (
+                "LD_LIBRARY_PATH",
+                block(
+                    &[
+                        "usr/lib/",
+                        "usr/lib/i386-linux-gnu/",
+                        "usr/lib/x86_64-linux-gnu/",
+                        "usr/lib32/",
+                        "usr/lib64/",
+                        "lib/",
+                        "lib/i386-linux-gnu/",
+                        "lib/x86_64-linux-gnu/",
+                        "lib32/",
+                        "lib64/",
+                    ],
+                    user_ld,
+                ),
+            ),
+            ("PYTHONHOME", format!("{mount}/usr")),
+            ("GIO_MODULE_DIR", format!("{mount}//usr/lib/gio/modules")),
+            ("GTK_THEME", "Adwaita:light".into()),
+            ("GDK_BACKEND", "x11".into()),
+            ("CHAN_LINUX_SYSTEM_GUI_REEXEC_PID", "1234".into()),
+            ("CHAN_LINUX_SYSTEM_GUI_APPLIED", "1".into()),
+            ("CHAN_LINUX_CLI_REEXEC_PID", "1234".into()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_commands_receive_the_terminal_environment() {
+        use std::ffi::OsStr;
+        for (user_ld, ld) in [
+            ("", None),
+            (":/opt/user/lib", Some(OsStr::new(":/opt/user/lib"))),
+        ] {
+            let command = extension_command(
+                "python3",
+                &["extension.py".into(), "space value".into()],
+                Path::new("/home/u/extensions/example.toml"),
+                appimage_parent(user_ld),
+            );
+            assert_eq!(command.as_std().get_program(), "python3");
+            assert_eq!(
+                command.as_std().get_args().collect::<Vec<_>>(),
+                ["extension.py", "space value"]
+            );
+            assert_eq!(
+                command.as_std().get_current_dir(),
+                Some(Path::new("/home/u/extensions"))
+            );
+            let env: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+            assert_eq!(
+                env.get(OsStr::new("PATH")),
+                Some(&Some(OsStr::new("/usr/local/bin:/usr/bin")))
+            );
+            assert_eq!(env.get(OsStr::new("LD_LIBRARY_PATH")), Some(&ld));
+            for removed in [
+                "APPDIR",
+                "APPIMAGE",
+                "ARGV0",
+                "OWD",
+                "PYTHONHOME",
+                "GIO_MODULE_DIR",
+                "GTK_THEME",
+                "GDK_BACKEND",
+                "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID",
+                "CHAN_LINUX_SYSTEM_GUI_APPLIED",
+                "CHAN_LINUX_CLI_REEXEC_PID",
+            ] {
+                assert_eq!(env.get(OsStr::new(removed)), Some(&None), "{removed}");
+            }
+        }
+        for missing in ["APPDIR", "APPIMAGE"] {
+            let parent = appimage_parent("")
+                .into_iter()
+                .filter(|(key, _)| key != missing);
+            assert_eq!(
+                extension_command("python3", &[], Path::new("example.toml"), parent)
+                    .as_std()
+                    .get_envs()
+                    .count(),
+                0,
+                "{missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_spawn_uses_the_prepared_command() {
+        let source = include_str!("extensions.rs");
+        let body = source
+            .split_once("async fn start_extension(")
+            .expect("extension starter")
+            .1
+            .split_once("let mut child =")
+            .expect("spawn")
+            .0;
+        assert!(
+            body.contains("extension_command(&command, &args, &config_path, std::env::vars_os())")
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_shares_one_grace_across_stuck_supervisors() {
@@ -1399,7 +1540,7 @@ mod tests {
     }
 
     /// An extension is spawned without a shell, so it inherits the serving
-    /// process's `PATH` verbatim and nothing reads a shell profile: a bare
+    /// process's `PATH` off an AppImage, and nothing reads a shell profile: a bare
     /// `command` and every helper the extension runs by name resolve through
     /// that `PATH` alone. Under a systemd service that is the unit's `PATH`
     /// line when it has one, and the user manager's default when it has none. The

@@ -445,6 +445,10 @@ pub const GUI_STACK_REEXEC_MARKER: &str = "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID";
 pub const GUI_STACK_REEXEC_MARKERS: &[&str] =
     &[GUI_STACK_REEXEC_MARKER, "CHAN_LINUX_SYSTEM_GUI_APPLIED"];
 
+/// The one-process PID marker for the AppImage CLI loader re-exec. It is
+/// consumed before dispatch and never handed to a terminal or child.
+pub const CLI_REEXEC_MARKER: &str = "CHAN_LINUX_CLI_REEXEC_PID";
+
 /// The library the desktop's GUI-stack re-exec looks up in the host's linker
 /// cache to choose the directory it puts first in `LD_LIBRARY_PATH`; every
 /// release's re-exec has chosen it by this one, so that directory holds it.
@@ -590,6 +594,7 @@ fn scrub_var(mount: &Mount, key: &str, value: &OsStr, to: HostEnvFor) -> Option<
     }
     if APPIMAGE_RUNTIME_KEYS.contains(&key)
         || GUI_STACK_REEXEC_MARKERS.contains(&key)
+        || key == CLI_REEXEC_MARKER
         || APPIMAGE_GTK_KEYS.contains(&key)
         || key == APPIMAGE_GTK_THEME_KEY
         || entry_in_bundle(mount, value)
@@ -682,8 +687,9 @@ fn host_value_given(
 /// Whether `dir` is one a GUI-stack re-exec could have put ahead of its
 /// block in `LD_LIBRARY_PATH`: an absolute directory holding
 /// [`GUI_STACK_REEXEC_LIBRARY`], which the re-exec found there in the host's
-/// linker cache. A directory of the user's holds it only if they keep a
-/// WebKitGTK of their own there.
+/// linker cache. A user entry immediately before a whole foreign block is
+/// indistinguishable from that re-exec directory when it holds the same
+/// library; this includes the system library directory.
 fn holds_gui_stack_library(dir: &Path) -> bool {
     dir.is_absolute() && dir.join(GUI_STACK_REEXEC_LIBRARY).exists()
 }
@@ -2373,6 +2379,70 @@ mod appimage_env_tests {
             let dir = tempfile::tempdir().expect("tempdir");
             std::fs::write(dir.path().join(GUI_STACK_REEXEC_LIBRARY), b"").expect("library");
             dir
+        }
+
+        #[test]
+        fn a_user_host_directory_before_a_foreign_block_is_indistinguishable() {
+            let own = block_under(APPDIR, &LD_BLOCK);
+            let foreign = block_under("/tmp/.mount_chanZZ", &LD_BLOCK);
+            let value = format!("{own}:{HOST_LIB}:{foreign}:/opt/a");
+            let entries: Vec<_> = std::env::split_paths(&value).collect();
+            let kept = host_value_given(
+                &Mount::new(APPDIR.as_ref()),
+                "LD_LIBRARY_PATH",
+                &entries,
+                None,
+                &|dir| dir == std::path::Path::new(HOST_LIB),
+            )
+            .unwrap();
+            assert_eq!(
+                std::env::join_paths(kept).unwrap(),
+                OsString::from("/opt/a")
+            );
+            let plain = format!("{own}:{HOST_LIB}:/opt/a");
+            let entries: Vec<_> = std::env::split_paths(&plain).collect();
+            let kept = host_value_given(
+                &Mount::new(APPDIR.as_ref()),
+                "LD_LIBRARY_PATH",
+                &entries,
+                None,
+                &|dir| dir == std::path::Path::new(HOST_LIB),
+            )
+            .unwrap();
+            assert_eq!(
+                std::env::join_paths(kept).unwrap(),
+                OsString::from(format!("{HOST_LIB}:/opt/a"))
+            );
+        }
+
+        #[test]
+        fn a_relative_directory_holding_webkit_is_not_a_reexec_directory() {
+            let dir = tempfile::tempdir_in(".").unwrap();
+            std::fs::write(dir.path().join(GUI_STACK_REEXEC_LIBRARY), b"").unwrap();
+            let relative = std::path::Path::new(".").join(dir.path().file_name().unwrap());
+            assert!(relative.join(GUI_STACK_REEXEC_LIBRARY).is_file());
+            assert!(!holds_gui_stack_library(&relative));
+        }
+
+        #[test]
+        fn all_child_scrubs_drop_the_cli_reexec_marker() {
+            let parent = vec![
+                (OsString::from("APPDIR"), OsString::from(APPDIR)),
+                (
+                    OsString::from("APPIMAGE"),
+                    OsString::from("/opt/Chan.AppImage"),
+                ),
+                (
+                    OsString::from(super::super::CLI_REEXEC_MARKER),
+                    OsString::from("4242"),
+                ),
+            ];
+            for to in [HostEnvFor::Terminal, HostEnvFor::AppImage] {
+                assert!(appimage_host_env(parent.clone(), to)
+                    .iter()
+                    .any(|(key, scrub)| key == super::super::CLI_REEXEC_MARKER
+                        && matches!(scrub, Scrub::Remove)));
+            }
         }
 
         /// What the hop hands a desktop it starts, and a terminal's scrub,

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -74,11 +75,21 @@ pub(super) async fn recent_unit_journal() -> String {
 /// Run a tool to completion, capturing its output. Errors only when the
 /// tool cannot be spawned (e.g. missing binary), not on a non-zero exit.
 pub(super) async fn run_tool(program: &str, args: &[&str]) -> Result<std::process::Output> {
-    tokio::process::Command::new(program)
-        .args(args)
+    tool_command(program, args, std::env::vars_os())
         .output()
         .await
         .with_context(|| format!("running `{program} {}`", args.join(" ")))
+}
+
+fn tool_command(
+    program: &str,
+    args: &[&str],
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    chan_server::clear_appimage_command_env(command.as_std_mut(), parent);
+    command
 }
 
 /// The launchd LaunchAgent label for the devserver. Reverse-DNS off the app
@@ -183,6 +194,128 @@ pub(super) async fn wait_until_launchd_active(uid: u32, timeout: Duration) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn appimage_parent(user_ld: &str) -> Vec<(OsString, OsString)> {
+        // The AppRun path blocks are the terminal environment fixture's.
+        let mount = "/tmp/.mount_Chan";
+        let block = |entries: &[&str], user: &str| {
+            let entries: Vec<_> = entries
+                .iter()
+                .map(|entry| format!("{mount}/{entry}"))
+                .collect();
+            format!("{}:{user}", entries.join(":"))
+        };
+        [
+            ("APPDIR", mount.to_string()),
+            ("APPIMAGE", "/home/u/Applications/Chan.AppImage".into()),
+            ("ARGV0", "chan".into()),
+            ("OWD", "/home/u".into()),
+            (
+                "PATH",
+                block(
+                    &["usr/bin/", "usr/sbin/", "usr/games/", "bin/", "sbin/"],
+                    "/usr/local/bin:/usr/bin",
+                ),
+            ),
+            (
+                "LD_LIBRARY_PATH",
+                block(
+                    &[
+                        "usr/lib/",
+                        "usr/lib/i386-linux-gnu/",
+                        "usr/lib/x86_64-linux-gnu/",
+                        "usr/lib32/",
+                        "usr/lib64/",
+                        "lib/",
+                        "lib/i386-linux-gnu/",
+                        "lib/x86_64-linux-gnu/",
+                        "lib32/",
+                        "lib64/",
+                    ],
+                    user_ld,
+                ),
+            ),
+            ("PYTHONHOME", format!("{mount}/usr")),
+            ("GIO_MODULE_DIR", format!("{mount}//usr/lib/gio/modules")),
+            ("GTK_THEME", "Adwaita:light".into()),
+            ("GDK_BACKEND", "x11".into()),
+            ("CHAN_LINUX_SYSTEM_GUI_REEXEC_PID", "1234".into()),
+            ("CHAN_LINUX_SYSTEM_GUI_APPLIED", "1".into()),
+            ("CHAN_LINUX_CLI_REEXEC_PID", "1234".into()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_tools_receive_the_terminal_environment() {
+        use std::ffi::OsStr;
+        for (user_ld, ld) in [
+            ("", None),
+            (":/opt/user/lib", Some(OsStr::new(":/opt/user/lib"))),
+        ] {
+            let command = tool_command(
+                "systemctl",
+                &["--user", "show", "chan-devserver.service"],
+                appimage_parent(user_ld),
+            );
+            assert_eq!(command.as_std().get_program(), "systemctl");
+            assert_eq!(
+                command.as_std().get_args().collect::<Vec<_>>(),
+                ["--user", "show", "chan-devserver.service"]
+            );
+            let env: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+            assert_eq!(
+                env.get(OsStr::new("PATH")),
+                Some(&Some(OsStr::new("/usr/local/bin:/usr/bin")))
+            );
+            assert_eq!(env.get(OsStr::new("LD_LIBRARY_PATH")), Some(&ld));
+            for removed in [
+                "APPDIR",
+                "APPIMAGE",
+                "ARGV0",
+                "OWD",
+                "PYTHONHOME",
+                "GIO_MODULE_DIR",
+                "GTK_THEME",
+                "GDK_BACKEND",
+                "CHAN_LINUX_SYSTEM_GUI_REEXEC_PID",
+                "CHAN_LINUX_SYSTEM_GUI_APPLIED",
+                "CHAN_LINUX_CLI_REEXEC_PID",
+            ] {
+                assert_eq!(env.get(OsStr::new(removed)), Some(&None), "{removed}");
+            }
+        }
+        for missing in ["APPDIR", "APPIMAGE"] {
+            let parent = appimage_parent("")
+                .into_iter()
+                .filter(|(key, _)| key != missing);
+            assert_eq!(
+                tool_command("journalctl", &["--user"], parent)
+                    .as_std()
+                    .get_envs()
+                    .count(),
+                0,
+                "{missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_execution_uses_the_prepared_command() {
+        let source = include_str!("supervisor.rs");
+        let body = source
+            .split_once("pub(super) async fn run_tool(")
+            .expect("tool runner")
+            .1
+            .split_once("\nfn tool_command(")
+            .expect("command builder")
+            .0;
+        assert!(body.contains("tool_command(program, args, std::env::vars_os())"));
+    }
 
     #[test]
     fn launchd_print_running_reads_state() {
