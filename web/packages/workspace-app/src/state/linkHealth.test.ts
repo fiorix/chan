@@ -106,6 +106,24 @@ describe("the window's link state", () => {
     expect(linkHealth.samples).toHaveLength(1);
   });
 
+  test("a round trip longer than the read deadline leaves the last reading in place", () => {
+    setLinkWatchStatus("open");
+    roundTrip(30);
+    ping();
+    vi.advanceTimersByTime(45_001);
+    expect(linkHealth.state).toBe("stalled");
+    pong();
+    expect(linkHealth.rttMs).toBe(30);
+    expect(linkHealth.samples).toHaveLength(1);
+    expect(linkHealth.waitMs).toBe(0);
+    // It answered, so the link is no longer stalled, and it leaves `slow` as
+    // any link does.
+    expect(linkHealth.state).toBe("slow");
+    roundTrip(30);
+    roundTrip(30);
+    expect(linkHealth.state).toBe("ok");
+  });
+
   test("time alone moves it to slow and to stalled while a ping waits", () => {
     setLinkWatchStatus("open");
     roundTrip(30);
@@ -260,12 +278,12 @@ describe("through the watcher", () => {
       s0.open();
       expect(linkHealth.state).toBe("unknown");
 
-      vi.advanceTimersByTime(20_040); // the first heartbeat's ping, 40 ms out
+      vi.advanceTimersByTime(40); // the ping the socket sent as it opened, 40 ms out
       s0.pong();
       expect(linkHealth.state).toBe("ok");
       expect(linkHealth.rttMs).toBe(40);
 
-      vi.advanceTimersByTime(19_960); // the next heartbeat's ping, never answered
+      vi.advanceTimersByTime(19_960); // the first heartbeat's ping, never answered
       vi.advanceTimersByTime(999);
       expect(linkHealth.state).toBe("ok");
       vi.advanceTimersByTime(1);
@@ -279,15 +297,40 @@ describe("through the watcher", () => {
       expect(s0.readyState).toBe(FakeSocket.CLOSED);
       expect(linkHealth.state).toBe("down");
       expect(linkHealth.samples).toEqual([
-        { at: t0 + 20_000, rttMs: 40 },
+        { at: t0, rttMs: 40 },
+        { at: t0 + 20_000, rttMs: null },
         { at: t0 + 40_000, rttMs: null },
-        { at: t0 + 60_000, rttMs: null },
       ]);
       expect(linkHealth.rttMs).toBe(40);
 
       vi.advanceTimersByTime(500);
       FakeSocket.instances[1].open();
       expect(linkHealth.state).toBe("unknown");
+    } finally {
+      handle.close();
+    }
+  });
+
+  test("a slow link reads slow a round trip after it connects", () => {
+    const handle = openWatch(
+      () => {},
+      (status) => setLinkWatchStatus(status),
+      undefined,
+      undefined,
+      undefined,
+      watchLinkProbe,
+    );
+    try {
+      const s0 = FakeSocket.instances[0];
+      s0.open();
+      // The open's ping waits in `unknown`: nothing counts it as overdue.
+      vi.advanceTimersByTime(1_200);
+      expect(linkHealth.state).toBe("unknown");
+      expect(linkHealth.waitMs).toBe(0);
+      s0.pong();
+      expect(linkHealth.state).toBe("slow");
+      expect(linkHealth.since).toBe(Date.now());
+      expect(linkLabel(linkHealth.state, linkHealth.rttMs, linkHealth.waitMs)).toBe("1.2 s");
     } finally {
       handle.close();
     }

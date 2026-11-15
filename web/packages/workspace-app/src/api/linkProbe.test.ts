@@ -5,7 +5,9 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  LINK_MAX_RTT_MS,
   LINK_OK_RTT_MS,
+  LINK_PENDING_CAP,
   LINK_RTT_RUN,
   LINK_SLOW_RTT_MS,
   LINK_SLOW_WAIT_MS,
@@ -21,6 +23,8 @@ interface Rig {
   probe: LinkProbe;
   samples: LinkSample[];
   changes: () => number;
+  /// The clock's reading.
+  now(): number;
   /// Move the clock forward.
   wait(ms: number): void;
   /// A whole round trip that takes `rttMs`: ping, wait, pong.
@@ -44,6 +48,7 @@ function rig(): Rig {
     probe,
     samples,
     changes: () => changed,
+    now: () => t,
     wait(ms) {
       t += ms;
     },
@@ -196,6 +201,150 @@ describe("a clock jump", () => {
   });
 });
 
+describe("an over-long round trip", () => {
+  test("the bounds are the contract's", () => {
+    expect([LINK_MAX_RTT_MS, LINK_PENDING_CAP]).toEqual([45_000, 32]);
+  });
+
+  test("past the read deadline it is not timed, but it answers and keeps the pairing", () => {
+    const r = rig();
+    r.roundTrip(30);
+    r.probe.pingSent(); // T0 + 30
+    r.wait(LINK_MAX_RTT_MS + 1);
+    const later = r.now();
+    r.probe.pingSent(); // sent before the late pong arrives
+    r.wait(20);
+
+    expect(r.pong()).toBeNull();
+    expect(r.probe.answered).toBe(true);
+    expect(r.probe.rttMs).toBe(30);
+    expect(r.probe.oldestPingAt).toBe(later);
+    // The next pong is the later ping's own.
+    expect(r.pong()).toBe(20);
+    expect(r.samples).toEqual([
+      { at: T0, rttMs: 30 },
+      { at: later, rttMs: 20 },
+    ]);
+  });
+
+  test("at exactly the read deadline it is still timed", () => {
+    const r = rig();
+    r.probe.pingSent();
+    r.wait(LINK_MAX_RTT_MS);
+    expect(r.pong()).toBe(LINK_MAX_RTT_MS);
+    expect(r.samples).toEqual([{ at: T0, rttMs: LINK_MAX_RTT_MS }]);
+  });
+
+  test("as a socket's first pong it answers without a reading", () => {
+    const r = rig();
+    r.probe.pingSent();
+    r.wait(LINK_MAX_RTT_MS + 1);
+    expect(r.pong()).toBeNull();
+    expect(r.probe.answered).toBe(true);
+    expect(r.probe.rttMs).toBeNull();
+    expect(r.samples).toEqual([]);
+    expect(r.probe.classify()).toBe("ok");
+  });
+});
+
+describe("a long queue", () => {
+  /// Send `count` pings 100 ms apart and return when each left.
+  function pings(r: Rig, count: number): number[] {
+    const sent: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      r.wait(100);
+      sent.push(r.now());
+      r.probe.pingSent();
+    }
+    return sent;
+  }
+
+  test("past the cap a ping is counted, not timed, and every pong still finds its own ping", () => {
+    const r = rig();
+    r.roundTrip(30);
+    const sent = pings(r, LINK_PENDING_CAP + 3);
+    expect(r.probe.oldestPingAt).toBe(sent[0]);
+
+    r.wait(500);
+    for (let i = 0; i < LINK_PENDING_CAP; i += 1) {
+      expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
+    }
+    expect(r.probe.oldestPingAt).toBeNull();
+    // The three sent past the cap: answered in their turn, with no time.
+    expect([r.pong(), r.pong(), r.pong()]).toEqual([null, null, null]);
+
+    // Each was consumed once: the next round trip is timed as itself.
+    r.probe.pingSent();
+    r.wait(25);
+    expect(r.pong()).toBe(25);
+    expect(r.samples).toHaveLength(1 + LINK_PENDING_CAP + 1);
+  });
+
+  test("a ping sent while counted ones wait is counted with them", () => {
+    const r = rig();
+    r.roundTrip(30);
+    const sent = pings(r, LINK_PENDING_CAP + 1);
+    r.wait(100);
+    expect(r.pong()).toBe(r.now() - sent[0]); // a timed place is free again
+    r.wait(100);
+    r.probe.pingSent(); // behind the counted one, so it cannot take that place
+    r.wait(100);
+    for (let i = 1; i < LINK_PENDING_CAP; i += 1) {
+      expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
+    }
+    // The counted one, then the one sent behind it.
+    expect([r.pong(), r.pong()]).toEqual([null, null]);
+    r.probe.pingSent();
+    r.wait(25);
+    expect(r.pong()).toBe(25);
+  });
+
+  test("once the timed ones are answered, counted ones ahead do not keep the next from being timed", () => {
+    const r = rig();
+    r.roundTrip(30);
+    pings(r, LINK_PENDING_CAP + 2);
+    r.wait(100);
+    for (let i = 0; i < LINK_PENDING_CAP; i += 1) r.pong();
+    expect(r.probe.oldestPingAt).toBeNull();
+
+    r.probe.pingSent();
+    const at = r.now();
+    expect(r.probe.oldestPingAt).toBe(at);
+    r.wait(40);
+    expect([r.pong(), r.pong()]).toEqual([null, null]);
+    expect(r.pong()).toBe(40);
+  });
+
+  test("a retired socket's misses stop at the cap", () => {
+    const r = rig();
+    r.roundTrip(30);
+    const sent = pings(r, LINK_PENDING_CAP + 5);
+    r.probe.reset();
+    const misses = r.samples.filter((s) => s.rttMs === null);
+    expect(misses.map((s) => s.at)).toEqual(sent.slice(0, LINK_PENDING_CAP));
+  });
+
+  test("a clock jump leaves every waiting ping, counted ones too, ahead of the next", () => {
+    const r = rig();
+    r.roundTrip(30);
+    pings(r, LINK_PENDING_CAP + 2);
+    r.probe.forgetTimings();
+    expect(r.probe.oldestPingAt).toBeNull();
+
+    r.probe.pingSent();
+    const at = r.now();
+    expect(r.probe.oldestPingAt).toBe(at);
+    r.wait(35);
+    for (let i = 0; i < LINK_PENDING_CAP + 2; i += 1) {
+      expect(r.pong(), `pong ${i}`).toBeNull();
+    }
+    expect(r.pong()).toBe(35);
+    // None of the forgotten ones is a miss.
+    r.probe.reset();
+    expect(r.samples.filter((s) => s.rttMs === null)).toEqual([]);
+  });
+});
+
 describe("the state", () => {
   test("the thresholds are the contract's", () => {
     expect([
@@ -247,6 +396,28 @@ describe("the state", () => {
     expect(r.probe.classify()).toBe("ok");
     r.roundTrip(LINK_SLOW_RTT_MS);
     expect(r.probe.classify()).toBe("slow");
+  });
+
+  test("one round trip at the slow wait makes it slow, though nothing read the state meanwhile", () => {
+    // A socket's first ping waits in `unknown`, so no reading saw it overdue.
+    const first = rig();
+    first.roundTrip(LINK_SLOW_WAIT_MS);
+    expect(first.probe.classify()).toBe("slow");
+
+    const r = rig();
+    r.roundTrip(LINK_SLOW_WAIT_MS - 1);
+    expect(r.probe.classify()).toBe("ok");
+    r.roundTrip(30);
+    expect(r.probe.classify()).toBe("ok");
+    // On a link that was ok, a page whose timers were held reads only the pong.
+    r.roundTrip(LINK_SLOW_WAIT_MS + 500);
+    expect(r.probe.classify()).toBe("slow");
+    // Leaving is as for any slow link: two round trips in a row under the
+    // ok threshold.
+    r.roundTrip(30);
+    expect(r.probe.classify()).toBe("slow");
+    r.roundTrip(30);
+    expect(r.probe.classify()).toBe("ok");
   });
 
   test("it leaves slow only after two round trips in a row under the ok threshold", () => {
@@ -350,6 +521,16 @@ describe("the state", () => {
 
 describe("classifyLink", () => {
   const base: LinkReading = { answered: true, rtts: [], oldestPingAt: null, lastFrameAt: null };
+
+  test("reads the latest round trip alone for the slow wait", () => {
+    const now = 50_000;
+    expect(classifyLink("unknown", { ...base, rtts: [1_000] }, now)).toBe("slow");
+    expect(classifyLink("unknown", { ...base, rtts: [999] }, now)).toBe("ok");
+    expect(classifyLink("ok", { ...base, rtts: [50, 1_000] }, now)).toBe("slow");
+    // An older one says nothing by itself.
+    expect(classifyLink("ok", { ...base, rtts: [1_000, 50] }, now)).toBe("ok");
+    expect(classifyLink("slow", { ...base, rtts: [1_000, 50] }, now)).toBe("slow");
+  });
 
   test("is a function of the previous state, the reading and the time", () => {
     const now = 50_000;
