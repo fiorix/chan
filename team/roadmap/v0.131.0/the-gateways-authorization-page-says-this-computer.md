@@ -22,3 +22,13 @@ Read at `a4c7fa631`: the desktop authorization page of the gateway (`gateway/cra
 
 1. The page's tests pin the new strings and fail on the old ones.
 2. A grep of the repository finds no remaining quote of the old strings outside history (`CHANGELOG.md`, `team/release/`, `team/roadmap/done/`).
+
+## Built, 2026-11-15
+
+The consent page names the requesting app's host "the local machine" in its heading, title, application sentence, optional WireGuard sentence and loopback callback sentence. The manual quotes the same heading, and the identity design describes the wording. The production diff changes those five text sites and one adjacent comment; label escaping, scopes, expiry, port interpolation, form fields and authorization behavior are unchanged.
+
+The heading is "Authorize an app on the local machine?" and the title omits the question mark. The application sentence is "An application running on the local machine is requesting access. It identifies itself by the label below. chan cannot verify who it is." The WireGuard sentence starts "Approving also enrolls the local machine's WireGuard key with" and retains its existing ingress wording. The callback sentence is "It will receive the result on the local machine at 127.0.0.1, port {port}."
+
+The tests applied to the unchanged renderer failed at seven intended assertions, covering the heading, title, application, callback, both WireGuard ingress forms and the snapshot (`dev/v0131-team/evidence/Desk131/gwwording-40/base-independent-red.log`, exit 101). The updated renderer passed all 40 tests in `desktop_authorize::tests` (`filtered-green.log`, exit 0). The JSON snapshot body was copied from actual renderer output and checked to differ only in its three body phrases (`tip-capture.log` and `copy-audit.json`). A repository search finds the old page quotes only in this row's original record; that historical text is preserved (`old-quotes-after.log`).
+
+Committed-tip gateway formatting, clippy, identity rustdoc and the database-free identity suite remain pending at this implementation checkpoint. No browser smoke, Postgres integration test or deployment was run. The owner retains the gateway deployment, and this row's final acceptance still requires the remaining gates and review.
