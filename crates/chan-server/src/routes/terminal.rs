@@ -278,15 +278,46 @@ fn client_input_bytes(frame: &ClientFrame) -> Option<Cow<'_, [u8]>> {
     Some(Cow::Owned(bytes))
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "pty")]
+enum SessionPty {
+    #[serde(rename = "conpty")]
+    Conpty {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        windows_build_number: Option<u32>,
+    },
+}
+
+fn conpty_pty(build: Option<&str>) -> SessionPty {
+    SessionPty::Conpty {
+        windows_build_number: build
+            .and_then(|build| build.parse().ok())
+            .filter(|build| *build > 0),
+    }
+}
+
+fn host_pty() -> Option<SessionPty> {
+    static PTY: std::sync::LazyLock<Option<SessionPty>> = std::sync::LazyLock::new(|| {
+        // On Windows sysinfo reads CurrentBuildNumber. Cache it because the
+        // operating-system build is stable for this process.
+        cfg!(windows).then(|| conpty_pty(sysinfo::System::kernel_version().as_deref()))
+    });
+    *PTY
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum ServerFrame {
     #[serde(rename = "session")]
     Session {
         id: String,
+        /// The server's native PTY kind, independent of the viewing platform.
+        /// A tmux pane has no native PTY of its own.
+        #[serde(flatten)]
+        pty: Option<SessionPty>,
         /// Server-authoritative live metadata and immutable spawn provenance.
         /// Optional names preserve honest unknowns from legacy fd-store data;
-        /// all fields are always present on the wire.
+        /// these name and group fields are always present on the wire.
         name: Option<String>,
         group: String,
         spawn_name: Option<String>,
@@ -1765,6 +1796,10 @@ async fn send_attach_prelude(
 }
 
 fn session_frame(session: &AttachHandle) -> ServerFrame {
+    session_frame_with_pty(session, host_pty())
+}
+
+fn session_frame_with_pty(session: &AttachHandle, pty: Option<SessionPty>) -> ServerFrame {
     let submit_agent = SubmitAgent::derive(
         session.spawn_command().unwrap_or_default(),
         session.spawn_env("CHAN_AGENT"),
@@ -1773,6 +1808,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
     let metadata = session.live_metadata();
     ServerFrame::Session {
         id: session.id().to_owned(),
+        pty: pty.filter(|_| session.tmux_pane().is_none()),
         name: metadata.name,
         group: metadata.group,
         spawn_name: session.spawn_name().map(str::to_string),
@@ -2070,6 +2106,10 @@ mod program_status_tests;
 #[cfg(all(test, unix))]
 #[path = "terminal_queue_details_tests.rs"]
 mod queue_details_tests;
+
+#[cfg(test)]
+#[path = "terminal_pty_tests.rs"]
+mod pty_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2805,6 +2845,7 @@ mod tests {
         );
         let session = ServerFrame::Session {
             id: "abc".into(),
+            pty: None,
             name: Some("live".into()),
             group: "group".into(),
             spawn_name: Some("spawn".into()),
@@ -2830,6 +2871,7 @@ mod tests {
         // assume the field exists -- pre-release, no back-compat).
         let session_empty = ServerFrame::Session {
             id: "abc".into(),
+            pty: None,
             name: None,
             group: "default".into(),
             spawn_name: None,
