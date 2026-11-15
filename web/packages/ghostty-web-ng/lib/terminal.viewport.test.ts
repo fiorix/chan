@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { GhosttyVt } from '../vt/ghosttyVt';
+import type { EventEmitter } from './event-emitter';
+import type { TerminalChange } from './interfaces';
+import { LinkDetector } from './link-detector';
+import { UrlRegexProvider } from './providers/url-regex-provider';
 import { Terminal } from './terminal';
+import type { ILink } from './types';
 
 let module: WebAssembly.Module;
 const terminals: Terminal[] = [];
@@ -152,6 +157,8 @@ describe('viewport positioning', () => {
 describe('content changes', () => {
   test('each parsed write emits once, before a synchronous echo paint and the callback', async () => {
     const { term, renderer } = await terminal();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
     expect(term.onChange, 'the widget emits content changes').toBeTypeOf('function');
     const seen: string[] = [];
     term.onChange(({ kind }) => {
@@ -161,12 +168,67 @@ describe('content changes', () => {
     term.input('x', true);
     term.write('x', () => seen.push('callback'));
     expect(seen).toEqual(['write:x', 'paint']);
+    expect(frames).toHaveLength(1);
+    frames.shift()!(0);
+    expect(seen).toEqual(['write:x', 'paint', 'callback']);
     term.write(new TextEncoder().encode('y'));
     term.writeln('z');
     term.write('');
     expect(seen.filter((item) => item.startsWith('write:'))).toEqual([
-      'write:x', 'write:xy', 'write:xyz', 'write:xyz',
+      'write:x', 'write:xy', 'write:xyz',
     ]);
+  });
+
+  test.each(['string', 'bytes'] as const)('an empty %s write queues its callback without changing content or consuming the pending echo', async (kind) => {
+    const { term, renderer } = await terminal();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+    const changed = vi.fn();
+    const callback = vi.fn();
+    term.onChange(changed);
+    term.input('x', true);
+    renderer.render.mockClear();
+    term.write(kind === 'string' ? '' : new Uint8Array(), callback);
+    expect(changed, 'empty output changes no content').not.toHaveBeenCalled();
+    expect(renderer.render, 'empty output is not the pending user echo').not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    frames.shift()!(0);
+    expect(callback).toHaveBeenCalledOnce();
+    term.write('x');
+    expect(changed).toHaveBeenCalledOnce();
+    expect(renderer.render, 'the next real echo still paints synchronously').toHaveBeenCalledOnce();
+  });
+
+  test('a throwing change listener cannot leave parsed terminal replies unsent', async () => {
+    const { term } = await terminal();
+    const replies: string[] = [];
+    term.onData((data) => replies.push(data));
+    term.onChange(() => { throw new Error('observer failed'); });
+    // This operating-status query/reply is also recorded in the differential oracle.
+    expect(() => term.write('\x1b[5n')).toThrow('observer failed');
+    expect(replies, 'the PTY receives the parsed reply before change observers run').toEqual(['\x1b[0n']);
+    expect(term.wasmTerm!.readResponse(), 'no reply is stranded for a later write').toBeNull();
+  });
+
+  test('a change listener queries links from the parsed content rather than the previous cache', async () => {
+    const { term } = await terminal();
+    const links = new LinkDetector(term);
+    links.registerProvider(new UrlRegexProvider(term));
+    Object.assign(term, { linkDetector: links });
+    term.write('https://before.example');
+    expect(await links.getLinkAt(0, 0), 'prime the real provider cache').toBeDefined();
+    const observed: Array<Promise<ILink | undefined>> = [];
+    term.onChange(() => { observed.push(links.getLinkAt(0, 0)); });
+    term.write('\r\x1b[2Khttps://after.example');
+    expect(observed).toHaveLength(1);
+    const link = await observed[0];
+    expect(link, 'the replacement URL remains a link').toBeDefined();
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    link!.activate(new MouseEvent('click', { ctrlKey: true }));
+    expect(open, 'the listener sees the URL currently on the screen').toHaveBeenCalledExactlyOnceWith(
+      'https://after.example', '_blank', 'noopener,noreferrer',
+    );
   });
 
   test('change listeners see the final anchored offset before any write paint', async () => {
@@ -218,6 +280,18 @@ describe('content changes', () => {
     term.dispose();
     expect(() => term.write('three')).toThrow('disposed');
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test('disposing the widget releases retained change subscriptions', async () => {
+    const { term } = await terminal();
+    const changed = vi.fn();
+    term.onChange(changed);
+    const emitter = (term as unknown as { changeEmitter: EventEmitter<TerminalChange> }).changeEmitter;
+    term.dispose();
+    // write() refuses a disposed widget before reaching the emitter; drive
+    // delivery here so that guard cannot hide retained subscriptions.
+    emitter.fire({ kind: 'write' });
+    expect(changed, 'disposed observers are no longer retained for dispatch').not.toHaveBeenCalled();
   });
 
   test('a change listener can dispose itself without skipping the next subscriber', async () => {

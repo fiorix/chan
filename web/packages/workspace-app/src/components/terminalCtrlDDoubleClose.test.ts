@@ -187,7 +187,6 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     getScrollbackLength() {
       return 0;
     }
-    scrollToLine() {}
     onData() {}
     onResize() {}
     write() {}
