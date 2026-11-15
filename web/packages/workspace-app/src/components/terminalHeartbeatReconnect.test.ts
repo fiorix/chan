@@ -104,12 +104,13 @@ describe("terminal heartbeat", () => {
     const socket = lastSocket();
     await attach(socket);
 
-    expect(pings(socket)).toBe(0);
-    await vi.advanceTimersByTimeAsync(WS_PING_MS);
     expect(pings(socket)).toBe(1);
     await pong(socket);
     await vi.advanceTimersByTimeAsync(WS_PING_MS);
     expect(pings(socket)).toBe(2);
+    await pong(socket);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS);
+    expect(pings(socket)).toBe(3);
     await pong(socket);
     // Frames kept arriving, so the read-deadline never tripped: one socket.
     expect(TerminalSocket.all).toHaveLength(1);
@@ -136,8 +137,9 @@ describe("terminal heartbeat", () => {
 
     // A successful reattach resumes the heartbeat on the new socket.
     await attach(lastSocket(), "sess-keep");
-    await vi.advanceTimersByTimeAsync(WS_PING_MS);
     expect(pings(lastSocket())).toBe(1);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS);
+    expect(pings(lastSocket())).toBe(2);
   });
 
   test("exactly one redial is in flight after a deadline trip", async () => {
