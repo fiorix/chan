@@ -42,7 +42,7 @@
   // Only a button the user activated may regain focus after its IPC settles.
   let focusAfterAction: "reconnect" | "abandon" | null = null;
   // A late IPC completion cannot return focus during a later outage.
-  let outageEpoch = 0;
+  let recoveryEpoch = 0;
   type FocusReturn = { element: HTMLElement; surface: boolean };
   // Keep the surface kind because reconnect can replace its focused DOM node.
   let focusBeforeCover: FocusReturn | null = null;
@@ -55,18 +55,18 @@
     fn: () => Promise<void>,
   ): Promise<void> {
     if (pendingAction !== null) return;
-    const actionEpoch = outageEpoch;
+    const actionEpoch = recoveryEpoch;
     pendingAction = action;
     recoveryError = null;
     try {
       await fn();
     } catch (e) {
-      if (outageEpoch === actionEpoch) recoveryError = errorText(e);
+      if (recoveryEpoch === actionEpoch) recoveryError = errorText(e);
     } finally {
-      if (outageEpoch === actionEpoch) pendingAction = null;
+      if (recoveryEpoch === actionEpoch) pendingAction = null;
       await tick();
       // Disabling the active button can drop native focus onto the body.
-      if (visible && !watcherOpen && outageEpoch === actionEpoch) {
+      if (visible && !outageResolved && recoveryEpoch === actionEpoch) {
         focusAfterAction = action;
         focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
       }
@@ -123,7 +123,7 @@
   onMount(() => {
     // A launcher hide is the first point at which the page may take focus back.
     const onWindowFocus = (): void => {
-      if (!deferredFocus || launcherShownOverWindow() || !watcherOpen) return;
+      if (!deferredFocus || launcherShownOverWindow() || !outageResolved) return;
       const { returnTo, epoch } = deferredFocus;
       deferredFocus = null;
       restoreFocus(returnTo, epoch);
@@ -132,12 +132,13 @@
     return () => window.removeEventListener("focus", onWindowFocus);
   });
 
-  const watcherOpen = $derived(ui.ws === "open" && connectionHealth.outage === null);
+  const outageResolved = $derived(ui.ws === "open" && connectionHealth.outage === null);
   const bandAvailable = $derived(windowTabBar.on && !keyboardOwnedAbovePanes());
   $effect(() => {
+    // Each watcher status change restarts the grace timer for a closed socket.
     const status = ui.ws;
-    if (status === "open" && watcherOpen) {
-      outageEpoch += 1;
+    if (status === "open" && outageResolved) {
+      recoveryEpoch += 1;
       const priorFocus = focusBeforeCover ?? deferredFocus?.returnTo ?? null;
       focusBeforeCover = null;
       deferredFocus = null;
@@ -147,7 +148,7 @@
       recoveryError = null;
       focusAfterAction = null;
       if (priorFocus) {
-        const epoch = outageEpoch;
+        const epoch = recoveryEpoch;
         void tick().then(() => restoreFocus(priorFocus, epoch));
       }
       return;
@@ -168,7 +169,7 @@
   });
 
   $effect(() => {
-    if (watcherOpen || !hasBeenOpen) {
+    if (outageResolved || !hasBeenOpen) {
       actionsReady = false;
       return;
     }
@@ -232,7 +233,7 @@
   }
 
   function restoreFocus(returnTo: FocusReturn, epoch: number): void {
-    if (outageEpoch !== epoch || !watcherOpen) return;
+    if (recoveryEpoch !== epoch || !outageResolved) return;
     if (launcherShownOverWindow()) {
       deferredFocus = { returnTo, epoch };
       return;

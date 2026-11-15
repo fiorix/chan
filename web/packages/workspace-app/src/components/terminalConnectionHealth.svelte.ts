@@ -35,6 +35,8 @@ export function createTerminalConnectionHealth(
   let noticeBlocked = false;
   let okSince: number | null = null;
   let stalledAt: number | null = null;
+  let windowWaitStartedAt: number | null = null;
+  let stallWaitStartedAt: number | null = null;
   let redialEligibleAt: number | null = null;
   let lastRedialAt = Number.NEGATIVE_INFINITY;
   let inputOutstanding = false;
@@ -118,6 +120,7 @@ export function createTerminalConnectionHealth(
       state.stalled = false;
       state.waitMs = 0;
       stalledAt = null;
+      stallWaitStartedAt = null;
       redialedThisStall = false;
       clearTicker();
       updateRedial();
@@ -127,11 +130,15 @@ export function createTerminalConnectionHealth(
     if (stalled && !state.stalled) stalledAt = now();
     if (!stalled) {
       stalledAt = null;
+      stallWaitStartedAt = null;
       redialedThisStall = false;
+    } else {
+      const start = Math.min(pingAt ?? now(), windowWaitStartedAt ?? Number.POSITIVE_INFINITY);
+      stallWaitStartedAt = Math.min(stallWaitStartedAt ?? start, start);
     }
     state.stalled = stalled;
     if (state.stalled) clearNotice();
-    state.waitMs = waitMs;
+    state.waitMs = stalled ? Math.max(0, now() - stallWaitStartedAt!) : waitMs;
     if (pingAt !== null && ticker === null) ticker = setInterval(sync, TERMINAL_CONNECTION_TICK_MS);
     else if (pingAt === null) clearTicker();
     updateRedial();
@@ -156,6 +163,8 @@ export function createTerminalConnectionHealth(
     state.waitMs = 0;
     state.retiring = false;
     stalledAt = null;
+    windowWaitStartedAt = null;
+    stallWaitStartedAt = null;
     redialEligibleAt = null;
     redialedThisStall = false;
   };
@@ -248,9 +257,14 @@ export function createTerminalConnectionHealth(
       updateRedial();
     },
     /// Re-evaluate watcher contact and pause notice time while the cover or tab hides it.
-    windowChanged(next: ConnectionState, blocked: boolean) {
+    windowChanged(next: ConnectionState, blocked: boolean, waitStartedAt: number | null = null) {
       if (windowState !== next) okSince = next === "ok" ? now() : null;
       windowState = next;
+      windowWaitStartedAt = next === "stalled" ? waitStartedAt : null;
+      if (state.stalled && windowWaitStartedAt !== null) {
+        stallWaitStartedAt = Math.min(stallWaitStartedAt ?? now(), windowWaitStartedAt);
+        state.waitMs = Math.max(0, now() - stallWaitStartedAt);
+      }
       if (noticeBlocked !== blocked) {
         noticeBlocked = blocked;
         if (blocked && noticeTimer !== null) {

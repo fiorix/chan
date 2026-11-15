@@ -148,6 +148,7 @@ test("collapsed connection has a close that hides it until its state changes", (
 test("section close keeps a counting stalled connection hidden until state changes", () => {
   state("stalled", 8_100);
   render();
+  expect(target.querySelector<HTMLButtonElement>('[aria-label="hide connection status"]')?.title).toBe("Hide until the connection state changes");
   target.querySelector<HTMLButtonElement>('[aria-label="hide connection status"]')!.click();
   flushSync();
   expect(section()).toBeNull();

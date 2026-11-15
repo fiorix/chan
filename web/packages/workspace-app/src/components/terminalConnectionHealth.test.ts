@@ -51,6 +51,29 @@ describe("terminal connection", () => {
     return { connection, runs, contact: (at: number | null) => { contactAt = at; } };
   }
 
+  test("counts one terminal stall from the earlier window wait through window loss", () => {
+    const { connection } = rig();
+    connection.pingSent();
+    connection.frameArrived();
+    connection.pongArrived();
+    vi.advanceTimersByTime(10_000);
+    connection.pingSent();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    connection.windowChanged("stalled", false, 5_000);
+    expect(connection.state.waitMs).toBe(9_000);
+    connection.windowChanged("down", false);
+    vi.advanceTimersByTime(1_000);
+    expect(connection.state.waitMs).toBe(10_000);
+    connection.frameArrived();
+    expect(connection.state.stalled).toBe(false);
+    connection.pongArrived();
+    connection.pingSent();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.waitMs).toBe(CONNECTION_STALLED_MS);
+    connection.dispose();
+  });
+
   test("waits for watcher contact newer than the terminal stall, then three seconds of ok", () => {
     expect(TERMINAL_STALL_REDIAL_MS).toBe(3_000);
     const { connection, runs, contact } = redialRig();

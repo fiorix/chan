@@ -4,16 +4,16 @@
   // disappears when none do.
   //
   // Sections (left -> right):
-  //   - connection     : unhealthy window connection, when tabs are not in the title bar.
-  //   - index    : indexer state (building / reindexing / recovering / error).
-  //                Idle is completely hidden so the bar stays quiet
-  //                when nothing's happening.
-  //   - import   : long-running import progress (contacts today;
-  //                others slot in via the same `importStatus` store).
-  //   - transfers: a launcher for the transfer bubble -- file uploads
-  //                and downloads (progress + cancel) live in the bubble,
-  //                not as inline status text.
-  //   - status   : action confirmations, progress and errors.
+  //   - connection: unhealthy window connection, when tabs are not in the title bar.
+  //   - index     : indexer state (building / reindexing / recovering / error).
+  //                 Idle is completely hidden so the bar stays quiet
+  //                 when nothing's happening.
+  //   - import    : long-running import progress (contacts today;
+  //                 others slot in via the same `importStatus` store).
+  //   - transfers : a launcher for the transfer bubble -- file uploads
+  //                 and downloads (progress + cancel) live in the bubble,
+  //                 not as inline status text.
+  //   - status    : action confirmations, progress and errors.
   //
   // Hide model: bar disappears entirely when no section shows, and
   // collapses to a pill on click. No idle fade and no time-based
@@ -269,7 +269,7 @@
         {#if connectionShown}
           <span class="closable connection-section">
             <ConnectionIndicator placement="status" />
-            {@render closeButton("connection", "hide connection status", "Hide until a new link state appears")}
+            {@render closeButton("connection", "hide connection status", "Hide until the connection state changes")}
           </span>
         {/if}
         {#if connectionShown && indexShown}

@@ -412,8 +412,9 @@
   });
   $effect(() => {
     const state = connectionHealth.state;
+    const waitStartedAt = state === "stalled" ? Date.now() - connectionHealth.waitMs : null;
     const blocked = ui.disconnectBlocking || !active;
-    untrack(() => terminalConnection.windowChanged(state, blocked));
+    untrack(() => terminalConnection.windowChanged(state, blocked, waitStartedAt));
   });
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
@@ -3625,7 +3626,7 @@
       stalled={terminalConnection.state.stalled && status === "connected" && active && !ui.disconnectBlocking}
       lost={terminalConnection.state.lost && status !== "exited" && active && !ui.disconnectBlocking}
       notice={terminalConnection.state.notice && status === "connected" && active && !ui.disconnectBlocking}
-      waitMs={connectionHealth.state === "stalled" ? connectionHealth.waitMs : terminalConnection.state.waitMs}
+      waitMs={terminalConnection.state.waitMs}
       {findOpen}
       inspectorOpen={!!tab.inspectorOpen}
       inspectorWidth={tab.inspectorWidth ?? 280}

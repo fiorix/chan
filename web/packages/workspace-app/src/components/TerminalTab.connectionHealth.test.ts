@@ -593,7 +593,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
-  test("the pill shares the window stall count and returns to its own count otherwise", async () => {
+  test("the pill keeps the earlier wait origin when the window drops from stalled to down", async () => {
     const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
@@ -603,9 +603,11 @@ describe("terminal connection in the tab", () => {
     connectionHealth.waitMs = 15_000;
     await tick();
     expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 15 s.");
-    connectionHealth.state = "slow";
+    connectionHealth.state = "down";
     await tick();
-    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 4 s.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 15 s.");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 16 s.");
   });
 
   test("the tab passes its find and inspector geometry to the pill", async () => {
