@@ -612,11 +612,11 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         tracing::warn!("malformed server config, falling back to defaults: {e}");
         ServerConfig::default()
     });
-    // Install any per-agent submit-chord overrides from
-    // `<config>/chan/submit.toml` into chan-shell, so a client changing its
-    // submit behavior is a config edit, not a rebuild. A missing or malformed
-    // file installs nothing, so the overrides already installed in this
-    // process stand (the built-in defaults until a build installs some);
+    // Install any per-agent submit-chord overrides from `submit.toml` in the
+    // chan home (`$CHAN_HOME`, default `~/.chan`) into chan-shell, so a client
+    // changing its submit behavior is a config edit, not a rebuild. A missing
+    // or malformed file installs nothing, so the overrides already installed
+    // in this process stand (the built-in defaults until a build installs some);
     // `CHAN_SUBMIT_<AGENT>` still wins at chord-application time.
     // Workspace-independent, so both kinds install it.
     submit_config::install();

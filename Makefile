@@ -860,8 +860,8 @@ web-check: web-launcher ## Run frontend check, vitest, and production build.
 	# cover command-deck behavior without relying on an importing SPA to do so.
 	# @chan/ghostty-web-ng's check type-checks chan's libghostty-vt binding in
 	# its vt/ and the widget sources lib/index.ts reaches, under the app's
-	# rules, and its tests cover the binding; the workspace app's suite tests
-	# the app's adapters over the binding, not the binding itself.
+	# rules. Its tests cover the binding, input handler and viewport behavior;
+	# the workspace app's suite tests the app's adapters over the binding.
 	cd web && $(NPM) install \
 		&& $(NPM) run check -w @chan/web-shared && $(NPM) run test -w @chan/web-shared \
 		&& $(NPM) run check -w @chan/ghostty-web-ng && $(NPM) run test -w @chan/ghostty-web-ng \
