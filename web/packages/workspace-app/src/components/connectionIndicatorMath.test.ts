@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { linkContactTime, linkFigures, linkIndicatorLabelCh, linkIndicatorShown, linkSparkline, linkStateAge } from "./linkIndicatorMath";
+import { connectionContactTime, connectionFigures, connectionIndicatorLabelCh, connectionIndicatorShown, connectionSparkline, connectionStateAge } from "./connectionIndicatorMath";
 
 for (const [placement, remote, state, expected] of [
   ["tab-bar", false, "unknown", false],
@@ -24,7 +24,7 @@ for (const [placement, remote, state, expected] of [
   ["status", true, "down", true],
 ] as const) {
   test(`visibility: ${placement}/${state}/remote=${remote}`, () => {
-    expect(linkIndicatorShown(placement, state, remote)).toBe(expected);
+    expect(connectionIndicatorShown(placement, state, remote)).toBe(expected);
   });
 }
 
@@ -35,87 +35,87 @@ test.each([
   ["ok", 0],
   ["unknown", 0],
 ] as const)("%s reserves %s characters", (state, width) => {
-  expect(linkIndicatorLabelCh(state)).toBe(width);
+  expect(connectionIndicatorLabelCh(state)).toBe(width);
 });
 
-describe("link figures", () => {
+describe("connection figures", () => {
   test("uses answered samples for latest, odd median and worst", () => {
-    expect(linkFigures([{ at: 1, rttMs: 50 }, { at: 2, rttMs: null }, { at: 3, rttMs: 10 }, { at: 4, rttMs: 30 }]))
+    expect(connectionFigures([{ at: 1, rttMs: 50 }, { at: 2, rttMs: null }, { at: 3, rttMs: 10 }, { at: 4, rttMs: 30 }]))
       .toEqual({ latest: 30, median: 30, worst: 50 });
   });
 
   test("averages the middle pair for an even median", () => {
-    expect(linkFigures([{ at: 1, rttMs: 40 }, { at: 2, rttMs: 10 }, { at: 3, rttMs: 20 }, { at: 4, rttMs: 30 }]).median).toBe(25);
+    expect(connectionFigures([{ at: 1, rttMs: 40 }, { at: 2, rttMs: 10 }, { at: 3, rttMs: 20 }, { at: 4, rttMs: 30 }]).median).toBe(25);
   });
 
   test("has no figures when all samples missed", () => {
-    expect(linkFigures([{ at: 1, rttMs: null }])).toEqual({ latest: null, median: null, worst: null });
-    expect(linkFigures([])).toEqual({ latest: null, median: null, worst: null });
+    expect(connectionFigures([{ at: 1, rttMs: null }])).toEqual({ latest: null, median: null, worst: null });
+    expect(connectionFigures([])).toEqual({ latest: null, median: null, worst: null });
   });
 
   test("sorts RTTs numerically for the median", () => {
-    expect(linkFigures([5, 100, 20, 30, 9].map((rttMs, at) => ({ at, rttMs }))))
+    expect(connectionFigures([5, 100, 20, 30, 9].map((rttMs, at) => ({ at, rttMs }))))
       .toEqual({ latest: 9, median: 20, worst: 100 });
   });
 });
 
 describe("sparkline", () => {
   test("breaks the line at misses and marks their baseline positions", () => {
-    expect(linkSparkline([{ at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: null }, { at: 4, rttMs: 30 }, { at: 5, rttMs: 40 }], 40, 40))
+    expect(connectionSparkline([{ at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: null }, { at: 4, rttMs: 30 }, { at: 5, rttMs: 40 }], 40, 40))
       .toEqual({ paths: ["M 3 35 L 12 34", "M 29 34 L 37 33"], misses: [20] });
   });
 
   test("keeps a slow-threshold floor and clips outliers above it", () => {
-    const line = linkSparkline([{ at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: 1000 }], 20, 40);
+    const line = connectionSparkline([{ at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: 1000 }], 20, 40);
     expect(line.paths).toEqual(["M 3 35 L 10 34 L 17 4"]);
   });
 
   test("scales to twice the median once that passes the slow threshold", () => {
-    expect(linkSparkline([500, 600, 5000].map((rttMs, at) => ({ at, rttMs })), 20, 40).paths)
+    expect(connectionSparkline([500, 600, 5000].map((rttMs, at) => ({ at, rttMs })), 20, 40).paths)
       .toEqual(["M 3 23 L 10 20 L 17 4"]);
   });
 
   test("paints the first answer as an inset point", () => {
-    expect(linkSparkline([{ at: 0, rttMs: 100 }], 40, 40))
+    expect(connectionSparkline([{ at: 0, rttMs: 100 }], 40, 40))
       .toEqual({ paths: ["M 20 28 L 20 28"], misses: [] });
   });
 
   test("a zero median keeps one millisecond of jitter low", () => {
-    expect(linkSparkline([0, 0, 1].map((rttMs, at) => ({ at, rttMs })), 40, 40).paths)
+    expect(connectionSparkline([0, 0, 1].map((rttMs, at) => ({ at, rttMs })), 40, 40).paths)
       .toEqual(["M 3 36 L 20 36 L 37 36"]);
   });
 
   test("paints a lone answer between missed pings", () => {
-    expect(linkSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: 10 }, { at: 2, rttMs: null }], 40, 40))
+    expect(connectionSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: 10 }, { at: 2, rttMs: null }], 40, 40))
       .toEqual({ paths: ["M 20 35 L 20 35"], misses: [3, 37] });
   });
 
   test("marks misses at both inset edges", () => {
-    expect(linkSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: null }], 40, 40))
+    expect(connectionSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: 10 }, { at: 2, rttMs: 20 }, { at: 3, rttMs: null }], 40, 40))
       .toEqual({ paths: ["M 14 35 L 26 34"], misses: [3, 37] });
   });
 
   test("keeps consecutive misses separate from zero RTT answers", () => {
-    expect(linkSparkline([{ at: 0, rttMs: 0 }, { at: 1, rttMs: null }, { at: 2, rttMs: null }, { at: 3, rttMs: 0 }], 40, 40))
+    expect(connectionSparkline([{ at: 0, rttMs: 0 }, { at: 1, rttMs: null }, { at: 2, rttMs: null }, { at: 3, rttMs: 0 }], 40, 40))
       .toEqual({ paths: ["M 3 36 L 3 36", "M 37 36 L 37 36"], misses: [14, 26] });
   });
 
   test("marks every miss when no ping was answered", () => {
-    expect(linkSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: null }, { at: 2, rttMs: null }], 40, 40))
+    expect(connectionSparkline([{ at: 0, rttMs: null }, { at: 1, rttMs: null }, { at: 2, rttMs: null }], 40, 40))
       .toEqual({ paths: [], misses: [3, 20, 37] });
   });
 
   test("an empty history draws nothing", () => {
-    expect(linkSparkline([])).toEqual({ paths: [], misses: [] });
+    expect(connectionSparkline([])).toEqual({ paths: [], misses: [] });
   });
 });
 
 describe("contact clock and state age", () => {
   test("last contact is a locale clock time with seconds or a dash", () => {
-    expect(linkContactTime(null)).toBe("-");
+    expect(connectionContactTime(null)).toBe("-");
     const format = vi.spyOn(Date.prototype, "toLocaleTimeString").mockReturnValue("17:42:07");
     try {
-      expect(linkContactTime(9_600)).toBe("17:42:07");
+      expect(connectionContactTime(9_600)).toBe("17:42:07");
       expect(format).toHaveBeenCalledWith(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       expect((format.mock.instances[0] as Date).getTime()).toBe(9_600);
     } finally {
@@ -124,16 +124,16 @@ describe("contact clock and state age", () => {
   });
 
   test("clamps future state timestamps to zero", () => {
-    expect(linkStateAge("slow", 10_000, 9_000, 0)).toBe("Slow for 0 s");
+    expect(connectionStateAge("slow", 10_000, 9_000, 0)).toBe("Slow for 0 s");
   });
 
   test("uses whole minutes for long state ages", () => {
-    expect(linkStateAge("down", 0, 754_000, 0)).toBe("Reconnecting for 12 min");
+    expect(connectionStateAge("down", 0, 754_000, 0)).toBe("Reconnecting for 12 min");
   });
 
   test("changes state age from seconds to minutes at 120 s", () => {
-    expect(linkStateAge("down", 0, 119_999, 0)).toBe("Reconnecting for 119 s");
-    expect(linkStateAge("down", 0, 120_000, 0)).toBe("Reconnecting for 2 min");
+    expect(connectionStateAge("down", 0, 119_999, 0)).toBe("Reconnecting for 119 s");
+    expect(connectionStateAge("down", 0, 120_000, 0)).toBe("Reconnecting for 2 min");
   });
 
   test.each([
@@ -143,12 +143,12 @@ describe("contact clock and state age", () => {
     ["stalled", "No response for 12 s"],
     ["down", "Reconnecting for 12 s"],
   ] as const)("words %s state", (state, expected) => {
-    expect(linkStateAge(state, 0, 12_900, 12_900)).toBe(expected);
+    expect(connectionStateAge(state, 0, 12_900, 12_900)).toBe(expected);
   });
 
   test("stalled counts the ping wait in seconds, while slow and down count from state change", () => {
-    expect(linkStateAge("stalled", 16_000, 20_000, 8_900)).toBe("No response for 8 s");
-    expect(linkStateAge("slow", 16_000, 20_000, 8_900)).toBe("Slow for 4 s");
-    expect(linkStateAge("down", 16_000, 20_000, 8_900)).toBe("Reconnecting for 4 s");
+    expect(connectionStateAge("stalled", 16_000, 20_000, 8_900)).toBe("No response for 8 s");
+    expect(connectionStateAge("slow", 16_000, 20_000, 8_900)).toBe("Slow for 4 s");
+    expect(connectionStateAge("down", 16_000, 20_000, 8_900)).toBe("Reconnecting for 4 s");
   });
 });

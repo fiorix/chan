@@ -1,7 +1,7 @@
 <script lang="ts">
   // The window tab bar is a band across the top of the window. It holds the
   // pane tree button, the window's title, the slot the active pane's tab
-  // strip moves into (see Pane.svelte), and the link indicator at its end.
+  // strip moves into (see Pane.svelte), and the connection indicator at its end.
   // The title sits after the tree button while the window has no tabs and
   // at the bar's end, left of the strip's actions, once it has one. In
   // chan-desktop's title bar its insets keep clear of the window controls,
@@ -11,13 +11,13 @@
   // their own above every overlay. The band is opaque: terminal background
   // opacity cuts its holes behind terminal panes only. While the window's
   // Computers launcher is shown over the page, the band holds neither the
-  // tree button, the strip nor the link indicator: they belong to the
+  // tree button, the strip nor the connection indicator: they belong to the
   // covered window. On Windows it holds the launcher's menubar menus there
   // instead, since the frameless window wears no menubar, and the window's
   // title after them. A tmux pane has no strip, so while one is active the
   // band marks the window as tmux's and names no pane: the window's title
   // names the window. Under the reconnecting cover it keeps the title and
-  // link indicator while hiding the tree button and strip in place.
+  // connection indicator while hiding the tree button and strip in place.
 
   import { untrack } from "svelte";
   import {
@@ -57,8 +57,8 @@
   } from "../state/windowTabBar.svelte";
   import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
   import { privacy } from "@chan/web-shared/privacy";
-  import LinkIndicator from "./LinkIndicator.svelte";
-  import { LINK_INDICATOR_STALLED_DOWN_LABEL_CH } from "./linkIndicatorMath";
+  import ConnectionIndicator from "./ConnectionIndicator.svelte";
+  import { CONNECTION_INDICATOR_STALLED_DOWN_LABEL_CH } from "./connectionIndicatorMath";
   import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
 
   // `restored` is false until the boot has restored the window's layout:
@@ -70,7 +70,7 @@
   // carrying the attribute, and zooms the window on a double click there.
   const drag = isTauriDesktop() ? "" : undefined;
   // The title clears the indicator's glyph, gap, padding, margin and bar gap.
-  const COVER_LINK_FIXED_PX = 16 + 4 + 10 + 8 + 4;
+  const COVER_CONNECTION_FIXED_PX = 16 + 4 + 10 + 8 + 4;
 
   const viewLayout = $derived(activeLayout());
   const rects = $derived(Object.entries(paneRects(viewLayout)));
@@ -217,12 +217,12 @@
   // Only Windows, whose frameless window wears no menubar, gets launcher
   // menus. The covered title is the bar's own, so privacy masks it before
   // the desktop's mask arrives. The launcher's macOS title stays native;
-  // reconnect alone draws this title beside the link state on every host.
+  // reconnect alone draws this title beside the connection state on every host.
   const menus = $derived(launcherCovered ? chrome.menus : []);
   const titleShown = $derived(title !== null && (launcherCovered ? chrome.drawControls : reconnectCovered));
   const coveredBandLeft = $derived(reconnectCovered && !launcherCovered ? `${chrome.insetLeft}px` : "0px");
   const coveredBandRight = $derived(reconnectCovered && !launcherCovered
-    ? `calc(${chrome.insetRight + 8 + COVER_LINK_FIXED_PX}px + var(--link-indicator-label-width))`
+    ? `calc(${chrome.insetRight + 8 + COVER_CONNECTION_FIXED_PX}px + var(--connection-indicator-label-width))`
     : `${chrome.insetRight + 8}px`);
 
   // The menu whose popup is up. The desktop answers once the menu has
@@ -381,12 +381,12 @@
          attribute on the element pressed. -->
     <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
-  {#if !launcherCovered}<LinkIndicator placement="tab-bar" />{/if}
+  {#if !launcherCovered}<ConnectionIndicator placement="tab-bar" />{/if}
   {#if menus.length > 0 || titleShown}
     <!-- The launcher puts Windows menubar menus and its title in the band.
          The reconnecting cover keeps the title visible on every host, clear
          of the indicator and window controls. The band remains drag space. -->
-    <div class="covered-band" style:left={coveredBandLeft} style:right={coveredBandRight} style:--link-indicator-label-width={`${LINK_INDICATOR_STALLED_DOWN_LABEL_CH}ch`}>
+    <div class="covered-band" style:left={coveredBandLeft} style:right={coveredBandRight} style:--connection-indicator-label-width={`${CONNECTION_INDICATOR_STALLED_DOWN_LABEL_CH}ch`}>
       {#if menus.length > 0}
         <div class="window-menus">
           {#each menus as menu (menu.id)}
@@ -525,7 +525,7 @@
   .slot.beside-title {
     flex: 1 0 auto;
   }
-  .window-tab-bar > :global(.link-indicator) {
+  .window-tab-bar > :global(.connection-indicator) {
     /* Matches the tmux badge's end margin: clear of a macOS edge or the Windows controls' inset. */
     margin-right: 8px;
   }
@@ -595,7 +595,7 @@
   }
   /* Black with white text in either theme: it names tmux, not a state the
      theme colours. In the side toggle's type; its 8px margin and the bar's
-     4px gap match the strip's 8px end padding and gap when the link indicator
+     4px gap match the strip's 8px end padding and gap when the connection indicator
      is absent, or separate the badge from it when it shows. */
   .tmux-badge {
     flex: none;

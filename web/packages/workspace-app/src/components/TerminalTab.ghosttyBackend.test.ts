@@ -619,7 +619,7 @@ describe("output and scrolling", () => {
     expect(arrows(socket)).toEqual(["\x1bOA"]);
   });
 
-  test("a wheel arrow sent to the PTY does not arm a link probe", async () => {
+  test("a wheel arrow sent to the PTY does not arm a connection probe", async () => {
     const { term, socket } = await mountGhostty();
     vi.useFakeTimers();
     try {

@@ -298,7 +298,7 @@ function wheel(term: GhosttyStandIn, delta: WheelEventInit = { deltaY: 1, deltaM
 }
 
 describe("a ghostty mouse report", () => {
-  test("an X10 mouse report from onData does not arm a link probe", async () => {
+  test("an X10 mouse report from onData does not arm a connection probe", async () => {
     const { term, socket } = await attachedGhostty();
     vi.useFakeTimers();
     try {
@@ -310,7 +310,7 @@ describe("a ghostty mouse report", () => {
     }
   });
 
-  test("an X10 wheel report does not arm a link probe", async () => {
+  test("an X10 wheel report does not arm a connection probe", async () => {
     const { term, socket } = await attachedGhostty();
     vi.useFakeTimers();
     try {
@@ -322,7 +322,7 @@ describe("a ghostty mouse report", () => {
     }
   });
 
-  test("typed ghostty data arms a link probe", async () => {
+  test("typed ghostty data arms a connection probe", async () => {
     const { term, socket } = await attachedGhostty();
     vi.useFakeTimers();
     try {

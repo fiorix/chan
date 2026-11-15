@@ -1,27 +1,27 @@
-// The link probe pairs each pong with the oldest waiting ping, since the wire
-// carries no ping id and the server answers in order, and reads the link's
+// The connection probe pairs each pong with the oldest waiting ping, since the wire
+// carries no ping id and the server answers in order, and reads the connection's
 // state from the round trips and from how long a ping has waited. Driven with
 // an injected clock: nothing here needs a socket or a timer.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
-  LINK_MAX_RTT_MS,
-  LINK_OK_RTT_MS,
-  LINK_PENDING_CAP,
-  LINK_RTT_RUN,
-  LINK_SLOW_RTT_MS,
-  LINK_SLOW_WAIT_MS,
-  LINK_STALLED_MS,
-  classifyLink,
-  createLinkProbe,
-  type LinkProbe,
-  type LinkReading,
-  type LinkSample,
-} from "./linkProbe";
+  CONNECTION_MAX_RTT_MS,
+  CONNECTION_OK_RTT_MS,
+  CONNECTION_PENDING_CAP,
+  CONNECTION_RTT_RUN,
+  CONNECTION_SLOW_RTT_MS,
+  CONNECTION_SLOW_WAIT_MS,
+  CONNECTION_STALLED_MS,
+  classifyConnection,
+  createConnectionProbe,
+  type ConnectionProbe,
+  type ConnectionReading,
+  type ConnectionSample,
+} from "./connectionProbe";
 
 interface Rig {
-  probe: LinkProbe;
-  samples: LinkSample[];
+  probe: ConnectionProbe;
+  samples: ConnectionSample[];
   changes: () => number;
   /// The clock's reading.
   now(): number;
@@ -36,8 +36,8 @@ interface Rig {
 function rig(rememberAnsweredAcrossSockets = false): Rig {
   let t = 1_000_000;
   let changed = 0;
-  const samples: LinkSample[] = [];
-  const probe = createLinkProbe({
+  const samples: ConnectionSample[] = [];
+  const probe = createConnectionProbe({
     rememberAnsweredAcrossSockets,
     now: () => t,
     onSample: (s) => samples.push(s),
@@ -119,7 +119,7 @@ describe("pong timing", () => {
 
   test("the default clock is the wall clock", () => {
     vi.useFakeTimers();
-    const probe = createLinkProbe();
+    const probe = createConnectionProbe();
     probe.pingSent();
     vi.advanceTimersByTime(75);
     probe.frameReceived();
@@ -238,14 +238,14 @@ describe("a clock jump", () => {
 
 describe("an over-long round trip", () => {
   test("the bounds are the contract's", () => {
-    expect([LINK_MAX_RTT_MS, LINK_PENDING_CAP]).toEqual([45_000, 32]);
+    expect([CONNECTION_MAX_RTT_MS, CONNECTION_PENDING_CAP]).toEqual([45_000, 32]);
   });
 
   test("past the read deadline it is not timed, but it answers and keeps the pairing", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent(); // T0 + 30
-    r.wait(LINK_MAX_RTT_MS + 1);
+    r.wait(CONNECTION_MAX_RTT_MS + 1);
     const later = r.now();
     r.probe.pingSent(); // sent before the late pong arrives
     r.wait(20);
@@ -265,15 +265,15 @@ describe("an over-long round trip", () => {
   test("at exactly the read deadline it is still timed", () => {
     const r = rig();
     r.probe.pingSent();
-    r.wait(LINK_MAX_RTT_MS);
-    expect(r.pong()).toBe(LINK_MAX_RTT_MS);
-    expect(r.samples).toEqual([{ at: T0, rttMs: LINK_MAX_RTT_MS }]);
+    r.wait(CONNECTION_MAX_RTT_MS);
+    expect(r.pong()).toBe(CONNECTION_MAX_RTT_MS);
+    expect(r.samples).toEqual([{ at: T0, rttMs: CONNECTION_MAX_RTT_MS }]);
   });
 
   test("as a socket's first pong it answers without a reading", () => {
     const r = rig();
     r.probe.pingSent();
-    r.wait(LINK_MAX_RTT_MS + 1);
+    r.wait(CONNECTION_MAX_RTT_MS + 1);
     expect(r.pong()).toBeNull();
     expect(r.probe.answered).toBe(true);
     expect(r.probe.rttMs).toBeNull();
@@ -297,11 +297,11 @@ describe("a long queue", () => {
   test("past the cap a ping is counted, not timed, and every pong still finds its own ping", () => {
     const r = rig();
     r.roundTrip(30);
-    const sent = pings(r, LINK_PENDING_CAP + 3);
+    const sent = pings(r, CONNECTION_PENDING_CAP + 3);
     expect(r.probe.oldestPingAt).toBe(sent[0]);
 
     r.wait(500);
-    for (let i = 0; i < LINK_PENDING_CAP; i += 1) {
+    for (let i = 0; i < CONNECTION_PENDING_CAP; i += 1) {
       expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
     }
     expect(r.probe.oldestPingAt).toBeNull();
@@ -312,19 +312,19 @@ describe("a long queue", () => {
     r.probe.pingSent();
     r.wait(25);
     expect(r.pong()).toBe(25);
-    expect(r.samples).toHaveLength(1 + LINK_PENDING_CAP + 1);
+    expect(r.samples).toHaveLength(1 + CONNECTION_PENDING_CAP + 1);
   });
 
   test("a ping sent while counted ones wait is counted with them", () => {
     const r = rig();
     r.roundTrip(30);
-    const sent = pings(r, LINK_PENDING_CAP + 1);
+    const sent = pings(r, CONNECTION_PENDING_CAP + 1);
     r.wait(100);
     expect(r.pong()).toBe(r.now() - sent[0]); // a timed place is free again
     r.wait(100);
     r.probe.pingSent(); // behind the counted one, so it cannot take that place
     r.wait(100);
-    for (let i = 1; i < LINK_PENDING_CAP; i += 1) {
+    for (let i = 1; i < CONNECTION_PENDING_CAP; i += 1) {
       expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
     }
     // The counted one, then the one sent behind it.
@@ -337,9 +337,9 @@ describe("a long queue", () => {
   test("once the timed ones are answered, counted ones ahead do not keep the next from being timed", () => {
     const r = rig();
     r.roundTrip(30);
-    pings(r, LINK_PENDING_CAP + 2);
+    pings(r, CONNECTION_PENDING_CAP + 2);
     r.wait(100);
-    for (let i = 0; i < LINK_PENDING_CAP; i += 1) r.pong();
+    for (let i = 0; i < CONNECTION_PENDING_CAP; i += 1) r.pong();
     expect(r.probe.oldestPingAt).toBeNull();
 
     r.probe.pingSent();
@@ -353,16 +353,16 @@ describe("a long queue", () => {
   test("a retired socket's misses stop at the cap", () => {
     const r = rig();
     r.roundTrip(30);
-    const sent = pings(r, LINK_PENDING_CAP + 5);
+    const sent = pings(r, CONNECTION_PENDING_CAP + 5);
     r.probe.reset();
     const misses = r.samples.filter((s) => s.rttMs === null);
-    expect(misses.map((s) => s.at)).toEqual(sent.slice(0, LINK_PENDING_CAP));
+    expect(misses.map((s) => s.at)).toEqual(sent.slice(0, CONNECTION_PENDING_CAP));
   });
 
   test("a clock jump leaves every waiting ping, counted ones too, ahead of the next", () => {
     const r = rig();
     r.roundTrip(30);
-    pings(r, LINK_PENDING_CAP + 2);
+    pings(r, CONNECTION_PENDING_CAP + 2);
     r.probe.forgetTimings();
     expect(r.probe.oldestPingAt).toBeNull();
 
@@ -370,7 +370,7 @@ describe("a long queue", () => {
     const at = r.now();
     expect(r.probe.oldestPingAt).toBe(at);
     r.wait(35);
-    for (let i = 0; i < LINK_PENDING_CAP + 2; i += 1) {
+    for (let i = 0; i < CONNECTION_PENDING_CAP + 2; i += 1) {
       expect(r.pong(), `pong ${i}`).toBeNull();
     }
     expect(r.pong()).toBe(35);
@@ -383,11 +383,11 @@ describe("a long queue", () => {
 describe("the state", () => {
   test("the thresholds are the contract's", () => {
     expect([
-      LINK_SLOW_WAIT_MS,
-      LINK_SLOW_RTT_MS,
-      LINK_OK_RTT_MS,
-      LINK_RTT_RUN,
-      LINK_STALLED_MS,
+      CONNECTION_SLOW_WAIT_MS,
+      CONNECTION_SLOW_RTT_MS,
+      CONNECTION_OK_RTT_MS,
+      CONNECTION_RTT_RUN,
+      CONNECTION_STALLED_MS,
     ]).toEqual([1_000, 400, 300, 2, 4_000]);
   });
 
@@ -395,11 +395,11 @@ describe("the state", () => {
     const r = rig();
     expect(r.probe.classify()).toBe("unknown");
     r.probe.pingSent();
-    r.wait(LINK_STALLED_MS * 10);
+    r.wait(CONNECTION_STALLED_MS * 10);
     expect(r.probe.classify()).toBe("unknown");
     // Frames other than a pong do not make it known either.
     r.probe.frameReceived();
-    r.wait(LINK_STALLED_MS * 10);
+    r.wait(CONNECTION_STALLED_MS * 10);
     expect(r.probe.classify()).toBe("unknown");
   });
 
@@ -414,7 +414,7 @@ describe("the state", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent();
-    r.wait(LINK_SLOW_WAIT_MS - 1);
+    r.wait(CONNECTION_SLOW_WAIT_MS - 1);
     expect(r.probe.classify()).toBe("ok");
     r.wait(1);
     expect(r.probe.classify()).toBe("slow");
@@ -423,31 +423,31 @@ describe("the state", () => {
   test("two round trips in a row at the slow threshold make it slow, one does not", () => {
     const r = rig();
     r.roundTrip(30);
-    r.roundTrip(LINK_SLOW_RTT_MS + 50);
+    r.roundTrip(CONNECTION_SLOW_RTT_MS + 50);
     expect(r.probe.classify()).toBe("ok");
     r.roundTrip(30);
     expect(r.probe.classify()).toBe("ok");
-    r.roundTrip(LINK_SLOW_RTT_MS + 50);
+    r.roundTrip(CONNECTION_SLOW_RTT_MS + 50);
     expect(r.probe.classify()).toBe("ok");
-    r.roundTrip(LINK_SLOW_RTT_MS);
+    r.roundTrip(CONNECTION_SLOW_RTT_MS);
     expect(r.probe.classify()).toBe("slow");
   });
 
   test("one round trip at the slow wait makes it slow, though nothing read the state meanwhile", () => {
     // A socket's first ping waits in `unknown`, so no reading saw it overdue.
     const first = rig();
-    first.roundTrip(LINK_SLOW_WAIT_MS);
+    first.roundTrip(CONNECTION_SLOW_WAIT_MS);
     expect(first.probe.classify()).toBe("slow");
 
     const r = rig();
-    r.roundTrip(LINK_SLOW_WAIT_MS - 1);
+    r.roundTrip(CONNECTION_SLOW_WAIT_MS - 1);
     expect(r.probe.classify()).toBe("ok");
     r.roundTrip(30);
     expect(r.probe.classify()).toBe("ok");
-    // On a link that was ok, a page whose timers were held reads only the pong.
-    r.roundTrip(LINK_SLOW_WAIT_MS + 500);
+    // On a connection that was ok, a page whose timers were held reads only the pong.
+    r.roundTrip(CONNECTION_SLOW_WAIT_MS + 500);
     expect(r.probe.classify()).toBe("slow");
-    // Leaving is as for any slow link: two round trips in a row under the
+    // Leaving is as for any slow connection: two round trips in a row under the
     // ok threshold.
     r.roundTrip(30);
     expect(r.probe.classify()).toBe("slow");
@@ -457,23 +457,23 @@ describe("the state", () => {
 
   test("it leaves slow only after two round trips in a row under the ok threshold", () => {
     const r = rig();
-    r.roundTrip(LINK_SLOW_RTT_MS);
-    r.roundTrip(LINK_SLOW_RTT_MS);
+    r.roundTrip(CONNECTION_SLOW_RTT_MS);
+    r.roundTrip(CONNECTION_SLOW_RTT_MS);
     expect(r.probe.classify()).toBe("slow");
 
     // Between the two thresholds it stays slow.
-    r.roundTrip(LINK_OK_RTT_MS);
-    r.roundTrip(LINK_OK_RTT_MS);
+    r.roundTrip(CONNECTION_OK_RTT_MS);
+    r.roundTrip(CONNECTION_OK_RTT_MS);
     expect(r.probe.classify()).toBe("slow");
     // One fast round trip is not a run.
-    r.roundTrip(LINK_OK_RTT_MS - 1);
+    r.roundTrip(CONNECTION_OK_RTT_MS - 1);
     expect(r.probe.classify()).toBe("slow");
-    r.roundTrip(LINK_OK_RTT_MS - 1);
+    r.roundTrip(CONNECTION_OK_RTT_MS - 1);
     expect(r.probe.classify()).toBe("ok");
 
-    // The same round trips that kept it slow do not make an ok link slow.
-    r.roundTrip(LINK_OK_RTT_MS);
-    r.roundTrip(LINK_OK_RTT_MS);
+    // The same round trips that kept it slow do not make an ok connection slow.
+    r.roundTrip(CONNECTION_OK_RTT_MS);
+    r.roundTrip(CONNECTION_OK_RTT_MS);
     expect(r.probe.classify()).toBe("ok");
   });
 
@@ -481,14 +481,14 @@ describe("the state", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent();
-    r.wait(LINK_SLOW_WAIT_MS);
+    r.wait(CONNECTION_SLOW_WAIT_MS);
     expect(r.probe.classify()).toBe("slow");
-    expect(r.pong()).toBe(LINK_SLOW_WAIT_MS);
+    expect(r.pong()).toBe(CONNECTION_SLOW_WAIT_MS);
     // Two fast round trips in a row would end it, but the next ping is late.
     r.roundTrip(30);
     r.roundTrip(30);
     r.probe.pingSent();
-    r.wait(LINK_SLOW_WAIT_MS);
+    r.wait(CONNECTION_SLOW_WAIT_MS);
     expect(r.probe.classify()).toBe("slow");
     r.pong();
     r.roundTrip(30);
@@ -500,7 +500,7 @@ describe("the state", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent();
-    r.wait(LINK_STALLED_MS - 1);
+    r.wait(CONNECTION_STALLED_MS - 1);
     expect(r.probe.classify()).toBe("slow");
     r.wait(1);
     expect(r.probe.classify()).toBe("stalled");
@@ -516,7 +516,7 @@ describe("the state", () => {
       expect(r.probe.classify()).toBe("slow");
     }
     // The frames stop: the stall counts from the last of them.
-    r.wait(LINK_STALLED_MS - 1);
+    r.wait(CONNECTION_STALLED_MS - 1);
     expect(r.probe.classify()).toBe("slow");
     r.wait(1_000);
     expect(r.probe.classify()).toBe("stalled");
@@ -530,17 +530,17 @@ describe("the state", () => {
     r.probe.pingSent();
     r.wait(10);
     expect(r.probe.classify()).toBe("ok");
-    r.wait(LINK_STALLED_MS - 11);
+    r.wait(CONNECTION_STALLED_MS - 11);
     expect(r.probe.classify()).toBe("slow");
     r.wait(1);
     expect(r.probe.classify()).toBe("stalled");
   });
 
-  test("a stalled link is slow at its first frame and ok after two fast round trips", () => {
+  test("a stalled connection is slow at its first frame and ok after two fast round trips", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent();
-    r.wait(LINK_STALLED_MS + 2_000);
+    r.wait(CONNECTION_STALLED_MS + 2_000);
     expect(r.probe.classify()).toBe("stalled");
 
     r.probe.frameReceived();
@@ -554,33 +554,33 @@ describe("the state", () => {
   });
 });
 
-describe("classifyLink", () => {
-  const base: LinkReading = { hasAnswered: true, rtts: [], oldestPingAt: null, lastFrameAt: null };
+describe("classifyConnection", () => {
+  const base: ConnectionReading = { hasAnswered: true, rtts: [], oldestPingAt: null, lastFrameAt: null };
 
   test("reads the latest round trip alone for the slow wait", () => {
     const now = 50_000;
-    expect(classifyLink("unknown", { ...base, rtts: [1_000] }, now)).toBe("slow");
-    expect(classifyLink("unknown", { ...base, rtts: [999] }, now)).toBe("ok");
-    expect(classifyLink("ok", { ...base, rtts: [50, 1_000] }, now)).toBe("slow");
+    expect(classifyConnection("unknown", { ...base, rtts: [1_000] }, now)).toBe("slow");
+    expect(classifyConnection("unknown", { ...base, rtts: [999] }, now)).toBe("ok");
+    expect(classifyConnection("ok", { ...base, rtts: [50, 1_000] }, now)).toBe("slow");
     // An older one says nothing by itself.
-    expect(classifyLink("ok", { ...base, rtts: [1_000, 50] }, now)).toBe("ok");
-    expect(classifyLink("slow", { ...base, rtts: [1_000, 50] }, now)).toBe("slow");
+    expect(classifyConnection("ok", { ...base, rtts: [1_000, 50] }, now)).toBe("ok");
+    expect(classifyConnection("slow", { ...base, rtts: [1_000, 50] }, now)).toBe("slow");
   });
 
   test("is a function of the previous state, the reading and the time", () => {
     const now = 50_000;
-    expect(classifyLink("ok", { ...base, hasAnswered: false, oldestPingAt: 0 }, now)).toBe("unknown");
-    expect(classifyLink("unknown", base, now)).toBe("ok");
-    expect(classifyLink("ok", { ...base, rtts: [500, 500] }, now)).toBe("slow");
-    expect(classifyLink("ok", { ...base, rtts: [350, 350] }, now)).toBe("ok");
-    expect(classifyLink("slow", { ...base, rtts: [350, 350] }, now)).toBe("slow");
-    expect(classifyLink("slow", { ...base, rtts: [100, 100] }, now)).toBe("ok");
-    expect(classifyLink("stalled", { ...base, rtts: [100, 100] }, now)).toBe("ok");
-    expect(classifyLink("stalled", { ...base, rtts: [5_000, 100] }, now)).toBe("slow");
+    expect(classifyConnection("ok", { ...base, hasAnswered: false, oldestPingAt: 0 }, now)).toBe("unknown");
+    expect(classifyConnection("unknown", base, now)).toBe("ok");
+    expect(classifyConnection("ok", { ...base, rtts: [500, 500] }, now)).toBe("slow");
+    expect(classifyConnection("ok", { ...base, rtts: [350, 350] }, now)).toBe("ok");
+    expect(classifyConnection("slow", { ...base, rtts: [350, 350] }, now)).toBe("slow");
+    expect(classifyConnection("slow", { ...base, rtts: [100, 100] }, now)).toBe("ok");
+    expect(classifyConnection("stalled", { ...base, rtts: [100, 100] }, now)).toBe("ok");
+    expect(classifyConnection("stalled", { ...base, rtts: [5_000, 100] }, now)).toBe("slow");
     const waiting = { ...base, rtts: [100, 100], oldestPingAt: now - 6_000 };
-    expect(classifyLink("ok", waiting, now)).toBe("stalled");
-    expect(classifyLink("ok", { ...waiting, lastFrameAt: now - 3_999 }, now)).toBe("slow");
-    expect(classifyLink("ok", { ...waiting, lastFrameAt: now - 4_000 }, now)).toBe("stalled");
-    expect(classifyLink("ok", { ...waiting, oldestPingAt: now - 999 }, now)).toBe("ok");
+    expect(classifyConnection("ok", waiting, now)).toBe("stalled");
+    expect(classifyConnection("ok", { ...waiting, lastFrameAt: now - 3_999 }, now)).toBe("slow");
+    expect(classifyConnection("ok", { ...waiting, lastFrameAt: now - 4_000 }, now)).toBe("stalled");
+    expect(classifyConnection("ok", { ...waiting, oldestPingAt: now - 999 }, now)).toBe("ok");
   });
 });

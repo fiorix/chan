@@ -1,4 +1,4 @@
-// Link probe: times one socket's pongs and reads the link's health from them.
+// Connection probe: times one socket's pongs and reads the connection's health from them.
 //
 // The server answers each `{"type":"ping"}` with a `{"type":"pong"}` that
 // carries no id, in the order the pings reached it. A queue of send times
@@ -9,52 +9,52 @@
 // its owner reports what the socket did and reads the result. The
 // clock is injectable so a test can drive it without real time passing.
 
-/// What the probe's pongs say about its link. `unknown` until this socket has
+/// What the probe's pongs say about its connection. `unknown` until this socket has
 /// received a pong, or any socket this probe has served with memory enabled.
-export type LinkProbeState = "unknown" | "ok" | "slow" | "stalled";
+export type ConnectionProbeState = "unknown" | "ok" | "slow" | "stalled";
 
-/// A ping unanswered this long makes the link `slow`. Well above a healthy
+/// A ping unanswered this long makes the connection `slow`. Well above a healthy
 /// round trip through a gateway, so jitter does not trip it, and short enough
 /// to show while the user still wonders why the window stopped answering.
-export const LINK_SLOW_WAIT_MS = 1_000;
-/// Round trips at or over this make the link `slow` once LINK_RTT_RUN in a
+export const CONNECTION_SLOW_WAIT_MS = 1_000;
+/// Round trips at or over this make the connection `slow` once CONNECTION_RTT_RUN in a
 /// row reach it: the delay at which an echoed keystroke visibly lags.
-export const LINK_SLOW_RTT_MS = 400;
-/// Round trips must come back under this, LINK_RTT_RUN in a row, for the link
-/// to leave `slow`. Lower than the entry threshold so a link that hovers
+export const CONNECTION_SLOW_RTT_MS = 400;
+/// Round trips must come back under this, CONNECTION_RTT_RUN in a row, for the connection
+/// to leave `slow`. Lower than the entry threshold so a connection that hovers
 /// around it does not change state on every pong.
-export const LINK_OK_RTT_MS = 300;
+export const CONNECTION_OK_RTT_MS = 300;
 /// How many round trips in a row a threshold takes, so that one outlier
 /// neither enters nor leaves `slow`.
-export const LINK_RTT_RUN = 2;
+export const CONNECTION_RTT_RUN = 2;
 /// A ping unanswered this long, with no frame of any kind arriving meanwhile,
-/// makes the link `stalled`: it carries nothing. Long enough for TCP to
+/// makes the connection `stalled`: it carries nothing. Long enough for TCP to
 /// retransmit through a short burst of loss, and well short of the read
 /// deadlines, so the state shows before the socket is retired.
-export const LINK_STALLED_MS = 4_000;
+export const CONNECTION_STALLED_MS = 4_000;
 /// The longest round trip worth timing: the sockets' ordinary read deadline,
 /// `WS_READ_DEADLINE_MS` in `transport.ts`, repeated here because this module
 /// imports nothing. A socket silent that long is retired, so a pong later
 /// than this crossed a jump of the page's clock, as over a machine sleep, or
-/// came over a socket that other frames kept open, and neither is the link's
+/// came over a socket that other frames kept open, and neither is the connection's
 /// round-trip time.
-export const LINK_MAX_RTT_MS = 45_000;
+export const CONNECTION_MAX_RTT_MS = 45_000;
 /// How many waiting pings keep their send time. A socket whose pongs stop
 /// while other frames keep it open would otherwise hold one for every ping
 /// of its life. Several times what either cadence sends inside its read
 /// deadline, so a socket retired on silence never reaches it.
-export const LINK_PENDING_CAP = 32;
+export const CONNECTION_PENDING_CAP = 32;
 
 /// One finished ping.
-export interface LinkSample {
+export interface ConnectionSample {
   /// When the ping left, on the probe's clock.
   at: number;
   /// How long its pong took, or `null` for a ping the socket never answered.
   rttMs: number | null;
 }
 
-/// What `classifyLink` reads. Times are on the probe's clock.
-export interface LinkReading {
+/// What `classifyConnection` reads. Times are on the probe's clock.
+export interface ConnectionReading {
   /// This socket has received a pong, or an earlier one when this probe keeps
   /// answer memory across resets.
   hasAnswered: boolean;
@@ -66,39 +66,39 @@ export interface LinkReading {
   lastFrameAt: number | null;
 }
 
-/// The link's state at `now`, given the state it was in. Pure: the previous
+/// The connection's state at `now`, given the state it was in. Pure: the previous
 /// state is the only memory, and it matters only for leaving `slow`, which
-/// takes LINK_RTT_RUN round trips under LINK_OK_RTT_MS where entering takes
-/// as many at LINK_SLOW_RTT_MS or over, or one at LINK_SLOW_WAIT_MS or over.
-export function classifyLink(
-  prev: LinkProbeState,
-  reading: LinkReading,
+/// takes CONNECTION_RTT_RUN round trips under CONNECTION_OK_RTT_MS where entering takes
+/// as many at CONNECTION_SLOW_RTT_MS or over, or one at CONNECTION_SLOW_WAIT_MS or over.
+export function classifyConnection(
+  prev: ConnectionProbeState,
+  reading: ConnectionReading,
   now: number,
-): LinkProbeState {
+): ConnectionProbeState {
   if (!reading.hasAnswered) return "unknown";
   const pingAt = reading.oldestPingAt;
   if (pingAt !== null) {
     // The silence counts from the ping: a frame older than the ping says
-    // nothing about a link that was not being asked. A frame newer than the
-    // ping proves the link still carries data, however late the pong.
+    // nothing about a connection that was not being asked. A frame newer than the
+    // ping proves the connection still carries data, however late the pong.
     const quietSince = Math.max(pingAt, reading.lastFrameAt ?? pingAt);
-    if (now - quietSince >= LINK_STALLED_MS) return "stalled";
-    if (now - pingAt >= LINK_SLOW_WAIT_MS) return "slow";
+    if (now - quietSince >= CONNECTION_STALLED_MS) return "stalled";
+    if (now - pingAt >= CONNECTION_SLOW_WAIT_MS) return "slow";
   }
   // A round trip that long had its ping overdue, whether or not anything
   // read the state while it waited: a socket's first ping waits in `unknown`
   // unless this probe keeps answer memory from an earlier socket.
   const latest = reading.rtts.at(-1);
-  if (latest !== undefined && latest >= LINK_SLOW_WAIT_MS) return "slow";
-  const run = reading.rtts.slice(-LINK_RTT_RUN);
-  const full = run.length === LINK_RTT_RUN;
+  if (latest !== undefined && latest >= CONNECTION_SLOW_WAIT_MS) return "slow";
+  const run = reading.rtts.slice(-CONNECTION_RTT_RUN);
+  const full = run.length === CONNECTION_RTT_RUN;
   if (prev === "slow" || prev === "stalled") {
-    return full && run.every((ms) => ms < LINK_OK_RTT_MS) ? "ok" : "slow";
+    return full && run.every((ms) => ms < CONNECTION_OK_RTT_MS) ? "ok" : "slow";
   }
-  return full && run.every((ms) => ms >= LINK_SLOW_RTT_MS) ? "slow" : "ok";
+  return full && run.every((ms) => ms >= CONNECTION_SLOW_RTT_MS) ? "slow" : "ok";
 }
 
-export interface LinkProbeOptions {
+export interface ConnectionProbeOptions {
   /// Keep whether any socket this probe has served answered a ping across reset().
   rememberAnsweredAcrossSockets?: boolean;
   /// Clock, in milliseconds. Defaults to `Date.now`.
@@ -106,13 +106,13 @@ export interface LinkProbeOptions {
   /// Called once per finished ping that was timed: an answered one with its
   /// round-trip time, and each eligible one still waiting when the socket is
   /// retired as a miss.
-  onSample?: (sample: LinkSample) => void;
+  onSample?: (sample: ConnectionSample) => void;
   /// Called after every report that changed the probe, so an owner can read
   /// it again.
   onChange?: () => void;
 }
 
-export interface LinkProbe {
+export interface ConnectionProbe {
   /// A ping is leaving. Report it before handing the frame to the socket: a
   /// socket that answers in place, as the demo's does, delivers the pong
   /// inside the send.
@@ -120,9 +120,9 @@ export interface LinkProbe {
   /// A pong arrived, reported after `frameReceived` for the same frame.
   /// Returns its round-trip time, or `null` where there is none to give: a
   /// stray pong with no ping waiting, the pong of a ping that was not timed
-  /// (its timing forgotten, or the ping counted because LINK_PENDING_CAP
+  /// (its timing forgotten, or the ping counted because CONNECTION_PENDING_CAP
   /// timed ones already waited), or one that took longer than
-  /// LINK_MAX_RTT_MS. All but the stray one still count as the socket
+  /// CONNECTION_MAX_RTT_MS. All but the stray one still count as the socket
   /// answering.
   pongReceived(): number | null;
   /// A frame of any kind arrived, a pong included.
@@ -150,17 +150,17 @@ export interface LinkProbe {
   /// When the oldest unanswered ping that is still timed left, or `null` with
   /// none waiting.
   readonly oldestPingAt: number | null;
-  /// The link's state now, carried forward from the state at the last call.
+  /// The connection's state now, carried forward from the state at the last call.
   /// Time alone can change it while a ping waits, so an owner that wants the
   /// change without a socket event calls again on a timer.
-  classify(): LinkProbeState;
+  classify(): ConnectionProbeState;
 }
 
-export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
+export function createConnectionProbe(options: ConnectionProbeOptions = {}): ConnectionProbe {
   const now = options.now ?? (() => Date.now());
   // The pings awaiting a pong, in the order their pongs come: `ahead` of them
   // untimed, then the send times in `timed`, oldest first, then `behind` more
-  // untimed. Only the timed ones take memory, and at most LINK_PENDING_CAP of
+  // untimed. Only the timed ones take memory, and at most CONNECTION_PENDING_CAP of
   // them; an untimed ping is a count, which is all the pairing needs.
   let ahead = 0;
   let timed: number[] = [];
@@ -169,7 +169,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
   let everAnswered = false;
   let rtts: number[] = [];
   let lastFrameAt: number | null = null;
-  let state: LinkProbeState = "unknown";
+  let state: ConnectionProbeState = "unknown";
 
   const oldestPingAt = (): number | null => timed[0] ?? null;
 
@@ -184,7 +184,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       // A send time joins `timed` only at its end, so a ping sent while
       // untimed ones wait behind is counted with them: timing it would hand
       // it the pong of an older ping.
-      if (behind > 0 || timed.length >= LINK_PENDING_CAP) behind += 1;
+      if (behind > 0 || timed.length >= CONNECTION_PENDING_CAP) behind += 1;
       else timed.push(now());
       options.onChange?.();
     },
@@ -199,10 +199,10 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       let rtt: number | null = null;
       if (at !== null) {
         const took = Math.max(0, now() - at);
-        if (took <= LINK_MAX_RTT_MS) {
+        if (took <= CONNECTION_MAX_RTT_MS) {
           rtt = took;
           rtts.push(rtt);
-          if (rtts.length > LINK_RTT_RUN) rtts.shift();
+          if (rtts.length > CONNECTION_RTT_RUN) rtts.shift();
           options.onSample?.({ at, rttMs: rtt });
         }
       }
@@ -253,7 +253,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       return oldestPingAt();
     },
     classify() {
-      state = classifyLink(
+      state = classifyConnection(
         state,
         { hasAnswered: everAnswered, rtts, oldestPingAt: oldestPingAt(), lastFrameAt },
         now(),

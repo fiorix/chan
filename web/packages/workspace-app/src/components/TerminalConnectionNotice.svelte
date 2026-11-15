@@ -25,8 +25,8 @@
 {#if mode !== "none"}
   <!-- The inspector box extends 12px past its width; 17px more leaves a 5px gap beside the pill. -->
   <div
-    class="terminal-link-pill"
-    data-terminal-link-pill
+    class="terminal-connection-pill"
+    data-terminal-connection-pill
     aria-hidden="true"
     style:pointer-events="none"
     style:top={findOpen ? "50px" : "5px"}
@@ -38,7 +38,7 @@
 {/if}
 
 <style>
-  .terminal-link-pill {
+  .terminal-connection-pill {
     position: absolute;
     top: 5px;
     right: 5px;

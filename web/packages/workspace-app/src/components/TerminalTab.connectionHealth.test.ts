@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import TerminalTab from "./TerminalTab.svelte";
 import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import { WS_PING_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
-import { LINK_STALLED_MS } from "../api/linkProbe";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
-import { TERMINAL_STALL_REDIAL_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalLink.svelte";
+import { CONNECTION_STALLED_MS } from "../api/connectionProbe";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
+import { TERMINAL_STALL_REDIAL_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { broadcastTerminalInput, sendPromptToTerminal } from "../state/tabs.svelte";
@@ -25,15 +25,15 @@ import {
   xterm,
 } from "../__tests__/terminalTab";
 
-const links = vi.hoisted(() => ({ all: [] as unknown[] }));
-vi.mock("./terminalLink.svelte", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./terminalLink.svelte")>();
+const connections = vi.hoisted(() => ({ all: [] as unknown[] }));
+vi.mock("./terminalConnectionHealth.svelte", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./terminalConnectionHealth.svelte")>();
   return {
     ...actual,
-    createTerminalLink(...args: Parameters<typeof actual.createTerminalLink>) {
-      const link = actual.createTerminalLink(...args);
-      links.all.push(link);
-      return link;
+    createTerminalConnectionHealth(...args: Parameters<typeof actual.createTerminalConnectionHealth>) {
+      const connection = actual.createTerminalConnectionHealth(...args);
+      connections.all.push(connection);
+      return connection;
     },
   };
 });
@@ -52,15 +52,15 @@ beforeEach(() => {
   TerminalSocket.connecting = false;
   ui.terminalControl = false;
   xterm.textareaFocus = true;
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
 });
 
 afterEach(() => {
   ui.disconnectBlocking = false;
   ui.terminalControl = false;
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   resetTerminals();
-  links.all.splice(0);
+  connections.all.splice(0);
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -69,23 +69,23 @@ function pings(socket: TerminalSocket): number {
   return sentFrames(socket).filter((frame) => frame.type === "ping").length;
 }
 
-type TerminalLink = ReturnType<(typeof import("./terminalLink.svelte"))["createTerminalLink"]>;
-function lastLink(): TerminalLink {
-  const link = links.all.at(-1) as TerminalLink | undefined;
-  if (!link) throw new Error("expected a terminal link");
-  return link;
+type TerminalConnectionHealth = ReturnType<(typeof import("./terminalConnectionHealth.svelte"))["createTerminalConnectionHealth"]>;
+function lastConnection(): TerminalConnectionHealth {
+  const connection = connections.all.at(-1) as TerminalConnectionHealth | undefined;
+  if (!connection) throw new Error("expected a terminal connection");
+  return connection;
 }
 
-describe("terminal link in the tab", () => {
-  test("a stalled open session redials through connect after three seconds of healthy window link", async () => {
+describe("terminal connection in the tab", () => {
+  test("a stalled open session redials through connect after three seconds of healthy window connection", async () => {
     const tab = terminalTab();
     await mountTerminal(TerminalTab, tab, { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first, { id: "sess-redial" });
     await receive(first, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS - 100);
     expect(TerminalSocket.all).toHaveLength(1);
@@ -101,19 +101,19 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     TerminalSocket.connecting = true;
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS);
     const second = TerminalSocket.all.at(-1)!;
     expect(second).not.toBe(first);
     expect(second.readyState).toBe(0);
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe("Connection lost. Typing is not being sent until it reconnects.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe("Connection lost. Typing is not being sent until it reconnects.");
     second.open();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("an old watcher contact cannot redial a newly stalled terminal", async () => {
@@ -121,12 +121,12 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    linkHealth.lastContactAt = 0;
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = 0;
+    connectionHealth.state = "ok";
     await tick();
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS + TERMINAL_STALL_REDIAL_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS + TERMINAL_STALL_REDIAL_MS);
     expect(TerminalSocket.all).toHaveLength(1);
-    linkHealth.lastContactAt = Date.now();
+    connectionHealth.lastContactAt = Date.now();
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS - 1);
     expect(TerminalSocket.all).toHaveLength(1);
@@ -136,10 +136,10 @@ describe("terminal link in the tab", () => {
 
   test("watcher contact frames do not re-run the tab effect while the state stays ok", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
-    linkHealth.state = "ok";
+    connectionHealth.state = "ok";
     await tick();
-    const changed = vi.spyOn(lastLink(), "windowChanged");
-    linkHealth.lastContactAt = Date.now() + 1;
+    const changed = vi.spyOn(lastConnection(), "windowChanged");
+    connectionHealth.lastContactAt = Date.now() + 1;
     await tick();
     expect(changed).not.toHaveBeenCalled();
   });
@@ -149,11 +149,11 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     await receive(first, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     const before = pings(first);
     term.type("\x1b[<0;10;5M");
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS + 1_000);
     expect(pings(first)).toBe(before);
@@ -162,7 +162,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a retiring socket with no input is redialed once and ignores its late onclose", async () => {
@@ -173,20 +173,20 @@ describe("terminal link in the tab", () => {
     await receive(first, { type: "pong" });
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
     expect(first.readyState).toBe(TerminalSocket.CLOSING);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS);
     expect(TerminalSocket.all).toHaveLength(2);
     const second = TerminalSocket.all.at(-1)!;
     expect(second.url).toContain("session=");
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("Connection lost.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("Connection lost.");
     first.finishClose();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS + 1);
     expect(TerminalSocket.all).toHaveLength(2);
     await attach(second);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a never-answered socket can redial from its deadline after fresh watcher contact", async () => {
@@ -194,15 +194,15 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     first.holdClose = true;
     await attach(first);
-    linkHealth.state = "ok";
-    linkHealth.lastContactAt = 0;
+    connectionHealth.state = "ok";
+    connectionHealth.lastContactAt = 0;
     await tick();
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
     expect(first.readyState).toBe(TerminalSocket.CLOSING);
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("Connection lost.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("Connection lost.");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(TerminalSocket.all).toHaveLength(1);
-    linkHealth.lastContactAt = Date.now();
+    connectionHealth.lastContactAt = Date.now();
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS - 1);
     expect(TerminalSocket.all).toHaveLength(1);
@@ -220,8 +220,8 @@ describe("terminal link in the tab", () => {
     await receive(first, { type: "pong" });
     term.type("x");
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS * 2);
     expect(TerminalSocket.all).toHaveLength(1);
@@ -236,9 +236,9 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     await receive(socket, { type: "pong" });
     await receive(socket, { type: "exit", code: 0 });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS * 2);
     expect(TerminalSocket.all).toHaveLength(1);
@@ -249,9 +249,9 @@ describe("terminal link in the tab", () => {
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     socket.readyState = 3;
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS);
@@ -267,19 +267,19 @@ describe("terminal link in the tab", () => {
     if (path === "server close") first.close();
     else if (path === "read deadline") await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("Connection lost.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("Connection lost.");
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const next = TerminalSocket.all.at(-1)!;
     expect(next).not.toBe(first);
     await attach(next);
     await tick();
     const sentence = "Reconnected. Input typed while disconnected may not have been sent.";
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     expect(target.querySelector('[role="status"]')?.textContent).toBe(sentence);
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MIN_MS);
     term.type("y");
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("an answered input and an idle socket retire without a warning", async () => {
@@ -292,12 +292,12 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     TerminalSocket.all.at(-1)!.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("holds the reconnect warning under the cover then announces it once", async () => {
@@ -310,7 +310,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     const region = target.querySelector('[role="status"]');
     expect(region?.textContent).toBe("");
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MS);
@@ -318,7 +318,7 @@ describe("terminal link in the tab", () => {
     await tick();
     expect(target.querySelector('[role="status"]')).toBe(region);
     expect(region?.textContent).toBe("Reconnected. Input typed while disconnected may not have been sent.");
-    expect(target.querySelector('[data-terminal-link-pill]')).not.toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
   });
 
   test("a held read-deadline close shows a connection-lost pill until onclose and warns about refused keys", async () => {
@@ -330,21 +330,21 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_READ_DEADLINE_MS);
     await tick();
     expect(first.readyState).toBe(2);
-    expect(lastLink().state.retiring).toBe(true);
+    expect(lastConnection().state.retiring).toBe(true);
     const sentence = "Connection lost. Typing is not being sent until it reconnects.";
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     term.type("lost");
     expect(sentFrames(first).some((frame) => frame.type === "input" && frame.data === "lost")).toBe(false);
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     first.finishClose();
     await tick();
-    expect(lastLink().state.retiring).toBe(false);
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("Connection lost.");
+    expect(lastConnection().state.retiring).toBe(false);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("Connection lost.");
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
   });
 
   test("input refused before the first socket opens creates no reconnection warning", async () => {
@@ -356,7 +356,7 @@ describe("terminal link in the tab", () => {
     socket.open();
     await receive(socket, { type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 });
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("an automatic lead identity prompt refused on first connect creates no warning", async () => {
@@ -367,7 +367,7 @@ describe("terminal link in the tab", () => {
     expect(sendPromptToTerminal(tab.id, "identity", "codex")).toBe(false);
     await attach(first);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("an automatic lead identity retry after a disconnect creates no lost-input warning", async () => {
@@ -380,7 +380,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a sent lead identity prompt arms no probe and seeds no lost-input notice", async () => {
@@ -396,7 +396,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a refused Rich Prompt submit warns on the next socket", async () => {
@@ -411,7 +411,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
   });
 
   test("a refused broadcast input sink warns the receiving terminal on its next socket", async () => {
@@ -429,7 +429,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe("Reconnected. Input typed while disconnected may not have been sent.");
   });
 
   test("a stale lost-input flag does not replace the connection-lost pill while closed", async () => {
@@ -437,9 +437,9 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     first.close();
-    lastLink().state.notice = true;
+    lastConnection().state.notice = true;
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe("Connection lost. Typing is not being sent until it reconnects.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe("Connection lost. Typing is not being sent until it reconnects.");
   });
 
   test("the connection-lost pill spans immediate close, backoff, dial, and next open", async () => {
@@ -449,15 +449,15 @@ describe("terminal link in the tab", () => {
     const sentence = "Connection lost. Typing is not being sent until it reconnects.";
     first.close();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     TerminalSocket.connecting = true;
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const second = TerminalSocket.all.at(-1)!;
     expect(second.readyState).toBe(0);
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     second.open();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a failed first dial never shows a connection-lost sentence", async () => {
@@ -466,10 +466,10 @@ describe("terminal link in the tab", () => {
     const first = TerminalSocket.all.at(-1)!;
     first.failDial();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     expect(TerminalSocket.all).toHaveLength(2);
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("the lost-connection pill hides under the cover and on a hidden tab", async () => {
@@ -479,17 +479,17 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     socket.close();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).not.toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
     ui.disconnectBlocking = true;
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     ui.disconnectBlocking = false;
     harness.hide();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     harness.show();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).not.toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
   });
 
   test("an exited terminal does not show lost connection or carry refused keys into Restart", async () => {
@@ -499,14 +499,14 @@ describe("terminal link in the tab", () => {
     await receive(first, { type: "exit", code: 0 });
     first.close();
     term.type("x");
-    lastLink().state.lost = true;
+    lastConnection().state.lost = true;
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("broadcast input on an exited terminal does not call inputRefused", async () => {
@@ -519,7 +519,7 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     await receive(socket, { type: "exit", code: 0 });
     socket.close();
-    const refused = vi.spyOn(lastLink(), "inputRefused");
+    const refused = vi.spyOn(lastConnection(), "inputRefused");
     broadcastTerminalInput(member!, "lost");
     expect(refused).not.toHaveBeenCalled();
   });
@@ -531,7 +531,7 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     await receive(socket, { type: "exit", code: 0 });
     socket.close();
-    const refused = vi.spyOn(lastLink(), "inputRefused");
+    const refused = vi.spyOn(lastConnection(), "inputRefused");
     expect(sendPromptToTerminal(tab.id, "lost", "codex", "p-1")).toBe(false);
     expect(refused).not.toHaveBeenCalled();
   });
@@ -547,15 +547,15 @@ describe("terminal link in the tab", () => {
     const sentence = "Reconnected. Input typed while disconnected may not have been sent.";
     term.type("early");
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     await vi.advanceTimersByTimeAsync(3_999);
     term.type("still early");
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent?.trim()).toBe(sentence);
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent?.trim()).toBe(sentence);
     await vi.advanceTimersByTimeAsync(1);
     term.type("next");
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a refused mouse report creates no lost-input notice", async () => {
@@ -569,7 +569,7 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("an inactive tab holds its reconnect notice until it is shown", async () => {
@@ -584,13 +584,13 @@ describe("terminal link in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MS * 2);
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     harness.show();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).not.toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("the pill shares the window stall count and returns to its own count otherwise", async () => {
@@ -598,14 +598,14 @@ describe("terminal link in the tab", () => {
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
-    linkHealth.state = "stalled";
-    linkHealth.waitMs = 15_000;
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.state = "stalled";
+    connectionHealth.waitMs = 15_000;
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("No response for 15 s.");
-    linkHealth.state = "slow";
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 15 s.");
+    connectionHealth.state = "slow";
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("No response for 4 s.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 4 s.");
   });
 
   test("the tab passes its find and inspector geometry to the pill", async () => {
@@ -614,9 +614,9 @@ describe("terminal link in the tab", () => {
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     await tick();
-    const pill = target.querySelector<HTMLElement>('[data-terminal-link-pill]')!;
+    const pill = target.querySelector<HTMLElement>('[data-terminal-connection-pill]')!;
     expect(pill.style.right).toBe("249px");
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.find.open" } }));
     await tick();
@@ -634,31 +634,31 @@ describe("terminal link in the tab", () => {
     const second = TerminalSocket.all.at(-1)!;
     await attach(second);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).not.toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).not.toBeNull();
     await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_NOTICE_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
     second.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const third = TerminalSocket.all.at(-1)!;
     await attach(third);
-    lastLink().inputRefused();
+    lastConnection().inputRefused();
     third.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const fourth = TerminalSocket.all.at(-1)!;
     await attach(fourth);
     await receive(fourth, { type: "pong" });
-    lastLink().pingSent();
-    await vi.advanceTimersByTimeAsync(LINK_STALLED_MS);
+    lastConnection().pingSent();
+    await vi.advanceTimersByTimeAsync(CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("No response for 4 s.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("No response for 4 s.");
   });
 
   test("times the heartbeat pong, probes silent input and removes its pill on the first frame without resizing", async () => {
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
     expect(pings(socket)).toBe(1);
     await receive(socket, { type: "pong" });
     term.type("x");
@@ -670,9 +670,9 @@ describe("terminal link in the tab", () => {
 
     const fitCalls = xterm.fit.calls;
     const resizeFrames = sentFrames(socket).filter((frame) => frame.type === "resize");
-    await vi.advanceTimersByTimeAsync(LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STALLED_MS);
     await tick();
-    const pill = target.querySelector<HTMLElement>("[data-terminal-link-pill]")!;
+    const pill = target.querySelector<HTMLElement>("[data-terminal-connection-pill]")!;
     expect(pill.textContent).toContain("No response for 4 s. Waiting for the connection.");
     expect(pill.parentElement?.classList.contains("terminal-main")).toBe(true);
     expect(xterm.fit.calls).toBe(fitCalls);
@@ -688,7 +688,7 @@ describe("terminal link in the tab", () => {
 
     await output(socket, "first output");
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
   });
 
   test("binary PTY output cancels a pending input probe", async () => {
@@ -708,15 +708,15 @@ describe("terminal link in the tab", () => {
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
     ui.disconnectBlocking = true;
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
     ui.disconnectBlocking = false;
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
   });
 
   test("an exited terminal never shows a stalled pill while its socket is still open", async () => {
@@ -725,10 +725,10 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     await receive(socket, { type: "pong" });
     await receive(socket, { type: "exit", code: 0 });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     await tick();
     expect(pings(socket)).toBe(2);
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
   });
 
   test("a dropped socket clears its stall before a redial and the next socket needs its own pong", async () => {
@@ -736,42 +736,42 @@ describe("terminal link in the tab", () => {
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
     socket.close();
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")?.textContent).toContain("Connection lost.");
+    expect(target.querySelector("[data-terminal-connection-pill]")?.textContent).toContain("Connection lost.");
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     const redial = TerminalSocket.all.at(-1)!;
     expect(redial).not.toBe(socket);
     await attach(redial);
     expect(pings(redial)).toBe(1);
-    await vi.advanceTimersByTimeAsync(LINK_STALLED_MS);
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    await vi.advanceTimersByTimeAsync(CONNECTION_STALLED_MS);
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
     await receive(redial, { type: "pong" });
     term.type("x");
-    await vi.advanceTimersByTimeAsync(1_000 + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(1_000 + CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
   });
 
   test("the control terminal sends neither an opening ping nor an input probe", async () => {
     ui.terminalControl = true;
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
-    const opened = vi.spyOn(lastLink(), "opened");
+    const opened = vi.spyOn(lastConnection(), "opened");
     await attach(socket);
     expect(opened).not.toHaveBeenCalled();
     term.type("password");
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS);
     expect(pings(socket)).toBe(0);
     expect(TerminalSocket.all).toHaveLength(1);
-    expect(target.querySelector("[data-terminal-link-pill]")).toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
   });
 
   test("a Rich Prompt submit arms the input probe", async () => {
@@ -784,9 +784,9 @@ describe("terminal link in the tab", () => {
     expect(sentFrames(socket).some((frame) => frame.type === "prompt" && frame.data === "run it")).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(pings(socket)).toBe(2);
-    await vi.advanceTimersByTimeAsync(LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
   });
 
   test("a generated terminal reply does not arm the input probe", async () => {
@@ -852,9 +852,9 @@ describe("terminal link in the tab", () => {
     await receive(socket, { type: "pong" });
     broadcastTerminalInput(member!, "typed");
     expect(sentFrames(socket).some((frame) => frame.type === "input" && frame.data === "typed")).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_000 + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(1_000 + CONNECTION_STALLED_MS);
     await tick();
-    expect(target.querySelector("[data-terminal-link-pill]")).not.toBeNull();
+    expect(target.querySelector("[data-terminal-connection-pill]")).not.toBeNull();
   });
 
   test("mouse reports sent through the terminal input sink do not arm the probe", async () => {
@@ -876,7 +876,7 @@ describe("terminal link in the tab", () => {
   test("reports the opening ping before the socket sends it", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
-    const reported = vi.spyOn(lastLink(), "pingSent");
+    const reported = vi.spyOn(lastConnection(), "pingSent");
     const send = socket.send.bind(socket);
     socket.send = (data) => {
       if (JSON.parse(data).type === "ping") {
@@ -888,12 +888,12 @@ describe("terminal link in the tab", () => {
     await attach(socket);
     await tick();
     expect(pings(socket)).toBe(1);
-    expect(lastLink().state.waitMs).toBe(0);
+    expect(lastConnection().state.waitMs).toBe(0);
   });
 
   test("opens the probe for each socket after a redial", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
-    const opened = vi.spyOn(lastLink(), "opened");
+    const opened = vi.spyOn(lastConnection(), "opened");
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
     expect(opened).toHaveBeenCalledTimes(1);
@@ -907,7 +907,7 @@ describe("terminal link in the tab", () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    const retired = vi.spyOn(lastLink(), "retired");
+    const retired = vi.spyOn(lastConnection(), "retired");
     socket.close();
     expect(retired).toHaveBeenCalledTimes(1);
   });
@@ -916,13 +916,13 @@ describe("terminal link in the tab", () => {
     const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: true });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
-    const retired = vi.spyOn(lastLink(), "retired");
+    const retired = vi.spyOn(lastConnection(), "retired");
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     expect(confirmState.open).toBe(true);
     resolveConfirm(true);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     expect(retired).toHaveBeenCalled();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a requested restart clears a prior connection-lost pill before the next socket opens", async () => {
@@ -931,7 +931,7 @@ describe("terminal link in the tab", () => {
     await attach(first);
     first.close();
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')?.textContent).toContain("Connection lost.");
+    expect(target.querySelector('[data-terminal-connection-pill]')?.textContent).toContain("Connection lost.");
     TerminalSocket.connecting = true;
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     expect(confirmState.open).toBe(true);
@@ -939,7 +939,7 @@ describe("terminal link in the tab", () => {
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     expect(TerminalSocket.all.at(-1)!.readyState).toBe(0);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("keys refused during a requested restart do not warn on the new shell", async () => {
@@ -955,7 +955,7 @@ describe("terminal link in the tab", () => {
     expect(sentFrames(second).some((frame) => frame.type === "input")).toBe(false);
     await attach(second);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a requested restart discards a pending lost-input warning", async () => {
@@ -971,7 +971,7 @@ describe("terminal link in the tab", () => {
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("a requested restart drops unanswered input from the old shell's notice accounting", async () => {
@@ -986,12 +986,12 @@ describe("terminal link in the tab", () => {
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
-    expect(target.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
   test("disposes the terminal probe when the component unmounts", async () => {
     await mountTerminal(TerminalTab, terminalTab(), { focused: false });
-    const dispose = vi.spyOn(lastLink(), "dispose");
+    const dispose = vi.spyOn(lastConnection(), "dispose");
     resetTerminals();
     expect(dispose).toHaveBeenCalledTimes(1);
   });

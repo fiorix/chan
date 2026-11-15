@@ -4,7 +4,7 @@
   // disappears when none do.
   //
   // Sections (left -> right):
-  //   - link     : unhealthy window connection, when tabs are not in the title bar.
+  //   - connection     : unhealthy window connection, when tabs are not in the title bar.
   //   - index    : indexer state (building / reindexing / recovering / error).
   //                Idle is completely hidden so the bar stays quiet
   //                when nothing's happening.
@@ -49,9 +49,9 @@
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
   import { sessionState } from "../state/session.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { linkHealth, type LinkState } from "../state/linkHealth.svelte";
-  import { linkIndicatorShown } from "./linkIndicatorMath";
-  import LinkIndicator from "./LinkIndicator.svelte";
+  import { connectionHealth, type ConnectionState } from "../state/connectionHealth.svelte";
+  import { connectionIndicatorShown } from "./connectionIndicatorMath";
+  import ConnectionIndicator from "./ConnectionIndicator.svelte";
 
   let collapsed = $state(false);
 
@@ -88,7 +88,7 @@
   const transfersBubbleVisible = $derived(transferEntries > 0);
   const activeXfers = $derived(transfers.items.filter((t) => t.state === "active").length);
   const statusVisible = $derived(!!ui.status);
-  const linkVisible = $derived(!windowTabBar.on && linkIndicatorShown("status", linkHealth.state, false));
+  const connectionVisible = $derived(!windowTabBar.on && connectionIndicatorShown("status", connectionHealth.state, false));
   /// The status as shown. Many call sites write the sentence, some with a
   /// file's path in it, so a draft's client path is rewritten here, where
   /// every one of them is read.
@@ -129,22 +129,22 @@
   // section names what it shows as tokens; a close records the tokens it
   // saw, and the section shows again once a token it did not see arrives.
   // Progress (the reindexed file, a transfer's percentage) is not a token.
-  type Closable = "link" | "index" | "import" | "transfers" | "warnings" | "role";
+  type Closable = "connection" | "index" | "import" | "transfers" | "warnings" | "role";
   let hidden = $state<Partial<Record<Closable, readonly string[]>>>({});
 
-  // A close covers states the link has already shown in this unhealthy spell;
+  // A close covers states the connection has already shown in this unhealthy spell;
   // an ok or unknown reading starts a new spell with no remembered states.
-  let linkSpellStates = $state<LinkState[]>([]);
+  let connectionSpellStates = $state<ConnectionState[]>([]);
   $effect(() => {
-    const state = linkHealth.state;
-    if (state === "ok" || state === "unknown") linkSpellStates = [];
-    else if (!linkSpellStates.includes(state)) linkSpellStates = [...linkSpellStates, state];
+    const state = connectionHealth.state;
+    if (state === "ok" || state === "unknown") connectionSpellStates = [];
+    else if (!connectionSpellStates.includes(state)) connectionSpellStates = [...connectionSpellStates, state];
   });
   // Include the current state on the first flush, before the effect records it.
-  const linkTokens = $derived.by(() =>
-    !linkVisible ? [] : linkSpellStates.includes(linkHealth.state)
-      ? linkSpellStates
-      : [...linkSpellStates, linkHealth.state],
+  const connectionTokens = $derived.by(() =>
+    !connectionVisible ? [] : connectionSpellStates.includes(connectionHealth.state)
+      ? connectionSpellStates
+      : [...connectionSpellStates, connectionHealth.state],
   );
 
   const warningsLabel = $derived(statusActionVisible ? ui.status! : null);
@@ -152,7 +152,7 @@
     const s = indexStatus.value;
     const warningKeys = workspaceWarningsDialog.warnings.map(workspaceWarningKey);
     return {
-      link: linkTokens,
+      connection: connectionTokens,
       index: indexVisible && s
         ? [s.state === "error" ? `error\u0000${s.message}` : s.state === "idle" ? "embedding" : s.state]
         : [],
@@ -200,14 +200,14 @@
     }
   });
 
-  const linkShown = $derived(linkVisible && !isHidden("link"));
+  const connectionShown = $derived(connectionVisible && !isHidden("connection"));
   const indexShown = $derived(indexVisible && !isHidden("index"));
   const importShown = $derived(importVisible && !isHidden("import"));
   const transfersShown = $derived(transfersBubbleVisible && !isHidden("transfers"));
   const statusShown = $derived(statusVisible && !(statusActionVisible && isHidden("warnings")));
   const roleShown = $derived(roleVisible && !isHidden("role"));
   const anyVisible = $derived(
-    linkShown ||
+    connectionShown ||
       indexShown ||
       importShown ||
       transfersShown ||
@@ -220,7 +220,7 @@
   // close of its own: every section it holds closes under the same rule,
   // and a dismissable status is dismissed. Hybrid Nav stays.
   const chipClosable = $derived(
-    linkShown ||
+    connectionShown ||
       indexShown ||
       importShown ||
       transfersShown ||
@@ -229,7 +229,7 @@
   );
 
   function closeAll(): void {
-    if (linkShown) hide("link");
+    if (connectionShown) hide("connection");
     if (indexShown) hide("index");
     if (importShown) hide("import");
     if (transfersShown) hide("transfers");
@@ -266,13 +266,13 @@
   <div class="app-statusbar" class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
-        {#if linkShown}
-          <span class="closable link-section">
-            <LinkIndicator placement="status" />
-            {@render closeButton("link", "hide connection status", "Hide until a new link state appears")}
+        {#if connectionShown}
+          <span class="closable connection-section">
+            <ConnectionIndicator placement="status" />
+            {@render closeButton("connection", "hide connection status", "Hide until a new link state appears")}
           </span>
         {/if}
-        {#if linkShown && indexShown}
+        {#if connectionShown && indexShown}
           <span class="sep"> - </span>
         {/if}
         {#if indexShown}
@@ -318,7 +318,7 @@
             {@render closeButton("index", "hide indexing status", "Hide until the index changes")}
           </span>
         {/if}
-        {#if (linkShown || indexShown) && importShown}
+        {#if (connectionShown || indexShown) && importShown}
           <span class="sep"> - </span>
         {/if}
         {#if importShown}
@@ -330,7 +330,7 @@
             {@render closeButton("import", "hide import status", "Hide until the next import")}
           </span>
         {/if}
-        {#if (linkShown || indexShown || importShown) && transfersShown}
+        {#if (connectionShown || indexShown || importShown) && transfersShown}
           <span class="sep"> - </span>
         {/if}
         {#if transfersShown}
@@ -348,7 +348,7 @@
             {@render closeButton("transfers", "hide file transfers", "Hide until a new transfer")}
           </span>
         {/if}
-        {#if (linkShown || indexShown || importShown || transfersShown) && statusShown}
+        {#if (connectionShown || indexShown || importShown || transfersShown) && statusShown}
           <span class="sep"> - </span>
         {/if}
         {#if statusShown}
@@ -378,7 +378,7 @@
             </span>
           {/if}
         {/if}
-        {#if (linkShown || indexShown || importShown || transfersShown || statusShown) && paneModeVisible}
+        {#if (connectionShown || indexShown || importShown || transfersShown || statusShown) && paneModeVisible}
           <span class="sep"> - </span>
         {/if}
         {#if paneModeVisible}
@@ -392,7 +392,7 @@
             {/if}
           </span>
         {/if}
-        {#if (linkShown || indexShown || importShown || transfersShown || statusShown || paneModeVisible) && roleShown}
+        {#if (connectionShown || indexShown || importShown || transfersShown || statusShown || paneModeVisible) && roleShown}
           <span class="sep"> - </span>
         {/if}
         {#if roleShown}

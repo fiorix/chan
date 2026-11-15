@@ -17,7 +17,7 @@ import { clientHolder, clientDetached, markClientDetached, onClientDetached } fr
 // protocol, so HTTP and WebSocket traffic use the same origin on both surfaces.
 
 import { ApiError, UncertainOutcomeError, apiErrorFromText, readApiError } from "./errors";
-import { createLinkProbe, type LinkProbe } from "./linkProbe";
+import { createConnectionProbe, type ConnectionProbe } from "./connectionProbe";
 import type { WsClientFrame, WsPingFrame } from "./types";
 import { installWakeGapDetector } from "../wakeGap";
 
@@ -533,12 +533,12 @@ export const WS_PING_MS = 20_000;
 export const WS_READ_DEADLINE_MS = 45_000;
 /// The watcher's ping cadence while any page is visible and focused and a
 /// socket served by its probe has answered a ping. The user is looking at the
-/// window, so a link that stops answering has to show within seconds, and a
+/// window, so a connection that stops answering has to show within seconds, and a
 /// ping this often is one small frame each way. A hidden or unfocused page,
 /// and a probe that has never received a pong, keep WS_PING_MS.
 export const WS_FAST_PING_MS = 3_000;
 /// The remote watcher's read deadline on the fast ping cadence. Several pings
-/// leave inside it, so only a link that answered none loses its socket. A
+/// leave inside it, so only a connection that answered none loses its socket. A
 /// local window keeps WS_READ_DEADLINE_MS even while pinging every 3 s.
 export const WS_FAST_READ_DEADLINE_MS = 15_000;
 /// A dial stuck in CONNECTING produces no frame and no onclose, so the
@@ -551,7 +551,7 @@ export const WS_CONNECT_DEADLINE_MS = 10_000;
 /// wire has no ping id, so a pre-freeze heartbeat pong can also settle it.
 /// The ordinary read deadline remains the backstop in that case.
 ///
-/// The deadline follows the socket's latest round-trip time, so a link known
+/// The deadline follows the socket's latest round-trip time, so a connection known
 /// to be slow does not lose a working socket to a probe: this is its floor,
 /// and the whole deadline of a socket with no round trip measured.
 export const WS_PROBE_DEADLINE_MS = 3_000;
@@ -560,7 +560,7 @@ export const WS_PROBE_DEADLINE_MS = 3_000;
 /// than this.
 export const WS_PROBE_DEADLINE_MAX_MS = 10_000;
 /// The probe deadline as a multiple of the latest round-trip time, between
-/// the floor and the cap: on a poor link a pong a few times later than the
+/// the floor and the cap: on a poor connection a pong a few times later than the
 /// last one is jitter, not a dead socket.
 export const WS_PROBE_DEADLINE_RTT_FACTOR = 4;
 /// The app's resume hook is debounced by 300 ms after the transport's wake
@@ -613,8 +613,8 @@ function probeDeadlineMs(rttMs: number | null): number {
 /// The disposer detaches every WS event handler before calling
 /// `close()`, so its queued `onclose` cannot schedule a redial.
 ///
-/// Every ping and pong is reported to `link`, which times them. A caller that
-/// shows the link's health passes its own probe and reads it; the watcher
+/// Every ping and pong is reported to `connection`, which times them. A caller that
+/// shows the connection's health passes its own probe and reads it; the watcher
 /// reads the same probe to pick its cadence and its probe deadline. Only a
 /// Every focused window takes fast pings after its first pong; only a remote
 /// window takes the fast read deadline.
@@ -624,7 +624,7 @@ export function openWatch(
   onOpen: () => void = () => {},
   windowId?: string,
   holder?: string,
-  link: LinkProbe = createLinkProbe({ rememberAnsweredAcrossSockets: true }),
+  connection: ConnectionProbe = createConnectionProbe({ rememberAnsweredAcrossSockets: true }),
   options: WatchOptions = {},
 ): WatchSocket {
   let closed = false;
@@ -664,7 +664,7 @@ export function openWatch(
     fast = false;
     // The retired socket's unanswered pings are its misses, and the next
     // socket starts with no timings.
-    link.reset();
+    connection.reset();
   };
 
   const scheduleReconnect = (drop?: WatchDrop) => {
@@ -692,7 +692,7 @@ export function openWatch(
   const forceReconnect = () => {
     const stale = ws;
     if (!stale || closed) return;
-    const drop: WatchDrop = { reason: "deadline", lastFrameAt: link.lastFrameAt };
+    const drop: WatchDrop = { reason: "deadline", lastFrameAt: connection.lastFrameAt };
     ws = null;
     clearLiveness();
     scheduleReconnect(drop);
@@ -723,7 +723,7 @@ export function openWatch(
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     // Reported first: a socket that answers in place delivers the pong
     // inside `send`.
-    link.pingSent();
+    connection.pingSent();
     try {
       ws.send(JSON.stringify({ type: "ping" } satisfies WsPingFrame));
     } catch {
@@ -741,9 +741,9 @@ export function openWatch(
   // never extend it. No-pending changes re-arm as before. This compares timer
   // due times, not wall-clock silence, which can include a page sleep. A wake
   // probe keeps its own deadline until a pong settles it.
-  const syncCadence = (hadPendingPing = link.hasPendingPing) => {
+  const syncCadence = (hadPendingPing = connection.hasPendingPing) => {
     if (pingTimer === null) return;
-    const next = inFront && link.everAnswered;
+    const next = inFront && connection.everAnswered;
     if (next === fast) return;
     fast = next;
     startHeartbeat();
@@ -757,9 +757,9 @@ export function openWatch(
 
   const onFrontChange = () => {
     const was = inFront;
-    const hadPendingPing = link.hasPendingPing;
+    const hadPendingPing = connection.hasPendingPing;
     inFront = pageInFront();
-    // The user is back at the window: read the link now, not at the next
+    // The user is back at the window: read the connection now, not at the next
     // heartbeat.
     if (inFront && !was) sendPing();
     syncCadence(hadPendingPing);
@@ -807,7 +807,7 @@ export function openWatch(
       attempt = 0;
       onStatus("open", attempt);
       // Later focused sockets ping fast from open once this probe has seen a pong.
-      fast = inFront && link.everAnswered;
+      fast = inFront && connection.everAnswered;
       armDeadline();
       startHeartbeat();
       // One ping now, ahead of the frames the owner sends from `onOpen`, so
@@ -822,7 +822,7 @@ export function openWatch(
     };
     socket.onmessage = (m) => {
       if (closed || ws !== socket) return;
-      link.frameReceived();
+      connection.frameReceived();
       // Outside a probe, any frame refreshes the ordinary read deadline.
       // During a probe, queued pre-wake events are still delivered but only
       // a pong settles the short deadline. The wire cannot tell whether that
@@ -838,7 +838,7 @@ export function openWatch(
       // The heartbeat pong is liveness-only (already counted above); it is not
       // an app event, so do not forward it to the sink.
       if (isPongFrame(frame)) {
-        link.pongReceived();
+        connection.pongReceived();
         if (probePending) armDeadline();
         // A pong may change cadence after focus or answer history changes.
         syncCadence();
@@ -848,7 +848,7 @@ export function openWatch(
     };
     socket.onclose = () => {
       if (ws !== socket) return;
-      const drop: WatchDrop = { reason: "closed", lastFrameAt: link.lastFrameAt };
+      const drop: WatchDrop = { reason: "closed", lastFrameAt: connection.lastFrameAt };
       ws = null;
       clearLiveness();
       scheduleReconnect(drop);
@@ -874,7 +874,7 @@ export function openWatch(
     lastProbeAt = now;
     probePending = true;
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
-    const length = probeDeadlineMs(link.rttMs);
+    const length = probeDeadlineMs(connection.rttMs);
     deadlineDueAt = Date.now() + length;
     deadlineTimer = setTimeout(forceReconnect, length);
     // A socket that changes state during the send keeps the same deadline.
@@ -935,7 +935,7 @@ export function openWatch(
   // across the sleep cannot be timed: its pong would count the sleep as
   // round-trip time.
   disposeWakeGap = installWakeGapDetector(() => {
-    link.forgetTimings();
+    connection.forgetTimings();
     probe();
   });
   window.addEventListener("focus", onFrontChange);

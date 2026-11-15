@@ -4,13 +4,13 @@ import { flushSync, mount, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 
 const host = vi.hoisted(() => ({ remote: false }));
-vi.mock("../state/linkHealth.svelte", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../state/linkHealth.svelte")>()),
-  linkIsRemote: () => host.remote,
+vi.mock("../state/connectionHealth.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/connectionHealth.svelte")>()),
+  connectionIsRemote: () => host.remote,
 }));
 
 import AppStatusBar from "./AppStatusBar.svelte";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 import { importStatus, indexStatus, ui } from "../state/store.svelte";
 import { windowTabBar } from "../state/windowTabBar.svelte";
 import { paneMode } from "../state/tabs.svelte";
@@ -26,7 +26,7 @@ afterEach(() => {
   if (view) unmount(view);
   view = null;
   document.body.replaceChildren();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   windowTabBar.on = false;
   indexStatus.value = null;
   importStatus.value = null;
@@ -44,17 +44,17 @@ function render(): void {
   flushSync();
 }
 
-function state(next: typeof linkHealth.state, waitMs = 0): void {
-  linkHealth.state = next;
-  linkHealth.waitMs = waitMs;
+function state(next: typeof connectionHealth.state, waitMs = 0): void {
+  connectionHealth.state = next;
+  connectionHealth.waitMs = waitMs;
   flushSync();
 }
 
 function section(): HTMLElement | null {
-  return target.querySelector<HTMLElement>(".link-section");
+  return target.querySelector<HTMLElement>(".connection-section");
 }
 
-test("link alone controls the bar for each unhealthy state and stays quiet while healthy", () => {
+test("connection alone controls the bar for each unhealthy state and stays quiet while healthy", () => {
   state("ok");
   render();
   expect(target.querySelector(".app-statusbar")).toBeNull();
@@ -62,19 +62,19 @@ test("link alone controls the bar for each unhealthy state and stays quiet while
     state(next, 8_100);
     expect(section()).not.toBeNull();
     expect(target.querySelector(".app-statusbar")).not.toBeNull();
-    expect(section()?.querySelector(".link-indicator")?.getAttribute("data-state")).toBe(next);
+    expect(section()?.querySelector(".connection-indicator")?.getAttribute("data-state")).toBe(next);
   }
 });
 
-test("recovering link leaves a glyph-only status pill section", () => {
-  linkHealth.rttMs = 26;
+test("recovering connection leaves a glyph-only status pill section", () => {
+  connectionHealth.rttMs = 26;
   state("slow");
   render();
-  expect(section()?.querySelector(".link-indicator .glyph")).not.toBeNull();
-  expect(section()?.querySelector(".link-indicator .label")).toBeNull();
+  expect(section()?.querySelector(".connection-indicator .glyph")).not.toBeNull();
+  expect(section()?.querySelector(".connection-indicator .label")).toBeNull();
 });
 
-test("a window tab bar removes the status link section", () => {
+test("a window tab bar removes the status connection section", () => {
   state("slow");
   render();
   expect(section()).not.toBeNull();
@@ -84,7 +84,7 @@ test("a window tab bar removes the status link section", () => {
   expect(target.querySelector(".app-statusbar")).toBeNull();
 });
 
-test("a remote healthy window has no status link or empty close-only pill", () => {
+test("a remote healthy window has no status connection or empty close-only pill", () => {
   host.remote = true;
   state("ok");
   render();
@@ -92,13 +92,13 @@ test("a remote healthy window has no status link or empty close-only pill", () =
   expect(target.querySelector(".app-statusbar")).toBeNull();
 });
 
-test("link comes first and has one separator before an index neighbour", () => {
+test("connection comes first and has one separator before an index neighbour", () => {
   state("slow");
   indexStatus.value = { state: "reindexing", file: "a.md" } as IndexStatus;
   render();
   const row = target.querySelector(".row")!;
-  expect([...row.children].map((child) => child.classList.contains("sep") ? "sep" : child.classList.contains("link-section") ? "link" : "index"))
-    .toEqual(["link", "sep", "index"]);
+  expect([...row.children].map((child) => child.classList.contains("sep") ? "sep" : child.classList.contains("connection-section") ? "connection" : "index"))
+    .toEqual(["connection", "sep", "index"]);
 });
 
 test.each([
@@ -113,23 +113,23 @@ test.each([
       { window_id: "remote-1", name: null, role: "follower", status: "live" },
     ];
   }],
-] as const)("link has one separator before a lone %s section", (_name, neighbour) => {
+] as const)("connection has one separator before a lone %s section", (_name, neighbour) => {
   state("slow");
   neighbour();
   render();
   const row = target.querySelector(".row")!;
-  expect([...row.children].map((child) => child.classList.contains("sep") ? "sep" : child.classList.contains("link-section") ? "link" : "neighbour"))
-    .toEqual(["link", "sep", "neighbour"]);
+  expect([...row.children].map((child) => child.classList.contains("sep") ? "sep" : child.classList.contains("connection-section") ? "connection" : "neighbour"))
+    .toEqual(["connection", "sep", "neighbour"]);
 });
 
-test("the link wrapper uses the close spacing of other sections", () => {
+test("the connection wrapper uses the close spacing of other sections", () => {
   state("slow");
   render();
   expect(section()?.classList.contains("closable")).toBe(true);
   expect(section()?.classList.contains("section")).toBe(false);
 });
 
-test("collapsed link has a close that hides it until its state changes", () => {
+test("collapsed connection has a close that hides it until its state changes", () => {
   state("stalled", 8_100);
   render();
   target.querySelector<HTMLButtonElement>(".collapse")!.click();
@@ -145,7 +145,7 @@ test("collapsed link has a close that hides it until its state changes", () => {
   expect(target.querySelector(".collapsed")).not.toBeNull();
 });
 
-test("section close keeps a counting stalled link hidden until state changes", () => {
+test("section close keeps a counting stalled connection hidden until state changes", () => {
   state("stalled", 8_100);
   render();
   target.querySelector<HTMLButtonElement>('[aria-label="hide connection status"]')!.click();
@@ -194,12 +194,12 @@ test("section close remembers states already seen in an unhealthy spell and rese
   expect(section(), "stalled is new in the spell after unknown").not.toBeNull();
 });
 
-test("pressing link opens its popover without collapsing the status bar", () => {
+test("pressing connection opens its popover without collapsing the status bar", () => {
   state("slow");
   render();
-  const button = section()?.querySelector<HTMLButtonElement>(".link-indicator")!;
+  const button = section()?.querySelector<HTMLButtonElement>(".connection-indicator")!;
   button.click();
   flushSync();
-  expect(document.body.querySelector(".link-popover")).not.toBeNull();
+  expect(document.body.querySelector(".connection-popover")).not.toBeNull();
   expect(target.querySelector(".app-statusbar")?.classList.contains("collapsed")).toBe(false);
 });

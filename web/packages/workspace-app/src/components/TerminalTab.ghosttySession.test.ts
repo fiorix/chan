@@ -34,9 +34,9 @@ import {
   ghosttyLineText, ghosttyMode, ghosttyMouseTracking, installSoftwareCanvas, mountGhostty,
 } from "../__tests__/ghosttyTab";
 import { WS_PING_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
-import { LINK_STALLED_MS } from "../api/linkProbe";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
-import { TERMINAL_STALL_REDIAL_MS } from "./terminalLink.svelte";
+import { CONNECTION_STALLED_MS } from "../api/connectionProbe";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
+import { TERMINAL_STALL_REDIAL_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
   attach,
@@ -64,13 +64,13 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   installSoftwareCanvas();
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
 });
 
 afterEach(async () => {
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   for (const component of mounted) await unmount(component);
   mounted.clear();
   for (const cleanup of cleanups.splice(0)) cleanup();
@@ -118,14 +118,14 @@ describe("a Ghostty tab reconnecting to a session", () => {
     await output(socket, "\x1b[?1049h");
     expect(ghosttyAlternateScreen(term)).toBe(true);
     await receive(socket, { type: "pong" });
-    await vi.advanceTimersByTimeAsync(WS_PING_MS + LINK_STALLED_MS);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
     const beforePings = sentFrames(socket).filter((frame) => frame.type === "ping").length;
     const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
     expect(ghosttyCellMetrics(term).height).toBeGreaterThan(0);
     canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1, deltaMode: 1 }));
     expect(inputFrames(socket)).toContainEqual({ type: "input", data: "\x1b[A" });
-    linkHealth.lastContactAt = Date.now();
-    linkHealth.state = "ok";
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
     await tick();
     await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS + 1_000);
     expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(beforePings);
@@ -134,7 +134,7 @@ describe("a Ghostty tab reconnecting to a session", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!, { id: SESSION });
     await tick();
-    expect(document.querySelector('[data-terminal-link-pill]')).toBeNull();
+    expect(document.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
   test.each([
     ["replacement", "sess-fresh", "\n"],

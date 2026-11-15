@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { abandonDevserverForWindow, reconnectDevserverForWindow } from "../api/desktop";
 import type { WsStatus } from "../api/client";
-import { resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
+import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { overlayStack, promptState, setCoverBlocking, ui } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
@@ -35,17 +35,17 @@ const mounted: Array<Record<string, unknown>> = [];
 
 function watchStatus(status: WsStatus): void {
   ui.ws = status;
-  setLinkWatchStatus(status);
+  setConnectionWatchStatus(status);
   if (status === "open") {
-    watchLinkProbe.pingSent();
-    watchLinkProbe.frameReceived();
-    watchLinkProbe.pongReceived();
+    watchConnectionProbe.pingSent();
+    watchConnectionProbe.frameReceived();
+    watchConnectionProbe.pongReceived();
   }
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   invoke = vi.fn(async () => undefined);
   watchStatus("open");
   ui.wsAttempt = 0;
@@ -63,7 +63,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const view of mounted.splice(0)) unmount(view);
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   document.body.innerHTML = "";
   delete (window as TauriWindow).__TAURI_INTERNALS__;
   history.replaceState(null, "", "/");

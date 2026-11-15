@@ -18,7 +18,7 @@ import {
   requestCloseWindow,
 } from "../api/desktop";
 import { setTransientStatus, ui } from "./store.svelte";
-import { linkHealth } from "./linkHealth.svelte";
+import { connectionHealth } from "./connectionHealth.svelte";
 import { flushEditsToRecovery } from "./tabs.svelte";
 
 export type CloseConfirmChoice = "hide" | "close" | "cancel";
@@ -49,7 +49,7 @@ export function uiCloseConfirm(): Promise<CloseConfirmChoice> {
     closeConfirmState.resolve?.("cancel");
     closeConfirmState.resolve = resolve;
     closeConfirmState.refusal = null;
-    closeConfirmState.outageEpochAtOpen = linkHealth.outageEpoch;
+    closeConfirmState.outageEpochAtOpen = connectionHealth.outageEpoch;
     closeConfirmState.coveredAtOpen = ui.disconnectBlocking;
     closeConfirmState.open = true;
   });

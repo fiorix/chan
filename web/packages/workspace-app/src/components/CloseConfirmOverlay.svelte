@@ -25,7 +25,7 @@
   import { tmuxPaneTabs } from "../state/tabs.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
-  import { linkHealth } from "../state/linkHealth.svelte";
+  import { connectionHealth } from "../state/connectionHealth.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -46,7 +46,7 @@
     const covered = ui.disconnectBlocking;
     if (
       open &&
-      (linkHealth.outageEpoch !== closeConfirmState.outageEpochAtOpen ||
+      (connectionHealth.outageEpoch !== closeConfirmState.outageEpochAtOpen ||
         (covered && !observedCover && !closeConfirmState.coveredAtOpen))
     ) {
       cancelCloseConfirmForConnectionChange();

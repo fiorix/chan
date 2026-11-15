@@ -1,5 +1,5 @@
 <script lang="ts">
-  import TerminalLinkNotice from "../components/TerminalLinkNotice.svelte";
+  import TerminalConnectionNotice from "../components/TerminalConnectionNotice.svelte";
 
   let stalled = $state(false);
   let waitMs = $state(0);
@@ -16,4 +16,4 @@
   }
 </script>
 
-<TerminalLinkNotice {stalled} lost={false} notice={false} {waitMs} findOpen={false} inspectorOpen={false} inspectorWidth={0} />
+<TerminalConnectionNotice {stalled} lost={false} notice={false} {waitMs} findOpen={false} inspectorOpen={false} inspectorWidth={0} />

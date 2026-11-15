@@ -25,7 +25,7 @@
   import { surveyFor } from "../state/survey.svelte";
   import { teamDialogState } from "../state/teamDialog.svelte";
   import { closeConfirmState } from "../state/closeConfirm.svelte";
-  import { linkHealth } from "../state/linkHealth.svelte";
+  import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { onDestroy, onMount, tick } from "svelte";
 
@@ -132,7 +132,7 @@
     return () => window.removeEventListener("focus", onWindowFocus);
   });
 
-  const watcherOpen = $derived(ui.ws === "open" && linkHealth.outage === null);
+  const watcherOpen = $derived(ui.ws === "open" && connectionHealth.outage === null);
   const bandAvailable = $derived(windowTabBar.on && !keyboardOwnedAbovePanes());
   $effect(() => {
     const status = ui.ws;
@@ -158,9 +158,9 @@
       visible = false;
       return;
     }
-    // Only direct status changes without the link-state bridge, as in tests,
+    // Only direct status changes without the connection-state bridge, as in tests,
     // lack an outage deadline.
-    const coverAt = linkHealth.outage?.coverAt ?? Date.now();
+    const coverAt = connectionHealth.outage?.coverAt ?? Date.now();
     const show = setTimeout(() => {
       visible = true;
     }, Math.max(STARTUP_GRACE_MS, coverAt - Date.now()));
@@ -283,8 +283,8 @@
       elapsedMs = 0;
       return;
     }
-    // Direct status changes without the link-state bridge have no outage start.
-    const start = linkHealth.outage?.startedAt ?? Date.now();
+    // Direct status changes without the connection-state bridge have no outage start.
+    const start = connectionHealth.outage?.startedAt ?? Date.now();
     elapsedMs = Date.now() - start;
     const id = setInterval(() => {
       elapsedMs = Date.now() - start;

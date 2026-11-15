@@ -3,7 +3,7 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import { setSocketFactory } from "../api/transport";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 import { resumeWatcher, teardown, ui } from "../state/store.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 
@@ -37,7 +37,7 @@ class FakeSocket {
 
 afterEach(() => {
   teardown();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   setSocketFactory(null);
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -51,7 +51,7 @@ afterEach(() => {
 test("a real watcher status bridge carries a deadline and a close to the window cover", async () => {
   vi.useFakeTimers();
   teardown();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   FakeSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
@@ -68,20 +68,20 @@ test("a real watcher status bridge carries a deadline and a close to the window 
   first.pong();
   await tick();
   expect(ui.ws).toBe("open");
-  expect(linkHealth.state).toBe("ok");
+  expect(connectionHealth.state).toBe("ok");
   const contact = Date.now();
 
   vi.advanceTimersByTime(15_000);
   await tick();
   expect(first.readyState).toBe(3);
   expect(ui.ws).toBe("reconnecting");
-  expect(linkHealth.outage?.coverAt).toBe(contact + 45_000);
+  expect(connectionHealth.outage?.coverAt).toBe(contact + 45_000);
   expect(target.querySelector(".overlay")).toBeNull();
   vi.advanceTimersByTime(500);
   const redial = FakeSocket.instances.at(-1)!;
   redial.open();
   await tick();
-  expect(linkHealth.state).toBe("down");
+  expect(connectionHealth.state).toBe("down");
   for (let i = 0; i < 2; i += 1) {
     vi.advanceTimersByTime(10_000);
     redial.onmessage?.({ data: "{" });
@@ -95,7 +95,7 @@ test("a real watcher status bridge carries a deadline and a close to the window 
 
   await unmount(view);
   teardown();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   const closeTarget = document.body.appendChild(document.createElement("div"));
   const closeView = mount(DisconnectOverlay, { target: closeTarget });
   resumeWatcher();
@@ -103,11 +103,11 @@ test("a real watcher status bridge carries a deadline and a close to the window 
   second.open();
   second.pong();
   await tick();
-  expect(linkHealth.outage).toBeNull();
+  expect(connectionHealth.outage).toBeNull();
   expect(closeTarget.querySelector(".overlay")).toBeNull();
   second.close();
   await tick();
-  expect(linkHealth.outage?.coverAt).toBe(linkHealth.outage?.startedAt);
+  expect(connectionHealth.outage?.coverAt).toBe(connectionHealth.outage?.startedAt);
   vi.advanceTimersByTime(500);
   await tick();
   expect(ui.ws).toBe("connecting");
@@ -124,7 +124,7 @@ test("a real watcher status bridge carries a deadline and a close to the window 
 test("a real watcher pong ends the outage and clears the cover", async () => {
   vi.useFakeTimers();
   teardown();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   FakeSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
@@ -138,7 +138,7 @@ test("a real watcher pong ends the outage and clears the cover", async () => {
   await tick();
   first.close();
   await tick();
-  expect(linkHealth.outage).not.toBeNull();
+  expect(connectionHealth.outage).not.toBeNull();
   vi.advanceTimersByTime(500);
   const redial = FakeSocket.instances.at(-1)!;
   redial.open();
@@ -146,10 +146,10 @@ test("a real watcher pong ends the outage and clears the cover", async () => {
   vi.advanceTimersByTime(600);
   await tick();
   expect(target.querySelector(".overlay")).not.toBeNull();
-  expect(linkHealth.outage).not.toBeNull();
+  expect(connectionHealth.outage).not.toBeNull();
   redial.pong();
   await tick();
-  expect(linkHealth.outage).toBeNull();
+  expect(connectionHealth.outage).toBeNull();
   expect(target.querySelector(".overlay")).toBeNull();
   await unmount(view);
 });
