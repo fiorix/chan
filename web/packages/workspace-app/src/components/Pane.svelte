@@ -2686,7 +2686,8 @@
   @keyframes tab-spin {
     to { transform: rotate(360deg); }
   }
-  /* Keyboard focus reveals the close action even on an inactive tab. */
+  /* Hide inactive close buttons to keep a crowded strip readable;
+     keyboard focus reveals the action without requiring a hover. */
   .tab .close {
     background: none;
     border: 0;

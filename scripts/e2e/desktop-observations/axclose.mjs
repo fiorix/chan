@@ -357,9 +357,15 @@ async function main() {
       } finally {
         deadline = Date.now() + 60000;
         try { save(`${arm}-final.json`, snapshot()); screenshot(`${arm}-after`); }
-        catch (error) { row.evidenceError = mask(error.message); row.status = "incomplete"; }
+        catch (error) {
+          row.evidenceError = mask(error.message);
+          if (row.status !== "fault") row.status = "incomplete";
+        }
         try { save(`${arm}-cleanup.json`, await cleanup()); }
-        catch (error) { row.cleanupError = mask(error.message); row.status = "incomplete"; }
+        catch (error) {
+          row.cleanupError = mask(error.message);
+          if (row.status !== "fault") row.status = "incomplete";
+        }
       }
       result.arms.push(row);
       save("axclose-results.json", result);

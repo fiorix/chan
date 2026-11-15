@@ -11,6 +11,35 @@ assert.ok(start >= 0 && end > start, "native controller verdict block is present
 const verdict = new Function("result", `${source.slice(start, end)}\nreturn code;`);
 const fault = JSON.parse(readFileSync(new URL("./fixtures/axclose/fault.json", import.meta.url), "utf8"));
 const held = JSON.parse(readFileSync(new URL("./fixtures/axclose/held.json", import.meta.url), "utf8"));
+const finalizerStart = source.indexOf("        deadline = Date.now() + 60000;", source.indexOf("      const row = { arm,"));
+const finalizerEnd = source.indexOf("\n      }\n      result.arms.push(row);", finalizerStart);
+assert.ok(finalizerStart >= 0 && finalizerEnd > finalizerStart, "native arm finalizer is present");
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const finalize = new AsyncFunction("row", "arm", "save", "snapshot", "screenshot", "cleanup", "mask",
+  `let deadline;\n${source.slice(finalizerStart, finalizerEnd)}`);
+
+for (const failure of ["evidence", "cleanup", "both"]) {
+  const failureName = failure === "both" ? "evidence and cleanup failures" : `${failure} failure`;
+  for (const completed of ["fault", "held"]) {
+    test(`a ${completed === "fault" ? "completed fault" : "held arm"} retains the correct verdict after its own ${failureName}`, async () => {
+      const result = structuredClone(held);
+      const row = result.arms[0] = structuredClone(completed === "fault" ? fault.arms[0] : held.arms[0]);
+      const observedError = row.error;
+      await finalize(row, row.arm, () => {}, () => {
+        if (failure !== "cleanup") throw new Error("post-arm snapshot failed");
+        return {};
+      }, () => {}, async () => {
+        if (failure !== "evidence") throw new Error("arm cleanup failed");
+        return {};
+      }, (message) => message);
+      assert.equal(row.evidenceError, failure !== "cleanup" ? "post-arm snapshot failed" : undefined);
+      assert.equal(row.cleanupError, failure !== "evidence" ? "arm cleanup failed" : undefined);
+      assert.equal(row.error, observedError, "the observed action error remains available");
+      assert.equal(row.status, completed === "fault" ? "fault" : "incomplete");
+      assert.equal(verdict(result), completed === "fault" ? 10 : 3);
+    });
+  }
+}
 
 test("recorded selection faults outrank unavailable close controls", () => {
   assert.deepEqual(fault.arms.map((arm) => arm.status), ["fault", "fault", "fault", "unavailable", "unavailable", "unavailable"]);
