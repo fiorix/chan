@@ -239,6 +239,8 @@
   import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
+  import { createTerminalLink, terminalMouseReport } from "./terminalLink.svelte";
+  import TerminalStallStrip from "./TerminalStallStrip.svelte";
 
   let {
     tab,
@@ -345,6 +347,7 @@
     | { type: "resize_other"; cols: number; rows: number }
     | { type: "closed"; reason: CloseReason }
     | { type: "exit"; code?: number }
+    | { type: "pong" }
     | { type: "error"; message?: string; reason?: string };
 
   type QueuedMessagePreview = {
@@ -402,6 +405,7 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
+  const terminalLink = createTerminalLink(() => sendPing());
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
   // shared from transport.ts so the two cannot drift) applied to the one SPA
@@ -656,9 +660,12 @@
     void tick().then(start);
     return teardown;
   });
+  $effect(() => () => terminalLink.dispose());
 
   $effect(() => {
-    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => sendInput(data, binary));
+    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
+      if (sendInput(data, binary) && !terminalMouseReport(data)) terminalLink.inputSent();
+    });
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
     // write queue (NOT sendInput's raw keystroke path).
@@ -1560,6 +1567,13 @@
       clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
+    terminalLink.retired();
+  }
+
+  function sendPing(): void {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    terminalLink.pingSent();
+    send({ type: "ping" });
   }
 
   function cancelReconnect(): void {
@@ -1713,7 +1727,9 @@
       // The control terminal is a single-shot local runner; it does not send
       // the heartbeat ping.
       if (!ui.terminalControl) {
-        pingTimer = setInterval(() => send({ type: "ping" }), WS_PING_MS);
+        terminalLink.opened();
+        pingTimer = setInterval(sendPing, WS_PING_MS);
+        sendPing();
       }
       if (term) publishLocalSize(term.cols, term.rows);
       sendFocusState();
@@ -1722,6 +1738,7 @@
       // Any inbound frame proves the socket is live -- refresh the deadline
       // first, before decoding.
       armDeadline();
+      terminalLink.frameArrived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
         if (resetBeforeReplay && bytes.length > 0) {
@@ -1754,6 +1771,10 @@
       try {
         frame = JSON.parse(String(event.data)) as ServerFrame;
       } catch {
+        return;
+      }
+      if (frame.type === "pong") {
+        terminalLink.pongArrived();
         return;
       }
       if (frame.type === "ready") {
@@ -2136,8 +2157,8 @@
   /// `binary` marks `data` as one byte per character, which the server writes
   /// as the characters' codes rather than their UTF-8. Text frames carry no
   /// such field.
-  function sendInput(data: string, binary = false): void {
-    send(binary ? { type: "input", data, binary } : { type: "input", data });
+  function sendInput(data: string, binary = false): boolean {
+    return send(binary ? { type: "input", data, binary } : { type: "input", data });
   }
 
   function sendGeneratedTerminalInput(data: string): void {
@@ -2227,7 +2248,9 @@
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
-    return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
+    const sent = send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
+    if (sent) terminalLink.inputSent();
+    return sent;
   }
 
   /// Rich Prompt recall: ask the server to pull a still-queued message out of
@@ -2368,8 +2391,8 @@
     sendUserInput(data);
   }
 
-  function sendUserInput(data: string, binary = false): void {
-    sendInput(data, binary);
+  function sendUserInput(data: string, binary = false, probeInput = true): void {
+    if (sendInput(data, binary) && probeInput && !terminalMouseReport(data)) terminalLink.inputSent();
     broadcastTerminalInput(tab, data, binary);
     // Cross-window broadcast: same-group members in OTHER windows live in the
     // shared terminal registry and are unreachable from this window's SPA, so
@@ -2381,11 +2404,10 @@
   }
 
   function handleGhosttyData(data: string): void {
-    // ghostty-web 0.4.0-next.20's encodeMouseX10 and sendMouseEvent emit
-    // these complete chunks. The end assertion also excludes a trailing newline.
-    if (/^\x1b\[M[\x20-\xff]{3}(?![\s\S])/.test(data)) {
+    const mouseReport = terminalMouseReport(data);
+    if (mouseReport === "x10") {
       sendUserInput(data, true);
-    } else if (/^\x1b\[<\d+;\d+;\d+[Mm](?![\s\S])/.test(data)) {
+    } else if (mouseReport === "sgr") {
       sendUserInput(data);
     } else {
       handleXtermData(data);
@@ -2449,7 +2471,7 @@
       const cellHeight = t.renderer?.getMetrics().height ?? 0;
       if (!(cellHeight > 0)) return false;
       if (ghosttyWheelRows.consume(e, cellHeight, t.rows) !== 0) {
-        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)));
+        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)), false, false);
       }
       return true;
     }
@@ -3562,6 +3584,7 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
+    <TerminalStallStrip visible={terminalLink.state.stalled && status === "connected" && !ui.disconnectBlocking} waitMs={terminalLink.state.waitMs} />
     <TmuxConsentBanner
       question={tab.tmuxConsent?.question ?? null}
       program={terminalTabName(tab)}
