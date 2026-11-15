@@ -319,7 +319,6 @@ async function restoreArm(ctx, page, engine, adopt) {
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(`${TERMINAL} ${ENGINE[engine]}`, { visible: true, timeout: 30_000 });
   await page.waitForFunction((selector) => document.querySelectorAll(selector).length > 0, { timeout: 15_000 }, FILE_ROW);
-  await ctx.waitWindowLive(windowId);
   // Past the terminal's open and ghostty-web's zero-delay focus retry,
   // sampled so a reading shows what took the keyboard and when.
   const timeline = [];
@@ -330,7 +329,9 @@ async function restoreArm(ctx, page, engine, adopt) {
     await sleep(25);
   }
   const state = await browserState(page);
-  return { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  await ctx.waitWindowLive(windowId);
+  return result;
 }
 
 async function engineWindow(ctx, dir, engine, failures) {

@@ -35,7 +35,7 @@ import {
 } from "../__tests__/terminalTab";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink } from "../state/tabs.svelte";
-import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
+import { SecretAssignmentMatcher } from "../terminal/secretMasking";
 
 const mounted: Array<Record<string, unknown>> = [];
 const cleanups: Array<() => void> = [];
@@ -126,19 +126,44 @@ test("a letter typed before the Ghostty write callback reaches the group while i
   expect(callbacksPending, "the held callback completes when the frame advances").toBe(0);
 });
 
-test("Ghostty publishes its resized PTY grid before invalidating visible secret masks", async () => {
-  const { term, socket } = await attached();
-  const ownScan = GhosttySecretMasker.prototype.scanViewport;
-  const gridsAtScan: Array<Array<Record<string, unknown>>> = [];
-  vi.spyOn(GhosttySecretMasker.prototype, "scanViewport").mockImplementation(function (this: GhosttySecretMasker) {
-    gridsAtScan.push(sentFrames(socket).filter((frame) => frame.type === "resize"));
-    ownScan.call(this);
+test("Ghostty publishes its resized PTY grid before scanning and painting rewrapped secrets", async () => {
+  const { term, host, socket } = await attached();
+  const secret = "TOKEN=abcdefghijklmnopqrstuvwx";
+  const find = SecretAssignmentMatcher.prototype.find;
+  const scans: Array<{ text: string; ranges: Array<{ start: number; end: number }>; grids: Array<Record<string, unknown>> }> = [];
+  // Observe the real scan's matcher, not the request to invalidate its cache.
+  vi.spyOn(SecretAssignmentMatcher.prototype, "find").mockImplementation(function (this: SecretAssignmentMatcher, text) {
+    const ranges = find.call(this, text);
+    if (text.includes("TOKEN=")) {
+      scans.push({ text: text.trimEnd(), ranges, grids: sentFrames(socket).filter((frame) => frame.type === "resize") });
+    }
+    return ranges;
   });
+  const context = canvas.context(host);
+  const { width, height } = term.renderer!.getMetrics();
+  const mask = { r: 108, g: 108, b: 112, a: 1 };
+  const pixel = (column: number, row: number) => context.pixelAt((column + 0.5) * width, (row + 0.5) * height);
+  await output(socket, secret);
+  canvas.frame();
 
-  term.resize(91, 24);
+  expect(scans, "the mounted masker scans the real core's secret").toEqual([
+    { text: secret, ranges: [{ start: 6, end: 30 }], grids: [] },
+  ]);
+  for (let column = 6; column < 30; column += 1) expect(pixel(column, 0)).toEqual(mask);
+  scans.splice(0);
+  socket.sent.splice(0);
 
-  expect(gridsAtScan, "the size notification must precede even the synchronous masker call")
-    .toEqual([[{ type: "resize", cols: 91, rows: 24 }]]);
+  term.resize(20, 24);
+
+  expect(scans, "the PTY already has the new grid when the real masker scans its rewrapped value").toEqual([
+    { text: secret, ranges: [{ start: 6, end: 30 }], grids: [{ type: "resize", cols: 20, rows: 24 }] },
+  ]);
   expect(sentFrames(socket).filter((frame) => frame.type === "resize"))
-    .toEqual([{ type: "resize", cols: 91, rows: 24 }]);
+    .toEqual([{ type: "resize", cols: 20, rows: 24 }]);
+  expect(ghosttyLineText(term, 0)).toBe(secret.slice(0, 20));
+  expect(ghosttyLineText(term, 1)).toBe(secret.slice(20));
+  for (let column = 6; column < 20; column += 1) expect(pixel(column, 0)).toEqual(mask);
+  for (let column = 0; column < 10; column += 1) expect(pixel(column, 1)).toEqual(mask);
+  expect(pixel(5, 0), "the assignment name stays unmasked").not.toEqual(mask);
+  expect(pixel(11, 1), "the mask ends with the wrapped value").not.toEqual(mask);
 });

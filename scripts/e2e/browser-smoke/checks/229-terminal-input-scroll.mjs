@@ -222,7 +222,7 @@ export default {
               if (report.before.bottom || JSON.stringify(report.before.rows) !== JSON.stringify(beforeMode.rows)) {
                 throw new Error(`${backend}/${encoding}/${kind}: enabling mouse reports moved history`);
               }
-              const surface = `${hostQuery} ${backend === "ghostty" ? "canvas" : ".xterm-screen"}`;
+              const surface = `${hostQuery} ${backend === "ghostty" ? "> canvas" : ".xterm-screen"}`;
               const position = await page.$eval(surface, (node) => {
                 const rect = node.getBoundingClientRect();
                 return { x: rect.left + 5, y: rect.top + 8 };
@@ -236,7 +236,9 @@ export default {
               try {
                 if (kind === "mouse") await page.mouse.down();
                 else await page.mouse.wheel({ deltaY: -120 });
-                await fixture.waitFor(() => pattern.test(inputSince(fixture, inputIndex)));
+                await fixture.waitFor(() => pattern.test(inputSince(fixture, inputIndex))).catch((error) => {
+                  throw new Error(`${backend}/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
+                });
                 report.input = inputSince(fixture, inputIndex);
                 await frame(page);
                 await frame(page);
