@@ -12,7 +12,7 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 async function mode(page, name) {
   for (const button of await page.$$(".team-dialog .team-realestate-mode")) {
-    if (await button.evaluate((node) => node.textContent?.trim() === name)) {
+    if (await button.evaluate((node, expected) => node.textContent?.trim() === expected, name)) {
       await button.click();
       return;
     }
@@ -133,6 +133,24 @@ export default {
           leg.passed = true;
         } catch (error) {
           leg.error = maskTokens(error?.stack ?? String(error));
+          try {
+            const state = await page.evaluate(() => ({
+              modeButtons: [...document.querySelectorAll(".team-dialog .team-realestate-mode")]
+                .map((button) => button.textContent?.trim() ?? ""),
+              windowName: window.name,
+            }));
+            leg.failureState = {
+              modeButtons: state.modeButtons.map((label) => maskTokens(label)),
+              windowName: maskTokens(state.windowName),
+            };
+          } catch (evidenceError) {
+            leg.failureStateError = maskTokens(evidenceError?.stack ?? String(evidenceError));
+          }
+          try {
+            await ctx.shot(`276-${kind}-failure`);
+          } catch (evidenceError) {
+            leg.failureScreenshotError = maskTokens(evidenceError?.stack ?? String(evidenceError));
+          }
         } finally {
           page.off("request", onRequest);
           try {
