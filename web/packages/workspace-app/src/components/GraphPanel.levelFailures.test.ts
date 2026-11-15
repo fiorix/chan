@@ -37,7 +37,9 @@ installGraphDom();
 
 const fixtureRead = vi.mocked(api.fsGraph).getMockImplementation()!;
 const opened = { docs: true, notes: true, src: true };
-const timeout = () => new Error("request timed out");
+const timeout = (path = "notes") => new ApiError(0,
+  `request timed out after 10000 ms: GET /api/fs-graph?scope=directory&path=${encodeURIComponent(path)}&depth=1&limit=128`,
+);
 let timers: TimerTrack;
 let releaseStreams: Array<() => void>;
 
@@ -81,14 +83,20 @@ function coverNotes(): void {
   };
 }
 
-function failLevel(path: string, failures = Infinity, error: () => Error = timeout): void {
+function failLevel(path: string, failures = Infinity, error: (path: string) => Error = timeout): void {
   vi.mocked(api.fsGraph).mockImplementation(async (options) => {
     if (options.path === path && failures-- > 0) {
       graphServer.fsGraphCalls.push({ path: options.path, depth: options.depth ?? 1, cursor: options.cursor });
-      throw error();
+      throw error(options.path);
     }
     return fixtureRead(options);
   });
+}
+
+function warningText(target: HTMLElement): string {
+  const warning = target.querySelector(".spine-warning");
+  expect(warning, "an uncovered failed retry displays a warning").not.toBeNull();
+  return warning!.textContent!.trim();
 }
 
 function reads(path: string): number {
@@ -158,12 +166,15 @@ describe("a failed nonroot filesystem level", () => {
     expect(target.querySelector(".spine-warning")).toBeNull();
   });
 
-  test("a second uncovered failure names its directory without dimming the retained graph", async () => {
-    failLevel("notes");
+  test.each([
+    ["timeout", timeout, "request timed out after 10000 ms"],
+    ["dropped connection", () => new TypeError("Failed to fetch"), "Failed to fetch"],
+  ] as const)("a second uncovered %s names its directory and short reason without dimming the retained graph", async (_kind, error, reason) => {
+    failLevel("notes", Infinity, error);
     const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { ...opened } }));
 
     expect.soft(reads("notes")).toBe(2);
-    expect.soft(target.querySelector(".spine-warning")?.textContent).toContain("Could not read directory notes: request timed out");
+    expect(warningText(target)).toBe(`Could not read directory notes: ${reason}`);
     expect.soft(target.querySelector(".placeholder.error")).toBeNull();
     expect.soft(target.querySelector(".cy.dim")).toBeNull();
     expect(visibleIds()).toEqual(expect.arrayContaining(["docs/a.md", "src/a.md"]));
@@ -189,7 +200,7 @@ describe("a failed nonroot filesystem level", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (options.path !== "") {
         graphServer.fsGraphCalls.push({ path: options.path, depth: options.depth ?? 1, cursor: options.cursor });
-        throw timeout();
+        throw timeout(options.path);
       }
       return fixtureRead(options);
     });
@@ -200,7 +211,8 @@ describe("a failed nonroot filesystem level", () => {
     expect(dirs.map(reads)).toEqual([2, 2, 2, 2, 2, 2]);
     expect(target.querySelector(".placeholder.error")).toBeNull();
     expect(target.querySelector(".cy.dim")).toBeNull();
-    for (const dir of dirs) expect(target.querySelector(".spine-warning")?.textContent).toContain(`directory ${dir}:`);
+    const warning = warningText(target);
+    for (const dir of dirs) expect(warning).toContain(`directory ${dir}:`);
   });
 
   test("a failed later page retries the directory from its first page", async () => {
@@ -210,7 +222,7 @@ describe("a failed nonroot filesystem level", () => {
       if (options.path === "notes" && options.cursor !== undefined && fail) {
         fail = false;
         graphServer.fsGraphCalls.push({ path: options.path, depth: options.depth ?? 1, cursor: options.cursor });
-        throw timeout();
+        throw timeout(options.path);
       }
       return fixtureRead(options);
     });
@@ -226,7 +238,7 @@ describe("a failed nonroot filesystem level", () => {
 
 describe("root failures remain fatal", () => {
   test.each([
-    ["timeout", timeout],
+    ["timeout", () => timeout("")],
     ["404", () => new ApiError(404, "no such path: /ws", { error: "no such path: /ws" })],
   ] as const)("a root %s still fails the tab load", async (_kind, error) => {
     coverNotes();
@@ -286,7 +298,7 @@ describe("a failed level belongs to its load", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (options.path === "notes") {
         graphServer.fsGraphCalls.push({ path: options.path, depth: options.depth ?? 1, cursor: options.cursor });
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       if (options.path === "docs" && ++docsReads === 2) await patch;

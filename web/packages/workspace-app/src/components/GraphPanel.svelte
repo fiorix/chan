@@ -1368,8 +1368,8 @@
     const askAhead = (): void => {
       while (asked < dirs.length && reads.length < SPINE_READS_AHEAD) {
         const level = fetchSpineLevel(dirs[asked++], seq);
-        // Awaited in its turn; one in flight when an earlier one fails is
-        // dropped with the fetch.
+        // Awaited in its turn; a root failure or a superseding load can
+        // leave later requests unconsumed.
         level.catch(() => {});
         reads.push(level);
       }
@@ -1386,7 +1386,7 @@
         } catch (e) {
           if (seq !== spineSeq) return;
           if (dir === "" || isWorkspaceRootMissingError(e)) throw e;
-          setSpineFailure(dir, { status: "pending", message: (e as Error).message });
+          setSpineFailure(dir, { status: "pending", message: spineFailureMessage(e) });
           askAhead();
           continue;
         }
@@ -1557,6 +1557,11 @@
     spineFailures = new Map(spineFailures).set(dir, failure);
   }
 
+  function spineFailureMessage(error: unknown): string {
+    // The warning already names the directory; keep only the timeout reason.
+    return (error as Error).message.replace(/^(request timed out after \d+ ms): GET \/api\/fs-graph\?.*$/, "$1");
+  }
+
   // Retry behind patches, so a newer successful read can cancel the retry
   // before it starts. A hidden tab or a shared refresh defers pending work;
   // a request already started still belongs to this spine when it returns.
@@ -1566,6 +1571,7 @@
     if (read === null) return;
     spineRetryQueued = true;
     const run = async (): Promise<void> => {
+      let changed = false;
       try {
         for (const [dir, failure] of spineFailures) {
           if (seq !== spineSeq || read !== spineRead || !visible || !graphWhole || error !== null) return;
@@ -1575,17 +1581,20 @@
             const level = await fetchSpineLevel(dir, seq);
             if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
             applySpineLevel(read, dir, level);
-            publishSpine(read);
+            changed = true;
           } catch (e) {
             if (seq !== spineSeq || read !== spineRead) return;
             if (isWorkspaceRootMissingError(e)) {
               spineFailed(e);
               return;
             }
-            setSpineFailure(dir, { status: "failed", message: (e as Error).message });
+            setSpineFailure(dir, { status: "failed", message: spineFailureMessage(e) });
           }
         }
       } finally {
+        // Each publication lays out the whole spine. Keep completed reads
+        // together, including when visibility or a refresh ends the batch.
+        if (changed && seq === spineSeq && read === spineRead) publishSpine(read);
         spineRetryQueued = false;
       }
     };

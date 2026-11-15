@@ -36,7 +36,9 @@ installGraphDom();
 const fixtureRead = vi.mocked(api.fsGraph).getMockImplementation()!;
 type ReadOptions = Parameters<typeof api.fsGraph>[0];
 const opened = { docs: true, notes: true, src: true };
-const timeout = () => new Error("request timed out");
+const timeout = (path = "notes") => new ApiError(0,
+  `request timed out after 10000 ms: GET /api/fs-graph?scope=directory&path=${encodeURIComponent(path)}&depth=1&limit=128`,
+);
 let timers: TimerTrack;
 let releases: Array<() => void>;
 const mounted: Array<Record<string, unknown>> = [];
@@ -75,6 +77,12 @@ function gate(): { promise: Promise<void>; release: () => void } {
 
 function recordRead(options: ReadOptions): void {
   graphServer.fsGraphCalls.push({ path: options.path, depth: options.depth ?? 1, cursor: options.cursor });
+}
+
+function warningText(target: HTMLElement): string {
+  const warning = target.querySelector(".spine-warning");
+  expect(warning, "an uncovered failed retry displays a warning").not.toBeNull();
+  return warning!.textContent!.trim();
 }
 
 function reads(path: string): number {
@@ -128,6 +136,99 @@ function expectUsable(target: HTMLElement): void {
 }
 
 describe("the directory retry's lifetime", () => {
+  test("publishes successful retries once after the queue finishes", async () => {
+    const shared = gate();
+    graphServer.streamGate = shared.promise;
+    const dirs = ["docs", "notes", "src"];
+    const pending = new Map(dirs.map((dir) => [dir, gate()]));
+    const started: string[] = [];
+    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (!pending.has(options.path)) return fixtureRead(options);
+      if (reads(options.path) === 0) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
+      const response = await fixtureRead(options);
+      started.push(options.path);
+      await pending.get(options.path)!.promise;
+      return response;
+    });
+    const { target } = await render();
+    expect(dirs.map(reads)).toEqual([1, 1, 1]);
+    shared.release();
+    await settle();
+    expect(started).toHaveLength(1);
+    const initial = canvas.props!.nodes;
+    const observed = [initial];
+
+    for (let i = 0; i < dirs.length; i++) {
+      pending.get(started[i])!.release();
+      await settle();
+      observed.push(canvas.props!.nodes);
+      expect(started).toHaveLength(Math.min(i + 2, dirs.length));
+    }
+
+    expect.soft(observed[1], "the first retry does not publish the whole spine").toBe(initial);
+    expect.soft(observed[2], "the second retry does not publish the whole spine").toBe(initial);
+    expect.soft(new Set(observed).size, "one publication after all three reads").toBe(2);
+    expect(observed[3], "the completed queue publishes its retained levels").not.toBe(initial);
+    expect(dirs.map(reads)).toEqual([2, 2, 2]);
+    expect(visibleIds()).toEqual(expect.arrayContaining(dirs.map((dir) => `${dir}/a.md`)));
+    expect(target.querySelector(".spine-warning")).toBeNull();
+    expectUsable(target);
+  });
+
+  test.each(["hidden", "shared refresh"] as const)("flushes a completed retry when %s stops the remaining queue", async (transition) => {
+    const shared = gate();
+    graphServer.streamGate = shared.promise;
+    const pending = new Map(["docs", "notes"].map((dir) => [dir, gate()]));
+    const started: string[] = [];
+    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (!pending.has(options.path)) return fixtureRead(options);
+      if (reads(options.path) === 0) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
+      const response = await fixtureRead(options);
+      started.push(options.path);
+      await pending.get(options.path)!.promise;
+      return response;
+    });
+    const { target, show } = await render();
+    shared.release();
+    await settle();
+    expect(started).toHaveLength(1);
+    const first = started[0];
+    const remaining = first === "docs" ? "notes" : "docs";
+    let finishRefresh: (() => void) | undefined;
+    let refreshing: Promise<void> | undefined;
+    if (transition === "hidden") show(false);
+    else {
+      const refresh = gate();
+      graphServer.streamGate = refresh.promise;
+      finishRefresh = refresh.release;
+      refreshing = refreshGraph();
+    }
+    await settle();
+    pending.get(first)!.release();
+    await settle();
+
+    expect(reads(remaining), "the next retry waits for a visible, whole graph").toBe(1);
+    expect(visibleIds(), "an early loop exit still publishes the successful level").toContain(`${first}/a.md`);
+    if (transition === "hidden") show(true);
+    else finishRefresh!();
+    await refreshing;
+    await settle();
+    expect(reads(first), "the completed retry is not spent again").toBe(2);
+    expect(reads(remaining)).toBe(2);
+    pending.get(remaining)!.release();
+    await settle();
+
+    expect(visibleIds()).toEqual(expect.arrayContaining(["docs/a.md", "notes/a.md", "src/a.md"]));
+    expect(target.querySelector(".spine-warning")).toBeNull();
+    expectUsable(target);
+  });
+
   test.each(["success", "failure"] as const)("does not warn while an uncovered retry is waiting for %s", async (result) => {
     const pending = gate();
     let attempts = 0;
@@ -135,11 +236,11 @@ describe("the directory retry's lifetime", () => {
       if (options.path !== "notes") return fixtureRead(options);
       if (++attempts === 1) {
         recordRead(options);
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       await pending.promise;
-      if (result === "failure") throw timeout();
+      if (result === "failure") throw timeout(options.path);
       return response;
     });
     const { target } = await render();
@@ -148,6 +249,7 @@ describe("the directory retry's lifetime", () => {
     expect(target.querySelector(".spine-warning"), "an in-flight retry has not failed").toBeNull();
     expectUsable(target);
     expect(visibleIds()).toEqual(expect.arrayContaining(["docs/a.md", "src/a.md"]));
+    const waitingNodes = canvas.props!.nodes;
     pending.release();
     await settle();
 
@@ -155,8 +257,8 @@ describe("the directory retry's lifetime", () => {
       expect(target.querySelector(".spine-warning")).toBeNull();
       expect(visibleIds()).toContain("notes/a.md");
     } else {
-      expect(target.querySelector(".spine-warning")?.textContent).toContain("notes");
-      expect(target.querySelector(".spine-warning")?.textContent).toContain("request timed out");
+      expect(warningText(target)).toBe("Could not read directory notes: request timed out after 10000 ms");
+      expect(canvas.props!.nodes, "a failed retry does not republish an unchanged spine").toBe(waitingNodes);
     }
     expectUsable(target);
     expect(reads("notes")).toBe(2);
@@ -169,7 +271,7 @@ describe("the directory retry's lifetime", () => {
       if (options.path !== "notes") return fixtureRead(options);
       if (++attempts === 1) {
         recordRead(options);
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       await pending.promise;
@@ -206,11 +308,11 @@ describe("the directory retry's lifetime", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (options.path !== "notes/sub") return fixtureRead(options);
       recordRead(options);
-      throw timeout();
+      throw timeout(options.path);
     });
     const { target } = await render({ ...opened, "notes/sub": true });
     expect(reads("notes/sub")).toBe(2);
-    expect(target.querySelector(".spine-warning")?.textContent).toContain("notes/sub");
+    expect(warningText(target)).toContain("notes/sub");
 
     graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "notes" && !node.path.startsWith("notes/"));
     graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "notes" && !edge.target.startsWith("notes/"));
@@ -235,7 +337,7 @@ describe("the directory retry's lifetime", () => {
       if (options.path !== "notes") return fixtureRead(options);
       if (++attempts === 1) {
         recordRead(options);
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       if (attempts === 2) await patch.promise;
@@ -265,13 +367,13 @@ describe("the directory retry's lifetime", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (!failing || (options.path !== "notes" && options.path !== "notes/sub")) return fixtureRead(options);
       recordRead(options);
-      throw timeout();
+      throw timeout(options.path);
     });
     const { target } = await render({ ...opened, "notes/sub": true });
     expect(reads("notes")).toBe(2);
     expect(reads("notes/sub")).toBe(2);
     expect(canvas.props!.nodes.map((node) => node.id)).not.toContain("directory:notes/sub");
-    expect(target.querySelector(".spine-warning")?.textContent).toContain("notes/sub");
+    expect(warningText(target)).toContain("notes/sub");
     failing = false;
     graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "notes/sub" && !node.path.startsWith("notes/sub/"));
     graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "notes/sub" && !edge.target.startsWith("notes/sub/"));
@@ -293,7 +395,7 @@ describe("the directory retry's lifetime", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (!failing || (options.path !== "notes" && options.path !== "notes/sub")) return fixtureRead(options);
       recordRead(options);
-      throw timeout();
+      throw timeout(options.path);
     });
     const { target } = await render({ ...opened, "notes/sub": true });
     expect(reads("notes")).toBe(1);
@@ -321,7 +423,7 @@ describe("the directory retry's lifetime", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (options.path === "notes" && ++noteAttempts === 1) {
         recordRead(options);
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       if (options.path === "docs" && ++docAttempts === 2) await patch.promise;
@@ -363,36 +465,95 @@ describe("the directory retry's lifetime", () => {
     expectUsable(target);
   });
 
-  test("an old retry cannot replace a newer whole load", async () => {
+  test("a partly successful old retry cannot replace a newer whole load", async () => {
     const old = gate();
-    graphServer.fs.nodes.push(fsg.file("notes/old.md"));
-    graphServer.fs.edges.push(fsg.contains("notes", "notes/old.md"));
+    graphServer.fs.nodes.push(fsg.file("docs/old.md"));
+    graphServer.fs.edges.push(fsg.contains("docs", "docs/old.md"));
     let attempts = 0;
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (options.path === "docs" && reads("docs") === 0) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
       if (options.path !== "notes") return fixtureRead(options);
       if (++attempts === 1) {
         recordRead(options);
-        throw timeout();
+        throw timeout(options.path);
       }
       const response = await fixtureRead(options);
       if (attempts === 2) await old.promise;
       return response;
     });
     const { target } = await render();
+    expect(reads("docs"), "the old queue already applied one successful level").toBe(2);
     expect(reads("notes")).toBe(2);
-    graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "notes/old.md");
-    graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "notes/old.md");
-    graphServer.fs.nodes.push(fsg.file("notes/new.md"));
-    graphServer.fs.edges.push(fsg.contains("notes", "notes/new.md"));
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "docs/old.md");
+    graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "docs/old.md");
+    graphServer.fs.nodes.push(fsg.file("docs/new.md"));
+    graphServer.fs.edges.push(fsg.contains("docs", "docs/new.md"));
     reload();
     await settle();
     expect(reads("notes")).toBe(3);
+    const replacementNodes = canvas.props!.nodes;
     old.release();
     await settle();
 
-    expect(visibleIds()).toContain("notes/new.md");
-    expect(visibleIds(), "the stale response is discarded").not.toContain("notes/old.md");
+    expect(canvas.props!.nodes, "the stale queue does not publish its earlier successful level").toBe(replacementNodes);
+    expect(visibleIds()).toContain("docs/new.md");
+    expect(visibleIds(), "the stale response is discarded").not.toContain("docs/old.md");
     expect(reads("notes")).toBe(3);
+    expect(reads("")).toBe(2);
+    expect(target.querySelector(".spine-warning")).toBeNull();
+    expectUsable(target);
+  });
+
+  test("a partly successful old retry cannot publish while a newer root is pending", async () => {
+    const old = gate();
+    const replacement = gate();
+    graphServer.fs.nodes.push(fsg.file("docs/old.md"));
+    graphServer.fs.edges.push(fsg.contains("docs", "docs/old.md"));
+    let attempts = 0;
+    vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (options.path === "" && reads("") === 1) {
+        const response = await fixtureRead(options);
+        await replacement.promise;
+        return response;
+      }
+      if (options.path === "docs" && reads("docs") === 0) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
+      if (options.path !== "notes") return fixtureRead(options);
+      if (++attempts === 1) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
+      const response = await fixtureRead(options);
+      if (attempts === 2) await old.promise;
+      return response;
+    });
+    const { target } = await render();
+    expect(reads("docs"), "the old queue already applied one successful level").toBe(2);
+    expect(reads("notes")).toBe(2);
+    graphServer.fs.nodes = graphServer.fs.nodes.filter((node) => node.path !== "docs/old.md");
+    graphServer.fs.edges = graphServer.fs.edges.filter((edge) => edge.target !== "docs/old.md");
+    graphServer.fs.nodes.push(fsg.file("docs/new.md"));
+    graphServer.fs.edges.push(fsg.contains("docs", "docs/new.md"));
+    reload();
+    await settle();
+    expect(reads("")).toBe(2);
+    expect(reads("notes")).toBe(3);
+    const retainedNodes = canvas.props!.nodes;
+    old.release();
+    await settle();
+
+    expect(canvas.props!.nodes, "the old queue cannot publish while the replacement root is pending").toBe(retainedNodes);
+    expect(visibleIds()).not.toContain("docs/old.md");
+    replacement.release();
+    await settle();
+
+    expect(visibleIds()).toContain("docs/new.md");
+    expect(visibleIds()).not.toContain("docs/old.md");
     expect(reads("")).toBe(2);
     expect(target.querySelector(".spine-warning")).toBeNull();
     expectUsable(target);
@@ -407,7 +568,7 @@ describe("the directory retry's lifetime", () => {
       if (attempt <= 3) {
         recordRead(options);
         if (attempt === 2) await old.promise;
-        throw timeout();
+        throw timeout(options.path);
       }
       return fixtureRead(options);
     });
@@ -430,7 +591,7 @@ describe("the directory retry's lifetime", () => {
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
       if (options.path !== "notes") return fixtureRead(options);
       recordRead(options);
-      if (++attempts === 1) throw timeout();
+      if (++attempts === 1) throw timeout(options.path);
       throw new ApiError(status, "directory is gone", { error: "directory is gone" });
     });
     const { target } = await render();
@@ -445,13 +606,18 @@ describe("the directory retry's lifetime", () => {
     let attempts = 0;
     const words = "workspace root does not exist: /ws";
     vi.mocked(api.fsGraph).mockImplementation(async (options) => {
+      if (options.path === "docs" && reads("docs") === 0) {
+        recordRead(options);
+        throw timeout(options.path);
+      }
       if (options.path !== "notes") return fixtureRead(options);
       recordRead(options);
-      if (++attempts === 1) throw timeout();
+      if (++attempts === 1) throw timeout(options.path);
       throw new ApiError(404, words, { error: words, code: "workspace_root_missing" });
     });
     const { target } = await render();
 
+    expect(reads("docs"), "one retry succeeded before the later root failure").toBe(2);
     expect(reads("notes")).toBe(2);
     expect(target.querySelector(".placeholder.error")?.textContent).toBe(words);
     expect(target.querySelector(".cy.dim")).not.toBeNull();
