@@ -3,8 +3,8 @@
 // GhosttyFind over the binding's terminal on the vendored core, ghostty-web's
 // own SelectionManager and chan's viewport controller. The viewport is a
 // stand-in with ghostty-web's semantics (an offset of lines scrolled back from
-// the bottom, clamped to the history, back to 0 after a write; a resize that
-// hands the core the new grid, fires the resize event and repaints), and
+// the bottom, clamped to the history and anchored through output; a resize that
+// hands the core the new grid, fires a content change and repaints), and
 // frames run and the clock moves only when a case says so. The scan budget
 // is 0, one unit of the core's work per frame, so a scan's progress is the
 // same on any machine. Find times its feeds on the same clock, so a feed
@@ -84,7 +84,7 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
   const core = vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
   if (lines.length) core.write(lines.map((line) => `${line}\r\n`).join(""));
   const clamp = (y: number) => Math.max(0, Math.min(core.getScrollbackLength(), y));
-  const resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
+  const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
   /// The selection each resize's repaint drew.
   const painted: Array<MatchRange | null> = [];
   const view = {
@@ -93,19 +93,30 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     viewportY: 0,
     getViewportY: () => view.viewportY,
     getScrollbackLength: () => core.getScrollbackLength(),
-    scrollLines(amount: number) {
-      view.viewportY = clamp(view.viewportY - amount);
-    },
-    scrollToLine(line: number) {
-      view.viewportY = clamp(line);
+    viewport: {
+      get offset() { return view.viewportY; },
+      followOutput: "at-bottom" as const,
+      scrollTo(offset: number) { view.viewportY = clamp(offset); },
+      scrollBy(amount: number) { view.viewportY = clamp(view.viewportY + amount); },
+      scrollToBottom() { view.viewportY = 0; },
+      reveal(row: number, align = "center") {
+        const history = core.getScrollbackLength();
+        const onScreen = row - history + Math.max(0, Math.floor(view.viewportY));
+        if (onScreen >= 0 && onScreen < view.rows) return;
+        const at = align === "start" ? 0 : align === "end" ? view.rows - 1 : Math.floor(view.rows / 2);
+        view.viewportY = clamp(history - row + at);
+      },
     },
     write(data: string | Uint8Array) {
+      const before = core.getScrollbackLength();
       core.write(data);
-      view.viewportY = 0;
+      const growth = view.viewportY >= 1 ? Math.max(0, core.getScrollbackLength() - before) : 0;
+      view.viewportY = clamp(view.viewportY + growth);
+      for (const listener of changeListeners) listener({ kind: "write" });
     },
-    onResize(listener: (size: { cols: number; rows: number }) => void) {
-      resizeListeners.add(listener);
-      return { dispose: () => resizeListeners.delete(listener) };
+    onChange(listener: (change: { kind: "write" | "resize" }) => void) {
+      changeListeners.add(listener);
+      return { dispose: () => changeListeners.delete(listener) };
     },
     /// ghostty-web's resize: the core takes the grid, the event fires, and
     /// the whole grid is repainted with the selection held then. The
@@ -115,7 +126,7 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
       view.cols = newCols;
       view.rows = newRows;
       core.resize(newCols, newRows);
-      for (const listener of resizeListeners) listener({ cols: newCols, rows: newRows });
+      for (const listener of changeListeners) listener({ kind: "resize" });
       painted.push(selected(manager as unknown as Manager));
     },
   };
@@ -151,7 +162,7 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     budgetMs,
     clock: clock.now,
   });
-  return { core, view, viewport, manager: manager as unknown as Manager, frames, clock, counts, created, find, painted };
+  return { core, view, viewport, changeListeners, manager: manager as unknown as Manager, frames, clock, counts, created, find, painted };
 }
 
 /// The selection as a match range, null when nothing is selected.
@@ -1730,8 +1741,7 @@ describe("closing", () => {
 
 describe("dispose", () => {
   test("stops the scan, frees the search and stops watching changes", async () => {
-    const { core, frames, find, counts, created, viewport } = await fixture(numbered(3000, (i) => i % 10 === 5));
-    const observers = (viewport as unknown as { changeObservers: Set<unknown> }).changeObservers;
+    const { core, frames, find, counts, created, viewport, changeListeners: observers } = await fixture(numbered(3000, (i) => i % 10 === 5));
     const resizing = (core as unknown as { resizeListeners: Set<unknown> }).resizeListeners;
     expect(observers.size).toBe(1);
     expect(resizing.size).toBe(1);

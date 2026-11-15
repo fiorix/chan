@@ -275,6 +275,11 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     onData() {
       return { dispose() {} };
     }
+    changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
+    onChange(listener: (change: { kind: "write" | "resize" }) => void) {
+      this.changeListeners.add(listener);
+      return { dispose: () => this.changeListeners.delete(listener) };
+    }
     resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
     onResize(listener: (size: { cols: number; rows: number }) => void) {
       this.resizeListeners.add(listener);
@@ -293,8 +298,11 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       return false;
     }
     write(data: string | Uint8Array) {
+      const before = this.getScrollbackLength();
       this.wasmTerm.write(data);
-      this.viewportY = 0;
+      const growth = this.viewportY >= 1 ? Math.max(0, this.getScrollbackLength() - before) : 0;
+      this.viewportY = Math.max(0, Math.min(this.getScrollbackLength(), this.viewportY + growth));
+      for (const listener of this.changeListeners) listener({ kind: "write" });
     }
     writeln(data: string) {
       this.write(`${data}\r\n`);
@@ -305,6 +313,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.cols = cols;
       this.rows = rows;
       this.wasmTerm.resize(cols, rows);
+      for (const listener of this.changeListeners) listener({ kind: "resize" });
       for (const listener of this.resizeListeners) listener({ cols, rows });
     }
     focus() {
@@ -326,10 +335,24 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       return this.wasmTerm.getScrollbackLength();
     }
     scrollLines(amount: number) {
-      this.scrollToLine(this.viewportY - amount);
+      this.viewport.scrollBy(-amount);
     }
-    scrollToLine(line: number) {
-      this.viewportY = Math.max(0, Math.min(this.getScrollbackLength(), line));
+    get viewport() {
+      const term = this;
+      return {
+        get offset() { return term.viewportY; },
+        followOutput: "at-bottom" as const,
+        scrollTo(offset: number) { term.viewportY = Math.max(0, Math.min(term.getScrollbackLength(), offset)); },
+        scrollBy(rows: number) { this.scrollTo(term.viewportY + rows); },
+        scrollToBottom() { this.scrollTo(0); },
+        reveal(row: number, align = "center") {
+          const history = term.getScrollbackLength();
+          const onScreen = row - history + Math.max(0, Math.floor(term.viewportY));
+          if (onScreen >= 0 && onScreen < term.rows) return;
+          const at = align === "start" ? 0 : align === "end" ? term.rows - 1 : Math.floor(term.rows / 2);
+          this.scrollTo(history - row + at);
+        },
+      };
     }
     selectAll() {}
     clearSelection() {
