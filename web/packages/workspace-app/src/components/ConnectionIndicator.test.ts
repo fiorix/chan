@@ -5,20 +5,20 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const host = vi.hoisted(() => ({ remote: true }));
-vi.mock("../state/linkHealth.svelte", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../state/linkHealth.svelte")>()),
-  linkIsRemote: () => host.remote,
+vi.mock("../state/connectionHealth.svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/connectionHealth.svelte")>()),
+  connectionIsRemote: () => host.remote,
 }));
 
-import LinkIndicator from "./LinkIndicator.svelte";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
+import ConnectionIndicator from "./ConnectionIndicator.svelte";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 import { setCoverBlocking } from "../state/store.svelte";
 
 let view: Record<string, unknown> | null = null;
 
 beforeEach(() => {
   host.remote = true;
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   setCoverBlocking("reconnect", false);
   setCoverBlocking("screensaver", false);
   vi.useFakeTimers();
@@ -29,7 +29,7 @@ afterEach(async () => {
   if (view) await unmount(view);
   view = null;
   document.body.replaceChildren();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   setCoverBlocking("reconnect", false);
   setCoverBlocking("screensaver", false);
   vi.useRealTimers();
@@ -37,17 +37,17 @@ afterEach(async () => {
 
 async function render(placement: "tab-bar" | "status" = "tab-bar") {
   const target = document.body.appendChild(document.createElement("div"));
-  view = mount(LinkIndicator, { target, props: { placement } }) as Record<string, unknown>;
+  view = mount(ConnectionIndicator, { target, props: { placement } }) as Record<string, unknown>;
   await tick();
   return target;
 }
 
 function button(): HTMLButtonElement | null {
-  return document.body.querySelector<HTMLButtonElement>(".link-indicator");
+  return document.body.querySelector<HTMLButtonElement>(".connection-indicator");
 }
 
 function popover(): HTMLElement | null {
-  return document.body.querySelector<HTMLElement>(".link-popover");
+  return document.body.querySelector<HTMLElement>(".connection-popover");
 }
 
 function press(target: HTMLElement): MouseEvent {
@@ -58,10 +58,10 @@ function press(target: HTMLElement): MouseEvent {
   return down;
 }
 
-async function state(value: typeof linkHealth.state, rttMs: number | null = null, waitMs = 0): Promise<void> {
-  linkHealth.state = value;
-  linkHealth.rttMs = rttMs;
-  linkHealth.waitMs = waitMs;
+async function state(value: typeof connectionHealth.state, rttMs: number | null = null, waitMs = 0): Promise<void> {
+  connectionHealth.state = value;
+  connectionHealth.rttMs = rttMs;
+  connectionHealth.waitMs = waitMs;
   await tick();
 }
 
@@ -133,9 +133,9 @@ test("placement marks the tab-bar label for reserved width and leaves status nat
 
 test("only the tab-bar label reads its per-state reserved width", () => {
   // jsdom lays nothing out, so the tab-bar label's fixed width is a source contract.
-  const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
-  expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*var\(--link-indicator-label-width\);/);
-  expect(source).not.toMatch(/\.link-indicator\[data-placement="status"\]\s+\.label\s*\{[^}]*\bmin-width:/);
+  const source = readFileSync("src/components/ConnectionIndicator.svelte", "utf8");
+  expect(source).toMatch(/\.connection-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*var\(--connection-indicator-label-width\);/);
+  expect(source).not.toMatch(/\.connection-indicator\[data-placement="status"\]\s+\.label\s*\{[^}]*\bmin-width:/);
 });
 
 test.each([
@@ -146,7 +146,7 @@ test.each([
   await state(next, rtt, wait);
   await render();
   expect(button()?.querySelector(".label")).not.toBeNull();
-  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(width);
+  expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe(width);
 });
 
 test.each([
@@ -156,14 +156,14 @@ test.each([
   await state(next, rtt);
   await render();
   expect(button()?.querySelector(".label")).toBeNull();
-  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+  expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe("");
 });
 
 test("recovering slow keeps an empty tab-bar label span and its 7ch reserve", async () => {
   await state("slow", 26);
   await render();
   expect(button()?.querySelector(".label")?.textContent).toBe("");
-  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("7ch");
+  expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe("7ch");
 });
 
 test("slow jitter around 300 ms changes the text without changing the tab-bar reserve", async () => {
@@ -171,7 +171,7 @@ test("slow jitter around 300 ms changes the text without changing the tab-bar re
   for (const rtt of [299, 301, 298, 850]) {
     await state("slow", rtt);
     expect(button()?.querySelector(".label")?.textContent).toBe(rtt < 300 ? "" : `${rtt} ms`);
-    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("7ch");
+    expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe("7ch");
   }
 });
 
@@ -180,7 +180,7 @@ test("status placement keeps natural label width in every unhealthy state", asyn
   for (const next of ["slow", "stalled", "down"] as const) {
     await state(next, 850, 8_100);
     expect(button()?.querySelector(".label")).not.toBeNull();
-    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+    expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe("");
   }
 });
 
@@ -188,7 +188,7 @@ test("recovering status face drops its empty label span", async () => {
   await state("slow", 26);
   await render("status");
   expect(button()?.querySelector(".label")).toBeNull();
-  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe("");
+  expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe("");
 });
 
 test("counting within slow and stalled keeps each tab-bar reserve stable", async () => {
@@ -201,7 +201,7 @@ test("counting within slow and stalled keeps each tab-bar reserve stable", async
     ["stalled", 850, 44_100, "12ch"],
   ] as const) {
     await state(next, rtt, wait);
-    expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(width);
+    expect(button()?.style.getPropertyValue("--connection-indicator-label-width")).toBe(width);
   }
 });
 
@@ -209,21 +209,21 @@ test("stalled label follows the health ticker's wait while closed", async () => 
   await render();
   await state("stalled", null, 8_100);
   expect(button()?.textContent).toContain("stalled 8 s");
-  linkHealth.waitMs = 9_100;
+  connectionHealth.waitMs = 9_100;
   await tick();
   expect(button()?.textContent).toContain("stalled 9 s");
   expect(vi.getTimerCount()).toBe(0);
 });
 
 test("stalled popover age matches the face's unanswered wait", async () => {
-  linkHealth.since = 16_000;
+  connectionHealth.since = 16_000;
   await state("stalled", null, 8_100);
   await render();
   button()!.click();
   await tick();
   expect(button()?.textContent).toContain("stalled 8 s");
   expect(popover()?.textContent).toContain("No response for 8 s");
-  linkHealth.waitMs = 9_100;
+  connectionHealth.waitMs = 9_100;
   await tick();
   expect(button()?.textContent).toContain("stalled 9 s");
   expect(popover()?.textContent).toContain("No response for 9 s");
@@ -235,16 +235,16 @@ test("a waiting slow ping has a stable accessible name that matches the face", a
   expect(button()?.textContent).toContain("1.5 s");
   expect(button()?.getAttribute("aria-label")).toBe("Connection slow, waiting for a reply");
   expect(button()?.title).toBe(button()?.getAttribute("aria-label"));
-  linkHealth.waitMs = 2_500;
+  connectionHealth.waitMs = 2_500;
   await tick();
   expect(button()?.textContent).toContain("2.5 s");
   expect(button()?.getAttribute("aria-label")).toBe("Connection slow, waiting for a reply");
 });
 
 test("popover shows figures, samples, state age and last contact", async () => {
-  linkHealth.samples = [{ at: 1, rttMs: 30 }, { at: 2, rttMs: null }, { at: 3, rttMs: 10 }];
-  linkHealth.lastContactAt = 18_000;
-  linkHealth.since = 8_000;
+  connectionHealth.samples = [{ at: 1, rttMs: 30 }, { at: 2, rttMs: null }, { at: 3, rttMs: 10 }];
+  connectionHealth.lastContactAt = 18_000;
+  connectionHealth.since = 8_000;
   await state("slow", 10);
   await render();
   button()!.click();
@@ -266,7 +266,7 @@ test("popover shows figures, samples, state age and last contact", async () => {
   expect(pop.textContent).toContain("Slow for 13 s");
 });
 
-test("an unknown link shows dashes for missing figures and contact", async () => {
+test("an unknown connection shows dashes for missing figures and contact", async () => {
   await render();
   button()!.click();
   await tick();
@@ -278,8 +278,8 @@ test("an unknown link shows dashes for missing figures and contact", async () =>
 
 test("opening later reads the state age while contact keeps its clock time", async () => {
   await state("slow", 500);
-  linkHealth.since = 20_000;
-  linkHealth.lastContactAt = 20_000;
+  connectionHealth.since = 20_000;
+  connectionHealth.lastContactAt = 20_000;
   await render();
   vi.setSystemTime(25_000);
   button()!.click();
@@ -330,9 +330,9 @@ test("blocked indicator announces its disabled state without losing its face col
   await tick();
   expect(button()?.getAttribute("aria-disabled")).toBe("true");
   expect(button()?.getAttribute("data-state")).toBe("down");
-  const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
-  expect(source).toMatch(/\.link-indicator\[aria-disabled="true"\]\s*\{\s*cursor:\s*default;/);
-  expect(source).toMatch(/\.link-indicator:not\(\[aria-disabled="true"\]\):hover/);
+  const source = readFileSync("src/components/ConnectionIndicator.svelte", "utf8");
+  expect(source).toMatch(/\.connection-indicator\[aria-disabled="true"\]\s*\{\s*cursor:\s*default;/);
+  expect(source).toMatch(/\.connection-indicator:not\(\[aria-disabled="true"\]\):hover/);
 });
 
 test("a trigger press prevents focus leaving the terminal", async () => {
@@ -454,7 +454,7 @@ test("Escape closes before a focused outside surface receives it", async () => {
   outside.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   await tick();
   expect(seen).not.toHaveBeenCalled();
-  expect(document.body.querySelector(".link-popover")).toBeNull();
+  expect(document.body.querySelector(".connection-popover")).toBeNull();
 });
 
 test("Escape inside the details closes before the app's document handler", async () => {
@@ -481,7 +481,7 @@ test("a press outside closes without moving focus", async () => {
   outside.focus();
   outside.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
   await tick();
-  expect(document.body.querySelector(".link-popover")).toBeNull();
+  expect(document.body.querySelector(".connection-popover")).toBeNull();
   expect(document.activeElement).toBe(outside);
 });
 

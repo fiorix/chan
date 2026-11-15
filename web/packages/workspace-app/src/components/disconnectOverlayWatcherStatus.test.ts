@@ -4,7 +4,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import { COVER_ROOT_ATTR, raisedCoverKeys, ui } from "../state/store.svelte";
-import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 
 // A watcher drop starts the cover grace. Opening a redial alone does not heal
 // the outage; its first pong does.
@@ -13,7 +13,7 @@ const mounted: Array<Record<string, unknown>> = [];
 
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   document.body.innerHTML = "";
   vi.useRealTimers();
 });
@@ -28,18 +28,18 @@ function render(): HTMLElement {
 describe("DisconnectOverlay follows a watcher outage", () => {
   test("a force-close surfaces the cover and a redial pong clears it", async () => {
     vi.useFakeTimers();
-    resetLinkHealthForTests();
-    setLinkWatchStatus("open");
+    resetConnectionHealthForTests();
+    setConnectionWatchStatus("open");
     ui.ws = "open"; // watcher healthy at least once this session
     const target = render();
     await tick();
     expect(target.querySelector(".overlay")).toBeNull(); // hidden while open
 
-    watchLinkProbe.pingSent();
-    watchLinkProbe.frameReceived();
-    watchLinkProbe.pongReceived();
-    watchLinkProbe.reset();
-    setLinkWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
+    watchConnectionProbe.pingSent();
+    watchConnectionProbe.frameReceived();
+    watchConnectionProbe.pongReceived();
+    watchConnectionProbe.reset();
+    setConnectionWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
     ui.ws = "reconnecting";
     await tick();
     vi.advanceTimersByTime(600);
@@ -58,14 +58,14 @@ describe("DisconnectOverlay follows a watcher outage", () => {
     // the guard's exception for a cover's own text field.
     expect(overlay?.querySelectorAll("input, textarea, [contenteditable]").length).toBe(0);
 
-    setLinkWatchStatus("open");
+    setConnectionWatchStatus("open");
     ui.ws = "open";
     await tick();
-    expect(linkHealth.state).toBe("down");
+    expect(connectionHealth.state).toBe("down");
     expect(target.querySelector(".overlay")).not.toBeNull();
-    watchLinkProbe.pingSent();
-    watchLinkProbe.frameReceived();
-    watchLinkProbe.pongReceived();
+    watchConnectionProbe.pingSent();
+    watchConnectionProbe.frameReceived();
+    watchConnectionProbe.pongReceived();
     await tick();
     expect(target.querySelector(".overlay")).toBeNull();
     expect(raisedCoverKeys()).not.toContain("reconnect");

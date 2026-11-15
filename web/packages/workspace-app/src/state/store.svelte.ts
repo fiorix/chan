@@ -61,7 +61,7 @@ import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
 import { applyWindowLabel } from "./windowTitle.svelte";
-import { linkIsRemote, setLinkWatchStatus, watchLinkProbe } from "./linkHealth.svelte";
+import { connectionIsRemote, setConnectionWatchStatus, watchConnectionProbe } from "./connectionHealth.svelte";
 import {
   activeLayout,
   activeTabInPane,
@@ -2724,7 +2724,7 @@ function surfaceTeamSpawn(
 function onWatchStatus(status: WsStatus, attempt: number, drop?: import("../api/transport").WatchDrop): void {
   ui.ws = status;
   ui.wsAttempt = attempt;
-  setLinkWatchStatus(status, drop);
+  setConnectionWatchStatus(status, drop);
 }
 
 /// A fresh socket has none of the old socket's scopes or transfer count, so
@@ -2853,7 +2853,7 @@ async function seedTerminalRoster(): Promise<void> {
 
 /// Keep the window's probe and remote scope on every watcher opening path.
 function openWindowWatcher(): WatchSubscription {
-  return openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchLinkProbe, { remote: linkIsRemote() });
+  return openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchConnectionProbe, { remote: connectionIsRemote() });
 }
 
 /// Nudge the live event socket after wake or visibility return. A healthy

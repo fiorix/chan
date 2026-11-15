@@ -1,16 +1,16 @@
 // One terminal socket's probe, stalled redial, and lost-input notice. The
 // socket owner reports traffic and window health; this module owns timing.
 
-import { createLinkProbe } from "../api/linkProbe";
+import { createConnectionProbe } from "../api/connectionProbe";
 import { WS_READ_DEADLINE_MS } from "../api/transport";
-import type { LinkState } from "../state/linkHealth.svelte";
+import type { ConnectionState } from "../state/connectionHealth.svelte";
 
 /// Delay before a sent input with no answer asks the terminal socket for a pong.
 export const TERMINAL_INPUT_PROBE_MS = 1_000;
-/// Limit input-triggered pings while a terminal is busy or the link is silent.
+/// Limit input-triggered pings while a terminal is busy or the connection is silent.
 export const TERMINAL_INPUT_PROBE_SPACING_MS = 2_000;
 /// Read time-driven changes while an answered socket has a ping in flight.
-export const TERMINAL_LINK_TICK_MS = 250;
+export const TERMINAL_CONNECTION_TICK_MS = 250;
 /// Sustained healthy watcher time before replacing a stalled terminal socket.
 export const TERMINAL_STALL_REDIAL_MS = 3_000;
 /// Keep a terminal-only outage from recycling the same session repeatedly.
@@ -22,7 +22,7 @@ export const TERMINAL_INPUT_NOTICE_MIN_MS = 4_000;
 
 /// Open before the first ping, report each frame before its pong, and retire before opening the next socket. Dispose when the tab leaves the tree.
 /// The redial owner checks whether its socket can be replaced and dials through its existing resume path; lastContactAt must report the watcher's latest inbound contact.
-export function createTerminalLink(
+export function createTerminalConnectionHealth(
   sendPing: () => void,
   now: () => number = () => Date.now(),
   redial?: { canRedial: () => boolean; lastContactAt: () => number | null; run: () => void },
@@ -31,7 +31,7 @@ export function createTerminalLink(
   let open = false;
   let hasOpened = false;
   let disposed = false;
-  let windowState: LinkState = "unknown";
+  let windowState: ConnectionState = "unknown";
   let noticeBlocked = false;
   let okSince: number | null = null;
   let stalledAt: number | null = null;
@@ -112,7 +112,7 @@ export function createTerminalLink(
     const pingAt = probe.answered ? probe.oldestPingAt : null;
     const waitMs = pingAt === null ? 0 : Math.max(0, now() - pingAt);
     // The read deadline has fired by this wait; its socket may still be
-    // closing. A longer wall-clock wait is not a live link measurement.
+    // closing. A longer wall-clock wait is not a live connection measurement.
     if (waitMs > WS_READ_DEADLINE_MS) {
       probe.forgetTimings();
       state.stalled = false;
@@ -132,11 +132,11 @@ export function createTerminalLink(
     state.stalled = stalled;
     if (state.stalled) clearNotice();
     state.waitMs = waitMs;
-    if (pingAt !== null && ticker === null) ticker = setInterval(sync, TERMINAL_LINK_TICK_MS);
+    if (pingAt !== null && ticker === null) ticker = setInterval(sync, TERMINAL_CONNECTION_TICK_MS);
     else if (pingAt === null) clearTicker();
     updateRedial();
   };
-  const probe = createLinkProbe({ now });
+  const probe = createConnectionProbe({ now });
   const markInputWritten = () => {
     if (!open || disposed) return;
     inputOutstanding = true;
@@ -244,11 +244,11 @@ export function createTerminalLink(
         state.stalled = true;
         stalledAt = now();
       }
-      if (ticker === null) ticker = setInterval(sync, TERMINAL_LINK_TICK_MS);
+      if (ticker === null) ticker = setInterval(sync, TERMINAL_CONNECTION_TICK_MS);
       updateRedial();
     },
     /// Re-evaluate watcher contact and pause notice time while the cover or tab hides it.
-    windowChanged(next: LinkState, blocked: boolean) {
+    windowChanged(next: ConnectionState, blocked: boolean) {
       if (windowState !== next) okSince = next === "ok" ? now() : null;
       windowState = next;
       if (noticeBlocked !== blocked) {

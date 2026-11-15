@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-// The store is where the watcher and the window's link state meet: it opens
-// the watcher on the window's link probe and passes each status on. The
+// The store is where the watcher and the window's connection state meet: it opens
+// the watcher on the window's connection probe and passes each status on. The
 // watcher itself is replaced here by one that records what it was opened with.
 
 import { afterEach, expect, test, vi } from "vitest";
@@ -9,7 +9,7 @@ import type { WatchDrop } from "../api/transport";
 
 const watcher = vi.hoisted(() => ({
   status: null as ((status: "connecting" | "open" | "reconnecting", attempt: number, drop?: WatchDrop) => void) | null,
-  link: undefined as unknown,
+  connection: undefined as unknown,
   options: undefined as { remote?: boolean } | undefined,
 }));
 
@@ -21,11 +21,11 @@ vi.mock("../api/client", async (importOriginal) => {
       _onEvent: unknown,
       onStatus: typeof watcher.status,
       _onReady: unknown,
-      link: unknown,
+      connection: unknown,
       options?: { remote?: boolean },
     ) => {
       watcher.status = onStatus;
-      watcher.link = link;
+      watcher.connection = connection;
       watcher.options = options;
       return Object.assign(() => {}, {
         subscribeDir() {},
@@ -38,35 +38,35 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
-import { linkHealth, resetLinkHealthForTests, watchLinkProbe } from "./linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests, watchConnectionProbe } from "./connectionHealth.svelte";
 import { resumeWatcher, teardown, ui } from "./store.svelte";
 
 afterEach(() => {
   teardown();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   history.replaceState(null, "", "/");
 });
 
-test("the store opens its watcher on the window's link probe and reports each status", () => {
+test("the store opens its watcher on the window's connection probe and reports each status", () => {
   resumeWatcher();
-  expect(watcher.link).toBe(watchLinkProbe);
+  expect(watcher.connection).toBe(watchConnectionProbe);
   expect(watcher.options).toEqual({ remote: false });
 
   watcher.status?.("connecting", 0);
   watcher.status?.("open", 0);
   expect(ui.ws).toBe("open");
-  expect(linkHealth.state).toBe("unknown");
+  expect(connectionHealth.state).toBe("unknown");
 
   const contact = Date.now() - 15_000;
   watcher.status?.("reconnecting", 1, { reason: "deadline", lastFrameAt: contact });
   expect(ui.ws).toBe("reconnecting");
   expect(ui.wsAttempt).toBe(1);
-  expect(linkHealth.state).toBe("down");
-  expect(linkHealth.outage?.coverAt).toBe(contact + 45_000);
+  expect(connectionHealth.state).toBe("down");
+  expect(connectionHealth.outage?.coverAt).toBe(contact + 45_000);
 
   watcher.status?.("open", 0);
-  expect(linkHealth.state).toBe("down");
+  expect(connectionHealth.state).toBe("down");
 });
 
 test("a remote desktop window passes its remote flag to the watcher", () => {

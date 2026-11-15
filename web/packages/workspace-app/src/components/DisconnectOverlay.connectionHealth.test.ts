@@ -3,23 +3,23 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { WatchDrop } from "../api/transport";
-import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { raisedCoverKeys, ui } from "../state/store.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
-import LinkIndicator from "./LinkIndicator.svelte";
+import ConnectionIndicator from "./ConnectionIndicator.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
 beforeEach(() => {
   vi.useFakeTimers();
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   ui.ws = "connecting";
   ui.wsAttempt = 0;
 });
 
 afterEach(async () => {
   for (const view of mounted.splice(0)) await unmount(view);
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   ui.ws = "connecting";
   ui.wsAttempt = 0;
   document.body.replaceChildren();
@@ -36,19 +36,19 @@ async function render(): Promise<HTMLElement> {
 }
 
 async function open(): Promise<HTMLElement> {
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   ui.ws = "open";
   const target = await render();
-  watchLinkProbe.pingSent();
-  watchLinkProbe.frameReceived();
-  watchLinkProbe.pongReceived();
+  watchConnectionProbe.pingSent();
+  watchConnectionProbe.frameReceived();
+  watchConnectionProbe.pongReceived();
   await tick();
   return target;
 }
 
 async function drop(drop: WatchDrop): Promise<void> {
-  watchLinkProbe.reset();
-  setLinkWatchStatus("reconnecting", drop);
+  watchConnectionProbe.reset();
+  setConnectionWatchStatus("reconnecting", drop);
   ui.ws = "reconnecting";
   await tick();
 }
@@ -72,7 +72,7 @@ test.each([
   const lastFrameAt = Date.now();
   await advance(contactAge);
   await drop({ reason: "deadline", lastFrameAt });
-  expect(linkHealth.state).toBe("down");
+  expect(connectionHealth.state).toBe("down");
   expect(cover(target)).toBeNull();
   expect(ui.disconnectBlocking).toBe(false);
   expect(raisedCoverKeys()).not.toContain("reconnect");
@@ -86,7 +86,7 @@ test.each([
 test("a socket closed by the network covers after the 600 ms grace", async () => {
   const target = await open();
   await drop({ reason: "closed", lastFrameAt: Date.now() });
-  expect(linkHealth.outage?.coverAt).toBe(linkHealth.outage?.startedAt);
+  expect(connectionHealth.outage?.coverAt).toBe(connectionHealth.outage?.startedAt);
   await advance(599);
   expect(cover(target)).toBeNull();
   await advance(1);
@@ -97,14 +97,14 @@ test("a closed socket healed by a pong inside grace never covers", async () => {
   const target = await open();
   await drop({ reason: "closed", lastFrameAt: Date.now() });
   await advance(300);
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   ui.ws = "open";
-  watchLinkProbe.pingSent();
-  watchLinkProbe.frameReceived();
-  watchLinkProbe.pongReceived();
+  watchConnectionProbe.pingSent();
+  watchConnectionProbe.frameReceived();
+  watchConnectionProbe.pongReceived();
   await tick();
   await advance(400);
-  expect(linkHealth.outage).toBeNull();
+  expect(connectionHealth.outage).toBeNull();
   expect(cover(target)).toBeNull();
 });
 
@@ -114,7 +114,7 @@ test("a status flip just before a delayed deadline gets a fresh 600 ms grace", a
   await advance(15_000);
   await drop({ reason: "deadline", lastFrameAt });
   await advance(29_900);
-  setLinkWatchStatus("connecting");
+  setConnectionWatchStatus("connecting");
   ui.ws = "connecting";
   await tick();
   await advance(100);
@@ -131,7 +131,7 @@ test("an old-contact wake retirement still restarts the grace on a status flip",
   await advance(60_000);
   await drop({ reason: "deadline", lastFrameAt });
   await advance(500);
-  setLinkWatchStatus("connecting");
+  setConnectionWatchStatus("connecting");
   ui.ws = "connecting";
   await tick();
   await advance(100);
@@ -146,17 +146,17 @@ test("the reconnecting indicator stays pressable until the cover appears", async
   const target = await open();
   const lastFrameAt = Date.now();
   const indicatorTarget = document.body.appendChild(document.createElement("div"));
-  mounted.push(mount(LinkIndicator, { target: indicatorTarget, props: { placement: "status" } }) as Record<string, unknown>);
+  mounted.push(mount(ConnectionIndicator, { target: indicatorTarget, props: { placement: "status" } }) as Record<string, unknown>);
   await advance(15_000);
   await drop({ reason: "deadline", lastFrameAt });
-  const button = indicatorTarget.querySelector<HTMLButtonElement>(".link-indicator")!;
+  const button = indicatorTarget.querySelector<HTMLButtonElement>(".connection-indicator")!;
   button.click();
   await tick();
-  expect(document.body.querySelector(".link-popover")).not.toBeNull();
+  expect(document.body.querySelector(".connection-popover")).not.toBeNull();
   expect(cover(target)).toBeNull();
   await advance(30_000);
   expect(cover(target)).not.toBeNull();
-  expect(document.body.querySelector(".link-popover")).toBeNull();
+  expect(document.body.querySelector(".connection-popover")).toBeNull();
 });
 
 test("a late cover opens with recovery actions ready and does not block keys before then", async () => {
@@ -188,20 +188,20 @@ test("a pong before the late cover deadline cancels the cover", async () => {
   await advance(15_000);
   await drop({ reason: "deadline", lastFrameAt });
   await advance(500);
-  setLinkWatchStatus("connecting");
+  setConnectionWatchStatus("connecting");
   ui.ws = "connecting";
   await tick();
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   ui.ws = "open";
-  watchLinkProbe.pingSent();
+  watchConnectionProbe.pingSent();
   await tick();
-  expect(linkHealth.state).toBe("down");
+  expect(connectionHealth.state).toBe("down");
   await advance(100);
-  watchLinkProbe.frameReceived();
-  watchLinkProbe.pongReceived();
+  watchConnectionProbe.frameReceived();
+  watchConnectionProbe.pongReceived();
   await tick();
   await advance(30_000);
-  expect(linkHealth.state).toBe("ok");
+  expect(connectionHealth.state).toBe("ok");
   expect(cover(target)).toBeNull();
 });
 
@@ -210,34 +210,34 @@ test("a flap holds one cover and one action delay until a later socket's pong", 
   history.replaceState(null, "", "/?lib=dev-1");
   const target = await open();
   await drop({ reason: "closed", lastFrameAt: Date.now() });
-  const outage = linkHealth.outage;
+  const outage = connectionHealth.outage;
   await advance(600);
   expect(cover(target)).not.toBeNull();
-  setLinkWatchStatus("connecting");
+  setConnectionWatchStatus("connecting");
   ui.ws = "connecting";
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   ui.ws = "open";
-  watchLinkProbe.pingSent();
+  watchConnectionProbe.pingSent();
   await tick();
-  expect(linkHealth.state).toBe("down");
+  expect(connectionHealth.state).toBe("down");
   expect(cover(target)).not.toBeNull();
   await advance(7_400);
   expect(target.querySelector(".actions button")).not.toBeNull();
-  watchLinkProbe.reset();
-  setLinkWatchStatus("reconnecting", { reason: "deadline", lastFrameAt: null });
+  watchConnectionProbe.reset();
+  setConnectionWatchStatus("reconnecting", { reason: "deadline", lastFrameAt: null });
   ui.ws = "reconnecting";
   await tick();
-  expect(linkHealth.outage).toBe(outage);
+  expect(connectionHealth.outage).toBe(outage);
   expect(cover(target)).not.toBeNull();
   expect(target.querySelector(".actions button")).not.toBeNull();
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   ui.ws = "open";
-  watchLinkProbe.pingSent();
+  watchConnectionProbe.pingSent();
   await tick();
   expect(cover(target)).not.toBeNull();
-  watchLinkProbe.frameReceived();
-  watchLinkProbe.pongReceived();
+  watchConnectionProbe.frameReceived();
+  watchConnectionProbe.pongReceived();
   await tick();
-  expect(linkHealth.outage).toBeNull();
+  expect(connectionHealth.outage).toBeNull();
   expect(cover(target)).toBeNull();
 });

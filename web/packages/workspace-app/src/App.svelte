@@ -9,7 +9,7 @@
   import DisconnectOverlay from "./components/DisconnectOverlay.svelte";
   import SessionEndedOverlay from "./components/SessionEndedOverlay.svelte";
   import CloseConfirmOverlay from "./components/CloseConfirmOverlay.svelte";
-  import { linkHealth } from "./state/linkHealth.svelte";
+  import { connectionHealth } from "./state/connectionHealth.svelte";
   import { installWakeGapDetector } from "./wakeGap";
   import {
     flushAndCloseWindow,
@@ -1732,7 +1732,7 @@
         if (!requestTmuxWindow()) setTransientStatus("not a tmux window");
         return;
       case "app.window.confirmClose":
-        if (!hasAnyTab() || (ui.disconnectBlocking && !linkHealth.watcherOpen)) {
+        if (!hasAnyTab() || (ui.disconnectBlocking && !connectionHealth.watcherOpen)) {
           discardWindowSession({ reap: true });
           flushAndCloseWindow();
           return;

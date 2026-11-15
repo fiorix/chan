@@ -5,17 +5,17 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
-import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 let target: HTMLElement;
 
 beforeEach(async () => {
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   ui.disconnectBlocking = false;
   ui.ws = "open";
-  setLinkWatchStatus("open");
+  setConnectionWatchStatus("open");
   target = document.body.appendChild(document.createElement("div"));
   mounted.push(mount(CloseConfirmOverlay, { target }) as Record<string, unknown>);
   await tick();
@@ -24,7 +24,7 @@ beforeEach(async () => {
 afterEach(async () => {
   resolveCloseConfirm("cancel");
   for (const component of mounted.splice(0)) await unmount(component);
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   ui.ws = "connecting";
   ui.disconnectBlocking = false;
   vi.useRealTimers();
@@ -32,8 +32,8 @@ afterEach(async () => {
 });
 
 async function drop(): Promise<void> {
-  watchLinkProbe.reset();
-  setLinkWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
+  watchConnectionProbe.reset();
+  setConnectionWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
   ui.ws = "reconnecting";
   await tick();
 }
@@ -61,14 +61,14 @@ describe("CloseConfirmOverlay connection lifecycle", () => {
     const answer = uiCloseConfirm();
     await tick();
     expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
-    setLinkWatchStatus("connecting");
+    setConnectionWatchStatus("connecting");
     ui.ws = "connecting";
     await tick();
     expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
-    setLinkWatchStatus("open");
+    setConnectionWatchStatus("open");
     ui.ws = "open";
     await tick();
-    expect(linkHealth.outage).not.toBeNull();
+    expect(connectionHealth.outage).not.toBeNull();
     expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
     resolveCloseConfirm("cancel");
     await expect(answer).resolves.toBe("cancel");
@@ -78,15 +78,15 @@ describe("CloseConfirmOverlay connection lifecycle", () => {
     await drop();
     const answer = uiCloseConfirm();
     await tick();
-    setLinkWatchStatus("open");
+    setConnectionWatchStatus("open");
     ui.ws = "open";
     await tick();
     expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
-    watchLinkProbe.pingSent();
-    watchLinkProbe.frameReceived();
-    watchLinkProbe.pongReceived();
+    watchConnectionProbe.pingSent();
+    watchConnectionProbe.frameReceived();
+    watchConnectionProbe.pongReceived();
     await tick();
-    expect(linkHealth.outage).toBeNull();
+    expect(connectionHealth.outage).toBeNull();
     expect(target.querySelector('[role="alertdialog"]')).toBeNull();
     await expect(answer).resolves.toBe("cancel");
   });

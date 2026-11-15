@@ -240,9 +240,9 @@
   import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
-  import { createTerminalLink } from "./terminalLink.svelte";
-  import TerminalLinkNotice from "./TerminalLinkNotice.svelte";
-  import { linkHealth } from "../state/linkHealth.svelte";
+  import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
+  import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
+  import { connectionHealth } from "../state/connectionHealth.svelte";
 
   let {
     tab,
@@ -405,15 +405,15 @@
   // window that's actually in memory.
   let scrollbackLines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
   let ws: WebSocket | null = null;
-  const terminalLink = createTerminalLink(() => sendPing(), undefined, {
+  const terminalConnection = createTerminalConnectionHealth(() => sendPing(), undefined, {
     canRedial: () => status !== "exited",
-    lastContactAt: () => linkHealth.lastContactAt,
+    lastContactAt: () => connectionHealth.lastContactAt,
     run: redialStalledTerminal,
   });
   $effect(() => {
-    const state = linkHealth.state;
+    const state = connectionHealth.state;
     const blocked = ui.disconnectBlocking || !active;
-    untrack(() => terminalLink.windowChanged(state, blocked));
+    untrack(() => terminalConnection.windowChanged(state, blocked));
   });
   let unregisterTerminalMetadataSink: (() => void) | null = null;
   // Liveness + reconnect for the PTY socket: the watcher kit (constants
@@ -669,16 +669,16 @@
     void tick().then(start);
     return teardown;
   });
-  $effect(() => () => terminalLink.dispose());
+  $effect(() => () => terminalConnection.dispose());
 
   $effect(() => {
     const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => {
       const sent = sendInput(data, binary);
       const mouseReport = terminalMouseReport(data);
-      if (sent && mouseReport) terminalLink.inputWritten();
+      if (sent && mouseReport) terminalConnection.inputWritten();
       if (!mouseReport) {
-        if (sent) terminalLink.inputSent();
-        else if (status !== "exited") terminalLink.inputRefused();
+        if (sent) terminalConnection.inputSent();
+        else if (status !== "exited") terminalConnection.inputRefused();
       }
     });
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
@@ -1103,8 +1103,8 @@
   function redialStalledTerminal(): void {
     // The read deadline may have called close() without receiving onclose;
     // with no user input in flight, replacing that CLOSING socket is safe.
-    if (ws && (ws.readyState === WebSocket.OPEN || (terminalLink.state.retiring && ws.readyState === WebSocket.CLOSING))) {
-      terminalLink.disconnected();
+    if (ws && (ws.readyState === WebSocket.OPEN || (terminalConnection.state.retiring && ws.readyState === WebSocket.CLOSING))) {
+      terminalConnection.disconnected();
       void connect();
     }
   }
@@ -1592,12 +1592,12 @@
       clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
-    terminalLink.retired();
+    terminalConnection.retired();
   }
 
   function sendPing(): void {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    terminalLink.pingSent();
+    terminalConnection.pingSent();
     send({ type: "ping" });
   }
 
@@ -1619,7 +1619,7 @@
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(() => {
       deadlineTimer = null;
-      terminalLink.retiring();
+      terminalConnection.retiring();
       try {
         ws?.close();
       } catch {
@@ -1753,7 +1753,7 @@
       // The control terminal is a single-shot local runner; it does not send
       // the heartbeat ping.
       if (!ui.terminalControl) {
-        terminalLink.opened();
+        terminalConnection.opened();
         pingTimer = setInterval(sendPing, WS_PING_MS);
         sendPing();
       }
@@ -1764,7 +1764,7 @@
       // Any inbound frame proves the socket is live -- refresh the deadline
       // first, before decoding.
       armDeadline();
-      terminalLink.frameArrived();
+      terminalConnection.frameArrived();
       const bytes = await terminalMessageBytes(event.data);
       if (bytes) {
         if (resetBeforeReplay && bytes.length > 0) {
@@ -1800,7 +1800,7 @@
         return;
       }
       if (frame.type === "pong") {
-        terminalLink.pongArrived();
+        terminalConnection.pongArrived();
         return;
       }
       if (frame.type === "ready") {
@@ -2047,7 +2047,7 @@
     };
     ws.onclose = () => {
       clearLiveness();
-      if (status !== "exited" && !ui.terminalControl) terminalLink.disconnected();
+      if (status !== "exited" && !ui.terminalControl) terminalConnection.disconnected();
       clearTerminalMetadataSink();
       // Socket gone: any in-flight prompt can no longer observe its
       // delivery -- fail it (bubble unlocks, keeps text, labels honestly;
@@ -2274,12 +2274,12 @@
   /// a disconnected retry leaves the reader's viewport untouched.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      if (id && status !== "exited") terminalLink.inputRefused();
+      if (id && status !== "exited") terminalConnection.inputRefused();
       return false;
     }
     term?.scrollToBottom();
     const sent = send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
-    if (sent && id) terminalLink.inputSent();
+    if (sent && id) terminalConnection.inputSent();
     return sent;
   }
 
@@ -2424,10 +2424,10 @@
   function sendUserInput(data: string, binary = false, probeInput = true): void {
     const sent = sendInput(data, binary);
     const mouseReport = terminalMouseReport(data);
-    if (sent && (!probeInput || mouseReport)) terminalLink.inputWritten();
+    if (sent && (!probeInput || mouseReport)) terminalConnection.inputWritten();
     if (probeInput && !mouseReport) {
-      if (sent) terminalLink.inputSent();
-      else if (status !== "exited") terminalLink.inputRefused();
+      if (sent) terminalConnection.inputSent();
+      else if (status !== "exited") terminalConnection.inputRefused();
     }
     broadcastTerminalInput(tab, data, binary);
     // Cross-window broadcast: same-group members in OTHER windows live in the
@@ -2757,7 +2757,7 @@
       }
       return;
     }
-    terminalLink.restartRequested();
+    terminalConnection.restartRequested();
     explicitCloseSession();
     // An open find bar searches the terminal torn down here. It closes with
     // it, as on Escape, and keeps its query for the next open: left open it
@@ -3621,11 +3621,11 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
-    <TerminalLinkNotice
-      stalled={terminalLink.state.stalled && status === "connected" && active && !ui.disconnectBlocking}
-      lost={terminalLink.state.lost && status !== "exited" && active && !ui.disconnectBlocking}
-      notice={terminalLink.state.notice && status === "connected" && active && !ui.disconnectBlocking}
-      waitMs={linkHealth.state === "stalled" ? linkHealth.waitMs : terminalLink.state.waitMs}
+    <TerminalConnectionNotice
+      stalled={terminalConnection.state.stalled && status === "connected" && active && !ui.disconnectBlocking}
+      lost={terminalConnection.state.lost && status !== "exited" && active && !ui.disconnectBlocking}
+      notice={terminalConnection.state.notice && status === "connected" && active && !ui.disconnectBlocking}
+      waitMs={connectionHealth.state === "stalled" ? connectionHealth.waitMs : terminalConnection.state.waitMs}
       {findOpen}
       inspectorOpen={!!tab.inspectorOpen}
       inspectorWidth={tab.inspectorWidth ?? 280}

@@ -31,7 +31,7 @@ import { workspace } from "../state/workspace.svelte";
 import { demoWorkspaceInfo } from "../demo/data";
 import { preferences } from "../__tests__/standalone";
 import { terminalTab } from "../__tests__/tabs";
-import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 
@@ -72,7 +72,7 @@ afterEach(async () => {
   delete (window as W).__TAURI_INTERNALS__;
   workspace.info = null;
   __testSetStandalonePreferences(null);
-  resetLinkHealthForTests();
+  resetConnectionHealthForTests();
   persistStateToHash();
 });
 
@@ -376,11 +376,11 @@ describe("the window tab bar mode", () => {
     test("the strip's tabs fade toward it only while more of them lie past the strip's end", async () => {
       twoPanes();
       windowTabBar.title = TITLE;
-      linkHealth.state = "stalled";
-      linkHealth.waitMs = 8_100;
+      connectionHealth.state = "stalled";
+      connectionHealth.waitMs = 8_100;
       await renderBar();
       await renderPanes("left", "right");
-      expect(document.querySelector(".window-tab-bar .link-indicator")?.textContent).toContain("stalled 8 s");
+      expect(document.querySelector(".window-tab-bar .connection-indicator")?.textContent).toContain("stalled 8 s");
       const view = barStrips()[0]!.querySelector<HTMLElement>(".tab-scroll")!;
       expect(view.classList.contains("fade-end"), "the tabs fit").toBe(false);
 
