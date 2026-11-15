@@ -638,13 +638,19 @@ function persistHybridSurfaceTheme(kind: HybridSurfaceKind, choice: string): Pro
   }));
 }
 
-// Route the keymap override layer's writes through the shared config helper:
-// every shortcut assign/clear replaces the composite override table at
-// `preferences.shortcuts`. The server broadcasts config_changed, so every
-// other window re-hydrates: applyServerPreferences in a workspace window,
-// refreshStandalonePreferences in one without a workspace.
-registerOverridePersist((shortcuts) => {
-  void updateGlobalConfigSerial(() => ({ shortcuts }));
+// A window can miss another window's assignment. Merge only the edited
+// binding over the server's table, including on every revision-conflict retry.
+registerOverridePersist(({ id, slot, chord }) => {
+  void updateGlobalConfigSerial((prefs) => {
+    if ((prefs.shortcuts?.[id]?.[slot] ?? null) === chord) return null;
+    const shortcuts = { ...prefs.shortcuts };
+    const binding = { ...shortcuts[id] };
+    if (chord === null) delete binding[slot];
+    else binding[slot] = chord;
+    if (Object.keys(binding).length === 0) delete shortcuts[id];
+    else shortcuts[id] = binding;
+    return { shortcuts };
+  });
 });
 
 const TRANSIENT_STATUS_DEFAULT_MS = 3000;
@@ -990,8 +996,8 @@ async function refreshStandalonePreferences(): Promise<void> {
 }
 
 /** Mirror server preferences (theme, pane widths) into local state.
- *  Called on boot once `workspace.info` is set, and again on every
- *  `config_changed` WS event. */
+ *  Called on boot once `workspace.info` is set, and after a refresh from
+ *  `config_changed` or a watch-socket connection. */
 export function applyServerPreferences(): void {
   const prefs = workspace.info?.preferences;
   if (!prefs) return;
@@ -2717,6 +2723,9 @@ function onWatchStatus(status: WsStatus, attempt: number): void {
 /// into `fbWatch` resolves at call time because both modules import each
 /// other.
 function onWatchReady(): void {
+  // Settings can change before the socket subscribes or while it is down.
+  // The shared refresh uses the preference route this window's tenant serves.
+  scheduleWorkspaceRefresh();
   // A note created, moved or deleted while the socket was down sent this
   // page no frame, so every open after the page's first drops the link
   // pills' kinds as a frame of such a change does.
@@ -4797,6 +4806,7 @@ export function teardown(): void {
   rootReconciliation = null;
   rootReconcileRerun = false;
   stopIndexStatusPoller();
+  stopWorkspaceRefresh();
 }
 
 // ---- search-index status poller -----------------------------------------

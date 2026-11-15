@@ -31,7 +31,8 @@ function armedByJsdomFrameLoop(): boolean {
 /// Clearing a timer leaves its module's handle and pending work behind, so
 /// call the module's own stop before releasing the tracked timers
 /// (the index poll's `stopIndexStatusPoller` and the session refetch's
-/// `stopSessionSyncRefetch`, plus the store's `teardown` for the pane-width
+/// `stopSessionSyncRefetch`, the workspace's `stopWorkspaceRefresh`,
+/// plus the store's `teardown` for the pane-width
 /// and page-width debounces and their pending preference edits).
 ///
 /// One limit: d3-timer binds `window.requestAnimationFrame` when its module
