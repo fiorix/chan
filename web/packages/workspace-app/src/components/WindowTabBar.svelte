@@ -58,7 +58,7 @@
   import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
   import { privacy } from "@chan/web-shared/privacy";
   import LinkIndicator from "./LinkIndicator.svelte";
-  import { LINK_INDICATOR_LABEL_CH } from "./linkIndicatorMath";
+  import { LINK_INDICATOR_STALLED_DOWN_LABEL_CH } from "./linkIndicatorMath";
   import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
 
   // `restored` is false until the boot has restored the window's layout:
@@ -386,7 +386,7 @@
     <!-- The launcher puts Windows menubar menus and its title in the band.
          The reconnecting cover keeps the title visible on every host, clear
          of the indicator and window controls. The band remains drag space. -->
-    <div class="covered-band" style:left={coveredBandLeft} style:right={coveredBandRight} style:--link-indicator-label-width={`${LINK_INDICATOR_LABEL_CH}ch`}>
+    <div class="covered-band" style:left={coveredBandLeft} style:right={coveredBandRight} style:--link-indicator-label-width={`${LINK_INDICATOR_STALLED_DOWN_LABEL_CH}ch`}>
       {#if menus.length > 0}
         <div class="window-menus">
           {#each menus as menu (menu.id)}

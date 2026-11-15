@@ -12,7 +12,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // single Abandon action to give up on a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, keyboardOwnedAbovePanes, setCoverBlocking, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, appInputBlocked, keyboardOwnedAbovePanes, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -20,9 +20,13 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow } from "../state/focusGuard";
+  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
+  import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
+  import { surveyFor } from "../state/survey.svelte";
+  import { teamDialogState } from "../state/teamDialog.svelte";
+  import { closeConfirmState } from "../state/closeConfirm.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
 
   // Recovery actions (Restart connection / Abandon) are offered only on a devserver-backed
   // desktop window: a stuck remote connection the user can force back or give up
@@ -38,6 +42,11 @@
   let focusAfterAction: "reconnect" | "abandon" | null = null;
   // A late IPC completion cannot return focus during a later outage.
   let outageEpoch = 0;
+  type FocusReturn = { element: HTMLElement; surface: boolean };
+  // Keep the surface kind because reconnect can replace its focused DOM node.
+  let focusBeforeCover: FocusReturn | null = null;
+  // Computers owns the first responder; carry this until it hides or a newer owner wins.
+  let deferredFocus: { returnTo: FocusReturn; epoch: number } | null = null;
   const restartNoteId = $props.id();
 
   async function runRecovery(
@@ -113,17 +122,35 @@
     ui.disconnectBlocking = false;
     setCoverBlocking("reconnect", false);
   });
+  onMount(() => {
+    // A launcher hide is the first point at which the page may take focus back.
+    const onWindowFocus = (): void => {
+      if (!deferredFocus || launcherShownOverWindow() || ui.ws !== "open") return;
+      const { returnTo, epoch } = deferredFocus;
+      deferredFocus = null;
+      restoreFocus(returnTo, epoch);
+    };
+    window.addEventListener("focus", onWindowFocus);
+    return () => window.removeEventListener("focus", onWindowFocus);
+  });
 
   const watcherOpen = $derived(ui.ws === "open");
   const bandAvailable = $derived(windowTabBar.on && !keyboardOwnedAbovePanes());
   $effect(() => {
     if (ui.ws === "open") {
       outageEpoch += 1;
+      const priorFocus = focusBeforeCover ?? deferredFocus?.returnTo ?? null;
+      focusBeforeCover = null;
+      deferredFocus = null;
       hasBeenOpen = true;
       visible = false;
       pendingAction = null;
       recoveryError = null;
       focusAfterAction = null;
+      if (priorFocus) {
+        const epoch = outageEpoch;
+        void tick().then(() => restoreFocus(priorFocus, epoch));
+      }
       return;
     }
     if (!hasBeenOpen) {
@@ -149,7 +176,7 @@
     return () => clearTimeout(actions);
   });
 
-  /// Steal focus when the overlay appears. The backdrop's
+  /// Park focus when the overlay appears. The backdrop's
   /// pointer-events stop *clicks* from reaching the editor, but
   /// keystrokes still flow to whatever was focused before the
   /// disconnect (typically the WYSIWYG / CodeMirror surface), so a
@@ -169,6 +196,16 @@
   $effect(() => {
     if (!visible) return;
     const active = document.activeElement as HTMLElement | null;
+    if (active && active !== document.body && active !== document.documentElement && !active.closest(`[${COVER_ROOT_ATTR}]`)) {
+      focusBeforeCover = { element: active, surface: !!active.closest(".terminal-host, .editor-host") };
+      deferredFocus = null;
+    } else if (!focusBeforeCover && deferredFocus && (!active || active === document.body || active === document.documentElement)) {
+      focusBeforeCover = deferredFocus.returnTo;
+      deferredFocus = null;
+    }
+    // ModalShell repairs focus into its top dialog. Leave that keyboard owner
+    // alone throughout the cover and after it clears.
+    if (modalDialogOpen() && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
     queueMicrotask(() => focusCard());
     const onWindowFocus = (): void => {
@@ -177,6 +214,38 @@
     window.addEventListener("focus", onWindowFocus);
     return () => window.removeEventListener("focus", onWindowFocus);
   });
+
+  function keyboardOwnerContains(saved: HTMLElement): boolean {
+    if (modalDialogOpen()) {
+      return !!(
+        (surveyFor(null) && saved.closest('.survey-overlay:not(.per-terminal)[role="dialog"]')) ||
+        (teamDialogState.request && saved.closest('.team-dialog[role="dialog"]')) ||
+        (closeConfirmState.open && saved.closest('.overlay[role="alertdialog"][aria-label="Close this window?"]'))
+      );
+    }
+    const overlay = topOverlay();
+    if (overlay === "launcher") return !!saved.closest('.deck-shell[role="dialog"]');
+    if (overlay) return saved.closest<HTMLElement>('.panel[role="dialog"]')?.dataset.overlayId === overlay;
+    return false;
+  }
+
+  function restoreFocus(returnTo: FocusReturn, epoch: number): void {
+    if (outageEpoch !== epoch || ui.ws !== "open") return;
+    if (launcherShownOverWindow()) {
+      deferredFocus = { returnTo, epoch };
+      return;
+    }
+    const saved = returnTo.element;
+    if (appInputBlocked() || (keyboardOwnedAbovePanes() && !keyboardOwnerContains(saved))) return;
+    const owner = document.activeElement;
+    if (owner !== document.body && owner !== document.documentElement && !owner?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
+    // The tab pulse invokes the terminal or editor's own focus routine, which
+    // re-arms its real keyboard surface and cursor after the cover has gone.
+    if (returnTo.surface) {
+      if (!refocusRefused(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
+    }
+    else if (saved.isConnected) saved.focus({ preventScroll: true });
+  }
 
   function focusCard(preferred: HTMLElement | null = null): void {
     if (launcherShownOverWindow()) return;
@@ -199,15 +268,8 @@
     controls[next]?.focus();
   }
 
-  // "closed" is never emitted by the transport (it pushes connecting /
-  // open / reconnecting only), so the visible overlay is always a
-  // reconnect in progress; "connecting" is the transient retry-attempt
-  // state, anything else reads as reconnecting.
-  const message = $derived(
-    ui.ws === "connecting"
-      ? "connecting to the chan server"
-      : "reconnecting to the chan server",
-  );
+  // Every status shown after an earlier open belongs to the same reconnect.
+  const message = "reconnecting to the chan server";
 
   // Live elapsed timer + attempt counter, matching the desktop connecting
   // screen's retry presentation. The timer runs only while the overlay is up
@@ -300,6 +362,7 @@
     z-index: 30000;
     backdrop-filter: blur(2px);
   }
+  .overlay:focus { outline: none; }
   .card {
     background: var(--bg-elev);
     color: var(--text);

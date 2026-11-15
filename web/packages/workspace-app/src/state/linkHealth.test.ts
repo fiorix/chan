@@ -344,6 +344,9 @@ describe("linkLabel", () => {
     ["down says it is reconnecting", ["down", 30, 0], "reconnecting"],
     ["stalled counts the wait in whole seconds", ["stalled", 30, 8_250], "stalled 8 s"],
     ["slow names the round-trip time", ["slow", 850, 0], "850 ms"],
+    ["recovering slow hides a healthy round-trip time", ["slow", 26, 0], ""],
+    ["recovering slow hides a healthy pending wait", ["slow", 26, 299], ""],
+    ["slow shows a wait at the recovery threshold", ["slow", 26, 300], "300 ms"],
     ["slow names the wait once it is the longer", ["slow", 50, 2_400], "2.4 s"],
     ["slow with no round trip yet names the wait", ["slow", null, 1_000], "1.0 s"],
   ])("%s", (_what, args, label) => {

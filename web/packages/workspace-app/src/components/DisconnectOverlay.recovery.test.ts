@@ -9,13 +9,22 @@
 // desktop window on the local library, gets no actions: the watcher keeps
 // retrying on its own.
 
-import { mount, tick, unmount } from "svelte";
+import { readFileSync } from "node:fs";
+import { createRawSnippet, flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { abandonDevserverForWindow, reconnectDevserverForWindow } from "../api/desktop";
-import { overlayStack, ui } from "../state/store.svelte";
+import { overlayStack, promptState, setCoverBlocking, ui } from "../state/store.svelte";
+import { tabFocusPulse } from "../state/tabs.svelte";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
+import { teamDialogState } from "../state/teamDialog.svelte";
+import { closeConfirmState } from "../state/closeConfirm.svelte";
 import { WINDOW_TAB_BAR_MIN_HEIGHT, windowTabBar } from "../state/windowTabBar.svelte";
+import BubbleOverlay from "./BubbleOverlay.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
+import OverlayShell from "./OverlayShell.svelte";
+import PromptModal from "./PromptModal.svelte";
 
 type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
 
@@ -30,6 +39,13 @@ beforeEach(() => {
   windowTabBar.on = false;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   overlayStack.ids = [];
+  promptState.open = false;
+  teamDialogState.request = null;
+  closeConfirmState.open = false;
+  setCoverBlocking("screensaver", false);
+  document.documentElement.removeAttribute("data-launcher-shown");
+  resetLayout();
+  resetSurveysForTest();
 });
 
 afterEach(() => {
@@ -44,6 +60,13 @@ afterEach(() => {
   windowTabBar.on = false;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   overlayStack.ids = [];
+  promptState.open = false;
+  teamDialogState.request = null;
+  closeConfirmState.open = false;
+  setCoverBlocking("screensaver", false);
+  document.documentElement.removeAttribute("data-launcher-shown");
+  resetLayout();
+  resetSurveysForTest();
 });
 
 function desktopWindow(lib: string): void {
@@ -69,6 +92,23 @@ async function readyActions(): Promise<HTMLElement> {
   vi.advanceTimersByTime(7_400);
   await tick();
   return target;
+}
+
+async function deferredIntoSecondOutage(): Promise<HTMLTextAreaElement> {
+  const behind = document.body.appendChild(document.createElement("textarea"));
+  behind.focus();
+  await dropConnection();
+  showLauncher();
+  ui.ws = "open";
+  await tick();
+  await tick();
+  ui.ws = "reconnecting";
+  await tick();
+  vi.advanceTimersByTime(600);
+  await tick();
+  hideLauncher();
+  await tick();
+  return behind;
 }
 
 function button(target: HTMLElement, label: string): HTMLButtonElement {
@@ -124,6 +164,362 @@ describe("the reconnect overlay", () => {
     const cover = target.querySelector<HTMLElement>(".overlay")!;
     expect(document.activeElement).toBe(cover);
     expect(behind).not.toBe(document.activeElement);
+  });
+
+  test("returns focus to the element that held it before the cover", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    const coverTarget = await dropConnection();
+    expect(document.activeElement).toBe(coverTarget.querySelector(".overlay"));
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(behind);
+  });
+
+  test("returns terminal focus through the active surface's focus pulse", async () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    host.className = "terminal-host";
+    const input = host.appendChild(document.createElement("textarea"));
+    input.focus();
+    const before = tabFocusPulse.value;
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(tabFocusPulse.value).toBe(before + 1);
+  });
+
+  test("returns editor focus through the active surface's focus pulse", async () => {
+    const host = document.body.appendChild(document.createElement("div"));
+    host.className = "editor-host";
+    const input = host.appendChild(document.createElement("textarea"));
+    input.focus();
+    const before = tabFocusPulse.value;
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(tabFocusPulse.value).toBe(before + 1);
+  });
+
+  test.each(["search", "settings"] as const)("returns focus inside the %s overlay that owned it before the drop", async (id) => {
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(OverlayShell, {
+      target,
+      props: {
+        id,
+        open: true,
+        label: id,
+        onClose: () => {},
+        children: createRawSnippet(() => ({ render: () => '<input aria-label="owned field" />' })),
+      },
+    }));
+    await tick();
+    overlayStack.ids = [id];
+    const input = target.querySelector<HTMLInputElement>('input[aria-label="owned field"]')!;
+    input.focus();
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("does not return focus to a lower overlay while another overlay owns the keyboard", async () => {
+    const lower = document.body.appendChild(document.createElement("div"));
+    lower.className = "panel";
+    lower.setAttribute("role", "dialog");
+    lower.dataset.overlayId = "search";
+    const input = lower.appendChild(document.createElement("input"));
+    overlayStack.ids = ["search"];
+    input.focus();
+    await dropConnection();
+    overlayStack.ids = ["search", "settings"];
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(input);
+  });
+
+  test("returns focus to the command launcher field that owned it before the drop", async () => {
+    const deck = document.body.appendChild(document.createElement("div"));
+    deck.className = "deck-shell";
+    deck.setAttribute("role", "dialog");
+    const input = deck.appendChild(document.createElement("input"));
+    overlayStack.ids = ["launcher"];
+    input.focus();
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
+  test.each([
+    ["window-wide survey", "survey-overlay", "dialog", null, () => showSurvey({ surveyId: "window", bodyMarkdown: "Question", options: ["Yes"] }, null)],
+    ["Team Work dialog", "team-dialog", "dialog", null, () => { teamDialogState.request = { leadTabId: "t", leadPaneId: "p" }; }],
+    ["close confirmation", "overlay", "alertdialog", "Close this window?", () => { closeConfirmState.open = true; }],
+  ] as const)("returns focus to the %s field that owned it before the drop", async (_name, className, role, label, open) => {
+    const root = document.body.appendChild(document.createElement("div"));
+    root.className = className;
+    root.setAttribute("role", role);
+    if (label) root.setAttribute("aria-label", label);
+    const input = root.appendChild(document.createElement("input"));
+    open();
+    input.focus();
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("returns focus to a mounted window-wide survey card after the cover clears", async () => {
+    showSurvey({ surveyId: "window", bodyMarkdown: "Question", options: ["Yes"] }, null);
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(BubbleOverlay, { target }));
+    await tick();
+    const card = target.querySelector<HTMLElement>('.survey-overlay[role="dialog"] .survey-card')!;
+    expect(document.activeElement).toBe(card);
+    await dropConnection();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(card);
+  });
+
+  test("returns focus to the prompt field that owned it before the drop", async () => {
+    promptState.open = true;
+    promptState.title = "Prompt";
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(PromptModal, { target }));
+    await tick();
+    const input = target.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
+    input.focus();
+    const blur = vi.spyOn(input, "blur");
+    await dropConnection();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(input);
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("does not restore focus while the Computers launcher is shown", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+    document.documentElement.removeAttribute("data-launcher-shown");
+  });
+
+  test("returns the prior focus when the launcher hides after reconnection", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    showLauncher();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+    hideLauncher();
+    await tick();
+    expect(document.activeElement).toBe(behind);
+  });
+
+  test("carries deferred focus through a second outage when the launcher hides during it", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    showLauncher();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    ui.ws = "reconnecting";
+    await tick();
+    vi.advanceTimersByTime(600);
+    await tick();
+    hideLauncher();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(behind);
+  });
+
+  test("carries deferred focus when the launcher hides during a drop healed within the grace", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    showLauncher();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    ui.ws = "reconnecting";
+    await tick();
+    hideLauncher();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(behind);
+  });
+
+  test("a new focus owner supersedes a deferred restore from an earlier outage", async () => {
+    const old = document.body.appendChild(document.createElement("textarea"));
+    old.focus();
+    await dropConnection();
+    showLauncher();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    const newer = document.body.appendChild(document.createElement("input"));
+    newer.focus();
+    ui.ws = "reconnecting";
+    await tick();
+    vi.advanceTimersByTime(600);
+    await tick();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    hideLauncher();
+    await tick();
+    expect(document.activeElement).toBe(newer);
+    expect(document.activeElement).not.toBe(old);
+  });
+
+  test("a deferred restore carried through a second outage cannot run during a third outage", async () => {
+    const behind = await deferredIntoSecondOutage();
+    ui.ws = "open";
+    flushSync();
+    ui.ws = "reconnecting";
+    flushSync();
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+  });
+
+  test("a deferred restore carried through a second outage cannot run after a later opening", async () => {
+    const behind = await deferredIntoSecondOutage();
+    ui.ws = "open";
+    flushSync();
+    ui.ws = "reconnecting";
+    flushSync();
+    ui.ws = "open";
+    flushSync();
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+  });
+
+  test.each([
+    ["another cover", () => setCoverBlocking("screensaver", true)],
+    ["an overlay", () => { overlayStack.ids = ["settings"]; }],
+    ["a dialog", () => { promptState.open = true; }],
+  ] as const)("does not restore focus while %s owns the keyboard", async (_owner, takeKeyboard) => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    takeKeyboard();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).not.toBe(behind);
+  });
+
+  test("does not take focus back after it moved elsewhere deliberately", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    const other = document.body.appendChild(document.createElement("button"));
+    other.focus();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(other);
+  });
+
+  test("does not focus an element removed during the outage", async () => {
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    await dropConnection();
+    const focus = vi.spyOn(behind, "focus");
+    const before = tabFocusPulse.value;
+    behind.remove();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(focus).not.toHaveBeenCalled();
+    expect(tabFocusPulse.value).toBe(before);
+  });
+
+  test.each(["terminal-host", "editor-host"] as const)("a removed %s node falls back to the active surface pulse", async (className) => {
+    const host = document.body.appendChild(document.createElement("div"));
+    host.className = className;
+    const input = host.appendChild(document.createElement("textarea"));
+    input.focus();
+    const before = tabFocusPulse.value;
+    await dropConnection();
+    const focus = vi.spyOn(input, "focus");
+    host.remove();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(focus).not.toHaveBeenCalled();
+    expect(tabFocusPulse.value).toBe(before + 1);
+  });
+
+  test("a survey over the active terminal refuses its return pulse", async () => {
+    resetLayout([terminalTab({ id: "surveyed" })]);
+    const host = document.body.appendChild(document.createElement("div"));
+    host.className = "terminal-host";
+    const input = host.appendChild(document.createElement("textarea"));
+    input.focus();
+    const before = tabFocusPulse.value;
+    await dropConnection();
+    showSurvey({ surveyId: "one", bodyMarkdown: "Question", options: ["Yes"] }, "surveyed");
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(tabFocusPulse.value).toBe(before);
+  });
+
+  test("returns focus after a recovery action reconnects the window", async () => {
+    desktopWindow("dev-1");
+    const behind = document.body.appendChild(document.createElement("textarea"));
+    behind.focus();
+    const target = await readyActions();
+    button(target, "Restart connection").focus();
+    button(target, "Restart connection").click();
+    ui.ws = "open";
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(behind);
+  });
+
+  test("every watcher retry status says reconnecting in the title and dialog name", async () => {
+    const target = await dropConnection();
+    for (const status of ["reconnecting", "connecting"] as const) {
+      ui.ws = status;
+      await tick();
+      expect(target.querySelector(".title")?.textContent).toBe("reconnecting to the chan server");
+      expect(target.querySelector(".overlay")?.getAttribute("aria-label")).toBe("reconnecting to the chan server");
+    }
+  });
+
+  test("the focused cover has no outline while its buttons retain focus outlines", () => {
+    // jsdom does not paint focus rings; pin the component's CSS contract.
+    const source = readFileSync("src/components/DisconnectOverlay.svelte", "utf8");
+    expect(source).toMatch(/\.overlay:focus\s*\{\s*outline:\s*none;/);
+    expect(source).not.toMatch(/\.actions\s+button:focus(?:-visible)?\s*\{\s*outline:\s*none;/);
   });
 
   test("waits eight seconds after the watcher leaves before showing recovery actions", async () => {

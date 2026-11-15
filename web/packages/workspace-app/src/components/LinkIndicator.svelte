@@ -15,7 +15,7 @@
     linkSparkline,
     linkStateAge,
     type LinkIndicatorPlacement,
-    LINK_INDICATOR_LABEL_CH,
+    linkIndicatorLabelCh,
   } from "./linkIndicatorMath";
   import { clampMenu, triggerMenuX } from "./menuClamp";
   import { menuEscape } from "./menuEscape";
@@ -29,11 +29,13 @@
   const visible = $derived(linkIndicatorShown(placement, linkHealth.state, remote));
   const blocked = $derived(appInputBlocked());
   const label = $derived(linkLabel(linkHealth.state, linkHealth.rttMs, linkHealth.waitMs));
+  const labelCh = $derived(linkIndicatorLabelCh(linkHealth.state));
   const name = $derived.by(() => {
     switch (linkHealth.state) {
       case "ok": return "Connection healthy";
       case "unknown": return "Connection status unknown";
       case "slow": {
+        if (!label) return "Connection recovering";
         const rtt = linkHealth.rttMs;
         return rtt !== null && rtt >= linkHealth.waitMs
           ? `Connection slow, ${formatLinkMs(rtt)}`
@@ -120,14 +122,14 @@
     aria-controls={popoverId}
     aria-expanded={open}
     aria-disabled={blocked}
-    style:--link-indicator-label-width={`${LINK_INDICATOR_LABEL_CH}ch`}
+    style:--link-indicator-label-width={placement === "tab-bar" && labelCh > 0 ? `${labelCh}ch` : undefined}
     onmousedown={(event) => event.preventDefault()}
     onclick={toggle}
   >
     <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
       <path d="M2.5 11v2M6 8v5M9.5 5v8M13 2v11" />
     </svg>
-    {#if label}<span class="label">{label}</span>{/if}
+    {#if label || (placement === "tab-bar" && linkHealth.state === "slow")}<span class="label">{label}</span>{/if}
   </button>
 {/if}
 
