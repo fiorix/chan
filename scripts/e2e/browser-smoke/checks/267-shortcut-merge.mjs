@@ -44,7 +44,7 @@ async function restoreShortcuts(origin, configRecord, shortcuts) {
 // The missed-frame arm leaves the native socket open. The reconnect arms
 // close it and refuse actual native redials at an unserved path until released.
 // Neither intervention changes application state or fabricates watch frames.
-async function observe(page) {
+async function observe(page, watchPath) {
   const traffic = { reads: [], writes: [], errors: [], pending: 0 };
   const started = new WeakMap();
   const pending = new Set();
@@ -75,9 +75,9 @@ async function observe(page) {
       traffic.pending = pending.size;
     });
   });
-  await page.evaluateOnNewDocument(() => {
+  await page.evaluateOnNewDocument((watchPath) => {
     const NativeSocket = window.WebSocket;
-    const probe = window.__shortcut267 = { sockets: [], keys: [], dropConfig: false, blockWatch: false };
+    const probe = window.__shortcut267 = { watchPath, sockets: [], keys: [], dropConfig: false, blockWatch: false };
     document.addEventListener("keydown", (event) => {
       if (!event.target?.matches?.("button.capture")) return;
       probe.keys.push({ key: event.key, code: event.code, trusted: event.isTrusted,
@@ -86,7 +86,7 @@ async function observe(page) {
     window.WebSocket = new Proxy(NativeSocket, {
       construct(target, args) {
         const url = new URL(String(args[0]), location.href);
-        if (!url.pathname.endsWith("/ws") || url.pathname.includes("/api/")) return Reflect.construct(target, args);
+        if (url.pathname !== watchPath) return Reflect.construct(target, args);
         const blocked = probe.blockWatch;
         if (blocked) {
           url.pathname = "/__smoke_267_refused_watch__";
@@ -108,7 +108,7 @@ async function observe(page) {
         return socket;
       },
     });
-  });
+  }, watchPath);
   return traffic;
 }
 
@@ -127,7 +127,7 @@ async function settleStartup(origin, windows, original) {
   for (const window of windows) {
     await window.page.waitForFunction((after) => window.__shortcut267.sockets.some((record) =>
       record.frames.some((frame) => frame.at >= after && frame.kind === "config_changed" && !frame.dropped)),
-    { timeout: WAIT }, at);
+    { timeout: WAIT, polling: 100 }, at);
     const probe = await snapshotProbe(window.page);
     const frame = probe.sockets.flatMap((record) => record.frames)
       .filter((frame) => frame.at >= at && frame.kind === "config_changed").at(-1);
@@ -143,6 +143,8 @@ async function settleStartup(origin, windows, original) {
 
 async function snapshotProbe(page) {
   return page.evaluate(() => ({
+    watchPath: window.__shortcut267.watchPath,
+    visibility: document.visibilityState,
     keys: window.__shortcut267.keys,
     sockets: window.__shortcut267.sockets.map(({ socket, ...record }) => ({ ...record, readyState: socket.readyState })),
   }));
@@ -207,22 +209,34 @@ async function openWindow(ctx, origin, token, workspace, kind, label, record) {
     kind, origin: "browser", ...(kind === "workspace" ? { workspace_path: workspace } : {}),
   });
   const page = await ctx.browser.newPage();
+  let stage = "observer";
+  let traffic;
   try {
     await page.setViewport({ width: 1440, height: 1000 });
-    const traffic = await observe(page);
+    traffic = await observe(page, new URL(`${record.prefix}/ws`, origin).pathname);
     const url = new URL(`${record.prefix}/`, origin);
     for (const [key, value] of Object.entries({ w: record.window_id, t: record.token, lib: "local", h: `shortcut267-${label}` })) url.searchParams.set(key, value);
     if (kind === "terminal") url.searchParams.set("kind", "terminal");
+    stage = "navigation";
+    await page.bringToFront();
     await goto(page, url.href);
+    stage = "pane";
     await page.waitForSelector(".pane", { timeout: WAIT });
-    await page.waitForFunction(() => window.__shortcut267.sockets.some((socket) => socket.openedAt), { timeout: WAIT });
+    stage = "watch-open";
+    // Watch transport state must advance while another window owns focus.
+    await page.waitForFunction(() => window.__shortcut267.sockets.some((socket) => socket.openedAt), { timeout: WAIT, polling: 100 });
+    stage = "registry-connected";
     await poll(`${label} registered with the devserver`, async () =>
       (await fetchWindows(origin, token)).find((row) => row.window_id === record.window_id && row.connected));
+    stage = "settings";
     await showSettings(page);
     assert.ok(await cell(page, PEER), "setup: peer command is in the rendered grid");
     assert.ok(await cell(page, LOCAL), "setup: local command is in the rendered grid");
     return { page, record, traffic, kind };
   } catch (error) {
+    error.setupEvidence = { label, kind, stage, window: record.window_id, traffic,
+      probe: await snapshotProbe(page).catch((probeError) => ({ error: mask(probeError.message) })),
+      screenshot: await ctx.shot(`shortcut267-${label}-setup-failed`, page).catch(() => null) };
     await page.close();
     throw error;
   }
@@ -256,7 +270,7 @@ async function runArm(ctx, origin, token, workspace, peerRecord, original, label
         const probe = window.__shortcut267;
         return probe.sockets.find((record) => record.id === id)?.closedAt &&
           probe.sockets.some((record) => record.blocked && record.closedAt && !record.openedAt);
-      }, { timeout: WAIT }, cut.id);
+      }, { timeout: WAIT, polling: 100 }, cut.id);
       await poll("reader disconnected from the devserver", async () =>
         (await fetchWindows(origin, token)).find((row) => row.window_id === reader.record.window_id && !row.connected));
     }
@@ -274,7 +288,7 @@ async function runArm(ctx, origin, token, workspace, peerRecord, original, label
       result.offline = offline;
       await reader.page.evaluate(() => { window.__shortcut267.blockWatch = false; });
       await reader.page.waitForFunction((id) => window.__shortcut267.sockets.some((record) => record.id > id && !record.blocked && record.openedAt),
-        { timeout: 45_000 }, cut.id);
+        { timeout: 45_000, polling: 100 }, cut.id);
       const reconnected = (await snapshotProbe(reader.page)).sockets.find((socket) => socket.id > cut.id && !socket.blocked && socket.openedAt);
       result.reconnected = reconnected;
       result.stage = "contract-reconnect";
@@ -297,7 +311,7 @@ async function runArm(ctx, origin, token, workspace, peerRecord, original, label
     } else {
       await reader.page.waitForFunction((after) => window.__shortcut267.sockets.some((record) =>
         record.frames.some((frame) => frame.at >= after && frame.kind === "config_changed" && frame.dropped)),
-      { timeout: WAIT }, cut.at);
+      { timeout: WAIT, polling: 100 }, cut.at);
       const probe = await snapshotProbe(reader.page);
       assert.equal(probe.sockets.length, 1, "instrument: missed-frame arm did not reconnect");
       assert.equal(probe.sockets[0].readyState, 1, "instrument: missed-frame watcher is still open");
@@ -320,6 +334,7 @@ async function runArm(ctx, origin, token, workspace, peerRecord, original, label
   } catch (error) {
     result.status = "failed";
     result.error = mask(error.message);
+    if (error.setupEvidence) result.setupEvidence = error.setupEvidence;
     if (windows[0]) await ctx.shot(`shortcut267-${label}-failed`, windows[0].page).catch(() => {});
   } finally {
     result.evidence = [];
