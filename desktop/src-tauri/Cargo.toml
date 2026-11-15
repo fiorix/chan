@@ -148,6 +148,9 @@ reqwest013 = { package = "reqwest", version = "0.13", default-features = false, 
 # It also shows the message of a launch that exits beside a desktop that does
 # not answer (src/single_instance.rs).
 gtk = "0.18"
+# A launch's startup id applies to X11 windows only, even when GTK also
+# supports Wayland. This is the version wry already links.
+gdkx11 = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)

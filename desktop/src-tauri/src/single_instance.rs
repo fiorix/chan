@@ -365,6 +365,7 @@ fn show_message(notice: Notice) {
 fn show_message(_: Notice) {}
 
 fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointClaim> {
+    let startup_id = handoff::launch_startup_id();
     check_with(path, bounds, |budget| {
         forward_with(
             paths,
@@ -373,7 +374,13 @@ fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointCl
             |open, budget| {
                 tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
             },
-            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+            |budget| {
+                tauri::async_runtime::block_on(handoff::try_activate_at(
+                    path,
+                    startup_id.as_deref(),
+                    budget,
+                ))
+            },
         )
     })
 }
@@ -383,14 +390,26 @@ fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointCl
 /// forward, since the terminal window it opens is raised
 /// ([`forward_terminal_with`]).
 fn check_terminal_at(path: &Path, bounds: Bounds, dir: &str) -> Startup<EndpointClaim> {
+    let startup_id = handoff::launch_startup_id();
     check_with(path, bounds, |budget| {
         forward_terminal_with(
             dir,
             budget,
             |dir, budget| {
-                tauri::async_runtime::block_on(handoff::try_open_terminal_at(path, dir, budget))
+                tauri::async_runtime::block_on(handoff::try_open_terminal_at(
+                    path,
+                    dir,
+                    startup_id.as_deref(),
+                    budget,
+                ))
             },
-            |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+            |budget| {
+                tauri::async_runtime::block_on(handoff::try_activate_at(
+                    path,
+                    startup_id.as_deref(),
+                    budget,
+                ))
+            },
         )
     })
 }
@@ -696,7 +715,11 @@ impl Drop for BootSettled {
 /// not put away itself count as shown ([`shown_windows`]). A desktop shutting
 /// down refuses, so the launch waits for the endpoint instead of exiting
 /// beside a desktop about to go.
-pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
+pub(crate) fn come_forward(
+    app: &AppHandle,
+    state: &AppState,
+    startup_id: Option<&str>,
+) -> Response {
     if state.shutdown_started.load(Ordering::SeqCst) {
         return shutting_down();
     }
@@ -714,12 +737,12 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     match forward {
         Forward::Raise(label) => {
             if let Some(window) = app.get_webview_window(&label) {
-                if let Err(e) = crate::raise::raise_window(&window) {
+                if let Err(e) = crate::raise::raise_window_from_launch(&window, startup_id) {
                     tracing::warn!(label = %window.label(), error = %e, "raising the window to come forward failed");
                 }
             }
         }
-        Forward::OpenTerminal => crate::spawn_terminal_window(app),
+        Forward::OpenTerminal => crate::spawn_terminal_window_from_launch(app, startup_id),
         Forward::WindowOnItsWay => {
             tracing::info!("asked to come forward while a window is on its way; opening none")
         }
@@ -1425,7 +1448,7 @@ mod tests {
             .split_once("Forward::OpenTerminal =>")
             .expect("the terminal arm follows the raise arm");
         assert!(
-            raise.contains("crate::raise::raise_window(&window)"),
+            raise.contains("crate::raise::raise_window_from_launch(&window, startup_id)"),
             "{raise}"
         );
         for own in ["window.unminimize()", "window.show()", "window.set_focus()"] {
@@ -1711,6 +1734,40 @@ mod tests {
                 pair[0],
                 pair[1]
             );
+        }
+    }
+
+    #[test]
+    fn launch_activation_is_captured_once_and_forwarded_before_retries() {
+        for (signature, requests) in [
+            (
+                "\nfn check_at(",
+                vec!["handoff::try_activate_at(path,startup_id.as_deref(),budget)"],
+            ),
+            (
+                "\nfn check_terminal_at(",
+                vec![
+                    "handoff::try_open_terminal_at(path,dir,startup_id.as_deref(),budget)",
+                    "handoff::try_activate_at(path,startup_id.as_deref(),budget)",
+                ],
+            ),
+        ] {
+            let source = production_body(signature);
+            assert_eq!(source.matches("handoff::launch_startup_id()").count(), 1);
+            assert!(
+                source
+                    .find("let startup_id = handoff::launch_startup_id();")
+                    .unwrap()
+                    < source.find("check_with(").unwrap()
+            );
+            let compact: String = source.split_whitespace().collect();
+            let compact = compact.replace(",)", ")");
+            for request in requests {
+                assert!(
+                    compact.contains(request),
+                    "{signature} must forward capture in {request}"
+                );
+            }
         }
     }
 
