@@ -27,7 +27,7 @@ fn appimage_command(
     }
     let mut command = Command::new("xdg-open");
     command.env_clear().envs(parent.iter().cloned());
-    chan_library::terminal_sessions::clear_appimage_command_env(&mut command, parent);
+    chan_server::clear_appimage_command_env(&mut command, parent);
     command
         .arg(url.as_str())
         .stdin(Stdio::null())
