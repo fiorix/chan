@@ -91,23 +91,17 @@ export default {
       await activateTab(page, `Drafts/${first.path}`);
 
       // Save draft: one file at the chosen path, and the editor follows.
-      const promotions = [];
-      const onResponse = async (response) => {
-        if (!response.url().includes("/api/drafts/promote")) return;
-        promotions.push({
-          status: response.status(),
-          request: response.request().postData(),
-          answer: await response.text().catch(() => null),
-        });
-      };
-      page.on("response", onResponse);
+      // The promoted file can exist before the server sends its response.
+      const promotionResponse = page.waitForResponse(
+        (response) => response.url().includes("/api/drafts/promote"),
+        { timeout: 20_000 },
+      ).then((response) => ({ response }), (error) => ({ error }));
       mkdirSync(join(ctx.workspaceDir, dir));
       await saveDraftToWorkspace(page, target, () =>
         assertNothingMarkedShown(page, [first.id], "with Save draft open"),
       );
       const onDisk = join(ctx.workspaceDir, target);
       await waitFor("the promoted file in the workspace", 20_000, () => existsSync(onDisk));
-      page.off("response", onResponse);
       if (!readFileSync(onDisk, "utf8").includes(typed)) throw new Error("the promoted file lost the typed text");
       const made = filesUnder(dirname(onDisk));
       if (JSON.stringify(made) !== JSON.stringify(["lone.md"])) {
@@ -124,6 +118,14 @@ export default {
       if ((await listDrafts(ctx)).drafts.some((d) => d.name === first.name && d.primary.draft_id === first.id)) {
         throw new Error("the server still lists the saved draft");
       }
+
+      const { response, error } = await promotionResponse;
+      if (error) throw new Error(`the draft promotion response did not arrive within 20000ms: ${error.message}`, { cause: error });
+      const promotion = {
+        status: response.status(),
+        request: response.request().postData(),
+        answer: await response.text().catch(() => null),
+      };
 
       // A second draft, edited, discarded from its close dialog.
       const second = await newDraft(ctx, page);
@@ -159,7 +161,7 @@ export default {
         second,
         rawGet: rawGet.status,
         rawPut: rawPut.status,
-        promotion: promotions[0] ?? null,
+        promotion,
         trash: trashed,
       };
     } finally {

@@ -160,16 +160,11 @@ export default {
       await waitImagesRendered(page, 1, "draft B after A was discarded");
 
       // 4. B is saved to the workspace at a chosen file path.
-      const promotions = [];
-      const onResponse = async (response) => {
-        if (!response.url().includes("/api/drafts/promote")) return;
-        promotions.push({
-          status: response.status(),
-          request: response.request().postData(),
-          answer: await response.text().catch(() => null),
-        });
-      };
-      page.on("response", onResponse);
+      // The promoted file can exist before the server sends its response.
+      const promotionResponse = page.waitForResponse(
+        (response) => response.url().includes("/api/drafts/promote"),
+        { timeout: 20_000 },
+      ).then((response) => ({ response }), (error) => ({ error }));
       mkdirSync(join(ctx.workspaceDir, dir));
       await saveDraftToWorkspace(page, chosen, () =>
         assertNothingMarkedShown(page, [a.id, b.id], "with Save draft open"),
@@ -177,7 +172,6 @@ export default {
       const leaf = b.path.split("/").pop();
       const promotedDir = join(ctx.workspaceDir, dir, "report");
       await waitFor("the promoted directory in the workspace", 20_000, () => existsSync(join(promotedDir, leaf)));
-      page.off("response", onResponse);
       const promoted = filesUnder(join(ctx.workspaceDir, dir));
       const expected = [`report/${leaf}`, `report/${bImages[0]}`].sort();
       if (JSON.stringify(promoted) !== JSON.stringify(expected)) {
@@ -196,8 +190,13 @@ export default {
       await assertNothingMarkedShown(page, [a.id, b.id], "after the promotion");
       await ctx.shot("promoted");
 
-      const promotion = promotions[0] ?? null;
-      if (!promotion) throw new Error("no promotion request was seen");
+      const { response, error } = await promotionResponse;
+      if (error) throw new Error(`the draft promotion response did not arrive within 20000ms: ${error.message}`, { cause: error });
+      const promotion = {
+        status: response.status(),
+        request: response.request().postData(),
+        answer: await response.text().catch(() => null),
+      };
       const sent = JSON.parse(promotion.request ?? "{}");
       if (sent.target !== chosen) throw new Error(`the promotion sent target ${sent.target}, not the chosen file ${chosen}`);
       if (promotion.status !== 200) throw new Error(`the promotion answered ${promotion.status}: ${promotion.answer}`);

@@ -314,8 +314,29 @@ async function preSocketArm(ctx) {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector(".terminal-tab");
     await assertNotice(page);
-    await page.click('.cli-reload-notice button[aria-label="Dismiss notice"]');
+    const dismiss = await page.waitForSelector('.cli-reload-notice button[aria-label="Dismiss notice"]', { visible: true });
+    try {
+      await dismiss.scrollIntoView();
+      // The index status pill can cover the notice while earlier file operations settle.
+      details.dismissPoint = await poll("an unobstructed Dismiss notice click point", async () => {
+        const point = await dismiss.clickablePoint();
+        const hit = await dismiss.evaluate((button, point) => {
+          const cover = document.elementFromPoint(point.x, point.y);
+          return {
+            reachable: !button.disabled && !!cover && button.contains(cover),
+            cover: cover ? { tag: cover.tagName, id: cover.id, classes: String(cover.className), text: cover.textContent?.trim().slice(0, 160) } : null,
+          };
+        }, point);
+        ctx.mark("dismiss-click-point", { point, ...hit });
+        if (!hit.reachable) throw new Error(`Dismiss notice is covered at ${JSON.stringify(point)} by ${JSON.stringify(hit.cover)}`);
+        return point;
+      }, 60_000);
+      await page.mouse.click(details.dismissPoint.x, details.dismissPoint.y);
+    } finally {
+      await dismiss.dispose();
+    }
     await page.waitForSelector(".cli-reload-notice", { hidden: true });
+    await ctx.shot("before-socket-dismissed", page);
     await page.waitForFunction((before) => document.querySelector(".terminal-host")?.getBoundingClientRect().height > before,
       {}, details.firstHostHeight);
     details.dismissedHostHeight = await page.$eval(".terminal-host", (node) => node.getBoundingClientRect().height);
