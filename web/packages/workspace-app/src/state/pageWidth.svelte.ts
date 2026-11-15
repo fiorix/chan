@@ -22,6 +22,7 @@
 // also syncs the value live across open windows.
 
 import { api } from "../api/client";
+import { beginPreferenceWrite } from "../api/preferenceWrite";
 
 const CSS_VAR = "--chan-page-max-width";
 
@@ -66,13 +67,18 @@ function clampRatio(r: number): number {
 /// mid-drag.
 const PERSIST_DEBOUNCE_MS = 400;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let finishPendingRatio: (() => void) | null = null;
 function schedulePersistRatio(): void {
   if (persistTimer != null) clearTimeout(persistTimer);
+  finishPendingRatio?.();
+  finishPendingRatio = beginPreferenceWrite();
   persistTimer = setTimeout(() => {
     persistTimer = null;
     api.setPageWidthRatio(pageWidth.ratio).catch((e) => {
       console.warn("chan: failed to persist page-width", e);
     });
+    finishPendingRatio?.();
+    finishPendingRatio = null;
   }, PERSIST_DEBOUNCE_MS);
 }
 

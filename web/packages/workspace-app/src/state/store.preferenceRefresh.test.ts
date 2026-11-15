@@ -10,11 +10,14 @@ import { DemoGraph } from "../demo/graph";
 import { MockReports } from "../demo/report";
 import { createDemoFetch } from "../demo/router";
 import { MockWorkspaceStore } from "../demo/store";
+import { pageWidth, setPageWidth } from "./pageWidth.svelte";
 import {
   bootstrap,
   browserSidePanes,
   currentPreferences,
   onWatchEvent,
+  paneWidths,
+  persistPaneWidths,
   refreshWorkspace,
   setBrowserSidePane,
   setThemeChoice,
@@ -114,6 +117,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const release of releases) release();
+  // A failed drag assertion can leave readers waiting for a debounce.
+  await vi.advanceTimersByTimeAsync(500);
   await Promise.allSettled(operations);
   // Dock setters intentionally return void; drain the public write queue.
   await updateGlobalConfigSerial(() => null);
@@ -127,6 +132,152 @@ afterEach(async () => {
 });
 
 describe("workspace reads overlapping local preference writes", () => {
+  test("an older response cannot revert a pane-width drag before its debounce enqueues", async () => {
+    const read = heldWorkspace = heldRequest();
+    const refreshing = startRefresh();
+    await read.started.promise;
+    expect(paneWidths.graph).not.toBe(444);
+
+    paneWidths.graph = 444;
+    persistPaneWidths();
+    expect(patchCount).toBe(0);
+    read.released.resolve();
+    await refreshing;
+    expect.soft(paneWidths.graph).toBe(444);
+
+    await vi.advanceTimersByTimeAsync(199);
+    expect(patchCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(301);
+    expect.soft((await api.config()).preferences.pane_widths.graph).toBe(444);
+    expect.soft(paneWidths.graph).toBe(444);
+    expect.soft(currentPreferences()?.pane_widths.graph).toBe(444);
+  });
+
+  test("an older response cannot revert a page-width drag before its debounce enqueues", async () => {
+    const read = heldWorkspace = heldRequest();
+    const refreshing = startRefresh();
+    await read.started.promise;
+    expect(pageWidth.ratio).not.toBe(0.55);
+
+    setPageWidth(0.55);
+    expect(patchCount).toBe(0);
+    read.released.resolve();
+    await refreshing;
+    expect.soft(pageWidth.ratio).toBe(0.55);
+
+    // An invalidated read retries before this drag's longer debounce fires.
+    await vi.advanceTimersByTimeAsync(250);
+    expect(patchCount).toBe(0);
+    expect.soft(pageWidth.ratio).toBe(0.55);
+    await vi.advanceTimersByTimeAsync(400);
+    expect.soft((await api.config()).preferences.page_width_ratio).toBe(0.55);
+    expect.soft(pageWidth.ratio).toBe(0.55);
+    expect.soft(currentPreferences()?.page_width_ratio).toBe(0.55);
+  });
+
+  test("a workspace read begun during a page-width debounce waits for the drag's write", async () => {
+    setPageWidth(0.55);
+    const refreshing = startRefresh();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(patchCount).toBe(0);
+    expect.soft(pageWidth.ratio).toBe(0.55);
+    await vi.advanceTimersByTimeAsync(400);
+    await refreshing;
+    expect.soft((await api.config()).preferences.page_width_ratio).toBe(0.55);
+    expect.soft(pageWidth.ratio).toBe(0.55);
+    expect.soft(currentPreferences()?.page_width_ratio).toBe(0.55);
+  });
+
+  test("rearming a page-width debounce keeps a waiting read behind the latest drag tick", async () => {
+    const readsBeforeDrag = workspaceReads;
+    setPageWidth(0.55);
+    const refreshing = startRefresh();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(workspaceReads).toBe(readsBeforeDrag);
+
+    setPageWidth(0.65);
+    await vi.advanceTimersByTimeAsync(200);
+    expect.soft(workspaceReads).toBe(readsBeforeDrag);
+    expect.soft(pageWidth.ratio).toBe(0.65);
+    expect(patchCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(199);
+    expect.soft(workspaceReads).toBe(readsBeforeDrag);
+    expect(patchCount).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await refreshing;
+    expect(patchCount).toBe(1);
+    expect((await api.config()).preferences.page_width_ratio).toBe(0.65);
+    expect(currentPreferences()?.page_width_ratio).toBe(0.65);
+    expect(pageWidth.ratio).toBe(0.65);
+  });
+
+  test("overlapping width drags delay reads while unrelated immediate writes still progress", async () => {
+    const readsBeforeDrag = workspaceReads;
+    paneWidths.graph = 444;
+    persistPaneWidths();
+    setPageWidth(0.55);
+    const refreshing = startRefresh();
+    const themeWrite = setThemeChoice("dark");
+    operations.push(themeWrite);
+    await themeWrite;
+    expect((await api.config()).preferences.theme).toBe("dark");
+    expect(workspaceReads).toBe(readsBeforeDrag);
+
+    await vi.advanceTimersByTimeAsync(200);
+    const halfway = (await api.config()).preferences;
+    expect(halfway.pane_widths.graph).toBe(444);
+    expect(halfway.page_width_ratio).not.toBe(0.55);
+    expect.soft(workspaceReads).toBe(readsBeforeDrag);
+    expect.soft(pageWidth.ratio).toBe(0.55);
+
+    await vi.advanceTimersByTimeAsync(200);
+    await refreshing;
+    expect(patchCount).toBe(3);
+    expect(currentPreferences()).toMatchObject({
+      theme: "dark", page_width_ratio: 0.55, pane_widths: { graph: 444 },
+    });
+    expect(ui.themeChoice).toBe("dark");
+    expect(pageWidth.ratio).toBe(0.55);
+    expect(paneWidths.graph).toBe(444);
+  });
+
+  test("stopping a read waiting for a width debounce prevents its eventual workspace request", async () => {
+    const beforeStop = workspace.info;
+    demoStore.data.metadata.label = "After stop";
+    setPageWidth(0.55);
+    const refreshing = startRefresh();
+    await vi.advanceTimersByTimeAsync(0);
+    stopWorkspaceRefresh();
+    const readsAtStop = workspaceReads;
+
+    await vi.advanceTimersByTimeAsync(400);
+    await refreshing;
+    await vi.advanceTimersByTimeAsync(300);
+    expect((await api.config()).preferences.page_width_ratio).toBe(0.55);
+    expect(pageWidth.ratio).toBe(0.55);
+    expect(workspace.info).toBe(beforeStop);
+    expect(workspaceReads).toBe(readsAtStop);
+  });
+
+  test("a no-op width debounce releases a waiting read without a config_changed frame", async () => {
+    const currentRatio = (await api.config()).preferences.page_width_ratio;
+    if (currentRatio === undefined) throw new Error("demo fixture has no page-width ratio");
+    const readsBeforeDrag = workspaceReads;
+    setPageWidth(currentRatio);
+    const refreshing = startRefresh();
+    await vi.advanceTimersByTimeAsync(399);
+    expect(workspaceReads).toBe(readsBeforeDrag);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await refreshing;
+    expect(patchCount).toBe(0);
+    expect(workspaceReads).toBe(readsBeforeDrag + 1);
+    expect(currentPreferences()?.page_width_ratio).toBe(currentRatio);
+    expect(pageWidth.ratio).toBe(currentRatio);
+  });
+
   test("an older workspace response cannot close a dock the user just opened", async () => {
     demoStore.data.metadata.label = "Updated workspace label";
     const read = heldWorkspace = heldRequest();

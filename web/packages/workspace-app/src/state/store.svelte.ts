@@ -192,6 +192,7 @@ import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
 import { applyEditorToolPreferences } from "./editorTools.svelte";
 import {
+  beginPreferenceWrite,
   preferenceWriteGeneration,
   updateGlobalConfigSerial,
   waitForPreferenceWrites,
@@ -5647,6 +5648,7 @@ export async function fbClipboardPaste(destDir: string): Promise<string[]> {
 }
 
 let widthsPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let finishPendingWidths: (() => void) | null = null;
 const PANE_WIDTHS_DEBOUNCE_MS = 200;
 
 /// Persist the current widths. Called by ResizeHandle's onChange on
@@ -5654,6 +5656,8 @@ const PANE_WIDTHS_DEBOUNCE_MS = 200;
 /// one PATCH instead of dozens.
 export function persistPaneWidths(): void {
   if (widthsPersistTimer) clearTimeout(widthsPersistTimer);
+  finishPendingWidths?.();
+  finishPendingWidths = beginPreferenceWrite();
   widthsPersistTimer = setTimeout(() => {
     widthsPersistTimer = null;
     const snapshot = {
@@ -5677,6 +5681,8 @@ export function persistPaneWidths(): void {
       }
       return { pane_widths: snapshot };
     });
+    finishPendingWidths?.();
+    finishPendingWidths = null;
   }, PANE_WIDTHS_DEBOUNCE_MS);
 }
 
