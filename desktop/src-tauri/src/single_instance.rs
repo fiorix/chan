@@ -4,9 +4,8 @@
 //! only its own process's windows, so a second desktop beside the first
 //! opens a native window for every record the first already shows, attached
 //! to the same sessions. A GUI launch therefore claims the handoff endpoint
-//! (the flock beside the per-user socket; on Windows the first instance of a
-//! claim pipe beside the endpoint's, whose own pipe is created only when the
-//! listener starts) before it touches anything,
+//! (a file lock beside the per-user socket on unix, in the protected local
+//! profile directory on Windows) before it touches anything,
 //! and keeps the claim until its listener serves it. A launch that finds the
 //! endpoint held asks the desktop holding it to come forward over the
 //! handoff socket, or, given paths, to open each of them in a standalone
@@ -109,9 +108,7 @@ pub(crate) enum Lock<C> {
     Taken(C),
     /// A live process of this account holds it.
     Held,
-    /// The claim could not be tried, or a process of another account holds
-    /// the endpoint's name where no launch of this account can reach it; the
-    /// reason is logged.
+    /// The claim could not be tried; the reason is logged.
     Unavailable(String),
 }
 
@@ -444,11 +441,11 @@ fn forward_terminal_with(
 fn check_with(
     path: &Path,
     bounds: Bounds,
-    forward: impl FnMut(Duration) -> ActivateReply,
+    mut forward: impl FnMut(Duration) -> ActivateReply,
 ) -> Startup<EndpointClaim> {
-    decide(
+    let startup = decide(
         claim(path),
-        || ask(path, bounds, forward),
+        || ask(path, bounds, &mut forward),
         |wait| {
             let grace = match wait {
                 Wait::Drain => bounds.drain,
@@ -456,7 +453,80 @@ fn check_with(
             };
             wait_for_release(path, grace)
         },
-    )
+    );
+    #[cfg(windows)]
+    if let Startup::Run(claim) = startup {
+        // A previous release holds only the marker pipe. Keep our file lock
+        // while checking its authenticated endpoint, so another new launch
+        // cannot boot beside this check.
+        let mut startup = check_predecessor_with(claim, bounds, forward, |budget| {
+            tauri::async_runtime::block_on(handoff::probe_endpoint_at(path, budget))
+        });
+        if let Startup::Run(claim) = &mut startup {
+            tauri::async_runtime::block_on(async { claim.refresh_boot_marker() });
+        }
+        return startup;
+    }
+    startup
+}
+
+/// A freshly acquired file claim can coexist with an older listener that
+/// holds only its pipe. Ask that listener without a boot-marker wait; its
+/// absence releases the same file claim into this launch's boot.
+#[cfg(any(windows, test))]
+fn check_predecessor_with<C>(
+    claim: C,
+    bounds: Bounds,
+    mut forward: impl FnMut(Duration) -> ActivateReply,
+    mut probe: impl FnMut(Duration) -> handoff::EndpointProbe,
+) -> Startup<C> {
+    use handoff::EndpointProbe;
+
+    let mut deadline = Instant::now() + bounds.ask;
+    let mut asking = true;
+    let mut stopped = Startup::Unanswered;
+    loop {
+        let reading = probe(deadline.saturating_duration_since(Instant::now()));
+        match reading {
+            EndpointProbe::AbsentOrForeign => return Startup::Run(claim),
+            EndpointProbe::Busy => {
+                if Instant::now() >= deadline {
+                    // A busy pipe cannot authenticate its server. It must
+                    // not give a foreign squatter a veto over this launch.
+                    return Startup::Run(claim);
+                }
+            }
+            EndpointProbe::SameAccount => {
+                let budget = deadline.saturating_duration_since(Instant::now());
+                if budget.is_zero() {
+                    return stopped;
+                }
+                if asking {
+                    match forward(budget) {
+                        ActivateReply::Activated { desktop_version } => {
+                            return Startup::HandedOver {
+                                version: desktop_version,
+                            };
+                        }
+                        ActivateReply::NoReply => {}
+                        ActivateReply::Refused { reply } => {
+                            let grace = if is_shutting_down(&reply) {
+                                stopped = Startup::StillShuttingDown;
+                                bounds.drain
+                            } else {
+                                stopped = Startup::Refused { reply };
+                                bounds.release
+                            };
+                            asking = false;
+                            deadline = Instant::now() + grace;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
 }
 
 fn claim(path: &Path) -> Lock<EndpointClaim> {
@@ -465,10 +535,6 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     match tauri::async_runtime::block_on(async { handoff::claim_endpoint_at(path) }) {
         Ok(claim) => Lock::Taken(claim),
         Err(ClaimError::Held(_)) => Lock::Held,
-        Err(ClaimError::Foreign(error)) => Lock::Unavailable(format!(
-            "the handoff endpoint's claim is held by another account's process, which this \
-             account cannot reach: {error}"
-        )),
         Err(ClaimError::Unavailable(error)) => Lock::Unavailable(error.to_string()),
     }
 }
@@ -945,6 +1011,210 @@ mod tests {
 
     fn never_waited(_: Wait) -> Option<&'static str> {
         panic!("the endpoint must not be waited for")
+    }
+
+    fn predecessor_bounds() -> Bounds {
+        Bounds {
+            boot: Duration::from_secs(30),
+            ask: Duration::from_millis(200),
+            release: Duration::ZERO,
+            drain: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn predecessor_absent_keeps_the_file_claim_without_asking() {
+        assert_eq!(
+            check_predecessor_with(
+                "claim",
+                predecessor_bounds(),
+                |_| panic!("no listener to ask"),
+                |_| handoff::EndpointProbe::AbsentOrForeign
+            ),
+            Startup::Run("claim")
+        );
+    }
+
+    #[test]
+    fn predecessor_answer_releases_the_file_claim() {
+        struct Claim(std::rc::Rc<std::cell::Cell<bool>>);
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let held = std::rc::Rc::new(std::cell::Cell::new(true));
+        let startup = check_predecessor_with(
+            Claim(held.clone()),
+            predecessor_bounds(),
+            |_| {
+                assert!(held.get(), "the probe must retain the file claim");
+                ActivateReply::Activated {
+                    desktop_version: "0.130.0".into(),
+                }
+            },
+            |_| handoff::EndpointProbe::SameAccount,
+        );
+        assert!(matches!(startup, Startup::HandedOver { .. }));
+        assert!(!held.get(), "a handover releases the new claim");
+    }
+
+    #[test]
+    fn predecessor_exit_keeps_the_same_file_claim() {
+        let mut probes = 0;
+        assert_eq!(
+            check_predecessor_with(
+                "claim",
+                predecessor_bounds(),
+                |_| ActivateReply::NoReply,
+                |_| {
+                    probes += 1;
+                    if probes == 1 {
+                        handoff::EndpointProbe::SameAccount
+                    } else {
+                        handoff::EndpointProbe::AbsentOrForeign
+                    }
+                }
+            ),
+            Startup::Run("claim")
+        );
+    }
+
+    #[test]
+    fn predecessor_refusal_and_shutdown_have_distinct_exits() {
+        let stopped = check_predecessor_with(
+            "claim",
+            predecessor_bounds(),
+            |_| ActivateReply::Refused {
+                reply: "unknown request".into(),
+            },
+            |_| handoff::EndpointProbe::SameAccount,
+        );
+        assert!(matches!(stopped, Startup::Refused { .. }));
+        assert_eq!(stopped.exit_code(), Some(0));
+        let stopped = check_predecessor_with(
+            "claim",
+            predecessor_bounds(),
+            |_| ActivateReply::Refused {
+                reply: serde_json::to_string(&shutting_down()).unwrap(),
+            },
+            |_| handoff::EndpointProbe::SameAccount,
+        );
+        assert_eq!(stopped, Startup::StillShuttingDown);
+        assert_eq!(stopped.exit_code(), Some(1));
+    }
+
+    #[test]
+    fn predecessor_drained_reuses_the_file_claim() {
+        let mut probes = 0;
+        assert_eq!(
+            check_predecessor_with(
+                "claim",
+                predecessor_bounds(),
+                |_| ActivateReply::Refused {
+                    reply: serde_json::to_string(&shutting_down()).unwrap()
+                },
+                |_| {
+                    probes += 1;
+                    if probes == 1 {
+                        handoff::EndpointProbe::SameAccount
+                    } else {
+                        handoff::EndpointProbe::AbsentOrForeign
+                    }
+                }
+            ),
+            Startup::Run("claim")
+        );
+    }
+
+    #[test]
+    fn predecessor_silent_does_not_boot_beside_it() {
+        let started = Instant::now();
+        assert_eq!(
+            check_predecessor_with(
+                "claim",
+                predecessor_bounds(),
+                |_| ActivateReply::NoReply,
+                |_| handoff::EndpointProbe::SameAccount
+            ),
+            Startup::Unanswered
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "no boot-marker wait"
+        );
+    }
+
+    #[test]
+    fn predecessor_busy_retries_then_boots_at_the_bound() {
+        let mut probes = 0;
+        let bounds = Bounds {
+            ask: Duration::from_millis(120),
+            ..predecessor_bounds()
+        };
+        let started = Instant::now();
+        let startup = check_predecessor_with(
+            "claim",
+            bounds,
+            |_| panic!("an unauthenticated busy endpoint is not asked"),
+            |_| {
+                probes += 1;
+                handoff::EndpointProbe::Busy
+            },
+        );
+        assert_eq!(startup, Startup::Run("claim"), "busy cannot veto a launch");
+        assert!(probes >= 2, "busy must retry");
+        assert!(
+            started.elapsed() >= bounds.ask,
+            "busy needs the full ask bound"
+        );
+    }
+
+    #[test]
+    fn predecessor_transient_busy_is_authenticated_before_forwarding() {
+        let mut probes = 0;
+        let startup = check_predecessor_with(
+            "claim",
+            predecessor_bounds(),
+            |_| activated(),
+            |_| {
+                probes += 1;
+                if probes == 1 {
+                    handoff::EndpointProbe::Busy
+                } else {
+                    handoff::EndpointProbe::SameAccount
+                }
+            },
+        );
+        assert!(matches!(startup, Startup::HandedOver { .. }), "{startup:?}");
+        assert!(probes >= 2);
+    }
+
+    #[test]
+    fn predecessor_busy_after_shutdown_uses_the_drain_bound_then_boots() {
+        let mut probes = 0;
+        let bounds = Bounds {
+            drain: Duration::from_millis(120),
+            ..predecessor_bounds()
+        };
+        let started = Instant::now();
+        let startup = check_predecessor_with(
+            "claim",
+            bounds,
+            |_| ActivateReply::Refused {
+                reply: serde_json::to_string(&shutting_down()).unwrap(),
+            },
+            |_| {
+                probes += 1;
+                if probes == 1 {
+                    handoff::EndpointProbe::SameAccount
+                } else {
+                    handoff::EndpointProbe::Busy
+                }
+            },
+        );
+        assert_eq!(startup, Startup::Run("claim"));
+        assert!(started.elapsed() >= bounds.drain);
     }
 
     /// The guard's bounds for a test that never meets a holder still booting
@@ -2108,6 +2378,195 @@ mod tests {
     #[cfg(windows)]
     fn claimed(pipe: &Path) -> EndpointClaim {
         tauri::async_runtime::block_on(async { handoff::claim_endpoint_at(pipe) }).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_beside_a_busy_marker_does_not_wait_for_boot() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("marker-only");
+        let mut marker = pipe.as_os_str().to_os_string();
+        marker.push(".claim");
+        let _marker = tauri::async_runtime::block_on(async {
+            chan_winpipe::create_owner_only(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                marker,
+            )
+            .unwrap()
+        });
+        assert!(handoff::endpoint_is_booting_at(&pipe));
+        let started = Instant::now();
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(2),
+                ask: Duration::from_millis(200),
+                release: Duration::from_millis(100),
+                drain: Duration::from_millis(100),
+            },
+            &[],
+        );
+        assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a marker is not a holder"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_beside_a_listener_without_a_file_claim_hands_over() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("legacy-listener");
+        let listener_pipe = pipe.clone();
+        let server = tauri::async_runtime::block_on(async {
+            chan_winpipe::create_owner_only(ServerOptions::new().first_pipe_instance(true), &pipe)
+                .unwrap()
+        });
+        let task = tauri::async_runtime::spawn(async move {
+            let mut next = server;
+            loop {
+                next.connect().await.unwrap();
+                let fresh =
+                    chan_winpipe::create_owner_only(ServerOptions::new(), &listener_pipe).unwrap();
+                let connected = std::mem::replace(&mut next, fresh);
+                tokio::spawn(async move {
+                    let mut stream = BufReader::new(connected);
+                    let mut line = String::new();
+                    if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let request: handoff::Request = serde_json::from_str(&line).unwrap();
+                    assert!(matches!(request, handoff::Request::Activate { .. }));
+                    let mut reply = serde_json::to_vec(&Response::Activated {
+                        desktop_version: "0.130.0".into(),
+                    })
+                    .unwrap();
+                    reply.push(b'\n');
+                    stream.get_mut().write_all(&reply).await.unwrap();
+                });
+            }
+        });
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_millis(100),
+                ask: Duration::from_secs(2),
+                release: Duration::from_millis(100),
+                drain: Duration::from_millis(100),
+            },
+            &[],
+        );
+        task.abort();
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "0.130.0"),
+            "{startup:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_permanently_busy_endpoint_boots_after_the_ask_bound() {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let pipe = test_pipe("busy-endpoint");
+        let (_server, _client) = tauri::async_runtime::block_on(async {
+            // Any account can hold this shape; no client can authenticate
+            // its server while its only instance is occupied.
+            let server = chan_winpipe::create_with_sddl(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                &pipe,
+                "D:P(A;;GA;;;WD)",
+            )
+            .unwrap();
+            let client = ClientOptions::new().open(&pipe).unwrap();
+            server.connect().await.unwrap();
+            (server, client)
+        });
+        let started = Instant::now();
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_millis(600),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            &[],
+        );
+        assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(600),
+            "busy needs the ask bound"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "busy must not impose a boot wait"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_temporarily_busy_predecessor_is_asked_after_retry() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let pipe = test_pipe("transient-busy-endpoint");
+        let (server, client) = tauri::async_runtime::block_on(async {
+            let server = chan_winpipe::create_owner_only(
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .max_instances(1),
+                &pipe,
+            )
+            .unwrap();
+            let client = ClientOptions::new().open(&pipe).unwrap();
+            server.connect().await.unwrap();
+            (server, client)
+        });
+        let task = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            drop(client);
+            server.disconnect().unwrap();
+            let mut server = server;
+            loop {
+                server.connect().await.unwrap();
+                let mut stream = BufReader::new(server);
+                let mut line = String::new();
+                if stream.read_line(&mut line).await.unwrap_or(0) != 0 {
+                    let request: handoff::Request = serde_json::from_str(&line).unwrap();
+                    assert!(matches!(request, handoff::Request::Activate { .. }));
+                    let mut reply = serde_json::to_vec(&Response::Activated {
+                        desktop_version: "0.130.0".into(),
+                    })
+                    .unwrap();
+                    reply.push(b'\n');
+                    stream.get_mut().write_all(&reply).await.unwrap();
+                }
+                server = stream.into_inner();
+                server.disconnect().unwrap();
+            }
+        });
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::ZERO,
+                ask: Duration::from_secs(3),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            &[],
+        );
+        task.abort();
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "0.130.0"),
+            "{startup:?}"
+        );
     }
 
     #[cfg(windows)]
