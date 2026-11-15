@@ -1,0 +1,70 @@
+{
+  "source": "dev/v0131-team/evidence/Edit131/pdfpagination/j216-paginator-replay.json",
+  "sourceSha256": "08897cafa0beec122b07852716ee834e0e87de4286c242892b73384763606e0b",
+  "captureSha256": "30020e613b4c5ffc60afdcd5ebaba5f2aaa03d0db64113315c72507811a61bec",
+  "pageHeightPx": 997.8592130441717,
+  "themes": [
+    {
+      "theme": "light",
+      "blocks": [
+        { "top": 21.4375, "bottom": 72.03125, "heading": true, "pageBreak": false },
+        { "top": 93.46875, "bottom": 172.640625, "heading": false, "pageBreak": false },
+        { "top": 192.546875, "bottom": 230.734375, "heading": true, "pageBreak": false },
+        { "top": 250.640625, "bottom": 303.421875, "heading": false, "pageBreak": false },
+        { "top": 319.421875, "bottom": 440.609375, "heading": false, "pageBreak": false },
+        { "top": 460.515625, "bottom": 498.703125, "heading": true, "pageBreak": false },
+        { "top": 518.609375, "bottom": 604.609375, "heading": false, "pageBreak": false },
+        { "top": 604.609375, "bottom": 604.609375, "heading": false, "pageBreak": true },
+        { "top": 626.046875, "bottom": 676.640625, "heading": true, "pageBreak": false },
+        { "top": 698.078125, "bottom": 777.25, "heading": false, "pageBreak": false },
+        { "top": 793.25, "bottom": 2025.25, "heading": false, "pageBreak": false },
+        { "top": 2041.25, "bottom": 2067.640625, "heading": false, "pageBreak": false },
+        { "top": 2083.640625, "bottom": 2083.640625, "heading": false, "pageBreak": true },
+        { "top": 2105.078125, "bottom": 3355.078125, "heading": false, "pageBreak": false },
+        { "top": 3355.078125, "bottom": 3355.078125, "heading": false, "pageBreak": true },
+        { "top": 3376.515625, "bottom": 3427.109375, "heading": true, "pageBreak": false },
+        { "top": 3448.546875, "bottom": 3527.71875, "heading": false, "pageBreak": false },
+        { "top": 3543.71875, "bottom": 4253.71875, "heading": false, "pageBreak": false },
+        { "top": 4253.71875, "bottom": 4571.71875, "heading": false, "pageBreak": false },
+        { "top": 4587.71875, "bottom": 4614.109375, "heading": false, "pageBreak": false },
+        { "top": 4630.109375, "bottom": 4630.109375, "heading": false, "pageBreak": true },
+        { "top": 4651.546875, "bottom": 4702.140625, "heading": true, "pageBreak": false },
+        { "top": 4723.578125, "bottom": 4776.359375, "heading": false, "pageBreak": false },
+        { "top": 4792.359375, "bottom": 5502.359375, "heading": false, "pageBreak": false },
+        { "top": 5518.359375, "bottom": 5777.796875, "heading": false, "pageBreak": false },
+        { "top": 5793.796875, "bottom": 5820.1875, "heading": false, "pageBreak": false }
+      ]
+    },
+    {
+      "theme": "dark",
+      "blocks": [
+        { "top": 21.4375, "bottom": 72.03125, "heading": true, "pageBreak": false },
+        { "top": 93.46875, "bottom": 172.640625, "heading": false, "pageBreak": false },
+        { "top": 192.546875, "bottom": 230.734375, "heading": true, "pageBreak": false },
+        { "top": 250.640625, "bottom": 303.421875, "heading": false, "pageBreak": false },
+        { "top": 319.421875, "bottom": 440.609375, "heading": false, "pageBreak": false },
+        { "top": 460.515625, "bottom": 498.703125, "heading": true, "pageBreak": false },
+        { "top": 518.609375, "bottom": 604.609375, "heading": false, "pageBreak": false },
+        { "top": 604.609375, "bottom": 604.609375, "heading": false, "pageBreak": true },
+        { "top": 626.046875, "bottom": 676.640625, "heading": true, "pageBreak": false },
+        { "top": 698.078125, "bottom": 777.25, "heading": false, "pageBreak": false },
+        { "top": 793.25, "bottom": 2025.25, "heading": false, "pageBreak": false },
+        { "top": 2041.25, "bottom": 2067.640625, "heading": false, "pageBreak": false },
+        { "top": 2083.640625, "bottom": 2083.640625, "heading": false, "pageBreak": true },
+        { "top": 2105.078125, "bottom": 3355.078125, "heading": false, "pageBreak": false },
+        { "top": 3355.078125, "bottom": 3355.078125, "heading": false, "pageBreak": true },
+        { "top": 3376.515625, "bottom": 3427.109375, "heading": true, "pageBreak": false },
+        { "top": 3448.546875, "bottom": 3527.71875, "heading": false, "pageBreak": false },
+        { "top": 3543.71875, "bottom": 4253.71875, "heading": false, "pageBreak": false },
+        { "top": 4253.71875, "bottom": 4571.71875, "heading": false, "pageBreak": false },
+        { "top": 4587.71875, "bottom": 4614.109375, "heading": false, "pageBreak": false },
+        { "top": 4630.109375, "bottom": 4630.109375, "heading": false, "pageBreak": true },
+        { "top": 4651.546875, "bottom": 4702.140625, "heading": true, "pageBreak": false },
+        { "top": 4723.578125, "bottom": 4776.359375, "heading": false, "pageBreak": false },
+        { "top": 4792.359375, "bottom": 5502.359375, "heading": false, "pageBreak": false },
+        { "top": 5518.359375, "bottom": 5777.796875, "heading": false, "pageBreak": false },
+        { "top": 5793.796875, "bottom": 5820.1875, "heading": false, "pageBreak": false }
+      ]
+    }
+  ]
+}

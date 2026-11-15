@@ -221,6 +221,8 @@ Slides and printable documents opt into wikilink labels through `api/markdown.ts
 
 Pagination measures block geometry only once every diagram and image in the composition has settled. A deck page is laid out in the box a slide gets on a reference screen and rasterized at the scale that maps that box onto the page, so one deck gives one PDF from any window and from `cs export`; a slide larger than its box comes out whole and smaller. A `cs export` job runs inside a workspace window's page, reports each finished page so the server's quiet bound restarts, uploads under the server's guard to the job's output path alone, and stops at the server's stop frame.
 
+Document page windows partition the measured content without gaps or overlap. An explicit break cuts at its marker. If the next block is taller than a page, begins within the new page and no earlier content extends beyond the break, pagination keeps the intervening space with that block and cuts at page height; the space does not become a page on its own. Fitting blocks still move whole, and headings, paragraphs, ordinary rules and authored spacers retain their content windows. Consecutive breaks retain their explicit cuts, and a trailing break adds no empty final page.
+
 ## Implementation notes
 
 - List continuation, indent and outdent match the current line with a regex rather than the tree, so the edit stays cheap and correct while the parser lags; Backspace at an item's text start reads the tree, since it acts only where the decorations hide a prefix.

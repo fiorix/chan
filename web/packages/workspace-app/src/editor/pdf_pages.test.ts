@@ -19,6 +19,7 @@ import {
 } from "./pdf_pages";
 import { PAGE_BOX_ATTR, RASTER_SCALE } from "./pdf_snapshot";
 import { type SlideAspectRatio } from "./slides";
+import capturedRects from "./pdf_pages.rects.json";
 
 function block(
   top: number,
@@ -43,6 +44,26 @@ describe("docPageGeometry", () => {
 
 describe("paginateDocBlocks", () => {
   const PAGE = 1000;
+
+  test.each(capturedRects.themes)(
+    "$theme: a break before an oversized block keeps its gap with content",
+    ({ blocks }) => {
+      const height = capturedRects.pageHeightPx;
+      const windows = paginateDocBlocks(blocks, height);
+      const gapOnly = windows.filter((window) => !blocks.some((block) =>
+        !block.pageBreak && block.bottom > window.startPx && block.top < window.endPx,
+      ));
+      expect(gapOnly).toEqual([]);
+      expect(windows).toHaveLength(10);
+      expect(windows[0]!.startPx).toBe(0);
+      expect(windows.at(-1)!.endPx).toBe(Math.max(...blocks.map((b) => b.bottom)));
+      for (const [index, window] of windows.entries()) {
+        expect(window.endPx).toBeGreaterThan(window.startPx);
+        expect(window.endPx - window.startPx).toBeLessThanOrEqual(height + 1e-9);
+        if (index > 0) expect(window.startPx).toBe(windows[index - 1]!.endPx);
+      }
+    },
+  );
 
   test("everything fitting yields one window ending at the last bottom", () => {
     const windows = paginateDocBlocks(
@@ -114,6 +135,83 @@ describe("paginateDocBlocks", () => {
 
   test("an empty document still yields one window", () => {
     expect(paginateDocBlocks([], PAGE)).toEqual([{ startPx: 0, endPx: 0 }]);
+  });
+
+  test("consecutive and trailing breaks retain their explicit cuts", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(230, 230, { pageBreak: true }),
+      block(250, 500),
+      block(520, 520, { pageBreak: true }),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 230 },
+      { startPx: 230, endPx: 520 },
+    ]);
+  });
+
+  test.each([
+    { name: "heading", rect: block(230, 280, { heading: true }) },
+    { name: "paragraph", rect: block(230, 280) },
+    { name: "ordinary rule", rect: block(230, 232) },
+    { name: "authored spacer", rect: block(230, 280) },
+  ])("keeps a $name page before an oversized image", ({ rect }) => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      rect,
+      block(300, 1550),
+    ], PAGE)).toEqual(rect.heading ? [
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 230 },
+      { startPx: 230, endPx: 300 },
+      { startPx: 300, endPx: 1300 },
+      { startPx: 1300, endPx: 1550 },
+    ] : [
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 300 },
+      { startPx: 300, endPx: 1300 },
+      { startPx: 1300, endPx: 1550 },
+    ]);
+  });
+
+  test("a fitting block after a break moves whole despite its leading space", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(250, 1230),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 250 },
+      { startPx: 250, endPx: 1230 },
+    ]);
+  });
+
+  test("content overlapping a break is not treated as trailing space", () => {
+    expect(paginateDocBlocks([
+      block(0, 400),
+      block(210, 210, { pageBreak: true }),
+      block(230, 1480),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 230 },
+      { startPx: 230, endPx: 1230 },
+      { startPx: 1230, endPx: 1480 },
+    ]);
+  });
+
+  test("a full page of authored space after a break remains a page", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(1210, 2460),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 1210 },
+      { startPx: 1210, endPx: 2210 },
+      { startPx: 2210, endPx: 2460 },
+    ]);
   });
 
   test("windows partition the content: contiguous, complete, page-bounded", () => {
