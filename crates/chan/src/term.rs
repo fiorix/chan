@@ -427,6 +427,31 @@ mod tests {
     }
 
     #[test]
+    fn the_cli_terminal_forwards_its_captured_activation_on_every_retry() {
+        let source = include_str!("term.rs")
+            .split_once("\n#[cfg(test)]")
+            .unwrap()
+            .0;
+        let source = source
+            .split_once("\nasync fn ask_desktop(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert_eq!(source.matches("handoff::launch_startup_id()").count(), 1);
+        assert!(
+            source
+                .find("let startup_id = handoff::launch_startup_id();")
+                .unwrap()
+                < source.find("loop {").unwrap()
+        );
+        let compact: String = source.split_whitespace().collect();
+        let compact = compact.replace(",)", ")");
+        assert!(compact.contains("handoff::try_open_terminal(cwd,startup_id.as_deref(),budget)"));
+    }
+
+    #[test]
     fn the_name_matches_by_file_stem() {
         for arg0 in [
             "chan-term",

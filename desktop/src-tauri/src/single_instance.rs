@@ -1737,6 +1737,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn launch_activation_is_captured_once_and_forwarded_before_retries() {
+        for (signature, requests) in [
+            (
+                "\nfn check_at(",
+                vec!["handoff::try_activate_at(path,startup_id.as_deref(),budget)"],
+            ),
+            (
+                "\nfn check_terminal_at(",
+                vec![
+                    "handoff::try_open_terminal_at(path,dir,startup_id.as_deref(),budget)",
+                    "handoff::try_activate_at(path,startup_id.as_deref(),budget)",
+                ],
+            ),
+        ] {
+            let source = production_body(signature);
+            assert_eq!(source.matches("handoff::launch_startup_id()").count(), 1);
+            assert!(
+                source
+                    .find("let startup_id = handoff::launch_startup_id();")
+                    .unwrap()
+                    < source.find("check_with(").unwrap()
+            );
+            let compact: String = source.split_whitespace().collect();
+            let compact = compact.replace(",)", ")");
+            for request in requests {
+                assert!(
+                    compact.contains(request),
+                    "{signature} must forward capture in {request}"
+                );
+            }
+        }
+    }
+
     /// A source pin: `come_forward` reads whether the app is hidden and makes
     /// its choice before it unhides the app, so the choice sees the app as
     /// the launch found it, and unhides it before it acts on the choice.

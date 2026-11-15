@@ -96,15 +96,21 @@ fn startup_timestamp(startup_id: &str) -> Option<u32> {
     (time != 0).then_some(time)
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn usable_startup_id(id: &str) -> bool {
+    id.len() <= 1024 && !id.contains('\0')
+}
+
 /// Raise with only the requesting launch's activation. GTK's startup id
 /// is X11-specific; other platforms keep their
-/// ordinary raise. A wire string containing NUL cannot be passed to GTK.
+/// ordinary raise. NUL cannot be passed to GTK, and its startup notification
+/// broadcast is bounded to an id of at most 1 KiB.
 pub(crate) fn raise_window_from_launch<R: Runtime>(
     window: &WebviewWindow<R>,
     startup_id: Option<&str>,
 ) -> tauri::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    if let Some(startup_id) = startup_id.filter(|id| !id.contains('\0')) {
+    if let Some(startup_id) = startup_id.filter(|id| usable_startup_id(id)) {
         use gtk::prelude::*;
         let startup_id = startup_id.to_owned();
         let target = window.clone();
@@ -406,6 +412,21 @@ mod tests {
             );
         }
         assert_eq!(settle_for(Platform::Gtk, false, true), Settle::Nothing);
+    }
+
+    #[test]
+    fn launch_startup_ids_are_bounded_and_c_string_safe() {
+        assert!(usable_startup_id("_TIME42"));
+        assert!(usable_startup_id(&"x".repeat(1024)));
+        assert!(!usable_startup_id(&"x".repeat(1025)));
+        assert!(usable_startup_id(&"\u{e9}".repeat(512)));
+        assert!(!usable_startup_id(&"\u{e9}".repeat(513)));
+        assert!(!usable_startup_id("opaque\0_TIME42"));
+        let launch = body(
+            production(include_str!("raise.rs")),
+            "\npub(crate) fn raise_window_from_launch",
+        );
+        assert!(launch.contains("startup_id.filter(|id| usable_startup_id(id))"));
     }
 
     #[test]

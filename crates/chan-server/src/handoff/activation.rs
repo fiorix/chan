@@ -2,8 +2,8 @@
 
 /// Capture the launcher's activation before its handoff retries begin.
 ///
-/// On the GTK platforms, a supplied `DESKTOP_STARTUP_ID` takes precedence over
-/// `XDG_ACTIVATION_TOKEN`, and either is preserved verbatim. Without either,
+/// On the GTK platforms, a nonempty `DESKTOP_STARTUP_ID` takes precedence over
+/// a nonempty `XDG_ACTIVATION_TOKEN`, and either is preserved verbatim. Without either,
 /// an X11 launch reads the server's timestamp through its own connection.
 /// Wayland never takes that fallback. Other platforms return `None`.
 ///
@@ -36,7 +36,10 @@ fn startup_id_with(
     env: impl Fn(&str) -> Option<String>,
     server_time: impl FnOnce() -> Option<u32>,
 ) -> Option<String> {
-    if let Some(id) = env("DESKTOP_STARTUP_ID").or_else(|| env("XDG_ACTIVATION_TOKEN")) {
+    if let Some(id) = env("DESKTOP_STARTUP_ID")
+        .filter(|id| !id.is_empty())
+        .or_else(|| env("XDG_ACTIVATION_TOKEN").filter(|id| !id.is_empty()))
+    {
         return Some(id);
     }
     if env("WAYLAND_DISPLAY").is_some()
@@ -373,13 +376,30 @@ mod tests {
     }
 
     #[test]
-    fn startup_id_preserves_an_empty_supplied_id() {
-        let entries = [("DESKTOP_STARTUP_ID", "")];
+    fn startup_id_ignores_empty_supplied_ids() {
+        for entries in [
+            vec![("DESKTOP_STARTUP_ID", ""), ("DISPLAY", ":1")],
+            vec![("XDG_ACTIVATION_TOKEN", ""), ("DISPLAY", ":1")],
+            vec![
+                ("DESKTOP_STARTUP_ID", ""),
+                ("XDG_ACTIVATION_TOKEN", ""),
+                ("DISPLAY", ":1"),
+            ],
+        ] {
+            assert_eq!(
+                startup_id_with(environment(&entries), || Some(42)),
+                Some("_TIME42".into())
+            );
+        }
+        let entries = [
+            ("DESKTOP_STARTUP_ID", ""),
+            ("XDG_ACTIVATION_TOKEN", "token"),
+        ];
         assert_eq!(
             startup_id_with(environment(&entries), || panic!(
-                "present id stays verbatim"
+                "nonempty token takes precedence"
             )),
-            Some(String::new())
+            Some("token".into())
         );
     }
 
@@ -398,10 +418,15 @@ mod tests {
             vec![("DISPLAY", ":1"), ("WAYLAND_DISPLAY", "wayland-0")],
             vec![("DISPLAY", ":1"), ("XDG_SESSION_TYPE", "wayland")],
         ] {
+            let queried = std::cell::Cell::new(false);
             assert_eq!(
-                startup_id_with(environment(&entries), || panic!("not an X11 launch")),
+                startup_id_with(environment(&entries), || {
+                    queried.set(true);
+                    Some(42)
+                }),
                 None
             );
+            assert!(!queried.get(), "not an X11 launch");
         }
     }
 
