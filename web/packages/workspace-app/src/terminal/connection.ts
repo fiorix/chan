@@ -50,6 +50,14 @@ export async function terminalMessageBytes(data: unknown): Promise<Uint8Array | 
   return null;
 }
 
+/// PTY mouse reports are input bytes, but do not mean typed input awaits an answer.
+/// Ghostty and xterm use these two complete report encodings.
+export function terminalMouseReport(data: string): "x10" | "sgr" | null {
+  if (data.startsWith("\x1b[M") && /^\x1b\[M[\x20-\xff]{3}$/.test(data)) return "x10";
+  if (data.startsWith("\x1b[<") && /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data)) return "sgr";
+  return null;
+}
+
 /// Route one chunk of terminal data. `user` is xterm.js's mark that the user
 /// typed, pasted or composed it (`xtermUserInput.ts`): such a chunk reaches the
 /// whole broadcast group whatever the terminal's output is doing, except a

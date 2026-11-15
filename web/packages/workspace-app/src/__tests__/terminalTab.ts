@@ -31,10 +31,12 @@ export {
 /// CONNECTING until open() or failDial().
 export class TerminalSocket {
   static OPEN = 1;
+  static CLOSING = 2;
   static all: TerminalSocket[] = [];
   static connecting = false;
 
   readyState = TerminalSocket.connecting ? 0 : TerminalSocket.OPEN;
+  holdClose = false;
   binaryType = "blob";
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void | Promise<void>) | null = null;
@@ -49,6 +51,14 @@ export class TerminalSocket {
     this.sent.push(data);
   }
   close() {
+    if (this.holdClose) {
+      this.readyState = 2;
+      return;
+    }
+    this.finishClose();
+  }
+  /// Complete a close whose onclose callback the test held back.
+  finishClose() {
     this.readyState = 3;
     this.onclose?.();
   }
