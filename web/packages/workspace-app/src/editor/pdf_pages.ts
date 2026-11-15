@@ -143,10 +143,13 @@ export function paginateDocBlocks(
         push(start + pageHeightPx);
         continue;
       }
-      // A pulled heading or leading margin must not turn a reachable
-      // content page into a gap-only page. Explicit breaks remain explicit.
+      // Hard-cut only an oversized block or a pulled heading group:
+      // a fitting block after a margin must move whole.
       const pageEnd = start + pageHeightPx;
-      if (!containsContent(cut) && containsContent(pageEnd)) cut = pageEnd;
+      if (
+        (cut < block.top || block.bottom - block.top > pageHeightPx) &&
+        !containsContent(cut) && containsContent(pageEnd)
+      ) cut = pageEnd;
       push(cut);
     }
   }

@@ -45,12 +45,12 @@ describe("docPageGeometry", () => {
 describe("paginateDocBlocks", () => {
   const PAGE = 1000;
 
-  test("a pulled heading stays above the first oversized image slice without a gap page", () => {
+  test.each([1683, 1930])("a pulled heading stays above the first image slice ending at %s without a gap page", (bottom) => {
     const blocks = [
       block(0, 580),
       block(604.61, 604.61, { pageBreak: true }),
       block(626, 676, { heading: true }),
-      block(698, 1930),
+      block(698, bottom),
     ];
     const height = docPageGeometry().pageContentHeightPx;
     const windows = paginateDocBlocks(blocks, height);
@@ -60,7 +60,32 @@ describe("paginateDocBlocks", () => {
     expect(windows).toEqual([
       { startPx: 0, endPx: 604.61 },
       { startPx: 604.61, endPx: 604.61 + height },
-      { startPx: 604.61 + height, endPx: 1930 },
+      { startPx: 604.61 + height, endPx: bottom },
+    ]);
+  });
+
+  test("a 985px image after a break moves whole rather than leaving a bottom strip", () => {
+    expect(paginateDocBlocks([
+      block(0, 580),
+      block(604.61, 604.61, { pageBreak: true }),
+      block(626.05, 1611.05),
+    ], docPageGeometry().pageContentHeightPx)).toEqual([
+      { startPx: 0, endPx: 604.61 },
+      { startPx: 604.61, endPx: 626.05 },
+      { startPx: 626.05, endPx: 1611.05 },
+    ]);
+  });
+
+  test("a zero-height block does not make a gap into content", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(230, 230),
+      block(250, 1600),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 1210 },
+      { startPx: 1210, endPx: 1600 },
     ]);
   });
 
@@ -73,7 +98,18 @@ describe("paginateDocBlocks", () => {
         !block.pageBreak && block.bottom > window.startPx && block.top < window.endPx,
       ));
       expect(gapOnly).toEqual([]);
-      expect(windows).toHaveLength(10);
+      expect(windows).toEqual([
+        { startPx: 0, endPx: 604.609375 },
+        { startPx: 604.609375, endPx: 793.25 },
+        { startPx: 793.25, endPx: 1791.1092130441716 },
+        { startPx: 1791.1092130441716, endPx: 2083.640625 },
+        { startPx: 2083.640625, endPx: 3081.4998380441716 },
+        { startPx: 3081.4998380441716, endPx: 3355.078125 },
+        { startPx: 3355.078125, endPx: 4253.71875 },
+        { startPx: 4253.71875, endPx: 4630.109375 },
+        { startPx: 4630.109375, endPx: 5518.359375 },
+        { startPx: 5518.359375, endPx: 5820.1875 },
+      ]);
       expect(windows[0]!.startPx).toBe(0);
       expect(windows.at(-1)!.endPx).toBe(Math.max(...blocks.map((b) => b.bottom)));
       for (const [index, window] of windows.entries()) {
@@ -188,15 +224,15 @@ describe("paginateDocBlocks", () => {
     ]);
   });
 
-  test("leading space stays with a fitting block even when it must split", () => {
+  test("a fitting block after a break moves whole despite its leading space", () => {
     expect(paginateDocBlocks([
       block(0, 200),
       block(210, 210, { pageBreak: true }),
       block(250, 1230),
     ], PAGE)).toEqual([
       { startPx: 0, endPx: 210 },
-      { startPx: 210, endPx: 1210 },
-      { startPx: 1210, endPx: 1230 },
+      { startPx: 210, endPx: 250 },
+      { startPx: 250, endPx: 1230 },
     ]);
   });
 
