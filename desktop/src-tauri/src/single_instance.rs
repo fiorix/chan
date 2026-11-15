@@ -362,8 +362,7 @@ fn show_message(notice: Notice) {
 fn show_message(_: Notice) {}
 
 fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointClaim> {
-    let startup_id = handoff::launch_startup_id();
-    check_with(path, bounds, |budget| {
+    check_with(path, bounds, |startup_id, budget| {
         forward_with(
             paths,
             budget,
@@ -372,11 +371,7 @@ fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointCl
                 tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
             },
             |budget| {
-                tauri::async_runtime::block_on(handoff::try_activate_at(
-                    path,
-                    startup_id.as_deref(),
-                    budget,
-                ))
+                tauri::async_runtime::block_on(handoff::try_activate_at(path, startup_id, budget))
             },
         )
     })
@@ -387,25 +382,17 @@ fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointCl
 /// forward, since the terminal window it opens is raised
 /// ([`forward_terminal_with`]).
 fn check_terminal_at(path: &Path, bounds: Bounds, dir: &str) -> Startup<EndpointClaim> {
-    let startup_id = handoff::launch_startup_id();
-    check_with(path, bounds, |budget| {
+    check_with(path, bounds, |startup_id, budget| {
         forward_terminal_with(
             dir,
             budget,
             |dir, budget| {
                 tauri::async_runtime::block_on(handoff::try_open_terminal_at(
-                    path,
-                    dir,
-                    startup_id.as_deref(),
-                    budget,
+                    path, dir, startup_id, budget,
                 ))
             },
             |budget| {
-                tauri::async_runtime::block_on(handoff::try_activate_at(
-                    path,
-                    startup_id.as_deref(),
-                    budget,
-                ))
+                tauri::async_runtime::block_on(handoff::try_activate_at(path, startup_id, budget))
             },
         )
     })
@@ -441,11 +428,20 @@ fn forward_terminal_with(
 fn check_with(
     path: &Path,
     bounds: Bounds,
-    mut forward: impl FnMut(Duration) -> ActivateReply,
+    mut forward: impl FnMut(Option<&str>, Duration) -> ActivateReply,
 ) -> Startup<EndpointClaim> {
+    let startup_id = std::cell::OnceCell::new();
+    let activation = || {
+        startup_id
+            .get_or_init(handoff::launch_startup_id)
+            .as_deref()
+    };
     let startup = decide(
         claim(path),
-        || ask(path, bounds, &mut forward),
+        || {
+            let startup_id = activation();
+            ask(path, bounds, |budget| forward(startup_id, budget))
+        },
         |wait| {
             let grace = match wait {
                 Wait::Drain => bounds.drain,
@@ -459,9 +455,12 @@ fn check_with(
         // A previous release holds only the marker pipe. Keep our file lock
         // while checking its authenticated endpoint, so another new launch
         // cannot boot beside this check.
-        let mut startup = check_predecessor_with(claim, bounds, forward, |budget| {
-            tauri::async_runtime::block_on(handoff::probe_endpoint_at(path, budget))
-        });
+        let mut startup = check_predecessor_with(
+            claim,
+            bounds,
+            |budget| forward(activation(), budget),
+            |budget| tauri::async_runtime::block_on(handoff::probe_endpoint_at(path, budget)),
+        );
         if let Startup::Run(claim) = &mut startup {
             tauri::async_runtime::block_on(async { claim.refresh_boot_marker() });
         }
@@ -2012,24 +2011,22 @@ mod tests {
         for (signature, requests) in [
             (
                 "\nfn check_at(",
-                vec!["handoff::try_activate_at(path,startup_id.as_deref(),budget)"],
+                vec!["handoff::try_activate_at(path,startup_id,budget)"],
             ),
             (
                 "\nfn check_terminal_at(",
                 vec![
-                    "handoff::try_open_terminal_at(path,dir,startup_id.as_deref(),budget)",
-                    "handoff::try_activate_at(path,startup_id.as_deref(),budget)",
+                    "handoff::try_open_terminal_at(path,dir,startup_id,budget)",
+                    "handoff::try_activate_at(path,startup_id,budget)",
                 ],
             ),
         ] {
             let source = production_body(signature);
-            assert_eq!(source.matches("handoff::launch_startup_id()").count(), 1);
             assert!(
-                source
-                    .find("let startup_id = handoff::launch_startup_id();")
-                    .unwrap()
-                    < source.find("check_with(").unwrap()
+                !source.contains("handoff::launch_startup_id"),
+                "first boot captures no activation"
             );
+            assert!(source.contains("check_with(path, bounds, |startup_id, budget| {"));
             let compact: String = source.split_whitespace().collect();
             let compact = compact.replace(",)", ")");
             for request in requests {
@@ -2039,6 +2036,32 @@ mod tests {
                 );
             }
         }
+        let source = production_body("\nfn check_with(");
+        assert_eq!(source.matches("handoff::launch_startup_id").count(), 1);
+        assert!(source.contains("let startup_id = std::cell::OnceCell::new();"));
+        let compact: String = source.split_whitespace().collect();
+        assert!(compact.contains(
+            "letactivation=||{startup_id.get_or_init(handoff::launch_startup_id).as_deref()}"
+        ));
+        in_order(
+            source,
+            &[
+                "decide(",
+                "claim(path)",
+                "\n        || {",
+                "let startup_id = activation();",
+                "ask(path, bounds, |budget|",
+                "forward(startup_id, budget)",
+            ],
+        );
+        assert!(source.contains("|budget| forward(activation(), budget)"));
+        let predecessor = production_body("\nfn check_predecessor_with<C>(");
+        in_order(
+            predecessor,
+            &["EndpointProbe::SameAccount =>", "match forward(budget)"],
+        );
+        let decision = production_body("\npub(crate) fn decide<C>(");
+        assert!(decision.contains("Lock::Held => match ask()"));
     }
 
     /// A source pin: `come_forward` reads whether the app is hidden and makes

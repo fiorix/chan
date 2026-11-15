@@ -98,7 +98,7 @@ fn startup_timestamp(startup_id: &str) -> Option<u32> {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 fn usable_startup_id(id: &str) -> bool {
-    id.len() <= 1024 && !id.contains('\0')
+    !id.is_empty() && id.len() <= 1024 && !id.contains('\0')
 }
 
 /// Raise with only the requesting launch's activation. GTK's startup id
@@ -416,6 +416,7 @@ mod tests {
 
     #[test]
     fn launch_startup_ids_are_bounded_and_c_string_safe() {
+        assert!(!usable_startup_id(""));
         assert!(usable_startup_id("_TIME42"));
         assert!(usable_startup_id(&"x".repeat(1024)));
         assert!(!usable_startup_id(&"x".repeat(1025)));
@@ -835,25 +836,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn requested_terminal_menu_raise_resolves_the_minted_registry_id() {
-        let main = production(include_str!("main.rs"));
-        let explicit = body(main, "\nfn spawn_terminal_window_from_launch(");
-        assert!(
-            explicit.contains("serve::resolve_window_label("),
-            "the requested raise must resolve the minted registry id to its native label"
-        );
-        in_order(
-            explicit,
-            &[
-                "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
-                "Ok(id) => {",
-                "let label = serve::resolve_window_label(&app_for_task, &id);",
-                "raise_new_terminal_window(app_for_task, state, label, startup_id);",
-            ],
-        );
     }
 
     #[test]

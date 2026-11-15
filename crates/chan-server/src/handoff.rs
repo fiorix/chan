@@ -38,10 +38,11 @@
 //! unix (UDS) and Windows (named pipe), the desktop's two targets.
 //!
 //! `Activate` and `OpenTerminal` may carry a `startup_id` captured by the
-//! launching process: a launcher's activation id verbatim, or an X11
+//! launching process: a launcher's nonempty activation id verbatim, or an X11
 //! `_TIME<timestamp>` id when the launch had none. The GTK/X11 desktop applies
-//! only the supplied id; absence preserves the window manager's normal focus
-//! policy. The optional field leaves the protocol number unchanged: an
+//! only the supplied id, ignoring empty ids, ids over 1 KiB or containing NUL;
+//! absence preserves the window manager's normal focus policy. The optional
+//! field leaves the protocol number unchanged: an
 //! older sender omits it and an older desktop ignores it.
 
 mod activation;
