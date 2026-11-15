@@ -29,7 +29,7 @@ const whole = { nodes: [tag, doc], edges: [{ source: doc.id, target: tag.id, kin
 function holdFirstLoad(): (view: GraphView) => void {
   let finish!: (view: GraphView) => void;
   vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
-    opts?.onNodes?.(whole.nodes, { nodes: whole.nodes, edges: [] });
+    opts?.onView?.({ nodes: whole.nodes, edges: [] });
     return new Promise<GraphView>((resolve) => {
       finish = resolve;
     });

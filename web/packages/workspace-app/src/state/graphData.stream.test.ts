@@ -1,128 +1,312 @@
 // @vitest-environment jsdom
-//
-// What graphData publishes while the graph streams in: the view after each
-// batch, read over the real api.graphStream from a streamed response.
 
 import { afterEach, expect, test, vi } from "vitest";
 
 import { api } from "../api/client";
 import type { GraphView } from "../api/types";
-import { ensureGraphLoaded, graphData, invalidateGraph } from "./graphData.svelte";
+import captured from "./fixtures/graph-stream/response.ndjson?raw";
+import { GRAPH_STALL_MS, ensureGraphLoaded, graphData, invalidateGraph, refreshGraph } from "./graphData.svelte";
 
 afterEach(() => {
   invalidateGraph();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
-function streamed(events: unknown[]): Response {
+type Nodes = { type: "nodes"; nodes: GraphView["nodes"] };
+type Edges = { type: "edges"; edges: GraphView["edges"] };
+const [meta, initialNodes, initialEdges, replacementNodes, filesystemEdges, done] = captured.trimEnd().split("\n").map((line) => JSON.parse(line)) as [
+  { type: "meta" }, Nodes, Edges, Nodes, Edges, { type: "done" },
+];
+const batches = [initialNodes, initialEdges, replacementNodes, filesystemEdges];
+const a = initialNodes.nodes[1]!;
+const firstView: GraphView = { nodes: initialNodes.nodes, edges: initialEdges.edges };
+// The capture repeats the tag and both files with their report metadata.
+// Their first occurrence fixes the order; the later record supplies the value.
+const completed: GraphView = {
+  nodes: [replacementNodes.nodes[1]!, replacementNodes.nodes[2]!, replacementNodes.nodes[3]!, replacementNodes.nodes[0]!, replacementNodes.nodes[4]!],
+  edges: [...initialEdges.edges, ...filesystemEdges.edges],
+};
+
+function stream() {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
   const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(
-        new TextEncoder().encode(events.map((e) => JSON.stringify(e)).join("\n") + "\n"),
-      );
-      controller.close();
-    },
+    start(value) { controller = value; },
   });
-  return new Response(body, { status: 200 });
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+  return {
+    send(events: unknown[]) {
+      controller.enqueue(new TextEncoder().encode(events.map((e) => JSON.stringify(e)).join("\n") + "\n"));
+    },
+    close() { controller.close(); },
+    fail(error: Error) { controller.error(error); },
+  };
 }
 
-const a = { kind: "file", id: "a.md", label: "a", path: "a.md" };
-const root = { kind: "directory", id: "", label: "", path: "", files: 1, code: 1 };
-const tag = { kind: "tag", id: "#x", label: "#x" };
-/// The stream's edge key is source, target, kind and rank, so two edges that
-/// differ only in `files` are one edge and the later one wins.
-const tagEdge = (rank: number, files: number) => ({
-  source: "a.md",
-  target: "#x",
-  kind: "tag",
-  rank,
-  files,
-});
-
-test("publishes the accumulated view after every batch, upserting nodes and edges", async () => {
-  vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    streamed([
-      { type: "meta", scope: "workspace", path: "", depth: 1 },
-      { type: "nodes", nodes: [a, root] },
-      { type: "edges", edges: [tagEdge(1, 1)] },
-      { type: "nodes", nodes: [{ ...a, label: "A" }, tag] },
-      { type: "edges", edges: [tagEdge(1, 9), tagEdge(2, 1)] },
-      { type: "done" },
-    ]),
-  );
-  const seen: GraphView[] = [];
-  const record = () => seen.push(JSON.parse(JSON.stringify(graphData.view)) as GraphView);
-  const stream = api.graphStream;
-  vi.spyOn(api, "graphStream").mockImplementation((scope, opts = {}) => {
-    record();
-    return stream(scope, {
-      ...opts,
-      onNodes(nodes, view) {
-        opts.onNodes?.(nodes, view);
-        record();
-      },
-      onEdges(edges, view) {
-        opts.onEdges?.(edges, view);
-        record();
-      },
-    });
+function frames() {
+  let next = 0;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+    callbacks.set(++next, callback);
+    return next;
   });
+  const cancel = vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation((id) => {
+    callbacks.delete(id);
+  });
+  return {
+    callbacks,
+    cancel,
+    run() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) callback(16);
+    },
+  };
+}
 
-  await ensureGraphLoaded();
-  record();
+async function drain() {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
 
-  const renamed = [{ ...a, label: "A" }, root, tag];
-  expect(seen).toEqual([
-    { nodes: [], edges: [] },
-    { nodes: [a, root], edges: [] },
-    { nodes: [a, root], edges: [tagEdge(1, 1)] },
-    { nodes: renamed, edges: [tagEdge(1, 1)] },
-    { nodes: renamed, edges: [tagEdge(1, 9), tagEdge(2, 1)] },
-    { nodes: renamed, edges: [tagEdge(1, 9), tagEdge(2, 1)] },
-  ]);
+// Observe the accumulator's traversal separately from the store: ignoring a
+// snapshot at publish time must not hide its whole-graph allocation.
+function materializations() {
+  let count = 0;
+  const values = Map.prototype.values;
+  vi.spyOn(Map.prototype, "values").mockImplementation(function (this: Map<unknown, unknown>) {
+    if (this.has("a.md")) count++;
+    return values.call(this);
+  });
+  return () => count;
+}
+
+test("a chunk of many events publishes only its completed graph without a frame", async () => {
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const publish = vi.spyOn(graphData, "view", "set");
+  const load = ensureGraphLoaded();
+  source.send([meta, ...Array.from({ length: 20 }, () => batches).flat(), done]);
+  source.close();
+  await load;
+
+  expect(publish.mock.calls.map(([view]) => view)).toEqual([{ nodes: [], edges: [] }, completed]);
+  expect(a).not.toHaveProperty("bucket");
+  expect(graphData.view!.nodes.find((node) => node.id === "a.md")).toEqual(replacementNodes.nodes[2]);
+  expect(graphData.view!.edges.filter((edge) => edge.kind === "link")).toEqual(initialEdges.edges.filter((edge) => edge.kind === "link"));
+  expect(count(), "only completion materializes the accumulated maps").toBe(1);
+  expect(graphData.partial).toBe(false);
   expect(graphData.loading).toBe(false);
   expect(graphData.error).toBeNull();
+  expect(clock.callbacks.size, "completion cancels the pending partial frame").toBe(0);
+  clock.run();
+  expect(publish).toHaveBeenCalledTimes(2);
 });
 
-// A watcher event drops the cached graph while a load is in flight. The
-// dropped load must neither keep the loading flag up nor publish its view
-// over the drop.
+test("a first load builds and publishes one immutable view per animation frame", async () => {
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const publish = vi.spyOn(graphData, "view", "set");
+  const streamCall = api.graphStream;
+  const snapshots: GraphView[] = [];
+  vi.spyOn(api, "graphStream").mockImplementation((scope, opts = {}) => streamCall(scope, {
+    ...opts,
+    onView(view) {
+      snapshots.push(view);
+      opts.onView?.(view);
+    },
+  }));
+  const load = ensureGraphLoaded();
+  source.send([meta, ...Array.from({ length: 20 }, () => batches.slice(0, 2)).flat()]);
+  await drain();
+  expect(count(), "events must not build the view before a frame").toBe(0);
+  expect(publish).toHaveBeenCalledTimes(1);
+  expect(clock.callbacks.size).toBe(1);
+  clock.run();
+  expect(count()).toBe(1);
+  expect(publish).toHaveBeenCalledTimes(2);
+  const first = graphData.view;
+  expect(first).toBe(snapshots[0]);
+  expect(first).toEqual(firstView);
+
+  source.send(batches.slice(2));
+  await drain();
+  expect(graphData.view).toBe(first);
+  expect(count()).toBe(1);
+  clock.run();
+  expect(count()).toBe(2);
+  expect(publish).toHaveBeenCalledTimes(3);
+  expect(graphData.view).toBe(snapshots[1]);
+  expect(graphData.view).toEqual(completed);
+  expect(first, "later upserts cannot edit a published snapshot").toEqual(firstView);
+  expect(graphData.partial).toBe(true);
+
+  source.send([done]);
+  source.close();
+  await load;
+  expect(count()).toBe(3);
+  expect(publish).toHaveBeenCalledTimes(4);
+  expect(graphData.view).toEqual(completed);
+  expect(graphData.partial).toBe(false);
+  expect(clock.callbacks.size).toBe(0);
+});
+
+test("refresh builds no partial views and retains the completed view until replacement", async () => {
+  const previous = { nodes: [a], edges: [] } as GraphView;
+  graphData.view = previous;
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const publish = vi.spyOn(graphData, "view", "set");
+  const load = refreshGraph();
+  source.send([meta, ...Array.from({ length: 20 }, () => batches).flat()]);
+  await drain();
+  expect(count(), "refresh must not build views it discards").toBe(0);
+  expect(publish).not.toHaveBeenCalled();
+  expect(clock.callbacks.size).toBe(0);
+  expect(graphData.view).toBe(previous);
+  source.send([done]);
+  source.close();
+  await load;
+  expect(count()).toBe(1);
+  expect(publish).toHaveBeenCalledTimes(1);
+  expect(graphData.view).toEqual(completed);
+});
+
+test.each(["error", "incomplete", "abort"])("a %s stream cancels its pending view", async (kind) => {
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const publish = vi.spyOn(graphData, "view", "set");
+  const load = ensureGraphLoaded();
+  source.send(batches);
+  await drain();
+  expect(count()).toBe(0);
+  expect(clock.callbacks.size).toBe(1);
+  if (kind === "error") source.fail(new Error("stream fixture failure"));
+  if (kind === "incomplete") source.close();
+  if (kind === "abort") {
+    invalidateGraph();
+    expect(clock.callbacks.size, "abort cancels even before fetch rejects").toBe(0);
+    source.fail(new DOMException("aborted", "AbortError"));
+  }
+  await load;
+  const publications = publish.mock.calls.length;
+  expect(clock.callbacks.size).toBe(0);
+  clock.run();
+  expect(publish).toHaveBeenCalledTimes(publications);
+  expect(count()).toBe(0);
+  expect(graphData.loading).toBe(false);
+  if (kind === "abort") {
+    expect(graphData.view).toBeNull();
+    expect(graphData.partial).toBe(false);
+    expect(graphData.error).toBeNull();
+  } else {
+    expect(graphData.error).toContain(kind === "error" ? "stream fixture failure" : "before done");
+  }
+});
+
 test("an invalidate during a load leaves nothing loading and publishes nothing stale", async () => {
   let land: (view: GraphView) => void = () => {};
-  vi.spyOn(api, "graphStream").mockImplementation(
-    () => new Promise<GraphView>((resolve) => (land = resolve)),
-  );
+  vi.spyOn(api, "graphStream").mockImplementation(() => new Promise<GraphView>((resolve) => (land = resolve)));
   const load = ensureGraphLoaded();
   expect(graphData.loading).toBe(true);
-
   invalidateGraph();
-  expect(graphData.loading, "the drop ends the dropped load's loading").toBe(false);
+  expect(graphData.loading).toBe(false);
   land({ nodes: [a] as GraphView["nodes"], edges: [] });
   await load;
-
-  expect(graphData.view, "the dropped load publishes nothing").toBeNull();
+  expect(graphData.view).toBeNull();
 });
 
-test("a first load's view is partial until its stream completes, and an invalidation clears the mark", async () => {
+test("an obsolete stream callback cannot overwrite its replacement", async () => {
+  let obsolete!: (view: GraphView) => void;
   let finish!: (view: GraphView) => void;
-  vi.spyOn(api, "graphStream").mockImplementation(async (_scope, opts = {}) => {
-    opts.onNodes?.([a] as unknown as GraphView["nodes"], { nodes: [a], edges: [] } as unknown as GraphView);
-    return new Promise<GraphView>((resolve) => {
-      finish = resolve;
-    });
-  });
+  vi.spyOn(api, "graphStream").mockImplementationOnce(async (_scope, opts = {}) => {
+    obsolete = (view) => opts.onView?.(view);
+    return new Promise<GraphView>((resolve) => { finish = resolve; });
+  }).mockResolvedValueOnce(completed as GraphView);
+  const old = ensureGraphLoaded();
+  await reload();
+  obsolete({ nodes: [a], edges: [] } as GraphView);
+  expect(graphData.view).toEqual(completed);
+  finish({ nodes: [a], edges: [] } as GraphView);
+  await old;
+  expect(graphData.view).toEqual(completed);
+  expect(graphData.loading).toBe(false);
 
-  void ensureGraphLoaded();
-  await Promise.resolve();
-  expect(graphData.partial, "the first batch is partial").toBe(true);
-  invalidateGraph();
-  expect(graphData.view).toBeNull();
-  expect(graphData.partial, "a dropped view is not partial").toBe(false);
+  async function reload() {
+    invalidateGraph();
+    await ensureGraphLoaded();
+  }
+});
 
+test("metadata and batches keep the watchdog alive without any animation frames", async () => {
+  vi.useFakeTimers();
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
   const load = ensureGraphLoaded();
-  await Promise.resolve();
-  expect(graphData.partial).toBe(true);
-  finish({ nodes: [a], edges: [] } as unknown as GraphView);
+  await drain();
+  const signal = vi.mocked(globalThis.fetch).mock.calls[0]![1]!.signal!;
+  for (const events of [
+    [meta],
+    batches.slice(0, 2),
+    batches.slice(2),
+  ]) {
+    await vi.advanceTimersByTimeAsync(GRAPH_STALL_MS - 1);
+    source.send(events);
+    await drain();
+    expect(signal.aborted, "wire progress keeps the stream alive without a painted frame").toBe(false);
+  }
+  expect(count()).toBe(0);
+  expect(clock.callbacks.size).toBe(1);
+  source.send([done]);
+  source.close();
   await load;
-  expect(graphData.partial, "a completed stream is whole").toBe(false);
+  expect(graphData.view).toEqual(completed);
+  expect(graphData.error).toBeNull();
+  expect(graphData.loading).toBe(false);
+  expect(count()).toBe(1);
+  expect(clock.callbacks.size).toBe(0);
+});
+
+test("done cancels the partial frame even while transport EOF is pending", async () => {
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const load = ensureGraphLoaded();
+  source.send(batches);
+  await drain();
+  expect(clock.callbacks.size).toBe(1);
+  source.send([done]);
+  await drain();
+  expect(clock.callbacks.size).toBe(0);
+  clock.run();
+  expect(count()).toBe(0);
+  source.close();
+  await load;
+  expect(count()).toBe(1);
+  expect(graphData.view).toEqual(completed);
+});
+
+test("abort refuses buffered events before any final snapshot", async () => {
+  const source = stream();
+  const clock = frames();
+  const count = materializations();
+  const abort = new AbortController();
+  const onDone = vi.fn();
+  const load = api.graphStream({}, {
+    signal: abort.signal,
+    onMeta: () => abort.abort(),
+    onView: vi.fn(),
+    onDone,
+  });
+  const refused = expect(load).rejects.toMatchObject({ name: "AbortError" });
+  source.send([meta, ...batches, done]);
+  source.close();
+  await refused;
+  expect(onDone).not.toHaveBeenCalled();
+  expect(clock.callbacks.size).toBe(0);
+  expect(count()).toBe(0);
 });

@@ -904,7 +904,7 @@ describe("the shared graph load", () => {
     let finish!: (view: GraphView) => void;
     vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
       // The first batch holds the nodes; the edges are still to come.
-      opts?.onNodes?.(whole.nodes, { nodes: whole.nodes, edges: [] });
+      opts?.onView?.({ nodes: whole.nodes, edges: [] });
       return new Promise<GraphView>((resolve) => {
         finish = resolve;
       });
@@ -987,7 +987,7 @@ describe("the shared graph load", () => {
     vi.mocked(api.graphStream).mockImplementation(async (_scope, opts = {}) => {
       for (let batch = 0; batch < 3; batch += 1) {
         await new Promise((r) => setTimeout(r, 0));
-        opts.onNodes?.([node], { nodes: [node], edges: [] });
+        opts.onView?.({ nodes: [node], edges: [] });
       }
       return { nodes: [node], edges: [] };
     });

@@ -34,10 +34,10 @@ vi.mock("../api/client", async (importOriginal) => {
         async (
           _opts: unknown,
           streamOpts: {
-            onNodes?: (batch: GraphViewNode[], view: GraphView) => void;
+            onView?: (view: GraphView) => void;
           },
         ) => {
-          streamOpts.onNodes?.(NODES, { nodes: [...NODES], edges: [] });
+          streamOpts.onView?.({ nodes: [...NODES], edges: [] });
           return { nodes: NODES, edges: [] };
         },
       ),
