@@ -155,7 +155,7 @@ WantedBy=default.target</code></pre>
 
 <section class="manual-block" id="systemd-report">
   <h2><a class="heading-anchor" href="#systemd-report">Report the devserver to systemd-report</a></h2>
-  <p><code>systemd-report</code>, in systemd 260 and later, collects metrics from a machine's services (<a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report(1)</a>, <a href="https://amutable.com/blog/it-starts-upstream-systemd-report">the design</a>). Two optional user units make the devserver a source, <code>io.chan.Devserver</code>: systemd runs <code>chan metrics --varlink</code> for each connection.</p>
+  <p><code>systemd-report</code>, in systemd 260 and later, collects metrics from a machine's services (<a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report(1)</a>, <a href="https://amutable.com/blog/it-starts-upstream-systemd-report">the design</a>). Two optional user units make the devserver a source, <code>app.chan.Devserver</code>: systemd runs <code>chan metrics --varlink</code> for each connection.</p>
   <ol class="doc-steps">
     <li>
       <h3>Write the two units</h3>
@@ -167,7 +167,7 @@ cat &gt; chan-metrics.socket &lt;&lt;'EOF'
 Description=chan devserver metrics for systemd-report
 
 [Socket]
-ListenStream=%t/systemd/report/io.chan.Devserver
+ListenStream=%t/systemd/report/app.chan.Devserver
 FileDescriptorName=varlink
 SocketMode=0600
 Accept=yes
@@ -209,23 +209,23 @@ systemctl --user enable chan-metrics.socket &amp;&amp; systemctl --user restart 
       <p><code>systemd-report</code> is in <code>/usr/lib/systemd/</code>, outside <code>PATH</code>. On systemd 260, use <code>describe-metrics</code> in place of <code>describe</code>.</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>$</span><b data-copy-value>/usr/lib/systemd/systemd-report --user list-sources
-/usr/lib/systemd/systemd-report --user describe io.chan.Devserver
-/usr/lib/systemd/systemd-report --user metrics io.chan.Devserver</b></code>
+/usr/lib/systemd/systemd-report --user describe app.chan.Devserver
+/usr/lib/systemd/systemd-report --user metrics app.chan.Devserver</b></code>
     {{copyButton}}
   </div>
   <pre class="sample-output"><code>FAMILY                                    OBJECT FIELDS                         VALUE
-io.chan.Devserver.Build                   -      -                              "git-95696ef5e38e"
-io.chan.Devserver.CPUUsageNSec            -      -                              30000000
-io.chan.Devserver.HomeLogicalBytes        -      -                              425
-io.chan.Devserver.IOWriteBytes            -      {"scope":"storage"}            122880
-io.chan.Devserver.InstanceId              -      -                              "6dae770e5c7063c80c777d147fcbbedf"
-io.chan.Devserver.MemoryResidentBytes     -      -                              69668864
-io.chan.Devserver.PID                     -      -                              970
-io.chan.Devserver.TrafficReceivedBytes    -      {"layer":"network"}            804
-io.chan.Devserver.TrafficSentBytes        -      {"layer":"network"}            9925
-io.chan.Devserver.TransferJobs            -      {"outcome":"finished"}         0
-io.chan.Devserver.UptimeSec               -      -                              6
-io.chan.Devserver.Version                 -      -                              "0.129.0"
+app.chan.Devserver.Build                  -      -                              "git-95696ef5e38e"
+app.chan.Devserver.CPUUsageNSec           -      -                              30000000
+app.chan.Devserver.HomeLogicalBytes       -      -                              425
+app.chan.Devserver.IOWriteBytes           -      {"scope":"storage"}            122880
+app.chan.Devserver.InstanceId             -      -                              "6dae770e5c7063c80c777d147fcbbedf"
+app.chan.Devserver.MemoryResidentBytes    -      -                              69668864
+app.chan.Devserver.PID                    -      -                              970
+app.chan.Devserver.TrafficReceivedBytes   -      {"layer":"network"}            804
+app.chan.Devserver.TrafficSentBytes       -      {"layer":"network"}            9925
+app.chan.Devserver.TransferJobs           -      {"outcome":"finished"}         0
+app.chan.Devserver.UptimeSec              -      -                              6
+app.chan.Devserver.Version                -      -                              "0.129.0"
 ...
 
 48 metrics listed.</code></pre>
@@ -239,7 +239,7 @@ io.chan.Devserver.Version                 -      -                              
       </thead>
       <tbody>
         <tr><td><code>--json=short</code>, added to a <code>systemd-report</code> command</td><td>Prints each metric as one JSON object.</td></tr>
-        <tr><td><code>varlinkctl --more call "$XDG_RUNTIME_DIR/systemd/report/io.chan.Devserver" io.systemd.Metrics.List '{}'</code></td><td>Reads the source without systemd-report. Any Varlink client can.</td></tr>
+        <tr><td><code>varlinkctl --more call "$XDG_RUNTIME_DIR/systemd/report/app.chan.Devserver" io.systemd.Metrics.List '{}'</code></td><td>Reads the source without systemd-report. Any Varlink client can.</td></tr>
         <tr><td><code>systemctl --user disable --now chan-metrics.socket</code></td><td>Turns the source off.</td></tr>
       </tbody>
     </table>
@@ -264,7 +264,7 @@ io.chan.Devserver.Version                 -      -                              
       <li>From systemd 261, <code>systemd-report</code> also builds the metrics into one JSON report that it can upload to a server of yours, and from 262 it can sign the report.</li>
       <li>A client of the source needs no token: the source finds the devserver's address and <a href="/manual/devserver/#token">token</a> on every read, so it follows a restart and a rotated token.</li>
       <li>The families are counters and gauges, not rates: two reports give a rate. <code>chan metrics --json --history</code> has chan's own rates and the last ten minutes.</li>
-      <li>Counters start over when the devserver restarts. <code>io.chan.Devserver.InstanceId</code> names the devserver process, so a reader can tell a restart from a counter that went down.</li>
+      <li>Counters start over when the devserver restarts. <code>app.chan.Devserver.InstanceId</code> names the devserver process, so a reader can tell a restart from a counter that went down.</li>
       <li>A connection never starts the devserver. While it is down the source reports no metrics, and the report carries on without them.</li>
       <li>Reports more often than every five minutes keep the devserver scanning the chan home once a minute, as any metrics read does.</li>
     </ul>

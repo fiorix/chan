@@ -636,8 +636,8 @@ carries only the samples newer than the last one sent.
 
 --varlink makes the devserver a systemd-report source: it serves the
 readings as systemd's metrics interface, io.systemd.Metrics, on stdin
-and stdout, for a socket named io.chan.Devserver in the directory
-systemd-report reads. Each family is io.chan.Devserver.<Name>.
+and stdout, for a socket named app.chan.Devserver in the directory
+systemd-report reads. Each family is app.chan.Devserver.<Name>.
 ";
 
 /// `chan metrics` examples, side effects, and caveats.
@@ -665,7 +665,7 @@ out of the argument list:
 The devserver in systemd-report, once the example user units are
 installed (systemd-report lives in /usr/lib/systemd):
   systemctl --user enable chan-metrics.socket && systemctl --user restart chan-metrics.socket
-  /usr/lib/systemd/systemd-report --user metrics io.chan.Devserver
+  /usr/lib/systemd/systemd-report --user metrics app.chan.Devserver
 
 SIDE EFFECTS:
 None on this machine's disk. Each read is one GET of the server's
