@@ -1963,17 +1963,20 @@ export interface WatchSubscription {
 /// disposer, plus typed `subscribeDir` / `unsubscribeDir` helpers.
 /// `link` is the probe the watcher reports its pings and pongs to, for a
 /// caller that reads the link's health from it.
+/// `options.remote` selects the shorter focused read deadline for a remote
+/// watcher; focused answered watchers ping fast on either kind of window.
 export function openWatchSocket(
   onEvent: (e: unknown) => void,
-  onStatus?: (s: import("./transport").WsStatus, attempt: number) => void,
+  onStatus?: (s: import("./transport").WsStatus, attempt: number, drop?: import("./transport").WatchDrop) => void,
   onReady?: () => void,
   link?: LinkProbe,
+  options?: import("./transport").WatchOptions,
 ): WatchSubscription {
   // Pass this window's session id and its URL holder hint to the watcher.
   // The transport presents the client holder on every socket dial, including
   // a retained or minted holder for a directly navigated page.
   const holder = holderTagOf(window.location.href) ?? undefined;
-  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder, link);
+  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder, link, options);
   const sub = (() => socket.close()) as WatchSubscription;
   sub.subscribeDir = (dir: WatchScopeDir) => socket.send({ type: "sub", dir });
   sub.unsubscribeDir = (dir: WatchScopeDir) => socket.send({ type: "unsub", dir });

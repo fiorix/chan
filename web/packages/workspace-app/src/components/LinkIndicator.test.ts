@@ -122,18 +122,20 @@ test("placement marks the tab-bar label for reserved width and leaves status nat
   await state("down");
   await render("tab-bar");
   expect(button()?.dataset.placement).toBe("tab-bar");
+  expect(button()?.classList.contains("status")).toBe(false);
   await unmount(view!);
   view = null;
   document.body.replaceChildren();
   await render("status");
   expect(button()?.dataset.placement).toBe("status");
+  expect(button()?.classList.contains("status")).toBe(false);
 });
 
 test("only the tab-bar label reads its per-state reserved width", () => {
   // jsdom lays nothing out, so the tab-bar label's fixed width is a source contract.
   const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
   expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*var\(--link-indicator-label-width\);/);
-  expect(source).not.toMatch(/\.link-indicator\.status\s+\.label\s*\{[^}]*\bmin-width:/);
+  expect(source).not.toMatch(/\.link-indicator\[data-placement="status"\]\s+\.label\s*\{[^}]*\bmin-width:/);
 });
 
 test.each([
@@ -255,7 +257,8 @@ test("popover shows figures, samples, state age and last contact", async () => {
   expect(pop.textContent).toContain("Latest 10 ms");
   expect(pop.textContent).toContain("Median 20 ms");
   expect(pop.textContent).toContain("Worst 30 ms");
-  expect(pop.textContent).toContain("2 s ago");
+  const clock = new Date(18_000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  expect(pop.querySelector(".contact strong")?.textContent).toBe(clock);
   expect(pop.textContent).toContain("Slow for 12 s");
   expect(pop.querySelectorAll(".miss")).toHaveLength(1);
   vi.advanceTimersByTime(1_000);
@@ -273,7 +276,7 @@ test("an unknown link shows dashes for missing figures and contact", async () =>
   }
 });
 
-test("opening later reads the current clock for state and contact ages", async () => {
+test("opening later reads the state age while contact keeps its clock time", async () => {
   await state("slow", 500);
   linkHealth.since = 20_000;
   linkHealth.lastContactAt = 20_000;
@@ -282,7 +285,12 @@ test("opening later reads the current clock for state and contact ages", async (
   button()!.click();
   await tick();
   expect.soft(popover()?.textContent).toContain("Slow for 5 s");
-  expect.soft(popover()?.textContent).toContain("5 s ago");
+  const clock = new Date(20_000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  expect.soft(popover()?.querySelector(".contact strong")?.textContent).toBe(clock);
+  vi.advanceTimersByTime(2_000);
+  await tick();
+  expect.soft(popover()?.textContent).toContain("Slow for 7 s");
+  expect.soft(popover()?.querySelector(".contact strong")?.textContent).toBe(clock);
 });
 
 test("second press closes the popover", async () => {

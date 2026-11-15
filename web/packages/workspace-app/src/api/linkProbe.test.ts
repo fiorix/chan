@@ -33,11 +33,12 @@ interface Rig {
   pong(): number | null;
 }
 
-function rig(): Rig {
+function rig(rememberAnsweredAcrossSockets = false): Rig {
   let t = 1_000_000;
   let changed = 0;
   const samples: LinkSample[] = [];
   const probe = createLinkProbe({
+    rememberAnsweredAcrossSockets,
     now: () => t,
     onSample: (s) => samples.push(s),
     onChange: () => {
@@ -144,7 +145,7 @@ describe("a retired socket", () => {
       { at: T0 + 3_030, rttMs: null },
       { at: T0 + 6_030, rttMs: null },
     ]);
-    // Nothing of the old socket is left for the next one.
+    // Socket timings and default answer knowledge clear together.
     expect(r.probe.answered).toBe(false);
     expect(r.probe.rttMs).toBeNull();
     expect(r.probe.lastFrameAt).toBeNull();
@@ -163,6 +164,38 @@ describe("a retired socket", () => {
     r.probe.reset();
     expect(r.samples).toEqual([]);
   });
+
+  test("a later socket's first ping ages after another socket answered and leaves a miss with memory", () => {
+    const r = rig(true);
+    r.roundTrip(30);
+    r.probe.reset();
+    expect(r.probe.answered).toBe(false);
+    expect(r.probe.everAnswered).toBe(true);
+    r.probe.pingSent();
+    r.wait(1_000);
+    expect(r.probe.classify()).toBe("slow");
+    r.wait(3_000);
+    expect(r.probe.classify()).toBe("stalled");
+    r.probe.reset();
+    expect(r.samples).toEqual([{ at: T0, rttMs: 30 }, { at: T0 + 30, rttMs: null }]);
+    expect(r.probe.everAnswered).toBe(true);
+    r.probe.pingSent();
+    r.wait(4_000);
+    expect(r.probe.classify()).toBe("stalled");
+  });
+
+  test("a default probe keeps classification, waits and misses on the current socket", () => {
+    const r = rig();
+    r.roundTrip(30);
+    r.probe.reset();
+    expect(r.probe.everAnswered).toBe(false);
+    r.probe.pingSent();
+    r.wait(4_000);
+    expect(r.probe.oldestPingAt).toBe(T0 + 30);
+    expect(r.probe.classify()).toBe("unknown");
+    r.probe.reset();
+    expect(r.samples).toEqual([{ at: T0, rttMs: 30 }]);
+  });
 });
 
 describe("a clock jump", () => {
@@ -173,6 +206,7 @@ describe("a clock jump", () => {
     r.wait(3_600_000);
     r.probe.forgetTimings();
     expect(r.probe.oldestPingAt).toBeNull();
+    expect(r.probe.hasPendingPing).toBe(true);
     expect(r.probe.classify()).toBe("ok");
 
     r.probe.pingSent(); // the wake probe
@@ -184,6 +218,7 @@ describe("a clock jump", () => {
     expect(r.probe.oldestPingAt).toBe(probeAt);
     r.wait(35);
     expect(r.pong()).toBe(45);
+    expect(r.probe.hasPendingPing).toBe(false);
     expect(r.probe.rttMs).toBe(45);
     expect(r.samples).toEqual([
       { at: T0, rttMs: 30 },
@@ -520,7 +555,7 @@ describe("the state", () => {
 });
 
 describe("classifyLink", () => {
-  const base: LinkReading = { answered: true, rtts: [], oldestPingAt: null, lastFrameAt: null };
+  const base: LinkReading = { hasAnswered: true, rtts: [], oldestPingAt: null, lastFrameAt: null };
 
   test("reads the latest round trip alone for the slow wait", () => {
     const now = 50_000;
@@ -534,7 +569,7 @@ describe("classifyLink", () => {
 
   test("is a function of the previous state, the reading and the time", () => {
     const now = 50_000;
-    expect(classifyLink("ok", { ...base, answered: false, oldestPingAt: 0 }, now)).toBe("unknown");
+    expect(classifyLink("ok", { ...base, hasAnswered: false, oldestPingAt: 0 }, now)).toBe("unknown");
     expect(classifyLink("unknown", base, now)).toBe("ok");
     expect(classifyLink("ok", { ...base, rtts: [500, 500] }, now)).toBe("slow");
     expect(classifyLink("ok", { ...base, rtts: [350, 350] }, now)).toBe("ok");

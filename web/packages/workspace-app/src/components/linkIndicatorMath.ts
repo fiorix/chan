@@ -83,9 +83,11 @@ function elapsed(at: number, now: number): string {
   return seconds < 120 ? `${seconds} s` : `${Math.floor(seconds / 60)} min`;
 }
 
-/// Age of the last inbound frame, or a dash before any frame arrives.
-export function linkAge(at: number | null, now: number): string {
-  return at === null ? "-" : `${elapsed(at, now)} ago`;
+/// Clock time of the last inbound frame, or a dash before any frame arrives.
+export function linkContactTime(at: number | null): string {
+  return at === null ? "-" : new Date(at).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
 }
 
 /// The current state in words: stalled counts the oldest unanswered ping's

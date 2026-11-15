@@ -86,7 +86,11 @@ describe("the window's link state", () => {
 
     // The redialed socket has answered nothing yet.
     setLinkWatchStatus("open");
-    expect(linkHealth.state).toBe("unknown");
+    expect(linkHealth.state).toBe("down");
+    expect(linkHealth.since).toBe(wentDown);
+    ping();
+    pong();
+    expect(linkHealth.state).toBe("ok");
     expect(linkHealth.since).toBe(Date.now());
   });
 
@@ -106,6 +110,46 @@ describe("the window's link state", () => {
     expect(linkHealth.samples).toHaveLength(1);
   });
 
+  test("keeps the first cover deadline through failed redials", () => {
+    setLinkWatchStatus("open");
+    roundTrip(20);
+    const contact = Date.now();
+    vi.advanceTimersByTime(15_000);
+    watchLinkProbe.reset();
+    setLinkWatchStatus("reconnecting", { reason: "deadline", lastFrameAt: contact });
+    const outage = linkHealth.outage;
+    expect(outage).toEqual({ startedAt: Date.now(), coverAt: contact + 45_000 });
+    setLinkWatchStatus("connecting");
+    setLinkWatchStatus("open");
+    expect(linkHealth.state).toBe("down");
+    expect(linkHealth.outage).toBe(outage);
+    watchLinkProbe.pingSent();
+    vi.advanceTimersByTime(1_000);
+    expect(watchLinkProbe.classify()).toBe("slow");
+    expect(linkHealth.state).toBe("down");
+    watchLinkProbe.reset();
+    setLinkWatchStatus("reconnecting", { reason: "closed", lastFrameAt: null });
+    expect(linkHealth.outage).toBe(outage);
+    setLinkWatchStatus("connecting");
+    setLinkWatchStatus("open");
+    ping();
+    pong();
+    expect(linkHealth.outage).toBeNull();
+    expect(linkHealth.state).toBe("ok");
+    expect(linkHealth.samples).toEqual([{ at: contact - 20, rttMs: 20 }, { at: Date.now() - 1_000, rttMs: null }, { at: Date.now(), rttMs: 0 }]);
+  });
+
+  test("a clock jump forgets a pending timing before the ticker paints a huge stall", () => {
+    setLinkWatchStatus("open");
+    roundTrip(20);
+    ping();
+    vi.setSystemTime(Date.now() + 3_600_000);
+    vi.advanceTimersByTime(250);
+    expect(linkHealth.state).toBe("ok");
+    expect(linkHealth.waitMs).toBe(0);
+    expect(watchLinkProbe.oldestPingAt).toBeNull();
+  });
+
   test("a round trip longer than the read deadline leaves the last reading in place", () => {
     setLinkWatchStatus("open");
     roundTrip(30);
@@ -116,8 +160,7 @@ describe("the window's link state", () => {
     expect(linkHealth.rttMs).toBe(30);
     expect(linkHealth.samples).toHaveLength(1);
     expect(linkHealth.waitMs).toBe(0);
-    // It answered, so the link is no longer stalled, and it leaves `slow` as
-    // any link does.
+    // This was ordinary elapsed time, so the late pong leaves slow recovery.
     expect(linkHealth.state).toBe("slow");
     roundTrip(30);
     roundTrip(30);
@@ -305,7 +348,7 @@ describe("through the watcher", () => {
 
       vi.advanceTimersByTime(500);
       FakeSocket.instances[1].open();
-      expect(linkHealth.state).toBe("unknown");
+      expect(linkHealth.state).toBe("down");
     } finally {
       handle.close();
     }

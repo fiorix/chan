@@ -5,13 +5,12 @@
 // therefore pairs every pong with its ping and yields the round-trip time
 // with nothing added to the wire.
 //
-// A probe serves one socket at a time and knows nothing of sockets, timers or
-// the page: its owner reports what the socket did and reads the result. The
+// A probe serves one socket at a time and knows nothing of sockets, timers or the page:
+// its owner reports what the socket did and reads the result. The
 // clock is injectable so a test can drive it without real time passing.
 
-/// What a socket's pongs say about its link. `unknown` until the socket has
-/// answered a ping: a server that never answers gives no reading, so nothing
-/// is concluded from its silence.
+/// What the probe's pongs say about its link. `unknown` until this socket has
+/// received a pong, or any socket this probe has served with memory enabled.
 export type LinkProbeState = "unknown" | "ok" | "slow" | "stalled";
 
 /// A ping unanswered this long makes the link `slow`. Well above a healthy
@@ -56,8 +55,9 @@ export interface LinkSample {
 
 /// What `classifyLink` reads. Times are on the probe's clock.
 export interface LinkReading {
-  /// The socket has answered a ping.
-  answered: boolean;
+  /// This socket has received a pong, or an earlier one when this probe keeps
+  /// answer memory across resets.
+  hasAnswered: boolean;
   /// Its latest round trips, oldest first.
   rtts: readonly number[];
   /// When the oldest unanswered ping left, or `null` with none waiting.
@@ -75,7 +75,7 @@ export function classifyLink(
   reading: LinkReading,
   now: number,
 ): LinkProbeState {
-  if (!reading.answered) return "unknown";
+  if (!reading.hasAnswered) return "unknown";
   const pingAt = reading.oldestPingAt;
   if (pingAt !== null) {
     // The silence counts from the ping: a frame older than the ping says
@@ -86,8 +86,8 @@ export function classifyLink(
     if (now - pingAt >= LINK_SLOW_WAIT_MS) return "slow";
   }
   // A round trip that long had its ping overdue, whether or not anything
-  // read the state while it waited: a socket's first ping waits in `unknown`,
-  // and a page whose timers are held reads nothing until the pong.
+  // read the state while it waited: a socket's first ping waits in `unknown`
+  // unless this probe keeps answer memory from an earlier socket.
   const latest = reading.rtts.at(-1);
   if (latest !== undefined && latest >= LINK_SLOW_WAIT_MS) return "slow";
   const run = reading.rtts.slice(-LINK_RTT_RUN);
@@ -99,11 +99,13 @@ export function classifyLink(
 }
 
 export interface LinkProbeOptions {
+  /// Keep whether any socket this probe has served answered a ping across reset().
+  rememberAnsweredAcrossSockets?: boolean;
   /// Clock, in milliseconds. Defaults to `Date.now`.
   now?: () => number;
   /// Called once per finished ping that was timed: an answered one with its
-  /// round-trip time, and each one still waiting when the socket is retired
-  /// as a miss.
+  /// round-trip time, and each eligible one still waiting when the socket is
+  /// retired as a miss.
   onSample?: (sample: LinkSample) => void;
   /// Called after every report that changed the probe, so an owner can read
   /// it again.
@@ -127,16 +129,20 @@ export interface LinkProbe {
   frameReceived(): void;
   /// The clock jumped while pings were in flight, as across a machine sleep.
   /// They keep their place in the queue, so later pongs still pair up, but
-  /// their own pongs give no round-trip time and they count as neither
-  /// waiting nor missed.
+  /// their own pongs give no round-trip time and they count as neither timed
+  /// waits nor misses.
   forgetTimings(): void;
-  /// The socket opened or was retired. On a socket that had answered, each
-  /// timed ping still waiting becomes a miss; a socket that never answered
-  /// gave no reading, so its pings are not misses either. The probe then
-  /// holds nothing of the old socket.
+  /// The socket opened or was retired. Timed waiting pings become misses if
+  /// this socket answered, or if answer memory was enabled and an earlier
+  /// socket answered. The probe then clears this socket's timings.
   reset(): void;
   /// Whether this socket has answered a ping.
   readonly answered: boolean;
+  /// Whether any socket this probe has served has answered a ping, including
+  /// earlier sockets only when rememberAnsweredAcrossSockets is enabled.
+  readonly everAnswered: boolean;
+  /// Whether this socket has an unanswered ping, timed or counted.
+  readonly hasPendingPing: boolean;
   /// The latest round-trip time on this socket, or `null` before the first.
   readonly rttMs: number | null;
   /// When this socket's last frame arrived, or `null` before the first.
@@ -160,6 +166,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
   let timed: number[] = [];
   let behind = 0;
   let answered = false;
+  let everAnswered = false;
   let rtts: number[] = [];
   let lastFrameAt: number | null = null;
   let state: LinkProbeState = "unknown";
@@ -188,6 +195,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       else if (behind > 0) behind -= 1;
       else return null;
       answered = true;
+      everAnswered = true;
       let rtt: number | null = null;
       if (at !== null) {
         const took = Math.max(0, now() - at);
@@ -213,13 +221,14 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       options.onChange?.();
     },
     reset() {
-      if (answered) {
+      if (everAnswered) {
         for (const at of timed) options.onSample?.({ at, rttMs: null });
       }
       ahead = 0;
       timed = [];
       behind = 0;
       answered = false;
+      if (!options.rememberAnsweredAcrossSockets) everAnswered = false;
       rtts = [];
       lastFrameAt = null;
       state = "unknown";
@@ -227,6 +236,12 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
     },
     get answered() {
       return answered;
+    },
+    get everAnswered() {
+      return everAnswered;
+    },
+    get hasPendingPing() {
+      return ahead > 0 || timed.length > 0 || behind > 0;
     },
     get rttMs() {
       return rtts.at(-1) ?? null;
@@ -240,7 +255,7 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
     classify() {
       state = classifyLink(
         state,
-        { answered, rtts, oldestPingAt: oldestPingAt(), lastFrameAt },
+        { hasAnswered: everAnswered, rtts, oldestPingAt: oldestPingAt(), lastFrameAt },
         now(),
       );
       return state;

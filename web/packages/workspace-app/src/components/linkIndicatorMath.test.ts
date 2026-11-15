@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { linkAge, linkFigures, linkIndicatorLabelCh, linkIndicatorShown, linkSparkline, linkStateAge } from "./linkIndicatorMath";
+import { describe, expect, test, vi } from "vitest";
+import { linkContactTime, linkFigures, linkIndicatorLabelCh, linkIndicatorShown, linkSparkline, linkStateAge } from "./linkIndicatorMath";
 
 for (const [placement, remote, state, expected] of [
   ["tab-bar", false, "unknown", false],
@@ -110,23 +110,30 @@ describe("sparkline", () => {
   });
 });
 
-describe("age wording", () => {
-  test("last contact age uses a dash before any contact", () => {
-    expect(linkAge(null, 12_000)).toBe("-");
-    expect(linkAge(9_600, 12_000)).toBe("2 s ago");
+describe("contact clock and state age", () => {
+  test("last contact is a locale clock time with seconds or a dash", () => {
+    expect(linkContactTime(null)).toBe("-");
+    const format = vi.spyOn(Date.prototype, "toLocaleTimeString").mockReturnValue("17:42:07");
+    try {
+      expect(linkContactTime(9_600)).toBe("17:42:07");
+      expect(format).toHaveBeenCalledWith(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      expect((format.mock.instances[0] as Date).getTime()).toBe(9_600);
+    } finally {
+      format.mockRestore();
+    }
   });
 
-  test("clamps future contact and state timestamps to zero", () => {
-    expect(linkAge(10_000, 9_000)).toBe("0 s ago");
+  test("clamps future state timestamps to zero", () => {
     expect(linkStateAge("slow", 10_000, 9_000, 0)).toBe("Slow for 0 s");
   });
 
-  test("uses whole minutes from two minutes onward", () => {
-    expect(linkAge(0, 119_999)).toBe("119 s ago");
-    expect(linkAge(0, 120_000)).toBe("2 min ago");
-    expect(linkAge(0, 121_000)).toBe("2 min ago");
-    expect(linkAge(0, 179_000)).toBe("2 min ago");
+  test("uses whole minutes for long state ages", () => {
     expect(linkStateAge("down", 0, 754_000, 0)).toBe("Reconnecting for 12 min");
+  });
+
+  test("changes state age from seconds to minutes at 120 s", () => {
+    expect(linkStateAge("down", 0, 119_999, 0)).toBe("Reconnecting for 119 s");
+    expect(linkStateAge("down", 0, 120_000, 0)).toBe("Reconnecting for 2 min");
   });
 
   test.each([

@@ -13,10 +13,10 @@ import {
   type LinkProbeState,
   type LinkSample,
 } from "../api/linkProbe";
+import { WS_READ_DEADLINE_MS, type WatchDrop } from "../api/transport";
 
-/// A window's link state: what the watcher's pongs say, or `down` while the
-/// watcher is not open after having been open, which is when the reconnecting
-/// cover shows.
+/// A window's link state: what the watcher's pongs say, or `down` from the
+/// loss of an open watcher until a later socket answers a ping.
 export type LinkState = LinkProbeState | "down";
 
 /// How many finished pings the window keeps: three minutes of the watcher's
@@ -35,7 +35,7 @@ export const linkHealth = $state<{
   /// The latest round-trip time, kept across sockets; `null` before the first.
   rttMs: number | null;
   /// How long the oldest unanswered ping has waited, refreshed while one
-  /// waits on a socket that has answered before; 0 otherwise.
+  /// waits after the page's first pong; 0 otherwise.
   waitMs: number;
   /// The last LINK_SAMPLE_CAP finished pings, oldest first. A sample with a
   /// `null` round-trip time is a ping that was never answered.
@@ -43,6 +43,12 @@ export const linkHealth = $state<{
   /// When the last frame of any kind arrived, kept across sockets; `null`
   /// before the first.
   lastContactAt: number | null;
+  /// The first loss of an open watcher, held through failed redials until a pong.
+  outage: { startedAt: number; coverAt: number } | null;
+  /// Changes at the start and end of each outage, not on redial status flips.
+  outageEpoch: number;
+  /// A socket can be open during an outage, before its first pong.
+  watcherOpen: boolean;
 }>({
   state: "unknown",
   since: Date.now(),
@@ -50,34 +56,62 @@ export const linkHealth = $state<{
   waitMs: 0,
   samples: [],
   lastContactAt: null,
+  outage: null,
+  outageEpoch: 0,
+  watcherOpen: false,
 });
 
-let watchOpen = false;
-/// `down` needs an earlier open: a page still dialing for the first time has
-/// lost nothing.
-let watchOpenedBefore = false;
 let ticker: ReturnType<typeof setInterval> | null = null;
 
 /// The probe the window's watcher reports its pings and pongs to.
-export const watchLinkProbe: LinkProbe = createLinkProbe({
-  onSample(sample) {
-    linkHealth.samples.push(sample);
-    if (linkHealth.samples.length > LINK_SAMPLE_CAP) linkHealth.samples.shift();
-  },
-  onChange: sync,
-});
+function makeWatchLinkProbe(): LinkProbe {
+  return createLinkProbe({
+    rememberAnsweredAcrossSockets: true,
+    onSample(sample) {
+      linkHealth.samples.push(sample);
+      if (linkHealth.samples.length > LINK_SAMPLE_CAP) linkHealth.samples.shift();
+    },
+    onChange: sync,
+  });
+}
+
+export let watchLinkProbe: LinkProbe = makeWatchLinkProbe();
 
 /// The watcher's status changed.
-export function setLinkWatchStatus(status: WsStatus): void {
-  watchOpen = status === "open";
-  if (watchOpen) watchOpenedBefore = true;
+export function setLinkWatchStatus(status: WsStatus, drop?: WatchDrop): void {
+  const wasOpen = linkHealth.watcherOpen;
+  linkHealth.watcherOpen = status === "open";
+  if (wasOpen && !linkHealth.watcherOpen && linkHealth.outage === null) {
+    const startedAt = Date.now();
+    const deadline = drop?.reason === "deadline" && drop.lastFrameAt !== null
+      ? drop.lastFrameAt + WS_READ_DEADLINE_MS
+      : startedAt;
+    linkHealth.outage = {
+      startedAt,
+      coverAt: deadline,
+    };
+    linkHealth.outageEpoch += 1;
+  }
   sync();
 }
 
 function sync(): void {
   const now = Date.now();
-  const next: LinkState =
-    watchOpenedBefore && !watchOpen ? "down" : watchLinkProbe.classify();
+  const pingAt = watchLinkProbe.oldestPingAt;
+  if (pingAt !== null && now - pingAt > WS_READ_DEADLINE_MS) {
+    // A wall-clock jump beyond the 45 s ordinary read deadline is not a
+    // useful wait. forgetTimings reports one change and re-enters sync once;
+    // its cleared timing ends the recursion. On a hidden page whose pings
+    // never return while other frames arrive, this reads ok again each 45 s
+    // until the next ping becomes a second late.
+    watchLinkProbe.forgetTimings();
+    return;
+  }
+  if (linkHealth.watcherOpen && watchLinkProbe.answered && linkHealth.outage !== null) {
+    linkHealth.outage = null;
+    linkHealth.outageEpoch += 1;
+  }
+  const next: LinkState = linkHealth.outage !== null ? "down" : watchLinkProbe.classify();
   if (next !== linkHealth.state) {
     linkHealth.state = next;
     linkHealth.since = now;
@@ -86,15 +120,15 @@ function sync(): void {
   if (rtt !== null) linkHealth.rttMs = rtt;
   const contact = watchLinkProbe.lastFrameAt;
   if (contact !== null) linkHealth.lastContactAt = contact;
-  // A socket that has never answered stays `unknown` however long its pings
-  // wait, so only an answered one has a wait worth counting.
-  const pingAt = watchLinkProbe.answered ? watchLinkProbe.oldestPingAt : null;
-  linkHealth.waitMs = pingAt === null ? 0 : Math.max(0, now - pingAt);
+  // The page's first socket stays `unknown` before its first pong, so only
+  // pings after the page has an answer have a wait worth counting.
+  const countedPingAt = watchLinkProbe.everAnswered ? watchLinkProbe.oldestPingAt : null;
+  linkHealth.waitMs = countedPingAt === null ? 0 : Math.max(0, now - countedPingAt);
   // While a ping waits, time alone moves the state to `slow` and `stalled`,
   // with no socket event to report it; the ticker runs for exactly that long.
-  if (pingAt !== null && ticker === null) {
+  if (countedPingAt !== null && ticker === null) {
     ticker = setInterval(sync, LINK_TICK_MS);
-  } else if (pingAt === null && ticker !== null) {
+  } else if (countedPingAt === null && ticker !== null) {
     clearInterval(ticker);
     ticker = null;
   }
@@ -149,15 +183,16 @@ export function linkLabel(state: LinkState, rttMs: number | null, waitMs: number
 /// not left to the probe's reset, so a test that finds it running wrongly
 /// does not hand its handle to the next one.
 export function resetLinkHealthForTests(): void {
-  watchOpen = false;
-  watchOpenedBefore = false;
-  watchLinkProbe.reset();
   if (ticker !== null) clearInterval(ticker);
   ticker = null;
+  watchLinkProbe = makeWatchLinkProbe();
   linkHealth.state = "unknown";
   linkHealth.since = Date.now();
   linkHealth.rttMs = null;
   linkHealth.waitMs = 0;
   linkHealth.samples = [];
   linkHealth.lastContactAt = null;
+  linkHealth.outage = null;
+  linkHealth.outageEpoch = 0;
+  linkHealth.watcherOpen = false;
 }

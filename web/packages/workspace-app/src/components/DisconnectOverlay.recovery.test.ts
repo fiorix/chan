@@ -14,6 +14,8 @@ import { createRawSnippet, flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { abandonDevserverForWindow, reconnectDevserverForWindow } from "../api/desktop";
+import type { WsStatus } from "../api/client";
+import { resetLinkHealthForTests, setLinkWatchStatus, watchLinkProbe } from "../state/linkHealth.svelte";
 import { overlayStack, promptState, setCoverBlocking, ui } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
@@ -31,10 +33,21 @@ type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<un
 let invoke: ReturnType<typeof vi.fn<(cmd: string) => Promise<unknown>>>;
 const mounted: Array<Record<string, unknown>> = [];
 
+function watchStatus(status: WsStatus): void {
+  ui.ws = status;
+  setLinkWatchStatus(status);
+  if (status === "open") {
+    watchLinkProbe.pingSent();
+    watchLinkProbe.frameReceived();
+    watchLinkProbe.pongReceived();
+  }
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
+  resetLinkHealthForTests();
   invoke = vi.fn(async () => undefined);
-  ui.ws = "open";
+  watchStatus("open");
   ui.wsAttempt = 0;
   windowTabBar.on = false;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
@@ -50,6 +63,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const view of mounted.splice(0)) unmount(view);
+  resetLinkHealthForTests();
   document.body.innerHTML = "";
   delete (window as TauriWindow).__TAURI_INTERNALS__;
   history.replaceState(null, "", "/");
@@ -79,7 +93,7 @@ async function dropConnection(): Promise<HTMLElement> {
   document.body.append(target);
   mounted.push(mount(DisconnectOverlay, { target }));
   await tick();
-  ui.ws = "reconnecting";
+  watchStatus("reconnecting");
   await tick();
   vi.advanceTimersByTime(600);
   await tick();
@@ -99,10 +113,10 @@ async function deferredIntoSecondOutage(): Promise<HTMLTextAreaElement> {
   behind.focus();
   await dropConnection();
   showLauncher();
-  ui.ws = "open";
+  watchStatus("open");
   await tick();
   await tick();
-  ui.ws = "reconnecting";
+  watchStatus("reconnecting");
   await tick();
   vi.advanceTimersByTime(600);
   await tick();
@@ -143,10 +157,10 @@ describe("the reconnect overlay", () => {
     const target = document.body.appendChild(document.createElement("div"));
     mounted.push(mount(DisconnectOverlay, { target }));
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(500);
-    ui.ws = "connecting";
+    watchStatus("connecting");
     await tick();
     vi.advanceTimersByTime(500);
     await tick();
@@ -171,7 +185,7 @@ describe("the reconnect overlay", () => {
     behind.focus();
     const coverTarget = await dropConnection();
     expect(document.activeElement).toBe(coverTarget.querySelector(".overlay"));
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(behind);
@@ -184,7 +198,7 @@ describe("the reconnect overlay", () => {
     input.focus();
     const before = tabFocusPulse.value;
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(tabFocusPulse.value).toBe(before + 1);
@@ -197,7 +211,7 @@ describe("the reconnect overlay", () => {
     input.focus();
     const before = tabFocusPulse.value;
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(tabFocusPulse.value).toBe(before + 1);
@@ -220,7 +234,7 @@ describe("the reconnect overlay", () => {
     const input = target.querySelector<HTMLInputElement>('input[aria-label="owned field"]')!;
     input.focus();
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(input);
@@ -236,7 +250,7 @@ describe("the reconnect overlay", () => {
     input.focus();
     await dropConnection();
     overlayStack.ids = ["search", "settings"];
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).not.toBe(input);
@@ -250,7 +264,7 @@ describe("the reconnect overlay", () => {
     overlayStack.ids = ["launcher"];
     input.focus();
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(input);
@@ -269,7 +283,7 @@ describe("the reconnect overlay", () => {
     open();
     input.focus();
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(input);
@@ -283,7 +297,7 @@ describe("the reconnect overlay", () => {
     const card = target.querySelector<HTMLElement>('.survey-overlay[role="dialog"] .survey-card')!;
     expect(document.activeElement).toBe(card);
     await dropConnection();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(card);
@@ -301,7 +315,7 @@ describe("the reconnect overlay", () => {
     await dropConnection();
     expect(blur).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(input);
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(input);
@@ -312,7 +326,7 @@ describe("the reconnect overlay", () => {
     behind.focus();
     await dropConnection();
     document.documentElement.setAttribute("data-launcher-shown", "");
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).not.toBe(behind);
@@ -324,7 +338,7 @@ describe("the reconnect overlay", () => {
     behind.focus();
     await dropConnection();
     showLauncher();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).not.toBe(behind);
@@ -338,17 +352,17 @@ describe("the reconnect overlay", () => {
     behind.focus();
     await dropConnection();
     showLauncher();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(600);
     await tick();
     hideLauncher();
     await tick();
     expect(document.activeElement).not.toBe(behind);
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(behind);
@@ -359,15 +373,15 @@ describe("the reconnect overlay", () => {
     behind.focus();
     await dropConnection();
     showLauncher();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     hideLauncher();
     await tick();
     expect(document.activeElement).not.toBe(behind);
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(behind);
@@ -378,16 +392,16 @@ describe("the reconnect overlay", () => {
     old.focus();
     await dropConnection();
     showLauncher();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     const newer = document.body.appendChild(document.createElement("input"));
     newer.focus();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(600);
     await tick();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     hideLauncher();
@@ -398,9 +412,9 @@ describe("the reconnect overlay", () => {
 
   test("a deferred restore carried through a second outage cannot run during a third outage", async () => {
     const behind = await deferredIntoSecondOutage();
-    ui.ws = "open";
+    watchStatus("open");
     flushSync();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     flushSync();
     await tick();
     await tick();
@@ -409,11 +423,11 @@ describe("the reconnect overlay", () => {
 
   test("a deferred restore carried through a second outage cannot run after a later opening", async () => {
     const behind = await deferredIntoSecondOutage();
-    ui.ws = "open";
+    watchStatus("open");
     flushSync();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     flushSync();
-    ui.ws = "open";
+    watchStatus("open");
     flushSync();
     await tick();
     await tick();
@@ -429,7 +443,7 @@ describe("the reconnect overlay", () => {
     behind.focus();
     await dropConnection();
     takeKeyboard();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).not.toBe(behind);
@@ -441,7 +455,7 @@ describe("the reconnect overlay", () => {
     await dropConnection();
     const other = document.body.appendChild(document.createElement("button"));
     other.focus();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(other);
@@ -454,7 +468,7 @@ describe("the reconnect overlay", () => {
     const focus = vi.spyOn(behind, "focus");
     const before = tabFocusPulse.value;
     behind.remove();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(focus).not.toHaveBeenCalled();
@@ -470,7 +484,7 @@ describe("the reconnect overlay", () => {
     await dropConnection();
     const focus = vi.spyOn(input, "focus");
     host.remove();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(focus).not.toHaveBeenCalled();
@@ -486,7 +500,7 @@ describe("the reconnect overlay", () => {
     const before = tabFocusPulse.value;
     await dropConnection();
     showSurvey({ surveyId: "one", bodyMarkdown: "Question", options: ["Yes"] }, "surveyed");
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(tabFocusPulse.value).toBe(before);
@@ -499,7 +513,7 @@ describe("the reconnect overlay", () => {
     const target = await readyActions();
     button(target, "Restart connection").focus();
     button(target, "Restart connection").click();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
     await tick();
     expect(document.activeElement).toBe(behind);
@@ -508,7 +522,7 @@ describe("the reconnect overlay", () => {
   test("every watcher retry status says reconnecting in the title and dialog name", async () => {
     const target = await dropConnection();
     for (const status of ["reconnecting", "connecting"] as const) {
-      ui.ws = status;
+      watchStatus(status);
       await tick();
       expect(target.querySelector(".title")?.textContent).toBe("reconnecting to the chan server");
       expect(target.querySelector(".overlay")?.getAttribute("aria-label")).toBe("reconnecting to the chan server");
@@ -527,7 +541,7 @@ describe("the reconnect overlay", () => {
     const target = await dropConnection();
     expect(target.querySelector(".actions")).toBeNull();
     vi.advanceTimersByTime(3_000);
-    ui.ws = "connecting";
+    watchStatus("connecting");
     await tick();
     vi.advanceTimersByTime(4_399);
     await tick();
@@ -546,9 +560,9 @@ describe("the reconnect overlay", () => {
     desktopWindow("dev-1");
     const target = await readyActions();
     expect(target.querySelector(".actions")).not.toBeNull();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(600);
     await tick();
@@ -582,9 +596,9 @@ describe("the reconnect overlay", () => {
     button(target, "Restart connection").click();
     await vi.waitFor(() => expect(button(target, "Restart connection").disabled).toBe(false));
     await vi.waitFor(() => expect(document.activeElement).toBe(button(target, "Restart connection")));
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(8_000);
     await tick();
@@ -602,9 +616,9 @@ describe("the reconnect overlay", () => {
     button(target, "Restart connection").click();
     await tick();
     expect(finish).toBeTypeOf("function");
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(8_000);
     await tick();
@@ -627,9 +641,9 @@ describe("the reconnect overlay", () => {
     const target = await readyActions();
     button(target, "Restart connection").click();
     await tick();
-    ui.ws = "open";
+    watchStatus("open");
     await tick();
-    ui.ws = "reconnecting";
+    watchStatus("reconnecting");
     await tick();
     vi.advanceTimersByTime(8_000);
     await tick();

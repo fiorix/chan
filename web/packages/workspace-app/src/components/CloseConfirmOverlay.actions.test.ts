@@ -30,6 +30,7 @@ vi.mock("../api/client", async (importOriginal) => {
 import { closeWindowRefusal, hideWindowFromCloseConfirm, requestCloseWindow } from "../api/desktop";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { discardWindowSession, ui } from "../state/store.svelte";
+import { linkHealth, resetLinkHealthForTests, setLinkWatchStatus } from "../state/linkHealth.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 
@@ -39,6 +40,9 @@ let view: Record<string, unknown> | null = null;
 let target: HTMLElement;
 
 beforeEach(async () => {
+  resetLinkHealthForTests();
+  ui.disconnectBlocking = false;
+  setLinkWatchStatus("open");
   (window as TauriWindow).__TAURI_INTERNALS__ = { invoke: async () => {} };
   ui.ws = "open";
   target = document.createElement("div");
@@ -54,6 +58,8 @@ afterEach(() => {
   document.body.innerHTML = "";
   delete (window as TauriWindow).__TAURI_INTERNALS__;
   ui.ws = "connecting";
+  ui.disconnectBlocking = false;
+  resetLinkHealthForTests();
   vi.clearAllMocks();
 });
 
@@ -82,6 +88,21 @@ function action(label: string): HTMLButtonElement {
 }
 
 describe("the close prompt", () => {
+  test("stays open during an uncovered outage and cancels when the cover appears", async () => {
+    setLinkWatchStatus("reconnecting");
+    ui.ws = "reconnecting";
+    expect(linkHealth.outage).not.toBeNull();
+    const { answer } = await ask();
+    expect(target.querySelector(".overlay")).not.toBeNull();
+    ui.ws = "connecting";
+    await tick();
+    expect(target.querySelector(".overlay")).not.toBeNull();
+    ui.disconnectBlocking = true;
+    await tick();
+    expect(target.querySelector(".overlay")).toBeNull();
+    await expect(answer).resolves.toBe("cancel");
+  });
+
   test("offers Hide, Close and Cancel, with no spinner", async () => {
     await ask();
 
