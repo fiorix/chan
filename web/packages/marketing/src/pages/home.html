@@ -101,13 +101,13 @@
     <li class="tour-beat is-minor" id="files" data-beat="files">
       <p class="section-label"><span>03.1 /</span> FILE BROWSER</p>
       <h2>Files, beside the shell<span class="orange">.</span></h2>
-      <p>From a terminal in the new window, <code>cs pane new</code> splits it to the right or the bottom, and <code>cs open crates</code> opens the directory in the new pane's file browser.</p>
+      <p>From a terminal in the new window, <code>cs pane new right</code> or <code>cs pane new bottom</code> adds a pane beside or below it, and <code>cs open crates</code> opens the directory in the new pane's file browser.</p>
       <a class="text-link" href="/manual/files/">Files <span aria-hidden="true">&#8594;</span></a>
     </li>
     <li class="tour-beat is-minor" id="editor" data-beat="editor">
       <p class="section-label"><span>03.2 /</span> EDITOR</p>
       <h2>Markdown that renders as you type<span class="orange">.</span></h2>
-      <p><code>cs window new</code> opens another window of the workspace, and <code>cs open README.md --window</code> opens the file there, in the editor, with its source one switch away.</p>
+      <p><code>cs window new</code> opens another window of the workspace and prints its id. Use that id in <code>cs open README.md --window &lt;id&gt;</code> to open the file there, in the editor, with its source one switch away.</p>
       <a class="text-link" href="/manual/editor/">The editor <span aria-hidden="true">&#8594;</span></a>
     </li>
     <li class="tour-beat is-minor" id="graph" data-beat="graph">
