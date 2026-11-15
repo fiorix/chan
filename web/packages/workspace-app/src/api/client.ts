@@ -80,6 +80,7 @@ import {
   withTokenQuery as transportWithTokenQuery,
 } from "./transport";
 import type { WatchSocket } from "./transport";
+import type { LinkProbe } from "./linkProbe";
 import type { WatchScopeDir } from "./types";
 
 import {
@@ -1957,16 +1958,19 @@ export interface WatchSubscription {
 /// re-establish per-directory scope subscriptions (the server registry
 /// is per-socket). Returns a `WatchSubscription`: callable as the
 /// disposer, plus typed `subscribeDir` / `unsubscribeDir` helpers.
+/// `link` is the probe the watcher reports its pings and pongs to, for a
+/// caller that reads the link's health from it.
 export function openWatchSocket(
   onEvent: (e: unknown) => void,
   onStatus?: (s: import("./transport").WsStatus, attempt: number) => void,
   onReady?: () => void,
+  link?: LinkProbe,
 ): WatchSubscription {
   // Pass this window's session id and its URL holder hint to the watcher.
   // The transport presents the client holder on every socket dial, including
   // a retained or minted holder for a directly navigated page.
   const holder = holderTagOf(window.location.href) ?? undefined;
-  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder);
+  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder, link);
   const sub = (() => socket.close()) as WatchSubscription;
   sub.subscribeDir = (dir: WatchScopeDir) => socket.send({ type: "sub", dir });
   sub.unsubscribeDir = (dir: WatchScopeDir) => socket.send({ type: "unsub", dir });
