@@ -1,20 +1,22 @@
 <script lang="ts">
-  // The window tab bar: a band across the top of the window holding the pane
-  // tree button, the window's title and the slot the active pane's tab strip
-  // moves into (see Pane.svelte). The title sits after the tree button while
-  // the window has no tabs and at the bar's end, left of the strip's actions,
-  // once it has one. In chan-desktop's title bar its insets keep clear of the
-  // window controls, its content row sits on their centre line, and its empty
-  // stretches drag the window. Where the desktop asks for it (Windows, whose
-  // window has no frame in the mode) the window controls sit over the right
-  // inset, in a layer of their own above every overlay. The band is opaque: terminal background opacity cuts its holes
-  // behind terminal panes only. While the window's Computers launcher is
-  // shown over the page, the band holds neither the tree button nor the
-  // strip: they belong to the covered window. On Windows it holds the
-  // launcher menubar's menus there instead, since the frameless window wears
-  // no menubar, and the window's title after them. A tmux pane has no strip,
-  // so while one is active the band marks the window as tmux's and names no
-  // pane: the window's title names the window.
+  // The window tab bar is a band across the top of the window. It holds the
+  // pane tree button, the window's title, the slot the active pane's tab
+  // strip moves into (see Pane.svelte), and the link indicator at its end.
+  // The title sits after the tree button while the window has no tabs and
+  // at the bar's end, left of the strip's actions, once it has one. In
+  // chan-desktop's title bar its insets keep clear of the window controls,
+  // its content row sits on their centre line, and its empty stretches drag
+  // the window. Where the desktop asks for it (Windows, whose window has no
+  // frame in the mode) the controls sit over the right inset, in a layer of
+  // their own above every overlay. The band is opaque: terminal background
+  // opacity cuts its holes behind terminal panes only. While the window's
+  // Computers launcher is shown over the page, the band holds neither the
+  // tree button, the strip nor the link indicator: they belong to the
+  // covered window. On Windows it holds the launcher's menubar menus there
+  // instead, since the frameless window wears no menubar, and the window's
+  // title after them. A tmux pane has no strip, so while one is active the
+  // band marks the window as tmux's and names no pane: the window's title
+  // names the window.
 
   import { untrack } from "svelte";
   import {
@@ -54,6 +56,7 @@
   } from "../state/windowTabBar.svelte";
   import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
   import { privacy } from "@chan/web-shared/privacy";
+  import LinkIndicator from "./LinkIndicator.svelte";
   import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
 
   // `restored` is false until the boot has restored the window's layout:
@@ -368,6 +371,7 @@
          attribute on the element pressed. -->
     <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
+  {#if !covered}<LinkIndicator placement="tab-bar" />{/if}
   {#if menus.length > 0 || titleShown}
     <!-- While the launcher covers the page the band belongs to the window.
          A frameless window has no menubar and no title of its own, so the
@@ -514,6 +518,10 @@
   .slot.beside-title {
     flex: 1 0 auto;
   }
+  .window-tab-bar > :global(.link-indicator) {
+    /* Matches the tmux badge's end margin: clear of a macOS edge or the Windows controls' inset. */
+    margin-right: 8px;
+  }
   /* The title is a flex item of the row it sits in: the bar's at the start
      and, through places that draw no box of their own, the strip's or the
      bar's at the end. At the start it takes the room the strip leaves and
@@ -579,9 +587,9 @@
     }
   }
   /* Black with white text in either theme: it names tmux, not a state the
-     theme colours. In the side toggle's type, and as far from the band's
-     end (the bar's 4px gap and this margin) as the strip keeps its last
-     control (its 8px padding and the same gap). */
+     theme colours. In the side toggle's type; its 8px margin and the bar's
+     4px gap match the strip's 8px end padding and gap when the link indicator
+     is absent, or separate the badge from it when it shows. */
   .tmux-badge {
     flex: none;
     margin-right: 8px;

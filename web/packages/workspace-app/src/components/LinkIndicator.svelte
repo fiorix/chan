@@ -108,6 +108,7 @@
     bind:this={trigger}
     class="link-indicator"
     class:status={placement === "status"}
+    data-placement={placement}
     data-state={linkHealth.state}
     type="button"
     aria-label={name}
@@ -126,7 +127,7 @@
 
 {#if visible && open}
   <div id={popoverId} class="link-popover" bind:this={popover} role="group" aria-label="Connection details" style:width={`${POPOVER_WIDTH}px`} use:preserveFocus use:clampMenu={anchor} use:portal>
-    <div class="state-age">{linkStateAge(linkHealth.state, linkHealth.since, now)}</div>
+    <div class="state-age">{linkStateAge(linkHealth.state, linkHealth.since, now, linkHealth.waitMs)}</div>
     <svg class="sparkline" viewBox={`0 0 ${LINK_SPARKLINE_WIDTH} ${LINK_SPARKLINE_HEIGHT}`} role="img" aria-label="Recent round-trip times and missed pings">
       <path class="baseline" d={`M ${LINK_SPARKLINE_EDGE} ${LINK_SPARKLINE_BASELINE} L ${LINK_SPARKLINE_WIDTH - LINK_SPARKLINE_EDGE} ${LINK_SPARKLINE_BASELINE}`} />
       {#each sparkline.paths as path}<path class="reading" d={path} />{/each}
@@ -166,6 +167,7 @@
   .link-indicator[data-state="slow"] { color: var(--warn-text); }
   .link-indicator[data-state="stalled"], .link-indicator[data-state="down"] { color: var(--danger-text); }
   .link-indicator.status { height: auto; padding: 0; }
+  .link-indicator[data-placement="tab-bar"] .label { display: inline-block; min-width: 13ch; text-align: left; }
   .glyph { width: 16px; height: 16px; flex: none; }
   .link-popover {
     position: fixed;
