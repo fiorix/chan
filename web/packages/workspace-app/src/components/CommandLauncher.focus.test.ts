@@ -26,6 +26,9 @@ import CommandLauncher from "./CommandLauncher.svelte";
 import StandInSurface, { type SurfaceGrab } from "./CommandLauncher.testSurface.svelte";
 import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
+import BubbleOverlay from "./BubbleOverlay.svelte";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { allCommands, registerCommands } from "../state/commands";
 import "../state/commands/global";
 import {
@@ -240,6 +243,8 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
+  resetSurveysForTest();
+  resetLayout();
   if (pathPromptState.open) resolvePathPrompt(null);
   if (promptState.open) resolvePrompt(null);
   document.body.innerHTML = "";
@@ -362,6 +367,49 @@ describe("focus when the launcher closes", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(tabFocusPulse.value).toBe(pulses);
     expect(document.activeElement).toBe(document.body);
+  });
+
+  test.each([
+    { survey: true, removed: false },
+    { survey: true, removed: true },
+    { survey: false, removed: false },
+    { survey: false, removed: true },
+  ])("a settled run respects a terminal survey (survey $survey, removed origin $removed)", async ({ survey, removed }) => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    const target = await openFromOrigin();
+    const surveyTarget = document.createElement("div");
+    document.body.append(surveyTarget);
+    mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+    await runFromLauncher(target, "Wait on window");
+    expect(runHeld).toHaveBeenCalledOnce();
+    expect(launcherPanel.open).toBe(false);
+    if (survey) {
+      showSurvey({ surveyId: "launcher-focus-survey", title: null, bodyMarkdown: "Choose an option", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card")!;
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      // A temporarily unfocused survey still owns its terminal's modal slot.
+      card.blur();
+    }
+    expect(document.activeElement).toBe(document.body);
+    if (removed) origin.remove();
+    const focus = vi.spyOn(origin, "focus");
+    try {
+      const pulses = tabFocusPulse.value;
+      held!.resolve();
+      await flush();
+      expect(tabFocusPulse.value).toBe(pulses + (!survey && removed ? 1 : 0));
+      if (!survey && !removed) {
+        expect(focus).toHaveBeenCalledOnce();
+        expect(document.activeElement).toBe(origin);
+      } else {
+        expect(focus).not.toHaveBeenCalled();
+        expect(document.activeElement).toBe(document.body);
+      }
+    } finally {
+      focus.mockRestore();
+    }
   });
 
   test("a window action that closes the launcher after its success card hands focus back", async () => {
