@@ -122,6 +122,118 @@ describe("the dialog's Load mode", () => {
     expect(write.mock.lastCall?.[4], "whether Bootstrap preserves config.toml").toBe(keep);
   }
 
+  function recordConfigFiles(files: Record<string, { config: TeamConfigWire | Error; bytes: string }>) {
+    return recordRequests((request) => {
+      const body = request.body as { dir: string; config: TeamConfigWire; keep_config?: boolean };
+      if (request.path === "/api/team-config/read") {
+        const file = files[body.dir];
+        return file.config instanceof Error
+          ? json({ error: file.config.message }, { status: 400 })
+          : json(file.config);
+      }
+      if (request.path === "/api/team-config/write") {
+        // Model replacement at the transport boundary; the route tests cover
+        // the TOML serializer and filesystem byte preservation.
+        if (!body.keep_config) files[body.dir].bytes = JSON.stringify(body.config);
+        return json({ error: "stop after the config request" }, { status: 400 });
+      }
+      return json({});
+    });
+  }
+
+  test.each([false, true])("Bootstrap refuses an unreadable changed directory (Load attempted: %s)", async (load) => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const invalid = '# unfinished hand edit\nhost_name = "';
+    const files = {
+      "saved-team": { config: loadedWire(), bytes: "saved config" },
+      "other-team": { config: new Error("invalid config.toml in other-team"), bytes: invalid },
+    };
+    const requests = recordConfigFiles(files);
+    try {
+      const target = await openLoad();
+      await enter(dirInput(target), "saved-team");
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')).not.toBeNull());
+
+      type(dirInput(target), "other-team");
+      if (load) {
+        dirInput(target).dispatchEvent(new Event("change", { bubbles: true }));
+        await vi.waitFor(() => expect(target.querySelector(".team-load-error")?.textContent)
+          .toContain("invalid config.toml in other-team"));
+      }
+      await settle();
+      const bootstrap = target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!;
+      expect(bootstrap.disabled).toBe(false);
+      bootstrap.click();
+
+      await vi.waitFor(() => expect(target.querySelector(".team-dialog-error")?.textContent)
+        .toContain("bootstrap failed: invalid config.toml in other-team"));
+      expect(requests.filter((request) => request.path === "/api/team-config/write")).toEqual([]);
+      expect(files["other-team"].bytes).toBe(invalid);
+      expect(requests.filter((request) => request.path === "/api/team-config/read")
+        .map((request) => request.body)).toEqual([
+          { dir: "saved-team" },
+          ...(load ? [{ dir: "other-team" }] : []),
+          { dir: "other-team" },
+        ]);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
+  test("Bootstrap preserves the new directory after loading its valid config", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const other = { ...loadedWire(), team_name: "other-team", host_name: "Morpheus", host_handle: "@@Morpheus", tab_group: "other-group" };
+    const saved = '# hand-edited B\nhost_name = "Morpheus"\n';
+    const files = {
+      "saved-team": { config: loadedWire(), bytes: "saved config" },
+      "other-team": { config: other, bytes: saved },
+    };
+    const requests = recordConfigFiles(files);
+    try {
+      const target = await openLoad();
+      await enter(dirInput(target), "saved-team");
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')?.textContent).toContain("saved-team/config.toml"));
+      await enter(dirInput(target), "other-team");
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')?.textContent).toContain("other-team/config.toml"));
+
+      target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!.click();
+
+      await vi.waitFor(() => expect(target.querySelector(".team-dialog-error")?.textContent).toContain("stop after the config request"));
+      expect(requests.filter((request) => request.path === "/api/team-config/write")).toMatchObject([
+        { body: { dir: "other-team", config: { host_name: "Morpheus", tab_group: "other-group" }, keep_config: true } },
+      ]);
+      expect(files["other-team"].bytes).toBe(saved);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
+  test("Bootstrap refuses after a failed reload of the same directory", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const file: { config: TeamConfigWire | Error; bytes: string } = { config: loadedWire(), bytes: "saved config" };
+    const requests = recordConfigFiles({ "saved-team": file });
+    try {
+      const target = await openLoad();
+      await enter(dirInput(target), "saved-team");
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')).not.toBeNull());
+      file.config = new Error("invalid config.toml in saved-team");
+      file.bytes = '# unfinished hand edit\nhost_name = "';
+      const invalid = file.bytes;
+
+      dirInput(target).dispatchEvent(new Event("change", { bubbles: true }));
+      await vi.waitFor(() => expect(target.querySelector(".team-load-error")?.textContent).toContain("invalid config.toml in saved-team"));
+      target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!.click();
+
+      await vi.waitFor(() => expect(target.querySelector(".team-dialog-error")?.textContent)
+        .toContain("bootstrap failed: invalid config.toml in saved-team"));
+      expect(requests.filter((request) => request.path === "/api/team-config/write")).toEqual([]);
+      expect(file.bytes).toBe(invalid);
+      expect(requests.filter((request) => request.path === "/api/team-config/read")).toHaveLength(3);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
   test("reads the named directory's config and names the file it found", async () => {
     vi.spyOn(api, "list").mockResolvedValue([]);
     const read = vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());

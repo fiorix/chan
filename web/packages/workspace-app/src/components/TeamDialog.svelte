@@ -180,6 +180,7 @@
   /// refresh the directory autocomplete, and clear any stale load
   /// result so the surfaced config never lags the typed path.
   function onTeamDirInput(value: string): void {
+    delete config.loadedConfigSnapshot;
     syncTabGroupToPath();
     void refreshDirSuggestions(value);
     loadError = null;
@@ -212,6 +213,7 @@
         memberCount: wire.members.length,
       };
     } catch (err) {
+      delete config.loadedConfigSnapshot;
       loadError = (err as Error).message ?? String(err);
     } finally {
       busy = false;
