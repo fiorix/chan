@@ -2,7 +2,7 @@
 // the file on disk. Edited Load and New exercise the ordinary save path.
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
@@ -365,6 +365,14 @@ export default {
       }
     } finally {
       page.off("pageerror", pageError);
+      for (const leg of report.legs) {
+        try {
+          rmSync(join(ctx.workspaceDir, leg.dir), { recursive: true, force: true });
+          leg.directoryRemoved = true;
+        } catch (error) {
+          report.cleanupErrors.push(maskTokens(error?.stack ?? String(error)));
+        }
+      }
       save();
     }
     const failures = report.legs.filter((leg) => !leg.passed);

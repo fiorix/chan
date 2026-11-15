@@ -7,7 +7,7 @@
 // proves the survey key never reaches the PTY, then its cleanup byte proves
 // focus returned to the terminal. Also asserts the three distinct stdout
 // lines the asking agent branches on, and that [F] writes NO followup
-// artifact anywhere under the workspace (the retired followup-file
+// artifact during its leg anywhere under the workspace (the retired followup-file
 // machinery only ever wrote through the Workspace sandbox, so the workspace
 // tree is the complete universe of possible write targets).
 
@@ -49,8 +49,8 @@ async function clickTab(page, label) {
 }
 
 /// Recursive scan for followup-file artifacts: any `followups/` dir or
-/// any `followup-*.md` file anywhere under root.
-function followupArtifacts(root) {
+/// any `followup-*.md` file anywhere under root, excluding a prior snapshot.
+function followupArtifacts(root, before = new Set()) {
   const hits = [];
   const walk = (dir) => {
     let names;
@@ -76,7 +76,7 @@ function followupArtifacts(root) {
     }
   };
   walk(root);
-  return hits;
+  return hits.filter((path) => !before.has(path));
 }
 
 export default {
@@ -334,6 +334,7 @@ export default {
       }
 
       // Leg 3: [F] is the pure will-follow-up-later signal.
+      const beforeFollowup = new Set(followupArtifacts(ctx.workspaceDir));
       const fol = await surveyLeg("followup", async () => {
         await ctx.shot("survey-before-f");
         await page.keyboard.press("f");
@@ -347,8 +348,8 @@ export default {
         );
       }
 
-      // No followup artifact anywhere under the workspace.
-      const hits = followupArtifacts(ctx.workspaceDir);
+      // Earlier checks may leave team directories; only this leg's writes count.
+      const hits = followupArtifacts(ctx.workspaceDir, beforeFollowup);
       if (hits.length) {
         throw new Error(`followup artifacts written: ${hits.join(", ")}`);
       }
