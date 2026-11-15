@@ -211,7 +211,7 @@ pub fn hostname() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "this machine".to_string())
+        .unwrap_or_else(|| "local machine".to_string())
 }
 
 /// Authorization state owned by one gateway connect attempt. The matching
