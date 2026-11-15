@@ -108,6 +108,8 @@ async function suiteWindow(ctx, name) {
   url.searchParams.set("w", `pane-focus-226-${name}-${RUN}`);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+  // This fresh window must subscribe before a preference write broadcasts.
+  await ctx.waitWindowLive(url.searchParams.get("w"));
   return page;
 }
 

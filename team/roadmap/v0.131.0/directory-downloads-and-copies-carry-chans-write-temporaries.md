@@ -1,6 +1,6 @@
 # Directory downloads and copies carry chan's write temporaries
 
-Status: accepted for v0.131.0 by the owner on 2026-11-14 (`dev/v0131/decisions.md`, point 11: "as you recommend"); not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-14 (`dev/v0131/decisions.md`, point 11: "as you recommend"); implemented, with the proofs below.
 
 Record: a follow-up of v0.130.0 with no row (its release record, "Follow-ups", the listing walks; `dev/v0130/reports/walktmp-1-handback.md`): the terminal tenant's directory download archives `.chan-write-*` temporaries and `.git` as they are; directory copies (`rooted_fs::copy_subtree`, `MiniWorkspace::copy_tree_plain`) copy a temporary present in the source; and the doc of `excluded_dirs::directory_names` says "every directory". The decisions document for v0.131.0 sorted it as a row of its own, keeping `.git` in the download; the owner took that recommendation. The case-insensitive spellings of the prefix were dropped there (chan writes lowercase only; a user's `.CHAN-WRITE-x` is their file).
 
@@ -28,3 +28,15 @@ Read at `f7457becb`, by reading.
 
 1. chan-server and chan-workspace tests: a directory holding a `.chan-write-*` file and a `.git` directory downloads without the first and with the second; both copy walkers leave the temporary behind. Red on today's code.
 2. A test that a temporary renamed away while the archive is built does not end the stream with an error, if the build can stage that race deterministically; otherwise a reading in a guest, recorded.
+
+## Built, 2026-11-14
+
+Directory archives and both copy walkers use `fs_ops::is_atomic_write_temp_name` before metadata access or descent. Their preflights use the same predicate, so a temporary is neither counted nor inspected before a walker excludes it. The terminal archive retains `.git`, other control directories, dotfiles and uppercase lookalikes; the workspace copy keeps its existing control-directory exclusions and the standalone copy keeps those directories. The archive walk preserves tar's traversal order, directory naming, symlink handling and special-entry headers. `excluded_dirs::directory_names` describes the listing walk it actually uses.
+
+The server regressions hold a real atomic write open, archive its directory, and assert that its temporary file and a reserved stage are absent while ordinary entries remain. A second test commits the real save at the first tar header write, after enumeration, and verifies the complete archive and published contents. The copy tests hold live writes too; a separate preflight pin puts a symlink inside a reserved stage. A FIFO and dangling-symlink control preserves archive names and entry types.
+
+Proofs are under `dev/v0131-team/evidence/Core131/writetemps/`. `red-workspace.log` has three assertion failures: both copies include reserved entries, and preflight enters a reserved stage. `red-server.log` has two assertion failures: reserved entries enter the tar, and the deterministic save race returns `NotFound`. `green-workspace.log` and `green-server.log` pass the focused workspace checks and all 55 transfer checks, including encoded-size and ceiling coverage. `mutation-results.json` records removal of each of the five reserved-name guards, each killed by its named assertion; `mutation-special-path.result.json` records the special-header path mutation killed by the FIFO control. `restored-workspace.log` and `restored-server.log` record passing checks after restoring every mutation.
+
+The workspace and server design documents and the manual's Files download description state the exclusion. Full crate suites and native macOS/Windows execution were not run for this row. The concurrent-save case is deterministic in-process, so it needs no guest timing sample. Transfer ceilings and unrelated filesystem errors keep their existing behavior.
+
+Note on the server red, added at the merge: `red-server.log` was taken with the explicit walk already in place and its reserved-name guard removed (the race test calls that walk by name and does not compile against the base's `append_dir_all`), so it proves the guard, not that `append_dir_all` itself aborted on a rename; that part rests on reading tar 0.4.45's walk, which queues every child before the first header.

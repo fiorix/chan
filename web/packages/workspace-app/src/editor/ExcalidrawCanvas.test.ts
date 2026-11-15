@@ -3,7 +3,7 @@
 import { flushSync, mount, tick, unmount, type ComponentProps } from "svelte";
 // @ts-expect-error Svelte publishes no type for the reactive prop proxy used by its rune transform.
 import { proxy } from "svelte/internal/client";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import ExcalidrawCanvas, { canonicalJson, distinctIds, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
 import { boardPropsFromRender } from "../__tests__/excalidrawLibrary";
@@ -112,12 +112,28 @@ vi.mock("@excalidraw/excalidraw", () => modules["@excalidraw/excalidraw"]);
 const mounted: Array<Record<string, unknown>> = [];
 const renderedBoard = () => boardPropsFromRender(renderMock.mock.calls.at(-1)![0]);
 
+const resizeObservers = new Set<{ targets: Set<Element>; notify: () => void }>();
+beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", class {
+    targets = new Set<Element>();
+    notify: () => void;
+    constructor(callback: ResizeObserverCallback) {
+      this.notify = () => callback([], this as unknown as ResizeObserver);
+      resizeObservers.add(this);
+    }
+    observe(target: Element): void { this.targets.add(target); }
+    disconnect(): void { resizeObservers.delete(this); }
+  });
+});
+
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
   document.body.innerHTML = "";
   createRootMock.mockClear();
   renderMock.mockClear();
   unmountMock.mockClear();
+  resizeObservers.clear();
+  vi.unstubAllGlobals();
 });
 
 describe("ExcalidrawCanvas island", () => {
@@ -361,6 +377,7 @@ type FakeApi = {
   getFiles: () => Record<string, unknown>;
   addFiles: ReturnType<typeof vi.fn>;
   updateScene: ReturnType<typeof vi.fn>;
+  refresh: ReturnType<typeof vi.fn>;
   setElements: (next: Record<string, unknown>[]) => void;
   setAppState: (patch: Record<string, unknown>) => void;
   setFiles: (next: Record<string, unknown>) => void;
@@ -392,6 +409,7 @@ function fakeApi(initial: WireElement[] = [], report: () => void = () => {}): Fa
     getFiles: () => files,
     addFiles: vi.fn(),
     updateScene,
+    refresh: vi.fn(),
     setElements(next) {
       elements = next;
     },
@@ -466,6 +484,126 @@ const pushedAppStates = (session: SessionStub) =>
 function libraryChange(): void {
   renderedBoard().onChange();
 }
+
+describe("the canvas position after surrounding layout changes", () => {
+  async function positionedBoard() {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const changed = vi.fn();
+    const board = await mountBound([wireEl("kept", 1)], changed);
+    board.binding.applySnapshot([wireEl("kept", 1)], {}, {});
+    const host = document.querySelector<HTMLDivElement>(".excalidraw-host")!;
+    let box = new DOMRect(40, 33, 900, 600);
+    host.getBoundingClientRect = () => box;
+    board.api.setAppState({ offsetLeft: 40, offsetTop: 33, zoom: { value: 1.5 }, scrollX: 10, scrollY: -20, selectedElementIds: { kept: true } });
+    board.api.refresh.mockImplementation(() => {
+      board.api.setAppState({ offsetLeft: box.left, offsetTop: box.top });
+      libraryChange();
+    });
+    const paint = async () => {
+      await tick();
+      await Promise.resolve();
+      const ready = [...frames.values()];
+      frames.clear();
+      for (const frame of ready) frame(performance.now());
+    };
+    await paint();
+    board.api.refresh.mockClear();
+    return { ...board, changed, host, frames, paint, move: (left: number, top = 33, width = 900) => { box = new DOMRect(left, top, width, 600); } };
+  }
+
+  test("a containing block resize refreshes a same-size board without editing the scene", async () => {
+    const b = await positionedBoard();
+    const view = structuredClone(b.api.getAppState());
+    b.move(162);
+    for (const observer of resizeObservers) {
+      if (observer.targets.has(b.host.parentElement!)) {
+        observer.notify();
+        observer.notify();
+      }
+    }
+    expect(b.frames.size).toBe(1);
+    await b.paint();
+    expect(b.api.refresh).toHaveBeenCalledTimes(1);
+    expect(b.api.getAppState()).toEqual({ ...view, offsetLeft: 162 });
+    // Flush the normal serializer, including the live-session path.
+    (mounted.at(-1)!.flushPendingEdits as () => void)();
+    expect(b.changed).not.toHaveBeenCalled();
+    expect(b.session.pushScene).not.toHaveBeenCalled();
+    for (const observer of resizeObservers) observer.notify();
+    await b.paint();
+    expect(b.api.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(["style", "childList", "scroll", "animationend", "transitionend"])("an ancestor's %s can translate the canvas without a resize", async (kind) => {
+    const b = await positionedBoard();
+    b.move(162, 61);
+    const ancestor = b.host.parentElement!.parentElement!;
+    if (kind === "style") ancestor.style.marginLeft = "122px";
+    else if (kind === "childList") ancestor.prepend(document.createElement("aside"));
+    else ancestor.dispatchEvent(new Event(kind, { bubbles: kind !== "scroll" }));
+    await b.paint();
+    expect(b.api.refresh).toHaveBeenCalledTimes(1);
+    expect(b.api.getAppState()).toMatchObject({ offsetLeft: 162, offsetTop: 61 });
+  });
+
+  test("a hidden board is measured only after it has visible geometry again", async () => {
+    const b = await positionedBoard();
+    b.move(162, 33, 0);
+    b.host.parentElement!.classList.add("offscreen");
+    await b.paint();
+    expect(b.api.refresh).not.toHaveBeenCalled();
+    b.move(162);
+    b.host.parentElement!.classList.remove("offscreen");
+    await b.paint();
+    expect(b.api.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("receiving the API schedules a measurement without another layout event", async () => {
+    const b = await positionedBoard();
+    b.move(162);
+    renderedBoard().excalidrawAPI(b.api);
+    await b.paint();
+    expect(b.api.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("teardown cancels queued work and removes the observers and listeners", async () => {
+    const b = await positionedBoard();
+    b.move(162);
+    document.dispatchEvent(new Event("scroll"));
+    expect(b.frames.size).toBe(1);
+    const lateCallbacks = [...resizeObservers].map((observer) => observer.notify);
+    await unmount(mounted.pop()!);
+    expect(b.frames.size).toBe(0);
+    expect(resizeObservers.size).toBe(0);
+    document.body.style.marginTop = "10px";
+    document.dispatchEvent(new Event("scroll"));
+    document.body.dispatchEvent(new Event("animationend", { bubbles: true }));
+    for (const callback of lateCallbacks) callback();
+    expect(b.frames.size).toBe(0);
+    await b.paint();
+    expect(b.api.refresh).not.toHaveBeenCalled();
+    expect(b.frames.size).toBe(0);
+  });
+
+  test("a late observer callback cannot schedule work after an idle board unmounts", async () => {
+    const b = await positionedBoard();
+    expect(b.frames.size).toBe(0);
+    const lateCallbacks = [...resizeObservers].map((observer) => observer.notify);
+    expect(lateCallbacks.length).toBeGreaterThan(0);
+    await unmount(mounted.pop()!);
+    expect(resizeObservers.size).toBe(0);
+    for (const callback of lateCallbacks) callback();
+    expect(b.frames.size).toBe(0);
+    await b.paint();
+    expect(b.api.refresh).not.toHaveBeenCalled();
+  });
+});
 
 describe("a board that has not taken its first seed", () => {
   test("hands its session nothing", async () => {

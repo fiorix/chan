@@ -72,9 +72,15 @@
       });
       return;
     }
-    // A survey on a hidden terminal must not touch the visible tab's focus.
-    // Keep the tracked survey + return target intact for the later tab return.
-    if (!shown || !eligible) return;
+    // A hidden survey must not hold the visible tab's keyboard; an unfocused
+    // one must not hold another pane's. Keep the survey and its return target
+    // intact for the later tab or pane return.
+    if (!shown || !eligible) {
+      if (focusedSurveyId && !eligible && card?.contains(document.activeElement)) {
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
+      return;
+    }
     if (!focusedSurveyId) {
       const current = document.activeElement;
       if (current instanceof HTMLElement && current !== document.body) {

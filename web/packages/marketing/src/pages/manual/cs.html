@@ -84,6 +84,7 @@
       <li>In an ssh session opened from a chan terminal, only <code>cs terminal status</code> and <code>cs dump-skill</code> work, where <code>cs</code> is installed.</li>
       <li>A workspace command in a standalone terminal refuses with <em>this is a standalone terminal</em>.</li>
       <li><code>cs window rm</code> deletes a window and its saved layout, and refuses one with running terminals unless you add <code>--force</code>; a devserver's window removed from a desktop terminal gets no such check. <code>hide</code> keeps a window to reopen.</li>
+      <li>For a standalone terminal, <code>cs window new</code> requests focus for the new window once the desktop has built it. The operating system decides whether to grant focus.</li>
       <li><code>cs window list</code> is empty under a standalone <code>chan serve</code>, which keeps no windows.</li>
       <li><code>se</code> matches both search and session, and <code>t</code> both terminal and tunnel, so neither is accepted as a prefix.</li>
       <li><code>-v</code>, <code>-vv</code> and <code>-vvv</code> raise logging.</li>

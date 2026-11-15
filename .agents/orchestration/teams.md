@@ -4,13 +4,15 @@
 
 ## Provisioning
 
-`cs terminal team new <dir>` validates the config (`--config <file>` or `--stdin`), materializes the team directory and spawns the members; `cs terminal team load <dir>` respawns a saved team from its `config.toml` and regenerates nothing. `--brief FILE` folds a Markdown file verbatim into the generated bootstrap, `--mcp-env on|off` sets the team's MCP env toggle, and `--tabs` stacks the members in one pane instead of the config's grid. `--script` emits the whole flow as a paste-and-run shell script and mutates nothing: each member's `cs terminal new` line carries its `env` as `--env` entries, validated when the line runs, and the team directory is joined to `$PWD` once at the top, so run a generated script from the workspace root. A `load` script writes `bootstrap.md` only where none exists, so a saved team keeps the brief it was created with and any hand edits.
+`cs terminal team new <dir>` validates the config (`--config <file>` or `--stdin`), materializes the team directory and spawns the members; `cs terminal team load <dir>` respawns a saved team from its `config.toml` and regenerates nothing. `--brief FILE` folds a Markdown file verbatim into the generated bootstrap, `--mcp-env on|off` sets the team's MCP env toggle, and `--tabs` stacks the members in one pane instead of the config's grid. `--script` emits the whole flow as a paste-and-run shell script and mutates nothing: each member's `cs terminal new` line carries its `env` as `--env` entries, validated when the line runs, and the team directory is joined to `$PWD` once at the top, so run a generated script from the workspace root. A `load` script writes `config.toml` and `bootstrap.md` only where each is missing, preserving existing files byte for byte. A `new` script writes both files from the supplied config and brief.
 
 The config names `team_name`, `host_name`, `host_handle`, `tab_group` and one to nine `[[members]]` with exactly one `is_lead`. A member has a `handle` (its `$CHAN_TAB_NAME`), a `command`, an optional `env` and an optional `position = { row, col }` on a pane grid capped at nine panes. The submit agent is derived from the command by whole-word match (agy, claude, codex, gemini, kimi, muse, opencode); a recognized `CHAN_AGENT` in the member env overrides it, `none` or `shell` forces a plain shell member with no chord and no identity poke, and an unrecognized value falls through to the sniff. A member's `env` cannot set a key chan sets at spawn, except a `CHAN_TAB_NAME` equal to its own handle. That derivation sets the member's chord and what `cs terminal list` reports; `cs terminal write --submit` encodes whatever the sender names.
 
 ## The team directory
 
-The directory lives inside the workspace and is written through the `Workspace` contract, so it is sandboxed, atomic, and indexed and graphed like any other content:
+The directory lives inside the workspace. Server routes write through the `Workspace` contract, so their writes are sandboxed and atomic, and the Markdown files are indexed and graphed like other content. Generated scripts write directly through the shell.
+
+The directory layout is:
 
 ```text
 {dir}/

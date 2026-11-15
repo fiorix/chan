@@ -2,7 +2,7 @@
 //! launch coming forward (`single_instance::come_forward`), a close
 //! confirmation (`serve::on_close_requested`), an open Window menu row
 //! (`show_window` in `main.rs`), a window list or `cs window open` request or
-//! hidden Window menu row (`unbury_window` in `main.rs`), and the About item
+//! hidden Window menu row (`unbury_window` in `main.rs`), the About item
 //! for an existing window (`open_about_window` in `main.rs`), and a requested
 //! terminal once its watcher builds it (`raise_new_terminal_window` in
 //! `main.rs`). Only these explicit requests call [`raise_window`] or
@@ -817,6 +817,25 @@ mod tests {
     }
 
     #[test]
+    fn requested_terminal_menu_raise_resolves_the_minted_registry_id() {
+        let main = production(include_str!("main.rs"));
+        let explicit = body(main, "\nfn spawn_terminal_window_from_launch(");
+        assert!(
+            explicit.contains("serve::resolve_window_label("),
+            "the requested raise must resolve the minted registry id to its native label"
+        );
+        in_order(
+            explicit,
+            &[
+                "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
+                "Ok(id) => {",
+                "let label = serve::resolve_window_label(&app_for_task, &id);",
+                "raise_new_terminal_window(app_for_task, state, label, startup_id);",
+            ],
+        );
+    }
+
+    #[test]
     fn requested_terminal_opens_raise_only_the_new_native_window() {
         let main = production(include_str!("main.rs"));
         let handoff = main.split_once("Request::OpenTerminal {").unwrap().1;
@@ -837,7 +856,9 @@ mod tests {
             explicit,
             &[
                 "serve::spawn_local_terminal_window(Arc::clone(&state)).await",
-                "Ok(label) => raise_new_terminal_window(app_for_task, state, label, startup_id)",
+                "Ok(id) => {",
+                "let label = serve::resolve_window_label(&app_for_task, &id);",
+                "raise_new_terminal_window(app_for_task, state, label, startup_id);",
             ],
         );
         let requested = body(main, "\nfn raise_new_terminal_window(");
@@ -848,7 +869,9 @@ mod tests {
                 "requested_terminal_is_shown(&state, &label)",
                 "app.get_webview_window(&label).is_some()",
                 ".await",
-                "if !ready {\n            return;\n        }",
+                "if !ready {",
+                "requested terminal raise wait stopped",
+                "            );\n            return;\n        }\n        let dispatch",
                 "dispatch.run_on_main_thread(move || {",
             ],
         );
@@ -861,15 +884,14 @@ mod tests {
             &[
                 "tokio::time::Instant::now() >= deadline",
                 "!requested_terminal_is_shown(&state, &label)",
-                "return;",
-                "if let Some(window) = app.get_webview_window(&label)",
+                "                }\n                return;\n            }\n            if let Some(window) = app.get_webview_window(&label)",
                 "raise::raise_window_from_launch(&window, startup_id.as_deref())",
             ],
         );
         assert!(callback.contains(concat!(
             "if tokio::time::Instant::now() >= deadline\n",
             "                || !requested_terminal_is_shown(&state, &label)\n",
-            "            {\n                return;\n            }",
+            "            {\n                if tracing::enabled!(tracing::Level::DEBUG) {",
         )));
         assert_eq!(
             requested
@@ -883,6 +905,27 @@ mod tests {
             production(include_str!("launch_paths.rs")),
         ] {
             assert!(!boot.contains("raise_new_terminal_window("));
+        }
+    }
+
+    #[test]
+    fn requested_terminal_refusal_logging_does_not_hold_locks() {
+        let main = production(include_str!("main.rs"));
+        let requested = body(main, "\nfn raise_new_terminal_window(");
+        let callback = requested
+            .split_once("dispatch.run_on_main_thread(move || {")
+            .unwrap()
+            .1;
+        assert_eq!(callback.matches("tracing::debug!(").count(), 1);
+        let arguments = callback.split_once("tracing::debug!(").unwrap().1;
+        let arguments = arguments.split_once("\n                    );").unwrap().0;
+        assert!(arguments.contains("\"requested terminal raise callback refused\""));
+        let arguments: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+        for call in [".lock(", "put_away("] {
+            assert!(
+                !arguments.contains(call),
+                "refusal logging must snapshot {call} before the debug macro: {arguments}"
+            );
         }
     }
 

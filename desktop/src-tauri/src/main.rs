@@ -8025,7 +8025,10 @@ fn spawn_terminal_window_from_launch(app: &tauri::AppHandle, startup_id: Option<
     let startup_id = startup_id.map(str::to_owned);
     tauri::async_runtime::spawn(async move {
         match serve::spawn_local_terminal_window(Arc::clone(&state)).await {
-            Ok(label) => raise_new_terminal_window(app_for_task, state, label, startup_id),
+            Ok(id) => {
+                let label = serve::resolve_window_label(&app_for_task, &id);
+                raise_new_terminal_window(app_for_task, state, label, startup_id);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "opening standalone terminal window failed");
                 emit_system_notice(
@@ -8063,6 +8066,12 @@ fn raise_new_terminal_window(
         })
         .await;
         if !ready {
+            tracing::debug!(
+                %label,
+                deadline_expired = tokio::time::Instant::now() >= deadline,
+                reason = "window was not ready before the request ended",
+                "requested terminal raise wait stopped",
+            );
             return;
         }
         let dispatch = app.clone();
@@ -8071,6 +8080,42 @@ fn raise_new_terminal_window(
             if tokio::time::Instant::now() >= deadline
                 || !requested_terminal_is_shown(&state, &label)
             {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let record = state.embedded().and_then(|embedded| {
+                        embedded
+                            .local_window_records()
+                            .into_iter()
+                            .find(|record| window_watcher::native_label(record) == label)
+                    });
+                    // Snapshot fields separately so tracing cannot retain a guard
+                    // while another field takes the same lock.
+                    let deadline_expired = tokio::time::Instant::now() >= deadline;
+                    let shutdown_started = state
+                        .shutdown_started
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let hide_pending = state.silent_hides.lock().unwrap().contains(&label);
+                    let put_away = last_window::put_away(&state);
+                    let buried = state
+                        .local_watcher_view()
+                        .is_some_and(|view| view.is_buried(&label));
+                    let record_present = record.is_some();
+                    let record_hidden = record.as_ref().map(|record| record.hidden);
+                    let shown = record
+                        .as_ref()
+                        .is_some_and(|record| window_watcher::should_show(record, &put_away));
+                    tracing::debug!(
+                        %label,
+                        deadline_expired,
+                        shutdown_started,
+                        buried,
+                        hide_pending,
+                        record_present,
+                        ?record_hidden,
+                        shown,
+                        reason = "request expired or window no longer shown",
+                        "requested terminal raise callback refused",
+                    );
+                }
                 return;
             }
             if let Some(window) = app.get_webview_window(&label) {

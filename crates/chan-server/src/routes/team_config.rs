@@ -18,10 +18,9 @@
 //!   followups/    followup-{from}-{to}-{n}.md (owned by `to`)
 //! ```
 //!
-//! All file I/O routes through `Workspace::{read_text,write_text,
-//! create_dir}`, so the team config lives inside the same sandbox +
-//! atomic-write contract as notes content. `config.toml` and the
-//! generated `.md` both pass the editable-text gate. The team's `.md` docs are indexed and graphed like other workspace content.
+//! A `load --script` script writes `config.toml` and `bootstrap.md` only where each is missing, preserving existing files byte for byte. A `new --script` script writes both from the supplied config and brief. The dialog's re-save writes the config while keeping an existing bootstrap.
+//!
+//! Route file I/O goes through `Workspace::{read_text,write_text,create_dir}`, so the team config lives inside the same sandbox and atomic-write contract as notes content. `config.toml` and the generated `.md` both pass the editable-text gate. The team's `.md` docs are indexed and graphed like other workspace content. Generated scripts write files directly through the shell.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -607,9 +606,7 @@ fn heredoc_delimiter(base: &str, body: &str) -> String {
 ///      env + launch), then
 ///   5. an identity poke per agent (`cs terminal write --submit=<agent>`).
 ///
-/// With `keep_bootstrap` (a `load`), step 3 runs only where no
-/// `bootstrap.md` exists, as the route's `keep_bootstrap` write does: a
-/// saved team's own may carry the brief it was created with or hand edits.
+/// With `keep_bootstrap` (a `load`), steps 2 and 3 write each file only where it is missing: a saved team's config may carry comments and formatting, and its bootstrap may carry its brief or hand edits. Without it (a `new`), both files are written from the supplied config and brief. The route's separate `keep_bootstrap` write path always re-saves the config.
 ///
 /// The script resolves `{dir}` against `$PWD` once, at the top, prints the
 /// result, and uses that one value for the tree it writes and for the pokes
@@ -667,7 +664,14 @@ pub(crate) fn generate_bootstrap_script(
         "mkdir -p \"$chan_team_dir\"/tasks \"$chan_team_dir\"/journals \"$chan_team_dir\"/followups\n\n",
     );
 
-    out.push_str("# 2. config.toml (the validated team config).\n");
+    if keep_bootstrap {
+        out.push_str(
+            "# 2. config.toml (the validated team config), only where none exists.\n\
+             if [ ! -e \"$chan_team_dir\"/config.toml ]; then\n",
+        );
+    } else {
+        out.push_str("# 2. config.toml (the validated team config).\n");
+    }
     let config_eof = heredoc_delimiter("CHAN_TEAM_CONFIG_EOF", &config_toml);
     out.push_str(&format!(
         "cat <<'{config_eof}' > \"$chan_team_dir\"/config.toml\n"
@@ -676,7 +680,11 @@ pub(crate) fn generate_bootstrap_script(
     if !config_toml.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("{config_eof}\n\n"));
+    out.push_str(&format!("{config_eof}\n"));
+    if keep_bootstrap {
+        out.push_str("fi\n");
+    }
+    out.push('\n');
 
     let bootstrap_eof = heredoc_delimiter("CHAN_TEAM_BOOTSTRAP_EOF", &bootstrap_md);
     if keep_bootstrap {

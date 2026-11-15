@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { expect, test } from "vitest";
-import { activePane, restoreLayout, serializeLayout, type SerLeaf } from "./tabs.svelte";
+import { activePane, DASHBOARD_MAX_RESTORED_DIRECTORIES, restoreLayout, serializeLayout, type SerLeaf } from "./tabs.svelte";
 
 test.each([false, true])("terminal Program status visibility=%s and width survive serialization", async (open) => {
   await restoreLayout({ k: "l", t: [{ k: "t", n: "Worker", ...(open ? { o: 1 } : {}), iw: 310 }] });
@@ -41,11 +41,90 @@ test("a dashboard's opened directories survive serialization, and none are saved
   expect(tab.indexingExpanded).toEqual(["docs", "docs/api", "notes"]);
   tab.indexingExpanded = undefined;
   expect((serializeLayout() as SerLeaf).t[0].de).toBeUndefined();
+  tab.indexingExpanded = [];
+  expect((serializeLayout() as SerLeaf).t[0].de).toBeUndefined();
   // An entry that is no directory path is dropped, and a repeat is kept once.
-  await restoreLayout({ k: "l", t: [{ k: "d", de: ["", 7, "docs", "docs"] as string[] }] });
+  await expect(restoreLayout({ k: "l", t: [{ k: "d", de: ["", 7, "docs", "docs"] as string[] }] })).resolves.toBeUndefined();
   tab = activePane().tabs[0];
   if (tab.kind !== "dashboard") throw new Error("expected dashboard");
   expect(tab.indexingExpanded).toEqual(["docs"]);
+});
+
+test("dashboard restore drops paths the index cannot list, keeping valid directory names", async () => {
+  await restoreLayout({ k: "l", t: [{ k: "d", de: [
+    "../docs", "docs/../notes", "..", "/docs", "docs//api", "docs/", "",
+    "docs", "docs/api", "docs..old", "__proto__", "docs",
+  ] }] });
+  const tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["docs", "docs/api", "docs..old", "__proto__"]);
+  expect((serializeLayout() as SerLeaf).t[0].de).toEqual(tab.indexingExpanded);
+});
+
+test("dashboard restore bounds opened directories after filtering and deduplication", async () => {
+  const dirs = Array.from({ length: 300 }, (_, i) => `docs-${i}`);
+  await restoreLayout({ k: "l", t: [{ k: "d", de: [
+    ...Array<string>(300).fill("/invalid"), ...Array<string>(300).fill(dirs[0]), ...dirs,
+  ] }] });
+  let tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(dirs.slice(0, DASHBOARD_MAX_RESTORED_DIRECTORIES));
+  await restoreLayout(serializeLayout()!);
+  tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(dirs.slice(0, DASHBOARD_MAX_RESTORED_DIRECTORIES));
+});
+
+test("dashboard restore drops oversized directory entries from a shared hash", async () => {
+  const dirs = Array.from({ length: 128 }, (_, i) => `${i}-${"x".repeat(1_200)}`);
+  const hash = "#s=" + encodeURIComponent(JSON.stringify({ k: "l", t: [{ k: "d", de: [...dirs, "notes"] }] }));
+  expect(hash.length).toBeGreaterThan(150_000);
+  await restoreLayout(JSON.parse(new URLSearchParams(hash.slice(1)).get("s")!));
+  const tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["notes"]);
+});
+
+test("dashboard restore measures directory bytes and keeps the one-KiB boundary", async () => {
+  const boundary = "\u00e9".repeat(512);
+  await restoreLayout({ k: "l", t: [{ k: "d", de: [boundary, `${boundary}x`, "\ud800", "notes"] }] });
+  const tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual([boundary, "notes"]);
+});
+
+test("dashboard restore bounds the encoded poll query and stops at its first overflow", async () => {
+  const dirs = Array.from({ length: 100 }, (_, i) => `${i.toString().padStart(3, "0")}-${"%".repeat(500)}`);
+  await restoreLayout({ k: "l", t: [{ k: "d", de: [...dirs, "notes"] }] });
+  const tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(dirs.slice(0, 21));
+  const query = tab.indexingExpanded!.map((dir) => `open=${encodeURIComponent(dir)}`).join("&");
+  expect(query.length).toBeLessThanOrEqual(32 * 1024);
+  expect(`${query}&open=${encodeURIComponent(dirs[21])}`.length).toBeGreaterThan(32 * 1024);
+});
+
+test.each(["directory:../x", "directory:docs/../x", "directory:/docs", "directory:docs//x", "directory:"])(
+  "dashboard restore drops invalid Details selection %s", async (dsi) => {
+    await restoreLayout({ k: "l", t: [{ k: "d", de: ["notes"], dsi }] });
+    const tab = activePane().tabs[0];
+    if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+    expect(tab.indexingSelectedId).toBeUndefined();
+    expect(tab.indexingExpanded).toEqual(["notes"]);
+  },
+);
+
+test("dashboard restore applies the same bound and path rules to selected ancestors", async () => {
+  const path = Array<string>(300).fill("docs").join("/");
+  await restoreLayout({ k: "l", t: [{ k: "d", dsi: `directory:${path}` }] });
+  let tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(Array.from({ length: 95 }, (_, i) => Array<string>(i + 1).fill("docs").join("/")));
+
+  await restoreLayout({ k: "l", t: [{ k: "d", de: ["notes"], dsi: "directory:docs/../hidden/leaf" }] });
+  tab = activePane().tabs[0];
+  if (tab.kind !== "dashboard") throw new Error("expected dashboard");
+  expect(tab.indexingExpanded).toEqual(["notes"]);
 });
 
 test("a dashboard saved with a nested directory selected and none opened restores with the path to it opened", async () => {

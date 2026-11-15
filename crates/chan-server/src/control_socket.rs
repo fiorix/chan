@@ -2308,9 +2308,8 @@ async fn handle_team(req: TeamRequest, ctx: &ControlSocketCtx) -> ControlRespons
             };
             if script {
                 return ControlResponse::Ok {
-                    // Load never folds a brief, and its script writes
-                    // `bootstrap.md` only where none exists: a saved team's
-                    // own may carry its brief or hand edits.
+                    // Load keeps both saved files: the config may carry
+                    // comments, and the bootstrap its brief or hand edits.
                     message: generate_bootstrap_script(dir, &config, None, true),
                 };
             }
@@ -13193,7 +13192,7 @@ position = { row = 0, col = 1 }
     /// brief the team was created with or hand edits, is left as it is; a
     /// team directory without one gets one.
     #[tokio::test]
-    async fn a_load_script_keeps_an_existing_bootstrap_and_writes_a_missing_one() {
+    async fn a_team_load_script_keeps_an_existing_bootstrap_and_writes_a_missing_one() {
         use crate::routes::team_config::{
             generate_bootstrap_md, read_team_config, write_team_config,
         };
@@ -13276,6 +13275,110 @@ position = { row = 0, col = 1 }
             std::fs::read_to_string(&saved).expect("saved bootstrap.md"),
             generate_bootstrap_md("saved", &config, None),
             "a new team's script regenerates bootstrap.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn team_load_script_keeps_a_hand_edited_config() {
+        let dir = "saved team";
+        let (_cfg, root, cell) = bound_cell_with_shell_team(dir);
+        let edited = format!(
+            "# Keep the launcher's local notes.\nlocal_note = 'not a TeamConfig field'\n{}",
+            SHELL_TEAM_TOML.replace(
+                "team_name = \"shellsquad\"\nhost_name = \"Neo\"",
+                "host_name = \"Neo\"\nteam_name = \"shellsquad\""
+            )
+        );
+        let config_path = root.path().join(dir).join("config.toml");
+        std::fs::write(&config_path, &edited).expect("write hand-edited config");
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let response = handle_request(
+            ControlRequest::TerminalTeam {
+                dir: dir.to_string(),
+                op: TeamOp::Load,
+                config_toml: None,
+                brief_content: None,
+                script: true,
+                window_id: None,
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        )
+        .await;
+        let ControlResponse::Ok { message: script } = response else {
+            panic!("load: unexpected response: {response:?}");
+        };
+        run_team_script(&script, root.path());
+        assert_eq!(
+            std::fs::read(&config_path).expect("retained config"),
+            edited.as_bytes(),
+            "a team load script preserves every byte of an existing config"
+        );
+
+        let replacement = SHELL_TEAM_TOML.replace("shellsquad", "replacement");
+        let response = handle_request(
+            ControlRequest::TerminalTeam {
+                dir: dir.to_string(),
+                op: TeamOp::New,
+                config_toml: Some(replacement.clone()),
+                brief_content: None,
+                script: true,
+                window_id: None,
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        )
+        .await;
+        let ControlResponse::Ok { message: script } = response else {
+            panic!("new: unexpected response: {response:?}");
+        };
+        run_team_script(&script, root.path());
+        let replacement: TeamConfig = toml::from_str(&replacement).expect("replacement config");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("replacement config"),
+            toml::to_string_pretty(&replacement).expect("serialized replacement"),
+            "a team new script writes the config for the roster it starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn team_load_script_writes_the_validated_config_where_none_exists() {
+        let dir = "fresh team";
+        let (_cfg, _root, cell) = bound_cell_with_shell_team(dir);
+        let ctx = test_ctx(cell, ControlTenant::Workspace);
+        let response = handle_request(
+            ControlRequest::TerminalTeam {
+                dir: dir.to_string(),
+                op: TeamOp::Load,
+                config_toml: None,
+                brief_content: None,
+                script: true,
+                window_id: None,
+                destination: None,
+                tabs: false,
+            },
+            &ctx,
+        )
+        .await;
+        let ControlResponse::Ok { message: script } = response else {
+            panic!("load: unexpected response: {response:?}");
+        };
+        let destination = private_tempdir().expect("empty script destination");
+        let config_path = destination.path().join(dir).join("config.toml");
+        assert!(!config_path.exists());
+        run_team_script(&script, destination.path());
+        assert!(
+            config_path.is_file(),
+            "a team load script writes a missing config"
+        );
+        let written = std::fs::read_to_string(&config_path).expect("written config");
+        let config: TeamConfig = toml::from_str(SHELL_TEAM_TOML).expect("validated config");
+        assert_eq!(
+            written,
+            toml::to_string_pretty(&config).expect("serialized config"),
+            "an empty team directory receives the validated config"
         );
     }
 
