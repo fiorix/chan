@@ -157,12 +157,17 @@ fn terminal_directory_archive_survives_an_atomic_write_temporary_rename() {
 fn terminal_directory_archive_keeps_fifo_and_symlink_entries() {
     let root = tempfile::tempdir().unwrap();
     let fifo = root.path().join("pipe");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    // The POSIX utility also works on Apple, where rustix excludes mkfifoat.
+    let created = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(&fifo)
+        .output()
+        .expect("run mkfifo for the archive fixture");
+    assert!(
+        created.status.success(),
+        "create archive FIFO: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let _open = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
