@@ -51,7 +51,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | merged | closed |
 | [a close test fails a loaded gate][closetest] | merged | closed |
-| [an edit erases another window's keys][keysmerge] | not started | build |
+| [an edit erases another window's keys][keysmerge] | merged | closed |
 | [team load overwrites the config][teamload] | merged | closed |
 | [a survey takes another pane's keys][surveykeys] | merged | closed |
 | [an override sends a body raw][bracketbody] | merged | closed |
