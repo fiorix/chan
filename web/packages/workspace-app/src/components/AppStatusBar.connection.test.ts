@@ -10,6 +10,7 @@ vi.mock("../state/connectionHealth.svelte", async (importOriginal) => ({
 }));
 
 import AppStatusBar from "./AppStatusBar.svelte";
+import { APP_STATUS_PILL_SELECTOR } from "./terminalNoticePlacement";
 import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 import { importStatus, indexStatus, ui } from "../state/store.svelte";
 import { windowTabBar } from "../state/windowTabBar.svelte";
@@ -53,6 +54,12 @@ function state(next: typeof connectionHealth.state, waitMs = 0): void {
 function section(): HTMLElement | null {
   return target.querySelector<HTMLElement>(".connection-section");
 }
+
+test("a visible status pill exposes its layout selector", () => {
+  state("slow");
+  render();
+  expect(target.querySelector(APP_STATUS_PILL_SELECTOR)).not.toBeNull();
+});
 
 test("connection alone controls the bar for each unhealthy state and stays quiet while healthy", () => {
   state("ok");
