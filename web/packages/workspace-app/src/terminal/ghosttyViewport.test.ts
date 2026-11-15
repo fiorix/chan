@@ -10,44 +10,47 @@ const DOM_DELTA_PIXEL = 0;
 const DOM_DELTA_LINE = 1;
 const DOM_DELTA_PAGE = 2;
 
-/// Fake ghostty-web terminal with its real viewport semantics: scrollLines
-/// and scrollToLine clamp into [0, scrollback], and write() parses
-/// synchronously then forces scrollToBottom() whenever the viewport sits
-/// away from the bottom. The script `appendedByWrite` says how many
-/// scrollback lines each write adds (negative trims). resize() fires the
-/// resize event for a grid that changed, as ghostty-web's does.
+/// A widget double with the public viewport and parsed-change contract.
+/// Scripted history growth covers the adapter's wheel/reveal decisions;
+/// ghosttyViewport.change.test.ts checks the ownership against the real widget.
 function fakeGhostty(viewportY: number, scrollback: number) {
   const state = { viewportY, scrollback };
   const clamp = (v: number) => Math.max(0, Math.min(state.scrollback, v));
-  const resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
+  const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
   const term = {
     appendedByWrite: [] as number[],
     cols: 80,
     rows: 24,
-    onResize: vi.fn((listener: (size: { cols: number; rows: number }) => void) => {
-      resizeListeners.add(listener);
-      return { dispose: () => resizeListeners.delete(listener) };
+    viewport: {
+      get offset() { return state.viewportY; },
+      followOutput: "at-bottom" as const,
+      scrollTo: vi.fn((offset: number) => { state.viewportY = clamp(offset); }),
+      scrollBy: vi.fn((rows: number) => { state.viewportY = clamp(state.viewportY + rows); }),
+      scrollToBottom: vi.fn(() => { state.viewportY = 0; }),
+      reveal: vi.fn((row: number, align = "center") => {
+        const onScreen = row - state.scrollback + ghosttyHistoryRows(state.viewportY);
+        if (onScreen >= 0 && onScreen < term.rows) return;
+        const at = align === "start" ? 0 : align === "end" ? term.rows - 1 : Math.floor(term.rows / 2);
+        term.viewport.scrollTo(state.scrollback - row + at);
+      }),
+    },
+    onChange: vi.fn((listener: (change: { kind: "write" | "resize" }) => void) => {
+      changeListeners.add(listener);
+      return { dispose: () => changeListeners.delete(listener) };
     }),
     resize(cols: number, rows: number) {
       if (cols === term.cols && rows === term.rows) return;
       term.cols = cols;
       term.rows = rows;
-      for (const listener of resizeListeners) listener({ cols, rows });
+      for (const listener of changeListeners) listener({ kind: "resize" });
     },
-    getViewportY: vi.fn(() => state.viewportY),
     getScrollbackLength: vi.fn(() => state.scrollback),
-    scrollLines: vi.fn((amount: number) => {
-      state.viewportY = clamp(state.viewportY - amount);
-    }),
-    scrollToLine: vi.fn((line: number) => {
-      state.viewportY = clamp(line);
-    }),
     write: vi.fn((_data: string | Uint8Array) => {
-      state.scrollback = Math.max(
-        0,
-        state.scrollback + (term.appendedByWrite.shift() ?? 0),
-      );
-      if (state.viewportY !== 0) state.viewportY = 0;
+      const before = state.scrollback;
+      state.scrollback = Math.max(0, before + (term.appendedByWrite.shift() ?? 0));
+      const growth = state.viewportY >= 1 ? Math.max(0, state.scrollback - before) : 0;
+      state.viewportY = clamp(state.viewportY + growth);
+      for (const listener of changeListeners) listener({ kind: "write" });
     }),
   };
   return { state, term };
@@ -73,8 +76,8 @@ describe("GhosttyViewportController writes", () => {
     controller.write("chunk2");
 
     expect(term.write).toHaveBeenCalledTimes(2);
-    expect(term.scrollToLine).not.toHaveBeenCalled();
-    expect(term.scrollLines).not.toHaveBeenCalled();
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
+    expect(term.viewport.scrollBy).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(0);
     expect(state.scrollback).toBe(27);
   });
@@ -86,7 +89,7 @@ describe("GhosttyViewportController writes", () => {
 
     controller.write("output");
 
-    expect(term.scrollToLine).toHaveBeenCalledWith(10);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(10);
   });
 
@@ -103,7 +106,7 @@ describe("GhosttyViewportController writes", () => {
     controller.write("line\r\n");
     controller.write("more\r\n");
 
-    expect(term.scrollToLine).not.toHaveBeenCalled();
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(0);
     expect(state.scrollback).toBe(24);
   });
@@ -119,7 +122,7 @@ describe("GhosttyViewportController writes", () => {
 
     // The same fraction, not the bottom and not the fraction plus the
     // appended rows: the view still shows no history row.
-    expect(term.scrollToLine.mock.calls.flat()).toEqual([offset, offset]);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(offset);
     expect(ghosttyHistoryRows(state.viewportY)).toBe(0);
     expect(state.scrollback).toBe(24);
@@ -156,7 +159,7 @@ describe("GhosttyViewportController writes", () => {
     controller.write("line\r\n");
     controller.write("more\r\n");
 
-    expect(term.scrollToLine.mock.calls.flat()).toEqual([offset + 3, anchored]);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(anchored);
   });
 
@@ -169,19 +172,18 @@ describe("GhosttyViewportController writes", () => {
     controller.write("\x1b[2K\rredraw");
     controller.write("\x1b[2K\rredraw");
 
-    expect(term.scrollToLine).toHaveBeenCalledTimes(3);
-    expect(term.scrollToLine).toHaveBeenLastCalledWith(7);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(7);
   });
 
-  test("a scrollback clear or trim clamps the restored viewport", () => {
+  test("a scrollback clear or trim clamps the viewport", () => {
     const { state, term } = fakeGhostty(7, 20);
     term.appendedByWrite.push(-17);
     const controller = new GhosttyViewportController(term, context());
 
     controller.write("\x1b[3J");
 
-    expect(term.scrollToLine).toHaveBeenCalledWith(3);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(3);
   });
 
@@ -203,8 +205,8 @@ describe("GhosttyViewportController writes", () => {
 
     // The gesture plus the exact rebase, nothing else: repeated output
     // never converged the anchored viewport on the oldest retained line.
-    expect(term.scrollLines.mock.calls.flat()).toEqual([-2.5, -2.5]);
-    expect(term.scrollToLine.mock.calls.flat()).toEqual([5.5, 11]);
+    expect(term.viewport.scrollBy.mock.calls.flat()).toEqual([2.5, 2.5]);
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(11);
     expect(state.scrollback).toBe(26);
   });
@@ -222,7 +224,7 @@ describe("GhosttyViewportController writes", () => {
 
     // Once the gesture lands on the bottom, following is native again:
     // no restore runs and the live bottom stays reachable under output.
-    expect(term.scrollToLine).not.toHaveBeenCalled();
+    expect(term.viewport.scrollTo).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(0);
   });
 
@@ -233,10 +235,10 @@ describe("GhosttyViewportController writes", () => {
 
     controller.write("output");
 
-    expect(term.scrollLines).not.toHaveBeenCalled();
+    expect(term.viewport.scrollBy).not.toHaveBeenCalled();
   });
 
-  test("change observers hear every write, after the anchored restore, until stopped", () => {
+  test("change observers hear every write, after the widget anchors its view, until stopped", () => {
     const { state, term } = fakeGhostty(7, 20);
     term.appendedByWrite.push(3, 0, 0);
     const controller = new GhosttyViewportController(term, context());
@@ -249,8 +251,7 @@ describe("GhosttyViewportController writes", () => {
     stop();
     controller.write("unobserved");
 
-    // The anchored write is observed after its restore, not between the
-    // write and the restore.
+    // Observers read the widget's completed viewport adjustment.
     expect(seen).toEqual([
       ["write", 10],
       ["write", 0],
@@ -273,7 +274,7 @@ describe("GhosttyViewportController writes", () => {
 
     // An unchanged grid fires no event.
     expect(seen).toEqual(["resize", "resize"]);
-    expect(term.onResize).toHaveBeenCalledTimes(1);
+    expect(term.onChange).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -287,11 +288,11 @@ describe("GhosttyViewportController reveal", () => {
     ["near the oldest row, clamped to the top", 0, 2, 100],
     ["near the newest row, clamped to the bottom", 100, 108, 0],
   ])("a row %s", (_name, from, row, to) => {
-    const { term } = fakeGhostty(from, 100);
+    const { state, term } = fakeGhostty(from, 100);
     term.rows = 10;
     new GhosttyViewportController(term, context()).reveal(row);
-    if (to === null) expect(term.scrollToLine).not.toHaveBeenCalled();
-    else expect(term.scrollToLine.mock.calls).toEqual([[to]]);
+    expect(term.viewport.reveal).toHaveBeenCalledWith(row, "center");
+    expect(state.viewportY).toBe(to ?? from);
   });
 });
 
@@ -357,7 +358,7 @@ describe("GhosttyViewportController wheel decision matrix", () => {
       expect(
         controller.handleWheel({ deltaY: 100, deltaMode: row.deltaMode }),
       ).toBe(row.claimed);
-      expect(term.scrollLines.mock.calls.length).toBe(row.claimed ? 1 : 0);
+      expect(term.viewport.scrollBy.mock.calls.length).toBe(row.claimed ? 1 : 0);
     });
   }
 
@@ -371,7 +372,7 @@ describe("GhosttyViewportController wheel decision matrix", () => {
     expect(
       controller.handleWheel({ deltaY: 100, deltaMode: DOM_DELTA_PIXEL }),
     ).toBe(false);
-    expect(term.scrollLines).not.toHaveBeenCalled();
+    expect(term.viewport.scrollBy).not.toHaveBeenCalled();
   });
 
   test("wheel input never writes to the terminal", () => {
@@ -395,7 +396,7 @@ describe("GhosttyViewportController macOS pixel travel", () => {
 
     // 100px at 20px rows with factor 0.5 is 2.5 rows; factor 1 would
     // move 5. A dead-zone implementation would move 0.
-    expect(term.scrollLines.mock.calls.flat()).toEqual([2.5, -2.5]);
+    expect(term.viewport.scrollBy.mock.calls.flat()).toEqual([-2.5, 2.5]);
   });
 
   test("preserves fractional accumulation across small pixel deltas", () => {
@@ -408,8 +409,8 @@ describe("GhosttyViewportController macOS pixel travel", () => {
       controller.handleWheel({ deltaY: 8, deltaMode: DOM_DELTA_PIXEL });
     }
 
-    expect(term.scrollLines.mock.calls.flat()).toEqual([
-      0.2, 0.2, 0.2, 0.2, 0.2,
+    expect(term.viewport.scrollBy.mock.calls.flat()).toEqual([
+      -0.2, -0.2, -0.2, -0.2, -0.2,
     ]);
     expect(state.viewportY).toBeCloseTo(9, 10);
   });
@@ -422,7 +423,7 @@ describe("GhosttyViewportController macOS pixel travel", () => {
       controller.handleWheel({ deltaY, deltaMode: DOM_DELTA_PIXEL });
     }
 
-    expect(term.scrollLines.mock.calls.flat()).toEqual([5, 3, 1.5, 0.5]);
+    expect(term.viewport.scrollBy.mock.calls.flat()).toEqual([-5, -3, -1.5, -0.5]);
     expect(state.viewportY).toBeCloseTo(0, 10);
   });
 
@@ -433,7 +434,7 @@ describe("GhosttyViewportController macOS pixel travel", () => {
     expect(
       controller.handleWheel({ deltaY: 0, deltaMode: DOM_DELTA_PIXEL }),
     ).toBe(true);
-    expect(term.scrollLines).not.toHaveBeenCalled();
+    expect(term.viewport.scrollBy).not.toHaveBeenCalled();
     expect(state.viewportY).toBe(10);
   });
 });

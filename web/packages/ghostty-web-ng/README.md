@@ -16,11 +16,19 @@ chan's terminal widget is derived from [ghostty-web](https://github.com/coder/gh
 
 `vt/` contains the libghostty-vt binding, the copy filter and their tests. `vt/index.ts` is the separate `./vt` export. The workspace app, its terminal tests, the binding tests and the terminal pixel harness under `scripts/e2e/terminal-pixels/` all use the vendored core, exported as `./vendor/ghostty-vt/ghostty-vt.wasm`.
 
-The widget exposes the subset chan uses rather than an xterm.js compatibility API. OSC 8 and plain URL links use the built-in providers. The app still supplies its terminal adapters for viewport control, selection, find, secret masking and theme updates. `Terminal.open()` does not take focus; the caller chooses when the terminal receives the keyboard. `blur()` releases focus from descendants, including the hidden input textarea, and cancels a pending focus retry.
+The widget exposes the subset chan uses rather than an xterm.js compatibility API. OSC 8 and plain URL links use the built-in providers. The widget owns viewport positioning and output following; the app supplies wheel calibration, selection, find, secret masking and theme updates. `Terminal.open()` does not take focus; the caller chooses when the terminal receives the keyboard. `blur()` releases focus from descendants, including the hidden input textarea, and cancels a pending focus retry.
+
+## Viewport and content changes
+
+`term.viewport.offset` is the fractional number of rows back from the bottom. `scrollTo(offset)` sets that distance, `scrollBy(rows)` adds to it (positive moves toward older output), and `scrollToBottom()` returns to live output. Explicit positioning cancels a pending smooth scroll and clamps to retained history. `reveal(row, align)` takes an absolute row, with row zero at the oldest retained history row; it leaves a visible row in place and positions an off-screen row at `"start"`, `"center"` (the default) or `"end"`, subject to the same clamp.
+
+The viewport's `followOutput` policy is `"at-bottom"`. Writes keep a view anchored to its retained row, including when the core prunes older history. The visible row and an active smooth-scroll target are tracked independently; if either row is discarded, that position falls back to the oldest retained row. Their fractional distances are preserved within the retained-history bounds. An offset below one row follows the live screen while retaining its fractional distance, so successive pixel-wheel events can move into history while output streams. User input that emits bytes returns the view to the bottom before those bytes are emitted.
+
+`term.onChange(({ kind }) => ...)` reports `"write"` after each synchronous core write and `"resize"` after a grid size change. The core and viewport are updated before the event, and the event precedes painting, including the immediate input-echo frame. Its subscription has `dispose()`. Emission uses a snapshot of subscribers, so a listener disposing itself does not skip the next listener. The dimension-bearing `onResize` event serves consumers that publish terminal size; an unchanged size emits neither resize event.
 
 ## Type checking and tests
 
-TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and input-handler suite under the workspace app's strict settings. `vitest.config.ts` selects `vt/**/*.test.ts` and `lib/input-handler.test.ts`. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
+TypeScript, Vite and Vitest read the sources through the package's export map. `vt/tsconfig.json` checks the binding, widget entry and widget test suites under the workspace app's strict settings. `vitest.config.ts` selects the binding, input-handler and viewport suites. `make web-check` runs these checks together with the workspace app's terminal suites and production build.
 
 The package's `tsconfig.json` is a build input for `lib/`: its ES2020 target preserves constructor-assigned class fields. Vite uses the nearest configuration that includes each file. The binding's separate configuration targets ES2022; it does not change how Vite compiles the widget. The workspace app's `src/terminal/ghosttyWidget.test.ts` pins the widget's class-field behavior.
 

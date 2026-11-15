@@ -105,24 +105,37 @@ async function fixture(cols: number, rows: number, scrollbackLimit: number) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
   const core = vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
   const clamp = (y: number) => Math.max(0, Math.min(core.getScrollbackLength(), y));
+  const changeListeners = new Set<(change: { kind: "write" | "resize" }) => void>();
   const view = {
     cols,
     rows,
     viewportY: 0,
     getViewportY: () => view.viewportY,
     getScrollbackLength: () => core.getScrollbackLength(),
-    scrollLines(amount: number) {
-      view.viewportY = clamp(view.viewportY - amount);
-    },
-    scrollToLine(line: number) {
-      view.viewportY = clamp(line);
+    viewport: {
+      get offset() { return view.viewportY; },
+      followOutput: "at-bottom" as const,
+      scrollTo(offset: number) { view.viewportY = clamp(offset); },
+      scrollBy(amount: number) { view.viewportY = clamp(view.viewportY + amount); },
+      scrollToBottom() { view.viewportY = 0; },
+      reveal(row: number, align = "center") {
+        const history = core.getScrollbackLength();
+        const onScreen = row - history + Math.max(0, Math.floor(view.viewportY));
+        if (onScreen >= 0 && onScreen < view.rows) return;
+        const at = align === "start" ? 0 : align === "end" ? view.rows - 1 : Math.floor(view.rows / 2);
+        view.viewportY = clamp(history - row + at);
+      },
     },
     write(data: string | Uint8Array) {
+      const before = core.getScrollbackLength();
       core.write(data);
-      view.viewportY = 0;
+      const growth = view.viewportY >= 1 ? Math.max(0, core.getScrollbackLength() - before) : 0;
+      view.viewportY = clamp(view.viewportY + growth);
+      for (const listener of changeListeners) listener({ kind: "write" });
     },
-    onResize() {
-      return { dispose() {} };
+    onChange(listener: (change: { kind: "write" | "resize" }) => void) {
+      changeListeners.add(listener);
+      return { dispose: () => changeListeners.delete(listener) };
     },
   };
   const viewport = new GhosttyViewportController(view, {

@@ -16,7 +16,7 @@
  * ```
  */
 
-import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig } from '../vt/ghosttyVt';
+import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig, type VtTrackedCell } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
@@ -24,6 +24,8 @@ import type {
   IBufferNamespace,
   IEvent,
   ITerminalOptions,
+  TerminalChange,
+  TerminalViewport,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
@@ -45,6 +47,7 @@ export class Terminal {
 
   // Buffer API (xterm.js compatibility)
   public readonly buffer: IBufferNamespace;
+  public readonly viewport: TerminalViewport;
 
   // Options (public for xterm.js compatibility)
   public readonly options!: Required<ITerminalOptions>;
@@ -68,9 +71,11 @@ export class Terminal {
   // Event emitters
   private dataEmitter = new EventEmitter<string>();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
+  private changeEmitter = new EventEmitter<TerminalChange>();
   // Public event accessors (xterm.js compatibility)
   public readonly onData: IEvent<string> = this.dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
+  public readonly onChange: IEvent<TerminalChange> = this.changeEmitter.event;
 
   // Lifecycle state
   private isOpen = false;
@@ -139,6 +144,15 @@ export class Terminal {
 
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
+    const terminal = this;
+    this.viewport = {
+      get offset() { return terminal.viewportY; },
+      followOutput: 'at-bottom',
+      scrollTo: (offset) => this.scrollViewportTo(offset),
+      scrollBy: (rows) => this.scrollViewportTo(this.viewportY + rows),
+      scrollToBottom: () => this.scrollToBottom(),
+      reveal: (row, align = 'center') => this.revealRow(row, align),
+    };
   }
 
   // ==========================================================================
@@ -421,10 +435,12 @@ export class Terminal {
             return;
           }
           // Mouse reports share this callback but leave a reader in history.
-          if (isUserInput && data) this.scrollToBottom();
+          if (isUserInput && data) {
+            this.scrollToBottom();
+            this.awaitingEcho = true;
+          }
           // Clear selection when user types
           this.selectionManager?.clearSelection();
-          if (isUserInput) this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
@@ -512,8 +528,46 @@ export class Terminal {
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
-    // Write directly to WASM terminal (handles VT parsing internally)
-    this.wasmTerm!.write(data);
+    const core = this.wasmTerm!;
+    const viewportBefore = this.viewportY;
+    const targetBefore = this.targetViewportY;
+    const scrolling = this.scrollAnimationStartTime !== undefined;
+    const scrollbackBefore = this.getScrollbackLength();
+    const primary = !core.isAlternateScreen();
+    // History length can shrink while new rows arrive because the core
+    // prunes whole pages. Track the rows themselves across the write.
+    const anchor = primary && viewportBefore >= 1
+      ? core.trackCell(scrollbackBefore - Math.floor(viewportBefore), 0) : null;
+    let targetAnchor: VtTrackedCell | null = null;
+    let scrollbackAfter = scrollbackBefore;
+    try {
+      targetAnchor = primary && scrolling && targetBefore >= 1
+        ? core.trackCell(scrollbackBefore - Math.floor(targetBefore), 0) : null;
+      core.write(data);
+      scrollbackAfter = this.getScrollbackLength();
+      // Sub-row gestures follow the live screen without losing their
+      // fraction. A discarded anchor falls back to the oldest retained row.
+      const position = anchor?.point();
+      const offset = viewportBefore < 1 ? viewportBefore
+        : position ? scrollbackAfter - position.row + viewportBefore % 1 : scrollbackAfter;
+      this.viewportY = Math.max(0, Math.min(scrollbackAfter, offset));
+      if (scrolling) {
+        // The visible row can be pruned while a newer gesture target survives.
+        const targetPosition = targetAnchor?.point();
+        const target = targetBefore < 1 ? targetBefore
+          : targetPosition ? scrollbackAfter - targetPosition.row + targetBefore % 1 : scrollbackAfter;
+        this.targetViewportY = Math.max(0, Math.min(scrollbackAfter, target));
+      } else {
+        this.targetViewportY = this.viewportY;
+      }
+    } finally {
+      anchor?.free();
+      targetAnchor?.free();
+    }
+
+    // Find and other content readers must see the final view before an
+    // echo or scrollbar animation can paint it synchronously.
+    this.changeEmitter.fire({ kind: 'write' });
 
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
@@ -522,10 +576,7 @@ export class Terminal {
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    // Phase 2: Auto-scroll to bottom on new output (xterm.js behavior)
-    if (this.viewportY !== 0) {
-      this.scrollToBottom();
-    }
+    if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
 
     // Call callback if provided
     if (callback) {
@@ -570,10 +621,11 @@ export class Terminal {
       return;
     }
 
-    this.awaitingEcho = true;
+    const bracketed = this.wasmTerm!.hasBracketedPaste();
+    if (data || bracketed) this.awaitingEcho = true;
 
     // Check if terminal has bracketed paste mode enabled
-    if (this.wasmTerm!.hasBracketedPaste()) {
+    if (bracketed) {
       this.scrollToBottom();
       // Wrap with bracketed paste sequences (DEC mode 2004)
       this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
@@ -599,8 +651,10 @@ export class Terminal {
     }
 
     if (wasUserInput) {
-      if (data) this.scrollToBottom();
-      this.awaitingEcho = true;
+      if (data) {
+        this.scrollToBottom();
+        this.awaitingEcho = true;
+      }
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);
     } else {
@@ -632,6 +686,8 @@ export class Terminal {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
+      this.targetViewportY = Math.min(this.targetViewportY, this.getScrollbackLength());
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
@@ -643,7 +699,9 @@ export class Terminal {
       this.canvas!.style.width = `${metrics.width * cols}px`;
       this.canvas!.style.height = `${metrics.height * rows}px`;
 
-      // Fire resize event
+      this.changeEmitter.fire({ kind: 'resize' });
+
+      // The dimension event also serves PTY size publication.
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
@@ -857,22 +915,31 @@ export class Terminal {
     }
   }
 
-  /**
-   * Scroll viewport to a specific line in the buffer
-   * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
-   */
-  public scrollToLine(line: number): void {
+  private scrollViewportTo(offset: number): void {
     const scrollbackLength = this.getScrollbackLength();
-    const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
+    const newViewportY = Math.max(0, Math.min(scrollbackLength, offset));
+    this.targetViewportY = newViewportY;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
 
-      // Show scrollbar when scrolling to specific line
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
     }
+  }
+
+  private revealRow(row: number, align: 'start' | 'center' | 'end'): void {
+    const history = this.getScrollbackLength();
+    const onScreen = row - history + Math.max(0, Math.floor(this.viewportY));
+    if (onScreen >= 0 && onScreen < this.rows) return;
+    const at = align === 'start' ? 0 : align === 'end' ? this.rows - 1 : Math.floor(this.rows / 2);
+    this.scrollViewportTo(history - row + at);
   }
 
   /**
@@ -1002,6 +1069,7 @@ export class Terminal {
     // Dispose event emitters
     this.dataEmitter.dispose();
     this.resizeEmitter.dispose();
+    this.changeEmitter.dispose();
   }
 
   // ==========================================================================
@@ -1504,7 +1572,7 @@ export class Terminal {
         const relativeY = mouseY - scrollbarPadding;
         const scrollFraction = 1 - relativeY / scrollbarTrackHeight; // Inverted: top = 1, bottom = 0
         const targetViewportY = Math.round(scrollFraction * scrollbackLength);
-        this.scrollToLine(Math.max(0, Math.min(scrollbackLength, targetViewportY)));
+        this.viewport.scrollTo(targetViewportY);
       }
     }
   };
@@ -1561,7 +1629,7 @@ export class Terminal {
     const viewportDelta = Math.round(scrollFraction * scrollbackLength);
 
     const newViewportY = this.scrollbarDragStartViewportY + viewportDelta;
-    this.scrollToLine(Math.max(0, Math.min(scrollbackLength, newViewportY)));
+    this.viewport.scrollTo(newViewportY);
   }
 
   /**

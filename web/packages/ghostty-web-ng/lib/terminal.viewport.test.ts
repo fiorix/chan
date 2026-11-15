@@ -1,0 +1,477 @@
+import { readFileSync } from 'node:fs';
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { GhosttyVt } from '../vt/ghosttyVt';
+import { Terminal } from './terminal';
+
+let module: WebAssembly.Module;
+const terminals: Terminal[] = [];
+
+beforeAll(async () => {
+  module = await WebAssembly.compile(readFileSync('vendor/ghostty-vt/ghostty-vt.wasm'));
+});
+
+beforeEach(() => {
+  let next = 1;
+  vi.stubGlobal('requestAnimationFrame', () => next++);
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+});
+
+afterEach(() => {
+  for (const term of terminals.splice(0)) term.dispose();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+// Real parsing and history, with only the browser paint surface replaced.
+// The app integration suites open the widget against a software canvas.
+async function terminal(rows = 6) {
+  const ghostty = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+  const term = new Terminal({ ghostty, cols: 40, rows, smoothScrollDuration: 0 });
+  const renderer = {
+    render: vi.fn(),
+    resize: vi.fn(),
+    getMetrics: () => ({ width: 8, height: 16, baseline: 12 }),
+    dispose: vi.fn(),
+  };
+  Object.assign(term, {
+    wasmTerm: ghostty.createTerminal(40, rows, { scrollbackLimit: 1000 }),
+    renderer,
+    canvas: document.createElement('canvas'),
+    isOpen: true,
+  });
+  terminals.push(term);
+  return { term, renderer };
+}
+
+async function history(rows = 6) {
+  const fixture = await terminal(rows);
+  fixture.term.write(Array.from({ length: 40 }, (_, n) => `line ${n}\r\n`).join(''));
+  expect(fixture.term.getScrollbackLength()).toBeGreaterThan(20);
+  expect(fixture.term.viewport, 'the widget owns an explicit viewport').toBeDefined();
+  return fixture;
+}
+
+describe('viewport positioning', () => {
+  test('offset counts fractional rows back from the bottom and clamps to history', async () => {
+    const { term } = await history();
+    expect(term.viewport.followOutput).toBe('at-bottom');
+    term.viewport.scrollTo(7.25);
+    expect(term.viewport.offset).toBe(7.25);
+    expect(term.getViewportY()).toBe(7.25);
+    term.viewport.scrollBy(1.5);
+    expect(term.viewport.offset).toBe(8.75);
+    term.viewport.scrollBy(-2);
+    expect(term.viewport.offset).toBe(6.75);
+    term.viewport.scrollTo(-1);
+    expect(term.viewport.offset).toBe(0);
+    term.viewport.scrollTo(1e6);
+    expect(term.viewport.offset).toBe(term.getScrollbackLength());
+    term.viewport.scrollToBottom();
+    expect(term.viewport.offset).toBe(0);
+  });
+
+  test.each([0, 0.3, 0.999])('output follows at offset %s without discarding its fraction', async (offset) => {
+    const { term } = await history();
+    term.viewport.scrollTo(offset);
+    const before = term.getScrollbackLength();
+    term.write('first\r\n');
+    term.write(new TextEncoder().encode('second\r\n'));
+    expect(term.getScrollbackLength()).toBe(before + 2);
+    expect(term.viewport.offset).toBe(offset);
+  });
+
+  test.each([1, 1.5, 7])('output keeps offset %s anchored to its rows', async (offset) => {
+    const { term } = await history();
+    term.viewport.scrollTo(offset);
+    const before = term.getScrollbackLength();
+    const top = before - Math.floor(offset);
+    const first = term.buffer.active.getLine(top)?.translateToString(true);
+    term.write('first\r\nsecond\r\n');
+    expect(term.viewport.offset).toBe(offset + 2);
+    expect(term.getScrollbackLength() - Math.floor(term.viewport.offset)).toBe(top);
+    expect(term.buffer.active.getLine(top)?.translateToString(true)).toBe(first);
+  });
+
+  test('a slow gesture can leave the bottom while output streams', async () => {
+    const { term } = await history();
+    for (let n = 1; n <= 5; n++) {
+      term.viewport.scrollBy(0.2);
+      term.write('next\r\n');
+      if (n < 5) expect(Math.floor(term.viewport.offset)).toBe(0);
+    }
+    expect(term.viewport.offset).toBe(2);
+    term.write('last\r\n');
+    expect(term.viewport.offset).toBe(3);
+  });
+
+  test('an in-place redraw preserves an anchor and a history clear clamps it', async () => {
+    const { term } = await history();
+    term.viewport.scrollTo(7.5);
+    term.write('\rredraw');
+    expect(term.viewport.offset).toBe(7.5);
+    term.write('\x1b[3J');
+    expect(term.getScrollbackLength()).toBe(0);
+    expect(term.viewport.offset).toBe(0);
+  });
+
+  test.each(['start', 'center', 'end'] as const)('reveal aligns an offscreen absolute row at %s', async (align) => {
+    const { term } = await history(10);
+    const row = 12;
+    term.viewport.reveal(row, align);
+    const displayedRow = row - term.getScrollbackLength() + Math.floor(term.viewport.offset);
+    expect(displayedRow).toBe(align === 'start' ? 0 : align === 'center' ? 5 : 9);
+    const offset = term.viewport.offset;
+    term.viewport.reveal(row, align);
+    expect(term.viewport.offset).toBe(offset);
+  });
+
+  test.each(['start', 'center', 'end'] as const)('reveal preserves a visible row away from requested %s alignment', async (align) => {
+    const { term } = await history(10);
+    term.viewport.scrollTo(7.5);
+    const row = term.getScrollbackLength() - 7 + 2;
+    expect(row - term.getScrollbackLength() + Math.floor(term.viewport.offset)).toBe(2);
+    term.viewport.reveal(row, align);
+    expect(term.viewport.offset).toBe(7.5);
+  });
+
+  test('reveal clamps at both ends and alternate-screen output has no history', async () => {
+    const { term } = await history(10);
+    term.viewport.reveal(0, 'center');
+    expect(term.viewport.offset).toBe(term.getScrollbackLength());
+    term.viewport.reveal(term.getScrollbackLength() + term.rows - 1, 'center');
+    expect(term.viewport.offset).toBe(0);
+    term.viewport.scrollTo(7);
+    term.write('\x1b[?1049h');
+    expect(term.getScrollbackLength()).toBe(0);
+    expect(term.viewport.offset).toBe(0);
+    term.viewport.reveal(2, 'center');
+    expect(term.viewport.offset).toBe(0);
+  });
+});
+
+describe('content changes', () => {
+  test('each parsed write emits once, before a synchronous echo paint and the callback', async () => {
+    const { term, renderer } = await terminal();
+    expect(term.onChange, 'the widget emits content changes').toBeTypeOf('function');
+    const seen: string[] = [];
+    term.onChange(({ kind }) => {
+      seen.push(`${kind}:${term.buffer.active.getLine(0)?.translateToString(true)}`);
+    });
+    renderer.render.mockImplementation(() => { seen.push('paint'); });
+    term.input('x', true);
+    term.write('x', () => seen.push('callback'));
+    expect(seen).toEqual(['write:x', 'paint']);
+    term.write(new TextEncoder().encode('y'));
+    term.writeln('z');
+    term.write('');
+    expect(seen.filter((item) => item.startsWith('write:'))).toEqual([
+      'write:x', 'write:xy', 'write:xyz', 'write:xyz',
+    ]);
+  });
+
+  test('change listeners see the final anchored offset before any write paint', async () => {
+    const { term, renderer } = await history();
+    term.viewport.scrollTo(7.5);
+    const seen: Array<[string, number]> = [];
+    term.onChange(({ kind }) => { seen.push([kind, term.viewport.offset]); });
+    renderer.render.mockImplementation(() => { seen.push(['paint', term.viewport.offset]); });
+    term.write('more\r\n');
+    expect(seen[0]).toEqual(['write', 8.5]);
+    expect(seen.every(([, offset]) => offset === 8.5)).toBe(true);
+  });
+
+  test('resize emits once after reflow and before both resize listeners and paint', async () => {
+    const { term, renderer } = await terminal();
+    expect(term.onChange, 'the widget emits content changes').toBeTypeOf('function');
+    const seen: string[] = [];
+    term.onChange(({ kind }) => seen.push(`${kind}:${term.wasmTerm!.cols}x${term.wasmTerm!.rows}`));
+    term.onResize(() => seen.push('resize listener'));
+    renderer.render.mockImplementation(() => { seen.push('paint'); });
+    term.resize(30, 8);
+    expect(seen.slice(0, 3)).toEqual(['resize:30x8', 'resize listener', 'paint']);
+    expect(seen.filter((item) => item.startsWith('resize:'))).toHaveLength(1);
+    seen.length = 0;
+    term.resize(30, 8);
+    expect(seen).toEqual([]);
+  });
+
+  test('a resize that pulls history clamps both the view and its smooth-scroll target', async () => {
+    const { term } = await history();
+    term.viewport.scrollTo(7.5);
+    term.resize(40, 100);
+    expect(term.getScrollbackLength()).toBe(0);
+    expect(term.viewport.offset).toBe(0);
+    expect((term as unknown as { targetViewportY: number }).targetViewportY).toBe(0);
+  });
+
+  test('unsubscribed and disposed listeners receive no further changes', async () => {
+    const { term } = await terminal();
+    expect(term.onChange, 'the widget emits content changes').toBeTypeOf('function');
+    const listener = vi.fn();
+    const subscription = term.onChange(listener);
+    term.write('one');
+    subscription.dispose();
+    subscription.dispose();
+    term.write('two');
+    expect(listener).toHaveBeenCalledTimes(1);
+    term.onChange(listener);
+    term.dispose();
+    expect(() => term.write('three')).toThrow('disposed');
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test('a change listener can dispose itself without skipping the next subscriber', async () => {
+    const { term } = await terminal();
+    const seen: string[] = [];
+    const first = term.onChange(({ kind }) => {
+      seen.push(`first:${kind}`);
+      first.dispose();
+    });
+    term.onChange(({ kind }) => seen.push(`second:${kind}`));
+    term.write('one');
+    term.write('two');
+    expect(seen, 'every subscribed observer receives the parsed write').toEqual([
+      'first:write', 'second:write', 'second:write',
+    ]);
+  });
+
+  test('reveal defaults to centering an offscreen absolute row', async () => {
+    const { term } = await history(10);
+    const row = 12;
+    term.viewport.reveal(row);
+    expect(row - term.getScrollbackLength() + Math.floor(term.viewport.offset)).toBe(5);
+  });
+});
+
+async function historyPrune(offset: number | 'oldest' = 7.5, target?: number) {
+  const { term } = await terminal();
+  term.resize(80, 6);
+  const core = term.wasmTerm!;
+  const scrolling = term as unknown as {
+    targetViewportY: number;
+    scrollAnimationStartTime?: number;
+    scrollAnimationFrame?: number;
+  };
+  for (let line = 0; line < 5000; line++) {
+    const before = term.getScrollbackLength();
+    if (before < 20) {
+      term.write(`line ${line} ${'x'.repeat(40)}\r\n`);
+      continue;
+    }
+    // Position immediately before each write so a near-bottom anchor is
+    // retained when the core first discards a page of older history.
+    const offsetBefore = offset === 'oldest' ? before : offset;
+    term.viewport.scrollTo(offsetBefore);
+    if (target !== undefined) {
+      scrolling.targetViewportY = target;
+      scrolling.scrollAnimationStartTime = Date.now();
+      scrolling.scrollAnimationFrame = 999;
+    }
+    const rowBefore = before - Math.floor(offsetBefore);
+    const textBefore = term.buffer.active.getLine(rowBefore)?.translateToString(true);
+    const anchor = core.trackCell(rowBefore, 0)!;
+    const targetAnchor = target === undefined ? null : core.trackCell(before - Math.floor(target), 0);
+    expect(anchor, 'the source row exists before pruning').not.toBeNull();
+    if (target !== undefined) expect(targetAnchor).not.toBeNull();
+    try {
+      term.write(`line ${line} ${'x'.repeat(40)}\r\n`);
+      const after = term.getScrollbackLength();
+      if (after < before) {
+        const point = anchor.point();
+        return {
+          term, before, after, offsetBefore, textBefore, point, line,
+          retainedText: point === null ? null : term.buffer.active.getLine(point.row)?.translateToString(true),
+          shownText: term.buffer.active.getLine(after - Math.floor(term.viewport.offset))?.translateToString(true),
+          targetPoint: targetAnchor?.point(), targetOffset: scrolling.targetViewportY,
+        };
+      }
+    } finally {
+      anchor.free();
+      targetAnchor?.free();
+    }
+  }
+  throw new Error('the bounded real-core fixture never pruned history');
+}
+
+describe('retained history at the scrollback cap', () => {
+  test('a retained row keeps its screen position and fraction when history prunes', async () => {
+    const state = await historyPrune();
+    expect(state.after).toBeLessThan(state.before);
+    expect(state.point, 'the row being read survives pruning').not.toBeNull();
+    expect(state.retainedText).toBe(state.textBefore);
+    expect(state.shownText, 'output pruning keeps the retained top row in view').toBe(state.textBefore);
+    expect(state.term.viewport.offset).toBe(8.5);
+    expect(state.point!.row - state.after + Math.floor(state.term.viewport.offset)).toBe(0);
+  });
+
+  test.each([0.3, 0.999])('a live view at %s retains its fraction while history prunes', async (offset) => {
+    const { term, after, before } = await historyPrune(offset);
+    expect(after).toBeLessThan(before);
+    expect(term.viewport.offset).toBe(offset);
+  });
+
+  test('a pruned visible anchor clamps to the oldest retained row', async () => {
+    const { term, point, after } = await historyPrune('oldest');
+    expect(point, 'the old top row was pruned').toBeNull();
+    expect(term.viewport.offset).toBe(after);
+  });
+
+  test('a retained smooth-scroll target moves with its row when history prunes', async () => {
+    const { term, point, targetPoint, targetOffset, after } = await historyPrune(7.5, 12.25);
+    expect(point).not.toBeNull();
+    expect(targetPoint).not.toBeNull();
+    expect(term.viewport.offset).toBe(8.5);
+    expect(targetOffset, 'the gesture keeps its retained target row').toBe(13.25);
+    expect(targetPoint!.row - after + Math.floor(targetOffset)).toBe(0);
+  });
+
+  test('a surviving smooth-scroll target is retained when the visible anchor is pruned', async () => {
+    const { term, point, targetPoint, targetOffset, after } = await historyPrune('oldest', 12.25);
+    expect(point).toBeNull();
+    expect(targetPoint, 'the newer target row survived').not.toBeNull();
+    expect(term.viewport.offset).toBe(after);
+    expect(targetOffset, 'pruning the view does not discard the retained gesture target').toBe(13.25);
+    expect(targetPoint!.row - after + Math.floor(targetOffset)).toBe(0);
+  });
+
+  test('write anchors are released after a write, a screen change and a parser failure', async () => {
+    const { term } = await history();
+    const core = term.wasmTerm!;
+    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    expect(tracked.size).toBe(0);
+    term.viewport.scrollTo(7.5);
+    term.write('more\r\n');
+    expect(tracked.size).toBe(0);
+    const write = vi.spyOn(core, 'write').mockImplementationOnce(() => { throw new Error('parser failed'); });
+    expect(() => term.write('failed')).toThrow('parser failed');
+    expect(tracked.size, 'a failed parse releases its temporary anchors').toBe(0);
+    write.mockRestore();
+    term.write('\x1b[?1049h');
+    expect(term.viewport.offset).toBe(0);
+    expect(tracked.size).toBe(0);
+    term.write('\x1b[?1049l');
+    expect(term.viewport.offset).toBe(0);
+    expect(tracked.size).toBe(0);
+  });
+  test('a smooth-scroll target below one row keeps following live output across pruning', async () => {
+    const { term, targetOffset } = await historyPrune(7.5, 0.3);
+    expect(term.viewport.offset).toBe(8.5);
+    expect(targetOffset).toBe(0.3);
+  });
+
+  test('the viewport anchor is released if acquiring the gesture anchor throws', async () => {
+    const { term } = await history();
+    term.viewport.scrollTo(7.5);
+    const scrolling = term as unknown as { targetViewportY: number; scrollAnimationStartTime?: number };
+    scrolling.targetViewportY = 12.25;
+    scrolling.scrollAnimationStartTime = Date.now();
+    const core = term.wasmTerm!;
+    const track = core.trackCell.bind(core);
+    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    vi.spyOn(core, 'trackCell')
+      .mockImplementationOnce(track)
+      .mockImplementationOnce(() => { throw new Error('tracking failed'); });
+    expect(() => term.write('failed')).toThrow('tracking failed');
+    expect(tracked.size, 'failure to acquire the second anchor releases the first').toBe(0);
+  });
+
+});
+
+async function beforeHistoryPrune() {
+  const observed = await historyPrune();
+  const { term } = await terminal();
+  term.resize(80, 6);
+  for (let line = 0; line < observed.line; line++) {
+    term.write(`line ${line} ${'x'.repeat(40)}\r\n`);
+  }
+  expect(term.getScrollbackLength()).toBe(observed.before);
+  // Each payload occupies one row. The observed history loss identifies
+  // the first row that the next write retains, without assuming a page size.
+  const retainedRow = observed.before + 1 - observed.after;
+  return {
+    term, retainedRow, after: observed.after,
+    next: `line ${observed.line} ${'x'.repeat(40)}\r\n`,
+  };
+}
+
+function gestureTarget(term: Terminal, target: number) {
+  const scrolling = term as unknown as {
+    targetViewportY: number;
+    scrollAnimationStartTime?: number;
+    scrollAnimationFrame?: number;
+  };
+  scrolling.targetViewportY = target;
+  scrolling.scrollAnimationStartTime = Date.now();
+  scrolling.scrollAnimationFrame = 999;
+  return scrolling;
+}
+
+describe('history-cap boundary guards', () => {
+  test('a fractional visible anchor at the retained boundary clamps to the oldest row', async () => {
+    const { term, retainedRow, after, next } = await beforeHistoryPrune();
+    const offset = term.getScrollbackLength() - retainedRow + 0.75;
+    term.viewport.scrollTo(offset);
+    const anchor = term.wasmTerm!.trackCell(retainedRow, 0)!;
+    expect(anchor).not.toBeNull();
+    try {
+      term.write(next);
+      expect(term.getScrollbackLength()).toBe(after);
+      expect(anchor.point()?.row, 'the fractional anchor survived as the oldest row').toBe(0);
+      expect(term.viewport.offset, 'the oldest visible row cannot retain an extra fraction').toBe(after);
+    } finally {
+      anchor.free();
+    }
+  });
+
+  test('a fractional gesture target at the retained boundary clamps to the oldest row', async () => {
+    const { term, retainedRow, after, next } = await beforeHistoryPrune();
+    term.viewport.scrollTo(7.5);
+    const scrolling = gestureTarget(term, term.getScrollbackLength() - retainedRow + 0.25);
+    const anchor = term.wasmTerm!.trackCell(retainedRow, 0)!;
+    expect(anchor).not.toBeNull();
+    try {
+      term.write(next);
+      expect(term.getScrollbackLength()).toBe(after);
+      expect(anchor.point()?.row, 'the fractional target survived as the oldest row').toBe(0);
+      expect(term.viewport.offset).toBe(8.5);
+      expect(scrolling.targetViewportY, 'the oldest target row cannot retain an extra fraction').toBe(after);
+    } finally {
+      anchor.free();
+    }
+  });
+
+  test('a pruned gesture target falls back to the oldest retained row independently of the view', async () => {
+    const { term, after, next } = await beforeHistoryPrune();
+    term.viewport.scrollTo(7.5);
+    const scrolling = gestureTarget(term, term.getScrollbackLength());
+    const anchor = term.wasmTerm!.trackCell(0, 0)!;
+    expect(anchor).not.toBeNull();
+    try {
+      term.write(next);
+      expect(anchor.point(), 'the previous oldest target was discarded').toBeNull();
+      expect(term.viewport.offset).toBe(8.5);
+      expect(scrolling.targetViewportY, 'a discarded target falls back to retained history').toBe(after);
+    } finally {
+      anchor.free();
+    }
+  });
+
+  test.each([false, true])('both active gesture anchors are released when parser failure is %s', async (failure) => {
+    const { term } = await history();
+    term.viewport.scrollTo(7.5);
+    gestureTarget(term, 12.25);
+    const core = term.wasmTerm!;
+    const tracked = (core as unknown as { trackedCells: Set<unknown> }).trackedCells;
+    const write = core.write.bind(core);
+    const observed: number[] = [];
+    vi.spyOn(core, 'write').mockImplementationOnce((data) => {
+      observed.push(tracked.size);
+      if (failure) throw new Error('parser failed with two anchors');
+      write(data);
+    });
+    if (failure) expect(() => term.write('more\r\n')).toThrow('parser failed with two anchors');
+    else term.write('more\r\n');
+    expect(observed, 'both real anchors are owned during parsing').toEqual([2]);
+    expect(tracked.size, 'both active gesture anchors are freed after parsing').toBe(0);
+  });
+});
