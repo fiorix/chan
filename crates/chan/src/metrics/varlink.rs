@@ -20,7 +20,7 @@ const INTERFACE: &str = "io.systemd.Metrics";
 const SERVICE: &str = "org.varlink.service";
 /// The source's name: the socket's file name, which systemd-report requires
 /// as the prefix of every metric the source sends.
-const SOURCE: &str = "io.chan.Devserver";
+const SOURCE: &str = "app.chan.Devserver";
 /// systemd's own descriptions of the two interfaces, as its sources answer
 /// `GetInterfaceDescription` for them.
 const IDL: &str = include_str!("io.systemd.Metrics.varlink");
@@ -713,7 +713,7 @@ mod tests {
             .map(|reply| {
                 let metric = &reply["parameters"];
                 let name = metric["name"].as_str().unwrap();
-                let family = name.strip_prefix("io.chan.Devserver.").unwrap();
+                let family = name.strip_prefix("app.chan.Devserver.").unwrap();
                 (
                     family.to_string(),
                     metric["fields"].clone(),
@@ -892,7 +892,7 @@ mod tests {
             let mut names: Vec<String> = list(view)
                 .iter()
                 .map(|metric| {
-                    metric["name"].as_str().unwrap()["io.chan.Devserver.".len()..].to_string()
+                    metric["name"].as_str().unwrap()["app.chan.Devserver.".len()..].to_string()
                 })
                 .collect();
             names.dedup();
@@ -1026,7 +1026,7 @@ mod tests {
         }
         // The InstanceId description says what a reader needs to know.
         let instance = &described[2]["parameters"];
-        assert_eq!(instance["name"], "io.chan.Devserver.InstanceId");
+        assert_eq!(instance["name"], "app.chan.Devserver.InstanceId");
         assert!(instance["description"]
             .as_str()
             .unwrap()
@@ -1088,27 +1088,41 @@ mod tests {
     }
 
     #[test]
+    fn socket_unit_names_the_metrics_source() {
+        let unit = include_str!("../../../../docs/systemd/chan-metrics.socket");
+        let expected = format!("ListenStream=%t/systemd/report/{SOURCE}");
+        assert!(
+            unit.lines().any(|line| line == expected),
+            "socket unit must name metrics source {SOURCE}"
+        );
+    }
+
+    #[test]
     fn every_name_passes_systemd_reports_checks() {
         // The ports refuse what systemd-report refuses.
         for (name, valid) in [
             ("io.systemd.Basic.CPUUsage", true),
-            ("io.chan.Devserver.HomeFiles", true),
-            ("io.chan.Devserver.Home_Files", true),
-            ("io.chan.Devserver.Home__Files", false),
-            ("io.chan.Devserver.Home_", false),
-            ("io.chan.Devserver.9Files", false),
-            ("io.chan.Devserver.Home-Files", false),
-            ("io..chan.Devserver.HomeFiles", false),
-            ("io.chan-.Devserver.HomeFiles", false),
-            ("io.chan.Devserver.", false),
+            ("app.chan.Devserver.HomeFiles", true),
+            ("app.chan.Devserver.Home_Files", true),
+            ("app.chan.Devserver.Home__Files", false),
+            ("app.chan.Devserver.Home_", false),
+            ("app.chan.Devserver.9Files", false),
+            ("app.chan.Devserver.Home-Files", false),
+            ("app..chan.Devserver.HomeFiles", false),
+            ("app.chan-.Devserver.HomeFiles", false),
+            ("app.chan.Devserver.", false),
             ("HomeFiles", false),
         ] {
             assert_eq!(metrics_name_valid(name), valid, "{name}");
         }
-        assert!(metric_startswith_prefix("io.chan.Devserver.PID", SOURCE));
-        assert!(!metric_startswith_prefix("io.chan.DevserverPID", SOURCE));
+        assert!(
+            !metric_startswith_prefix("io.chan.Devserver.PID", SOURCE),
+            "the old source prefix must not name a current metric"
+        );
+        assert!(metric_startswith_prefix("app.chan.Devserver.PID", SOURCE));
+        assert!(!metric_startswith_prefix("app.chan.DevserverPID", SOURCE));
         assert!(!metric_startswith_prefix(SOURCE, SOURCE));
-        assert!(!metric_startswith_prefix("io.chan.Other.PID", SOURCE));
+        assert!(!metric_startswith_prefix("app.chan.Other.PID", SOURCE));
         // The source's socket name is one systemd-report lists.
         assert!(interface_name_is_valid(SOURCE));
         // Every name the source can send, described and listed.

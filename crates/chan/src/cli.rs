@@ -1818,7 +1818,7 @@ mod tests {
                 "CHAN_METRICS_TOKEN",
                 "/proc/net/tcp",
                 "io.systemd.Metrics",
-                "io.chan.Devserver",
+                "app.chan.Devserver",
                 "EXAMPLES:",
             ]
             .map(String::from),
