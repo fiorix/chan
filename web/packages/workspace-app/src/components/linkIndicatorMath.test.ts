@@ -108,7 +108,7 @@ describe("age wording", () => {
 
   test("clamps future contact and state timestamps to zero", () => {
     expect(linkAge(10_000, 9_000)).toBe("0 s ago");
-    expect(linkStateAge("stalled", 10_000, 9_000)).toBe("No response for 0 s");
+    expect(linkStateAge("slow", 10_000, 9_000, 0)).toBe("Slow for 0 s");
   });
 
   test("uses whole minutes from two minutes onward", () => {
@@ -116,7 +116,7 @@ describe("age wording", () => {
     expect(linkAge(0, 120_000)).toBe("2 min ago");
     expect(linkAge(0, 121_000)).toBe("2 min ago");
     expect(linkAge(0, 179_000)).toBe("2 min ago");
-    expect(linkStateAge("down", 0, 754_000)).toBe("Reconnecting for 12 min");
+    expect(linkStateAge("down", 0, 754_000, 0)).toBe("Reconnecting for 12 min");
   });
 
   test.each([
@@ -126,6 +126,12 @@ describe("age wording", () => {
     ["stalled", "No response for 12 s"],
     ["down", "Reconnecting for 12 s"],
   ] as const)("words %s state", (state, expected) => {
-    expect(linkStateAge(state, 0, 12_900)).toBe(expected);
+    expect(linkStateAge(state, 0, 12_900, 12_900)).toBe(expected);
+  });
+
+  test("stalled counts the ping wait in seconds, while slow and down count from state change", () => {
+    expect(linkStateAge("stalled", 16_000, 20_000, 8_900)).toBe("No response for 8 s");
+    expect(linkStateAge("slow", 16_000, 20_000, 8_900)).toBe("Slow for 4 s");
+    expect(linkStateAge("down", 16_000, 20_000, 8_900)).toBe("Reconnecting for 4 s");
   });
 });
