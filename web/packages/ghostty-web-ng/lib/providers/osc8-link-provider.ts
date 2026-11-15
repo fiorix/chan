@@ -98,7 +98,6 @@ export class OSC8LinkProvider implements ILinkProvider {
         };
 
         links.push({
-          text: uri,
           range,
           activate: (event) => {
             // Open link if Ctrl/Cmd is pressed
@@ -124,7 +123,6 @@ export class OSC8LinkProvider implements ILinkProvider {
 export interface ITerminalForOSC8Provider {
   buffer: {
     active: {
-      length: number;
       getLine(y: number):
         | {
             length: number;

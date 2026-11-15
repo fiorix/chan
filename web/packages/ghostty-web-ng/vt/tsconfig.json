@@ -23,5 +23,5 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["./**/*", "../lib/index.ts"]
+  "include": ["./**/*", "../lib/index.ts", "../lib/input-handler.test.ts", "../lib/terminal.viewport.test.ts"]
 }

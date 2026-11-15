@@ -45,7 +45,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
                     let result = serve::spawn_local_terminal_window(Arc::clone(&state)).await;
                     if let Ok(id) = &result {
                         let label = serve::resolve_window_label(&app, id);
-                        crate::raise_new_terminal_window(app, state, label);
+                        crate::raise_new_terminal_window(app, state, label, None);
                     }
                     result
                 }
@@ -468,7 +468,7 @@ mod tests {
             "let result = serve::spawn_local_terminal_window(Arc::clone(&state)).await;",
             "if let Ok(id) = &result {",
             "let label = serve::resolve_window_label(&app, id);",
-            "crate::raise_new_terminal_window(app, state, label);",
+            "crate::raise_new_terminal_window(app, state, label, None);",
             "}\n                    result",
         ];
         let mut after = 0;

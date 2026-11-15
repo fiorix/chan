@@ -362,11 +362,12 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -
 /// listening on the first ask is no desktop; once one was heard, its going
 /// away is silence, since another may be on its way up.
 async fn ask_desktop(cwd: &str) -> CliOpenTerminal {
+    let startup_id = handoff::launch_startup_id();
     let deadline = Instant::now() + opener::ANSWER_BOUND;
     let mut heard = false;
     loop {
         let budget = deadline.saturating_duration_since(Instant::now());
-        match handoff::try_open_terminal(cwd, budget).await {
+        match handoff::try_open_terminal(cwd, startup_id.as_deref(), budget).await {
             CliOpenTerminal::NotListening if !heard => return CliOpenTerminal::NotListening,
             CliOpenTerminal::NotListening | CliOpenTerminal::Silent => {
                 heard = true;
@@ -423,6 +424,31 @@ mod tests {
 
     fn error(items: &[&str]) -> String {
         parse_str(items).expect_err("a usage error")
+    }
+
+    #[test]
+    fn the_cli_terminal_forwards_its_captured_activation_on_every_retry() {
+        let source = include_str!("term.rs")
+            .split_once("\n#[cfg(test)]")
+            .unwrap()
+            .0;
+        let source = source
+            .split_once("\nasync fn ask_desktop(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert_eq!(source.matches("handoff::launch_startup_id()").count(), 1);
+        assert!(
+            source
+                .find("let startup_id = handoff::launch_startup_id();")
+                .unwrap()
+                < source.find("loop {").unwrap()
+        );
+        let compact: String = source.split_whitespace().collect();
+        let compact = compact.replace(",)", ")");
+        assert!(compact.contains("handoff::try_open_terminal(cwd,startup_id.as_deref(),budget)"));
     }
 
     #[test]

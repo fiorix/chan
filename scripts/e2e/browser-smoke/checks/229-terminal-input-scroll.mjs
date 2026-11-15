@@ -206,8 +206,10 @@ export default {
           result.cleanup = await fixture.send("barrier", { name: "cleanup" }).catch((error) => {
             failures.push(`${backend}: could not flush fixture: ${error.message}`);
           });
-          if (opened) await cs(["close", "--tab-name", name]).catch((error) => {
-            failures.push(`${backend}: could not close owned terminal: ${error.message}`);
+          // Creation can succeed even when attachment times out. Always try
+          // to close; a failed creation has no terminal for close to select.
+          await cs(["close", "--tab-name", name]).catch((error) => {
+            if (opened) failures.push(`${backend}: could not close owned terminal: ${error.message}`);
           });
           await fixture.close();
           writeFileSync(join(ctx.outDir, `229-${backend}.json`), JSON.stringify(result, null, 2) + "\n");

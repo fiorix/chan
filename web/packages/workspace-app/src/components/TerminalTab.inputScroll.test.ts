@@ -52,7 +52,7 @@ import TerminalTab from "./TerminalTab.svelte";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { sendPromptToTerminal } from "../state/tabs.svelte";
+import { registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
 import {
   attach, installTerminalDom, output, receive, resetTerminals,
   seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket,
@@ -100,9 +100,12 @@ function history(term: Terminal): number {
 function inputFrames(socket: TerminalSocket): unknown[] {
   return sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data);
 }
-async function scrolled(backend: "xterm" | "ghostty") {
-  __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false }));
-  const [tab] = seatTerminals([terminalTab()]);
+async function scrolled(backend: "xterm" | "ghostty", mouseCapture = false, broadcast = false) {
+  __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty", secret_masking: false, mouse_capture: mouseCapture }));
+  const [tab, sibling] = seatTerminals(broadcast ? [
+    terminalTab({ broadcastEnabled: true, group: "input-scroll" }),
+    terminalTab({ id: "term-sibling", broadcastEnabled: true, group: "input-scroll" }),
+  ] : [terminalTab()]);
   const target = document.createElement("div");
   document.body.append(target);
   component = mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } });
@@ -128,7 +131,7 @@ async function scrolled(backend: "xterm" | "ghostty") {
   });
   const host = target.querySelector<HTMLElement>(".terminal-host")!;
   const input = term instanceof GhosttyTerminal ? host : term.textarea!;
-  return { tab: tab!, target, term, socket, host, input, inputHistory, promptHistory };
+  return { tab: tab!, sibling, target, term, socket, host, input, inputHistory, promptHistory };
 }
 function key(input: HTMLElement, init: KeyboardEventInit): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
@@ -149,6 +152,87 @@ describe.each(["xterm", "ghostty"] as const)("%s terminal input viewport", (back
     ]);
     expect(promptHistory).toEqual([0]);
     expect(history(term)).toBe(0);
+  });
+
+  test.each([0, 2, 3])("a prompt rejected by socket state %s preserves history", async (readyState) => {
+    const { tab, term, socket, promptHistory } = await scrolled(backend);
+    socket.readyState = readyState;
+    expect(sendPromptToTerminal(tab.id, "run it", "claude", "prompt-offline")).toBe(false);
+    expect(sentFrames(socket)).toEqual([]);
+    expect(promptHistory).toEqual([]);
+    expect(history(term)).toBe(7);
+  });
+
+  test.each([
+    { name: "Ctrl+/ while connecting", readyState: 0, key: { key: "/", code: "Slash", ctrlKey: true } },
+    { name: "Option+Left while closing", readyState: 2, key: { key: "ArrowLeft", code: "ArrowLeft", altKey: true } },
+    { name: "a file drop while closed", readyState: 3, key: null },
+  ])("$name sends nothing and preserves history", async ({ readyState, key: init }) => {
+    const { target, term, socket, input, inputHistory } = await scrolled(backend);
+    socket.readyState = readyState;
+    if (init) {
+      key(input, init);
+    } else {
+      runtime.paths = ["/tmp/offline path"];
+      expect(drop(target).defaultPrevented).toBe(true);
+      await tick();
+    }
+    expect(sentFrames(socket)).toEqual([]);
+    expect(inputHistory).toEqual([]);
+    expect(history(term)).toBe(7);
+  });
+
+  test.each([0, 2, 3].flatMap((readyState) =>
+    ["direct key", "dropped path"].map((kind) => ({ readyState, kind })),
+  ))("$kind reaches the same-window group while socket state $readyState preserves local history", async ({ readyState, kind }) => {
+    const { sibling, target, term, socket, input, inputHistory } = await scrolled(backend, false, true);
+    const received: Array<[string, boolean | undefined]> = [];
+    const unregister = registerTerminalInputSink(sibling!.id, (data, binary) => received.push([data, binary]));
+    try {
+      socket.readyState = readyState;
+      let bytes: string;
+      if (kind === "direct key") {
+        bytes = backend === "ghostty" ? "\r" : "\x1f";
+        key(input, backend === "ghostty"
+          ? { key: "Enter", code: "Enter", keyCode: 13 }
+          : { key: "/", code: "Slash", ctrlKey: true });
+      } else {
+        bytes = "'/tmp/group path' ";
+        runtime.paths = ["/tmp/group path"];
+        expect(drop(target).defaultPrevented).toBe(true);
+        await tick();
+      }
+      expect(sentFrames(socket), "the disconnected source has no local or cross-window frame").toEqual([]);
+      expect(inputHistory).toEqual([]);
+      expect(history(term)).toBe(7);
+      expect(received, "the same-window sibling still receives the input").toEqual([[bytes, false]]);
+    } finally {
+      unregister();
+    }
+  });
+
+  test.each([
+    { name: "SGR mouse", sgr: true, wheel: false, bytes: "\x1b[<0;1;1M" },
+    { name: "X10 mouse", sgr: false, wheel: false, bytes: "\x1b[M !!" },
+    { name: "SGR wheel", sgr: true, wheel: true, bytes: "\x1b[<64;1;1M" },
+    { name: "X10 wheel", sgr: false, wheel: true, bytes: "\x1b[M`!!" },
+  ])("a native $name report follows the backend's input-scroll rule", async ({ sgr, wheel, bytes }) => {
+    const { term, socket, host, inputHistory } = await scrolled(backend, true);
+    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
+    await vi.waitFor(() => expect(term instanceof GhosttyTerminal
+      ? term.hasMouseTracking()
+      : term.modes.mouseTrackingMode === "vt200").toBe(true));
+    const surface = host.querySelector<HTMLElement>(backend === "ghostty" ? "canvas" : ".xterm-screen")!;
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
+    const position = { bubbles: true, cancelable: true, clientX: 1, clientY: 1 };
+    surface.dispatchEvent(wheel
+      ? new WheelEvent("wheel", { ...position, deltaY: -1, deltaMode: 1 })
+      : new MouseEvent("mousedown", { ...position, button: 0 }));
+    expect(inputFrames(socket)).toEqual([bytes]);
+    // xterm marks SGR reports as user data; its X10 reports use onBinary.
+    const expectedHistory = backend === "xterm" && sgr ? 0 : 7;
+    expect(inputHistory, "the viewport when the report reaches the socket").toEqual([expectedHistory]);
+    expect(history(term)).toBe(expectedHistory);
   });
 
   test("a file drop types its escaped path and returns to the live cursor", async () => {
@@ -217,33 +301,13 @@ describe("ghostty terminal key parity viewport", () => {
     expect(inputHistory).toEqual([0]);
     expect(history(term)).toBe(0);
   });
-  test.each([true, false])("a native mouse report preserves history (SGR %s)", async (sgr) => {
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
-    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    const canvas = host.querySelector("canvas")!;
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientX: 10, clientY: 10 }));
-    expect(inputFrames(socket)).toHaveLength(1);
-    expect(inputHistory, "the report itself leaves the view alone").toEqual([7]);
-    expect(history(term)).toBe(7);
-  });
-  test.each([true, false])("a program's wheel report preserves history (SGR %s)", async (sgr) => {
-    const { term, socket, host, inputHistory } = await scrolled("ghostty");
-    await output(socket, `\x1b[?1000h\x1b[?1006${sgr ? "h" : "l"}`);
-    const canvas = host.querySelector("canvas")!;
-    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 480));
-    canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1, deltaMode: 1, clientX: 10, clientY: 10 }));
-    expect(inputFrames(socket)).toHaveLength(1);
-    expect(inputHistory, "the report itself leaves the view alone").toEqual([7]);
-    expect(history(term)).toBe(7);
-  });
 });
 
 describe("ghostty fractional and queued viewport movement", () => {
   test("output advances the live screen and retains a half-row scroll fraction", async () => {
     const { term, socket } = await scrolled("ghostty");
     if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
-    term.scrollToLine(0.5);
+    term.viewport.scrollTo(0.5);
     const scrollback = term.getScrollbackLength();
     await output(socket, "background output\r\n");
     expect(term.getScrollbackLength()).toBe(scrollback + 1);
@@ -259,7 +323,7 @@ describe("ghostty fractional and queued viewport movement", () => {
   ] as const)("%s clears a half-row scroll fraction before sending", async (kind, bytes) => {
     const { term, socket, host, target, inputHistory } = await scrolled("ghostty");
     if (!(term instanceof GhosttyTerminal)) throw new Error("expected the Ghostty backend");
-    term.scrollToLine(0.5);
+    term.viewport.scrollTo(0.5);
     expect(term.getViewportY()).toBe(0.5);
     if (kind === "typed text") key(host, { key: "a", code: "KeyA", keyCode: 65 });
     if (kind === "arrow") key(host, { key: "ArrowUp", code: "ArrowUp", keyCode: 38 });

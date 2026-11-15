@@ -100,6 +100,12 @@ url = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 chan-winpipe = { workspace = true }
 
+# The CLI and desktop's second launch can read X11 server time without
+# initializing GTK. x11rb is the pure Rust connection already used by arboard.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+x11rb = "0.13.2"
+rustix = { workspace = true, features = ["event"] }
+
 [dev-dependencies]
 # This crate's tests (indexer.rs) arm chan-workspace's startup-recovery pause
 # barrier, one of the test-only seams behind the `test-hooks` feature; enable it

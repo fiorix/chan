@@ -1241,19 +1241,14 @@
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
-        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
         fontSize: rendererFontSize,
         ghostty: ghosttyInstance,
         scrollback: scrollbackLines,
-        // Ghostty's default 100ms smooth scroll keeps a private animation
-        // target that scrollToBottom() (called on every write away from
-        // the bottom) never syncs; a write interleaved with a gesture then
-        // resumes toward the stale target. Zero makes every viewport move
-        // synchronous, matching xterm.js, so the controller's write-side
-        // restore is the final word.
+        // Synchronous scrolling matches xterm.js and lets calibrated pixel
+        // gestures accumulate directly in the widget's fractional viewport.
         smoothScrollDuration: 0,
         theme: terminalTheme(),
       });
@@ -1304,8 +1299,8 @@
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
       ghosttyStatusGuard = new GhosttyStatusGuard();
-      // The viewport controller owns PTY-write reconciliation and the
-      // calibrated macOS pixel-scroll claim for this terminal instance.
+      // The widget owns output following; the adapter calibrates macOS
+      // pixel travel and gives find the current view.
       const viewport = new GhosttyViewportController(ghosttyTerm, {
         os: currentOS,
         hasMouseTracking: () => ghosttyTerm.hasMouseTracking(),
@@ -2227,7 +2222,10 @@
   /// into a batch.
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
+  /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
+  /// a disconnected retry leaves the reader's viewport untouched.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
     return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
   }
@@ -2366,7 +2364,7 @@
   /// Keys and dropped paths bypass the widgets' own input scroll. Mouse
   /// reports and program replies keep the send path without this scroll.
   function sendTypedInput(data: string): void {
-    term?.scrollToBottom();
+    if (ws?.readyState === WebSocket.OPEN) term?.scrollToBottom();
     sendUserInput(data);
   }
 

@@ -1057,6 +1057,7 @@ dependencies = [
  "chan-workspace",
  "dirs 5.0.1",
  "futures",
+ "gdkx11",
  "gethostname",
  "getrandom 0.2.17",
  "gtk",
@@ -1218,6 +1219,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+ "x11rb",
  "zstd",
 ]
 

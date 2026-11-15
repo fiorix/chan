@@ -36,6 +36,17 @@
 //! a Windows named pipe vanishes with the process). The protocol/types
 //! compile on every platform; the listener + client are implemented on
 //! unix (UDS) and Windows (named pipe), the desktop's two targets.
+//!
+//! `Activate` and `OpenTerminal` may carry a `startup_id` captured by the
+//! launching process: a launcher's nonempty activation id verbatim, or an X11
+//! `_TIME<timestamp>` id when the launch had none. The GTK/X11 desktop applies
+//! only the supplied id, ignoring empty ids, ids over 1 KiB or containing NUL;
+//! absence preserves the window manager's normal focus policy. The optional
+//! field leaves the protocol number unchanged: an
+//! older sender omits it and an older desktop ignores it.
+
+mod activation;
+pub use activation::launch_startup_id;
 
 use std::path::PathBuf;
 
@@ -227,6 +238,10 @@ pub enum Request {
         /// The absolute start directory. Sent as a string for stable JSON
         /// across platforms.
         cwd: String,
+        /// Activation supplied by the launching process, never synthesized
+        /// by the desktop that receives the request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup_id: Option<String>,
     },
     /// A second desktop launch found this endpoint held: come forward as a
     /// Dock click does, raising the last focused window or opening a
@@ -235,7 +250,14 @@ pub enum Request {
     /// field `cli_version` carries the launching desktop's version. A
     /// desktop shutting down answers `Error`; one that predates this request
     /// answers `Error` for its unknown type.
-    Activate { protocol: u32, cli_version: String },
+    Activate {
+        protocol: u32,
+        cli_version: String,
+        /// The launcher's activation id, or an X11 `_TIME<timestamp>` id
+        /// captured before the request. None keeps normal focus policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        startup_id: Option<String>,
+    },
     /// Open `path` as `cs open PATH` does in a standalone window: reuse or
     /// mint a standalone window, raise it, and open a directory in the file
     /// browser, a text file in the editor, reveal any other file, or create a
@@ -1881,21 +1903,27 @@ pub enum CliOpenTerminal {
 /// shell starts in `cwd`, within `budget`, for a `chan-term` launch that runs
 /// the user's shell. The caller reads `CHAN_NO_DESKTOP_HANDOFF` and the
 /// GUI-session check first, so it can say which of them stopped it.
+/// `startup_id` is captured by that caller once for the launch, before retries.
 #[cfg(any(unix, windows))]
-pub async fn try_open_terminal(cwd: &str, budget: Duration) -> CliOpenTerminal {
+pub async fn try_open_terminal(
+    cwd: &str,
+    startup_id: Option<&str>,
+    budget: Duration,
+) -> CliOpenTerminal {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return CliOpenTerminal::NotListening;
     };
-    try_open_terminal_from_cli_at(&socket_path, cwd, budget).await
+    try_open_terminal_from_cli_at(&socket_path, cwd, startup_id, budget).await
 }
 
 #[cfg(any(unix, windows))]
 async fn try_open_terminal_from_cli_at(
     socket_path: &Path,
     cwd: &str,
+    startup_id: Option<&str>,
     budget: Duration,
 ) -> CliOpenTerminal {
-    match request_endpoint(socket_path, &open_terminal_request(cwd), budget).await {
+    match request_endpoint(socket_path, &open_terminal_request(cwd, startup_id), budget).await {
         Ok(line) => match serde_json::from_str::<Response>(line.trim()) {
             Ok(Response::TerminalOpened { .. }) => CliOpenTerminal::Opened,
             _ => CliOpenTerminal::Refused {
@@ -1908,7 +1936,11 @@ async fn try_open_terminal_from_cli_at(
 }
 
 #[cfg(not(any(unix, windows)))]
-pub async fn try_open_terminal(_cwd: &str, _budget: std::time::Duration) -> CliOpenTerminal {
+pub async fn try_open_terminal(
+    _cwd: &str,
+    _startup_id: Option<&str>,
+    _budget: std::time::Duration,
+) -> CliOpenTerminal {
     CliOpenTerminal::NotListening
 }
 
@@ -1918,13 +1950,15 @@ pub async fn try_open_terminal(_cwd: &str, _budget: std::time::Duration) -> CliO
 /// a desktop launch handing its terminal to the desktop it will not run
 /// beside. The answer reads as an `Activate`'s: an opened terminal raised its
 /// window, so the holder came forward.
+/// `startup_id` belongs to the launch and is reused unchanged on a retry.
 #[cfg(any(unix, windows))]
 pub async fn try_open_terminal_at(
     socket_path: &Path,
     cwd: &str,
+    startup_id: Option<&str>,
     budget: Duration,
 ) -> ActivateReply {
-    match request_endpoint(socket_path, &open_terminal_request(cwd), budget).await {
+    match request_endpoint(socket_path, &open_terminal_request(cwd, startup_id), budget).await {
         Ok(line) => match serde_json::from_str::<Response>(line.trim()) {
             Ok(Response::TerminalOpened { desktop_version }) => {
                 ActivateReply::Activated { desktop_version }
@@ -1943,17 +1977,19 @@ pub async fn try_open_terminal_at(
 pub async fn try_open_terminal_at(
     _socket_path: &std::path::Path,
     _cwd: &str,
+    _startup_id: Option<&str>,
     _budget: std::time::Duration,
 ) -> ActivateReply {
     ActivateReply::NoReply
 }
 
 #[cfg(any(unix, windows))]
-fn open_terminal_request(cwd: &str) -> Request {
+fn open_terminal_request(cwd: &str, startup_id: Option<&str>) -> Request {
     Request::OpenTerminal {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         cwd: cwd.to_string(),
+        startup_id: startup_id.map(str::to_owned),
     }
 }
 
@@ -1975,9 +2011,14 @@ pub enum ActivateReply {
 /// Unlike the CLI's requests this ignores `CHAN_NO_DESKTOP_HANDOFF` and the
 /// GUI-session check: the sender is itself a desktop, and one desktop per
 /// endpoint is not something automation opts out of.
+/// `startup_id` belongs to the launch and is reused unchanged on a retry.
 #[cfg(any(unix, windows))]
-pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
-    match request_endpoint(socket_path, &activate_request(), budget).await {
+pub async fn try_activate_at(
+    socket_path: &Path,
+    startup_id: Option<&str>,
+    budget: Duration,
+) -> ActivateReply {
+    match request_endpoint(socket_path, &activate_request(startup_id), budget).await {
         Ok(line) => map_activate_response(&line),
         Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
             ActivateReply::NoReply
@@ -1988,16 +2029,18 @@ pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateRe
 #[cfg(not(any(unix, windows)))]
 pub async fn try_activate_at(
     _socket_path: &std::path::Path,
+    _startup_id: Option<&str>,
     _budget: std::time::Duration,
 ) -> ActivateReply {
     ActivateReply::NoReply
 }
 
 #[cfg(any(unix, windows))]
-fn activate_request() -> Request {
+fn activate_request(startup_id: Option<&str>) -> Request {
     Request::Activate {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
+        startup_id: startup_id.map(str::to_owned),
     }
 }
 
@@ -2778,6 +2821,140 @@ mod tests {
         assert_client_socket_gate(ClientVerb::Probe).await;
     }
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn activate_request_preserves_startup_id() {
+        let mut wire = serde_json::to_value(activate_request(None)).unwrap();
+        wire["startup_id"] = serde_json::json!("launcher_TIME4294967294");
+        let parsed: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn open_terminal_request_preserves_startup_id() {
+        let mut wire = serde_json::to_value(open_terminal_request("/tmp/a b", None)).unwrap();
+        wire["startup_id"] = serde_json::json!("_TIME4294967294");
+        let parsed: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn startup_id_is_optional_for_both_protocol_peers() {
+        // These fields and serde tags are the previous peer's complete
+        // Activate and OpenTerminal shapes, without a startup-id field.
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum RequestWithoutStartupId {
+            Activate {
+                protocol: u32,
+                cli_version: String,
+            },
+            OpenTerminal {
+                protocol: u32,
+                cli_version: String,
+                cwd: String,
+            },
+        }
+
+        for startup_id in ["launcher_TIME4294967294", "_TIME42", "", "token / + ="] {
+            for (older, current) in [
+                (
+                    RequestWithoutStartupId::Activate {
+                        protocol: PROTOCOL_VERSION,
+                        cli_version: CHAN_VERSION.into(),
+                    },
+                    activate_request(Some(startup_id)),
+                ),
+                (
+                    RequestWithoutStartupId::OpenTerminal {
+                        protocol: PROTOCOL_VERSION,
+                        cli_version: CHAN_VERSION.into(),
+                        cwd: "/tmp/a b".into(),
+                    },
+                    open_terminal_request("/tmp/a b", Some(startup_id)),
+                ),
+            ] {
+                let old_wire = serde_json::to_value(&older).unwrap();
+                let parsed: Request = serde_json::from_value(old_wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(parsed).unwrap(), old_wire);
+
+                let new_wire = serde_json::to_value(&current).unwrap();
+                assert_eq!(new_wire["startup_id"], startup_id);
+                let parsed_old: RequestWithoutStartupId = serde_json::from_value(new_wire).unwrap();
+                assert_eq!(parsed_old, older);
+
+                let mut null_wire = old_wire.clone();
+                null_wire["startup_id"] = serde_json::Value::Null;
+                let parsed: Request = serde_json::from_value(null_wire).unwrap();
+                assert_eq!(serde_json::to_value(parsed).unwrap(), old_wire);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_id_reaches_activate_and_both_terminal_senders() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("handoff.sock");
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let _listener = start_listener(socket.clone(), move |request| {
+            let sent = sent.clone();
+            async move {
+                let response = match request {
+                    Request::Activate { .. } => Response::Activated {
+                        desktop_version: CHAN_VERSION.into(),
+                    },
+                    Request::OpenTerminal { .. } => Response::TerminalOpened {
+                        desktop_version: CHAN_VERSION.into(),
+                    },
+                    _ => panic!("unexpected request {request:?}"),
+                };
+                sent.send(request).unwrap();
+                response
+            }
+        })
+        .unwrap();
+        let budget = Duration::from_secs(3);
+        for expected in [None, Some("launcher_TIME4294967294"), Some("_TIME42")] {
+            assert!(matches!(
+                try_activate_at(&socket, expected, budget).await,
+                ActivateReply::Activated { .. }
+            ));
+            let Request::Activate { startup_id, .. } = received.recv().await.unwrap() else {
+                panic!("expected Activate");
+            };
+            assert_eq!(startup_id.as_deref(), expected);
+
+            assert_eq!(
+                try_open_terminal_from_cli_at(&socket, "/tmp/a b", expected, budget).await,
+                CliOpenTerminal::Opened
+            );
+            let Request::OpenTerminal {
+                cwd, startup_id, ..
+            } = received.recv().await.unwrap()
+            else {
+                panic!("expected OpenTerminal from CLI");
+            };
+            assert_eq!(cwd, "/tmp/a b");
+            assert_eq!(startup_id.as_deref(), expected);
+
+            assert!(matches!(
+                try_open_terminal_at(&socket, "/srv/notes", expected, budget).await,
+                ActivateReply::Activated { .. }
+            ));
+            let Request::OpenTerminal {
+                cwd, startup_id, ..
+            } = received.recv().await.unwrap()
+            else {
+                panic!("expected OpenTerminal from desktop");
+            };
+            assert_eq!(cwd, "/srv/notes");
+            assert_eq!(startup_id.as_deref(), expected);
+        }
+    }
 
     #[test]
     fn request_round_trips() {
@@ -3733,6 +3910,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             cli_version: CHAN_VERSION.into(),
             cwd: "/tmp/proj".into(),
+            startup_id: None,
         };
         match try_devserver_control_at(&sock, req).await {
             DevserverControlOutcome::Reply(Response::TerminalOpened { desktop_version }) => {
@@ -3766,7 +3944,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn listener_round_trip_activated() {
-        let json = serde_json::to_string(&activate_request()).unwrap();
+        let json = serde_json::to_string(&activate_request(None)).unwrap();
         assert!(json.contains("\"type\":\"activate\""), "{json}");
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("hand.sock");
@@ -3785,7 +3963,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            try_activate_at(&sock, Duration::from_secs(3)).await,
+            try_activate_at(&sock, None, Duration::from_secs(3)).await,
             ActivateReply::Activated {
                 desktop_version: "9.9.9".into()
             }
@@ -3994,17 +4172,17 @@ mod tests {
         let budget = Duration::from_millis(300);
         let absent = dir.path().join("absent.sock");
         assert_eq!(
-            try_open_terminal_from_cli_at(&absent, "/srv", budget).await,
+            try_open_terminal_from_cli_at(&absent, "/srv", None, budget).await,
             CliOpenTerminal::NotListening
         );
         assert_eq!(
-            try_open_terminal_at(&absent, "/srv", budget).await,
+            try_open_terminal_at(&absent, "/srv", None, budget).await,
             ActivateReply::NoReply
         );
         let silent = dir.path().join("silent.sock");
         let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
         assert_eq!(
-            try_open_terminal_from_cli_at(&silent, "/srv", budget).await,
+            try_open_terminal_from_cli_at(&silent, "/srv", None, budget).await,
             CliOpenTerminal::Silent
         );
 
@@ -4029,7 +4207,7 @@ mod tests {
             }
         });
         assert_eq!(
-            try_open_terminal_from_cli_at(&answers, "/srv/a b", budget).await,
+            try_open_terminal_from_cli_at(&answers, "/srv/a b", None, budget).await,
             CliOpenTerminal::Opened
         );
         let request: serde_json::Value =
@@ -4037,13 +4215,13 @@ mod tests {
         assert_eq!(request["type"], "open_terminal");
         assert_eq!(request["cwd"], "/srv/a b");
         assert_eq!(
-            try_open_terminal_from_cli_at(&answers, "/srv", budget).await,
+            try_open_terminal_from_cli_at(&answers, "/srv", None, budget).await,
             CliOpenTerminal::Refused {
                 reply: r#"{"status":"error","message":"chan-desktop is shutting down"}"#.into()
             }
         );
         assert_eq!(
-            try_open_terminal_at(&answers, "/srv", budget).await,
+            try_open_terminal_at(&answers, "/srv", None, budget).await,
             ActivateReply::Activated {
                 desktop_version: "9.9.9".into()
             }
@@ -4207,7 +4385,7 @@ mod tests {
             write.write_all(reply.as_bytes()).await.unwrap();
         });
         assert_eq!(
-            try_activate_at(&old, Duration::from_secs(3)).await,
+            try_activate_at(&old, None, Duration::from_secs(3)).await,
             ActivateReply::Refused {
                 reply: unknown_reply.trim().to_string()
             }
@@ -4222,12 +4400,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("hand.sock");
         assert_eq!(
-            try_activate_at(&sock, Duration::from_millis(500)).await,
+            try_activate_at(&sock, None, Duration::from_millis(500)).await,
             ActivateReply::NoReply
         );
         let _claim = claim_endpoint_at(&sock).unwrap();
         assert_eq!(
-            try_activate_at(&sock, Duration::from_millis(500)).await,
+            try_activate_at(&sock, None, Duration::from_millis(500)).await,
             ActivateReply::NoReply
         );
     }
@@ -4262,7 +4440,7 @@ mod tests {
         .unwrap();
         assert!(matches!(claim_endpoint_at(&sock), Err(ClaimError::Held(_))));
         assert!(matches!(
-            try_activate_at(&sock, Duration::from_secs(3)).await,
+            try_activate_at(&sock, None, Duration::from_secs(3)).await,
             ActivateReply::Activated { .. }
         ));
 
@@ -4604,7 +4782,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            try_activate_at(&pipe, Duration::from_secs(3)).await,
+            try_activate_at(&pipe, None, Duration::from_secs(3)).await,
             ActivateReply::Activated {
                 desktop_version: "9.9.9".into()
             }
@@ -4614,7 +4792,7 @@ mod tests {
             std::process::id()
         ));
         assert_eq!(
-            try_activate_at(&absent, Duration::from_millis(500)).await,
+            try_activate_at(&absent, None, Duration::from_millis(500)).await,
             ActivateReply::NoReply
         );
     }
@@ -4746,7 +4924,7 @@ mod tests {
         )
         .unwrap();
         // The first client is accepted, and the re-arm after it fails.
-        let _ = try_activate_at(&pipe, Duration::from_secs(1)).await;
+        let _ = try_activate_at(&pipe, None, Duration::from_secs(1)).await;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match ClientOptions::new().open(&pipe) {

@@ -1,7 +1,7 @@
 /**
  * Terminal - Main terminal emulator class
  *
- * Provides an xterm.js-compatible API wrapping Ghostty's WASM terminal emulator.
+ * Terminal widget over libghostty-vt with canvas rendering and browser input.
  *
  * Usage:
  * ```typescript
@@ -16,32 +16,29 @@
  * ```
  */
 
-import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig } from '../vt/ghosttyVt';
+import { VtCells, type GhosttyVt, type VtTerminal, type VtTerminalConfig, type VtTrackedCell } from '../vt/ghosttyVt';
 import { BufferNamespace } from './buffer';
 import { EventEmitter } from './event-emitter';
 import { InputHandler, type MouseTrackingConfig } from './input-handler';
 import type {
   IBufferNamespace,
-  IBufferRange,
   IEvent,
-  IKeyEvent,
-  ITerminalAddon,
-  ITerminalCore,
   ITerminalOptions,
-  IUnicodeVersionProvider,
+  TerminalChange,
+  TerminalViewport,
 } from './interfaces';
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
 import { SelectionManager } from './selection-manager';
-import type { ILink, ILinkProvider } from './types';
+import type { ILink } from './types';
 
 // ============================================================================
 // Terminal Class
 // ============================================================================
 
-export class Terminal implements ITerminalCore {
+export class Terminal {
   // Public properties (xterm.js compatibility)
   public cols: number;
   public rows: number;
@@ -50,13 +47,7 @@ export class Terminal implements ITerminalCore {
 
   // Buffer API (xterm.js compatibility)
   public readonly buffer: IBufferNamespace;
-
-  // Unicode API (xterm.js compatibility)
-  public readonly unicode: IUnicodeVersionProvider = {
-    get activeVersion(): string {
-      return '15.1'; // Ghostty supports Unicode 15.1
-    },
-  };
+  public readonly viewport: TerminalViewport;
 
   // Options (public for xterm.js compatibility)
   public readonly options!: Required<ITerminalOptions>;
@@ -64,7 +55,7 @@ export class Terminal implements ITerminalCore {
   // Components (created on open())
   private ghostty?: GhosttyVt;
   public wasmTerm?: VtTerminal; // Made public for link providers
-  public renderer?: CanvasRenderer; // Made public for FitAddon
+  public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
   private canvas?: HTMLCanvasElement;
@@ -80,23 +71,11 @@ export class Terminal implements ITerminalCore {
   // Event emitters
   private dataEmitter = new EventEmitter<string>();
   private resizeEmitter = new EventEmitter<{ cols: number; rows: number }>();
-  private bellEmitter = new EventEmitter<void>();
-  private selectionChangeEmitter = new EventEmitter<void>();
-  private keyEmitter = new EventEmitter<IKeyEvent>();
-  private titleChangeEmitter = new EventEmitter<string>();
-  private scrollEmitter = new EventEmitter<number>();
-  private renderEmitter = new EventEmitter<{ start: number; end: number }>();
-  private cursorMoveEmitter = new EventEmitter<void>();
+  private changeEmitter = new EventEmitter<TerminalChange>();
   // Public event accessors (xterm.js compatibility)
   public readonly onData: IEvent<string> = this.dataEmitter.event;
   public readonly onResize: IEvent<{ cols: number; rows: number }> = this.resizeEmitter.event;
-  public readonly onBell: IEvent<void> = this.bellEmitter.event;
-  public readonly onSelectionChange: IEvent<void> = this.selectionChangeEmitter.event;
-  public readonly onKey: IEvent<IKeyEvent> = this.keyEmitter.event;
-  public readonly onTitleChange: IEvent<string> = this.titleChangeEmitter.event;
-  public readonly onScroll: IEvent<number> = this.scrollEmitter.event;
-  public readonly onRender: IEvent<{ start: number; end: number }> = this.renderEmitter.event;
-  public readonly onCursorMove: IEvent<void> = this.cursorMoveEmitter.event;
+  public readonly onChange: IEvent<TerminalChange> = this.changeEmitter.event;
 
   // Lifecycle state
   private isOpen = false;
@@ -106,14 +85,8 @@ export class Terminal implements ITerminalCore {
   private writeQueue: Uint8Array[] = [];
   private awaitingEcho = false;
 
-  // Addons
-  private addons: ITerminalAddon[] = [];
-
   // Phase 1: Custom event handlers
   private customKeyEventHandler?: (event: KeyboardEvent) => boolean;
-
-  // Phase 1: Title tracking
-  private currentTitle: string = '';
 
   // Phase 2: Viewport and scrolling state
   public viewportY: number = 0; // Top line of viewport in scrollback buffer (0 = at bottom, can be fractional during smooth scroll)
@@ -121,7 +94,6 @@ export class Terminal implements ITerminalCore {
   private scrollAnimationStartTime?: number;
   private scrollAnimationFrame?: number;
   private customWheelEventHandler?: (event: WheelEvent) => boolean;
-  private lastCursorY: number = 0; // Track cursor position for onCursorMove
 
   // Scrollbar interaction state
   private isDraggingScrollbar: boolean = false;
@@ -148,8 +120,6 @@ export class Terminal implements ITerminalCore {
       scrollback: options.scrollback ?? 10000,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
-      allowTransparency: options.allowTransparency ?? false,
-      convertEol: options.convertEol ?? false,
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
@@ -174,6 +144,15 @@ export class Terminal implements ITerminalCore {
 
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
+    const terminal = this;
+    this.viewport = {
+      get offset() { return terminal.viewportY; },
+      followOutput: 'at-bottom',
+      scrollTo: (offset) => this.scrollViewportTo(offset),
+      scrollBy: (rows) => this.scrollViewportTo(this.viewportY + rows),
+      scrollToBottom: () => this.scrollToBottom(),
+      reveal: (row, align = 'center') => this.revealRow(row, align),
+    };
   }
 
   // ==========================================================================
@@ -456,21 +435,17 @@ export class Terminal implements ITerminalCore {
             return;
           }
           // Mouse reports share this callback but leave a reader in history.
-          if (isUserInput && data) this.scrollToBottom();
+          if (isUserInput && data) {
+            this.scrollToBottom();
+            this.awaitingEcho = true;
+          }
           // Clear selection when user types
           this.selectionManager?.clearSelection();
-          this.awaitingEcho = true;
           // Input handler fires data events
           this.dataEmitter.fire(data);
         },
-        () => {
-          // Input handler can also fire bell
-          this.bellEmitter.fire();
-        },
-        (keyEvent: IKeyEvent) => {
-          // Forward key events
-          this.keyEmitter.fire(keyEvent);
-        },
+        () => {},
+        undefined,
         this.customKeyEventHandler,
         (mode: number) => {
           // Query terminal mode state (e.g., mode 1 for application cursor mode)
@@ -494,11 +469,6 @@ export class Terminal implements ITerminalCore {
 
       // Connect selection manager to renderer
       this.renderer.setSelectionManager(this.selectionManager);
-
-      // Forward selection change events
-      this.selectionManager.onSelectionChange(() => {
-        this.selectionChangeEmitter.fire();
-      });
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
@@ -547,11 +517,6 @@ export class Terminal implements ITerminalCore {
   write(data: string | Uint8Array, callback?: () => void): void {
     this.assertOpen();
 
-    // Handle convertEol option
-    if (this.options.convertEol && typeof data === 'string') {
-      data = data.replace(/\n/g, '\r\n');
-    }
-
     this.writeInternal(data, callback);
   }
 
@@ -559,38 +524,63 @@ export class Terminal implements ITerminalCore {
    * Internal write implementation (extracted from write())
    */
   private writeInternal(data: string | Uint8Array, callback?: () => void): void {
+    if (data.length === 0) {
+      if (callback) requestAnimationFrame(callback);
+      return;
+    }
     // Note: We intentionally do NOT clear selection on write - most modern terminals
     // preserve selection when new data arrives. Selection is cleared by user actions
     // like clicking or typing, not by incoming data.
 
-    // Write directly to WASM terminal (handles VT parsing internally)
-    this.wasmTerm!.write(data);
+    const core = this.wasmTerm!;
+    const viewportBefore = this.viewportY;
+    const targetBefore = this.targetViewportY;
+    const scrolling = this.scrollAnimationStartTime !== undefined;
+    const scrollbackBefore = this.getScrollbackLength();
+    const primary = !core.isAlternateScreen();
+    // History length can shrink while new rows arrive because the core
+    // prunes whole pages. Track the rows themselves across the write.
+    const anchor = primary && viewportBefore >= 1
+      ? core.trackCell(scrollbackBefore - Math.floor(viewportBefore), 0) : null;
+    let targetAnchor: VtTrackedCell | null = null;
+    let scrollbackAfter = scrollbackBefore;
+    try {
+      targetAnchor = primary && scrolling && targetBefore >= 1
+        ? core.trackCell(scrollbackBefore - Math.floor(targetBefore), 0) : null;
+      core.write(data);
+      scrollbackAfter = this.getScrollbackLength();
+      // Sub-row gestures follow the live screen without losing their
+      // fraction. A discarded anchor falls back to the oldest retained row.
+      const position = anchor?.point();
+      const offset = viewportBefore < 1 ? viewportBefore
+        : position ? scrollbackAfter - position.row + viewportBefore % 1 : scrollbackAfter;
+      this.viewportY = Math.max(0, Math.min(scrollbackAfter, offset));
+      if (scrolling) {
+        // The visible row can be pruned while a newer gesture target survives.
+        const targetPosition = targetAnchor?.point();
+        const target = targetBefore < 1 ? targetBefore
+          : targetPosition ? scrollbackAfter - targetPosition.row + targetBefore % 1 : scrollbackAfter;
+        this.targetViewportY = Math.max(0, Math.min(scrollbackAfter, target));
+      } else {
+        this.targetViewportY = this.viewportY;
+      }
+    } finally {
+      anchor?.free();
+      targetAnchor?.free();
+    }
 
     // Process any responses generated by the terminal (e.g., DSR cursor position)
     // These need to be sent back to the PTY via onData
     this.processTerminalResponses();
 
-    // Check for bell character (BEL, \x07)
-    // WASM doesn't expose bell events, so we detect it in the data stream
-    if (typeof data === 'string' && data.includes('\x07')) {
-      this.bellEmitter.fire();
-    } else if (data instanceof Uint8Array && data.includes(0x07)) {
-      this.bellEmitter.fire();
-    }
-
     // Invalidate link cache (content changed)
     this.linkDetector?.invalidateCache();
 
-    // Phase 2: Auto-scroll to bottom on new output (xterm.js behavior)
-    if (this.viewportY !== 0) {
-      this.scrollToBottom();
-    }
+    // Observers see the current links and view, with replies already sent,
+    // before an echo or scrollbar animation can paint synchronously.
+    this.changeEmitter.fire({ kind: 'write' });
 
-    // Check for title changes (OSC 0, 1, 2 sequences)
-    // This is a simplified implementation - Ghostty WASM may provide this
-    if (typeof data === 'string' && data.includes('\x1b]')) {
-      this.checkForTitleChange(data);
-    }
+    if (viewportBefore > 0 && scrollbackAfter > 0) this.showScrollbar();
 
     // Call callback if provided
     if (callback) {
@@ -635,10 +625,11 @@ export class Terminal implements ITerminalCore {
       return;
     }
 
-    this.awaitingEcho = true;
+    const bracketed = this.wasmTerm!.hasBracketedPaste();
+    if (data || bracketed) this.awaitingEcho = true;
 
     // Check if terminal has bracketed paste mode enabled
-    if (this.wasmTerm!.hasBracketedPaste()) {
+    if (bracketed) {
       this.scrollToBottom();
       // Wrap with bracketed paste sequences (DEC mode 2004)
       this.dataEmitter.fire('\x1b[200~' + data + '\x1b[201~');
@@ -664,8 +655,10 @@ export class Terminal implements ITerminalCore {
     }
 
     if (wasUserInput) {
-      if (data) this.scrollToBottom();
-      this.awaitingEcho = true;
+      if (data) {
+        this.scrollToBottom();
+        this.awaitingEcho = true;
+      }
       // Trigger onData event as if user typed it
       this.dataEmitter.fire(data);
     } else {
@@ -697,6 +690,8 @@ export class Terminal implements ITerminalCore {
 
       // Resize WASM terminal (may reallocate buffers, invalidating TypedArray views)
       this.wasmTerm!.resize(cols, rows);
+      this.viewportY = Math.min(this.viewportY, this.getScrollbackLength());
+      this.targetViewportY = Math.min(this.targetViewportY, this.getScrollbackLength());
 
       // Resize renderer
       this.renderer!.resize(cols, rows);
@@ -708,7 +703,9 @@ export class Terminal implements ITerminalCore {
       this.canvas!.style.width = `${metrics.width * cols}px`;
       this.canvas!.style.height = `${metrics.height * rows}px`;
 
-      // Fire resize event
+      this.changeEmitter.fire({ kind: 'resize' });
+
+      // The dimension event also serves PTY size publication.
       this.resizeEmitter.fire({ cols, rows });
 
       // Force full render
@@ -720,15 +717,6 @@ export class Terminal implements ITerminalCore {
     // Flush any writes that were queued during resize, then restart render loop
     this.flushWriteQueue();
     this.startRenderLoop();
-  }
-
-  /**
-   * Clear terminal screen
-   */
-  clear(): void {
-    this.assertOpen();
-    // Send ANSI clear screen and cursor home sequences
-    this.wasmTerm!.write('\x1b[2J\x1b[H');
   }
 
   /**
@@ -746,9 +734,6 @@ export class Terminal implements ITerminalCore {
 
     // Clear renderer
     this.renderer!.clear();
-
-    // Reset title
-    this.currentTitle = '';
   }
 
   /**
@@ -787,14 +772,6 @@ export class Terminal implements ITerminalCore {
         focused.blur();
       }
     }
-  }
-
-  /**
-   * Load an addon
-   */
-  loadAddon(addon: ITerminalAddon): void {
-    addon.activate(this);
-    this.addons.push(addon);
   }
 
   // ==========================================================================
@@ -852,9 +829,6 @@ export class Terminal implements ITerminalCore {
   }
 
   /**
-   * Get selection position as buffer range
-   */
-  /**
    * Get the current viewport Y position.
    *
    * This is the number of lines scrolled back from the bottom of the
@@ -862,10 +836,6 @@ export class Terminal implements ITerminalCore {
    */
   public getViewportY(): number {
     return this.viewportY;
-  }
-
-  public getSelectionPosition(): IBufferRange | undefined {
-    return this.selectionManager?.getSelectionPosition();
   }
 
   // ==========================================================================
@@ -897,31 +867,6 @@ export class Terminal implements ITerminalCore {
   }
 
   // ==========================================================================
-  // Link Detection Methods
-  // ==========================================================================
-
-  /**
-   * Register a custom link provider
-   * Multiple providers can be registered to detect different types of links
-   *
-   * @example
-   * ```typescript
-   * term.registerLinkProvider({
-   *   provideLinks(y, callback) {
-   *     // Detect URLs, file paths, etc.
-   *     callback(detectedLinks);
-   *   }
-   * });
-   * ```
-   */
-  public registerLinkProvider(provider: ILinkProvider): void {
-    if (!this.linkDetector) {
-      throw new Error('Terminal must be opened before registering link providers');
-    }
-    this.linkDetector.registerProvider(provider);
-  }
-
-  // ==========================================================================
   // Phase 2: Scrolling Methods
   // ==========================================================================
 
@@ -947,32 +892,11 @@ export class Terminal implements ITerminalCore {
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
-      this.scrollEmitter.fire(this.viewportY);
 
       // Show scrollbar when scrolling (with auto-hide)
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
-    }
-  }
-
-  /**
-   * Scroll viewport by a number of pages
-   * @param amount Number of pages to scroll (positive = down, negative = up)
-   */
-  public scrollPages(amount: number): void {
-    this.scrollLines(amount * this.rows);
-  }
-
-  /**
-   * Scroll viewport to the top of the scrollback buffer
-   */
-  public scrollToTop(): void {
-    const scrollbackLength = this.getScrollbackLength();
-    if (scrollbackLength > 0 && this.viewportY !== scrollbackLength) {
-      this.viewportY = scrollbackLength;
-      this.scrollEmitter.fire(this.viewportY);
-      this.showScrollbar();
     }
   }
 
@@ -988,7 +912,6 @@ export class Terminal implements ITerminalCore {
     this.scrollAnimationStartTime = undefined;
     if (this.viewportY !== 0) {
       this.viewportY = 0;
-      this.scrollEmitter.fire(this.viewportY);
       // Show scrollbar briefly when scrolling to bottom
       if (this.getScrollbackLength() > 0) {
         this.showScrollbar();
@@ -996,23 +919,31 @@ export class Terminal implements ITerminalCore {
     }
   }
 
-  /**
-   * Scroll viewport to a specific line in the buffer
-   * @param line Line number (0 = top of scrollback, scrollbackLength = bottom)
-   */
-  public scrollToLine(line: number): void {
+  private scrollViewportTo(offset: number): void {
     const scrollbackLength = this.getScrollbackLength();
-    const newViewportY = Math.max(0, Math.min(scrollbackLength, line));
+    const newViewportY = Math.max(0, Math.min(scrollbackLength, offset));
+    this.targetViewportY = newViewportY;
+    if (this.scrollAnimationFrame !== undefined) {
+      cancelAnimationFrame(this.scrollAnimationFrame);
+      this.scrollAnimationFrame = undefined;
+    }
+    this.scrollAnimationStartTime = undefined;
 
     if (newViewportY !== this.viewportY) {
       this.viewportY = newViewportY;
-      this.scrollEmitter.fire(this.viewportY);
 
-      // Show scrollbar when scrolling to specific line
       if (scrollbackLength > 0) {
         this.showScrollbar();
       }
     }
+  }
+
+  private revealRow(row: number, align: 'start' | 'center' | 'end'): void {
+    const history = this.getScrollbackLength();
+    const onScreen = row - history + Math.max(0, Math.floor(this.viewportY));
+    if (onScreen >= 0 && onScreen < this.rows) return;
+    const at = align === 'start' ? 0 : align === 'end' ? this.rows - 1 : Math.floor(this.rows / 2);
+    this.scrollViewportTo(history - row + at);
   }
 
   /**
@@ -1033,7 +964,6 @@ export class Terminal implements ITerminalCore {
     if (duration === 0) {
       this.viewportY = newTarget;
       this.targetViewportY = newTarget;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
 
       if (scrollbackLength > 0) {
         this.showScrollbar();
@@ -1074,7 +1004,6 @@ export class Terminal implements ITerminalCore {
     // If very close, snap to target
     if (absDistance < 0.01) {
       this.viewportY = this.targetViewportY;
-      this.scrollEmitter.fire(Math.floor(this.viewportY));
 
       const scrollbackLength = this.getScrollbackLength();
       if (scrollbackLength > 0) {
@@ -1093,10 +1022,6 @@ export class Terminal implements ITerminalCore {
     const framesForDuration = (duration / 1000) * 60; // Convert ms to frame count
     const moveRatio = 1 - (1 / framesForDuration) ** 2; // Ease-out
     this.viewportY += distance * moveRatio;
-
-    // Fire scroll event (use floor to convert fractional to integer for API)
-    const intViewportY = Math.floor(this.viewportY);
-    this.scrollEmitter.fire(intViewportY);
 
     // Show scrollbar during animation
     const scrollbackLength = this.getScrollbackLength();
@@ -1142,25 +1067,13 @@ export class Terminal implements ITerminalCore {
     }
     this.pendingMouseMove = undefined;
 
-    // Dispose addons
-    for (const addon of this.addons) {
-      addon.dispose();
-    }
-    this.addons = [];
-
     // Clean up components
     this.cleanupComponents();
 
     // Dispose event emitters
     this.dataEmitter.dispose();
     this.resizeEmitter.dispose();
-    this.bellEmitter.dispose();
-    this.selectionChangeEmitter.dispose();
-    this.keyEmitter.dispose();
-    this.titleChangeEmitter.dispose();
-    this.scrollEmitter.dispose();
-    this.renderEmitter.dispose();
-    this.cursorMoveEmitter.dispose();
+    this.changeEmitter.dispose();
   }
 
   // ==========================================================================
@@ -1201,18 +1114,6 @@ export class Terminal implements ITerminalCore {
         // 2. Only redraws dirty rows when forceAll=false
         // 3. Always ends the frame (endFrame) at the end
         this.renderer!.render(this.wasmTerm!, false, this.viewportY, this.scrollbarOpacity);
-
-        // Check for cursor movement (Phase 2: onCursorMove event)
-        // Note: getCursor() reads from already-updated render state (from render() above)
-        const cursor = this.wasmTerm!.getCursor();
-        if (cursor.y !== this.lastCursorY) {
-          this.lastCursorY = cursor.y;
-          this.cursorMoveEmitter.fire();
-        }
-
-        // Note: onRender event is intentionally not fired in the render loop
-        // to avoid performance issues. For now, consumers can use requestAnimationFrame
-        // if they need frame-by-frame updates.
 
         this.animationFrameId = requestAnimationFrame(loop);
       }
@@ -1436,14 +1337,8 @@ export class Terminal implements ITerminalCore {
       .then((link) => {
         // Update hover state for cursor changes and click handling
         if (link !== this.currentHoveredLink) {
-          // Notify old link we're leaving
-          this.currentHoveredLink?.hover?.(false);
-
           // Update current link
           this.currentHoveredLink = link;
-
-          // Notify new link we're entering
-          link?.hover?.(true);
 
           // Update cursor style on both container and canvas
           const cursorStyle = link ? 'pointer' : 'text';
@@ -1506,9 +1401,6 @@ export class Terminal implements ITerminalCore {
     }
 
     if (this.currentHoveredLink) {
-      // Notify link we're leaving
-      this.currentHoveredLink.hover?.(false);
-
       // Clear hovered link
       this.currentHoveredLink = undefined;
 
@@ -1684,7 +1576,7 @@ export class Terminal implements ITerminalCore {
         const relativeY = mouseY - scrollbarPadding;
         const scrollFraction = 1 - relativeY / scrollbarTrackHeight; // Inverted: top = 1, bottom = 0
         const targetViewportY = Math.round(scrollFraction * scrollbackLength);
-        this.scrollToLine(Math.max(0, Math.min(scrollbackLength, targetViewportY)));
+        this.viewport.scrollTo(targetViewportY);
       }
     }
   };
@@ -1741,7 +1633,7 @@ export class Terminal implements ITerminalCore {
     const viewportDelta = Math.round(scrollFraction * scrollbackLength);
 
     const newViewportY = this.scrollbarDragStartViewportY + viewportDelta;
-    this.scrollToLine(Math.max(0, Math.min(scrollbackLength, newViewportY)));
+    this.viewport.scrollTo(newViewportY);
   }
 
   /**
@@ -1864,31 +1756,6 @@ export class Terminal implements ITerminalCore {
       // Send response back to the PTY via onData
       // This is the same path as user keyboard input
       this.dataEmitter.fire(response);
-    }
-  }
-
-  /**
-   * Check for title changes in written data (OSC sequences)
-   * Simplified implementation - looks for OSC 0, 1, 2
-   */
-  private checkForTitleChange(data: string): void {
-    // OSC sequences: ESC ] Ps ; Pt BEL or ESC ] Ps ; Pt ST
-    // OSC 0 = icon + title, OSC 1 = icon, OSC 2 = title
-    const oscRegex = /\x1b\]([012]);([^\x07\x1b]*?)(?:\x07|\x1b\\)/g;
-    let match: RegExpExecArray | null = null;
-
-    // biome-ignore lint/suspicious/noAssignInExpressions: Standard regex pattern
-    while ((match = oscRegex.exec(data)) !== null) {
-      const ps = match[1];
-      const pt = match[2];
-
-      // OSC 0 and OSC 2 set the title
-      if (ps === '0' || ps === '2') {
-        if (pt !== this.currentTitle) {
-          this.currentTitle = pt;
-          this.titleChangeEmitter.fire(pt);
-        }
-      }
     }
   }
 

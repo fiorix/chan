@@ -75,7 +75,6 @@ export class UrlRegexProvider implements ILinkProvider {
       // Skip if URL is too short (e.g., just "http://")
       if (url.length > 8) {
         links.push({
-          text: url,
           range: {
             start: { x: startX, y },
             end: { x: endX, y },

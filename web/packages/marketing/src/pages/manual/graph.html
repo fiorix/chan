@@ -117,7 +117,7 @@
       <li>Changes reported by the workspace refresh the affected directories. If another directory takes an opened directory's name, its files appear without <strong>Reload graph</strong>.</li>
       <li>A directory git ignores that the graph still draws, such as an ignored <code>out/</code>, is drawn as the tab last read it, until <strong>Reload graph</strong> or until the tab reads the whole tree again, as after a branch switch.</li>
       <li>Directories the workspace excludes, by default <code>node_modules</code>, <code>build</code>, <code>dist</code> and <code>target</code> among others, are not drawn, nor are <code>.git</code> and <code>.chan</code>.</li>
-      <li>On a very large tree with hundreds of directories open, reading one level can pass the 10-second request limit. The graph then shows dimmed with the error until the next change or <strong>Reload graph</strong>.</li>
+      <li>If reading a directory times out or loses its connection, the other directories stay visible. The tab retries that directory once when it is shown and the workspace graph has finished loading. Recovered directories appear as the retries progress, without waiting for every retry to finish. If it still cannot read the directory and the workspace graph does not include it, a message names it without dimming the graph. A failure to read the workspace root still shows an error over a dimmed graph; a missing root clears the graph.</li>
       <li><a href="/manual/search/#terminal-search"><code>cs search --from</code></a> walks what the graph shows for a node, but follows neither symlinks nor hardlinks.</li>
     </ul>
   </details>

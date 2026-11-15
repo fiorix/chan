@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -278,15 +279,44 @@ fn client_input_bytes(frame: &ClientFrame) -> Option<Cow<'_, [u8]>> {
     Some(Cow::Owned(bytes))
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "pty")]
+enum SessionPty {
+    #[serde(rename = "conpty")]
+    Conpty {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        windows_build_number: Option<NonZeroU32>,
+    },
+}
+
+fn conpty_pty(build: Option<&str>) -> SessionPty {
+    SessionPty::Conpty {
+        windows_build_number: build.and_then(|build| build.parse().ok()),
+    }
+}
+
+fn host_pty() -> Option<SessionPty> {
+    static PTY: std::sync::LazyLock<Option<SessionPty>> = std::sync::LazyLock::new(|| {
+        // On Windows sysinfo reads CurrentBuildNumber. Cache it because the
+        // operating-system build is stable for this process.
+        cfg!(windows).then(|| conpty_pty(sysinfo::System::kernel_version().as_deref()))
+    });
+    *PTY
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum ServerFrame {
     #[serde(rename = "session")]
     Session {
         id: String,
+        /// The server's native PTY kind, independent of the viewing platform.
+        /// A tmux pane has no native PTY of its own.
+        #[serde(flatten)]
+        pty: Option<SessionPty>,
         /// Server-authoritative live metadata and immutable spawn provenance.
         /// Optional names preserve honest unknowns from legacy fd-store data;
-        /// all fields are always present on the wire.
+        /// these name and group fields are always present on the wire.
         name: Option<String>,
         group: String,
         spawn_name: Option<String>,
@@ -312,7 +342,7 @@ enum ServerFrame {
         /// instead of trusting the anonymous `queue_depth`. Always present
         /// (empty when nothing tagged is queued).
         queued_prompt_ids: Vec<String>,
-        program: ProgramReading,
+        program: Box<ProgramReading>,
         program_status: Arc<ProgramStatusSnapshot>,
         /// The tmux control-mode consent state, with the question that
         /// stands, if any, so a client joining mid-question shows it.
@@ -1765,6 +1795,10 @@ async fn send_attach_prelude(
 }
 
 fn session_frame(session: &AttachHandle) -> ServerFrame {
+    session_frame_with_pty(session, host_pty())
+}
+
+fn session_frame_with_pty(session: &AttachHandle, pty: Option<SessionPty>) -> ServerFrame {
     let submit_agent = SubmitAgent::derive(
         session.spawn_command().unwrap_or_default(),
         session.spawn_env("CHAN_AGENT"),
@@ -1773,6 +1807,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
     let metadata = session.live_metadata();
     ServerFrame::Session {
         id: session.id().to_owned(),
+        pty: pty.filter(|_| session.tmux_pane().is_none()),
         name: metadata.name,
         group: metadata.group,
         spawn_name: session.spawn_name().map(str::to_string),
@@ -1784,7 +1819,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
-        program: session.initial_program.clone(),
+        program: Box::new(session.initial_program.clone()),
         program_status: session.initial_program_status.clone(),
         tmux_consent: session.initial_tmux_consent.clone(),
         tmux_pane: session
@@ -2070,6 +2105,10 @@ mod program_status_tests;
 #[cfg(all(test, unix))]
 #[path = "terminal_queue_details_tests.rs"]
 mod queue_details_tests;
+
+#[cfg(test)]
+#[path = "terminal_pty_tests.rs"]
+mod pty_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2805,6 +2844,7 @@ mod tests {
         );
         let session = ServerFrame::Session {
             id: "abc".into(),
+            pty: None,
             name: Some("live".into()),
             group: "group".into(),
             spawn_name: Some("spawn".into()),
@@ -2816,7 +2856,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
-            program: ProgramReading::default(),
+            program: Box::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,
@@ -2830,6 +2870,7 @@ mod tests {
         // assume the field exists -- pre-release, no back-compat).
         let session_empty = ServerFrame::Session {
             id: "abc".into(),
+            pty: None,
             name: None,
             group: "default".into(),
             spawn_name: None,
@@ -2841,7 +2882,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
-            program: ProgramReading::default(),
+            program: Box::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,
@@ -3875,6 +3916,62 @@ mod tests {
                 Err(_) => {}
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn collector_with_replay_and_closed_stream() -> (Arc<AppState>, AttachHandle) {
+        let state = crate::state::test_support::make_test_state(false);
+        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let id = spawned.id();
+        assert!(state
+            .terminal_sessions
+            .inject_output(id, b"before attach\n"));
+        let mut attached = state
+            .terminal_sessions
+            .attach(id, None)
+            .expect("attach captures the retained output");
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+
+        // A short-lived command can close its live stream before a collector
+        // starts; its retained output must still be consumed exactly once.
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        drop(sender);
+        attached.rx = receiver;
+        (state, attached)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_until_keeps_replay_when_the_live_stream_is_closed() {
+        let _gate = pty_test_lock();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
+
+        let output = collect_until(&mut session, "not emitted", PROBE_BUDGET).await;
+
+        assert_eq!(output, "before attach\n");
+        assert!(session.replay.is_empty(), "replay is consumed, not copied");
+        assert_eq!(
+            collect_until(&mut session, "not emitted", PROBE_BUDGET).await,
+            "",
+            "a second collector must not deliver the same replay again"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_until_idle_keeps_replay_when_the_live_stream_is_closed() {
+        let _gate = pty_test_lock();
+        let (_state, mut session) = collector_with_replay_and_closed_stream();
+
+        let output = collect_until_idle(&mut session, PROBE_BUDGET, Duration::from_secs(1)).await;
+
+        assert_eq!(output, "before attach\n");
+        assert!(session.replay.is_empty(), "replay is consumed, not copied");
+        assert_eq!(
+            collect_until_idle(&mut session, PROBE_BUDGET, Duration::from_secs(1)).await,
+            "",
+            "a second collector must not deliver the same replay again"
+        );
     }
 
     /// Type `script` into an already-spawned test terminal and return

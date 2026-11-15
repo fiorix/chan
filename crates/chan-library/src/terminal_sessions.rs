@@ -3019,6 +3019,29 @@ impl Registry {
         Ok(session)
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn create_tmux_pane_for_test(
+        &self,
+        connection: u64,
+        pane: u32,
+        size: PtySize,
+    ) -> Result<AttachHandle, CreateError> {
+        let spec = TmuxPaneSpec {
+            pane: TmuxPaneRef {
+                connection: TmuxConnectionId(connection),
+                pane: chan_tmux::PaneId(pane),
+            },
+            name: Some("stream pane".into()),
+            group: "tmux".into(),
+            window_id: Some("stream-window".into()),
+            size,
+        };
+        let (sink, _commands) = std::sync::mpsc::channel();
+        self.add_tmux_pane(spec, sink)
+            .map(|session| session.attach(None))
+    }
+
     /// Relaunch session `id` in place under the same id, applying `overrides`
     /// to its spawn options. `Ok(false)` when the id is unknown or closed, or
     /// when a concurrent operation replaced the session during the spawn;
@@ -6209,7 +6232,12 @@ impl Session {
                 // entry is a FIFO boundary, so `part` here is the singleton's.
                 MessagePart::Whole => plan_submitted_input(text, submit.as_ref(), batched),
                 MessagePart::Body => PtyInputPlan {
-                    parts: vec![chan_shell::submitted_body_bytes(&text)],
+                    parts: vec![chan_shell::submitted_body_bytes(
+                        &text,
+                        submit
+                            .as_ref()
+                            .expect("a body entry carries its submit spec"),
+                    )],
                 },
                 MessagePart::Chord => PtyInputPlan {
                     parts: vec![chan_shell::submit_chord_bytes(
@@ -8286,6 +8314,7 @@ fn random_session_id() -> String {
 mod tests {
     mod control_socket_env_tests;
     mod program_status_tests;
+    mod replay_regression_tests;
     mod tmux_connection_tests;
     mod tmux_gate_session_tests;
     mod tmux_pane_session_tests;
@@ -10408,6 +10437,43 @@ mod tests {
     }
 
     #[test]
+    fn bracketing_split_queue_delivers_framed_body_then_bare_chord() {
+        let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let submit = ResolvedSubmit {
+                agent,
+                template: "\x1b[200~{}\x1b[201~\r".into(),
+                source: chan_shell::SubmitTemplateSource::Override,
+            };
+            let (entries, depth, writes) = queued_entries_depth_and_writes(submit, &[hostile]);
+            assert_eq!((entries, depth), (2, 1));
+            assert_eq!(
+                writes,
+                vec![
+                    b"\x1b[200~one [201~  \nline\tlast\n\x1b[201~".to_vec(),
+                    b"\r".to_vec(),
+                ],
+                "{} queued body and chord use the resolved framing",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_queue_keeps_builtin_body_and_chord_bytes() {
+        let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let (entries, depth, writes) =
+                queued_entries_depth_and_writes(built_in_submit(agent), &[hostile]);
+            assert_eq!((entries, depth), (2, 1));
+            assert_eq!(
+                writes,
+                vec![format!("{hostile}\n").into_bytes(), b"\r".to_vec()]
+            );
+        }
+    }
+
+    #[test]
     fn a_muse_session_is_listed_as_muse() {
         let registry = Registry::new(test_config(1024, 4, 10));
         let (by_command, _rx) = test_agent_session(
@@ -11555,7 +11621,11 @@ mod tests {
             session.detached_at.store(now, Ordering::Relaxed);
         }
         // 11s past detach > the 10s grace ⇒ reaped despite the fresh activity.
-        assert_eq!(registry.prune_idle_at(now + 11), 1);
+        assert_eq!(
+            registry.prune_idle_at(now + 11),
+            1,
+            "detach time reaps a busy orphan"
+        );
         assert_eq!(registry.len(), 0);
     }
 

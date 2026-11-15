@@ -1,5 +1,5 @@
 /**
- * xterm.js-compatible interfaces
+ * Terminal options and buffer interfaces
  */
 
 import type { GhosttyVt } from '../vt/ghosttyVt';
@@ -13,10 +13,6 @@ export interface ITerminalOptions {
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
-  allowTransparency?: boolean;
-
-  // Phase 1 additions
-  convertEol?: boolean; // Convert \n to \r\n (default: false)
   disableStdin?: boolean; // Disable keyboard input (default: false)
 
   // Scrolling options
@@ -59,24 +55,22 @@ export interface IDisposable {
 
 export type IEvent<T> = (listener: (arg: T) => void) => IDisposable;
 
-export interface ITerminalAddon {
-  activate(terminal: ITerminalCore): void;
-  dispose(): void;
-}
+/** A parsed write or a completed grid resize, delivered before painting. */
+export type TerminalChange = { kind: 'write' | 'resize' };
 
-export interface ITerminalCore {
-  cols: number;
-  rows: number;
-  element?: HTMLElement;
-  textarea?: HTMLTextAreaElement;
-}
-
-/**
- * Buffer range for selection coordinates
- */
-export interface IBufferRange {
-  start: { x: number; y: number };
-  end: { x: number; y: number };
+export interface TerminalViewport {
+  /** Rows back from the bottom; fractions accumulate between pixel-wheel events. */
+  readonly offset: number;
+  /** Offsets below one row follow output while retaining their fraction. */
+  readonly followOutput: 'at-bottom';
+  /** Set the bottom-relative offset, clamped to retained history. */
+  scrollTo(offset: number): void;
+  /** Add rows to the offset: positive moves toward older output. */
+  scrollBy(rows: number): void;
+  /** Return to live output and cancel pending smooth scrolling. */
+  scrollToBottom(): void;
+  /** Reveal an absolute buffer row; leave a visible row in place. */
+  reveal(row: number, align?: 'start' | 'center' | 'end'): void;
 }
 
 /**
@@ -85,13 +79,6 @@ export interface IBufferRange {
 export interface IKeyEvent {
   key: string;
   domEvent: KeyboardEvent;
-}
-
-/**
- * Unicode version provider (xterm.js compatibility)
- */
-export interface IUnicodeVersionProvider {
-  readonly activeVersion: string;
 }
 
 // ============================================================================
@@ -109,9 +96,6 @@ export interface IBufferNamespace {
   readonly normal: IBuffer;
   /** The alternate buffer (used by full-screen apps like vim) */
   readonly alternate: IBuffer;
-
-  /** Event fired when buffer changes (normal ↔ alternate) */
-  readonly onBufferChange: IEvent<IBuffer>;
 }
 
 /**
@@ -120,14 +104,6 @@ export interface IBufferNamespace {
 export interface IBuffer {
   /** Buffer type: 'normal' or 'alternate' */
   readonly type: 'normal' | 'alternate';
-  /** Cursor X position (0-indexed) */
-  readonly cursorX: number;
-  /** Cursor Y position (0-indexed, relative to viewport) */
-  readonly cursorY: number;
-  /** Viewport Y position (scroll offset, 0 = bottom of scrollback) */
-  readonly viewportY: number;
-  /** Base Y position (always 0 for normal buffer, may vary for alternate) */
-  readonly baseY: number;
   /** Total buffer length (rows + scrollback for normal, just rows for alternate) */
   readonly length: number;
 
@@ -137,11 +113,6 @@ export interface IBuffer {
    * @returns Line object or undefined if out of bounds
    */
   getLine(y: number): IBufferLine | undefined;
-
-  /**
-   * Get the null cell (used for empty/uninitialized cells)
-   */
-  getNullCell(): IBufferCell;
 }
 
 /**
@@ -176,42 +147,12 @@ export interface IBufferLine {
 export interface IBufferCell {
   /** Character(s) in this cell (may be empty, single char, or emoji) */
   getChars(): string;
-  /** Unicode codepoint (0 for null cell) */
-  getCode(): number;
   /** Character width (1 = normal, 2 = wide/emoji, 0 = combining) */
   getWidth(): number;
-
-  /** Foreground color index (for palette colors) or -1 for RGB */
-  getFgColorMode(): number;
-  /** Background color index (for palette colors) or -1 for RGB */
-  getBgColorMode(): number;
-  /** Foreground RGB color (or 0 for default) */
-  getFgColor(): number;
-  /** Background RGB color (or 0 for default) */
-  getBgColor(): number;
-
-  /** Whether cell has bold style */
-  isBold(): number;
-  /** Whether cell has italic style */
-  isItalic(): number;
-  /** Whether cell has underline style */
-  isUnderline(): number;
-  /** Whether cell has strikethrough style */
-  isStrikethrough(): number;
-  /** Whether cell has blink style */
-  isBlink(): number;
-  /** Whether cell has inverse video style */
-  isInverse(): number;
-  /** Whether cell has invisible style */
-  isInvisible(): number;
-  /** Whether cell has faint/dim style */
-  isFaint(): number;
 
   // Link detection support
   /** Get hyperlink ID for this cell (0 = no link) */
   getHyperlinkId(): number;
   /** Get the Unicode codepoint for this cell */
   getCodepoint(): number;
-  /** Whether cell has dim/faint attribute (boolean version) */
-  isDim(): boolean;
 }

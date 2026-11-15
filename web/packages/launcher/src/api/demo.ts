@@ -293,13 +293,12 @@ function tick<T>(value: T): Promise<T> {
 export type LauncherDemoVariant = "populated" | "empty" | "devserver";
 
 export type LauncherDemoOptions = {
-  /// Fired whenever the demo opens/focuses a window row. The marketing embed
-  /// hooks this to open the frontend-only workspace demo overlay; the demo
-  /// state change (hidden/connected) still happens either way.
+  /// Fired after openWindow updates any matching row and notifies subscribers.
+  /// The manual embeds leave this unset; the in-memory state changes either way.
   onOpenWindow?: (id: string) => void;
-  /// "populated" is the home hero's library fixture; "empty" is the manual's
-  /// first-run mock (local machine only, nothing created yet); "devserver" is
-  /// the same empty seed with the Add-devserver dialog opened on mount.
+  /// "populated" seeds a library with workspaces, devservers and windows.
+  /// "empty" starts with the local machine alone; "devserver" uses that seed,
+  /// and LauncherDemo opens the Add devserver form on mount.
   variant?: LauncherDemoVariant;
 };
 

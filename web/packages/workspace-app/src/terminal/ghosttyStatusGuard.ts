@@ -1,9 +1,10 @@
 const PREFIX = Uint8Array.of(0x1b, 0x5d, 0x37, 0x35, 0x30, 0x31, 0x3b);
 const MAX_BODY = 4087;
 
-/// Ghostty-web currently rings its bell for BEL-ended OSC 7501. Hold only a
-/// possible introducer; after the full prefix, consume through its terminator,
-/// including a body that exceeds the server's admission bound.
+/// The server handles OSC 7501 status but retains its bytes in output and
+/// replay. Keep that protocol out of Ghostty's parser, including bodies the
+/// server rejects as overlong. Hold only a possible introducer; after the full
+/// prefix, discard through BEL, passing ESC, CAN and SUB back to the parser.
 export class GhosttyStatusGuard {
   private prefix: number[] = [];
   private bodyLength = -1;

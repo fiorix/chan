@@ -128,7 +128,7 @@
     return () => untrack(() => dropBrowserView(id));
   });
 
-  // Open and Upload need the surface's own location and tree. Only the
+  // File commands need the surface's own location and tree. Only the
   // command surface answers, a dock included, with the same selection that
   // the launcher used to offer the command.
   $effect(() => {
@@ -137,6 +137,8 @@
       if (commandSurfaceId() !== id) return;
       const name = (e as CustomEvent).detail?.name;
       if (name === "app.browser.open") run("open");
+      else if (name === "app.browser.newFsEntry") run("new");
+      else if (name === "app.browser.pasteSelection") run("paste");
       else if (name === "app.browser.uploadSelection") run("upload");
     };
     window.addEventListener("chan:command", onCommand);

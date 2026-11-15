@@ -12,7 +12,6 @@
 
 import { EventEmitter } from './event-emitter';
 import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
-import type { IEvent } from './interfaces';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
 
@@ -310,41 +309,6 @@ export class SelectionManager {
   }
 
   /**
-   * Get selection position as buffer range
-   * xterm.js compatible API
-   */
-  getSelectionPosition():
-    | { start: { x: number; y: number }; end: { x: number; y: number } }
-    | undefined {
-    const coords = this.normalizeSelection();
-    if (!coords) return undefined;
-
-    return {
-      start: { x: coords.startCol, y: coords.startRow },
-      end: { x: coords.endCol, y: coords.endRow },
-    };
-  }
-
-  /**
-   * Deselect all text
-   * xterm.js compatible API
-   */
-  deselect(): void {
-    this.clearSelection();
-    this.selectionChangedEmitter.fire();
-  }
-
-  /**
-   * Focus the terminal (make it receive keyboard input)
-   */
-  focus(): void {
-    const canvas = this.renderer.getCanvas();
-    if (canvas.parentElement) {
-      canvas.parentElement.focus();
-    }
-  }
-
-  /**
    * Get current selection coordinates (for rendering)
    */
   getSelectionCoords(): SelectionCoordinates | null {
@@ -363,13 +327,6 @@ export class SelectionManager {
    */
   clearDirtySelectionRows(): void {
     this.dirtySelectionRows.clear();
-  }
-
-  /**
-   * Get selection change event accessor
-   */
-  get onSelectionChange(): IEvent<void> {
-    return this.selectionChangedEmitter.event;
   }
 
   /**

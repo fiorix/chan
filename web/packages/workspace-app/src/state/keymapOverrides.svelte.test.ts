@@ -151,14 +151,14 @@ describe("keymap override store", () => {
     expect(after["app.search.toggle"]).toBeUndefined(); // hydrate replaces
   });
 
-  test("persist writer receives the serialized wire on every mutation", () => {
+  test("persist writer receives only the assigned or cleared binding", () => {
     const seen: unknown[] = [];
-    registerOverridePersist((wire) => seen.push(wire));
+    registerOverridePersist((edit) => seen.push(edit));
     assignOverride("app.search.toggle", "Mod+J");
     clearOverride("app.search.toggle");
     expect(seen).toHaveLength(2);
-    expect(seen[0]).toEqual({ "app.search.toggle": { web: "Mod+J" } });
-    expect(seen[1]).toEqual({});
+    expect(seen[0]).toEqual({ id: "app.search.toggle", slot: "web", chord: "Mod+J" });
+    expect(seen[1]).toEqual({ id: "app.search.toggle", slot: "web", chord: null });
   });
 
   test("hydrate drops Shift-only slots and retains Mod+Shift chords", () => {

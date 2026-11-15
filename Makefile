@@ -40,6 +40,14 @@ CHAN_TARGET ?=
 CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-winpipe chan-desktop
 CHAN_SERVER_WINDOWS_TESTS := \
 	tenant_builder_tests::tenant_builders_preserve_routes_and_state \
+	routes::terminal::pty_tests::session_pty_native_windows_frame_reports_the_host_build \
+	routes::terminal::pty_tests::session_pty_serializes_conpty_and_numeric_windows_build \
+	routes::terminal::pty_tests::session_pty_omits_both_fields_for_other_ptys \
+	routes::terminal::pty_tests::session_pty_keeps_conpty_when_windows_build_is_unknown \
+	routes::terminal::pty_tests::session_pty_metadata_survives_restart_and_reattach \
+	routes::terminal::pty_tests::session_pty_omits_windows_host_metadata_for_tmux_panes \
+	routes::terminal::pty_tests::session_pty_parses_the_observed_windows_build \
+	routes::terminal::pty_tests::session_pty_does_not_invent_a_build_for_invalid_or_missing_values \
 	handoff::tests::well_known_path_is_named_pipe_on_windows \
 	handoff::tests::listener_round_trip_upgrade_checked_pipe \
 	handoff::tests::listener_round_trip_activated_pipe \
@@ -563,7 +571,8 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	$(MAKE) e2e-check
 	# The Rust test run covers chan-library, chan-winpipe and chan-desktop,
 	# plus the named chan-server tests that exercise Windows named-pipe
-	# paths. The chan-library tests include the Windows ConPTY child-reaping
+	# paths and the ConPTY session metadata, including the native build number.
+	# The chan-library tests include the Windows ConPTY child-reaping
 	# paths, chan-desktop includes
 	# the registry-backed user-PATH assertion when CHAN_TEST_REAL_USER_PATH arms
 	# it, and chan-server covers the tenant builder's named-pipe control socket,

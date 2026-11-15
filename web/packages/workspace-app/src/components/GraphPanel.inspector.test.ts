@@ -41,6 +41,7 @@ import {
   paneWidths,
   refreshTree,
   refreshWorkspace,
+  teardown,
 } from "../state/store.svelte";
 import { setFetchImpl } from "../api/transport";
 import { applyGraphColorPrefs } from "../state/graphPalette.svelte";
@@ -136,6 +137,7 @@ afterEach(async () => {
   closeTabMenu();
   unmountGraphPanels();
   await settle(2);
+  teardown();
   uninstallDemoWorkspace();
   timers.release();
 });

@@ -177,7 +177,11 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       return this.wasmTerm.getScrollbackLength();
     }
     scrollLines() {}
-    scrollToLine() {}
+    viewport = {
+      offset: 0, followOutput: "at-bottom" as const,
+      scrollTo() {}, scrollBy() {}, scrollToBottom() {}, reveal() {},
+    };
+    onChange() { return { dispose() {} }; }
     selectAll() {
       this.selectionManager.selectAll();
     }
