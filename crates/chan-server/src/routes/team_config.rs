@@ -11,16 +11,16 @@
 //!                 on every reload)
 //!   bootstrap.md  generated team-wide process doc (tool-owned;
 //!                 regenerated from config.toml on every write except
-//!                 a load's (the dialog's re-save, a `load --script`
+//!                 a load's (the dialog, a `load --script`
 //!                 script), which keeps an existing one)
 //!   tasks/        task-{from}-{to}-{n}.md  (owned by `to`, append-only)
 //!   journals/     journal-{member}.md      (owned by each member)
 //!   followups/    followup-{from}-{to}-{n}.md (owned by `to`)
 //! ```
 //!
-//! A `load --script` script writes `config.toml` and `bootstrap.md` only where each is missing, preserving existing files byte for byte. A `new --script` script writes both from the supplied config and brief. The dialog's re-save writes the config while keeping an existing bootstrap.
+//! A `load --script` script writes `config.toml` and `bootstrap.md` only where each is missing, preserving existing files byte for byte. A `new --script` script writes both from the supplied config and brief. The dialog keeps an existing config when its loaded form is unchanged; edited Loads save the modeled config. Every dialog Load keeps an existing bootstrap.
 //!
-//! Route file I/O goes through `Workspace::{read_text,write_text,create_dir}`, so the team config lives inside the same sandbox and atomic-write contract as notes content. `config.toml` and the generated `.md` both pass the editable-text gate. The team's `.md` docs are indexed and graphed like other workspace content. Generated scripts write files directly through the shell.
+//! Route file I/O goes through `Workspace::{read_text,write_text,create_bytes,create_dir}`, so the team config lives inside the same sandbox and atomic-write contract as notes content. `config.toml` and the generated `.md` both pass the editable-text gate. The team's `.md` docs are indexed and graphed like other workspace content. Generated scripts write files directly through the shell.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chan_workspace::paths::strip_verbatim_prefix;
-use chan_workspace::{Member, TeamConfig};
+use chan_workspace::{ChanError, Member, TeamConfig};
 use serde::Deserialize;
 
 use crate::error::{err, err_state};
@@ -49,8 +49,10 @@ pub struct ReadTeamConfigPayload {
 /// folded verbatim into the generated `bootstrap.md` (the dialog reads the
 /// file client-side and sends its text, mirroring the CLI's `--brief`).
 /// `keep_bootstrap` leaves an existing `bootstrap.md` as it is: the dialog's
-/// Load re-saves a team whose bootstrap may carry a brief or hand edits that a
-/// regenerate would drop.
+/// Load keeps a team's bootstrap, which may carry a brief or hand edits that
+/// a regenerate would drop.
+/// `keep_config` leaves an existing `config.toml` byte for byte when the
+/// dialog's loaded form is unchanged. Missing files are still created.
 #[derive(Deserialize)]
 pub struct WriteTeamConfigPayload {
     pub dir: String,
@@ -59,6 +61,8 @@ pub struct WriteTeamConfigPayload {
     pub brief_content: Option<String>,
     #[serde(default)]
     pub keep_bootstrap: bool,
+    #[serde(default)]
+    pub keep_config: bool,
 }
 
 /// Up-front guard so a bad `dir` produces a clean 400 message instead
@@ -214,6 +218,7 @@ pub async fn api_team_config_read(
 /// `POST /api/team-config/write` - validate, create the `{dir}/` tree,
 /// then write `config.toml` + the regenerated `bootstrap.md` (or, with
 /// `keep_bootstrap`, only a missing one) through the Workspace sandbox.
+/// `keep_config` also preserves an existing config.toml.
 /// 200 `{}` on success; 400 on bad dir / failed validation / write failure.
 pub async fn api_team_config_write(
     State(state): State<Arc<AppState>>,
@@ -226,12 +231,20 @@ pub async fn api_team_config_write(
     let config = payload.config;
     let brief = payload.brief_content;
     let keep_bootstrap = payload.keep_bootstrap;
+    let keep_config = payload.keep_config;
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
     let result = run_blocking("write team config", move || {
-        write_team_files(&workspace, &dir, &config, brief.as_deref(), keep_bootstrap)
+        write_team_files(
+            &workspace,
+            &dir,
+            &config,
+            brief.as_deref(),
+            keep_bootstrap,
+            keep_config,
+        )
     })
     .await;
     match result {
@@ -257,10 +270,10 @@ pub(crate) fn read_team_config(
 }
 
 /// Replace each member's `CHAN_TAB_NAME` that does not restate its handle
-/// with the handle, warning for each one replaced. Configs saved while a typed
-/// value was accepted carry one, and refusing the read would keep the load
-/// dialog, which drops the key, from ever healing them. The write and the
-/// spawn still refuse it, so the next save writes the handle.
+/// with the handle, warning for each one replaced. This lets the dialog load
+/// the team without exposing a field set at spawn for editing. The write and
+/// spawn still refuse mismatches. An edited Load or New writes the corrected
+/// value; an unchanged Load preserves the saved file.
 fn restate_saved_tab_names(config: &mut TeamConfig, rel: &str) {
     use chan_library::terminal_sessions::{chan_overrides_spawn_env, is_chan_spawn_env_key};
     for member in &mut config.members {
@@ -295,17 +308,19 @@ pub(crate) fn write_team_config(
     config: &TeamConfig,
     brief: Option<&str>,
 ) -> Result<(), String> {
-    write_team_files(workspace, dir, config, brief, false)
+    write_team_files(workspace, dir, config, brief, false, false)
 }
 
 /// `write_team_config`, except that `keep_bootstrap` leaves an existing
 /// `{dir}/bootstrap.md` as it is and generates one only where none exists.
+/// `keep_config` independently does the same for `{dir}/config.toml`.
 fn write_team_files(
     workspace: &chan_workspace::Workspace,
     dir: &str,
     config: &TeamConfig,
     brief: Option<&str>,
     keep_bootstrap: bool,
+    keep_config: bool,
 ) -> Result<(), String> {
     validate_team_config(config)?;
     let toml_text =
@@ -326,9 +341,20 @@ fn write_team_files(
     }
 
     let config_rel = format!("{dir}/config.toml");
-    workspace
-        .write_text(&config_rel, &toml_text)
-        .map_err(|e| format!("cannot write {config_rel}: {e}"))?;
+    let config_write = if keep_config {
+        match workspace.create_bytes(&config_rel, toml_text.as_bytes()) {
+            Err(ChanError::PathAlreadyExists(_)) if workspace.exists(&config_rel) => Ok(()),
+            Err(ChanError::PathAlreadyExists(_)) => {
+                return Err(format!(
+                    "cannot preserve {config_rel}: path is not a regular file"
+                ));
+            }
+            result => result,
+        }
+    } else {
+        workspace.write_text(&config_rel, &toml_text)
+    };
+    config_write.map_err(|e| format!("cannot write {config_rel}: {e}"))?;
 
     let bootstrap_rel = format!("{dir}/bootstrap.md");
     if keep_bootstrap && workspace.exists(&bootstrap_rel) {
@@ -606,7 +632,7 @@ fn heredoc_delimiter(base: &str, body: &str) -> String {
 ///      env + launch), then
 ///   5. an identity poke per agent (`cs terminal write --submit=<agent>`).
 ///
-/// With `keep_bootstrap` (a `load`), steps 2 and 3 write each file only where it is missing: a saved team's config may carry comments and formatting, and its bootstrap may carry its brief or hand edits. Without it (a `new`), both files are written from the supplied config and brief. The route's separate `keep_bootstrap` write path always re-saves the config.
+/// With `keep_bootstrap` (a `load`), steps 2 and 3 write each file only where it is missing: a saved team's config may carry comments and formatting, and its bootstrap may carry its brief or hand edits. Without it (a `new`), both files are written from the supplied config and brief. The route's separate write path controls config preservation with `keep_config`, independently of `keep_bootstrap`.
 ///
 /// The script resolves `{dir}` against `$PWD` once, at the top, prints the
 /// result, and uses that one value for the tree it writes and for the pokes
@@ -2115,6 +2141,10 @@ sleep 3"
 
     /// POST `/api/team-config/write` with `body` through the real router.
     async fn post_write(router: axum::Router, body: serde_json::Value) -> StatusCode {
+        post_write_response(router, body).await.status()
+    }
+
+    async fn post_write_response(router: axum::Router, body: serde_json::Value) -> Response {
         use axum::body::Body;
         use axum::http::{header, Request};
         use tower::ServiceExt;
@@ -2131,10 +2161,145 @@ sleep 3"
             )
             .await
             .unwrap()
-            .status()
     }
 
-    /// The dialog's Load re-saves an existing team's config.toml but leaves
+    #[tokio::test]
+    async fn write_route_keeps_an_existing_config_when_asked() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        write_team_config(&workspace, "saved", &sample_config(), None).unwrap();
+        let generated = workspace.read_text("saved/config.toml").unwrap();
+        let (header, members) = generated.split_once("[[members]]").unwrap();
+        let reordered = header.lines().rev().collect::<Vec<_>>().join("\n");
+        let hand_edited = format!(
+            "# Preserve this team's local instructions.\nlocal_note = 'keep me'\n{reordered}\n[[members]]{members}"
+        );
+        workspace
+            .write_text("saved/config.toml", &hand_edited)
+            .unwrap();
+        let config = read_team_config(&workspace, "saved").unwrap();
+        assert_eq!(
+            config,
+            sample_config(),
+            "hand edits leave the modeled team unchanged"
+        );
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace.clone(),
+            )
+        });
+        let router = crate::router(state);
+
+        for dir in ["saved", "missing"] {
+            let body = serde_json::json!({
+                "dir": dir,
+                "config": config,
+                "keep_config": true,
+                "keep_bootstrap": true,
+            });
+            assert_eq!(post_write(router.clone(), body).await, StatusCode::OK);
+            assert_eq!(read_team_config(&workspace, dir).unwrap(), config);
+        }
+        assert_eq!(
+            workspace.read_text("saved/config.toml").unwrap(),
+            hand_edited,
+            "an unchanged Load preserves comments, key order and unmodeled keys byte for byte"
+        );
+        assert_eq!(
+            workspace.read_text("missing/config.toml").unwrap(),
+            generated
+        );
+
+        let mut invalid = config.clone();
+        invalid.members.clear();
+        let body = serde_json::json!({ "dir": "saved", "config": invalid, "keep_config": true });
+        assert_eq!(
+            post_write(router.clone(), body).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            workspace.read_text("saved/config.toml").unwrap(),
+            hand_edited
+        );
+
+        let mut edited = config;
+        edited.tab_group = "edited-group".into();
+        let body = serde_json::json!({ "dir": "saved", "config": edited, "keep_bootstrap": true });
+        assert_eq!(post_write(router, body).await, StatusCode::OK);
+        assert_eq!(read_team_config(&workspace, "saved").unwrap(), edited);
+        assert_eq!(
+            workspace.read_text("saved/config.toml").unwrap(),
+            toml::to_string_pretty(&edited).unwrap(),
+            "an edited Load keeps the modeled save behavior"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_route_preserve_config_refuses_non_regular_targets() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let mut dirs = Vec::new();
+        workspace.create_dir("directory/config.toml").unwrap();
+        dirs.push("directory");
+        #[cfg(unix)]
+        {
+            workspace.create_dir("symlink").unwrap();
+            workspace
+                .write_text("target.toml", "keep the target")
+                .unwrap();
+            std::os::unix::fs::symlink("../target.toml", root.path().join("symlink/config.toml"))
+                .unwrap();
+            dirs.push("symlink");
+        }
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace.clone(),
+            )
+        });
+        let router = crate::router(state);
+        for dir in dirs {
+            let body =
+                serde_json::json!({ "dir": dir, "config": sample_config(), "keep_config": true });
+            let response = post_write_response(router.clone(), body).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{dir}: preserving a config refuses non-regular targets"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                response["error"],
+                format!("cannot preserve {dir}/config.toml: path is not a regular file"),
+                "the refusal names the non-regular config target"
+            );
+        }
+        assert!(root.path().join("directory/config.toml").is_dir());
+        #[cfg(unix)]
+        {
+            assert!(root.path().join("symlink/config.toml").is_symlink());
+            assert_eq!(
+                workspace.read_text("target.toml").unwrap(),
+                "keep the target"
+            );
+        }
+    }
+
+    /// An edited dialog Load re-saves an existing team's config.toml but leaves
     /// its bootstrap.md, which may carry a brief or hand edits, as it is; a
     /// team directory without one still gets one.
     #[tokio::test]

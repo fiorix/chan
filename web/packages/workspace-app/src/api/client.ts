@@ -1688,8 +1688,8 @@ const calls = {
   /// tasks/journals/followups dirs on write
   /// (see crates/chan-server/src/routes/team_config.rs).
   /// `readTeamConfig` backs the Load auto-validate (400 on
-  /// missing / invalid TOML); `writeTeamConfig` re-saves the
-  /// (possibly edited) config on Bootstrap.
+  /// missing / invalid TOML); `writeTeamConfig` saves the config on Bootstrap
+  /// unless an unchanged Load asks to preserve the existing file.
   readTeamConfig: (dir: string) =>
     req<TeamConfigWire>("POST", "/api/team-config/read", { dir }),
   /// `briefContent`, when set, is folded VERBATIM into the generated
@@ -1698,18 +1698,21 @@ const calls = {
   /// reads the file client-side, mirroring the CLI's `--brief`. It is not part
   /// of config.toml, so it travels as a sibling field. `keepBootstrap` leaves
   /// an existing bootstrap.md as it is (a Load's re-save); the server then
-  /// generates one only where none exists.
+  /// generates one only where none exists. `keepConfig` does the same for
+  /// config.toml when the loaded form is unchanged.
   writeTeamConfig: (
     dir: string,
     config: TeamConfigWire,
     briefContent?: string,
     keepBootstrap = false,
+    keepConfig = false,
   ) =>
     mutate<void>("POST", "/api/team-config/write", {
       dir,
       config,
       brief_content: briefContent,
       ...(keepBootstrap ? { keep_bootstrap: true } : {}),
+      ...(keepConfig ? { keep_config: true } : {}),
     }),
 
   /// Reply to a survey raised by `cs terminal survey`. The blocked CLI is

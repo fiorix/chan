@@ -206,6 +206,34 @@ export interface TeamDialogConfig {
   /// no access to the client filesystem, mirroring the CLI's `--brief`. Not
   /// part of the persisted `config.toml`; it travels alongside it.
   brief: string;
+  /// Immutable snapshot of the form populated by a successful Load. Carried
+  /// with the session draft so reopening the dialog keeps the same baseline.
+  /// Older drafts without a snapshot compare against a fresh config read.
+  loadedConfigSnapshot?: string;
+}
+
+/// The editable team fields, in a stable order, independent of generated
+/// wire metadata. The New-only brief is absent from config.toml; source mode
+/// is checked separately before deciding whether to preserve a saved config.
+export function teamConfigSnapshot(config: TeamDialogConfig): string {
+  return JSON.stringify({
+    teamDir: config.teamDir.trim().replace(/\/+$/, ""),
+    hostName: config.hostName,
+    tabGroup: config.tabGroup,
+    size: config.size,
+    autoPrefix: config.autoPrefix,
+    mcpEnv: config.mcpEnv,
+    members: config.members.map(({ name, command, env, isLead }) => ({
+      name, command, env, isLead,
+    })),
+    realEstate: config.realEstate.kind === "tabs"
+      ? { kind: "tabs" }
+      : {
+          kind: "split",
+          grid: { rows: config.realEstate.grid.rows, cols: config.realEstate.grid.cols },
+          slots: config.realEstate.slots,
+        },
+  });
 }
 
 /// The dialog request object. For the New team command App.svelte creates
