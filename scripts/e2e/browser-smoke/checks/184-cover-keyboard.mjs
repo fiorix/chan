@@ -34,8 +34,11 @@ export default {
       offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0,
     });
     await page.evaluate(() => window.__coverWatch.close());
-    await page.waitForSelector('[data-cover="reconnect"] .reconnect');
-    assert.equal(await page.$eval('[data-cover="reconnect"] .reconnect', (b) => b === document.activeElement), true);
+    await page.waitForSelector('[data-cover="reconnect"]');
+    await page.waitForFunction(() => document.activeElement?.matches('[data-cover="reconnect"]'));
+    for (const key of ["Enter", "Space"]) await page.keyboard.press(key);
+    assert.equal(await page.evaluate(() => window.__coverCalls.filter((c) => c.endsWith("_devserver_for_window")).length), 0);
+    await page.waitForSelector('[data-cover="reconnect"] .reconnect'); // Appears 8 s after the drop.
     const observations = [];
     for (const key of ["Enter", "Space"]) {
       for (const action of ["reconnect", "abandon"]) {
