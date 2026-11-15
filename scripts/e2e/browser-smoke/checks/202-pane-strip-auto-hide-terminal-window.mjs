@@ -83,6 +83,11 @@ export default {
 
       // Off, live, through the tenant's own config route: the lone terminal
       // gets its strip back without a reload.
+      // This private server's feed proves its sole page has a /ws subscriber;
+      // ctx.waitWindowLive addresses the suite's different workspace server.
+      await poll("the terminal window's preference watcher", async () =>
+        (await fetchWindows(origin, token)).some((window) =>
+          window.window_id === row.window_id && window.connected));
       await writePaneStripPreference(page, row.token, false);
       const restored = await waitPaneStrip(page, "the lone terminal after the preference turned off", (s) => s.tabs.length === 1 && stripShown(s));
       await ctx.shot("202-off-one-terminal", page);
