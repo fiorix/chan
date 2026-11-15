@@ -200,3 +200,7 @@ The three kept-contract link tests explicitly name their provider-registration p
 ## Part 3 merged, 2026-11-15
 
 The fix commit was gated at its own tip, `0554499b3`, clean before and after: the three touched suites (`dev/v0131-team/evidence/Term131/task31/committed-touched.log`, 68 tests, exit 0) and `make web-check` (`dev/v0131-team/evidence/Term131/task31/web-check.log`, 11,964 tests in 831 files, four Svelte checks at zero, exit 0). The broadcast red, green and mutation runs above ran at `4526376bc` with the fix in the working tree, whose `TerminalTab.svelte` is byte-identical to the committed one. Two Fable reviewers accepted part 3 and a third accepted its fixes; part 3 is merged into the integration branch, where check 227 runs with its setup barrier and the terminal suite runs on the merged tip.
+
+## The v0.131.0 cut, 2026-11-15
+
+The owner cut v0.131.0 at its third milestone on 2026-11-15: "ok let's cut to ga at m3 and move the rest to v0.132". Part 3 and part 4's first task (the explicit viewport and the change event) land in v0.131.0. Part 4's tasks 2 to 6 (focus and pointer; selection and highlights; paint layers; core and theme; seal and scan), part 5 and part 6 move to v0.132.0; the row moves there at v0.131.0's close, after part 4's first task merges. The notes the first task's reviews left for the later tasks are in `dev/v0131-team/plan.md` (2026-11-15T12:0xZ).

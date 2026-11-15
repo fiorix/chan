@@ -1,6 +1,6 @@
 # The AppImage's environment fixes are unread in FUSE mode
 
-Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 the same day, at v0.130.0's planning; not started. Its first step is the reading below, on a host that can mount FUSE.
+Status: accepted for v0.130.0 by the owner on 2026-11-13 and moved by him to v0.131.0 the same day, at v0.130.0's planning; moved by him to v0.132.0 on 2026-11-15 with the environment row it follows; not started. Its first step is the reading below, on a host that can mount FUSE.
 
 Record: the reading was owed before v0.129.0's release by [the chan-term row](../done/the-default-terminal-is-chan-desktop-under-flags-of-its-own.md), its last section, "Not read: FUSE mode". On the list of what stood before the v0.129.0 tag, which named the AppImage under FUSE, the owner moved it to the next version: "appimage: move to next version yes".
 
@@ -46,3 +46,7 @@ The owner answered the decisions document for v0.131.0 (`dev/v0131/decisions.md`
 - Where it runs: an sdme desktop guest given the host's `/dev/fuse` by a bind and a `DeviceAllow` drop-in on its unit, starting no chan process for the first probe (point 3's commands); the Arch VM under `dev/vm/` as the fallback, and for one item read as an unprivileged user as a control, since the guest runs as root and does not exercise the setuid `fusermount` path.
 - When: after the AppImage environment row merges, so the list is read once, against an AppImage that holds that fix, with v0.128.0's as the older parent. That row's third acceptance line joins this list.
 - An item that fails and is small goes to the desktop seat as a fix with a test; a larger one, or one in the update's relaunch, is drafted as a row and put to the owner. Once both routes have been tried and the reading is still too complicated, this row moves to the next release without a survey, with what was tried written here.
+
+## Moved to v0.132.0, 2026-11-15
+
+The owner cut v0.131.0 at its third milestone and moved this row to v0.132.0 on 2026-11-15: "ok let's cut to ga at m3 and move the rest to v0.132". It follows the AppImage environment row, which moved with it; he had allowed the move in advance (decisions point 3). Nothing of it was built or read.

@@ -28,7 +28,6 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
-| [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [New and Paste choose two folders][newpaste] | merged | closed |
 | [a warm chan-term leaves Chan behind][warmterm] | merged | owner |
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
@@ -45,10 +44,8 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a minimized window stays minimized][unbury] | merged | vm |
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | merged | owner |
-| [a fast stream loses output][streamlag] | not started | measure |
 | [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [another account holds the claim][winclaim] | not started | build |
-| [AppImage children get its environment][appenv] | not started | build |
 | [a reload focuses another pane][reloadfocus] | merged | closed |
 | [a close test fails a loaded gate][closetest] | merged | closed |
 | [an edit erases another window's keys][keysmerge] | merged | closed |
@@ -66,7 +63,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [the gateway page says this computer][gwwording] | not started | build |
 
 [ghosttyng]: v0.131.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
-[fusemode]: v0.131.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
+[fusemode]: v0.132.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [newpaste]: v0.131.0/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md
 [warmterm]: v0.131.0/a-warm-chan-term-launch-opens-its-window-without-chan-coming-forward-on-macos.md
 [fbtarget]: v0.131.0/the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active.md
@@ -83,10 +80,10 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [unbury]: v0.131.0/a-minimized-window-stays-minimized-when-cs-window-open-a-window-lists-focus-or-about-brings-it-back.md
 [wikirender]: v0.131.0/slides-and-pdf-export-show-wikilinks-as-raw-text.md
 [typescroll]: v0.131.0/typing-into-a-ghostty-terminal-leaves-a-scrolled-back-view-where-it-is.md
-[streamlag]: v0.131.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
+[streamlag]: v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [conpty]: v0.131.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
-[appenv]: v0.131.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
+[appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
 [closetest]: v0.131.0/a-devserver-close-test-holds-a-tenth-of-the-production-release-budget-and-fails-a-loaded-gate.md
 [keysmerge]: v0.131.0/a-window-that-edits-a-shortcut-erases-the-shortcuts-another-window-saved.md
@@ -102,6 +99,16 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [prefstale]: v0.131.0/a-stale-workspace-read-reverts-a-preference-the-user-just-set.md
 [dialogload]: v0.131.0/the-team-dialogs-load-rewrites-a-hand-edited-config.md
 [gwwording]: v0.131.0/the-gateways-authorization-page-says-this-computer.md
+
+### v0.132.0
+
+Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with its part 4 tasks 2 to 6 and parts 5 and 6 at v0.131.0's close.
+
+| Item | State | Next |
+| --- | --- | --- |
+| [a fast stream loses output][streamlag] | partly built | build |
+| [AppImage children get its environment][appenv] | partly built | build |
+| [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 
 ## Completed
 
