@@ -60,7 +60,7 @@
     tree,
   } from "../state/store.svelte";
   import { drafts, refreshDrafts } from "../state/drafts.svelte";
-  import { ensureGraphLoaded, graphData, refreshGraph } from "../state/graphData.svelte";
+  import { ensureGraphLoaded, graphData, refreshGraph, GRAPH_QUIET_MS } from "../state/graphData.svelte";
   import { graphPaletteStyleFor } from "../state/graphPalette.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { onDestroy, tick, untrack } from "svelte";
@@ -437,6 +437,9 @@
   let spineLoading = $state(true);
   let spineError = $state<string | null>(null);
   let spineSeq = 0;
+  type SpineFailure = { status: "pending" | "running" | "failed"; message: string };
+  let spineFailures = $state.raw(new Map<string, SpineFailure>());
+  let spineRetryQueued = $state(false);
   /// The spine's request found the workspace root gone. The tab then draws
   /// nothing, the shared graph included: what the index still holds of a
   /// missing workspace is not shown behind the error.
@@ -463,6 +466,19 @@
       taken.view === graphData.view &&
       (!graphData.gated || indexStatus.value?.state === "error"),
   );
+  // Reuse coverage across failures of the same view. A retry must not scan
+  // a large shared graph again just because another directory failed.
+  const sharedDirectories = $derived(new Set((taken?.view.nodes ?? []).flatMap((node) =>
+      node.kind === "directory" || node.kind === "folder" ? [node.path] : [],
+  )));
+  const spineWarnings = $derived.by(() => {
+    if (!graphWhole || error !== null) return [];
+    const failed = [...spineFailures].filter(([, failure]) => failure.status === "failed");
+    if (failed.length === 0) return [];
+    // The spine's own directory entries can survive a failed child read.
+    const covered = sharedDirectories;
+    return failed.filter(([dir]) => !covered.has(dir));
+  });
   /// Set once `showSelectedDirectoryFiles` has had its one run.
   let shownDirectoryFiles = false;
   let watchReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1336,6 +1352,7 @@
     const seq = ++spineSeq;
     spineLoading = true;
     spineError = null;
+    spineFailures = new Map();
     // A whole fetch reads every change made before it.
     spineChanges = new Set();
     // The first spine is drawn as its levels land, at most every
@@ -1363,7 +1380,16 @@
     try {
       askAhead();
       for (const dir of dirs) {
-        const level = await reads.shift()!;
+        let level;
+        try {
+          level = await reads.shift()!;
+        } catch (e) {
+          if (seq !== spineSeq) return;
+          if (dir === "" || isWorkspaceRootMissingError(e)) throw e;
+          setSpineFailure(dir, { status: "pending", message: (e as Error).message });
+          askAhead();
+          continue;
+        }
         if (level === "superseded") return;
         askAhead();
         applySpineLevel(read, dir, level);
@@ -1527,6 +1553,52 @@
   /// level lands after an earlier one's.
   let spinePatches: Promise<void> = Promise.resolve();
 
+  function setSpineFailure(dir: string, failure: SpineFailure): void {
+    spineFailures = new Map(spineFailures).set(dir, failure);
+  }
+
+  // Retry behind patches, so a newer successful read can cancel the retry
+  // before it starts. A hidden tab or a shared refresh defers pending work;
+  // a request already started still belongs to this spine when it returns.
+  function retrySpineFailures(): void {
+    const seq = spineSeq;
+    const read = spineRead;
+    if (read === null) return;
+    spineRetryQueued = true;
+    const run = async (): Promise<void> => {
+      try {
+        for (const [dir, failure] of spineFailures) {
+          if (seq !== spineSeq || read !== spineRead || !visible || !graphWhole || error !== null) return;
+          if (failure.status !== "pending" || spineFailures.get(dir) !== failure) continue;
+          setSpineFailure(dir, { ...failure, status: "running" });
+          try {
+            const level = await fetchSpineLevel(dir, seq);
+            if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
+            applySpineLevel(read, dir, level);
+            publishSpine(read);
+          } catch (e) {
+            if (seq !== spineSeq || read !== spineRead) return;
+            if (isWorkspaceRootMissingError(e)) {
+              spineFailed(e);
+              return;
+            }
+            setSpineFailure(dir, { status: "failed", message: (e as Error).message });
+          }
+        }
+      } finally {
+        spineRetryQueued = false;
+      }
+    };
+    spinePatches = spinePatches.then(run, run);
+  }
+
+  $effect(() => {
+    if (!visible || !graphWhole || error !== null || spineRetryQueued) return;
+    if ([...spineFailures.values()].some((failure) => failure.status === "pending")) {
+      untrack(retrySpineFailures);
+    }
+  });
+
   /// A change in the workspace, as the spine takes it: the children of each
   /// directory in `dirs` are read again, one level each, and take the place
   /// of what the spine held of them, so a save costs a request per
@@ -1605,14 +1677,27 @@
     dir: string,
     level: { nodes: FsGraphNode[]; edges: FsGraphEdge[] } | null,
   ): void {
+    const failures = new Map(spineFailures);
+    failures.delete(dir);
     const fresh = new Set(level?.nodes.map((n) => n.id) ?? []);
     // A directory there now, by id; a file where a directory was is not one.
     const freshDirs = new Set(level?.nodes.filter(isFsDirectory).map((n) => n.id) ?? []);
+    // A failed child may never have supplied a node. The parent's new
+    // listing still authoritatively removes that child's stale failure.
+    const prefix = dir === "" ? "" : `${dir}/`;
+    for (const failed of failures.keys()) {
+      if (!failed.startsWith(prefix)) continue;
+      const child = prefix + failed.slice(prefix.length).split("/")[0];
+      if (!freshDirs.has(child)) failures.delete(failed);
+    }
     const entries = new Set<string>();
     const removed = new Set<string>();
     const dropBelow = (below: string): void => {
       for (const m of read.nodes.values()) if (spineBelow(below, m)) removed.add(m.id);
       for (const held of read.held) if (held === below || held.startsWith(`${below}/`)) read.held.delete(held);
+      for (const failed of failures.keys()) {
+        if (failed === below || failed.startsWith(`${below}/`)) failures.delete(failed);
+      }
     };
     for (const n of read.nodes.values()) {
       // A ghost is a symlink's missing target, which the symlink's own level
@@ -1631,6 +1716,7 @@
       const was = read.nodes.get(n.id);
       if (was !== undefined && isFsDirectory(was) && !isFsDirectory(n)) dropBelow(was.path);
     }
+    if (failures.size !== spineFailures.size) spineFailures = failures;
     for (const id of removed) read.nodes.delete(id);
     read.edges = read.edges.filter((e) => {
       if (removed.has(e.source) || removed.has(e.target)) return false;
@@ -1923,7 +2009,7 @@
       watchReloadTimer = null;
       if (visible) takeSpineChanges();
       else graphDirty = true;
-    }, 250);
+    }, GRAPH_QUIET_MS);
   });
 
   /// Persist the live selection so it survives a window reload. The
@@ -2138,6 +2224,13 @@
     {/if}
     {#if loading && nodes.length > 0}
       <div class="stream-status">loading graph… {nodes.length} nodes, {edges.length} edges</div>
+    {/if}
+    {#if spineWarnings.length > 0}
+      <div class="spine-warning" role="status">
+        {#each spineWarnings as [dir, failure] (dir)}
+          <div>Could not read directory {dir}: {failure.message}</div>
+        {/each}
+      </div>
     {/if}
     <div class="cy" class:dim={!!error}>
       <GraphCanvas
@@ -2562,7 +2655,8 @@ drag to pan · scroll to zoom · click to select · double-click a directory to 
     color: #d33;
     font-style: normal;
   }
-  .stream-status {
+  .stream-status,
+  .spine-warning {
     position: absolute;
     left: 12px;
     top: 12px;
@@ -2574,6 +2668,13 @@ drag to pan · scroll to zoom · click to select · double-click a directory to 
     color: var(--text-secondary);
     font-size: 12px;
     pointer-events: none;
+  }
+  .spine-warning {
+    max-width: calc(100% - 24px);
+    max-height: 30%;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    pointer-events: auto;
   }
 
   /* Tab right-click bubble.
