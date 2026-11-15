@@ -179,7 +179,12 @@ async function selectControl(marker) {
   const box = domBy(state, marker)?.labelRect;
   if (!box?.width || !box.height) throw new Incomplete("the control tab has no visible label");
   evaluate("window.__axcloseClick = null");
-  xdo("mousemove", "--sync", Math.round(box.left + box.width / 2 + offset.dx), Math.round(box.top + box.height / 2 + offset.dy));
+  const x = Math.round(box.left + box.width / 2 + offset.dx);
+  const y = Math.round(box.top + box.height / 2 + offset.dy);
+  // Each fixture returns to the same label position; make a real motion
+  // before waiting for it, as the pointer calibration does.
+  xdo("mousemove", x - 9, y - 9);
+  xdo("mousemove", "--sync", x, y);
   xdo("click", "1");
   await poll(() => snapshot(), (value) => selected(value, marker));
   if (!evaluate("window.__axcloseClick?.trusted === true")) throw new Incomplete("the control tab saw no trusted click");

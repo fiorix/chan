@@ -14,16 +14,30 @@ function requireProduct(value, message) {
   if (!value) throw new Error(`PRODUCT_TAB_ACTION: ${message}`);
 }
 
+async function withTimeout(promise, ms, label) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`instrument: ${label} exceeded ${ms}ms`)), ms);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Observe native delivery and real session/exit frames, without changing the
 // application's state. Synthetic activation below is a separate control.
 function installProbe() {
   const probe = window.__tab266 = { events: [], frames: [] };
-  for (const type of ["mousedown", "mouseup", "click", "keydown", "contextmenu", "dragstart", "dragend", "drop"]) {
+  for (const type of ["mousedown", "mouseup", "click", "keydown", "contextmenu", "dragstart", "dragover", "dragend", "drop"]) {
     document.addEventListener(type, (event) => {
       const outer = event.target?.closest?.(".tabs .tab");
-      if (outer) probe.events.push({ type, trusted: event.isTrusted, key: event.key, button: event.button,
-        label: outer.querySelector(".path")?.textContent.trim(), target: event.target.className,
-        dropEffect: event.dataTransfer?.dropEffect });
+      if (!event.target?.closest?.(".tabs")) return;
+      const reading = { type, trusted: event.isTrusted, key: event.key, button: event.button,
+        label: outer?.querySelector(".path")?.textContent.trim(), target: event.target.className,
+        x: event.clientX, y: event.clientY, dropEffect: event.dataTransfer?.dropEffect };
+      probe.events.push(reading);
+      setTimeout(() => { reading.defaultPrevented = event.defaultPrevented; }, 0);
     }, true);
   }
   const NativeSocket = window.WebSocket;
@@ -240,7 +254,38 @@ async function activation(ctx, f, kind, mode) {
           for (const type of ["mousedown", "mouseup", "click"]) target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
         });
       } finally { await role.dispose(); }
-    } else if (mode === "held-pointer" || mode === "drag" || mode === "right") {
+    } else if (mode === "drag") {
+      const handle = await element(f.page, label);
+      const from = await handle.boundingBox();
+      await handle.dispose();
+      assert.ok(from, "instrument: inner label has a pointer target");
+      const control = arm.before.tabs.find((tab) => tab.label === f.labels.control).rect;
+      // Stay inside the control when its insertion marker shifts the row.
+      const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+      const target = { x: control.x + control.width / 4, y: control.y + control.height / 2 };
+      arm.drag = { start, target };
+      await f.page.setDragInterception(true);
+      try {
+        const data = await withTimeout(f.page.mouse.drag(start, target), 15_000, "native inner-label drag");
+        arm.drag.types = (data.items ?? []).map((item) => item.mimeType);
+        assert.ok(arm.drag.types.includes("application/x-md-tab"), "instrument: the native drag carries the app's tab payload");
+        await f.page.mouse.dragEnter(target, data);
+        await f.page.mouse.dragOver(target, data);
+        await poll("trusted dragover accepted on the control tab", async () => f.page.evaluate(({ target, control, eventStart }) => {
+          const hit = document.elementFromPoint(target.x, target.y)?.closest(".tab");
+          return hit?.querySelector(".path")?.textContent.trim() === control &&
+            hit.previousElementSibling?.classList.contains("drop-bar") &&
+            window.__tab266.events.slice(eventStart).some((event) => event.type === "dragover" &&
+              event.trusted && event.defaultPrevented && event.label === control);
+        }, { target, control: f.labels.control, eventStart }));
+        arm.drag.hover = await state(f.page);
+        arm.hoverShot = await ctx.shot(`${kind}-drag-hover`, f.page);
+        await f.page.mouse.drop(target, data);
+      } finally {
+        try { await f.page.mouse.up(); }
+        finally { await f.page.setDragInterception(false); }
+      }
+    } else if (mode === "held-pointer" || mode === "right") {
       const handle = await element(f.page, label);
       const from = await handle.boundingBox();
       await handle.dispose();
@@ -263,9 +308,6 @@ async function activation(ctx, f, kind, mode) {
             arm.heldSamples.push({ at: Date.now(), tabs: arm.held.tabs, dialogs: arm.held.dialogs });
             await sleep(50);
           } while (Date.now() < until);
-        } else {
-          const target = arm.before.tabs.find((tab) => tab.label === f.labels.control).rect;
-          await f.page.mouse.move(target.x + 3, target.y + target.height / 2, { steps: 14 });
         }
       } finally { await f.page.mouse.up({ button }); }
     } else await click(f.page, label);
