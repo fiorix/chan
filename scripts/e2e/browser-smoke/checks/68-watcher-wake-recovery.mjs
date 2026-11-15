@@ -179,19 +179,17 @@ export default {
       if (relay.activeWatchers().length !== 1) throw new Error("initial watcher has overlapping relay subscriptions");
       ctx.mark("watcher:first-open", { requestId: first.requestId, relayFlow: firstFlow.id });
 
-      // Establish the 20 s heartbeat's phase first. A foreground ping within
-      // two seconds of the next transition cannot be the cadence ping.
-      const heartbeat = await until(
+      // The watcher pings on open. Hide the page for longer than the focused
+      // 3 s cadence so its next foreground ping is a wake probe.
+      const openPing = await until(
         () => network.sent.find((entry) => entry.requestId === first.requestId && entry.type === "ping"),
-        "ordinary heartbeat ping",
-        25_000,
+        "watcher open ping",
       );
       await until(
-        () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= heartbeat.at),
-        "ordinary heartbeat pong",
+        () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= openPing.at),
+        "watcher open pong",
         5_000,
       );
-      await delay(2_000);
 
       // A real tab switch fires visibilitychange on the app page. Require
       // both hidden and visible states before attributing its ping to resume.
@@ -199,6 +197,7 @@ export default {
       await otherPage.goto("about:blank");
       await otherPage.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "hidden", { timeout: 10_000, polling: 100 });
+      await delay(4_100);
       const beforePing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length;
       await page.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "visible", { timeout: 10_000 });
@@ -213,8 +212,8 @@ export default {
         2_000,
       );
       const ping = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").at(-1);
-      if (ping.at < healthyVisibleAt || ping.at - healthyVisibleAt > 2_000 || ping.at - heartbeat.at > 15_000) {
-        throw new Error("foreground probe ping arrived outside its visibility and heartbeat phase windows");
+      if (ping.at < healthyVisibleAt || ping.at - healthyVisibleAt > 2_000) {
+        throw new Error("foreground probe ping arrived outside its visibility window");
       }
       await until(
         () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= ping.at),
@@ -225,7 +224,7 @@ export default {
       if (network.created.length !== 1 || network.closed.length !== 0 || relay.activeWatchers().length !== 1) {
         throw new Error(`healthy foreground replaced its watcher: ${JSON.stringify({ created: network.created.length, closed: network.closed.length, live: relay.activeWatchers().length })}`);
       }
-      evidence.healthy = { requestId: first.requestId, relayFlow: firstFlow.id, heartbeatAt: heartbeat.at, visibilityEvents: healthyVisibility, visibleAt: healthyVisibleAt, probePingAt: ping.at, retainedForMs: Date.now() - healthyVisibleAt };
+      evidence.healthy = { requestId: first.requestId, relayFlow: firstFlow.id, openPingAt: openPing.at, visibilityEvents: healthyVisibility, visibleAt: healthyVisibleAt, probePingAt: ping.at, retainedForMs: Date.now() - healthyVisibleAt };
       ctx.mark("watcher:healthy-retained", evidence.healthy);
 
       async function oneTerminal(name) {
@@ -266,17 +265,16 @@ export default {
       }
 
       const afterHealthyPing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length;
-      const nextHeartbeat = await until(
+      const nextCadencePing = await until(
         () => network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping")[afterHealthyPing],
-        "heartbeat before the silent transition",
-        22_000,
+        "cadence ping before the silent transition",
+        5_000,
       );
       await until(
-        () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= nextHeartbeat.at),
+        () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= nextCadencePing.at),
         "pong before the silent transition",
         5_000,
       );
-      await delay(2_000);
 
       // Hold both TCP directions open but silent. The server retains this
       // stale subscriber while the client must replace its unanswered probe.
@@ -284,6 +282,7 @@ export default {
       const pongCount = network.received.filter((entry) => entry.requestId === first.requestId && entry.type === "pong").length;
       await otherPage.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "hidden", { timeout: 10_000, polling: 100 });
+      await delay(4_100);
       const beforeSilentPing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length;
       await page.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "visible", { timeout: 10_000 });
@@ -298,8 +297,8 @@ export default {
         2_000,
       );
       const silentPing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").at(-1);
-      if (silentPing.at < silentVisibleAt || silentPing.at - silentVisibleAt > 2_000 || silentPing.at - nextHeartbeat.at > 15_000) {
-        throw new Error("silent foreground probe ping arrived outside its visibility and heartbeat phase windows");
+      if (silentPing.at < silentVisibleAt || silentPing.at - silentVisibleAt > 2_000) {
+        throw new Error("silent foreground probe ping arrived outside its visibility window");
       }
       const second = await until(
         () => network.handshakes.find((entry) => entry.status === 101 && entry.requestId !== first.requestId),
