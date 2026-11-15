@@ -270,10 +270,10 @@ pub(crate) fn read_team_config(
 }
 
 /// Replace each member's `CHAN_TAB_NAME` that does not restate its handle
-/// with the handle, warning for each one replaced. Configs saved while a typed
-/// value was accepted carry one, and refusing the read would keep the load
-/// dialog, which drops the key, from ever healing them. The write and the
-/// spawn still refuse it, so the next save writes the handle.
+/// with the handle, warning for each one replaced. This lets the dialog load
+/// the team without exposing a field set at spawn for editing. The write and
+/// spawn still refuse mismatches. An edited Load or New writes the corrected
+/// value; an unchanged Load preserves the saved file.
 fn restate_saved_tab_names(config: &mut TeamConfig, rel: &str) {
     use chan_library::terminal_sessions::{chan_overrides_spawn_env, is_chan_spawn_env_key};
     for member in &mut config.members {
@@ -344,6 +344,11 @@ fn write_team_files(
     let config_write = if keep_config {
         match workspace.create_bytes(&config_rel, toml_text.as_bytes()) {
             Err(ChanError::PathAlreadyExists(_)) if workspace.exists(&config_rel) => Ok(()),
+            Err(ChanError::PathAlreadyExists(_)) => {
+                return Err(format!(
+                    "cannot preserve {config_rel}: path is not a regular file"
+                ));
+            }
             result => result,
         }
     } else {
@@ -2136,6 +2141,10 @@ sleep 3"
 
     /// POST `/api/team-config/write` with `body` through the real router.
     async fn post_write(router: axum::Router, body: serde_json::Value) -> StatusCode {
+        post_write_response(router, body).await.status()
+    }
+
+    async fn post_write_response(router: axum::Router, body: serde_json::Value) -> Response {
         use axum::body::Body;
         use axum::http::{header, Request};
         use tower::ServiceExt;
@@ -2152,7 +2161,6 @@ sleep 3"
             )
             .await
             .unwrap()
-            .status()
     }
 
     #[tokio::test]
@@ -2264,10 +2272,20 @@ sleep 3"
         for dir in dirs {
             let body =
                 serde_json::json!({ "dir": dir, "config": sample_config(), "keep_config": true });
+            let response = post_write_response(router.clone(), body).await;
             assert_eq!(
-                post_write(router.clone(), body).await,
+                response.status(),
                 StatusCode::BAD_REQUEST,
                 "{dir}: preserving a config refuses non-regular targets"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                response["error"],
+                format!("cannot preserve {dir}/config.toml: path is not a regular file"),
+                "the refusal names the non-regular config target"
             );
         }
         assert!(root.path().join("directory/config.toml").is_dir());

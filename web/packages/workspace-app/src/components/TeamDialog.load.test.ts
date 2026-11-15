@@ -199,6 +199,21 @@ describe("the dialog's Load mode", () => {
     }
   });
 
+  test("Bootstrap keeps the loaded config when its directory gains a trailing slash", async () => {
+    const config = await loadDraft();
+    config.teamDir += "/";
+    const requests = recordRequests(() => json({ error: "stop after the config request" }, { status: 400 }));
+    try {
+      await expect(runTeamBootstrap(config, { leadTabId: "lead-tab", leadPaneId: "pane-test" }))
+        .rejects.toThrow("stop after the config request");
+      expect(requests.filter((request) => request.path === "/api/team-config/write")).toMatchObject([
+        { method: "POST", body: { dir: "saved-team/", keep_config: true, keep_bootstrap: true } },
+      ]);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
   test.each<[string, (config: TeamDialogConfig) => void]>([
     ["host", (config) => { config.hostName = "Morpheus"; }],
     ["prefix", (config) => { config.autoPrefix = false; }],
