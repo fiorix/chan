@@ -13,8 +13,9 @@
 //!   - `apply_submit_chord`: turn a poke into the PTY bytes that submit it.
 //!     Each agent has a `{}`-templated chord whose DEFAULT reproduces the
 //!     live-probed bytes, but which is overridable at runtime (env var or
-//!     `<config>/chan/submit.toml`) so a client changing its submit behavior
-//!     does not need a rebuild. See `apply_submit_chord` / `set_chord_overrides`.
+//!     `submit.toml` in the server's chan home, `$CHAN_HOME` or `~/.chan` by
+//!     default) so a client changing its submit behavior does not need a
+//!     rebuild. See `apply_submit_chord` / `set_chord_overrides`.
 //!
 //! Rich Prompt sends the agent NAME and the server applies the chord. The SPA's
 //! `submitMode.ts` mirrors only the agent union and identity fallback; submit
@@ -251,7 +252,7 @@ impl SubmitAgent {
 
     /// Resolve this agent's submit template, applying overrides in priority
     /// order: env `CHAN_SUBMIT_<AGENT>` > the process-global override map
-    /// (loaded from `<config>/chan/submit.toml` by the server) > the built-in
+    /// (loaded from the chan home's `submit.toml` by the server) > the built-in
     /// default. Override strings are unescaped (`\e`, `\xHH`, `\r`, `\n`,
     /// `\t`, `\\`) so a config/env value can carry control bytes as text.
     fn template(self) -> String {
@@ -261,7 +262,7 @@ impl SubmitAgent {
 
 /// Process-global per-agent chord template overrides, keyed by agent name
 /// ("agy"/"claude"/"codex"/"gemini"/"kimi"/"muse"/"opencode"). The server
-/// loads these from `<config>/chan/submit.toml` once at startup via
+/// loads these from `submit.toml` in its chan home once at startup via
 /// `set_chord_overrides`; env `CHAN_SUBMIT_<AGENT>` still takes precedence
 /// at apply time. Default `None` means "no file overrides", which every
 /// chan-shell-only caller (the `cs` CLI) sees, so it falls back to env +
@@ -745,7 +746,7 @@ mod tests {
 
     #[test]
     fn config_map_override_is_marked_override() {
-        // A `<config>/chan/submit.toml` value (the process-global map) is an
+        // A `submit.toml` value (the process-global map) is an
         // override just like the env var: it disables batching for that agent
         // and its exact unescaped bytes are what reaches the PTY.
         let mut file = HashMap::new();

@@ -69,8 +69,9 @@ impl SubmitOverridesFile {
     }
 }
 
-/// Load `<config>/chan/submit.toml` (if present) and install any per-agent
-/// chord template overrides into chan-shell. Missing file: no-op, so
+/// Load `submit.toml` from the chan home (`$CHAN_HOME`, default `~/.chan`) if
+/// present, and install any per-agent chord template overrides into chan-shell.
+/// Missing file: no-op, so
 /// whatever an earlier install in this process set stands (the built-in
 /// defaults until one installs some). Malformed file: logged and ignored,
 /// matching the fall-back-on-malformed policy of the editor/server configs.

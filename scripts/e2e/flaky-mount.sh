@@ -16,8 +16,8 @@
 # Two arms:
 #   A. idle workspace  -- the classification and remount-recovery contract.
 #   B. busy workspace  -- the same kill while an index pass is walking a seeded
-#      tree, which is the in-flight case that used to wedge the row
-#      unopenable (`WorkspaceAlreadyOpen`) until the devserver restarted.
+#      tree; the row must recover without `WorkspaceAlreadyOpen` blocking
+#      access or requiring a devserver restart.
 #
 # Throwaway CHAN_HOME, port and mountpoint; tears down only what it started.
 # Exit 0 all assertions held, 1 an assertion failed, 2 the environment cannot
@@ -267,8 +267,8 @@ status="$(await_status running)"
 if [ "$status" = "running" ]; then
   ok "row recovered on its own after a mount death during an index pass"
 else
-  # Fall back to the explicit repair the launcher offers, and require that it
-  # works: this is precisely where `WorkspaceAlreadyOpen` used to be terminal.
+  # The launcher's explicit repair must recover the row when automatic
+  # recovery does not, without a `WorkspaceAlreadyOpen` refusal.
   curl -sS -m 60 -X POST -H "Authorization: Bearer $TOKEN" \
     -H 'content-type: application/json' -d '{"on":false,"force":true}' \
     "http://127.0.0.1:$PORT/api/devserver/workspaces$PREFIX/on" >/dev/null 2>&1
