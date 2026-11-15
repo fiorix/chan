@@ -11,13 +11,17 @@ vi.mock("../state/linkHealth.svelte", async (importOriginal) => ({
 }));
 
 import LinkIndicator from "./LinkIndicator.svelte";
+import { LINK_INDICATOR_LABEL_CH } from "./linkIndicatorMath";
 import { linkHealth, resetLinkHealthForTests } from "../state/linkHealth.svelte";
+import { setCoverBlocking } from "../state/store.svelte";
 
 let view: Record<string, unknown> | null = null;
 
 beforeEach(() => {
   host.remote = true;
   resetLinkHealthForTests();
+  setCoverBlocking("reconnect", false);
+  setCoverBlocking("screensaver", false);
   vi.useFakeTimers();
   vi.setSystemTime(20_000);
 });
@@ -27,6 +31,8 @@ afterEach(async () => {
   view = null;
   document.body.replaceChildren();
   resetLinkHealthForTests();
+  setCoverBlocking("reconnect", false);
+  setCoverBlocking("screensaver", false);
   vi.useRealTimers();
 });
 
@@ -116,7 +122,13 @@ test("placement marks the tab-bar label for reserved width and leaves status nat
 test("tab-bar label reserves 13ch for reconnecting", () => {
   // jsdom lays nothing out, so the tab-bar label's fixed width is a source contract.
   const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
-  expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*13ch;/);
+  expect(LINK_INDICATOR_LABEL_CH).toBe(13);
+  expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*var\(--link-indicator-label-width\);/);
+});
+
+test("tab-bar button carries the shared character width used by its label", async () => {
+  await render();
+  expect(button()?.style.getPropertyValue("--link-indicator-label-width")).toBe(`${LINK_INDICATOR_LABEL_CH}ch`);
 });
 
 test("stalled label follows the health ticker's wait while closed", async () => {
@@ -209,6 +221,38 @@ test("second press closes the popover", async () => {
   await tick();
   expect(popover()).toBeNull();
   expect(button()?.getAttribute("aria-expanded")).toBe("false");
+});
+
+test("any full-window cover closes details and prevents reopening while keeping the face", async () => {
+  await state("down");
+  await render();
+  button()!.click();
+  await tick();
+  expect(popover()).not.toBeNull();
+  setCoverBlocking("screensaver", true);
+  await tick();
+  expect(popover()).toBeNull();
+  expect(button()?.textContent).toContain("reconnecting");
+  button()!.click();
+  await tick();
+  expect(popover()).toBeNull();
+  setCoverBlocking("screensaver", false);
+  await tick();
+  button()!.click();
+  await tick();
+  expect(popover()).not.toBeNull();
+});
+
+test("blocked indicator announces its disabled state without losing its face colours", async () => {
+  await state("down");
+  await render();
+  setCoverBlocking("reconnect", true);
+  await tick();
+  expect(button()?.getAttribute("aria-disabled")).toBe("true");
+  expect(button()?.getAttribute("data-state")).toBe("down");
+  const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
+  expect(source).toMatch(/\.link-indicator\[aria-disabled="true"\]\s*\{\s*cursor:\s*default;/);
+  expect(source).toMatch(/\.link-indicator:not\(\[aria-disabled="true"\]\):hover/);
 });
 
 test("a trigger press prevents focus leaving the terminal", async () => {
