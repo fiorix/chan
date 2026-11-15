@@ -19,6 +19,7 @@ import {
 } from "./pdf_pages";
 import { PAGE_BOX_ATTR, RASTER_SCALE } from "./pdf_snapshot";
 import { type SlideAspectRatio } from "./slides";
+import capturedRects from "./pdf_pages.rects.json";
 
 function block(
   top: number,
@@ -43,6 +44,81 @@ describe("docPageGeometry", () => {
 
 describe("paginateDocBlocks", () => {
   const PAGE = 1000;
+
+  test.each([1683, 1930])("a pulled heading stays above the first image slice ending at %s without a gap page", (bottom) => {
+    const blocks = [
+      block(0, 580),
+      block(604.61, 604.61, { pageBreak: true }),
+      block(626, 676, { heading: true }),
+      block(698, bottom),
+    ];
+    const height = docPageGeometry().pageContentHeightPx;
+    const windows = paginateDocBlocks(blocks, height);
+    expect(windows.filter((window) => !blocks.some((block) =>
+      !block.pageBreak && block.bottom > window.startPx && block.top < window.endPx,
+    ))).toEqual([]);
+    expect(windows).toEqual([
+      { startPx: 0, endPx: 604.61 },
+      { startPx: 604.61, endPx: 604.61 + height },
+      { startPx: 604.61 + height, endPx: bottom },
+    ]);
+  });
+
+  test("a 985px image after a break moves whole rather than leaving a bottom strip", () => {
+    expect(paginateDocBlocks([
+      block(0, 580),
+      block(604.61, 604.61, { pageBreak: true }),
+      block(626.05, 1611.05),
+    ], docPageGeometry().pageContentHeightPx)).toEqual([
+      { startPx: 0, endPx: 604.61 },
+      { startPx: 604.61, endPx: 626.05 },
+      { startPx: 626.05, endPx: 1611.05 },
+    ]);
+  });
+
+  test("a zero-height block does not make a gap into content", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(230, 230),
+      block(250, 1600),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 1210 },
+      { startPx: 1210, endPx: 1600 },
+    ]);
+  });
+
+  test.each(capturedRects.themes)(
+    "$theme: a break before an oversized block keeps its gap with content",
+    ({ blocks }) => {
+      const height = capturedRects.pageHeightPx;
+      const windows = paginateDocBlocks(blocks, height);
+      const gapOnly = windows.filter((window) => !blocks.some((block) =>
+        !block.pageBreak && block.bottom > window.startPx && block.top < window.endPx,
+      ));
+      expect(gapOnly).toEqual([]);
+      expect(windows).toEqual([
+        { startPx: 0, endPx: 604.609375 },
+        { startPx: 604.609375, endPx: 793.25 },
+        { startPx: 793.25, endPx: 1791.1092130441716 },
+        { startPx: 1791.1092130441716, endPx: 2083.640625 },
+        { startPx: 2083.640625, endPx: 3081.4998380441716 },
+        { startPx: 3081.4998380441716, endPx: 3355.078125 },
+        { startPx: 3355.078125, endPx: 4253.71875 },
+        { startPx: 4253.71875, endPx: 4630.109375 },
+        { startPx: 4630.109375, endPx: 5518.359375 },
+        { startPx: 5518.359375, endPx: 5820.1875 },
+      ]);
+      expect(windows[0]!.startPx).toBe(0);
+      expect(windows.at(-1)!.endPx).toBe(Math.max(...blocks.map((b) => b.bottom)));
+      for (const [index, window] of windows.entries()) {
+        expect(window.endPx).toBeGreaterThan(window.startPx);
+        expect(window.endPx - window.startPx).toBeLessThanOrEqual(height + 1e-9);
+        if (index > 0) expect(window.startPx).toBe(windows[index - 1]!.endPx);
+      }
+    },
+  );
 
   test("everything fitting yields one window ending at the last bottom", () => {
     const windows = paginateDocBlocks(
@@ -114,6 +190,76 @@ describe("paginateDocBlocks", () => {
 
   test("an empty document still yields one window", () => {
     expect(paginateDocBlocks([], PAGE)).toEqual([{ startPx: 0, endPx: 0 }]);
+  });
+
+  test("consecutive and trailing breaks retain their explicit cuts", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(230, 230, { pageBreak: true }),
+      block(250, 500),
+      block(520, 520, { pageBreak: true }),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 230 },
+      { startPx: 230, endPx: 520 },
+    ]);
+  });
+
+  test.each([
+    { name: "paragraph", rect: block(230, 280), image: block(300, 1550) },
+    { name: "ordinary rule", rect: block(230, 232), image: block(300, 1550) },
+    { name: "authored spacer", rect: block(230, 940), image: block(960, 2210) },
+  ])("keeps a $name page before an oversized image", ({ rect, image }) => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      rect,
+      image,
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: image.top },
+      { startPx: image.top, endPx: image.top + PAGE },
+      { startPx: image.top + PAGE, endPx: image.bottom },
+    ]);
+  });
+
+  test("a fitting block after a break moves whole despite its leading space", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(250, 1230),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 250 },
+      { startPx: 250, endPx: 1230 },
+    ]);
+  });
+
+  test("content overlapping a break is not treated as trailing space", () => {
+    expect(paginateDocBlocks([
+      block(0, 400),
+      block(210, 210, { pageBreak: true }),
+      block(230, 1480),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 230 },
+      { startPx: 230, endPx: 1230 },
+      { startPx: 1230, endPx: 1480 },
+    ]);
+  });
+
+  test("a full page of authored space after a break remains a page", () => {
+    expect(paginateDocBlocks([
+      block(0, 200),
+      block(210, 210, { pageBreak: true }),
+      block(1210, 2460),
+    ], PAGE)).toEqual([
+      { startPx: 0, endPx: 210 },
+      { startPx: 210, endPx: 1210 },
+      { startPx: 1210, endPx: 2210 },
+      { startPx: 2210, endPx: 2460 },
+    ]);
   });
 
   test("windows partition the content: contiguous, complete, page-bounded", () => {
