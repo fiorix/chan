@@ -323,8 +323,8 @@ export const ui = $state<{
   /// the server prints at launch.
   authMissing: boolean;
   /// True while the DisconnectOverlay is actively blocking the UI (the
-  /// watcher dropped after having been open, past the startup grace). The
-  /// overlay greys out the app, but global keyboard shortcuts are
+  /// watcher closed under the page past its grace, or stayed silent past its
+  /// read deadline). The overlay greys out the app, but global keyboard shortcuts are
   /// document-level and fire regardless of focus, so App.svelte's key
   /// handlers consult this to suppress pane/tab shortcuts (e.g. Ctrl+D
   /// closing a tab) behind the overlay. Owned by DisconnectOverlay, which

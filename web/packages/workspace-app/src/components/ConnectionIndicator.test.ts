@@ -85,7 +85,7 @@ test("remote unhealthy faces show a label and accessible state", async () => {
   expect(button()?.getAttribute("aria-label")).toBe("Connection stalled");
   await state("down");
   expect(button()?.textContent).toContain("reconnecting");
-  expect(button()?.getAttribute("aria-label")).toBe("Connection reconnecting");
+  expect(button()?.getAttribute("aria-label")).toBe("Connection lost, reconnecting");
 });
 
 test.each(["tab-bar", "status"] as const)("%s recovering face keeps only the warning glyph and names recovery", async (placement) => {

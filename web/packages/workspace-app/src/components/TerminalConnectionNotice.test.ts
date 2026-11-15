@@ -33,14 +33,14 @@ describe("terminal connection pill", () => {
 
   test("takes no pointer or focus and announces a fixed message once", () => {
     const target = show(true, 9_000);
-    const strip = target.querySelector<HTMLElement>("[data-terminal-connection-pill]")!;
-    expect(strip.style.pointerEvents).toBe("none");
-    expect(strip.tabIndex).toBe(-1);
-    expect(strip.querySelector("button, a, input, textarea, [tabindex]")).toBeNull();
-    expect(strip.getAttribute("aria-hidden")).toBe("true");
+    const pill = target.querySelector<HTMLElement>("[data-terminal-connection-pill]")!;
+    expect(pill.style.pointerEvents).toBe("none");
+    expect(pill.tabIndex).toBe(-1);
+    expect(pill.querySelector("button, a, input, textarea, [tabindex]")).toBeNull();
+    expect(pill.getAttribute("aria-hidden")).toBe("true");
     expect(target.querySelectorAll('[role="status"]')).toHaveLength(1);
     expect(target.querySelector('[role="status"]')?.textContent).toBe("Terminal connection stalled. Waiting for the connection.");
-    expect(strip.textContent).toBe("No response for 9 s. Waiting for the connection.");
+    expect(pill.textContent).toBe("No response for 9 s. Waiting for the connection.");
   });
 
   test("shows the lost-input sentence through the same fixed live region", () => {

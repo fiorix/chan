@@ -42,7 +42,7 @@
           : "Connection slow, waiting for a reply";
       }
       case "stalled": return "Connection stalled";
-      case "down": return "Connection reconnecting";
+      case "down": return "Connection lost, reconnecting";
     }
   });
   const figures = $derived(connectionFigures(connectionHealth.samples));
