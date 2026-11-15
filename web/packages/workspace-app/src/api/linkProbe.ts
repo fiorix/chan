@@ -33,6 +33,18 @@ export const LINK_RTT_RUN = 2;
 /// retransmit through a short burst of loss, and well short of the read
 /// deadlines, so the state shows before the socket is retired.
 export const LINK_STALLED_MS = 4_000;
+/// The longest round trip worth timing: the sockets' ordinary read deadline,
+/// `WS_READ_DEADLINE_MS` in `transport.ts`, repeated here because this module
+/// imports nothing. A socket silent that long is retired, so a pong later
+/// than this crossed a jump of the page's clock, as over a machine sleep, or
+/// came over a socket that other frames kept open, and neither is the link's
+/// round-trip time.
+export const LINK_MAX_RTT_MS = 45_000;
+/// How many waiting pings keep their send time. A socket whose pongs stop
+/// while other frames keep it open would otherwise hold one for every ping
+/// of its life. Several times what either cadence sends inside its read
+/// deadline, so a socket retired on silence never reaches it.
+export const LINK_PENDING_CAP = 32;
 
 /// One finished ping.
 export interface LinkSample {
@@ -57,7 +69,7 @@ export interface LinkReading {
 /// The link's state at `now`, given the state it was in. Pure: the previous
 /// state is the only memory, and it matters only for leaving `slow`, which
 /// takes LINK_RTT_RUN round trips under LINK_OK_RTT_MS where entering takes
-/// as many at LINK_SLOW_RTT_MS or over.
+/// as many at LINK_SLOW_RTT_MS or over, or one at LINK_SLOW_WAIT_MS or over.
 export function classifyLink(
   prev: LinkProbeState,
   reading: LinkReading,
@@ -73,6 +85,11 @@ export function classifyLink(
     if (now - quietSince >= LINK_STALLED_MS) return "stalled";
     if (now - pingAt >= LINK_SLOW_WAIT_MS) return "slow";
   }
+  // A round trip that long had its ping overdue, whether or not anything
+  // read the state while it waited: a socket's first ping waits in `unknown`,
+  // and a page whose timers are held reads nothing until the pong.
+  const latest = reading.rtts.at(-1);
+  if (latest !== undefined && latest >= LINK_SLOW_WAIT_MS) return "slow";
   const run = reading.rtts.slice(-LINK_RTT_RUN);
   const full = run.length === LINK_RTT_RUN;
   if (prev === "slow" || prev === "stalled") {
@@ -84,8 +101,9 @@ export function classifyLink(
 export interface LinkProbeOptions {
   /// Clock, in milliseconds. Defaults to `Date.now`.
   now?: () => number;
-  /// Called once per finished ping: an answered one with its round-trip time,
-  /// and each one still waiting when the socket is retired as a miss.
+  /// Called once per finished ping that was timed: an answered one with its
+  /// round-trip time, and each one still waiting when the socket is retired
+  /// as a miss.
   onSample?: (sample: LinkSample) => void;
   /// Called after every report that changed the probe, so an owner can read
   /// it again.
@@ -99,8 +117,11 @@ export interface LinkProbe {
   pingSent(): void;
   /// A pong arrived, reported after `frameReceived` for the same frame.
   /// Returns its round-trip time, or `null` where there is none to give: a
-  /// stray pong with no ping waiting, or the pong of a ping whose timing
-  /// `forgetTimings` dropped.
+  /// stray pong with no ping waiting, the pong of a ping that was not timed
+  /// (its timing forgotten, or the ping counted because LINK_PENDING_CAP
+  /// timed ones already waited), or one that took longer than
+  /// LINK_MAX_RTT_MS. All but the stray one still count as the socket
+  /// answering.
   pongReceived(): number | null;
   /// A frame of any kind arrived, a pong included.
   frameReceived(): void;
@@ -110,9 +131,9 @@ export interface LinkProbe {
   /// waiting nor missed.
   forgetTimings(): void;
   /// The socket opened or was retired. On a socket that had answered, each
-  /// ping still waiting becomes a miss; a socket that never answered gave no
-  /// reading, so its pings are not misses either. The probe then holds
-  /// nothing of the old socket.
+  /// timed ping still waiting becomes a miss; a socket that never answered
+  /// gave no reading, so its pings are not misses either. The probe then
+  /// holds nothing of the old socket.
   reset(): void;
   /// Whether this socket has answered a ping.
   readonly answered: boolean;
@@ -120,7 +141,8 @@ export interface LinkProbe {
   readonly rttMs: number | null;
   /// When this socket's last frame arrived, or `null` before the first.
   readonly lastFrameAt: number | null;
-  /// When the oldest unanswered ping left, or `null` with none waiting.
+  /// When the oldest unanswered ping that is still timed left, or `null` with
+  /// none waiting.
   readonly oldestPingAt: number | null;
   /// The link's state now, carried forward from the state at the last call.
   /// Time alone can change it while a ping waits, so an owner that wants the
@@ -130,31 +152,51 @@ export interface LinkProbe {
 
 export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
   const now = options.now ?? (() => Date.now());
-  // Send times of the pings awaiting a pong, oldest first. `null` holds the
-  // place of one whose timing was forgotten.
-  let pending: (number | null)[] = [];
+  // The pings awaiting a pong, in the order their pongs come: `ahead` of them
+  // untimed, then the send times in `timed`, oldest first, then `behind` more
+  // untimed. Only the timed ones take memory, and at most LINK_PENDING_CAP of
+  // them; an untimed ping is a count, which is all the pairing needs.
+  let ahead = 0;
+  let timed: number[] = [];
+  let behind = 0;
   let answered = false;
   let rtts: number[] = [];
   let lastFrameAt: number | null = null;
   let state: LinkProbeState = "unknown";
 
-  const oldestPingAt = (): number | null => pending.find((at) => at !== null) ?? null;
+  const oldestPingAt = (): number | null => timed[0] ?? null;
 
   return {
     pingSent() {
-      pending.push(now());
+      // With no timed ping left between them, the ones behind are ahead of
+      // this one like any other.
+      if (timed.length === 0) {
+        ahead += behind;
+        behind = 0;
+      }
+      // A send time joins `timed` only at its end, so a ping sent while
+      // untimed ones wait behind is counted with them: timing it would hand
+      // it the pong of an older ping.
+      if (behind > 0 || timed.length >= LINK_PENDING_CAP) behind += 1;
+      else timed.push(now());
       options.onChange?.();
     },
     pongReceived() {
-      if (pending.length === 0) return null;
-      const at = pending.shift() ?? null;
+      let at: number | null = null;
+      if (ahead > 0) ahead -= 1;
+      else if (timed.length > 0) at = timed.shift() ?? null;
+      else if (behind > 0) behind -= 1;
+      else return null;
       answered = true;
       let rtt: number | null = null;
       if (at !== null) {
-        rtt = Math.max(0, now() - at);
-        rtts.push(rtt);
-        if (rtts.length > LINK_RTT_RUN) rtts.shift();
-        options.onSample?.({ at, rttMs: rtt });
+        const took = Math.max(0, now() - at);
+        if (took <= LINK_MAX_RTT_MS) {
+          rtt = took;
+          rtts.push(rtt);
+          if (rtts.length > LINK_RTT_RUN) rtts.shift();
+          options.onSample?.({ at, rttMs: rtt });
+        }
       }
       options.onChange?.();
       return rtt;
@@ -164,17 +206,19 @@ export function createLinkProbe(options: LinkProbeOptions = {}): LinkProbe {
       options.onChange?.();
     },
     forgetTimings() {
-      if (pending.length === 0) return;
-      pending = pending.map(() => null);
+      if (timed.length === 0) return;
+      ahead += timed.length + behind;
+      timed = [];
+      behind = 0;
       options.onChange?.();
     },
     reset() {
       if (answered) {
-        for (const at of pending) {
-          if (at !== null) options.onSample?.({ at, rttMs: null });
-        }
+        for (const at of timed) options.onSample?.({ at, rttMs: null });
       }
-      pending = [];
+      ahead = 0;
+      timed = [];
+      behind = 0;
       answered = false;
       rtts = [];
       lastFrameAt = null;

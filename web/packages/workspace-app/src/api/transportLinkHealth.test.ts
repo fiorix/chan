@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 
 // The watcher times every ping against its pong and takes its cadence from
-// the result: a socket that has answered a ping, on a page in front of the
-// user, is pinged every 3 s and retired after 15 s of silence, and every other
-// socket keeps 20 s and 45 s. A wake probe's deadline follows the latest
-// round-trip time. Driven with fake timers, an injected socket and a page
-// whose focus and visibility the test sets.
+// the result: it pings once as its socket opens, and a socket that has
+// answered a ping, on a page in front of the user, is pinged every 3 s and
+// retired after 15 s of silence, while every other socket keeps 20 s and 45 s.
+// A wake probe's deadline follows the latest round-trip time. Driven with
+// fake timers, an injected socket and a page whose focus and visibility the
+// test sets.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createLinkProbe, type LinkProbe, type LinkSample } from "./linkProbe";
+import { createLinkProbe, LINK_MAX_RTT_MS, type LinkProbe, type LinkSample } from "./linkProbe";
 import {
   openWatch,
   setSocketFactory,
@@ -17,6 +18,7 @@ import {
   WS_PROBE_DEADLINE_MAX_MS,
   WS_PROBE_DEADLINE_MS,
   WS_PROBE_DEADLINE_RTT_FACTOR,
+  WS_READ_DEADLINE_MS,
   type WatchSocket,
 } from "./transport";
 import * as wakeGap from "../wakeGap";
@@ -81,7 +83,7 @@ function page(next: { focused?: boolean; visible?: boolean }): void {
 
 const handles: WatchSocket[] = [];
 
-/// Open a watcher and its first socket.
+/// Open a watcher and its first socket, which pings as it opens.
 function watch(link?: LinkProbe): { s: FakeSocket; handle: WatchSocket } {
   const handle = openWatch(() => {}, undefined, undefined, undefined, undefined, link);
   handles.push(handle);
@@ -90,10 +92,9 @@ function watch(link?: LinkProbe): { s: FakeSocket; handle: WatchSocket } {
   return { s, handle };
 }
 
-/// Run a freshly opened socket to its first heartbeat and answer it `rttMs`
-/// later, which is what makes the socket one that has answered a ping.
-function answerFirstHeartbeat(s: FakeSocket, rttMs = 40): void {
-  vi.advanceTimersByTime(20_000);
+/// Answer the ping a socket sent as it opened, `rttMs` after the open, which
+/// is what makes it a socket that has answered a ping.
+function answerOpenPing(s: FakeSocket, rttMs = 40): void {
   vi.advanceTimersByTime(rttMs);
   s.pong();
 }
@@ -128,15 +129,38 @@ describe("watcher cadence", () => {
     expect([WS_FAST_PING_MS, WS_FAST_READ_DEADLINE_MS]).toEqual([3_000, 15_000]);
   });
 
+  test("a socket pings as it opens, and so does its redial", () => {
+    const { s } = watch();
+    expect(pingCount(s)).toBe(1);
+    s.close();
+    vi.advanceTimersByTime(500);
+    const s1 = FakeSocket.instances[1];
+    expect(pingCount(s1)).toBe(0);
+    s1.open();
+    expect(pingCount(s1)).toBe(1);
+  });
+
+  test("the open's ping leaves ahead of the frames the owner sends as the socket opens", () => {
+    const handle: WatchSocket = openWatch(
+      () => {},
+      undefined,
+      () => handle.send({ type: "sub", dir: "" }),
+    );
+    handles.push(handle);
+    const s = FakeSocket.instances[0];
+    s.open();
+    expect(s.sent).toEqual([PING, '{"type":"sub","dir":""}']);
+  });
+
   test("a socket that has not answered keeps 20 s and 45 s in front of the user", () => {
     page({ focused: true });
     const { s } = watch();
     vi.advanceTimersByTime(19_999);
-    expect(pingCount(s)).toBe(0);
+    expect(pingCount(s)).toBe(1); // only the open's
     vi.advanceTimersByTime(1);
-    expect(pingCount(s)).toBe(1);
-    vi.advanceTimersByTime(20_000);
     expect(pingCount(s)).toBe(2);
+    vi.advanceTimersByTime(20_000);
+    expect(pingCount(s)).toBe(3);
     vi.advanceTimersByTime(4_999);
     expect(s.readyState).toBe(FakeSocket.OPEN);
     vi.advanceTimersByTime(1);
@@ -147,7 +171,7 @@ describe("watcher cadence", () => {
     const { s } = watch();
     vi.advanceTimersByTime(5_000);
     page({ focused: true });
-    // The ping sent for the focus is not the heartbeat's.
+    // The pings sent for the open and for the focus are not the heartbeat's.
     const base = pingCount(s);
     vi.advanceTimersByTime(14_999);
     expect(pingCount(s) - base).toBe(0);
@@ -161,33 +185,35 @@ describe("watcher cadence", () => {
 
   test("gaining focus sends a ping at once", () => {
     const { s } = watch();
+    const base = pingCount(s);
     vi.advanceTimersByTime(1_000);
     page({ focused: true });
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s) - base).toBe(1);
     // A focus event on a page already in front, as when focus comes back
     // from a frame inside it, sends none.
     window.dispatchEvent(new Event("focus"));
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s) - base).toBe(1);
     page({ focused: false });
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s) - base).toBe(1);
     vi.advanceTimersByTime(1_000);
     page({ focused: true });
-    expect(pingCount(s)).toBe(2);
+    expect(pingCount(s) - base).toBe(2);
   });
 
   test("a focused page that becomes visible again sends one too", () => {
     page({ focused: true, visible: false });
     const { s } = watch();
+    const base = pingCount(s);
     vi.advanceTimersByTime(1_000);
     page({ visible: true });
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s) - base).toBe(1);
     page({ visible: false });
-    expect(pingCount(s)).toBe(1);
+    expect(pingCount(s) - base).toBe(1);
   });
 
   test("an answered socket in front of the user is pinged every 3 s", () => {
     const { s } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     page({ focused: true });
     s.pong();
     const base = pingCount(s);
@@ -200,10 +226,10 @@ describe("watcher cadence", () => {
     }
   });
 
-  test("the first pong in front of the user starts the fast cadence", () => {
+  test("the open's pong in front of the user starts the fast cadence", () => {
     page({ focused: true });
     const { s } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     const base = pingCount(s);
     vi.advanceTimersByTime(2_999);
     expect(pingCount(s) - base).toBe(0);
@@ -213,7 +239,7 @@ describe("watcher cadence", () => {
 
   test("on the fast cadence a silent socket is retired 15 s after its last frame", () => {
     const { s } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     page({ focused: true });
     vi.advanceTimersByTime(10_000);
     s.message(EVENT);
@@ -231,7 +257,7 @@ describe("watcher cadence", () => {
   ])("%s page keeps 20 s and 45 s on an answered socket", (_what, state) => {
     page(state);
     const { s } = watch();
-    answerFirstHeartbeat(s); // the pong lands 20 040 ms after the open
+    answerOpenPing(s); // the pong lands 40 ms after the open
     vi.advanceTimersByTime(19_959);
     expect(pingCount(s)).toBe(1);
     vi.advanceTimersByTime(1);
@@ -244,7 +270,7 @@ describe("watcher cadence", () => {
 
   test("losing focus returns an answered socket to 20 s and 45 s", () => {
     const { s } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     page({ focused: true });
     s.pong();
     vi.advanceTimersByTime(3_000);
@@ -263,7 +289,7 @@ describe("watcher cadence", () => {
 
   test("a redialed socket starts over on 20 s until it answers", () => {
     const { s } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     s.close();
     vi.advanceTimersByTime(500);
     const s1 = FakeSocket.instances[1];
@@ -293,7 +319,7 @@ describe("wake probe deadline", () => {
     ["the cap", 5_000, 10_000],
   ])("is %s after a %i ms round trip: %i ms", (_what, rttMs, deadlineMs) => {
     const { s, handle } = watch();
-    answerFirstHeartbeat(s, rttMs);
+    answerOpenPing(s, rttMs);
     handle.probe();
     vi.advanceTimersByTime(deadlineMs - 1);
     expect(s.readyState).toBe(FakeSocket.OPEN);
@@ -303,7 +329,7 @@ describe("wake probe deadline", () => {
 
   test("follows the latest round trip, not an earlier one", () => {
     const { s, handle } = watch();
-    answerFirstHeartbeat(s, 5_000);
+    answerOpenPing(s, 5_000);
     handle.probe();
     vi.advanceTimersByTime(100);
     s.pong(); // settles that probe with a 100 ms round trip
@@ -317,7 +343,7 @@ describe("wake probe deadline", () => {
 
   test("keeps its own deadline through a cadence change", () => {
     const { s, handle } = watch();
-    answerFirstHeartbeat(s);
+    answerOpenPing(s);
     handle.probe();
     vi.advanceTimersByTime(1_000);
     page({ focused: true });
@@ -334,15 +360,17 @@ describe("watcher link probe", () => {
     return { link: createLinkProbe({ onSample: (x) => samples.push(x) }), samples };
   }
 
-  test("times heartbeat, focus and probe pings alike", () => {
+  test("times open, heartbeat, focus and probe pings alike", () => {
     const { link, samples } = sampled();
     const { s, handle } = watch(link);
     const t0 = Date.now();
-    vi.advanceTimersByTime(20_000); // the heartbeat's ping
-    vi.advanceTimersByTime(40);
+    vi.advanceTimersByTime(40); // the open's ping
     s.pong();
     expect(link.answered).toBe(true);
     expect(link.rttMs).toBe(40);
+    vi.advanceTimersByTime(19_960); // the heartbeat's ping
+    vi.advanceTimersByTime(55);
+    s.pong();
     page({ focused: true }); // the focus ping
     vi.advanceTimersByTime(70);
     s.pong();
@@ -350,9 +378,10 @@ describe("watcher link probe", () => {
     vi.advanceTimersByTime(25);
     s.pong();
     expect(samples).toEqual([
-      { at: t0 + 20_000, rttMs: 40 },
-      { at: t0 + 20_040, rttMs: 70 },
-      { at: t0 + 20_110, rttMs: 25 },
+      { at: t0, rttMs: 40 },
+      { at: t0 + 20_000, rttMs: 55 },
+      { at: t0 + 20_055, rttMs: 70 },
+      { at: t0 + 20_125, rttMs: 25 },
     ]);
   });
 
@@ -373,25 +402,26 @@ describe("watcher link probe", () => {
     const { link, samples } = sampled();
     const { s } = watch(link);
     const t0 = Date.now();
-    answerFirstHeartbeat(s);
-    // Silent from here: the heartbeat pings twice more before the deadline.
+    answerOpenPing(s);
+    // Silent from here: the heartbeat pings twice before the deadline.
     vi.advanceTimersByTime(45_000);
     expect(s.readyState).toBe(FakeSocket.CLOSED);
     expect(samples).toEqual([
-      { at: t0 + 20_000, rttMs: 40 },
+      { at: t0, rttMs: 40 },
+      { at: t0 + 20_000, rttMs: null },
       { at: t0 + 40_000, rttMs: null },
-      { at: t0 + 60_000, rttMs: null },
     ]);
     expect(link.answered).toBe(false);
   });
 
   test("a pong delivered inside the send still finds its ping", () => {
     const { link, samples } = sampled();
-    const { s } = watch(link);
-    const t0 = Date.now();
+    handles.push(openWatch(() => {}, undefined, undefined, undefined, undefined, link));
+    const s = FakeSocket.instances[0];
     s.answersInPlace = true;
-    vi.advanceTimersByTime(20_000);
-    expect(samples).toEqual([{ at: t0 + 20_000, rttMs: 0 }]);
+    const t0 = Date.now();
+    s.open();
+    expect(samples).toEqual([{ at: t0, rttMs: 0 }]);
     expect(link.answered).toBe(true);
     expect(link.oldestPingAt).toBeNull();
   });
@@ -407,17 +437,46 @@ describe("watcher link probe", () => {
     const { link, samples } = sampled();
     const { s } = watch(link);
     const t0 = Date.now();
-    answerFirstHeartbeat(s);
-    vi.advanceTimersByTime(19_960); // the next heartbeat's ping leaves
+    answerOpenPing(s);
+    vi.advanceTimersByTime(19_960); // the heartbeat's ping leaves
     vi.advanceTimersByTime(2_000); // and is still unanswered at the wake
     onWake();
     vi.advanceTimersByTime(30);
     s.pong(); // the sleeping ping's pong
     s.pong(); // the wake probe's
     expect(samples).toEqual([
-      { at: t0 + 20_000, rttMs: 40 },
-      { at: t0 + 42_000, rttMs: 30 },
+      { at: t0, rttMs: 40 },
+      { at: t0 + 22_000, rttMs: 30 },
     ]);
     expect(link.rttMs).toBe(30);
+  });
+
+  test("the longest round trip the probe times is the ordinary read deadline", () => {
+    expect(LINK_MAX_RTT_MS).toBe(WS_READ_DEADLINE_MS);
+  });
+
+  test("a pong that lands after a clock jump the wake detector has not seen yet is not timed", () => {
+    const { link, samples } = sampled();
+    const { s, handle } = watch(link);
+    const t0 = Date.now();
+    answerOpenPing(s);
+    vi.advanceTimersByTime(19_960); // the heartbeat's ping leaves
+    // The machine sleeps an hour: the clock moves and no timer runs, the wake
+    // detector's included.
+    vi.setSystemTime(t0 + 20_000 + 3_600_000);
+    s.pong();
+    expect(samples).toEqual([{ at: t0, rttMs: 40 }]);
+    expect(link.rttMs).toBe(40);
+    expect(link.answered).toBe(true);
+    expect(link.oldestPingAt).toBeNull();
+
+    // The pairing held: the next pong is the next ping's own.
+    handle.probe();
+    vi.advanceTimersByTime(25);
+    s.pong();
+    expect(samples).toEqual([
+      { at: t0, rttMs: 40 },
+      { at: t0 + 20_000 + 3_600_000, rttMs: 25 },
+    ]);
   });
 });

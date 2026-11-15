@@ -791,6 +791,10 @@ export function openWatch(
       // cadence: a socket takes the fast one only once it has answered a ping.
       armDeadline();
       startHeartbeat();
+      // One ping now, ahead of the frames the owner sends from `onOpen`, so
+      // the socket has its first reading a round trip after it opens and not
+      // a heartbeat later.
+      sendPing();
       // The server's scope registry is per-socket, so a fresh socket
       // starts with no subscriptions. The owner re-establishes its
       // active scopes here (the File Browser instances wire that in);
