@@ -477,6 +477,50 @@ describe("workspace reads overlapping local preference writes", () => {
     expect(ui.themeChoice).toBe("dark");
   });
 
+  test("watch ready closes a peer preference change in the bootstrap subscription gap", async () => {
+    let ready: (() => void) | undefined;
+    const watch = vi.spyOn(client, "openWatchSocket").mockImplementation((_event, _status, onReady) => {
+      ready = onReady;
+      return Object.assign(() => {}, {
+        subscribeDir() {}, unsubscribeDir() {}, reportTransfers() {}, probe() {}, close() {},
+      });
+    });
+    const listing = heldRequest();
+    const originalList = api.list;
+    vi.spyOn(api, "list").mockImplementationOnce(async (dir) => {
+      listing.started.resolve();
+      await listing.released.promise;
+      return originalList(dir);
+    });
+    workspace.info = null;
+    const booting = bootstrap();
+    operations.push(booting);
+    await listing.started.promise;
+    expect(currentPreferences()?.theme).toBe("light");
+    expect(watch).not.toHaveBeenCalled();
+
+    const current = await api.config();
+    await api.updateConfig({
+      expected_revision: current.revision,
+      preferences: { theme: "dark", browser_side_panes: { left: true, right: false } },
+    });
+    expect((await api.config()).preferences.theme).toBe("dark");
+    expect(currentPreferences()?.theme).toBe("light");
+
+    listing.released.resolve();
+    await booting;
+    expect(watch).toHaveBeenCalledTimes(1);
+    expect(ready).toBeTypeOf("function");
+    expect(ui.themeChoice).toBe("light");
+    expect(browserSidePanes.left).toBe(false);
+    ready!();
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(currentPreferences()?.theme).toBe("dark");
+    expect(ui.themeChoice).toBe("dark");
+    expect(browserSidePanes.left).toBe(true);
+  });
+
   test("bootstrap does not apply an initial response invalidated by a local write", async () => {
     const watch = stubWatch();
     workspace.info = null;

@@ -984,11 +984,21 @@ export function __testSetStandalonePreferences(prefs: Preferences | null): void 
 /// saved shortcuts, which the chord resolver and the key dispatch read from
 /// the override table, dropping a retired command's row as they load.
 async function refreshStandalonePreferences(): Promise<void> {
+  const epoch = workspaceReadEpoch;
   try {
-    const prefs = (await api.config()).preferences;
-    standalonePreferences.current = prefs;
-    applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
-    hydrateOverrides(prefs.shortcuts);
+    for (;;) {
+      const generation = await waitForPreferenceWrites();
+      if (epoch !== workspaceReadEpoch) return;
+      const prefs = (await api.config()).preferences;
+      if (epoch !== workspaceReadEpoch) return;
+      // Hydrating an old table can erase an optimistic binding before its
+      // reset is clicked. A no-op write may emit no frame to refresh again.
+      if (generation !== preferenceWriteGeneration()) continue;
+      standalonePreferences.current = prefs;
+      applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
+      hydrateOverrides(prefs.shortcuts);
+      return;
+    }
   } catch {
     // Left as-is rather than cleared: a failed refresh should not throw away
     // preferences that are already applied and still correct.
