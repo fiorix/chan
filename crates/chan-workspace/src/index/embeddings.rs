@@ -260,6 +260,9 @@ impl Embedder {
             serde_json::from_slice(&config_raw).map_err(|e| EmbedError::Config(e.to_string()))?;
         let dim = config.hidden_size;
 
+        if std::fs::metadata(&weights_path)?.len() == 0 {
+            return Err(EmbedError::Candle("model weights file is empty".to_owned()));
+        }
         let device = select_device();
         // Safe: safetensors files are mmap-friendly; candle reads
         // them read-only and doesn't mutate the backing pages.
@@ -368,11 +371,8 @@ impl Embedder {
     }
 }
 
-/// Wipe the hf-hub cache subdirectory for `model_id`. hf-hub maps
-/// `org/name` to `models--<org>--<name>/` under the cache root, so
-/// a sha-mismatched or half-downloaded snapshot is reclaimable by
-/// removing one directory. Best-effort: if the dir doesn't exist
-/// we treat it as already clean.
+/// Remove a corrupt model's cache directory so its files can be downloaded
+/// again. A directory that is already absent needs no cleanup.
 fn wipe_model_cache(model_id: &str, cache_dir: &Path) -> Result<(), EmbedError> {
     let dir = cache_dir.join(format!("models--{}", model_id.replace('/', "--")));
     if dir.exists() {
@@ -487,8 +487,8 @@ fn lookup_model(id: &str) -> Result<usize, EmbedError> {
 /// Per-machine model cache. macOS: `~/Library/Caches/chan/models`;
 /// Linux: `$XDG_CACHE_HOME/chan/models`; Windows:
 /// `%LOCALAPPDATA%/chan/models`. Falls back to the system temp dir
-/// if `dirs::cache_dir()` is unavailable; hf-hub will then re-download
-/// into the temp dir on each launch but search still works.
+/// if `dirs::cache_dir()` is unavailable; the downloader repopulates that
+/// directory whenever its cached model files are absent.
 pub fn global_models_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -510,8 +510,8 @@ pub fn repo_dir_name(model_id: &str) -> String {
 /// `refs/main` present, plus at least one `snapshots/<hash>/`
 /// directory containing `config.json`, `tokenizer.json`, and
 /// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, blobs-only state from an aborted hf-hub
-/// fetch) fails the check.
+/// downloaded snapshot, blobs-only state from an aborted model
+/// download) fails the check.
 fn model_files_present(repo_dir: &Path) -> bool {
     if !repo_dir.join("refs").join("main").is_file() {
         return false;
@@ -586,6 +586,24 @@ fn model_downloaded_in(model_id: &str, cache_dir: &Path) -> Result<bool, EmbedEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_weights_are_classified_before_mapping() {
+        let cache = tempfile::tempdir().unwrap();
+        crate::index::test_support::seed_embedding_model(cache.path());
+        let weights = cache
+            .path()
+            .join(repo_dir_name(crate::DEFAULT_MODEL))
+            .join("snapshots/test-model/model.safetensors");
+        std::fs::write(weights, []).unwrap();
+        let client = download::Client::new(cache.path()).unwrap();
+        let error = Embedder::open_once(crate::DEFAULT_MODEL, cache.path(), &client)
+            .expect_err("empty weights must fail before an OS-specific mmap attempt");
+        assert!(
+            matches!(&error, EmbedError::Candle(message) if message == "model weights file is empty"),
+            "empty weights need a platform-independent corruption error: {error}"
+        );
+    }
 
     #[test]
     fn candle_filesystem_errors_preserve_kind_and_context() {

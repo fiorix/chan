@@ -8,7 +8,7 @@ The leaf covers `DNS:localhost` and `IP:127.0.0.1`, with server authentication v
 - `localhost.der`: `115eb1abb03e5ef69d4bd797c1478f1149e313e9039a3040884d4e1439fc72e1`.
 - `localhost-key.pk8`: `bffa666b0956e2578c11f14825a0dc0a0fdbe2aaacde751cf0b6e134563c6d37`.
 
-To replace all three files, run the following from the repository root with OpenSSL. The commands generate fresh random ECDSA P-256 keys and certificates valid for 10,950 days from generation; they preserve the fixture's subjects, serials, extensions and formats, but do not reproduce its bytes. Update the validity dates and hashes above after replacement. The temporary CA key is removed when the command finishes.
+To replace all three files, run the following from the repository root with OpenSSL. The commands generate fresh random ECDSA P-256 keys and certificates valid for 10,950 days from generation; they preserve the fixture's subjects, serials, extensions and formats, but do not reproduce its bytes. The CA subject retains `chan updater test fixture CA` to match the subject in the checked-in `ca.der` bytes. Update the validity dates and hashes above after replacement. The temporary CA key is removed when the command finishes.
 
 ```sh
 (

@@ -122,6 +122,31 @@ fn part_file(cache: &Path, bytes: &[u8]) -> PathBuf {
 }
 
 #[test]
+fn partial_file_supports_resume_and_restart_writes() {
+    let cache = tempfile::tempdir().unwrap();
+    let partial = part_file(cache.path(), b"stale");
+    let mut file = open_part(&partial).unwrap();
+    file.write_all(b"-suffix").unwrap();
+    assert_eq!(
+        std::fs::read(&partial).unwrap(),
+        b"stale-suffix",
+        "opening a partial must retain its prefix and position writes at its end"
+    );
+
+    file.rewind().unwrap();
+    file.write_all(b"fresh").unwrap();
+    assert_eq!(
+        std::fs::read(&partial).unwrap(),
+        b"fresh-suffix",
+        "restart writes must honor the cursor instead of an append-only handle"
+    );
+    file.set_len(5)
+        .expect("the partial handle must permit truncation on every platform");
+    drop(file);
+    assert_eq!(std::fs::read(partial).unwrap(), b"fresh");
+}
+
+#[test]
 fn partial_download_resumes_and_publishes_exact_bytes() {
     let cache = tempfile::tempdir().unwrap();
     let partial = part_file(cache.path(), &BODY[..3]);

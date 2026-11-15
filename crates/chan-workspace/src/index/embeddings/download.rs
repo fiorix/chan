@@ -1,7 +1,7 @@
 //! Blocking retrieval of the three embedding files into the Hub cache layout.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -291,10 +291,11 @@ impl Client {
         filename: &str,
     ) -> Result<(), DownloadError> {
         let part = blob.with_extension("part");
-        let mut file = OpenOptions::new().create(true).append(true).open(&part)?;
+        let mut file = open_part(&part)?;
         let mut start = file.metadata()?.len();
         if start > size {
             file.set_len(0)?;
+            file.rewind()?;
             start = 0;
         }
         let progress = self.progress.then(|| progress_bar(size, start, filename));
@@ -309,6 +310,7 @@ impl Client {
                 // it before replacing the prefix, while retaining the lock.
                 validate_resume(&response, 0, size)?;
                 file.set_len(0)?;
+                file.rewind()?;
                 start = 0;
                 if let Some(progress) = &progress {
                     progress.set_position(0);
@@ -350,6 +352,18 @@ impl Client {
         }
         Ok(())
     }
+}
+
+fn open_part(path: &Path) -> io::Result<File> {
+    // Windows append-only handles cannot truncate a corrupt or ignored-range
+    // partial. The blob lock serializes these seekable writes.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.seek(SeekFrom::End(0))?;
+    Ok(file)
 }
 
 fn header<'a>(response: &'a Response, name: &'static str) -> Result<&'a str, DownloadError> {

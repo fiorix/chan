@@ -74,6 +74,8 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	mini_workspace::tests::move_plain_refuses_an_empty_directory_created_inside_the_race_window \
 	mini_workspace::tests::copy_plain_refuses_a_file_created_inside_the_race_window \
 	mini_workspace::tests::cross_device_move_refuses_a_file_created_inside_the_race_window \
+	index::embeddings::tests::empty_weights_are_classified_before_mapping \
+	index::embeddings::download::tests::partial_file_supports_resume_and_restart_writes \
 	index::embeddings::download::tests::partial_download_resumes_and_publishes_exact_bytes \
 	index::embeddings::download::tests::ignored_resume_range_restarts_from_full_response \
 	index::embeddings::download::tests::mismatched_resume_range_never_appends_bytes \
