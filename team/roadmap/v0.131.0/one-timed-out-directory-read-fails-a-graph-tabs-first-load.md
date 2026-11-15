@@ -1,6 +1,6 @@
 # One timed-out directory read fails a graph tab's first load
 
-Status: accepted for v0.131.0 by the owner on 2026-11-13; built and verified on 2026-11-15, awaiting integration.
+Status: accepted for v0.131.0 by the owner on 2026-11-13; built, reviewed and merged into `v0131/int` on 2026-11-15. Closed.
 
 Record: found by the second independent review of v0.129.0's graph fixes on 2026-11-13, from reading and the builder's diagnostic run on a kernel-sized tree, the same at the base (`dev/v0129/reviews/review-graphfix-2.md`, finding 4; run `dev/v0129/evidence/graphfix/r3-diag-wide/out.json`). Left open in the shipped [graph row](../done/the-graph-tab-draws-a-different-graph-for-each-way-it-is-opened.md) ("Open") and in `dev/v0129/row-notes.md`, "Graph work: follow-ups from the second review". At v0.130.0's planning the owner placed the later group of rows, this one among them, in v0.131.0: "yes v0.131" (`dev/v0130/status.md`).
 
@@ -61,7 +61,7 @@ The surrounding GraphPanel suite passed 212 tests in 15 files; svelte-check repo
 
 ## Built and verified, 2026-11-15T13:30:07Z
 
-Recoverable nonroot directory failures retain the levels already drawn and their patch base. Each failed directory is retried once after the shared graph completes; recovered levels publish on the bounded cadence. A second failure reports an uncovered directory without dimming the graph. Root failures remain fatal and the request deadline remains 10 seconds. The shared view establishes directory presence, not per-directory content completeness. The implementation and its two fix ranges were accepted by the Fable reviews in `dev/v0131-team/reviews/review-graphtimeout-1a.md`, `review-graphtimeout-1b.md`, `review-graphtimeout-2.md` and `review-graphtimeout-3.md`.
+Recoverable nonroot directory failures retain the levels already drawn and their patch base. Each failed directory is retried once after the shared graph completes, while the tab is visible and has no error; recovered levels publish on the bounded cadence. A second failure reports an uncovered directory without dimming the graph. Root failures remain fatal and the request deadline remains 10 seconds. The shared view establishes directory presence, not per-directory content completeness. The implementation and its two fix ranges were accepted by the Fable reviews in `dev/v0131-team/reviews/review-graphtimeout-1a.md`, `review-graphtimeout-1b.md`, `review-graphtimeout-2.md` and `review-graphtimeout-3.md`.
 
 Acceptance 1 is covered by the red-first tests and guard mutations recorded above. The final focused suite has 39 passing tests; the surrounding GraphPanel suite has 212, with svelte-check at zero errors and warnings. J174r ran the committed frontend and marketing gates at `0dd963fd021bdbae198c183b19e7bb1dc45d58d6`, all native exit 0, with identical clean source receipts before and after. Its complete logs are under `dev/v0131-team/evidence/Ops131/J174r/`; the audited package counts are in `dev/v0131-team/evidence/Web131/graphtimeout-J174r-parent-audit.json`.
 
@@ -71,4 +71,15 @@ The natural timeouts occurred after successful response headers, with a timer-st
 
 A subsequent read-only comparison bound all 4,036 base and 4,038 tip archive entries, including symlink targets, to the retained guest trees with no missing or differing bytes. The actual driver was captured separately because the original saved copy retained an older tip; the corrected pin agrees with the execution logs. This is an after-run driver capture and source comparison, not a retrospective pre-build manifest. The original fresh-archive extraction logs establish initial staging. These additional receipts are under `dev/v0131-team/evidence/Ops131/J175/provenance-final/`, audited in `dev/v0131-team/evidence/Web131/graphtimeout/J175-provenance-parent-audit.json`.
 
-The browser contexts were fresh and HTTP cache disabled; server and operating-system caches stayed warm, so the timings are diagnostic rather than a performance benchmark. Generic HTTP 404 messages appeared in both browser consoles, with no uncaught page exceptions or probe errors. No repeated failed retry occurred naturally; its nondimming warning remains covered by unit tests and mutations. The accepted review notes that a shared refresh failure suppresses a retry batch's final publication until a subsequent patch or reload; the composite fatal guard is retained as requested. No owner or macOS pass is part of this row's acceptance. The graphstall and graphtimeout design paragraphs must both survive integration.
+The browser contexts were fresh and HTTP cache disabled; server and operating-system caches stayed warm, so the timings are diagnostic rather than a performance benchmark. Generic HTTP 404 messages appeared in both browser consoles, with no uncaught page exceptions or probe errors. No repeated failed retry occurred naturally; its nondimming warning remains covered by unit tests and mutations. The accepted review notes that a shared refresh failure suppresses a retry batch's publications, and ends the batch at its next directory, until a subsequent patch or reload; the composite fatal guard is retained as requested. No owner or macOS pass is part of this row's acceptance. The graphstall and graphtimeout design paragraphs must both survive integration.
+
+## Merged, 2026-11-15
+
+The row's range (`a4c7fa631..7d4b85323`) was accepted by five Fable reads (`dev/v0131-team/reviews/review-graphtimeout-1a.md`, `-1b.md`, `-2.md`, `-3.md` and `-4.md`: the build, two fix rounds and this closing record) and merged into `v0131/int`. Its design paragraph sits beside the graph stream row's in `web/packages/workspace-app/src/design.md`; that row composes the two at its own merge.
+
+Open, not built here:
+
+- A change under a directory whose retry failed, or a double-click open there, hands the repeat failure to a whole `loadSpine` through `patchSpine`'s catch and `loadOpenedChildren`, so the fail-and-retry cycle starts again. A candidate for v0.132.0.
+- A directory deeper than the shared graph's depth of 6, or past its node cap, is reported as uncovered by design, since the shared view establishes presence only within its own bounds.
+- A restored selection that lives only in a failed level is dropped rather than kept for the retry.
+- The publication guard reads the composite error, so a shared refresh that fails during a retry batch leaves applied levels undrawn until the next patch or reload.
