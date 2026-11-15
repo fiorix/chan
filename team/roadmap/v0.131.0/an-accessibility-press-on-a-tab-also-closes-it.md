@@ -1,6 +1,6 @@
 # An accessibility press on a tab also closes it
 
-Status: accepted for v0.131.0 by the owner on 2026-11-13; not started.
+Status: accepted for v0.131.0 by the owner on 2026-11-13; built, reviewed and merged into `v0131/int` on 2026-11-15; its macOS line waits for the owner's batch.
 
 Record: seen on 2026-11-13 on the owner's Mac (macOS 27.0.1, chan-desktop built from `8a44e110e`) by the agent that ran his checks, as an observation it was not asked for: "pressing a tab in the tab strip through AX (AXPress, the action VoiceOver uses) selected it and also opened its `Close tab?` prompt, as if its close button had been pressed; a terminal tab with no live session closed outright" (`dev/v0129/owner/reports/parts-abc-at-8a44e110e.md`, Part C, "Observations, not judged"). Listed for him as a candidate (`dev/v0129/row-notes.md`, the Mac report for Parts A, B and C) and among v0.129.0's known limits (the [release record](../../release/release-v0.129.0.md)). At v0.130.0's planning he placed the later group of rows, this one among them, in v0.131.0: "yes v0.131" (`dev/v0130/status.md`).
 
@@ -84,6 +84,17 @@ The final mounted suites pass 41 accessibility cases and 28 focus-follow cases. 
 
 ## Built, 2026-11-15: name-text context-menu focus
 
-The name text has its own context-menu handler, which now calls the same guarded label fallback as the outer pill. A dashboard-name gesture reproduces body focus on `b818ed6234f2e70bf01b1d669b3fab00b306fceb`; the other 41 accessibility cases pass. With the shared fallback, all 42 pass. Removing that call reproduces the intended focus assertion, and restoring it returns all 42 cases to green. Evidence is under `dev/v0131-team/evidence/Edit131/axclose-fix5/`. The separate Pane and Svelte checks for this change remain pending.
+The name text has its own context-menu handler, which now calls the same guarded label fallback as the outer pill. A dashboard-name gesture reproduces body focus on `b818ed6234f2e70bf01b1d669b3fab00b306fceb`; the other 41 accessibility cases pass. With the shared fallback, all 42 pass. Removing that call reproduces the intended focus assertion, and restoring it returns all 42 cases to green. Evidence is under `dev/v0131-team/evidence/Edit131/axclose-fix5/`. Its Pane suites (17 files, 311 tests) and svelte-check (no errors or warnings) passed at that commit (J202).
 
-J198 stays pinned at `b818ed6234f2e70bf01b1d669b3fab00b306fceb`: its terminal-padding gestures do not traverse the name-text handler changed here. This change's proof is its mounted regression test and the checks on its final commit and merge. The quiet browser reading and the owner's macOS acceptance remain unclaimed.
+The browser reading at this commit is J208, below. Check 266's plain right arms press the name text of a live terminal and a file tab, whose surfaces take focus, so the fallback added here stands down on every gesture it reads; no arm right-presses a dashboard's name, which this change's mounted regression test covers. The owner's macOS acceptance remains unclaimed.
+
+## Merged, 2026-11-15
+
+The row's range (`f766fa845..107f91c97`) was accepted by eight Fable reads (`dev/v0131-team/reviews/review-axclose-1a.md`, `-1b.md` and `-2.md` to `-6.md`: the build, five fix rounds and the held arm of check 266) and merged into `v0131/int`. Check 266's held arm now waits, bounded, for the target label's focus while the button is held (the first sample came about 3 ms after the press, before the deferred focus step). J208, at the final product commit `48782fc69` with that check (`107f91c97`), passed all 44 arms on both terminal backends; the same check failed on the old product (no forwarder: the held arm acquired no label focus within its bound) and on a product mutation dropping the deferred step, and the source was restored exactly. The committed gates passed at `107f91c97` (J207). The padding drag that the first synchronous forwarder blocked in Chrome starts and reorders on both backends since `b818ed623` (J198).
+
+Open, not built here:
+
+- The native verdict test (`scripts/e2e/desktop-observations/axclose-verdict.test.mjs`) runs in no gate; `make e2e-check` checks its syntax only.
+- The jsdom style tests read the component's CSS with `:focus-visible` substituted; the real cascade and keyboard modality rest on check 266's style arm.
+- Two test models of the browser's press-focus default (`Pane.menuFocus.test.ts` and the accessibility suite's helper) differ for a `tabindex=-1` element.
+- Check 266's held arm records interim focus owners before acquisition without asserting them, and samples every 50 ms, so a focus bounce between samples would pass.

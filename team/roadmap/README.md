@@ -30,7 +30,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [New and Paste choose two folders][newpaste] | merged | closed |
 | [a warm chan-term leaves Chan behind][warmterm] | merged | owner |
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
-| [an accessibility press closes a tab][axclose] | not started | build |
+| [an accessibility press closes a tab][axclose] | merged | owner |
 | [a PDF export is images only][pdftext] | withdrawn | closed |
 | [the model download trusts bundled roots][modelroots] | not started | build |
 | [the self-update trusts bundled roots][updroots] | not started | build |
