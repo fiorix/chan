@@ -298,6 +298,42 @@ function wheel(term: GhosttyStandIn, delta: WheelEventInit = { deltaY: 1, deltaM
 }
 
 describe("a ghostty mouse report", () => {
+  test("an X10 mouse report from onData does not arm a link probe", async () => {
+    const { term, socket } = await attachedGhostty();
+    vi.useFakeTimers();
+    try {
+      term.type(REPORT);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an X10 wheel report does not arm a link probe", async () => {
+    const { term, socket } = await attachedGhostty();
+    vi.useFakeTimers();
+    try {
+      wheel(term);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("typed ghostty data arms a link probe", async () => {
+    const { term, socket } = await attachedGhostty();
+    vi.useFakeTimers();
+    try {
+      term.type("x");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("sends a wide X10 wheel report as bytes to the PTY and group", async () => {
     const { term, socket, received } = await attachedGhostty();
     const report = `\x1b[M${String.fromCharCode(32 + 65, 32 + 151, 32 + 4)}`;
