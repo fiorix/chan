@@ -7,9 +7,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchWindows, goto, killChild, openRow, poll, spawnDevserver, wait } from "../lib/launcher-devserver.mjs";
+import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
 const SOCKET = "chan-smoke-195";
 const SESSION = "smoke195";
+const TERMINAL_SCREEN = Object.values(TERMINAL_SURFACES).map((surface) => `.terminal-tab.active ${surface}`).join(", ");
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -128,12 +130,12 @@ async function evaluateOrDump(page, fn, label, ...args) {
 
 /// The attached terminal tabs of a page: each with a box behind it.
 const attachedTabs = (page) =>
-  evaluateOrDump(page, () =>
+  evaluateOrDump(page, (selector) =>
     [...document.querySelectorAll(".terminal-tab")].map((tab) => {
-      const screen = tab.querySelector(".terminal.xterm .xterm-screen, .terminal-host canvas");
+      const screen = tab.querySelector(selector);
       const box = screen?.getBoundingClientRect();
       return { id: tab.getAttribute("data-terminal-tab-id"), attached: !!box && box.width > 0 && box.height > 0, active: tab.classList.contains("active") };
-    }), "attached tabs");
+    }), "attached tabs", Object.values(TERMINAL_SURFACES).join(", "));
 
 async function waitAttachedTabs(page, count, label) {
   return poll(`${label}: ${count} attached terminal tab(s)`, async () => {
@@ -176,12 +178,12 @@ async function dispatchCommand(page, name) {
 
 /// The panes of a page, each with whether its active tab has a terminal box.
 const panesAttached = (page) =>
-  evaluateOrDump(page, () =>
+  evaluateOrDump(page, (selector) =>
     [...document.querySelectorAll(".pane")].map((pane) => {
-      const screen = pane.querySelector(".terminal-tab.active .terminal.xterm .xterm-screen, .terminal-tab.active .terminal-host canvas");
+      const screen = pane.querySelector(selector);
       const box = screen?.getBoundingClientRect();
       return !!box && box.width > 0 && box.height > 0;
-    }), "panes");
+    }), "panes", TERMINAL_SCREEN);
 
 const rowName = (record) => `Terminal Window ${record.ordinal}${record.label ? ` [${record.label.trim()}]` : ""}`;
 
@@ -244,7 +246,7 @@ export default {
       // Type the command into the shell: the marker enters at once, since a
       // local tmux is the foreground.
       await source.bringToFront();
-      await source.click(".terminal-tab.active .terminal.xterm .xterm-screen, .terminal-tab.active .terminal-host canvas");
+      await source.click(TERMINAL_SCREEN);
       step("typing tmux");
       const shellToken = `SHELL_${Date.now()}`;
       await source.keyboard.type(`TMUX195_SHELL_TOKEN='${shellToken}'; tmux -L ${SOCKET} -f /dev/null -CC new-session -s ${SESSION}\n`);
@@ -368,7 +370,7 @@ export default {
       await poll("the card gone from the launcher", () => evaluateOrDump(launcher, (title) => !(document.body.textContent?.includes(title) ?? false), "launcher text", CARD_TITLE), 30_000);
       await assertSourceRetained("connection detached");
       await source.bringToFront();
-      await source.click(".terminal-tab.active .terminal.xterm .xterm-screen, .terminal-tab.active .terminal-host canvas");
+      await source.click(TERMINAL_SCREEN);
       const expected = `TMUX195_${shellToken}`;
       // The shell retains this variable across tmux; the typed command contains no complete marker, so neither a replacement shell nor echoed input can pass.
       await source.keyboard.type('printf \'TMUX195_%s\\n\' "$TMUX195_SHELL_TOKEN"\n');

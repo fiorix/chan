@@ -102,11 +102,10 @@ for (const backend of ["xterm", "ghostty"]) {
   }
 }
 
-test("opening ghostty refuses xterm's nested WebGL canvas", async (t) => {
-  const row = { ...restored, name: "requested-ghostty", window_status: "alive" };
-  const f = fixture(t, "xterm", [row]);
+function openingFixture(t, backend, row, requestedBackend = backend) {
+  const f = fixture(t, backend, [row], row);
   const evaluate = f.page.evaluate;
-  f.page.evaluate = (fn, arg) => arg === "" ? Promise.resolve({ ghostty: true }) : evaluate(fn, arg);
+  f.page.evaluate = (fn, arg) => arg === "" ? Promise.resolve({ ghostty: requestedBackend === "ghostty" }) : evaluate(fn, arg);
   const commands = [], shots = [];
   const cs = async (args) => {
     commands.push(args);
@@ -116,10 +115,28 @@ test("opening ghostty refuses xterm's nested WebGL canvas", async (t) => {
   let clockReads = 0;
   t.mock.method(Date, "now", () => clockReads++ === 0 ? 0 : 60_001);
   const ctx = { serverUrl: "http://test.invalid", shot: async (name) => { shots.push(name); } };
-  await assert.rejects(openAttachedTerminal(ctx, f.page, cs, original.window, row.name, "ghostty"), /terminal not attached/);
+  return { ...f, cs, ctx, commands, shots };
+}
+
+test("opening ghostty refuses xterm's nested WebGL canvas", async (t) => {
+  const row = { ...restored, name: "requested-ghostty", window_status: "alive" };
+  const { ctx, page, cs, commands, shots } = openingFixture(t, "xterm", row, "ghostty");
+  await assert.rejects(openAttachedTerminal(ctx, page, cs, original.window, row.name, "ghostty"), /terminal not attached/);
   assert.deepEqual(commands, [["new", "--tab-name", row.name], ["list", "--json"]]);
   assert.deepEqual(shots, [`${row.name}-attach-failure`]);
 });
+
+for (const mismatch of [{ window: "another-window" }, { window_status: "offline" }]) {
+  test(`opening reports the name-matched row when ${Object.keys(mismatch)[0]} prevents attachment`, async (t) => {
+    const row = { ...restored, name: "requested-xterm", window_status: "alive", ...mismatch };
+    const { ctx, page, cs } = openingFixture(t, "xterm", row);
+    await assert.rejects(openAttachedTerminal(ctx, page, cs, original.window, row.name, "xterm"), (error) => {
+      assert.match(error.message, /terminal not attached/);
+      assert.ok(error.message.includes(`row=${JSON.stringify(row)}`), error.message);
+      return true;
+    });
+  });
+}
 
 test("a malformed roster fails instead of satisfying attachment", async () => {
   const cs = async () => ({ stdout: "{" });

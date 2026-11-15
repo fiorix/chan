@@ -2,7 +2,7 @@ import { readTerminalPrefs } from "./terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const SURFACES = {
+export const TERMINAL_SURFACES = {
   // Xterm's WebGL canvas is nested inside its screen, not directly in the host.
   ghostty: ".terminal-host > canvas",
   xterm: ".terminal.xterm .xterm-screen",
@@ -18,7 +18,7 @@ export async function readTerminalAttachment(page, cs, backend, matchesRow) {
   const attached = selector ? await page.evaluate((query) => {
     const box = document.querySelector(query)?.getBoundingClientRect();
     return !!box && box.width > 0 && box.height > 0;
-  }, `${selector} ${SURFACES[backend]}`) : false;
+  }, `${selector} ${TERMINAL_SURFACES[backend]}`) : false;
   return { row, selector, attached };
 }
 
@@ -34,10 +34,9 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
   for (;;) {
     // A devserver's window roster marks an attached session "alive". A
     // standalone `chan serve` has no roster and calls the same tab "orphaned".
-    const { row, attached } = await readTerminalAttachment(page, cs, backend, (entry) =>
-      entry.name === name && entry.window === windowId &&
-      (entry.window_status === "alive" || entry.window_status === "orphaned"));
-    if (attached) return row;
+    const { row, attached } = await readTerminalAttachment(page, cs, backend, (entry) => entry.name === name);
+    if (attached && row.window === windowId &&
+        (row.window_status === "alive" || row.window_status === "orphaned")) return row;
     if (Date.now() > deadline) {
       const tabs = await page.evaluate((surfaces) => [...document.querySelectorAll(".terminal-tab")].map((tab) => {
         const xterm = tab.querySelector(surfaces.xterm);
@@ -50,7 +49,7 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
           backend: xterm ? "xterm" : ghostty ? "ghostty" : "missing",
           box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
         };
-      }), SURFACES);
+      }), TERMINAL_SURFACES);
       await ctx.shot(`${name}-attach-failure`, page).catch(() => {});
       throw new Error(`${name}: terminal not attached: row=${JSON.stringify(row)} tabs=${JSON.stringify(tabs)}`);
     }

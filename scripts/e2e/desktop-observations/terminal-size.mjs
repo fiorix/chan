@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { defaultChrome, findControlSocket, launchServer, seedWorkspace, teardownServer } from "../browser-smoke/lib/server.mjs";
 import { writeTerminalPrefs } from "../browser-smoke/lib/terminal-prefs.mjs";
+import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
 import { installSizeObserver, unobservedViews } from "./terminal-size-page.mjs";
 import { checkpointAfter, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
 
@@ -77,7 +78,7 @@ async function flush(page, evidence) {
 async function views() {
   return (await Promise.all(pages.map(async ({ page, evidence }) => {
     const rows = run.observer ? await page.evaluate(() => window.__terminalSizeObserver.snapshot())
-      : await page.evaluate(unobservedViews, { name: run.name, tabId: evidence.probeTab });
+      : await page.evaluate(unobservedViews, { name: run.name, tabId: evidence.probeTab, surfaces: TERMINAL_SURFACES });
     return rows.filter((r) => r.name === run.name && r.connected).map((r) => ({ ...r, page: evidence.name }));
   }))).flat();
 }
@@ -140,7 +141,7 @@ try {
     const evidence = { name, calibrations: [], records: [], overflow: false };
     run.pages.push(evidence); pages.push({ page, evidence });
     await page.setViewport({ width, height });
-    if (run.observer) await page.evaluateOnNewDocument(installSizeObserver);
+    if (run.observer) await page.evaluateOnNewDocument(installSizeObserver, TERMINAL_SURFACES);
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
     await calibrate(page, evidence);
@@ -236,8 +237,8 @@ try {
     run.coViewReadiness.restored = restored;
     run.coViewReadiness.restoredAtMs = now();
     if (run.observer) await until(views, (rows) => rows.length === 2, "co-view connected probes");
-    else await until(async () => second.evaluate(() => [...document.querySelectorAll("[data-terminal-tab-id]")]
-      .filter((tab) => tab.querySelector(".terminal-host .xterm-screen, .terminal-host canvas")).length),
+    else await until(async () => second.evaluate((selector) => [...document.querySelectorAll("[data-terminal-tab-id]")]
+      .filter((tab) => tab.querySelector(selector)).length, Object.values(TERMINAL_SURFACES).join(", ")),
     (drawn) => drawn >= required.length, "co-view drawn terminals");
     await identifyProbe(pages[1]);
     for (const entry of pages) await selectTab(entry.page, "size-cover");

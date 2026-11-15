@@ -5,6 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
 const TAB = "SmokeAppearance105";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -204,7 +205,7 @@ export default {
         if (Date.now() > deadline) throw new Error(`${TAB} never registered`);
         await sleep(250);
       }
-      await page.waitForSelector(".terminal-tab .terminal.xterm .xterm-screen", {
+      await page.waitForSelector(`.terminal-tab ${TERMINAL_SURFACES.xterm}`, {
         visible: true,
         timeout: 30_000,
       });
@@ -238,10 +239,11 @@ export default {
 
     async function rendererSnapshot(backend, frameStart) {
       const grid = await waitStableGrid(frameStart, backend);
-      const dom = await page.evaluate(({ backend, grid }) => {
+      const dom = await page.evaluate(({ backend, grid, surfaces }) => {
         const tab = document.querySelector(".terminal-tab");
         const host = tab?.querySelector(".terminal-host");
-        const canvas = host?.querySelector("canvas");
+        const canvas = tab?.querySelector(surfaces.ghostty)
+          ?? tab?.querySelector(`${surfaces.xterm} canvas`);
         if (!(tab instanceof HTMLElement) || !(host instanceof HTMLElement)) {
           throw new Error(`${backend}: terminal surface missing`);
         }
@@ -276,7 +278,7 @@ export default {
             cursor: tabStyle.getPropertyValue("--link").trim(),
           },
         };
-      }, { backend, grid });
+      }, { backend, grid, surfaces: TERMINAL_SURFACES });
       return dom;
     }
 
@@ -583,7 +585,7 @@ export default {
       }
 
       const xterm20 = await reloadBackend(
-        ".terminal-tab .terminal.xterm .xterm-screen",
+        `.terminal-tab ${TERMINAL_SURFACES.xterm}`,
         "xterm-20",
       );
       const sessionAfterXtermReload = await session();
@@ -665,7 +667,7 @@ export default {
       await sleep(1_500);
       await page.evaluate(() => performance.clearResourceTimings());
       const ghostty20 = await reloadBackend(
-        ".terminal-tab .terminal-host canvas",
+        `.terminal-tab ${TERMINAL_SURFACES.ghostty}`,
         "ghostty-20",
       );
       await page.waitForFunction(
@@ -675,7 +677,7 @@ export default {
             .some((entry) => entry.name.includes("ghostty-vt")),
         { timeout: 60_000 },
       );
-      if (await page.$(".terminal-tab .xterm")) {
+      if (await page.$(`.terminal-tab ${TERMINAL_SURFACES.xterm}`)) {
         throw new Error("ghostty preference reconstructed an xterm renderer");
       }
       const sessionAfterGhosttyReload = await session();
@@ -707,7 +709,7 @@ export default {
         );
       }
       const ghostty18 = await reloadBackend(
-        ".terminal-tab .terminal-host canvas",
+        `.terminal-tab ${TERMINAL_SURFACES.ghostty}`,
         "ghostty-18",
       );
       if (

@@ -43,6 +43,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, openSync, readdirS
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { TERMINAL_SURFACES } from "../browser-smoke/lib/terminal-attach.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -239,6 +240,7 @@ async function run() {
   // page, so it is planted again after one.
   const WITNESS = `(() => {
     if (window.__flows) return true;
+    const terminalSurfaces = ${JSON.stringify(TERMINAL_SURFACES)};
     const s = (window.__flows = { pastes: [], drops: [], drags: {}, keys: [], chords: [], dragstarts: [], dblclicks: [], statuses: [], lastMove: null });
     addEventListener("keydown", (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
@@ -266,7 +268,7 @@ async function run() {
       content: (id) => [...(pane(id)?.querySelectorAll(".cm-content") ?? [])].find((c) => !c.closest(".rich-prompt") && visible(c)) ?? null,
       modeOf: (c) => !c ? null : c.closest(".md-source") ? "source" : c.closest(".md-wysiwyg-cm6") ? "rendered" : "other",
       host: (id) => [...(pane(id)?.querySelectorAll(".terminal-host") ?? [])].find(visible) ?? null,
-      backendOf: (h) => !h ? null : h.querySelector(".xterm-screen") ? "xterm" : h.querySelector("canvas") ? "ghostty" : "unknown",
+      backendOf: (h) => !h ? null : h.querySelector(terminalSurfaces.xterm) ? "xterm" : h.querySelector(terminalSurfaces.ghostty) ? "ghostty" : "unknown",
       center: (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; },
       api: async (path, init = {}) => {
         const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content")?.replace(/\\/+$/, "") ?? "";
@@ -1378,7 +1380,7 @@ async function run() {
 
   // The compact hash and restored pane IDs differ across reloads. Read the
   // focused surface's kind, never paths, tokens, commands or terminal IDs.
-  function reloadFocusState() {
+  function reloadFocusState(terminalSurfaces) {
     const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility === "visible"; };
     const leaf = (node) => !node ? null : node.k === "s" ? leaf(node.a) ?? leaf(node.b) : node.f === 1 ? node : null;
     let hashFocus = "invalid";
@@ -1396,13 +1398,13 @@ async function run() {
     const keyboard = active?.closest(".browser") ? "browser"
       : active?.closest(".terminal-host") ? (active.tagName === "TEXTAREA" ? "terminal-textarea" : "terminal") : "other";
     const allHosts = [...document.querySelectorAll(".terminal-host")].filter(visible);
-    const backend = allHosts.some((el) => el.querySelector(".xterm-screen")) ? "xterm"
-      : allHosts.some((el) => el.querySelector("canvas")) ? "ghostty" : "none";
+    const backend = allHosts.some((el) => el.querySelector(terminalSurfaces.xterm)) ? "xterm"
+      : allHosts.some((el) => el.querySelector(terminalSurfaces.ghostty)) ? "ghostty" : "none";
     return { at: performance.now(), document: performance.timeOrigin, hashFocus,
       focused: browser ? "browser" : host ? "terminal" : "other", keyboard, backend,
       panes: document.querySelectorAll(".pane[data-pane-id]").length };
   }
-  const reloadState = () => page.evaluate(`(${reloadFocusState})()`);
+  const reloadState = () => page.evaluate(`(${reloadFocusState})(${JSON.stringify(TERMINAL_SURFACES)})`);
 
   async function reloadFocusArms(backend) {
     const group = "reload-focus";
@@ -1463,7 +1465,7 @@ async function run() {
           if (!point) throw new Error("no browser status text to click");
           const key = `chan.basic-flows.reload-focus.${backend}.${scenario.label}`;
           await page.evaluate(`(() => {
-            const read = ${reloadFocusState};
+            const read = (${reloadFocusState}).bind(null, ${JSON.stringify(TERMINAL_SURFACES)});
             const key = ${JSON.stringify(key)};
             const trace = { delay: ${scenario.delay}, before: read(), writes: [], click: null, reload: null, failedFocus: false };
             const save = () => sessionStorage.setItem(key, JSON.stringify(trace));
@@ -1502,7 +1504,7 @@ async function run() {
             let next = null;
             try {
               next = await attach(args.page);
-              const state = await next.evaluate(`(${reloadFocusState})()`);
+              const state = await next.evaluate(`(${reloadFocusState})(${JSON.stringify(TERMINAL_SURFACES)})`);
               if (state.document !== row.terminal.document && state.panes === setup.panes && state.backend === backend && await next.evaluate("document.readyState === 'complete'")) return next;
             } catch { /* A reload replaces the inspector's page target. */ }
             await next?.close();
