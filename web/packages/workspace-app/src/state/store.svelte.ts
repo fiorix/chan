@@ -61,6 +61,7 @@ import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
 import { applyWindowLabel } from "./windowTitle.svelte";
+import { setLinkWatchStatus, watchLinkProbe } from "./linkHealth.svelte";
 import {
   activeLayout,
   activeTabInPane,
@@ -2723,6 +2724,7 @@ function surfaceTeamSpawn(
 function onWatchStatus(status: WsStatus, attempt: number): void {
   ui.ws = status;
   ui.wsAttempt = attempt;
+  setLinkWatchStatus(status);
 }
 
 /// A fresh socket has none of the old socket's scopes or transfer count, so
@@ -2855,7 +2857,7 @@ export function resumeWatcher(): void {
   if (unwatch) {
     unwatch.probe();
   } else {
-    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchLinkProbe);
   }
 }
 
@@ -3042,7 +3044,7 @@ async function bootstrapStandalone(): Promise<void> {
   // Watcher socket drives the broadcast / pane event bus terminals rely on,
   // and the scoped filesystem watch a File Browser subscribes to.
   if (!unwatch) {
-    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchLinkProbe);
   }
   // No index-status poller (no `/api/index/status` route in this tenant).
 
@@ -3190,7 +3192,7 @@ export async function bootstrap(): Promise<void> {
       if (pendingLead) openTeamDialog(pendingLead);
     }
     if (!unwatch) {
-      unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+      unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchLinkProbe);
     }
     startIndexStatusPoller();
   } catch (e) {
