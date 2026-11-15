@@ -11,7 +11,6 @@ import { startTerminalFixture } from "../lib/terminal-fixture.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const NOTICE = "terminal not connected; try again";
-const CARD = ".terminal-tab.active .rich-prompt";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function routeTerminal({ session, relay }) {
@@ -51,28 +50,29 @@ function routeTerminal({ session, relay }) {
   trace.restore = () => { window.WebSocket = NativeSocket; };
 }
 
-async function state(page) {
+async function state(page, card) {
   return page.evaluate((card) => {
-    const editor = document.querySelector(`${card} .cm-content`);
-    const note = document.querySelector(`${card} .rp-text`);
+    const composer = card ? document.querySelector(card) : null;
+    const editor = composer?.querySelector(".cm-content");
+    const note = composer?.querySelector(".rp-text");
     const trace = window.__prompt290;
     return {
       text: editor?.textContent ?? null,
       editable: editor?.getAttribute("contenteditable") === "true",
-      pending: document.querySelector(card)?.classList.contains("pending") ?? null,
+      pending: composer?.classList.contains("pending") ?? null,
       note: note?.textContent ?? null,
       live: note?.getAttribute("aria-live") ?? null,
       sockets: trace?.sockets.map(({ socket, ready, delivered }) => ({ state: socket.readyState, ready, delivered })) ?? [],
       prompts: trace?.prompts ?? [],
     };
-  }, CARD);
+  }, card);
 }
 
-async function waitFor(page, label, accept, timeout = 15_000) {
+async function waitFor(page, card, label, accept, timeout = 15_000) {
   const deadline = Date.now() + timeout;
   let observed;
   do {
-    observed = await state(page);
+    observed = await state(page, card);
     if (accept(observed)) return observed;
     await sleep(50);
   } while (Date.now() < deadline);
@@ -91,6 +91,32 @@ export async function waitSaved(ctx, page, windowId, name) {
     if (response.status === 204) return false;
     return response.ok && JSON.stringify((await response.json()).layout ?? null).includes(name);
   }, { timeout: 20_000, polling: 100 }, { windowId, name, token });
+}
+
+export async function waitRestoredTerminal(page, cs, windowId, original, backend, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
+  const surface = backend === "ghostty" ? ".terminal-host canvas" : ".terminal.xterm .xterm-screen";
+  let placement = null;
+  for (;;) {
+    const listed = await cs(["list", "--json"]);
+    const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
+    const row = rows.find((entry) => entry.session_id === original.session_id && entry.window === windowId);
+    // Session identity survives a reload; pane and tab IDs are regenerated.
+    placement = row ? { session_id: row.session_id, window: row.window, pane: row.pane, tab: row.tab } : null;
+    if (placement?.pane && placement.tab) {
+      const selector = `.pane[data-pane-id="${placement.pane}"] ` +
+        `.terminal-tab.active[data-terminal-tab-id="${placement.tab}"]`;
+      const visible = await page.evaluate((query) => {
+        const box = document.querySelector(query)?.getBoundingClientRect();
+        return !!box && box.width > 0 && box.height > 0;
+      }, `${selector} ${surface}`);
+      if (visible) return { ...placement, selector };
+    }
+    if (Date.now() >= deadline) {
+      assert.fail(`restored ${backend} terminal not attached: ${JSON.stringify(placement)}`);
+    }
+    await sleep(100);
+  }
 }
 
 export default {
@@ -119,7 +145,7 @@ export default {
         const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
         const onError = (error) => result.pageErrors.push(String(error));
         const fixture = await startTerminalFixture({ logPath: join(ctx.outDir, `290-${backend}-output.bin`), deadlineMs: 20_000 });
-        let proxy, script, opened = false;
+        let proxy, script, card = null, opened = false;
         page.on("pageerror", onError);
         try {
           await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
@@ -137,20 +163,21 @@ export default {
           script = await page.evaluateOnNewDocument(routeTerminal, { session: row.session_id, relay: proxy.url });
           await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
           await ctx.waitWindowLive(windowId);
-          const terminal = `.terminal-tab.active[data-terminal-tab-id="${row.tab}"]`;
-          await page.waitForSelector(`${terminal} ${backend === "ghostty" ? ".terminal-host canvas" : ".xterm-screen"}`,
-            { visible: true, timeout: 30_000 });
-          await waitFor(page, "the reloaded terminal received ready", (value) => value.sockets[0]?.ready);
+          // Ready follows the server's placement update for this same session.
+          await waitFor(page, card, "the reloaded terminal received ready", (value) => value.sockets[0]?.ready);
+          result.attachment = await waitRestoredTerminal(page, cs, windowId, row, backend);
+          const terminal = result.attachment.selector;
+          card = `${terminal} .rich-prompt`;
           await page.click(`${terminal} .terminal-host`);
           await page.keyboard.down("Control");
           await page.keyboard.down("Alt");
           await page.keyboard.press("KeyP");
           await page.keyboard.up("Alt");
           await page.keyboard.up("Control");
-          await page.waitForSelector(`${CARD} .cm-content`, { visible: true, timeout: 15_000 });
-          await page.click(`${CARD} .cm-content`);
+          await page.waitForSelector(`${card} .cm-content`, { visible: true, timeout: 15_000 });
+          await page.click(`${card} .cm-content`);
           await page.keyboard.type(text);
-          await waitFor(page, "the initial draft is editable", (value) => value.text === text && value.editable && !value.pending);
+          await waitFor(page, card, "the initial draft is editable", (value) => value.text === text && value.editable && !value.pending);
           const ready = await proxy.waitForRecord((record) => record.event === "frame" && record.connection === 1
             && record.direction === "forwarded" && record.type === "ready");
           // A later browser task has seen the mounted composer; the ready
@@ -159,7 +186,7 @@ export default {
           result.cut = await proxy.waitForCut();
           assert.deepEqual(result.cut.disconnect, { client: "closed", upstream: "closed" });
           await proxy.waitForHeldRedial();
-          result.held = await waitFor(page, "the redial is genuinely CONNECTING", (value) =>
+          result.held = await waitFor(page, card, "the redial is genuinely CONNECTING", (value) =>
             value.sockets.length === 2 && value.sockets[0].state === 3 && value.sockets[1].state === 0);
           assert.equal(proxy.records.filter((record) => record.event === "connection").length, 1,
             "the held redial has no upstream connection");
@@ -169,9 +196,9 @@ export default {
             await page.keyboard.press("Enter");
             await page.keyboard.up("Control");
           } else {
-            await page.click(`${CARD} .rp-primary`);
+            await page.click(`${card} .rp-primary`);
           }
-          result.refused = await waitFor(page, "disconnected submit shows its refusal", (value) => value.note === NOTICE, 3000);
+          result.refused = await waitFor(page, card, "disconnected submit shows its refusal", (value) => value.note === NOTICE, 3000);
           assert.deepEqual(result.refused.sockets.map((socket) => socket.state), [3, 0]);
           assert.equal(result.refused.text, text);
           assert.equal(result.refused.editable, true);
@@ -179,33 +206,33 @@ export default {
           assert.equal(result.refused.live, "polite");
           assert.deepEqual(result.refused.prompts, []);
           assert.equal(keys(fixture), "");
-          await page.click(`${CARD} .cm-content`);
+          await page.click(`${card} .cm-content`);
           await page.keyboard.press("End");
           await page.keyboard.type(" revised");
-          result.edited = await waitFor(page, "the refused draft stays editable", (value) => value.text === revised && value.editable && !value.pending);
+          result.edited = await waitFor(page, card, "the refused draft stays editable", (value) => value.text === revised && value.editable && !value.pending);
           assert.deepEqual(result.edited.sockets.map((socket) => socket.state), [3, 0],
             "fixture precondition: the held redial has not reached its connect deadline");
           // Release before the terminal's normal connect deadline. The real
           // note lifetime is observed after reconnect, with no clock shim.
           proxy.releaseRedial();
           await ctx.shot(`290-${backend}-refusal-notice`);
-          await waitFor(page, "the redial has received ready", (value) => value.sockets[1]?.ready && value.sockets[1].state === 1);
+          await waitFor(page, card, "the redial has received ready", (value) => value.sockets[1]?.ready && value.sockets[1].state === 1);
           // Neither reconnect nor the refusal timer may send the draft.
-          result.reconnected = await waitFor(page, "the refusal is transient and the connected draft remains unsent", (value) => value.note === null, 7000);
+          result.reconnected = await waitFor(page, card, "the refusal is transient and the connected draft remains unsent", (value) => value.note === null, 7000);
           assert.equal(result.reconnected.text, revised);
           assert.equal(result.reconnected.editable, true);
           assert.equal(result.reconnected.pending, false);
           assert.deepEqual(result.reconnected.prompts, []);
           assert.equal(keys(fixture), "");
           await ctx.shot(`290-${backend}-reconnected-unsent`);
-          await page.click(`${CARD} .rp-primary`);
-          result.sent = await waitFor(page, "the explicit retry sends one prompt", (value) => value.prompts.length === 1);
+          await page.click(`${card} .rp-primary`);
+          result.sent = await waitFor(page, card, "the explicit retry sends one prompt", (value) => value.prompts.length === 1);
           assert.equal(result.sent.prompts[0].data, revised);
           assert.equal(result.sent.prompts[0].connection, 2);
           assert.equal(typeof result.sent.prompts[0].id, "string");
           const id = result.sent.prompts[0].id;
           await fixture.waitFor(() => keys(fixture).includes(revised));
-          result.delivered = await waitFor(page, "the delivered retry clears the composer", (value) =>
+          result.delivered = await waitFor(page, card, "the delivered retry clears the composer", (value) =>
             value.sockets[1].delivered.includes(id) && value.text === "" && !value.pending);
           assert.equal(result.delivered.prompts.length, 1);
           assert.equal(result.delivered.note, null);
@@ -218,7 +245,7 @@ export default {
         } catch (error) {
           result.failure = String(error.message).replaceAll(fixture.env.TERMINAL_FIXTURE_TOKEN, "[redacted]");
           failures.push(`${backend}: ${result.failure}`);
-          result.final = await state(page).catch(() => null);
+          result.final = await state(page, card).catch(() => null);
           await ctx.shot(`290-${backend}-failure`).catch(() => {});
         } finally {
           result.proxy = proxy?.records ?? [];

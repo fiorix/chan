@@ -98,6 +98,8 @@ Check 290 cuts a real terminal socket after ready and holds its replacement befo
 
 Before reloading, check 290 waits for the terminal's saved layout. A fresh window's `204 No Content` response keeps that wait pending without parsing JSON; malformed JSON in a successful response still fails. `node --test scripts/e2e/browser-smoke/lib/rich-prompt-saved.test.mjs` exercises the readiness predicate with HTTP stand-ins and starts no server or browser.
 
+Reload regenerates pane and tab IDs. After the original session's routed ready frame, check 290 resolves that session's current row in the same window, requires its requested backend to be visible, and scopes the composer reads and actions to that pane and tab. `node --test scripts/e2e/browser-smoke/lib/rich-prompt-attachment.test.mjs` exercises changed coordinates, stale rosters and unrelated or invisible terminals with independent roster and DOM stand-ins.
+
 Drafts checks 130, 131 and 133 search body text, titles, aria labels, current input, textarea and select values, image alt text, and placeholders for a draft path mark or lifetime id. Check 130 proves that the search refuses planted values from each source. The search excludes URLs because a draft image address intentionally carries its lifetime id; checks 130 and 131 also search while the Save draft prompt and the Close Draft dialog are open.
 
 ## Terminal socket and PTY tools
