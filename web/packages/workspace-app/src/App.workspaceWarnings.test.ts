@@ -19,9 +19,10 @@ vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")
 
 import { api } from "./api/client";
 import type { DraftList, WorkspaceWarning } from "./api/types";
-import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { mountApp as mountDemoApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { demoTransportSettled } from "./demo/install";
 import { settle as settleDialog, press as pressDialog } from "./__tests__/dialog";
-import { dismissWorkspaceWarning, onWatchEvent, refreshWorkspace, resyncDrafts, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
+import { dismissWorkspaceWarning, onWatchEvent, refreshWorkspace, resyncDrafts, stopWorkspaceRefresh, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
 import { drafts, refreshDrafts, resetDraftsForTests } from "./state/drafts.svelte";
 import { draftPath } from "./__tests__/drafts";
 
@@ -30,6 +31,15 @@ stubAppEnvironment();
 let warnings: WorkspaceWarning[];
 let writeText: ReturnType<typeof vi.fn>;
 let warningRowSequence = 0;
+
+async function mountApp(): Promise<HTMLElement> {
+  const target = await mountDemoApp();
+  // Only the action under test may schedule the next workspace request.
+  stopWorkspaceRefresh();
+  await demoTransportSettled();
+  await settle();
+  return target;
+}
 
 beforeEach(() => {
   resetDraftsForTests();
@@ -208,8 +218,10 @@ describe("draft warnings follow the list", () => {
     vi.mocked(api.workspace).mockClear();
 
     onWatchEvent({ type: "watch", event: { kind: "Modified", path: "README.md" } });
-    // The event may join the real timer armed by the socket's startup read.
-    await vi.waitFor(() => expect(api.workspace, "the file event refreshed the payload").toHaveBeenCalledTimes(1));
+    await vi.waitFor(
+      () => expect(api.workspace, "the file event refreshed the payload").toHaveBeenCalledTimes(1),
+      { timeout: 5000 },
+    );
     await settle();
 
     expect(workspaceWarningsDialog.warnings, "a workspace refresh preserves the list-only warning").toEqual([extra]);

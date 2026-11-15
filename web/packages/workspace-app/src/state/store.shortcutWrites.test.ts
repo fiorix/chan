@@ -135,6 +135,54 @@ test("clearing a stale binding preserves new slots and other commands", async ()
   });
 });
 
+test("assigning the server's current binding sends no patch", async () => {
+  server.preferences.shortcuts = {
+    "app.settings.open": { web: "Mod+Alt+J", macos: "Cmd+Alt+K" },
+    "app.search.toggle": { windows: "Ctrl+Alt+L" },
+  };
+  const initial = structuredClone(server);
+  const first = await newWindow("first");
+  first.keymap.assignOverride("app.settings.open", "Mod+Alt+J", "web");
+  await first.flush();
+
+  expect(writes).toEqual([]);
+  expect(server).toEqual(initial);
+});
+
+test.each([false, true])("resetting a binding already removed on the server sends no patch (sibling=%s)", async (sibling) => {
+  server.preferences.shortcuts = {
+    "app.settings.open": { web: "Mod+Alt+J", ...(sibling ? { macos: "Cmd+Alt+K" } : {}) },
+    "app.search.toggle": { windows: "Ctrl+Alt+L" },
+  };
+  const first = await newWindow("first");
+  const second = await newWindow("second");
+  first.keymap.clearOverride("app.settings.open", "web");
+  await first.flush();
+  const initial = structuredClone(server);
+  writes.length = 0;
+  second.keymap.clearOverride("app.settings.open", "web");
+  await second.flush();
+
+  expect(writes).toEqual([]);
+  expect(server).toEqual(initial);
+});
+
+test("a conflict retry sends no patch when the other window already saved the same binding", async () => {
+  const first = await newWindow("first");
+  const second = await newWindow("second");
+  beforePatch = async () => {
+    first.keymap.assignOverride("app.settings.open", "Mod+Alt+J", "web");
+    await first.flush();
+  };
+  second.keymap.assignOverride("app.settings.open", "Mod+Alt+J", "web");
+  await second.flush();
+
+  const attempts = writes.filter((write) => write.window === "second");
+  expect(attempts.map(({ accepted, body }) => [accepted, body.expected_revision])).toEqual([[false, 1]]);
+  expect(server.revision).toBe(2);
+  expect(server.preferences.shortcuts).toEqual({ "app.settings.open": { web: "Mod+Alt+J" } });
+});
+
 test("the conflict retry merges the same edit over the other window's accepted write", async () => {
   const first = await newWindow("first");
   const second = await newWindow("second");

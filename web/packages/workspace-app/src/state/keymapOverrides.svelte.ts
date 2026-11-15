@@ -350,7 +350,7 @@ function dropRetiredFromSavedTable(): void {
 
 // ---- wire round-trip ---------------------------------------------------
 
-/// Snapshot the override table in wire shape for persistence.
+/// Snapshot the in-memory override table in wire shape.
 export function serializeOverrides(): KeymapOverridesWire {
   const out: KeymapOverridesWire = {};
   for (const [id, override] of Object.entries(keymapOverrides.byId)) {

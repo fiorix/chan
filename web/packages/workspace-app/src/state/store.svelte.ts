@@ -637,6 +637,7 @@ function persistHybridSurfaceTheme(kind: HybridSurfaceKind, choice: string): Pro
 // binding over the server's table, including on every revision-conflict retry.
 registerOverridePersist(({ id, slot, chord }) => {
   void updateGlobalConfigSerial((prefs) => {
+    if ((prefs.shortcuts?.[id]?.[slot] ?? null) === chord) return null;
     const shortcuts = { ...prefs.shortcuts };
     const binding = { ...shortcuts[id] };
     if (chord === null) delete binding[slot];
