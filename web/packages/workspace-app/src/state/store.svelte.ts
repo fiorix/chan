@@ -201,7 +201,7 @@ import {
   hydrateOverrides,
   registerOverridePersist,
 } from "./keymapOverrides.svelte";
-import { hydratePageWidthFromPrefs } from "./pageWidth.svelte";
+import { cancelPageWidthPersist, hydratePageWidthFromPrefs } from "./pageWidth.svelte";
 import { fbWatchResyncAll } from "./fbWatch.svelte";
 import { drafts, noteDraftBorn, onDraftsListed, refreshDrafts } from "./drafts.svelte";
 import { reportUncertainOutcome, uncertainOutcomeText } from "./mutationReport";
@@ -4780,6 +4780,8 @@ export function installSessionFlushHook(): void {
 
 export function teardown(): void {
   stopWorkspaceRefresh();
+  cancelPaneWidthPersist();
+  cancelPageWidthPersist();
   invalidateWatchRelists();
   cancelGraphRefresh();
   treeListingsOut.clear();
@@ -5651,12 +5653,18 @@ let widthsPersistTimer: ReturnType<typeof setTimeout> | null = null;
 let finishPendingWidths: (() => void) | null = null;
 const PANE_WIDTHS_DEBOUNCE_MS = 200;
 
+function cancelPaneWidthPersist(): void {
+  if (widthsPersistTimer !== null) clearTimeout(widthsPersistTimer);
+  widthsPersistTimer = null;
+  finishPendingWidths?.();
+  finishPendingWidths = null;
+}
+
 /// Persist the current widths. Called by ResizeHandle's onChange on
 /// every drag tick; debounced so a sweep across the screen lands as
 /// one PATCH instead of dozens.
 export function persistPaneWidths(): void {
-  if (widthsPersistTimer) clearTimeout(widthsPersistTimer);
-  finishPendingWidths?.();
+  cancelPaneWidthPersist();
   finishPendingWidths = beginPreferenceWrite();
   widthsPersistTimer = setTimeout(() => {
     widthsPersistTimer = null;

@@ -68,9 +68,18 @@ function clampRatio(r: number): number {
 const PERSIST_DEBOUNCE_MS = 400;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let finishPendingRatio: (() => void) | null = null;
-function schedulePersistRatio(): void {
+
+/// Cancel an unqueued drag when its workspace is disposed. Releasing the
+/// pending edit lets later workspace reads proceed without sending the drag.
+export function cancelPageWidthPersist(): void {
   if (persistTimer != null) clearTimeout(persistTimer);
+  persistTimer = null;
   finishPendingRatio?.();
+  finishPendingRatio = null;
+}
+
+function schedulePersistRatio(): void {
+  cancelPageWidthPersist();
   finishPendingRatio = beginPreferenceWrite();
   persistTimer = setTimeout(() => {
     persistTimer = null;

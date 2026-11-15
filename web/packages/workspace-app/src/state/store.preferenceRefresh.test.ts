@@ -261,6 +261,48 @@ describe("workspace reads overlapping local preference writes", () => {
     expect(workspaceReads).toBe(readsAtStop);
   });
 
+  test.each(["pane", "page"] as const)(
+    "teardown releases a pending %s-width edit so the next workspace can load",
+    async (kind) => {
+      const armWidthEdit = () => {
+        if (kind === "pane") {
+          paneWidths.graph = 444;
+          persistPaneWidths();
+        } else {
+          setPageWidth(0.55);
+        }
+      };
+      const readsBeforeDrag = workspaceReads;
+      let canceledReadSettled = false;
+      let nextReadSettled = false;
+      armWidthEdit();
+      void startRefresh().then(() => { canceledReadSettled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(workspaceReads).toBe(readsBeforeDrag);
+
+      try {
+        teardown();
+        expect.soft(vi.getTimerCount()).toBe(0);
+        // The mounted-app timer tracker clears canceled work without firing
+        // its callback; the owner must also release its pending edit.
+        vi.clearAllTimers();
+        void startRefresh().then(() => { nextReadSettled = true; });
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect.soft(canceledReadSettled).toBe(true);
+        expect.soft(nextReadSettled).toBe(true);
+        expect.soft(workspaceReads).toBe(readsBeforeDrag + 1);
+        expect.soft(patchCount).toBe(0);
+      } finally {
+        // Rearming releases an orphaned intent on failing code, so this
+        // regression cannot strand the other tests' workspace reads.
+        armWidthEdit();
+        await vi.advanceTimersByTimeAsync(500);
+        await Promise.allSettled(operations);
+      }
+    },
+  );
+
   test("a no-op width debounce releases a waiting read without a config_changed frame", async () => {
     const currentRatio = (await api.config()).preferences.page_width_ratio;
     if (currentRatio === undefined) throw new Error("demo fixture has no page-width ratio");
