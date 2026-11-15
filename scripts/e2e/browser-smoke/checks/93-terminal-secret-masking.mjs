@@ -45,7 +45,7 @@
 // the mask is painted onto its 2D canvas, so the observable is the
 // canvas's own pixels read back through getImageData.
 
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB_DEFAULT = "SmokeMask93Default";
@@ -222,7 +222,7 @@ export default {
     /// Renderer-independent selection probe via the terminal's own copy
     /// chord (Ctrl+Shift+C -> copySelectionToClipboard), same as 97.
     async function dragAndCopy() {
-      const screen = await page.$(".terminal-tab .terminal.xterm .xterm-screen");
+      const screen = await page.$(`.terminal-tab ${TERMINAL_SURFACES.xterm}`);
       if (!screen) {
         throw new Error(
           "xterm selector missing: .xterm-screen -- xterm internals renamed?",
@@ -270,8 +270,8 @@ export default {
     /// a cell high, so a rectangle is a painted mask. Returns null while
     /// no ghostty canvas is mounted.
     function canvasMaskRects() {
-      return page.evaluate(() => {
-        const canvas = document.querySelector(".terminal-tab .terminal-host canvas");
+      return page.evaluate((selector) => {
+        const canvas = document.querySelector(selector);
         if (!canvas) return null;
         const { width, height } = canvas;
         const data = canvas.getContext("2d").getImageData(0, 0, width, height).data;
@@ -306,7 +306,7 @@ export default {
           for (const [key, rect] of next) open.set(key, rect);
         }
         return rects.filter((rect) => rect.h >= 8);
-      });
+      }, `.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
     }
 
     /// Wait until the canvas holds exactly `want` mask rectangles, and
@@ -336,10 +336,10 @@ export default {
     /// canvas (its SelectionManager listens there, not on the padded
     /// host) and the terminal's own copy chord from ghostty's textarea.
     async function dragAndCopyGhostty() {
-      const canvas = await page.$(".terminal-tab .terminal-host canvas");
-      if (!canvas) throw new Error(".terminal-host canvas missing");
+      const canvas = await page.$(`.terminal-tab ${TERMINAL_SURFACES.ghostty}`);
+      if (!canvas) throw new Error(`${TERMINAL_SURFACES.ghostty} missing`);
       const box = await canvas.boundingBox();
-      if (!box) throw new Error(".terminal-host canvas has no bounding box");
+      if (!box) throw new Error(`${TERMINAL_SURFACES.ghostty} has no bounding box`);
       const x0 = box.x + 5;
       const y0 = box.y + 8;
       const x1 = box.x + Math.min(420, box.width - 10);
@@ -531,9 +531,8 @@ export default {
       await emitPayload(TAB_G);
       await waitScrollback(TAB_G, `GH_TOKEN=${SECRET_VALUE}`);
       if (
-        await page.evaluate(() =>
-          document.querySelector(".terminal-tab .terminal.xterm"),
-        )
+        await page.evaluate((selector) => document.querySelector(selector),
+          `.terminal-tab ${TERMINAL_SURFACES.xterm}`)
       ) {
         throw new Error("ghostty leg: xterm DOM present on a ghostty terminal");
       }
