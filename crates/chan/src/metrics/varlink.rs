@@ -1088,6 +1088,16 @@ mod tests {
     }
 
     #[test]
+    fn socket_unit_names_the_metrics_source() {
+        let unit = include_str!("../../../../docs/systemd/chan-metrics.socket");
+        let expected = format!("ListenStream=%t/systemd/report/{SOURCE}");
+        assert!(
+            unit.lines().any(|line| line == expected),
+            "socket unit must name metrics source {SOURCE}"
+        );
+    }
+
+    #[test]
     fn every_name_passes_systemd_reports_checks() {
         // The ports refuse what systemd-report refuses.
         for (name, valid) in [

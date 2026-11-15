@@ -664,7 +664,8 @@ out of the argument list:
 
 The devserver in systemd-report, once the example user units are
 installed (systemd-report lives in /usr/lib/systemd):
-  systemctl --user enable chan-metrics.socket && systemctl --user restart chan-metrics.socket
+  systemctl --user enable chan-metrics.socket
+  systemctl --user restart chan-metrics.socket
   /usr/lib/systemd/systemd-report --user metrics app.chan.Devserver
 
 SIDE EFFECTS:

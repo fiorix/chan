@@ -197,7 +197,7 @@ cd - &gt;/dev/null</b></code>
     </li>
     <li>
       <h3>Enable the socket</h3>
-      <p>A running socket keeps its old path until it is restarted.</p>
+      <p>A socket that is already running does not take a changed path until it is restarted.</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>$</span><b data-copy-value>systemctl --user daemon-reload
 systemctl --user enable chan-metrics.socket &amp;&amp; systemctl --user restart chan-metrics.socket</b></code>
@@ -213,19 +213,19 @@ systemctl --user enable chan-metrics.socket &amp;&amp; systemctl --user restart 
 /usr/lib/systemd/systemd-report --user metrics app.chan.Devserver</b></code>
     {{copyButton}}
   </div>
-  <pre class="sample-output"><code>FAMILY                                    OBJECT FIELDS                         VALUE
-app.chan.Devserver.Build                  -      -                              "git-95696ef5e38e"
-app.chan.Devserver.CPUUsageNSec           -      -                              30000000
-app.chan.Devserver.HomeLogicalBytes       -      -                              425
-app.chan.Devserver.IOWriteBytes           -      {"scope":"storage"}            122880
-app.chan.Devserver.InstanceId             -      -                              "6dae770e5c7063c80c777d147fcbbedf"
-app.chan.Devserver.MemoryResidentBytes    -      -                              69668864
-app.chan.Devserver.PID                    -      -                              970
-app.chan.Devserver.TrafficReceivedBytes   -      {"layer":"network"}            804
-app.chan.Devserver.TrafficSentBytes       -      {"layer":"network"}            9925
-app.chan.Devserver.TransferJobs           -      {"outcome":"finished"}         0
-app.chan.Devserver.UptimeSec              -      -                              6
-app.chan.Devserver.Version                -      -                              "0.129.0"
+  <pre class="sample-output"><code>FAMILY                                     OBJECT FIELDS                         VALUE
+app.chan.Devserver.Build                   -      -                              "git-95696ef5e38e"
+app.chan.Devserver.CPUUsageNSec            -      -                              30000000
+app.chan.Devserver.HomeLogicalBytes        -      -                              425
+app.chan.Devserver.IOWriteBytes            -      {"scope":"storage"}            122880
+app.chan.Devserver.InstanceId              -      -                              "6dae770e5c7063c80c777d147fcbbedf"
+app.chan.Devserver.MemoryResidentBytes     -      -                              69668864
+app.chan.Devserver.PID                     -      -                              970
+app.chan.Devserver.TrafficReceivedBytes    -      {"layer":"network"}            804
+app.chan.Devserver.TrafficSentBytes        -      {"layer":"network"}            9925
+app.chan.Devserver.TransferJobs            -      {"outcome":"finished"}         0
+app.chan.Devserver.UptimeSec               -      -                              6
+app.chan.Devserver.Version                 -      -                              "0.129.0"
 ...
 
 48 metrics listed.</code></pre>
