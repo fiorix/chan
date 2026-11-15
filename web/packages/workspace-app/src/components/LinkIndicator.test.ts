@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -101,6 +102,23 @@ test("status placement only shows unhealthy states", async () => {
   expect(button()).toBeNull();
 });
 
+test("placement marks the tab-bar label for reserved width and leaves status natural", async () => {
+  await state("down");
+  await render("tab-bar");
+  expect(button()?.dataset.placement).toBe("tab-bar");
+  await unmount(view!);
+  view = null;
+  document.body.replaceChildren();
+  await render("status");
+  expect(button()?.dataset.placement).toBe("status");
+});
+
+test("tab-bar label reserves 13ch for reconnecting", () => {
+  // jsdom lays nothing out, so the tab-bar label's fixed width is a source contract.
+  const source = readFileSync("src/components/LinkIndicator.svelte", "utf8");
+  expect(source).toMatch(/\.link-indicator\[data-placement="tab-bar"\]\s+\.label\s*\{[^}]*\bmin-width:\s*13ch;/);
+});
+
 test("stalled label follows the health ticker's wait while closed", async () => {
   await render();
   await state("stalled", null, 8_100);
@@ -109,6 +127,20 @@ test("stalled label follows the health ticker's wait while closed", async () => 
   await tick();
   expect(button()?.textContent).toContain("stalled 9 s");
   expect(vi.getTimerCount()).toBe(0);
+});
+
+test("stalled popover age matches the face's unanswered wait", async () => {
+  linkHealth.since = 16_000;
+  await state("stalled", null, 8_100);
+  await render();
+  button()!.click();
+  await tick();
+  expect(button()?.textContent).toContain("stalled 8 s");
+  expect(popover()?.textContent).toContain("No response for 8 s");
+  linkHealth.waitMs = 9_100;
+  await tick();
+  expect(button()?.textContent).toContain("stalled 9 s");
+  expect(popover()?.textContent).toContain("No response for 9 s");
 });
 
 test("a waiting slow ping has a stable accessible name that matches the face", async () => {

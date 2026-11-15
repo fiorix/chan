@@ -77,14 +77,15 @@ export function linkAge(at: number | null, now: number): string {
   return at === null ? "-" : `${elapsed(at, now)} ago`;
 }
 
-/// The current state in words, with an age only where it explains a problem.
-export function linkStateAge(state: LinkState, since: number, now: number): string {
+/// The current state in words: stalled counts the oldest unanswered ping's
+/// wait, while slow and down count from the state change.
+export function linkStateAge(state: LinkState, since: number, now: number, waitMs: number): string {
   const age = elapsed(since, now);
   switch (state) {
     case "ok": return "Connected";
     case "unknown": return "No reading yet";
     case "slow": return `Slow for ${age}`;
-    case "stalled": return `No response for ${age}`;
+    case "stalled": return `No response for ${Math.floor(waitMs / 1000)} s`;
     case "down": return `Reconnecting for ${age}`;
   }
 }
