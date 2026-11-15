@@ -1,0 +1,27 @@
+{
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "files": {
+    "config.json": {
+      "body_path": "payloads/config.json",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "etag": "2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd",
+      "sha256": "2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd",
+      "size": 38
+    },
+    "model.safetensors": {
+      "body_path": "payloads/model.safetensors",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "etag": "411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd",
+      "sha256": "411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd",
+      "size": 10
+    },
+    "tokenizer.json": {
+      "body_path": "payloads/tokenizer.json",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "etag": "e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d",
+      "sha256": "e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d",
+      "size": 18
+    }
+  },
+  "model": "fixture/model"
+}

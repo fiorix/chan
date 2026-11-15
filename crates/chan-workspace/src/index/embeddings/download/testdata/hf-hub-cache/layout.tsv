@@ -1,0 +1,16 @@
+path	type	link_target	size	sha256
+models--fixture--model	directory	-	-	-
+models--fixture--model/blobs	directory	-	-	-
+models--fixture--model/blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd	file	-	38	2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd
+models--fixture--model/blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd.lock	file	-	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+models--fixture--model/blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd	file	-	10	411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd
+models--fixture--model/blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd.lock	file	-	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+models--fixture--model/blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d	file	-	18	e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d
+models--fixture--model/blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d.lock	file	-	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+models--fixture--model/refs	directory	-	-	-
+models--fixture--model/refs/main	file	-	40	deb87fabd17715bb31ad4cf4ffb9494eeb15f8d33d85b031a301c64ab3417eaa
+models--fixture--model/snapshots	directory	-	-	-
+models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567	directory	-	-	-
+models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/config.json	symlink	../../blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd	76	5f46591ef7e89c4118cbb8f539d2e0ec336f40ef399f9401aafd911961af33c8
+models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/model.safetensors	symlink	../../blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd	76	e0c74a9b40d2a37beea5b3ec9bf3f8dead0164125d595f7c4bd6dfa8d59217b8
+models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/tokenizer.json	symlink	../../blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d	76	2f0f02eafd116082d9fd76bdcbb11678ef8d4214b3ec11d45e19dd2ee22c29e5

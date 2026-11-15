@@ -8,9 +8,9 @@
   // nothing to dismiss. It matches
   // MissingTokenOverlay's full-page boot-surface shape.
   //
-  // The snapshot is derived server-side on every poll, so the only state
-  // here is the latest snapshot plus a poll timer. A ready (or
-  // unreachable) pre-flight never blocks the editor.
+  // The snapshot is derived server-side on every poll. A pending decision's refusal
+  // stays visible while readiness is polled. A ready (or unreachable)
+  // pre-flight never blocks the editor.
 
   import { onMount, onDestroy, tick } from "svelte";
   import { api } from "../api/client";
@@ -26,6 +26,7 @@
 
   let snapshot = $state<PreflightSnapshot | null>(null);
   let deciding = $state(false);
+  let decisionError = $state<{ step: string; message: string } | null>(null);
   let coverEl = $state<HTMLElement>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
@@ -240,6 +241,9 @@
       const next = await api.preflight();
       if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
+      if (!next.locked || !next.steps.some((step) => step.id === decisionError?.step && step.state === "needs_decision")) {
+        decisionError = null;
+      }
       errorStreak = 0;
       if (!settled(snapshot)) schedule();
     } catch {
@@ -261,6 +265,7 @@
   async function decide(step: string, choice: string): Promise<void> {
     if (stopped || deciding) return;
     deciding = true;
+    decisionError = null;
     if (timer !== null) clearTimeout(timer);
     timer = null;
     const seq = ++snapshotSeq;
@@ -270,8 +275,9 @@
       if (stopped || seq !== snapshotSeq) return;
       snapshot = next;
       resumePolling = !settled(next);
-    } catch {
+    } catch (error) {
       if (stopped || seq !== snapshotSeq) return;
+      decisionError = { step, message: errorText(error) };
       resumePolling = true;
     } finally {
       deciding = false;
@@ -331,6 +337,9 @@
     </ul>
     {#if snapshot.error}
       <p class="error">{snapshot.error.message}</p>
+    {/if}
+    {#if decisionError}
+      <p class="error" role="alert">{decisionError.message}</p>
     {/if}
   </main>
 {/if}

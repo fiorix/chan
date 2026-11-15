@@ -277,6 +277,66 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    #[cfg(feature = "embeddings")]
+    #[tokio::test]
+    async fn model_certificate_refusal_retains_its_transport_cause() {
+        use chan_workspace::index::{embeddings::EmbedError, IndexError};
+
+        let cause: String = serde_json::from_str(include_str!(
+            "testdata/model-download-certificate-transport.json"
+        ))
+        .unwrap();
+        assert!(
+            cause.contains("invalid peer certificate"),
+            "the fixture must contain an actual TLS certificate refusal"
+        );
+        let error = EmbedError::Certificate(cause.clone());
+        let workspace_error = chan_workspace::ChanError::from(IndexError::Embed(error));
+        let response = err_from(&workspace_error);
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a model certificate refusal must remain an HTTP 500"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json",
+            "a model certificate refusal must use the JSON error response"
+        );
+        let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let message = value["error"].as_str().unwrap();
+        assert!(
+            message.contains(&cause),
+            "the transport cause reaches the HTTP error"
+        );
+        assert!(
+            message.contains("certificate verification failed"),
+            "the certificate classification reaches the HTTP error"
+        );
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": format!("search error: hf-hub: {cause} (certificate verification failed)")
+            }),
+            "the model download refusal retains the complete search error envelope"
+        );
+        let browser_fixture = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/e2e/browser-smoke/fixtures/model-download-refusal.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            browser_fixture.as_slice(),
+            "the browser fixture must equal the actual server response bytes"
+        );
+        println!(
+            "MODELROOTS_HTTP_RESPONSE_JSON={}",
+            std::str::from_utf8(&bytes).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn refusal_shapes_are_pinned_bytes() {
         for (response, expected) in [

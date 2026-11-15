@@ -37,11 +37,12 @@ use std::sync::Mutex;
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use hf_hub::api::sync::ApiBuilder;
 use thiserror::Error;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
 
 use super::config;
+
+mod download;
 
 #[derive(Debug, Error)]
 pub enum EmbedError {
@@ -55,8 +56,11 @@ pub enum EmbedError {
     Tokenizer(String),
     #[error("hf-hub: {0}")]
     HfHub(String),
+    /// The model server's certificate failed the shared trust decision.
+    #[error("hf-hub: {0} (certificate verification failed)")]
+    Certificate(String),
     /// A proxy env var (`HTTP(S)_PROXY`/`ALL_PROXY`) is set to a value the model
-    /// downloader's HTTP client (hf-hub/ureq) cannot use, so a download would run
+    /// downloader's HTTP client (ureq) cannot use, so a download would run
     /// without the proxy and fail in a constrained env. Surfaced with the
     /// offending var + value instead of the opaque transport error.
     #[error(
@@ -84,14 +88,27 @@ pub enum EmbedError {
     },
 }
 
-fn candle_err<E: std::fmt::Display>(e: E) -> EmbedError {
-    EmbedError::Candle(e.to_string())
+fn candle_err(error: candle_core::Error) -> EmbedError {
+    // Candle's contextual wrappers do not expose their inner error through
+    // Error::source. Preserve I/O before corruption recovery classifies it.
+    let mut cause = &error;
+    loop {
+        match cause {
+            candle_core::Error::Io(io) => {
+                return EmbedError::Io(std::io::Error::new(io.kind(), error));
+            }
+            candle_core::Error::WithPath { inner, .. }
+            | candle_core::Error::Context { inner, .. }
+            | candle_core::Error::WithBacktrace { inner, .. } => cause = inner,
+            _ => return EmbedError::Candle(error.to_string()),
+        }
+    }
 }
 fn tok_err<E: std::fmt::Display>(e: E) -> EmbedError {
     EmbedError::Tokenizer(e.to_string())
 }
 
-/// The proxy env vars hf-hub's ureq client consults, in its precedence order
+/// The proxy env vars the ureq client consults, in its precedence order
 /// (`ureq::Proxy::try_from_system`): the first that parses to a usable proxy
 /// wins. Mirrored here so a download failure can point at a set-but-unusable
 /// proxy var.
@@ -139,17 +156,6 @@ fn proxy_issue_from(lookup: impl Fn(&str) -> Option<String>) -> Option<(String, 
     first_unusable
 }
 
-/// Map an hf-hub fetch failure to a clear [`EmbedError::ProxyConfig`] when a
-/// proxy var is set to a value ureq cannot use (the likely cause in a
-/// constrained env), else the raw hf-hub error. Only the DOWNLOAD path goes
-/// through here, so a cached model never trips it.
-fn hf_fetch_err<E: std::fmt::Display>(e: E) -> EmbedError {
-    match proxy_env_issue() {
-        Some((var, value)) => EmbedError::ProxyConfig { var, value },
-        None => EmbedError::HfHub(e.to_string()),
-    }
-}
-
 /// Maximum input length in tokens. BGE family is 512.
 const MAX_SEQ_LEN: usize = 512;
 
@@ -195,28 +201,39 @@ impl Embedder {
     /// HuggingFace into `cache_dir` on first use; subsequent opens
     /// are local and fast.
     ///
-    /// Two-pass guard against a corrupt hf-hub cache: a process
-    /// SIGKILLed mid-download can leave a half-written file that
-    /// hf-hub doesn't always notice on the next call. We `open_once`
-    /// then run a single-element `embed_documents` probe; if either
-    /// fails we wipe the per-model cache subdirectory and try once
-    /// more. The second failure surfaces to the caller. The probe
-    /// also catches the rare "open succeeds but forward pass dies"
-    /// shape that a truncated safetensors file can produce.
+    /// Decoding, loading or probing a corrupt cached model removes its
+    /// per-model cache and retries once. Download and filesystem failures
+    /// preserve the cache so resumable bytes and concurrent download locks
+    /// remain intact. The probe also detects weights that load but fail
+    /// during inference. A second failure surfaces to the caller.
     pub fn open(model_id: &str, cache_dir: &Path) -> Result<Self, EmbedError> {
-        match Self::open_once(model_id, cache_dir).and_then(|e| e.probe().map(|_| e)) {
+        let client = download::Client::new(cache_dir)?;
+        Self::open_with_client(model_id, cache_dir, &client)
+    }
+
+    fn open_with_client(
+        model_id: &str,
+        cache_dir: &Path,
+        client: &download::Client,
+    ) -> Result<Self, EmbedError> {
+        match Self::open_once(model_id, cache_dir, client).and_then(|e| e.probe().map(|_| e)) {
             Ok(e) => Ok(e),
-            Err(first_err) => {
+            Err(
+                first_err @ (EmbedError::Config(_)
+                | EmbedError::Tokenizer(_)
+                | EmbedError::Candle(_)),
+            ) => {
                 tracing::warn!(
                     model = model_id,
                     error = %first_err,
                     "embedder open/probe failed; wiping model cache and retrying",
                 );
                 wipe_model_cache(model_id, cache_dir)?;
-                let e = Self::open_once(model_id, cache_dir)?;
+                let e = Self::open_once(model_id, cache_dir, client)?;
                 e.probe()?;
                 Ok(e)
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -224,31 +241,23 @@ impl Embedder {
     /// Pulled out of `open` so the wipe-and-retry path can call it
     /// twice without duplicating the body. Callers should prefer
     /// `Embedder::open`, which adds the corruption recovery.
-    fn open_once(model_id: &str, cache_dir: &Path) -> Result<Self, EmbedError> {
+    fn open_once(
+        model_id: &str,
+        cache_dir: &Path,
+        client: &download::Client,
+    ) -> Result<Self, EmbedError> {
         let _ = lookup_model(model_id)?;
         std::fs::create_dir_all(cache_dir)?;
 
-        // hf-hub builds its own ureq agent and already honors HTTP_PROXY /
-        // HTTPS_PROXY / ALL_PROXY (and SOCKS) from the environment via
-        // `try_proxy_from_env`, so a normal proxied env needs no extra config
-        // here. It does NOT honor NO_PROXY, and ureq rejects an https://-scheme
-        // proxy URL -- both unsupported for the model download. When a fetch fails
-        // AND a proxy var is set to a value ureq cannot use, `hf_fetch_err`
-        // surfaces that up front instead of the opaque transport error.
-        let api = ApiBuilder::new()
-            .with_cache_dir(cache_dir.to_path_buf())
-            .with_progress(true)
-            .build()
-            .map_err(|e| EmbedError::HfHub(e.to_string()))?;
-        let repo = api.model(model_id.to_owned());
+        // Cache lookup precedes client initialization, so an already downloaded
+        // model opens without network access or a new trust-store read.
+        let config_path = client.get(model_id, "config.json")?;
+        let tokenizer_path = client.get(model_id, "tokenizer.json")?;
+        let weights_path = client.get(model_id, "model.safetensors")?;
 
-        let config_path = repo.get("config.json").map_err(hf_fetch_err)?;
-        let tokenizer_path = repo.get("tokenizer.json").map_err(hf_fetch_err)?;
-        let weights_path = repo.get("model.safetensors").map_err(hf_fetch_err)?;
-
-        let config_raw = std::fs::read_to_string(&config_path)?;
+        let config_raw = std::fs::read(&config_path)?;
         let config: Config =
-            serde_json::from_str(&config_raw).map_err(|e| EmbedError::Config(e.to_string()))?;
+            serde_json::from_slice(&config_raw).map_err(|e| EmbedError::Config(e.to_string()))?;
         let dim = config.hidden_size;
 
         let device = select_device();
@@ -260,7 +269,8 @@ impl Embedder {
         };
         let model = BertModel::load(vb, &config).map_err(candle_err)?;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(tok_err)?;
+        let tokenizer_bytes = std::fs::read(&tokenizer_path)?;
+        let mut tokenizer = Tokenizer::from_bytes(&tokenizer_bytes).map_err(tok_err)?;
         // Pad to the longest in the batch (BERT requires uniform
         // length per batch). Truncate to the model's max position
         // embedding window to match HF's default policy.
@@ -576,6 +586,52 @@ fn model_downloaded_in(model_id: &str, cache_dir: &Path) -> Result<bool, EmbedEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candle_filesystem_errors_preserve_kind_and_context() {
+        let io = || {
+            candle_core::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "model read denied",
+            ))
+        };
+        let backtrace = |inner| candle_core::Error::WithBacktrace {
+            inner: Box::new(inner),
+            backtrace: Box::new(std::backtrace::Backtrace::disabled()),
+        };
+        for error in [
+            io(),
+            io().with_path("model.safetensors"),
+            io().context("mapping model weights"),
+            backtrace(io()),
+            backtrace(io().with_path("model.safetensors")).context("loading model"),
+        ] {
+            let message = error.to_string();
+            let mapped = candle_err(error);
+            let EmbedError::Io(error) = mapped else {
+                panic!("filesystem failures must remain non-retryable I/O: {mapped}");
+            };
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "filesystem error kind must survive Candle context wrappers"
+            );
+            assert_eq!(
+                error.to_string(),
+                message,
+                "retain the full model read context"
+            );
+        }
+
+        let decode = candle_core::Error::Msg("invalid model weights".to_owned())
+            .with_path("model.safetensors")
+            .context("loading model");
+        let expected = decode.to_string();
+        assert!(
+            matches!(candle_err(decode), EmbedError::Candle(message) if message == expected),
+            "model decoding failures remain retryable with their full context"
+        );
+    }
 
     #[test]
     fn unknown_model_is_error() {
