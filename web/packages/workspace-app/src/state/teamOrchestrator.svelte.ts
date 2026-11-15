@@ -5,8 +5,8 @@
 // `createTeamWorkLeadTerminal`, and the dialog handed us its tab + pane
 // id). Bootstrap:
 //
-//   1. Save/update the team config inside the workspace at the
-//      dialog's `{teamDir}/config.toml`.
+//   1. Save the team config at `{teamDir}/config.toml`, preserving an
+//      existing file when the loaded form is unchanged.
 //   2. Launch the LEAD agent FIRST into the existing lead tab, then
 //      the workers into new tabs (split-pane or tabs-in-Hybrid per
 //      the dialog's real estate).
@@ -36,7 +36,7 @@ import {
   type TerminalTab,
 } from "./tabs.svelte";
 import type { AgentTarget, TeamDialogConfig, TeamMemberDraft } from "./teamDialog.svelte";
-import { agentForMember, defaultTabGroupFromPath } from "./teamDialog.svelte";
+import { agentForMember, defaultTabGroupFromPath, resizeTeamMembers, teamConfigSnapshot } from "./teamDialog.svelte";
 import { workspace } from "./workspace.svelte";
 
 /// Context the dialog hands the orchestrator: the EXISTING Team Work
@@ -156,9 +156,9 @@ function memberPositions(
 
 /// Inverse of `translateConfig`: map the snake_case wire shape back
 /// into the dialog's camelCase `TeamDialogConfig` so the Load flow
-/// opens the dialog populated from the team's config.toml. The user
-/// edits, hits Bootstrap, and the config is re-saved with their
-/// changes.
+/// opens the dialog populated from the team's config.toml. The dialog takes
+/// a snapshot after normalizing the loaded form; Bootstrap saves changes
+/// and preserves an unchanged existing config.
 ///
 /// `env` Records serialise back to "KEY=VALUE\n" lines;
 /// `CHAN_TAB_NAME` is dropped from the visible env field
@@ -417,9 +417,19 @@ export async function runTeamBootstrap(
   //    folds verbatim into the generated bootstrap.md (server-side); the
   //    brief is not part of config.toml, so it travels as a separate arg.
   //    Load shows no brief field and keeps the team's existing bootstrap.md,
-  //    which may carry the brief it was created with or hand edits.
+  //    which may carry the brief it was created with or hand edits. An
+  //    unchanged loaded form also keeps config.toml byte for byte.
   const brief = config.brief.trim() ? config.brief : undefined;
-  await api.writeTeamConfig(config.teamDir, wire, brief, config.configMode === "load");
+  let keepConfig = false;
+  if (config.configMode === "load") {
+    let loadedSnapshot = config.loadedConfigSnapshot;
+    if (loadedSnapshot === undefined) {
+      const saved = await api.readTeamConfig(config.teamDir);
+      loadedSnapshot = teamConfigSnapshot(resizeTeamMembers(wireToDialog(saved, config.teamDir)));
+    }
+    keepConfig = loadedSnapshot === teamConfigSnapshot(config);
+  }
+  await api.writeTeamConfig(config.teamDir, wire, brief, config.configMode === "load", keepConfig);
 
   const leadEntry = wire.members.find((m) => m.is_lead);
   if (!leadEntry) throw new Error("config has no lead member");

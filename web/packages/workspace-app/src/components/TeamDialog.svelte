@@ -20,6 +20,7 @@
     resizeTeamMembers,
     autoAssignSlots,
     switchRealEstate,
+    teamConfigSnapshot,
     TEAM_MAX_SIZE,
     TEAM_MIN_SIZE,
     type GridShape,
@@ -187,7 +188,7 @@
 
   /// Load mode: on team-dir entry, read + validate the team's
   /// config.toml via the backend. On success, prepopulate the form
-  /// from the loaded config (still editable; Bootstrap re-saves it and
+  /// from the loaded config (still editable; Bootstrap saves edits and
   /// keeps the team's bootstrap.md). On failure, surface the 400
   /// message inline.
   async function validateAndLoad(): Promise<void> {
@@ -204,8 +205,8 @@
     busy = true;
     try {
       const wire = await api.readTeamConfig(path);
-      const loaded = wireToDialog(wire, path);
-      config = resizeTeamMembers(loaded);
+      const loaded = resizeTeamMembers(wireToDialog(wire, path));
+      config = { ...loaded, loadedConfigSnapshot: teamConfigSnapshot(loaded) };
       loadedConfig = {
         teamName: wire.team_name,
         memberCount: wire.members.length,

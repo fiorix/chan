@@ -11,8 +11,16 @@ import {
   translateConfig,
   wireToDialog,
 } from "../state/teamOrchestrator.svelte";
-import { resizeTeamMembers } from "../state/teamDialog.svelte";
-import { layout, type LeafNode, type TerminalTab } from "../state/tabs.svelte";
+import { resizeTeamMembers, type TeamDialogConfig } from "../state/teamDialog.svelte";
+import {
+  findTeamWorkPendingLead,
+  layout,
+  restoreLayout,
+  serializeLayout,
+  teamWorkPendingConfig,
+  type LeafNode,
+  type TerminalTab,
+} from "../state/tabs.svelte";
 import { workspace } from "../state/workspace.svelte";
 import TeamDialog from "./TeamDialog.svelte";
 
@@ -24,8 +32,8 @@ workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
 // Load mode reads an existing team's config.toml from the directory the user
 // names, fills the dialog's form with it (still editable), and says which
 // file it found or why it could not. The directory field suggests workspace
-// folders only. Bootstrap writes the edited config back to that directory and
-// leaves the team's bootstrap.md, which may carry a brief, as it is.
+// folders only. Bootstrap preserves an unchanged loaded config, saves edits,
+// and leaves the team's bootstrap.md, which may carry a brief, as it is.
 
 describe("the team-config client calls", () => {
   afterEach(stopRecordingRequests);
@@ -96,6 +104,24 @@ describe("the dialog's Load mode", () => {
     flushSync();
   }
 
+  async function loadDraft(wire = loadedWire()): Promise<TeamDialogConfig> {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    vi.spyOn(api, "readTeamConfig").mockResolvedValue(wire);
+    const target = await openLoad();
+    await enter(dirInput(target), "saved-team");
+    const draft = teamWorkPendingConfig({ leadTabId: "lead-tab", leadPaneId: "pane-test" });
+    expect(draft).not.toBeNull();
+    return JSON.parse(JSON.stringify(draft)) as TeamDialogConfig;
+  }
+
+  async function expectConfigPolicy(config: TeamDialogConfig, keep: boolean): Promise<void> {
+    const stopped = new Error("stop after the config request");
+    const write = vi.spyOn(api, "writeTeamConfig").mockRejectedValue(stopped);
+    await expect(runTeamBootstrap(config, { leadTabId: "lead-tab", leadPaneId: "pane-test" }))
+      .rejects.toBe(stopped);
+    expect(write.mock.lastCall?.[4], "whether Bootstrap preserves config.toml").toBe(keep);
+  }
+
   test("reads the named directory's config and names the file it found", async () => {
     vi.spyOn(api, "list").mockResolvedValue([]);
     const read = vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
@@ -143,7 +169,7 @@ describe("the dialog's Load mode", () => {
     expect(target.querySelector('[role="alert"]')?.textContent?.trim()).toBe("Team directory required");
   });
 
-  test("Bootstrap re-saves the loaded config and asks the server to keep its bootstrap.md", async () => {
+  test("Bootstrap keeps the unchanged loaded config and its bootstrap.md", async () => {
     vi.spyOn(api, "list").mockResolvedValue([]);
     vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
     vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
@@ -165,11 +191,135 @@ describe("the dialog's Load mode", () => {
         dir: "saved-team",
         config: { host_name: "Trinity" },
         keep_bootstrap: true,
+        keep_config: true,
       });
       expect(write.body, "a Load sends no brief").not.toHaveProperty("brief_content");
     } finally {
       stopRecordingRequests();
     }
+  });
+
+  test.each<[string, (config: TeamDialogConfig) => void]>([
+    ["host", (config) => { config.hostName = "Morpheus"; }],
+    ["prefix", (config) => { config.autoPrefix = false; }],
+    ["MCP", (config) => { config.mcpEnv = true; }],
+    ["group", (config) => { config.tabGroup = "edited-group"; }],
+    ["member name", (config) => { config.members[1].name = "@@Editor"; }],
+    ["command", (config) => { config.members[1].command = "codex --resume"; }],
+    ["environment", (config) => { config.members[1].env = "WORKERS=2"; }],
+    ["lead", (config) => {
+      config.members[0].isLead = false;
+      config.members[1].isLead = true;
+    }],
+    ["member count", (config) => { config.members.pop(); config.size = 1; }],
+    ["layout", (config) => {
+      config.realEstate = { kind: "split", grid: { rows: 1, cols: 2 }, slots: [[0], [1]] };
+    }],
+    ["directory", (config) => { config.teamDir = "other-team"; }],
+    ["New mode", (config) => { config.configMode = "new"; }],
+  ])("Bootstrap saves a loaded draft after changing %s", async (_field, change) => {
+    const config = await loadDraft();
+    change(config);
+    await expectConfigPolicy(config, false);
+  });
+
+  test("edits do not mutate the loaded baseline and reverting them preserves again", async () => {
+    const config = await loadDraft();
+    const baseline = config.loadedConfigSnapshot;
+    expect(typeof baseline).toBe("string");
+    config.members[1].env = "WORKERS=2";
+    await expectConfigPolicy(config, false);
+    expect(config.loadedConfigSnapshot).toBe(baseline);
+    config.members[1].env = "";
+    await expectConfigPolicy(config, true);
+    config.configMode = "new";
+    await expectConfigPolicy(config, false);
+    config.configMode = "load";
+    await expectConfigPolicy(config, true);
+  });
+
+  test("the loaded snapshot matches the displayed form after layout and group normalization", async () => {
+    const wire = loadedWire();
+    wire.tab_group = "";
+    wire.members[0].position = { row: 0, col: 0 };
+    wire.members[1].position = { row: 1, col: 0 };
+    const config = await loadDraft(wire);
+    expect(config.tabGroup).toBe("saved-team");
+    expect(config.realEstate).toEqual({ kind: "split", grid: { rows: 1, cols: 2 }, slots: [[0], [1]] });
+    await expectConfigPolicy(config, true);
+  });
+
+  test.each(["grid", "slots"])("Bootstrap saves an edit to the loaded split layout's %s", async (field) => {
+    const wire = loadedWire();
+    wire.members[0].position = { row: 0, col: 0 };
+    wire.members[1].position = { row: 0, col: 1 };
+    const config = await loadDraft(wire);
+    expect(config.realEstate.kind).toBe("split");
+    if (config.realEstate.kind !== "split") throw new Error("expected split layout");
+    if (field === "grid") config.realEstate.grid = { rows: 2, cols: 1 };
+    else config.realEstate.slots = [[1], [0]];
+    await expectConfigPolicy(config, false);
+  });
+
+  test("an unchanged loaded draft survives session serialization and reopening the dialog", async () => {
+    await loadDraft();
+    const saved = JSON.parse(JSON.stringify(serializeLayout({ terminalSessions: true })));
+    expect(JSON.stringify(serializeLayout())).not.toContain("loadedConfigSnapshot");
+    await unmount(view!);
+    view = null;
+    document.body.innerHTML = "";
+    await restoreLayout(saved);
+    const request = findTeamWorkPendingLead();
+    expect(request).not.toBeNull();
+    const target = document.createElement("div");
+    document.body.append(target);
+    view = mount(TeamDialog, { target, props: { request: request! } });
+    await settle();
+    const config = teamWorkPendingConfig(request!)!;
+    await expectConfigPolicy(config, true);
+  });
+
+  test("an unchanged legacy Load reads its baseline and preserves config.toml", async () => {
+    const wire = loadedWire();
+    wire.tab_group = "";
+    wire.members[0].position = { row: 0, col: 0 };
+    wire.members[1].position = { row: 1, col: 0 };
+    const config = resizeTeamMembers(wireToDialog(wire, "saved-team"));
+    const read = vi.spyOn(api, "readTeamConfig").mockResolvedValue(wire);
+    await expectConfigPolicy(config, true);
+    expect(read).toHaveBeenCalledExactlyOnceWith("saved-team");
+  });
+
+  test("an edited legacy Load reads the baseline without replacing the edited draft", async () => {
+    const config = resizeTeamMembers(wireToDialog(loadedWire(), "saved-team"));
+    config.members[1].env = "WORKERS=2";
+    const read = vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
+    await expectConfigPolicy(config, false);
+    expect(read).toHaveBeenCalledExactlyOnceWith("saved-team");
+    const write = vi.mocked(api.writeTeamConfig);
+    expect(write.mock.lastCall?.[1].members[1].env).toMatchObject({ WORKERS: "2" });
+  });
+
+  test("a legacy Load refuses a failed baseline read before writing", async () => {
+    const config = resizeTeamMembers(wireToDialog(loadedWire(), "saved-team"));
+    const refused = new Error("saved config is unavailable");
+    vi.spyOn(api, "readTeamConfig").mockRejectedValue(refused);
+    const write = vi.spyOn(api, "writeTeamConfig").mockRejectedValue(new Error("unexpected write"));
+    await expect(runTeamBootstrap(config, { leadTabId: "lead-tab", leadPaneId: "pane-test" }))
+      .rejects.toBe(refused);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test("New and a loaded snapshot need no baseline read at Bootstrap", async () => {
+    const config = await loadDraft();
+    const read = vi.mocked(api.readTeamConfig);
+    read.mockClear();
+    await expectConfigPolicy(config, true);
+    expect(read).not.toHaveBeenCalled();
+    delete config.loadedConfigSnapshot;
+    config.configMode = "new";
+    await expectConfigPolicy(config, false);
+    expect(read).not.toHaveBeenCalled();
   });
 
   test("suggests workspace folders only, matching what is typed", async () => {
@@ -272,14 +422,18 @@ describe("Load -> edit -> Bootstrap re-saves the config", () => {
       .mockResolvedValue(undefined as unknown as void);
     vi.spyOn(api, "restartTerminal").mockResolvedValue(undefined as unknown as void);
     vi.spyOn(api, "spawnTerminal").mockResolvedValue({ session: "w", tab_label: "w" });
+    vi.spyOn(api, "readTeamConfig").mockResolvedValue(loadedWire());
 
     const cfg = resizeTeamMembers(wireToDialog(loadedWire(), "saved-team"));
+    cfg.members[1].command = "codex --resume";
     await runTeamBootstrap(cfg, { leadTabId: "lead-tab", leadPaneId: "pane-test" });
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0][0]).toBe("saved-team");
     // The persisted wire carries the loaded host name.
     expect(write.mock.calls[0][1]).toMatchObject({ host_name: "Trinity" });
+    expect(write.mock.calls[0][1].members[1].command).toBe("codex --resume");
+    expect(write.mock.calls[0][4]).toBe(false);
   });
 
   test("a New bootstrap sends its brief and lets the server regenerate bootstrap.md", async () => {
@@ -297,6 +451,7 @@ describe("Load -> edit -> Bootstrap re-saves the config", () => {
       const write = requests.find((r) => r.path === "/api/team-config/write")!;
       expect(write.body).toMatchObject({ dir: "saved-team", brief_content: "# Brief" });
       expect(write.body).not.toHaveProperty("keep_bootstrap");
+      expect(write.body).not.toHaveProperty("keep_config");
     } finally {
       stopRecordingRequests();
     }
