@@ -372,20 +372,50 @@ async function activation(ctx, f, kind, mode) {
           preserveSessions(arm.before, arm.held, "right mousedown");
           if (padding) terminalMenuFocus(arm.held, arm.expectedFocus);
         } else {
-          const until = Date.now() + 500;
           arm.heldSamples = [];
-          do {
+          if (padding) {
+            arm.focusWaitStartedAt = Date.now();
+            arm.focusWaitDeadlineAt = arm.focusWaitStartedAt + 1_000;
+            arm.focusWaitSamples = [];
+            while (true) {
+              arm.held = await state(f.page);
+              const at = Date.now();
+              arm.focusWaitSamples.push({ at, activeElement: arm.held.activeElement,
+                focusEventCount: arm.held.focusEventCount, tabs: arm.held.tabs, dialogs: arm.held.dialogs });
+              requireProduct(arm.held.tabs.find((tab) => tab.label === f.labels.control)?.selected, "terminal mousedown selected before release");
+              requireProduct(arm.held.dialogs.length === 0, "terminal mousedown opened a dialog");
+              if (arm.held.tabs.find((tab) => tab.label === label)?.labelFocused && at <= arm.focusWaitDeadlineAt) {
+                arm.focusAcquiredAt = at;
+                break;
+              }
+              requireProduct(at < arm.focusWaitDeadlineAt, "held padding press did not acquire focus on the tab label within 1000 ms");
+              await sleep(Math.min(25, arm.focusWaitDeadlineAt - at));
+            }
+          }
+          arm.heldStartedAt = Date.now();
+          const until = arm.heldStartedAt + 500;
+          while (true) {
             arm.held = await state(f.page);
+            const at = Date.now();
+            arm.heldSamples.push({ at, activeElement: arm.held.activeElement,
+              focusEventCount: arm.held.focusEventCount, tabs: arm.held.tabs, dialogs: arm.held.dialogs });
             requireProduct(arm.held.tabs.find((tab) => tab.label === f.labels.control)?.selected, "terminal mousedown selected before release");
             requireProduct(arm.held.dialogs.length === 0, "terminal mousedown opened a dialog");
             if (padding) requireProduct(arm.held.tabs.find((tab) => tab.label === label)?.labelFocused,
               "held padding press did not keep focus on the tab label");
-            arm.heldSamples.push({ at: Date.now(), tabs: arm.held.tabs, dialogs: arm.held.dialogs });
-            await sleep(50);
-          } while (Date.now() < until);
+            if (at >= until) {
+              arm.heldCompletedAt = at;
+              break;
+            }
+            await sleep(Math.min(50, until - at));
+          }
         }
         if (padding) arm.heldShot = await ctx.shot(`${f.backend}-${kind}-${mode}-held`, f.page);
-      } finally { await f.page.mouse.up({ button }); }
+      } finally {
+        arm.releaseStartedAt = Date.now();
+        await f.page.mouse.up({ button });
+        arm.releasedAt = Date.now();
+      }
     } else await click(f.page, label);
     const deadline = Date.now() + 5_000;
     do {
