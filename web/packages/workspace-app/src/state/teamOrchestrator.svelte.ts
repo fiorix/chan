@@ -397,9 +397,12 @@ function resolveWorkerPanes(
 /// the dialog can surface the error inline; the caller closes the
 /// dialog on success.
 export async function runTeamBootstrap(
-  config: TeamDialogConfig,
+  draft: TeamDialogConfig,
   ctx: TeamBootstrapContext,
 ): Promise<void> {
+  // The dialog remains editable while requests are pending. Keep one form
+  // for the baseline read, write, layout and spawned members.
+  const config = $state.snapshot(draft);
   // The identity prompt names bootstrap.md by its absolute path under the
   // workspace root, so a root the store does not hold yet is refused here,
   // before anything is written or spawned, rather than guessed at.

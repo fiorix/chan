@@ -13,8 +13,10 @@ import {
 } from "../state/teamOrchestrator.svelte";
 import { resizeTeamMembers, type TeamDialogConfig } from "../state/teamDialog.svelte";
 import {
+  allTerminalTabs,
   findTeamWorkPendingLead,
   layout,
+  registerTerminalPromptSink,
   restoreLayout,
   serializeLayout,
   teamWorkPendingConfig,
@@ -203,6 +205,8 @@ describe("the dialog's Load mode", () => {
         { body: { dir: "other-team", config: { host_name: "Morpheus", tab_group: "other-group" }, keep_config: true } },
       ]);
       expect(files["other-team"].bytes).toBe(saved);
+      expect(requests.filter((request) => request.path === "/api/team-config/read")
+        .map((request) => request.body)).toEqual([{ dir: "saved-team" }, { dir: "other-team" }]);
     } finally {
       stopRecordingRequests();
     }
@@ -231,6 +235,94 @@ describe("the dialog's Load mode", () => {
       expect(requests.filter((request) => request.path === "/api/team-config/read")).toHaveLength(3);
     } finally {
       stopRecordingRequests();
+    }
+  });
+
+  test("Bootstrap keeps its submitted config while a fresh read is pending", async () => {
+    vi.spyOn(api, "list").mockResolvedValue([]);
+    const spawn = vi.spyOn(api, "spawnTerminal").mockImplementation(async (request) => ({
+      session: `session-${request.name}`,
+      tab_label: request.name ?? "",
+    }));
+    const wire = loadedWire();
+    wire.members[0].position = { row: 0, col: 0 };
+    wire.members[1].position = { row: 0, col: 1 };
+    let finishRead!: (response: Response) => void;
+    const pendingRead = new Promise<Response>((resolve) => { finishRead = resolve; });
+    const requests = recordRequests((request) => {
+      if (request.path === "/api/team-config/read") {
+        return (request.body as { dir: string }).dir === "saved-team" ? json(wire) : pendingRead;
+      }
+      return json({});
+    });
+    let unregister = () => {};
+    let cancel: HTMLButtonElement | null = null;
+    try {
+      const target = await openLoad();
+      cancel = target.querySelector<HTMLButtonElement>(".team-dialog-cancel");
+      await enter(dirInput(target), "saved-team");
+      await vi.waitFor(() => expect(target.querySelector('[role="status"]')).not.toBeNull());
+      type(dirInput(target), "other-team");
+      await settle();
+      target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!.click();
+      await vi.waitFor(() => expect(requests.filter((request) => request.path === "/api/team-config/read"))
+        .toHaveLength(2));
+      expect(requests.filter((request) => request.path === "/api/team-config/write")).toEqual([]);
+
+      type(dirInput(target), "third-team");
+      type(target.querySelector<HTMLInputElement>('input[placeholder="Neo"]')!, "Morpheus");
+      type(target.querySelector<HTMLInputElement>('input[placeholder="chan-team"]')!, "edited-group");
+      // Callers can also mutate nested draft values without replacing the
+      // object the pending Bootstrap received.
+      const draft = teamWorkPendingConfig({ leadTabId: "lead-tab", leadPaneId: "pane-test" })!;
+      draft.configMode = "new";
+      draft.members[0].command = "bash";
+      draft.members[0].env = "CHAN_AGENT=none";
+      draft.members.pop();
+      draft.size = 1;
+      if (draft.realEstate.kind !== "split") throw new Error("expected split layout");
+      draft.realEstate.grid.cols = 1;
+      draft.realEstate.slots[0].push(1);
+      draft.realEstate.slots[1].length = 0;
+      await settle();
+      finishRead(json({ ...wire, team_name: "other-team", tab_group: "other-team" }));
+
+      await vi.waitFor(() => expect(requests.filter((request) => request.path === "/api/team-config/write"))
+        .toHaveLength(1));
+      expect(requests.find((request) => request.path === "/api/team-config/write")!.body).toMatchObject({
+        dir: "other-team",
+        config: { team_name: "other-team", host_name: "Trinity", tab_group: "other-team" },
+        keep_bootstrap: true,
+        keep_config: true,
+      });
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+      expect(spawn.mock.calls.map(([request]) => request)).toMatchObject([
+        { name: "@@Lead", command: "claude", env: { CHAN_TAB_NAME: "@@Lead" }, group: "other-team" },
+        { name: "@@Worker1", command: "codex", group: "other-team" },
+      ]);
+      await vi.waitFor(() => expect(Object.values(layout.nodes).filter((node) => node.kind === "leaf")
+        .map((node) => node.tabs.map((tab) => tab.kind === "terminal" ? tab.title : tab.kind)))
+        .toEqual([["@@Lead"], ["@@Worker1"]]));
+      const delivered: Array<{ text: string; agent?: string }> = [];
+      const lead = allTerminalTabs().find((tab) => tab.title === "@@Lead")!;
+      unregister = registerTerminalPromptSink(lead.id, (text, agent) => {
+        delivered.push({ text, agent });
+        return true;
+      });
+      await vi.waitFor(() => expect(delivered).toHaveLength(1));
+      expect(delivered[0].agent).toBe("claude");
+      expect(delivered[0].text).toContain("/ws/other-team/bootstrap.md");
+      expect(delivered[0].text).not.toContain("third-team");
+      expect(requests.filter((request) => request.path === "/api/team-config/read")
+        .map((request) => request.body)).toEqual([{ dir: "saved-team" }, { dir: "other-team" }]);
+    } finally {
+      finishRead(json({ error: "test cleanup" }, { status: 400 }));
+      try {
+        if (cancel) await vi.waitFor(() => expect(cancel!.disabled).toBe(false));
+      } finally {
+        unregister();
+        stopRecordingRequests();
+      }
     }
   });
 
