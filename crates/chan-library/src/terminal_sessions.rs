@@ -6209,7 +6209,12 @@ impl Session {
                 // entry is a FIFO boundary, so `part` here is the singleton's.
                 MessagePart::Whole => plan_submitted_input(text, submit.as_ref(), batched),
                 MessagePart::Body => PtyInputPlan {
-                    parts: vec![chan_shell::submitted_body_bytes(&text)],
+                    parts: vec![chan_shell::submitted_body_bytes(
+                        &text,
+                        submit
+                            .as_ref()
+                            .expect("a body entry carries its submit spec"),
+                    )],
                 },
                 MessagePart::Chord => PtyInputPlan {
                     parts: vec![chan_shell::submit_chord_bytes(
@@ -10406,6 +10411,43 @@ mod tests {
             "a body entry and a chord entry for each of three messages"
         );
         assert_eq!(as_muse, as_gemini);
+    }
+
+    #[test]
+    fn bracketing_split_queue_delivers_framed_body_then_bare_chord() {
+        let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let submit = ResolvedSubmit {
+                agent,
+                template: "\x1b[200~{}\x1b[201~\r".into(),
+                source: chan_shell::SubmitTemplateSource::Override,
+            };
+            let (entries, depth, writes) = queued_entries_depth_and_writes(submit, &[hostile]);
+            assert_eq!((entries, depth), (2, 1));
+            assert_eq!(
+                writes,
+                vec![
+                    b"\x1b[200~one [201~  \nline\tlast\n\x1b[201~".to_vec(),
+                    b"\r".to_vec(),
+                ],
+                "{} queued body and chord use the resolved framing",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_queue_keeps_builtin_body_and_chord_bytes() {
+        let hostile = "one\x1b[201~\x03\x7f\nline\tlast";
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let (entries, depth, writes) =
+                queued_entries_depth_and_writes(built_in_submit(agent), &[hostile]);
+            assert_eq!((entries, depth), (2, 1));
+            assert_eq!(
+                writes,
+                vec![format!("{hostile}\n").into_bytes(), b"\r".to_vec()]
+            );
+        }
     }
 
     #[test]

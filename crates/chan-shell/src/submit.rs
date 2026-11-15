@@ -388,16 +388,45 @@ fn submitted_body(text: &str) -> String {
     body
 }
 
-/// The normalized body bytes a submitted message delivers ahead of its chord.
-pub fn submitted_body_bytes(text: &str) -> Vec<u8> {
-    submitted_body(text).into_bytes()
+/// The body template and chord of a split agent's bracketed paste. A close
+/// belongs to the body so it cannot arrive only at the next idle gate. With
+/// no close, the entire suffix is still inside the paste, not a submit chord.
+fn split_bracketed_template(submit: &ResolvedSubmit) -> Option<(&str, &str)> {
+    if !matches!(submit.agent, SubmitAgent::Gemini | SubmitAgent::Muse) {
+        return None;
+    }
+    let (before, after) = submit.template.split_once("{}")?;
+    if !opens_bracketed_paste(before) {
+        return None;
+    }
+    let body_end = after
+        .find(BRACKETED_PASTE_END)
+        .map_or(submit.template.len(), |end| {
+            before.len() + 2 + end + BRACKETED_PASTE_END.len()
+        });
+    Some(submit.template.split_at(body_end))
+}
+
+/// The normalized body bytes a submitted message delivers ahead of its
+/// chord. A split agent's bracketing template cleans and frames the body,
+/// including its closing bracket; other templates leave it unframed.
+pub fn submitted_body_bytes(text: &str, submit: &ResolvedSubmit) -> Vec<u8> {
+    let body = submitted_body(text);
+    match split_bracketed_template(submit) {
+        Some((template, _)) => apply_template(&body, template).into_bytes(),
+        None => body.into_bytes(),
+    }
 }
 
 /// The resolved submit chord alone, the template with its text placeholder
-/// removed. This is what an agent that rejects a coalesced text+chord write
+/// removed except that a split agent's bracketed-paste framing belongs to its
+/// body. This is what an agent that rejects a coalesced text+chord write
 /// receives as its own PTY write.
 pub fn submit_chord_bytes(submit: &ResolvedSubmit) -> Vec<u8> {
-    template_without_text(&submit.template).into_bytes()
+    match split_bracketed_template(submit) {
+        Some((_, chord)) => chord.as_bytes().to_vec(),
+        None => template_without_text(&submit.template).into_bytes(),
+    }
 }
 
 /// Whether `text` submitted under `submit` needs its chord delivered as a
@@ -410,13 +439,16 @@ pub fn submit_chord_bytes(submit: &ResolvedSubmit) -> Vec<u8> {
 pub fn splits_submit_chord(text: &str, submit: &ResolvedSubmit) -> bool {
     matches!(submit.agent, SubmitAgent::Gemini | SubmitAgent::Muse)
         && !text.is_empty()
-        && !chord_is_empty(&submit.template)
+        && !chord_is_empty(submit)
 }
 
-/// Whether a template's chord half (everything outside `{}`) is empty, the
-/// allocation-free form of `template_without_text(t).is_empty()`.
-fn chord_is_empty(template: &str) -> bool {
-    template == "{}" || template.is_empty()
+/// Whether the resolved chord is empty, without allocating an encoded body
+/// or treating a split body's bracketed-paste framing as a chord.
+fn chord_is_empty(submit: &ResolvedSubmit) -> bool {
+    match split_bracketed_template(submit) {
+        Some((_, chord)) => chord.is_empty(),
+        None => submit.template == "{}" || submit.template.is_empty(),
+    }
 }
 
 /// Build the ordered PTY input for one logical message, encoding only after
@@ -437,8 +469,13 @@ pub fn plan_submitted_input(
     let claude_batch = submit.agent == SubmitAgent::Claude
         && batched
         && submit.source == SubmitTemplateSource::BuiltIn;
-    let parts = if claude_batch || splits_submit_chord(&text, submit) {
-        vec![submitted_body_bytes(&text), submit_chord_bytes(submit)]
+    let parts = if text.is_empty() && split_bracketed_template(submit).is_some() {
+        vec![submit_chord_bytes(submit)]
+    } else if claude_batch || splits_submit_chord(&text, submit) {
+        vec![
+            submitted_body_bytes(&text, submit),
+            submit_chord_bytes(submit),
+        ]
     } else {
         vec![apply_template(&submitted_body(&text), &submit.template).into_bytes()]
     };
@@ -1256,6 +1293,164 @@ mod tests {
             SubmitAgent::Kimi,
             SubmitAgent::OpenCode,
         ]
+    }
+
+    fn split_override(agent: SubmitAgent, template: &str) -> ResolvedSubmit {
+        ResolvedSubmit {
+            agent,
+            template: template.into(),
+            source: SubmitTemplateSource::Override,
+        }
+    }
+
+    fn assert_bracketing_split_body(agent: SubmitAgent) {
+        let submit = split_override(agent, "\x1b[200~{}\x1b[201~\r");
+        for batched in [false, true] {
+            assert_eq!(
+                plan_submitted_input(HOSTILE.into(), Some(&submit), batched).parts,
+                vec![
+                    format!("\x1b[200~{CLEANED}\n\x1b[201~").into_bytes(),
+                    b"\r".to_vec(),
+                ],
+                "the framed body precedes its separate chord for {}",
+                agent.name()
+            );
+        }
+        let replaced = fixture_replaced_bytes();
+        for byte in 0u8..0x80 {
+            let ch = char::from(byte);
+            let kept = if replaced.contains(&byte) { ' ' } else { ch };
+            assert_eq!(
+                plan_submitted_input(format!("a{ch}z"), Some(&submit), false).parts,
+                vec![
+                    format!("\x1b[200~a{kept}z\n\x1b[201~").into_bytes(),
+                    b"\r".to_vec(),
+                ],
+                "{} byte 0x{byte:02x}",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_gemini_body_is_cleaned_and_framed() {
+        assert_bracketing_split_body(SubmitAgent::Gemini);
+    }
+
+    #[test]
+    fn bracketing_split_muse_body_is_cleaned_and_framed() {
+        assert_bracketing_split_body(SubmitAgent::Muse);
+    }
+
+    #[test]
+    fn bracketing_split_chord_contains_only_the_suffix() {
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let submit = split_override(agent, "prefix\x1b[200~{}tail\x1b[201~\r\n\x1b[201~");
+            assert_eq!(
+                submit_chord_bytes(&submit),
+                b"\r\n\x1b[201~",
+                "the first close ends the body for {}",
+                agent.name()
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_keeps_other_agents_templates_whole() {
+        for agent in [
+            SubmitAgent::Agy,
+            SubmitAgent::Claude,
+            SubmitAgent::Codex,
+            SubmitAgent::Kimi,
+            SubmitAgent::OpenCode,
+        ] {
+            let submit = split_override(agent, "\x1b[200~{}\x1b[201~\r");
+            assert_eq!(
+                submit_chord_bytes(&submit),
+                b"\x1b[200~\x1b[201~\r",
+                "{} keeps its complete template",
+                agent.name()
+            );
+            assert_eq!(
+                plan_submitted_input(String::new(), Some(&submit), false).parts,
+                vec![b"\x1b[200~\x1b[201~\r".to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_keeps_template_bytes_and_unicode_in_the_body() {
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let submit = split_override(
+                agent,
+                "prefix\x1b[200~closed\x1b[201~\x1b[200~{}tail\x1b[201~\r",
+            );
+            let parts = plan_submitted_input("caf\u{e9}\n\n".into(), Some(&submit), false).parts;
+            assert_eq!(
+                parts,
+                vec![
+                    "prefix\x1b[200~closed\x1b[201~\x1b[200~caf\u{e9}\ntail\x1b[201~"
+                        .as_bytes()
+                        .to_vec(),
+                    b"\r".to_vec(),
+                ]
+            );
+            assert_eq!(
+                parts.concat(),
+                apply_template("caf\u{e9}\n", &submit.template).as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_without_a_chord_is_one_framed_write() {
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            for template in ["\x1b[200~{}\x1b[201~", "\x1b[200~{}tail"] {
+                let submit = split_override(agent, template);
+                assert!(!splits_submit_chord(HOSTILE, &submit));
+                assert_eq!(
+                    plan_submitted_input(HOSTILE.into(), Some(&submit), false).parts,
+                    vec![apply_template(&format!("{HOSTILE}\n"), template).into_bytes()]
+                );
+                assert!(submit_chord_bytes(&submit).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn bracketing_split_empty_body_is_chord_only() {
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            let submit = split_override(agent, "\x1b[200~{}\x1b[201~\r");
+            assert_eq!(
+                plan_submitted_input(String::new(), Some(&submit), false).parts,
+                vec![b"\r".to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    fn bracketing_split_leaves_unframed_and_builtin_bytes_unchanged() {
+        for agent in [SubmitAgent::Gemini, SubmitAgent::Muse] {
+            for template in [
+                "{}\r",
+                "\r",
+                "\x1b[200~\x1b[201~{}\r",
+                "\x1b[200~suffix\x1b[201~\r",
+            ] {
+                let submit = split_override(agent, template);
+                assert_eq!(
+                    plan_submitted_input(HOSTILE.into(), Some(&submit), false).parts,
+                    vec![
+                        format!("{HOSTILE}\n").into_bytes(),
+                        template_without_text(template).into_bytes(),
+                    ]
+                );
+            }
+            assert_eq!(
+                plan_submitted_input(HOSTILE.into(), Some(&built_in(agent)), false).parts,
+                vec![format!("{HOSTILE}\n").into_bytes(), b"\r".to_vec()]
+            );
+        }
     }
 
     #[test]
