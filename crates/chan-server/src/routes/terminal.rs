@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -284,15 +285,13 @@ enum SessionPty {
     #[serde(rename = "conpty")]
     Conpty {
         #[serde(skip_serializing_if = "Option::is_none")]
-        windows_build_number: Option<u32>,
+        windows_build_number: Option<NonZeroU32>,
     },
 }
 
 fn conpty_pty(build: Option<&str>) -> SessionPty {
     SessionPty::Conpty {
-        windows_build_number: build
-            .and_then(|build| build.parse().ok())
-            .filter(|build| *build > 0),
+        windows_build_number: build.and_then(|build| build.parse().ok()),
     }
 }
 
@@ -343,7 +342,7 @@ enum ServerFrame {
         /// instead of trusting the anonymous `queue_depth`. Always present
         /// (empty when nothing tagged is queued).
         queued_prompt_ids: Vec<String>,
-        program: ProgramReading,
+        program: Box<ProgramReading>,
         program_status: Arc<ProgramStatusSnapshot>,
         /// The tmux control-mode consent state, with the question that
         /// stands, if any, so a client joining mid-question shows it.
@@ -1820,7 +1819,7 @@ fn session_frame_with_pty(session: &AttachHandle, pty: Option<SessionPty>) -> Se
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
-        program: session.initial_program.clone(),
+        program: Box::new(session.initial_program.clone()),
         program_status: session.initial_program_status.clone(),
         tmux_consent: session.initial_tmux_consent.clone(),
         tmux_pane: session
@@ -2857,7 +2856,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
-            program: ProgramReading::default(),
+            program: Box::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,
@@ -2883,7 +2882,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
-            program: ProgramReading::default(),
+            program: Box::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,

@@ -90,7 +90,7 @@ fn session_pty_serializes_conpty_and_numeric_windows_build() {
     let windows = frame(
         &session.handle,
         Some(SessionPty::Conpty {
-            windows_build_number: Some(26300),
+            windows_build_number: NonZeroU32::new(26300),
         }),
     );
     assert_conpty(&windows, Some(26300));
@@ -113,7 +113,7 @@ fn session_pty_omits_windows_host_metadata_for_tmux_panes() {
         let windows = frame(
             &session.handle,
             Some(SessionPty::Conpty {
-                windows_build_number: build,
+                windows_build_number: build.and_then(NonZeroU32::new),
             }),
         );
         assert_without_pty(&windows);
@@ -150,7 +150,7 @@ fn session_pty_metadata_survives_restart_and_reattach() {
             let windows = frame(
                 handle,
                 Some(SessionPty::Conpty {
-                    windows_build_number: build,
+                    windows_build_number: build.and_then(NonZeroU32::new),
                 }),
             );
             assert_conpty(&windows, build);
@@ -205,7 +205,7 @@ fn session_pty_parses_the_observed_windows_build() {
     let SessionPty::Conpty {
         windows_build_number,
     } = conpty_pty(Some("26300"));
-    assert_eq!(windows_build_number, Some(26300));
+    assert_eq!(windows_build_number.map(NonZeroU32::get), Some(26300));
 }
 
 #[test]
