@@ -96,6 +96,8 @@ Check 223 copies a long command from a ghostty terminal by every path and pastes
 
 Check 290 cuts a real terminal socket after ready and holds its replacement before the handshake, leaving the native socket CONNECTING. Rich Prompt submission through Ctrl+Enter on xterm.js and the Send button on ghostty must show the transient `terminal not connected; try again` notice, retain editable text, and send nothing. After an edit and reconnection, neither ready nor the notice timer may send the draft; an explicit retry must send one tagged prompt, reach the raw PTY once, and clear the composer after delivery. Each backend writes its proxy receipts, browser state, PTY input and screenshots. This Chrome check does not deterministically exercise CLOSING or native webviews.
 
+Before reloading, check 290 waits for the terminal's saved layout. A fresh window's `204 No Content` response keeps that wait pending without parsing JSON; malformed JSON in a successful response still fails. `node --test scripts/e2e/browser-smoke/lib/rich-prompt-saved.test.mjs` exercises the readiness predicate with HTTP stand-ins and starts no server or browser.
+
 Drafts checks 130, 131 and 133 search body text, titles, aria labels, current input, textarea and select values, image alt text, and placeholders for a draft path mark or lifetime id. Check 130 proves that the search refuses planted values from each source. The search excludes URLs because a draft image address intentionally carries its lifetime id; checks 130 and 131 also search while the Save draft prompt and the Close Draft dialog are open.
 
 ## Terminal socket and PTY tools

@@ -82,11 +82,13 @@ async function waitFor(page, label, accept, timeout = 15_000) {
 const keys = (fixture) => Buffer.concat(fixture.records.filter((record) => record.type === "keys")
   .map((record) => Buffer.from(record.base64, "base64"))).toString("utf8");
 
-async function waitSaved(ctx, page, windowId, name) {
+export async function waitSaved(ctx, page, windowId, name) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   await page.waitForFunction(async ({ windowId, name, token }) => {
     const headers = token ? { authorization: `Bearer ${token}` } : {};
     const response = await fetch(`/api/session?w=${encodeURIComponent(windowId)}`, { headers });
+    // A fresh window has no saved session until its debounced write lands.
+    if (response.status === 204) return false;
     return response.ok && JSON.stringify((await response.json()).layout ?? null).includes(name);
   }, { timeout: 20_000, polling: 100 }, { windowId, name, token });
 }
