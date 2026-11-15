@@ -2461,7 +2461,7 @@ mod tests {
             loop {
                 next.connect().await.unwrap();
                 let fresh =
-                    chan_winpipe::create_owner_only(ServerOptions::new(), &listener_pipe).unwrap();
+                    chan_winpipe::create_owner_only(&ServerOptions::new(), &listener_pipe).unwrap();
                 let connected = std::mem::replace(&mut next, fresh);
                 tokio::spawn(async move {
                     let mut stream = BufReader::new(connected);
