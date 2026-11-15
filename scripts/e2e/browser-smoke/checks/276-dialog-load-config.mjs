@@ -10,6 +10,125 @@ import { maskTokens } from "../lib/token-mask.mjs";
 const DIR_INPUT = '.team-dialog input[list="team-dir-suggestions"]';
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+async function startFocusTrace(page) {
+  await page.evaluate(() => {
+    if (window.__dialogload276Focus) throw new Error("dialogload focus recorder already installed");
+    const trace = { events: [], dropped: 0 };
+    const describe = (node) => node instanceof Element ? {
+      tag: node.tagName,
+      id: node.id,
+      className: node.getAttribute("class") ?? "",
+      tab: node.closest("[data-terminal-tab-id]")?.getAttribute("data-terminal-tab-id") ?? null,
+    } : null;
+    const record = (event) => {
+      if (trace.events.length >= 256) { trace.dropped++; return; }
+      trace.events.push({ type: event.type, at: performance.now(), target: describe(event.target), related: describe(event.relatedTarget) });
+    };
+    document.addEventListener("focusin", record, true);
+    document.addEventListener("focusout", record, true);
+    record({ type: "start", target: document.activeElement });
+    window.__dialogload276Focus = {
+      stop() {
+        document.removeEventListener("focusin", record, true);
+        document.removeEventListener("focusout", record, true);
+        delete window.__dialogload276Focus;
+        return trace;
+      },
+    };
+  });
+}
+
+// Keep only identity and readiness metadata, never socket URLs or payloads.
+async function watchLeadSocket(page, windowId) {
+  const cdp = await page.createCDPSession();
+  const sockets = new Map();
+  let overflow = false;
+  let changed = () => {};
+  cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
+    const parsed = new URL(url);
+    if (!parsed.pathname.endsWith("/api/terminal/ws") || parsed.searchParams.get("window_id") !== windowId) return;
+    if (sockets.size >= 16) { overflow = true; changed(); return; }
+    sockets.set(requestId, { tab: parsed.searchParams.get("tab_id"), session: null, ready: false, closed: false });
+    changed();
+  });
+  cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+    const socket = sockets.get(requestId);
+    if (!socket || response.opcode !== 1) return;
+    let frame;
+    try { frame = JSON.parse(response.payloadData); } catch { return; }
+    if (frame.type === "session") { socket.session = frame.id; socket.ready = false; }
+    if (frame.type === "ready") socket.ready = typeof socket.session === "string" && socket.session.length > 0;
+    changed();
+  });
+  cdp.on("Network.webSocketClosed", ({ requestId }) => {
+    const socket = sockets.get(requestId);
+    if (socket) socket.closed = true;
+    changed();
+  });
+  try { await cdp.send("Network.enable"); } catch (error) { await cdp.detach(); throw error; }
+  return {
+    snapshot: () => ({ overflow, sockets: [...sockets.values()] }),
+    close: () => cdp.detach(),
+    wait(tab, oldSessions, timeout) {
+      return new Promise((resolve, reject) => {
+        const finish = (error, socket) => {
+          clearTimeout(timer);
+          changed = () => {};
+          if (error) reject(new Error(error)); else resolve({ ...socket });
+        };
+        const timer = setTimeout(() => finish("created lead did not receive session and ready frames"), timeout);
+        changed = () => {
+          const matches = [...sockets.values()].filter((socket) => socket.tab === tab);
+          if (overflow || matches.length > 1) return finish("created lead socket identity is ambiguous");
+          const socket = matches[0];
+          if (socket?.closed) return finish("created lead socket closed before readiness");
+          if (socket?.session && oldSessions.includes(socket.session)) return finish("created lead reused an existing session");
+          if (socket?.ready) finish(null, socket);
+        };
+        changed();
+      });
+    },
+  };
+}
+
+async function settleLead(page, api, windowId, before, watcher) {
+  const deadline = Date.now() + 30_000;
+  const remaining = () => {
+    const left = deadline - Date.now();
+    if (left <= 0) throw new Error("created lead readiness deadline expired");
+    return left;
+  };
+  const handle = await page.waitForFunction((oldTabs) => {
+    const created = [...document.querySelectorAll(".terminal-tab")].filter((node) => !oldTabs.includes(node.getAttribute("data-terminal-tab-id")));
+    if (created.length > 1) throw new Error("created lead tab identity is ambiguous");
+    const node = created[0];
+    if (!node?.classList.contains("active")) return false;
+    const renderer = node.querySelector(".terminal-host canvas, .terminal.xterm .xterm-screen");
+    const box = renderer?.getBoundingClientRect();
+    if (!box || box.width <= 0 || box.height <= 0) return false;
+    const tab = node.getAttribute("data-terminal-tab-id");
+    return tab ? { tab, renderer: renderer.tagName, width: box.width, height: box.height } : false;
+  }, { timeout: remaining() }, before.tabs);
+  const renderer = await handle.jsonValue();
+  await handle.dispose();
+  const socket = await watcher.wait(renderer.tab, before.sessions, remaining());
+  const roster = await api("/api/terminals/roster", undefined, "GET", remaining());
+  const created = roster.sessions.filter((session) => session.window_id === windowId && !before.sessions.includes(session.id));
+  if (created.length !== 1 || created[0].id !== socket.session) throw new Error("created lead session delta disagrees with its socket");
+  // Initialization queues a focus microtask and Ghostty queues a zero-delay
+  // retry. Cross a timer task after readiness; elapsed time is not the test.
+  let timer;
+  try {
+    await Promise.race([
+      page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0))),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("created lead timer barrier timed out")), remaining()); }),
+    ]);
+  } finally { clearTimeout(timer); }
+  const confirmed = await watcher.wait(renderer.tab, before.sessions, remaining());
+  if (confirmed.session !== socket.session) throw new Error("created lead session changed during readiness");
+  return { ...renderer, session: socket.session, ready: socket.ready };
+}
+
 async function mode(page, name) {
   for (const button of await page.$$(".team-dialog .team-realestate-mode")) {
     if (await button.evaluate((node, expected) => node.textContent?.trim() === expected, name)) {
@@ -26,14 +145,17 @@ async function input(page, selector, value) {
     value: node.value,
     selectionStart: node.selectionStart,
     selectionEnd: node.selectionEnd,
+    focused: document.activeElement === node,
   }));
+  if (!selected.focused) throw new Error(`team input ${selector}: focus lost before Backspace`);
   if (selected.selectionStart !== 0 || selected.selectionEnd !== selected.value.length) {
     throw new Error(`team input ${selector}: full selection failed (${selected.selectionStart}:${selected.selectionEnd}/${selected.value.length})`);
   }
   await page.keyboard.press("Backspace");
-  const cleared = await page.$eval(selector, (node) => node.value);
-  if (cleared !== "") throw new Error(`team input ${selector}: Backspace left ${JSON.stringify(cleared)}`);
-  await page.type(selector, value);
+  const cleared = await page.$eval(selector, (node) => ({ value: node.value, focused: document.activeElement === node }));
+  if (cleared.value !== "") throw new Error(`team input ${selector}: Backspace left ${JSON.stringify(cleared.value)}`);
+  if (!cleared.focused) throw new Error(`team input ${selector}: focus lost before typing`);
+  await page.keyboard.type(value);
   const typed = await page.$eval(selector, (node) => node.value);
   if (typed !== value) throw new Error(`team input ${selector}: typed value ${JSON.stringify(typed)}, expected ${JSON.stringify(value)}`);
   await page.keyboard.press("Tab");
@@ -50,13 +172,13 @@ export default {
     const save = () => writeFileSync(join(ctx.outDir, "276-dialog-load-config.json"), JSON.stringify(report, null, 2));
     const pageError = (error) => report.pageErrors.push(maskTokens(error?.stack ?? String(error)));
     page.on("pageerror", pageError);
-    const api = async (path, body, method = "POST") => {
+    const api = async (path, body, method = "POST", timeout = 20_000) => {
       const url = new URL(path, ctx.serverUrl);
       const response = await fetch(url, {
         method,
         headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(timeout),
       });
       if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
       const text = await response.text();
@@ -75,6 +197,8 @@ export default {
           }
         };
         page.on("request", onRequest);
+        let watcher;
+        let tracing = false;
         try {
           await api("/api/team-config/write", {
             dir,
@@ -108,8 +232,16 @@ export default {
           const bootstrapBefore = readFileSync(bootstrapPath, "utf8");
           writeFileSync(join(ctx.outDir, `276-${kind}-before.toml`), before);
 
+          leg.leadBefore = {
+            tabs: await page.$$eval(".terminal-tab", (nodes) => nodes.map((node) => node.getAttribute("data-terminal-tab-id"))),
+            sessions: (await api("/api/terminals/roster", undefined, "GET")).sessions.filter((session) => session.window_id === windowId).map((session) => session.id),
+          };
+          watcher = await watchLeadSocket(page, windowId);
+          await startFocusTrace(page);
+          tracing = true;
           await dispatchCommand(page, "app.terminal.teamWork");
           await page.waitForSelector(".team-dialog", { timeout: 15_000 });
+          leg.leadReady = await settleLead(page, api, windowId, leg.leadBefore, watcher);
           await mode(page, "Load");
           await input(page, DIR_INPUT, dir);
           await page.waitForFunction((expected) => {
@@ -190,6 +322,18 @@ export default {
           }
         } finally {
           page.off("request", onRequest);
+          if (tracing) {
+            try {
+              const trace = await page.evaluate(() => window.__dialogload276Focus.stop());
+              leg.focusTrace = JSON.parse(JSON.stringify(trace, (_, value) => typeof value === "string" ? maskTokens(value) : value));
+            } catch (error) {
+              report.cleanupErrors.push(maskTokens(error?.stack ?? String(error)));
+            }
+          }
+          if (watcher) {
+            leg.leadSockets = watcher.snapshot();
+            try { await watcher.close(); } catch (error) { report.cleanupErrors.push(maskTokens(error?.stack ?? String(error))); }
+          }
           try {
             if (await page.$(".team-dialog")) {
               await page.click(".team-dialog-cancel");
