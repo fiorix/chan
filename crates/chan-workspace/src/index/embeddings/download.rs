@@ -292,9 +292,10 @@ impl Client {
     ) -> Result<(), DownloadError> {
         let part = blob.with_extension("part");
         let mut file = OpenOptions::new().create(true).append(true).open(&part)?;
-        let start = file.metadata()?.len();
+        let mut start = file.metadata()?.len();
         if start > size {
-            return Err(DownloadError::InvalidResume);
+            file.set_len(0)?;
+            start = 0;
         }
         let progress = self.progress.then(|| progress_bar(size, start, filename));
         if start != size {
@@ -303,7 +304,18 @@ impl Client {
                 .set("Range", &format!("bytes={start}-"))
                 .call()
                 .map_err(Box::new)?;
-            validate_resume(&response, start, size)?;
+            if response.status() == 200 && start != 0 {
+                // A proxy may ignore Range and send the whole blob. Validate
+                // it before replacing the prefix, while retaining the lock.
+                validate_resume(&response, 0, size)?;
+                file.set_len(0)?;
+                start = 0;
+                if let Some(progress) = &progress {
+                    progress.set_position(0);
+                }
+            } else {
+                validate_resume(&response, start, size)?;
+            }
             let mut reader = response.into_reader();
             let mut remaining = size - start;
             let mut buffer = [0; 64 * 1024];
@@ -501,3 +513,6 @@ mod tests;
 
 #[cfg(test)]
 mod tls_tests;
+
+#[cfg(test)]
+mod publication_tests;

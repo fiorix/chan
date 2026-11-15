@@ -152,7 +152,7 @@ fn partial_download_resumes_and_publishes_exact_bytes() {
 }
 
 #[test]
-fn ignored_resume_range_never_corrupts_the_partial_or_publishes() {
+fn ignored_resume_range_restarts_from_full_response() {
     let cache = tempfile::tempdir().unwrap();
     let partial = part_file(cache.path(), &BODY[..3]);
     let server = Server::start(|request| {
@@ -167,15 +167,29 @@ fn ignored_resume_range_never_corrupts_the_partial_or_publishes() {
         &server.endpoint,
         chan_tls::client_config().unwrap(),
     );
-    assert!(
-        client.get("fixture/model", "config.json").is_err(),
-        "an ignored Range must refuse resume"
+    let path = client
+        .get("fixture/model", "config.json")
+        .expect("an ignored resume range must restart from its full response");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        BODY,
+        "the full response replaces the partial prefix"
     );
-    assert_eq!(std::fs::read(partial).unwrap(), &BODY[..3]);
-    assert!(hf_hub::Cache::new(cache.path().to_owned())
-        .model("fixture/model".into())
-        .get("config.json")
-        .is_none());
+    assert!(
+        !partial.exists(),
+        "the restarted download consumes its part"
+    );
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        2,
+        "the full response is consumed without another request"
+    );
+    assert_eq!(
+        Some(path),
+        hf_hub::Cache::new(cache.path().to_owned())
+            .model("fixture/model".into())
+            .get("config.json")
+    );
 }
 
 #[test]
@@ -701,22 +715,37 @@ fn completed_part_publishes_without_an_invalid_end_range_request() {
 }
 
 #[test]
-fn oversized_part_is_not_published_or_modified() {
+fn oversized_part_restarts_and_publishes_exact_bytes() {
     let cache = tempfile::tempdir().unwrap();
     let oversized = [BODY, b"extra"].concat();
     let part = part_file(cache.path(), &oversized);
-    let server = Server::start(|_| metadata_response());
+    let server = Server::start(|request| match requested_range(request) {
+        "bytes=0-0" => metadata_response(),
+        "bytes=0-" => bytes_response(0),
+        _ => response(
+            "400 Bad Request",
+            "",
+            b"oversized part must restart at zero",
+        ),
+    });
     let client = Client::with_config(
         cache.path(),
         &server.endpoint,
         chan_tls::client_config().unwrap(),
     );
-    assert!(client.get("fixture/model", "config.json").is_err());
-    assert_eq!(std::fs::read(part).unwrap(), oversized);
+    let path = client
+        .get("fixture/model", "config.json")
+        .expect("an oversized part must restart from zero in the same call");
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        BODY,
+        "the oversized prefix must be discarded"
+    );
+    assert!(!part.exists());
     assert_eq!(
         server.requests.lock().unwrap().len(),
-        1,
-        "an oversized part must be refused before a payload request"
+        2,
+        "an oversized part needs metadata and one fresh payload"
     );
 }
 
@@ -1258,6 +1287,11 @@ fn embedder_retries_corrupt_cached_tokenizer() {
 #[test]
 fn embedder_retries_corrupt_cached_weights() {
     recovers_corrupt_cached_file("model.safetensors", b"not-safetensors");
+}
+
+#[test]
+fn embedder_retries_empty_cached_weights() {
+    recovers_corrupt_cached_file("model.safetensors", b"");
 }
 
 #[test]

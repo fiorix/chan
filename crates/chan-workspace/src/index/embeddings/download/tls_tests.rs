@@ -579,6 +579,66 @@ fn https_payload_redirect_refuses_http_before_connecting() {
 }
 
 #[test]
+fn http_proxy_environment_routes_metadata_and_payload() {
+    const CHILD: &str = "MODELROOTS_HTTP_PROXY_ENDPOINT";
+    if let Ok(endpoint) = std::env::var(CHILD) {
+        let cache = tempfile::tempdir().unwrap();
+        let client = Client::with_config(cache.path(), &endpoint, trusted_config());
+        let path = client.get("fixture/model", "config.json").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), BODY);
+        println!("proxy-download-completed");
+        return;
+    }
+    let origin = Server::start(false, model_response);
+    let proxy = Server::start(false, model_response);
+    let endpoint = origin.endpoint(false);
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    for name in super::super::PROXY_VARS {
+        command.env_remove(name);
+    }
+    let output = command
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env(CHILD, &endpoint)
+        .env("HTTP_PROXY", proxy.endpoint(false))
+        .output()
+        .unwrap();
+    let proxy = proxy.finish();
+    let origin = origin.finish();
+    assert_eq!(
+        proxy.requests.len(),
+        2,
+        "HTTP_PROXY must carry metadata and payload requests"
+    );
+    let absolute_request = format!("GET {endpoint}fixture/model/resolve/main/config.json HTTP/1.1");
+    for request in &proxy.requests {
+        assert_eq!(
+            request.lines().next(),
+            Some(absolute_request.as_str()),
+            "the proxy must receive an absolute-form request"
+        );
+    }
+    assert!(
+        origin.requests.is_empty(),
+        "the client must not bypass HTTP_PROXY"
+    );
+    assert!(proxy.errors.is_empty());
+    assert!(
+        output.status.success(),
+        "isolated proxy download failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("proxy-download-completed"));
+}
+
+#[test]
 fn unusable_proxy_takes_precedence_over_certificate_error() {
     const CHILD: &str = "MODELROOTS_PROXY_CLASSIFIER_CHILD";
     if std::env::var_os(CHILD).is_none() {

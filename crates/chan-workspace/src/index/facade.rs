@@ -468,8 +468,8 @@ impl Index {
     ///
     /// `resolve_model_in` checks the handle's retained model directory
     /// before `Embedder::open` loads from that same directory. An absent
-    /// model produces `ModelNotDownloaded` without an hf-hub network fetch;
-    /// a present model is found through hf-hub's cache lookup.
+    /// model produces `ModelNotDownloaded` without a network fetch;
+    /// a present model is found through chan-workspace's cache lookup.
     #[cfg(feature = "embeddings")]
     fn embedder(&self) -> Result<Arc<Embedder>, IndexError> {
         self.embedder_with(|model_id| {

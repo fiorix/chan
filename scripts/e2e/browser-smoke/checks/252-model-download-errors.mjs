@@ -215,6 +215,7 @@ export default {
         return field?.querySelector('[role="alert"]')?.textContent === expected && toggle && !toggle.disabled;
       }, { timeout: WAIT_MS }, FIELD, refusal.error);
       const checkboxChecked = await page.$eval(TOGGLE, (toggle) => toggle.checked);
+      assert.equal(checkboxChecked, true, "the saved semantic-search preference stays checked beside its refusal");
       assert.equal(counts.downloads, 1);
       assert.equal(counts.enables, 0, "a refused download never sends enable");
       assert.deepEqual(errors, [], "every intercepted request followed the intended protocol");

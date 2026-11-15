@@ -25,7 +25,7 @@
 // model's own `config.json::hidden_size` so adding a new BGE
 // variant only means adding one row.
 //
-// On-disk layout: hf-hub stores the model under
+// On-disk layout: the downloader writes the Hub-compatible model cache under
 // `<cache_dir>/models--<org>--<name>/snapshots/<rev>/`. We resolve
 // `config.json`, `tokenizer.json`, and `model.safetensors` from
 // there. The cache is per-machine (immutable model files,
@@ -77,7 +77,7 @@ pub enum EmbedError {
     /// built with `--features embed-model`. Surfaces to the CLI / API
     /// layer so the user sees "model not downloaded;
     /// run `chan workspace index download-model` or enable in Settings"
-    /// instead of a silent hf-hub network fetch.
+    /// instead of a silent model download.
     #[error(
         "embedding model '{model_id}' not downloaded; expected at {expected_dir:?}. \
          Run `chan workspace index download-model` or rebuild with `--features embed-model`."
@@ -237,7 +237,7 @@ impl Embedder {
         }
     }
 
-    /// Cold-path bring-up: do the actual hf-hub fetch + candle load.
+    /// Cold-path bring-up: fetch model files and load them with candle.
     /// Pulled out of `open` so the wipe-and-retry path can call it
     /// twice without duplicating the body. Callers should prefer
     /// `Embedder::open`, which adds the corruption recovery.
@@ -798,11 +798,8 @@ mod tests {
 
     #[test]
     fn wipe_model_cache_removes_org_name_dir() {
-        // hf-hub stores model snapshots under
-        // `<cache>/models--<org>--<name>/`; the wipe-and-retry path
-        // depends on this exact name layout. Pin it so an hf-hub
-        // upgrade that changes the convention fails this test
-        // loudly instead of silently leaking stale snapshots.
+        // The cache writer and wipe-and-retry path share this repository
+        // naming convention, so recovery must remove the same directory.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("models--BAAI--bge-small-en-v1.5");
         std::fs::create_dir_all(dir.join("snapshots/rev/blobs")).unwrap();
