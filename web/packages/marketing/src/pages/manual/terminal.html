@@ -54,6 +54,7 @@
       <li>On reattach, chan asks the program to redraw and restores the cursor-key, mouse, focus-reporting and bracketed-paste modes it had on. Mouse encodings still depend on support in the selected terminal engine.</li>
       <li>Renaming or regrouping a running terminal applies at once, but its shell keeps the old <code>$CHAN_TAB_NAME</code> and <code>$CHAN_TAB_GROUP</code>: the tab menu reads <em>stale env</em> and offers <strong>Restart terminal</strong>.</li>
       <li>Two terminals can share a name. A <code>cs</code> command that selects by name reaches both.</li>
+      <li>For shells chan starts itself, a slow connection can slow the program while output catches up. A connection with no output progress for five seconds stops holding the program and resumes from retained output when it reads again. Other views of the same shell share its output rate. tmux panes keep producing and recover only the output still retained; older bytes can be lost.</li>
       <li>On Windows, where chan finds several shells (PowerShell, cmd, Git Bash, WSL), the pane menu lists them under <strong>New terminal</strong>, and the command launcher has <strong>New terminal with profile</strong>.</li>
       <li>Most browsers keep <kbd>Ctrl+Shift+T</kbd> to reopen a closed tab. Use the pane menu, or bind another key in <a href="/manual/shortcuts/#customize">Keyboard shortcuts</a>.</li>
     </ul>

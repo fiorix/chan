@@ -393,7 +393,7 @@ async fn sockets_share_status_and_late_attach_gets_the_retained_value() {
 async fn attach_status_is_coherent_on_both_sides_of_the_output_lock() {
     for seam in [
         AttachSeam::AttachBeforeRingLock,
-        AttachSeam::AttachAfterRingLock,
+        AttachSeam::AttachProgressAfterRingLock,
     ] {
         let rig = Rig::new().await;
         rig.report("state=working");
@@ -406,7 +406,7 @@ async fn attach_status_is_coherent_on_both_sides_of_the_output_lock() {
             AttachSeam::AttachBeforeRingLock => {
                 assert_eq!(revision, 2, "report before snapshot belongs in attach")
             }
-            AttachSeam::AttachAfterRingLock => {
+            AttachSeam::AttachProgressAfterRingLock => {
                 assert_eq!(revision, 1, "snapshot and subscription share the ring lock");
                 tokio::time::advance(Duration::from_millis(150)).await;
                 let later = status_frame(&mut client).await;
@@ -493,7 +493,7 @@ async fn output_lag_keeps_the_latest_status_without_a_further_report() {
     let id = rig.handle.id().to_owned();
     arm_attach_seam(
         rig.handle.id(),
-        AttachSeam::AttachAfterRingLock,
+        AttachSeam::AttachProgressAfterRingLock,
         move || {
             assert!(state
                 .terminal_sessions
@@ -508,17 +508,33 @@ async fn output_lag_keeps_the_latest_status_without_a_further_report() {
     tokio::time::advance(Duration::from_millis(150)).await;
     let frames = fence(&rig, &mut client).await;
     assert!(
-        frames.iter().any(|frame| frame["type"] == "error"
-            && frame["message"]
-                .as_str()
-                .is_some_and(|s| s.contains("lagged"))),
-        "fixture must force broadcast lag"
+        !frames.iter().any(|frame| frame["type"] == "error"),
+        "output lag recovers without an error frame: {frames:?}"
     );
+    let recovered: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame["type"] == "session")
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        1,
+        "the enrolled receiver's forced lag produces one recovery: {frames:?}"
+    );
+    let recovered = recovered[0];
+    assert_eq!(recovered["id"], initial["id"]);
+    assert_eq!(recovered["generation"], initial["generation"]);
+    assert_eq!(recovered["missed_bytes"], 0);
     let updates = statuses(&frames);
     assert_eq!(updates.len(), 1, "watch update survives output lag");
     assert_eq!(
         updates[0]["program_status"]["records"][0]["state"],
         "blocked"
+    );
+    assert_eq!(updates[0]["id"], initial["id"]);
+    assert_eq!(updates[0]["generation"], initial["generation"]);
+    assert_eq!(
+        recovered["program_status"], updates[0]["program_status"],
+        "recovery and the watch retain the same latest value without another report"
     );
 }
 
@@ -756,7 +772,7 @@ async fn an_attach_between_the_exit_record_and_its_broadcast_reports_one_exit() 
         .expect("the exit became readable");
     arm_attach_seam(
         rig.handle.id(),
-        AttachSeam::AttachAfterRingLock,
+        AttachSeam::AttachProgressAfterRingLock,
         move || {
             let _ = attached_tx.send(());
         },

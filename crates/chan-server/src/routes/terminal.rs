@@ -22,10 +22,14 @@ use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, ProgramReading, ProgramStatusSnapshot,
-    QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalExit, TerminalPlacement,
-    TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest, ALT_SCREEN_ATTACH_PRELUDE,
-    DEFAULT_TERMINAL_GROUP,
+    QueuedMessagePreview, RestartOverrides, SessionEvent, SessionLifecycle, TerminalExit,
+    TerminalPlacement, TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest,
+    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
+
+#[path = "terminal_socket.rs"]
+mod terminal_socket;
+use terminal_socket::TerminalSocket;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -1133,7 +1137,7 @@ where
 /// exit came as an event or with the attach, which can also find the event
 /// on its subscription.
 async fn send_exit(
-    socket: &mut WebSocket,
+    socket: &mut TerminalSocket,
     state: &AppState,
     session: &AttachHandle,
     program_status: &mut ProgramStatusFeed,
@@ -1147,7 +1151,8 @@ async fn send_exit(
     terminal_program_tests::observe_exit_wait(session.id());
     tokio::time::sleep_until(program_status.next_send.max(program.next_send)).await;
     if let Some(reading) = program.take_changed() {
-        if send_frame(socket, program_frame(session, reading))
+        if socket
+            .frame(session, program_frame(session, reading))
             .await
             .is_err()
         {
@@ -1155,7 +1160,8 @@ async fn send_exit(
         }
     }
     let final_status = program_status.current();
-    if send_frame(socket, program_status_frame(session, final_status))
+    if socket
+        .frame(session, program_status_frame(session, final_status))
         .await
         .is_err()
     {
@@ -1163,13 +1169,14 @@ async fn send_exit(
     }
     #[cfg(all(test, unix))]
     program_status_tests::observe_status_send(session.id());
-    let _ = send_frame(
-        socket,
-        ServerFrame::Exit {
-            code: exit.wire_code(),
-        },
-    )
-    .await;
+    let _ = socket
+        .frame(
+            session,
+            ServerFrame::Exit {
+                code: exit.wire_code(),
+            },
+        )
+        .await;
 }
 
 async fn terminal_ws(
@@ -1272,33 +1279,26 @@ async fn terminal_ws(
         }
     };
     let mut shutdown_rx = state.shutdown_rx.clone();
-    // A query's candidate stays conditional across restart re-attaches until
-    // this socket sends a Resize frame declaring the size of its shown grid.
-    let mut client_size = opts.declared_size;
-    let mut client_size_conditional = opts.size_if_unset;
-
-    if opts.size_if_unset {
-        if let Some(size) = client_size {
+    session = session.with_output_progress();
+    let mut socket = TerminalSocket::new(
+        socket,
+        state.clone(),
+        client,
+        opts.declared_size,
+        opts.size_if_unset,
+    );
+    if socket.input.size_conditional {
+        if let Some(size) = socket.input.size {
             session.fit_if_unsized(size);
         }
     } else {
-        fit_pty_to_client(&session, client_size);
+        fit_pty_to_client(&session, socket.input.size);
     }
-    let Ok(attached_at) = send_attach_prelude(
-        &mut socket,
-        &state,
-        &session,
-        client_size.unwrap_or(opts.size),
-    )
-    .await
-    else {
+    let size = socket.input.size.unwrap_or(opts.size);
+    let Ok(attached_at) = send_attach_prelude(&mut socket, &session, size, false).await else {
         return;
     };
-
-    client.observe(
-        Some(session.id()),
-        client_size.map(|size| (size.cols, size.rows)),
-    );
+    socket.observe(&session);
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
     let mut program = ProgramFeed::new(&session, attached_at);
     let mut tmux_consent_rx = session.tmux_consent_rx.clone();
@@ -1312,20 +1312,114 @@ async fn terminal_ws(
             exit,
         )
         .await;
-        finish_socket(socket, 1000, "exit".into()).await;
+        socket.finish(1000, "exit".into()).await;
         return;
     }
-    let mut queue_details = false;
-
-    // The epoch of this socket's word that its terminal is focused, while
-    // that is the last thing it said of focus. A socket that ends says
-    // nothing more, so its word is withdrawn after the loop.
-    let mut socket_focus: Option<u64> = None;
-    // The Close an arm that ends the socket after its final frame finishes
-    // it with; the other ends are the client's or a failed transport's.
+    let mut lifecycle_rx = session.lifecycle_rx.clone();
+    let mut recover = false;
     let mut finish: Option<(u16, &'static str)> = None;
 
     loop {
+        // A prompt accepted during a blocked send is acknowledged before its
+        // delivery event or a replay's authoritative queue snapshot.
+        if socket.flush_replies(&session).await.is_err() {
+            break;
+        }
+        let lifecycle = lifecycle_rx.borrow_and_update().clone();
+        if let Some(SessionLifecycle::Closed(reason)) = lifecycle {
+            let _ = socket.frame(&session, ServerFrame::Closed { reason }).await;
+            finish = Some((1000, "closed"));
+            break;
+        }
+        let restarting = matches!(lifecycle, Some(SessionLifecycle::Restarted));
+        let progress = session
+            .output_progress()
+            .expect("terminal socket has output progress");
+        if recover || progress.needs_replay() || restarting {
+            let next = if restarting {
+                let Some(next) = state.terminal_sessions.attach_for_ws(session.id(), None) else {
+                    break;
+                };
+                let focused = socket
+                    .input
+                    .focus
+                    .is_some_and(|epoch| session.withdraw_focus(epoch));
+                let next = next.with_output_progress();
+                socket.input.cancel_cwd();
+                socket.input.focus = if focused {
+                    next.set_focused(true)
+                } else {
+                    None
+                };
+                next
+            } else {
+                session.replay_from(progress.seq()).with_output_progress()
+            };
+            drop(progress);
+            session = next;
+            // The subscription precedes this barrier: replies accepted before
+            // the snapshot arrive before its queue reproof; newer requests are
+            // represented on the new receiver.
+            if socket.flush_replies(&session).await.is_err() {
+                break;
+            }
+            if restarting {
+                if socket
+                    .send(&session, Message::binary(RESET_TERMINAL))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if socket.input.size_conditional {
+                    if let Some(size) = socket.input.size {
+                        session.fit_if_unsized(size);
+                    }
+                } else {
+                    fit_pty_to_client(&session, socket.input.size);
+                }
+            }
+            let size = if restarting {
+                socket.input.size.unwrap_or(opts.size)
+            } else {
+                session.size()
+            };
+            let Ok(attached_at) =
+                send_attach_prelude(&mut socket, &session, size, !restarting).await
+            else {
+                break;
+            };
+            if restarting {
+                program_status = ProgramStatusFeed::new(&session, attached_at);
+                program = ProgramFeed::new(&session, attached_at);
+            } else {
+                // The prelude replaced the displayed pair, even when the
+                // watch has since returned to the pair sent before recovery.
+                program.last_sent = session.initial_program.clone();
+            }
+            tmux_consent_rx = session.tmux_consent_rx.clone();
+            lifecycle_rx = session.lifecycle_rx.clone();
+            recover = false;
+        }
+        if let Some(exit) = &session.exit {
+            send_exit(
+                &mut socket,
+                &state,
+                &session,
+                &mut program_status,
+                &mut program,
+                exit,
+            )
+            .await;
+            finish = Some((1000, "exit"));
+            break;
+        }
+        let progress = session
+            .output_progress()
+            .expect("terminal socket has output progress");
+        if progress.needs_replay() {
+            continue;
+        }
         #[cfg(all(test, unix))]
         program_status_tests::loop_gate(session.id()).await;
         tokio::select! {
@@ -1334,9 +1428,12 @@ async fn terminal_ws(
                 finish = Some((1001, "server shutdown"));
                 break;
             }
+            changed = lifecycle_rx.changed() => {
+                if changed.is_err() { break; }
+            }
             update = program_status.next() => {
                 let Ok(snapshot) = update else { break };
-                if send_frame(&mut socket, program_status_frame(&session, snapshot)).await.is_err() {
+                if socket.frame(&session, program_status_frame(&session, snapshot)).await.is_err() {
                     break;
                 }
                 program_status.sent();
@@ -1345,7 +1442,7 @@ async fn terminal_ws(
             }
             update = program.next() => {
                 let Ok(reading) = update else { break };
-                if send_frame(&mut socket, program_frame(&session, reading)).await.is_err() {
+                if socket.frame(&session, program_frame(&session, reading)).await.is_err() {
                     break;
                 }
                 program.sent();
@@ -1353,342 +1450,78 @@ async fn terminal_ws(
             changed = tmux_consent_rx.changed() => {
                 let Ok(()) = changed else { break };
                 let snapshot = tmux_consent_rx.borrow_and_update().clone();
-                if send_frame(&mut socket, tmux_consent_frame(&session, snapshot)).await.is_err() {
+                if socket.frame(&session, tmux_consent_frame(&session, snapshot)).await.is_err() {
                     break;
                 }
             }
-            msg = socket.recv() => {
-                let Some(msg) = msg else {
-                    break;
-                };
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        client.observe(Some(session.id()), None);
-                        match serde_json::from_str::<ClientFrame>(&text) {
-                            Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {
-                                let Some(data) = client_input_bytes(&frame) else {
-                                    let _ = send_frame(
-                                        &mut socket,
-                                        ServerFrame::Error {
-                                            message: "invalid terminal frame: binary input holds a character above U+00FF".into(),
-                                            reason: None,
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                };
-                                if matches!(&frame, ClientFrame::Input { .. }) {
-                                    session.send_input(&data);
-                                } else {
-                                    state.terminal_sessions.broadcast_input_cross_window(
-                                        session.id(),
-                                        &data,
-                                    );
-                                }
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::Resize { cols, rows }) => {
-                                let size = pty_size(Some(cols), Some(rows));
-                                client.observe(Some(session.id()), Some((size.cols, size.rows)));
-                                session.resize(size);
-                                client_size = Some(size);
-                                client_size_conditional = false;
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::Cwd) => {
-                                let (cwd, cwd_rel) = terminal_cwd_payload_blocking(
-                                    state.try_workspace().ok(),
-                                    session.blocking_cwd_probe(),
-                                )
-                                .await;
-                                let _ = send_frame(&mut socket, ServerFrame::Cwd { cwd, cwd_rel }).await;
-                            }
-                            Ok(ClientFrame::Focus { focused }) => {
-                                socket_focus = session.set_focused(focused);
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::TmuxRequest { request }) => {
-                                // A pane session's request goes to the control
-                                // session that holds its connection.
-                                let hopped = session.tmux_pane().is_some_and(|pane| {
-                                    state.terminal_sessions.tmux_request_for(&pane, request.clone())
-                                });
-                                if !hopped {
-                                    session.tmux_request(request);
-                                }
-                            }
-                            Ok(ClientFrame::TmuxAnswer { answer }) => {
-                                session.answer_tmux(answer);
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::SetBroadcast { on }) => {
-                                session.set_broadcast(on);
-                                // The toggle is a session-field change the
-                                // registry map does not see, so nudge the
-                                // roster broadcaster explicitly.
-                                state.terminal_sessions.notify_roster_change();
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::Placement {
-                                pane_id,
-                                side,
-                                tab_id,
-                            }) => {
-                                state.terminal_sessions.update_session_layout(
-                                    session.id(),
-                                    pane_id.and_then(|id| normalize_label(&id, MAX_ID_CHARS)),
-                                    side,
-                                    tab_id.and_then(|id| normalize_label(&id, MAX_ID_CHARS)),
-                                );
-                            }
-                            Ok(ClientFrame::Rename { name, group }) => {
-                                let result = rename_terminal_session(
-                                    &state.terminal_sessions,
-                                    session.id(),
-                                    &name,
-                                    group.as_deref(),
-                                );
-                                let frame = match result {
-                                    Ok(metadata) => ServerFrame::Renamed {
-                                        name: metadata
-                                            .name
-                                            .expect("settled terminal rename has a name"),
-                                        group: metadata.group,
-                                    },
-                                    Err(message) => ServerFrame::RenameFailed { message },
-                                };
-                                let _ = send_frame(&mut socket, frame).await;
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::Close) => {
-                                let id = session.id().to_owned();
-                                state.terminal_sessions.close(&id, CloseReason::Explicit);
-                            }
-                            Ok(ClientFrame::Prompt { data, agent, id }) => {
-                                // Rich Prompt bubble: resolve the target agent's
-                                // submit spec (default claude when omitted),
-                                // then ENQUEUE logical text onto the shared write queue so it
-                                // serializes with `cs terminal write` pokes and
-                                // submits when the agent is idle.
-                                let submit = SubmitAgent::from_agent_name(
-                                    agent.as_deref().unwrap_or("claude"),
-                                )
-                                .map(ResolvedSubmit::resolve);
-                                let outcome = session.enqueue_prompt(data, submit, id.clone());
-                                if let Some(id) = id {
-                                    let frame = match outcome {
-                                        Some(depth) => ServerFrame::PromptAck {
-                                            id,
-                                            queued: true,
-                                            depth,
-                                        },
-                                        None => ServerFrame::PromptAck {
-                                            id,
-                                            queued: false,
-                                            depth: session.queue_depth(),
-                                        },
-                                    };
-                                    let _ = send_frame(&mut socket, frame).await;
-                                }
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::QueueDetails { enabled }) => {
-                                queue_details = enabled;
-                                if enabled && send_frame(&mut socket, ServerFrame::QueueDetails {
-                                    messages: session.queued_message_previews(),
-                                }).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Ok(ClientFrame::CancelPrompt { id }) => {
-                                // Recall a still-queued Rich Prompt message. The
-                                // retain-filter is authoritative under the queue
-                                // lock; ack removed / already-drained so the SPA
-                                // never recalls a message that already hit the
-                                // PTY. On a removal, cancel_prompt re-broadcasts
-                                // QueueDepth -> the `queue` frame below re-syncs
-                                // the badge, so we only send the inline ack here.
-                                let removed = session.cancel_prompt(&id);
-                                let _ = send_frame(
-                                    &mut socket,
-                                    ServerFrame::PromptCancelled { id, removed },
-                                )
-                                .await;
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::Ping) => {
-                                // Heartbeat only: answer on this socket and
-                                // count it as activity (a pinging tab is a
-                                // live tab, matching the watcher socket's
-                                // ping). Nothing reaches the PTY or the
-                                // prompt queue.
-                                let _ = send_frame(&mut socket, ServerFrame::Pong).await;
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                let _ = send_frame(
-                                    &mut socket,
-                                    ServerFrame::Error {
-                                        message: format!("invalid terminal frame: {e}"),
-                                        reason: None,
-                                    },
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
-                    Err(_) => break,
-                }
+            result = socket.input.next_cwd() => {
+                if socket.input.complete_cwd(result).is_err() { break; }
+            }
+            message = futures::StreamExt::next(&mut socket.stream) => {
+                if socket.receive(&session, message).is_err() { break; }
             }
             event = session.rx.recv() => {
                 match event {
-                    Ok(SessionEvent::Output(data)) => {
-                        if socket.send(Message::binary(data)).await.is_err() {
-                            break;
-                        }
-                        state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                    }
-                    Ok(SessionEvent::Activity { bytes_since_focus }) => {
-                        if send_frame(&mut socket, ServerFrame::Activity { bytes_since_focus }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionEvent::QueueDepth(depth)) => {
-                        if send_frame(&mut socket, ServerFrame::Queue { depth }).await.is_err() {
-                            break;
-                        }
-                        if queue_details && send_frame(&mut socket, ServerFrame::QueueDetails {
-                            messages: session.queued_message_previews(),
-                        }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionEvent::PromptDelivered { id, depth }) => {
-                        if send_frame(&mut socket, ServerFrame::PromptDelivered { id, depth }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionEvent::Resize(size)) => {
-                        if send_frame(&mut socket, ServerFrame::Resize { cols: size.cols, rows: size.rows }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionEvent::Exit(exit)) => {
-                        send_exit(&mut socket, &state, &session, &mut program_status, &mut program, &exit).await;
-                        finish = Some((1000, "exit"));
-                        break;
-                    }
-                    Ok(SessionEvent::Error(message)) => {
-                        if send_frame(&mut socket, ServerFrame::Error { message, reason: None }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionEvent::Closed(reason)) => {
-                        let _ = send_frame(&mut socket, ServerFrame::Closed { reason }).await;
-                        finish = Some((1000, "closed"));
-                        break;
-                    }
-                    Ok(SessionEvent::Restarted) => {
-                        // The session was restarted in place under the same id.
-                        // Re-attach this socket to the relaunched session and
-                        // replay it over a reset screen, so the tab stays put and
-                        // transparently shows the new shell (no Closed/Exit ⇒ the
-                        // SPA never drops it). If the relaunched session is gone,
-                        // fall through to a normal teardown.
-                        let id = session.id().to_owned();
-                        match state.terminal_sessions.attach_for_ws(&id, None) {
-                            Some(next) => {
-                                // The relaunched session starts unfocused, and
-                                // the page says nothing of focus at a restart:
-                                // its socket stays open. So this socket's word
-                                // moves with it, if it is still the session's.
-                                // A word another socket's has replaced is not
-                                // said again: nobody may be looking through it.
-                                let focused = socket_focus
-                                    .is_some_and(|epoch| session.withdraw_focus(epoch));
-                                session = next;
-                                socket_focus = if focused {
-                                    session.set_focused(true)
-                                } else {
-                                    None
-                                };
-                                if socket
-                                    .send(Message::binary(RESET_TERMINAL))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                if client_size_conditional {
-                                    if let Some(size) = client_size {
-                                        session.fit_if_unsized(size);
-                                    }
-                                } else {
-                                    fit_pty_to_client(&session, client_size);
-                                }
-                                let Ok(attached_at) = send_attach_prelude(
-                                    &mut socket,
-                                    &state,
-                                    &session,
-                                    client_size.unwrap_or(opts.size),
-                                )
-                                .await
-                                else {
-                                    break;
-                                };
-                                program_status = ProgramStatusFeed::new(&session, attached_at);
-                                program = ProgramFeed::new(&session, attached_at);
-                                tmux_consent_rx = session.tmux_consent_rx.clone();
-                                if let Some(exit) = &session.exit {
-                                    send_exit(&mut socket, &state, &session, &mut program_status, &mut program, exit)
-                                        .await;
-                                    finish = Some((1000, "exit"));
-                                    break;
-                                }
+                    Ok(event) => {
+                        // A request received during the earlier reply batch
+                        // can already have produced the selected event.
+                        if socket.flush_replies(&session).await.is_err() { break; }
+                        match event {
+                            SessionEvent::Output(data) => {
+                                let bytes = data.len();
+                                if socket.send(&session, Message::binary(data)).await.is_err() { break; }
+                                progress.sent_output(bytes);
+                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
-                            None => break,
+                            SessionEvent::Activity { bytes_since_focus } => {
+                                if socket.frame(&session, ServerFrame::Activity { bytes_since_focus }).await.is_err() { break; }
+                            }
+                            SessionEvent::QueueDepth(depth) => {
+                                if socket.frame(&session, ServerFrame::Queue { depth }).await.is_err() { break; }
+                                if socket.input.queue_details && socket.frame(&session, ServerFrame::QueueDetails {
+                                    messages: session.queued_message_previews(),
+                                }).await.is_err() { break; }
+                            }
+                            SessionEvent::PromptDelivered { id, depth } => {
+                                if socket.frame(&session, ServerFrame::PromptDelivered { id, depth }).await.is_err() { break; }
+                            }
+                            SessionEvent::Resize(size) => {
+                                if socket.frame(&session, ServerFrame::Resize { cols: size.cols, rows: size.rows }).await.is_err() { break; }
+                            }
+                            SessionEvent::Error(message) => {
+                                if socket.frame(&session, ServerFrame::Error { message, reason: None }).await.is_err() { break; }
+                            }
+                            SessionEvent::Exit(exit) => {
+                                send_exit(&mut socket, &state, &session, &mut program_status, &mut program, &exit).await;
+                                finish = Some((1000, "exit"));
+                                break;
+                            }
+                            SessionEvent::Closed(_) | SessionEvent::Restarted => {
+                                // Their retained value survives output eviction.
+                                continue;
+                            }
                         }
+                        progress.sent_event();
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // The watch retains status even when byte events lag.
-                        // A Restarted event lost here still leaves this socket
-                        // on the old incarnation until it reconnects.
-                        let _ = send_frame(
-                            &mut socket,
-                            ServerFrame::Error {
-                                message: "terminal output lagged; reconnect to replay retained scrollback".into(),
-                                reason: None,
-                            },
-                        )
-                        .await;
-                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => recover = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
     }
-
-    // A page that goes away focused sends no `focus` frame for it. Left
-    // standing, its word would keep the session focused with nobody attached:
-    // output written from then on would go uncounted, and the tab that
-    // returns unfocused would have unseen output and no dot. Only this
-    // socket's own word is withdrawn: one page holds two sockets across a
-    // redial, and the older one ends after the newer one said focused.
-    if let Some(epoch) = socket_focus {
+    if let Some(epoch) = socket.input.focus {
         session.withdraw_focus(epoch);
     }
     if let Some((code, reason)) = finish {
-        finish_socket(socket, code, reason.into()).await;
+        socket.finish(code, reason.into()).await;
     }
 }
 
 /// Give the PTY the size the client declared before the attach prelude, so
 /// the redraw nudge that ends the prelude repaints at that size, not at the
 /// size an earlier client left. The SPA also sends a Resize frame when its
-/// socket opens, which this route reads only after the prelude; by then the
-/// PTY has its size already.
+/// socket opens; the prelude pumps that frame while sending, with the declared
+/// grid already applied before its first byte.
 ///
 /// Only a declared size is applied, and only when its cells differ from the
 /// size last requested of the PTY (a resize to the same size would still echo
@@ -1707,37 +1540,35 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
     }
 }
 
-/// Send the post-attach prelude for `session`: the session-control frame, the
-/// retained scrollback replay, the alt-screen prelude, a redraw nudge, and the
-/// `Ready` frame carrying `size`. Used on first attach and on an in-place
-/// restart re-attach, after the client fit when admitted: the PTY controller
-/// runs that resize before the nudge's size wobble. Any socket send failure
-/// returns `Err(())` so the caller tears the connection down. The returned
-/// time anchors status pacing to the session frame, before a slow replay.
+/// Send one coherent replay window, from Session through Ready. A live
+/// recovery appends retained bytes without clearing its existing screen or
+/// applying the client's older fit. Only raw replay bytes advance progress;
+/// mode reconciliation stays inside the window without advancing the cursor.
+/// The returned time anchors status pacing before a potentially slow replay.
 async fn send_attach_prelude(
-    socket: &mut WebSocket,
-    state: &AppState,
+    socket: &mut TerminalSocket,
     session: &AttachHandle,
     size: PtySize,
+    recovering: bool,
 ) -> Result<tokio::time::Instant, ()> {
-    if send_frame(socket, session_frame(session)).await.is_err() {
+    if socket.frame(session, session_frame(session)).await.is_err() {
         return Err(());
     }
     let attached_at = tokio::time::Instant::now();
-    // A tmux pane's grid is tmux's, not this client's: it goes out ahead of
-    // the replay, so the renderer takes it before bytes drawn for it, and
-    // the Ready frame says the same size.
-    let size = if session.tmux_pane().is_some() {
+    // Recovery restores a missed resize before replay. A tmux pane always
+    // uses the grid owned by tmux, including on its first attach.
+    let size = if recovering || session.tmux_pane().is_some() {
         let size = session.size();
-        if send_frame(
-            socket,
-            ServerFrame::Resize {
-                cols: size.cols,
-                rows: size.rows,
-            },
-        )
-        .await
-        .is_err()
+        if socket
+            .frame(
+                session,
+                ServerFrame::Resize {
+                    cols: size.cols,
+                    rows: size.rows,
+                },
+            )
+            .await
+            .is_err()
         {
             return Err(());
         }
@@ -1746,50 +1577,65 @@ async fn send_attach_prelude(
         size
     };
     for chunk in &session.replay {
-        if socket.send(Message::binary(chunk.clone())).await.is_err() {
+        if socket
+            .send(session, Message::binary(chunk.clone()))
+            .await
+            .is_err()
+        {
             return Err(());
         }
+        if let Some(progress) = session.output_progress() {
+            progress.sent_output(chunk.len());
+        }
     }
-    if session.alt_screen
+    if !recovering
+        && session.alt_screen
         && socket
-            .send(Message::binary(ALT_SCREEN_ATTACH_PRELUDE))
+            .send(session, Message::binary(ALT_SCREEN_ATTACH_PRELUDE))
             .await
             .is_err()
     {
         return Err(());
     }
-    // Re-assert the live private-mode set (DECCKM + mouse + bracketed paste the
-    // foreground program set but won't re-announce after a reattach), so a fresh
-    // client whose terminal came up at defaults regains them -- otherwise arrows
-    // stop navigating (DECCKM) and the wheel/clicks stop reaching the program
-    // (mouse), the htop-after-reload bug. Empty for a plain shell. Sent after the
-    // alt-screen prelude (alt buffer active first) and before the redraw nudge
-    // (the repaint then lands with the modes already set).
+    // A fresh view needs the modes the program enabled before it attached.
+    // After actual loss, this suffix also disables modes whose reset bytes
+    // were lost and reconciles the alternate screen without a full reset.
     if !session.mode_reassert.is_empty()
         && socket
-            .send(Message::binary(session.mode_reassert.clone()))
+            .send(session, Message::binary(session.mode_reassert.clone()))
             .await
             .is_err()
     {
         return Err(());
     }
-    session.request_redraw();
-    let (cwd, cwd_rel) =
-        terminal_cwd_payload_blocking(state.try_workspace().ok(), session.blocking_cwd_probe())
-            .await;
-    if send_frame(
-        socket,
-        ServerFrame::Ready {
-            cols: size.cols,
-            rows: size.rows,
-            cwd,
-            cwd_rel,
-        },
-    )
-    .await
-    .is_err()
+    if !recovering || session.missed_bytes > 0 {
+        session.request_redraw();
+    }
+    let (cwd, cwd_rel) = socket.cwd(session).await?;
+    if socket
+        .frame(
+            session,
+            ServerFrame::Ready {
+                cols: size.cols,
+                rows: size.rows,
+                cwd,
+                cwd_rel,
+            },
+        )
+        .await
+        .is_err()
     {
         return Err(());
+    }
+    if socket.input.queue_details {
+        socket
+            .frame(
+                session,
+                ServerFrame::QueueDetails {
+                    messages: session.queued_message_previews(),
+                },
+            )
+            .await?;
     }
     Ok(attached_at)
 }
@@ -1844,12 +1690,15 @@ fn rename_terminal_session(
         .ok_or_else(|| "terminal session is no longer live".to_string())
 }
 
+fn frame_message(frame: ServerFrame) -> Message {
+    Message::text(
+        serde_json::to_string(&frame)
+            .unwrap_or_else(|e| format!(r#"{{"type":"error","message":"serialize failed: {e}"}}"#)),
+    )
+}
+
 async fn send_frame(socket: &mut WebSocket, frame: ServerFrame) -> Result<(), axum::Error> {
-    socket
-        .send(Message::text(serde_json::to_string(&frame).unwrap_or_else(
-            |e| format!(r#"{{"type":"error","message":"serialize failed: {e}"}}"#),
-        )))
-        .await
+    socket.send(frame_message(frame)).await
 }
 
 fn path_to_wire(path: PathBuf) -> String {
@@ -2105,6 +1954,10 @@ mod program_status_tests;
 #[cfg(all(test, unix))]
 #[path = "terminal_queue_details_tests.rs"]
 mod queue_details_tests;
+
+#[cfg(all(test, unix))]
+#[path = "terminal_streamlag_tests.rs"]
+mod streamlag_tests;
 
 #[cfg(test)]
 #[path = "terminal_pty_tests.rs"]
@@ -2742,7 +2595,7 @@ mod tests {
     /// `std::fs::File` guard is `Send` (held across `.await` on the
     /// multi-thread runtime is fine) and releases on drop / process
     /// exit.
-    fn pty_test_lock() -> std::fs::File {
+    pub(super) fn pty_test_lock() -> std::fs::File {
         let path = std::env::temp_dir().join(FS_TIMING_GATE);
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -2761,7 +2614,7 @@ mod tests {
     /// by seconds. The cross-process `pty_test_lock` gate is the primary
     /// fix (it removes the competing FS-timing load); this budget is the
     /// backstop and should rarely be approached now.
-    const PROBE_BUDGET: Duration = Duration::from_secs(30);
+    pub(super) const PROBE_BUDGET: Duration = Duration::from_secs(30);
 
     fn terminal_workspace_fixture() -> (
         tempfile::TempDir,
@@ -5451,7 +5304,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const WINCH_REPORTER: &str = r#"trap 'w=1' WINCH; printf '<ARMED>\n'; while :; do if [ -n "$w" ]; then w=; stty size | sed 's/.*/<WINCH &>/'; fi; sleep 0.05; done"#;
 
-    fn create_quiet_terminal(state: &AppState, command: &str) -> AttachHandle {
+    pub(super) fn create_quiet_terminal(state: &AppState, command: &str) -> AttachHandle {
         create_terminal_at(state, command, pty_size(Some(80), Some(24)))
     }
 
@@ -6128,7 +5981,7 @@ mod tests {
 
     /// Serve `/api/terminal/ws` from a listener whose accepted sockets inherit
     /// a [`SMALL_SOCKET_BUFFER`] send buffer.
-    async fn serve_terminal_route_with_small_buffers(
+    pub(super) async fn serve_terminal_route_with_small_buffers(
         state: Arc<AppState>,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let socket = tokio::net::TcpSocket::new_v4().expect("tcp socket");
@@ -6153,7 +6006,7 @@ mod tests {
 
     /// Dial a terminal socket over a connection whose receive buffer is
     /// [`SMALL_SOCKET_BUFFER`].
-    async fn dial_terminal_with_small_buffer(
+    pub(super) async fn dial_terminal_with_small_buffer(
         address: std::net::SocketAddr,
         query: &str,
     ) -> TerminalClient {
