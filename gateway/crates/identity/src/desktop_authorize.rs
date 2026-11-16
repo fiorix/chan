@@ -156,6 +156,17 @@ const KEY_DESKTOP_CSRF: &str = "desktop_authorize_csrf";
 /// the scheme `http`, and the port free; only the path is fixed here.
 const LOOPBACK_CALLBACK_PATH: &str = "/auth/callback";
 
+/// The single registered mobile callback. The mobile app has no
+/// loopback listener; the OS routes this custom scheme to the app,
+/// so the value is pinned whole by [`validate_mobile_redirect_uri`]
+/// with no free field.
+const MOBILE_CALLBACK_URI: &str = "chan://auth/callback";
+
+/// The single path the mobile `redirect_uri` may carry. The scheme
+/// must be `chan` and the host `auth` (parsed-component equality,
+/// [`validate_mobile_redirect_uri`]); only the path is fixed here.
+const MOBILE_CALLBACK_PATH: &str = "/callback";
+
 /// Ninety-day ceiling on desktop credentials. The clamp prevents a
 /// hostile or buggy desktop build from issuing year-long credentials.
 const MAX_EXPIRES_IN_SECS: i64 = 90 * 86_400;
@@ -354,6 +365,49 @@ fn validate_loopback_redirect_uri(raw: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate the registered mobile `redirect_uri` by PARSED-COMPONENT
+/// equality against [`MOBILE_CALLBACK_URI`] -- never text matching.
+/// Each rule names the bypass it blocks.
+fn validate_mobile_redirect_uri(raw: &str) -> Result<()> {
+    let url = Url::parse(raw).map_err(|_| Error::BadRequest("invalid redirect_uri".into()))?;
+    // Scheme `chan` only, matched post-parse: the OS routes the
+    // callback to the registered handler by scheme, so any other
+    // scheme would deliver the code where the app never sees it.
+    if url.scheme() != "chan" {
+        return Err(Error::BadRequest("invalid redirect_uri".into()));
+    }
+    // Host by parsed value, not substring: `chan://auth@evil.example/`
+    // parses with host `evil.example` and `auth` in userinfo, so a
+    // text check would hand the code to evil.example; `auth.evil` and
+    // `authx` are different hosts, not the registered one.
+    match url.host_str() {
+        Some("auth") => {}
+        _ => return Err(Error::BadRequest("invalid redirect_uri".into())),
+    }
+    // No port: the registered value carries none, and a port on a
+    // custom scheme is either a typo or a smuggle for a parser that
+    // keeps it.
+    if url.port().is_some() {
+        return Err(Error::BadRequest("invalid redirect_uri".into()));
+    }
+    // Path exact, not starts_with: `/callback/x` or `/callbackX`
+    // would otherwise slip a different endpoint past the pin.
+    if url.path() != MOBILE_CALLBACK_PATH {
+        return Err(Error::BadRequest("invalid redirect_uri".into()));
+    }
+    // No query/fragment/userinfo/password: userinfo is the host-spoof
+    // vector above; a query/fragment would let a requester smuggle
+    // extra state into the callback the app never expects.
+    if url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(Error::BadRequest("invalid redirect_uri".into()));
+    }
+    Ok(())
+}
+
 /// Query shape parsed from the request URL.
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
@@ -396,7 +450,8 @@ pub struct AuthorizeParams {
 /// Parse + validate. `Err` is a 400; the desktop client expects to fix
 /// and retry its query string before any loopback redirect happens.
 fn validate(q: AuthorizeQuery, enrollment_offered: bool) -> Result<AuthorizeParams> {
-    validate_loopback_redirect_uri(&q.redirect_uri)?;
+    validate_loopback_redirect_uri(&q.redirect_uri)
+        .or_else(|_| validate_mobile_redirect_uri(&q.redirect_uri))?;
     if q.code_challenge_method != "S256" {
         return Err(Error::BadRequest("invalid code_challenge_method".into()));
     }
@@ -1092,12 +1147,53 @@ mod tests {
             "http://127.0.0.1:54321/auth/callback?x=1",
             "http://127.0.0.1:54321/auth/callback#frag",
             "http://user:pass@127.0.0.1:54321/auth/callback",
-            // the removed custom scheme.
-            "chan://auth/callback",
             "",
         ] {
             assert!(
                 validate_loopback_redirect_uri(bad).is_err(),
+                "{bad} should reject"
+            );
+        }
+    }
+
+    // --- validate_mobile_redirect_uri: accept + reject BY NAME ---
+
+    #[test]
+    fn mobile_redirect_uri_accepts_the_registered_value() {
+        assert_eq!(MOBILE_CALLBACK_URI, "chan://auth/callback");
+        assert!(validate_mobile_redirect_uri("chan://auth/callback").is_ok());
+    }
+
+    #[test]
+    fn mobile_redirect_uri_rejects_named_bypasses() {
+        for bad in [
+            // query smuggle: the registered value carries no query.
+            "chan://auth/callback?code=x",
+            // fragment smuggle.
+            "chan://auth/callback#frag",
+            // userinfo host-spoof: host is evil.example, auth in
+            // userinfo; a text check would hand the code to evil.
+            "chan://auth@evil.example/callback",
+            "chan://user:pass@auth/callback",
+            // prefix games on host and path.
+            "chan://auth.evil.example/callback",
+            "chan://authx/callback",
+            "chan://auth/callback/x",
+            "chan://auth/callbackX",
+            "chan://auth/cb",
+            // the registered value carries no port.
+            "chan://auth:88/callback",
+            // wrong scheme, missing host, missing path.
+            "chanx://auth/callback",
+            "https://auth/callback",
+            "chan:auth/callback",
+            "chan:///callback",
+            "chan://auth",
+            "chan://auth/",
+            "",
+        ] {
+            assert!(
+                validate_mobile_redirect_uri(bad).is_err(),
                 "{bad} should reject"
             );
         }
@@ -1118,10 +1214,20 @@ mod tests {
     }
 
     #[test]
+    fn validates_mobile_query() {
+        // The registered mobile callback validates like loopback:
+        // same PKCE, same scope rules, same clamp.
+        let mut q = base_query();
+        q.redirect_uri = "chan://auth/callback".into();
+        let p = validate(q, false).unwrap();
+        assert_eq!(p.redirect_uri, "chan://auth/callback");
+        assert_eq!(p.scopes, vec!["tunnel".to_string()]);
+    }
+
+    #[test]
     fn rejects_wrong_redirect_uri() {
         for bad in [
             "https://attacker.example/cb",
-            "chan://auth/callback",
             "http://localhost:54321/auth/callback",
             "",
         ] {
@@ -1281,6 +1387,30 @@ mod tests {
     }
 
     #[test]
+    fn success_url_mobile_carries_code_and_state_as_query() {
+        let mut p = params();
+        p.redirect_uri = MOBILE_CALLBACK_URI.into();
+        let url = success_url(&p, "the-code");
+        assert!(url.starts_with("chan://auth/callback?"), "got {url}");
+        assert!(!url.contains('#'), "no fragment: {url}");
+        assert!(url.contains("code=the-code"), "got {url}");
+        assert!(url.contains("state=abc+xyz"), "got {url}");
+        assert!(!url.contains("secret="), "got {url}");
+    }
+
+    #[test]
+    fn error_url_mobile_carries_reason_and_state_as_query() {
+        let mut p = params();
+        p.redirect_uri = MOBILE_CALLBACK_URI.into();
+        let url = error_url(&p, "user_cancelled");
+        assert!(url.starts_with("chan://auth/callback?"), "got {url}");
+        assert!(!url.contains('#'), "no fragment: {url}");
+        assert!(url.contains("error=user_cancelled"), "got {url}");
+        assert!(url.contains("state=abc+xyz"), "got {url}");
+        assert!(!url.contains("code="), "error carries no code: {url}");
+    }
+
+    #[test]
     fn loopback_urls_contain_no_html_attr_breakers() {
         // The property that makes embedding the URL in the handoff
         // page's attributes safe: byte_serialize percent-encodes every
@@ -1376,7 +1506,7 @@ mod tests {
         assert_eq!(j["id"], "00000000-0000-0000-0000-000000000000");
     }
 
-    // --- handoff page (loopback target) ---
+    // --- handoff page ---
 
     #[test]
     fn handoff_html_embeds_target_twice_and_escapes() {
@@ -1410,6 +1540,22 @@ mod tests {
         assert!(html.contains("error=user_cancelled"), "{html}");
         assert!(html.contains("<h1>Request cancelled</h1>"), "{html}");
         assert!(html.contains("No token was issued."), "{html}");
+    }
+
+    #[test]
+    fn handoff_html_embeds_mobile_target_twice() {
+        // The meta refresh + manual link mechanics carry the mobile
+        // callback the same way they carry loopback.
+        let mut p = params();
+        p.redirect_uri = MOBILE_CALLBACK_URI.into();
+        let url = success_url(&p, "the-code");
+        let html = render_handoff_html(&Handoff::Success, &url);
+        let escaped = pages::html_escape(&url);
+        assert_eq!(
+            html.matches(&escaped).count(),
+            2,
+            "meta + link, got: {html}"
+        );
     }
 
     // --- consent page ---
