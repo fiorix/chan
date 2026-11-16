@@ -723,22 +723,52 @@ pub fn handoff_forced() -> bool {
 /// The right to serve the well-known endpoint, taken apart from the bind so
 /// a desktop can learn at the very start of its boot whether another desktop
 /// serves the endpoint, and keep the right through the rest of its boot. On
-/// unix it is the endpoint's flock (`take_stable_lock`). On Windows it is the
-/// first instance of a pipe of its own beside the endpoint's, `<endpoint>.claim`,
-/// which no other process can create while it exists and no client opens: a
-/// pipe's first instance takes a client before anyone reads it, so the
-/// endpoint's own pipe is created only when the listener starts, and a client
-/// during the boot meets no pipe instead of one nobody reads. The pipe
-/// namespace is one for the whole machine, so two sessions of one account
-/// meet the same claim. It ends when the claim, or the listener started on
-/// it, is dropped, and with the process.
+/// unix it is the endpoint's flock (`take_stable_lock`). On Windows it is a
+/// file lock in the account's protected local profile directory. The
+/// `<endpoint>.claim` pipe is only a boot marker; a foreign pipe of that name
+/// cannot hold the lock. The endpoint's pipe is created only when the
+/// listener starts, so a client during boot cannot enqueue an unread request.
+/// The claim ends when it, or the listener started on it, is dropped.
 #[derive(Debug)]
 pub struct EndpointClaim {
     socket_path: PathBuf,
     #[cfg(unix)]
     lock: std::fs::File,
     #[cfg(windows)]
-    claim_pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    windows: WindowsClaim,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsClaim {
+    // No delete sharing: the checked directory and lock cannot be replaced
+    // while this handle or its listener holds the claim.
+    _marker: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    _lock: std::fs::File,
+    _directory: std::fs::File,
+}
+
+#[cfg(windows)]
+impl EndpointClaim {
+    /// Retry the optional boot marker for up to 200 ms while an older desktop drains.
+    /// Its endpoint and marker can close at different times; the protected
+    /// file lock remains authoritative if marker creation still fails.
+    pub async fn refresh_boot_marker(&mut self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        while self.windows._marker.is_none() {
+            self.windows._marker = create_claim_pipe(&self.socket_path).ok();
+            if self.windows._marker.is_some() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(20)),
+            )
+            .await;
+        }
+        if self.windows._marker.is_none() {
+            tracing::debug!(endpoint = %self.socket_path.display(), "boot marker refresh exhausted its 200 ms bound; keeping the file claim");
+        }
+    }
 }
 
 /// Why [`claim_endpoint_at`] did not claim the endpoint.
@@ -746,12 +776,6 @@ pub struct EndpointClaim {
 pub enum ClaimError {
     /// A live process of this account holds it.
     Held(std::io::Error),
-    /// A process of another account holds the endpoint's name in a way this
-    /// account cannot reach (on Windows, a claim pipe that refuses it
-    /// access). That is no holder of this account's: no launch of this
-    /// account can ask it to come forward, so the launch boots without the
-    /// listener rather than exit beside it.
-    Foreign(std::io::Error),
     /// The claim could not be tried: the runtime directory is missing or not
     /// the user's, the lock file cannot be opened, or the platform has no
     /// endpoint.
@@ -761,9 +785,7 @@ pub enum ClaimError {
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaimError::Held(error)
-            | ClaimError::Foreign(error)
-            | ClaimError::Unavailable(error) => error.fmt(f),
+            ClaimError::Held(error) | ClaimError::Unavailable(error) => error.fmt(f),
         }
     }
 }
@@ -773,9 +795,7 @@ impl std::error::Error for ClaimError {}
 impl From<ClaimError> for std::io::Error {
     fn from(error: ClaimError) -> Self {
         match error {
-            ClaimError::Held(error)
-            | ClaimError::Foreign(error)
-            | ClaimError::Unavailable(error) => error,
+            ClaimError::Held(error) | ClaimError::Unavailable(error) => error,
         }
     }
 }
@@ -793,38 +813,122 @@ pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError
     }
 }
 
-/// Claim the endpoint at `socket_path` (see [`EndpointClaim`]). The claim's
-/// pipe registers with the tokio reactor, so this must be called from within
-/// a tokio runtime, like [`start_listener`].
-///
-/// The claim is held when this account's claim pipe already has its one
-/// instance. A claim pipe of the name that refuses this account access is
-/// another account's, since this account's grants it full access: no holder
-/// of this account's ([`ClaimError::Foreign`]). Nothing that holds this
-/// account's claim serves the endpoint without it, so an endpoint pipe some
-/// other process created first does not keep the claim from this launch; the
-/// listener's first instance then fails on it, and the desktop runs without
-/// its listener, keeping the claim.
+/// Claim the endpoint with an account-local file lock. The optional boot
+/// marker registers with Tokio, so call within a runtime. The well-known
+/// endpoint uses `%LOCALAPPDATA%\chan\run\desktop.lock`; explicitly supplied
+/// endpoints use a digest of their case-insensitive pipe name in the same
+/// protected directory, keeping isolated listeners independent.
 #[cfg(windows)]
 pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError> {
-    // What CreateNamedPipe answers for a claim pipe that already has an
-    // instance: pipe busy when the name is at its instance limit, which this
-    // account's claim pipe of one instance always is, and access denied when
-    // the pipe's security grants this account no instance of it.
-    const ERROR_ACCESS_DENIED: i32 = 5;
-    const ERROR_PIPE_BUSY: i32 = 231;
+    let local = std::env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            ClaimError::Unavailable(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no absolute LOCALAPPDATA for the desktop claim",
+            ))
+        })?;
+    let parent = local.join("chan");
+    std::fs::create_dir_all(&parent).map_err(ClaimError::Unavailable)?;
+    claim_endpoint_in(socket_path, &parent.join("run"))
+}
 
-    match create_claim_pipe(socket_path) {
-        Ok(claim_pipe) => Ok(EndpointClaim {
-            socket_path: socket_path.to_path_buf(),
-            claim_pipe,
-        }),
-        Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => Err(ClaimError::Held(error)),
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-            Err(ClaimError::Foreign(error))
-        }
-        Err(error) => Err(ClaimError::Unavailable(error)),
+#[cfg(windows)]
+fn windows_claim_filename(socket_path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::ffi::OsStrExt;
+
+    let sid = chan_winpipe::current_account_sid()?;
+    if socket_path
+        .to_str()
+        .is_some_and(|path| path.eq_ignore_ascii_case(&endpoint_for_account(sid).to_string_lossy()))
+    {
+        return Ok("desktop.lock".into());
     }
+    let mut digest = Sha256::new();
+    // Named pipes compare without ASCII case; encode UTF-16 losslessly so
+    // malformed UTF-16 cannot alias a different explicit endpoint.
+    for unit in socket_path.as_os_str().encode_wide() {
+        let folded = if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        };
+        digest.update(folded.to_le_bytes());
+    }
+    Ok(format!("endpoint-{:x}.lock", digest.finalize()))
+}
+
+#[cfg(windows)]
+fn claim_endpoint_in(socket_path: &Path, dir: &Path) -> Result<EndpointClaim, ClaimError> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    let unavailable = ClaimError::Unavailable;
+    match chan_winpipe::create_owner_only_dir(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(unavailable(error)),
+    }
+    let directory = chan_winpipe::open_dir(dir).map_err(unavailable)?;
+    let metadata = directory.metadata().map_err(unavailable)?;
+    let sid = chan_winpipe::current_account_sid().map_err(unavailable)?;
+    let descriptor = chan_winpipe::file_security_sddl(&directory).map_err(unavailable)?;
+    if !metadata.is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !chan_winpipe::grants_account_alone(&descriptor, sid)
+    {
+        return Err(unavailable(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "desktop claim directory {} is not owner-controlled",
+                dir.display()
+            ),
+        )));
+    }
+    let lock = chan_winpipe::open_owner_only_file(
+        &dir.join(windows_claim_filename(socket_path).map_err(unavailable)?),
+    )
+    .map_err(unavailable)?;
+    let metadata = lock.metadata().map_err(unavailable)?;
+    let descriptor = chan_winpipe::file_security_sddl(&lock).map_err(unavailable)?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !chan_winpipe::grants_account_alone(&descriptor, sid)
+    {
+        return Err(unavailable(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "desktop claim is not an owner-controlled regular file",
+        )));
+    }
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(ClaimError::Held(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "desktop claim is held",
+            )))
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(unavailable(error)),
+    }
+    let marker = match create_claim_pipe(socket_path) {
+        Ok(pipe) => Some(pipe),
+        Err(error) => {
+            tracing::debug!(%error, "desktop boot marker unavailable; file claim remains held");
+            None
+        }
+    };
+    Ok(EndpointClaim {
+        socket_path: socket_path.to_owned(),
+        windows: WindowsClaim {
+            _directory: directory,
+            _lock: lock,
+            _marker: marker,
+        },
+    })
 }
 
 /// Create the claim pipe of the endpoint at `socket_path`: the first, and
@@ -856,9 +960,8 @@ fn claim_pipe_name(socket_path: &Path) -> std::ffi::OsString {
 enum PipeListing {
     /// Neither pipe has an instance: no desktop.
     Absent,
-    /// The claim pipe has an instance and the endpoint's pipe has none: a
-    /// desktop that claimed the endpoint and has not started its listener,
-    /// which is a desktop still booting.
+    /// A boot marker exists without an endpoint. A foreign marker can also
+    /// produce this listing; it conveys no ownership of the file lock.
     Booting,
     /// The endpoint's pipe has an instance: a listener serves it, or a
     /// process created a pipe of its name, which a client tells apart by the
@@ -927,10 +1030,9 @@ fn classify_listing(
     }
 }
 
-/// Whether a desktop holds the claim of the endpoint at `socket_path` and
-/// has not started its listener yet, which is a desktop still booting
-/// ([`PipeListing::Booting`]; an unreadable listing is not). On unix the
-/// claim is the flock beside the socket, and this reads false.
+/// Whether the boot marker exists without an endpoint pipe. A foreign
+/// marker can make this hint wrong; it cannot hold the file claim. An
+/// unreadable listing is not a boot reading. On unix this reads false.
 #[cfg(windows)]
 pub fn endpoint_is_booting_at(socket_path: &Path) -> bool {
     endpoint_listing_at(socket_path).booting()
@@ -1005,7 +1107,7 @@ pub struct ListenerHandle {
     /// accept loop that stops while its desktop runs leaves the endpoint
     /// claimed.
     #[cfg(windows)]
-    _claim: tokio::net::windows::named_pipe::NamedPipeServer,
+    _claim: WindowsClaim,
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1090,11 +1192,11 @@ impl Drop for ListenerHandle {
 /// can connect (defense in depth on top of the per-user directory). Must be
 /// called from within a tokio runtime.
 ///
-/// Claims the endpoint first and fails while a live process holds it, with
-/// the error the claim met: `AddrInUse` on unix; on Windows the claim pipe's
-/// pipe-busy error, its access-denied error for another account's claim
-/// pipe, or the listener's own when another process created the endpoint's
-/// pipe first. [`start_claimed_listener`] serves a claim taken earlier.
+/// Claims the endpoint first and returns `AddrInUse` while a live process
+/// holds its file lock on Unix or Windows. An unavailable lock or an endpoint
+/// another process reserved returns the corresponding claim or bind error.
+/// A foreign Windows boot marker does not prevent the claim.
+/// [`start_claimed_listener`] serves a claim taken earlier.
 #[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
 where
@@ -1259,7 +1361,7 @@ where
     };
     let EndpointClaim {
         socket_path,
-        claim_pipe,
+        windows,
     } = claim;
     let pipe_name = socket_path.as_os_str().to_owned();
 
@@ -1309,7 +1411,7 @@ where
         socket_path,
         stop: Some(stop),
         accept_loop: Some(accept_loop),
-        _claim: claim_pipe,
+        _claim: windows,
     })
 }
 
@@ -1490,7 +1592,9 @@ async fn connect_endpoint(
     timeout: Duration,
 ) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
     let account = chan_winpipe::current_account_sid().ok()?;
-    connect_endpoint_as(socket_path, timeout, account).await
+    connect_endpoint_as(socket_path, timeout, account)
+        .await
+        .ok()
 }
 
 /// [`connect_endpoint`] for a client of `account`, so a test can stand in
@@ -1500,7 +1604,7 @@ async fn connect_endpoint_as(
     socket_path: &Path,
     timeout: Duration,
     account: &str,
-) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, EndpointProbe> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     // Win32 ERROR_PIPE_BUSY: every instance of the pipe is taken.
@@ -1516,21 +1620,48 @@ async fn connect_endpoint_as(
             {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            // No pipe (no desktop, or one still booting), access denied
-            // (another account's pipe), or busy past the bound.
-            Err(_) => return None,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => return Err(EndpointProbe::Busy),
+            // An inaccessible endpoint, including an unreadable server
+            // account below, is no authenticated desktop.
+            Err(_) => return Err(EndpointProbe::AbsentOrForeign),
         }
     };
     match chan_winpipe::server_account_sid(&client) {
-        Ok(server) if server == account => Some(client),
+        Ok(server) if server == account => Ok(client),
         served => {
             tracing::debug!(
                 endpoint = %socket_path.display(),
                 ?served,
                 "the handoff endpoint is not served by this account; nothing is sent to it"
             );
-            None
+            Err(EndpointProbe::AbsentOrForeign)
         }
+    }
+}
+
+/// A Windows endpoint's connect-only reading for the startup guard. A busy
+/// pipe has no readable server account until a client instance opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointProbe {
+    /// A connection authenticated the server as this process's account.
+    SameAccount,
+    /// No connection, or its server account was foreign or unreadable.
+    AbsentOrForeign,
+    /// Every instance remained occupied through the probe budget.
+    Busy,
+}
+
+/// Probe an explicit endpoint without writing a request. The guard can
+/// retry [`EndpointProbe::Busy`] within its own bound while retaining the
+/// protected file claim. An unreadable account is foreign, with no retry.
+#[cfg(windows)]
+pub async fn probe_endpoint_at(socket_path: &Path, budget: Duration) -> EndpointProbe {
+    let Ok(account) = chan_winpipe::current_account_sid() else {
+        return EndpointProbe::AbsentOrForeign;
+    };
+    match connect_endpoint_as(socket_path, budget.min(PROBE_TIMEOUT), account).await {
+        Ok(_) => EndpointProbe::SameAccount,
+        Err(reading) => reading,
     }
 }
 
@@ -3373,6 +3504,27 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_claim_filenames_follow_endpoint_identity() {
+        let endpoint = well_known_socket_path().unwrap();
+        assert_eq!(windows_claim_filename(&endpoint).unwrap(), "desktop.lock");
+        let uppercase = PathBuf::from(endpoint.to_str().unwrap().to_ascii_uppercase());
+        assert_eq!(windows_claim_filename(&uppercase).unwrap(), "desktop.lock");
+        let first = test_pipe("claim-name-one");
+        let second = test_pipe("claim-name-two");
+        let upper = PathBuf::from(first.to_str().unwrap().to_ascii_uppercase());
+        assert_eq!(
+            windows_claim_filename(&first).unwrap(),
+            windows_claim_filename(&upper).unwrap()
+        );
+        assert_ne!(
+            windows_claim_filename(&first).unwrap(),
+            windows_claim_filename(&second).unwrap()
+        );
+        assert_ne!(windows_claim_filename(&first).unwrap(), "desktop.lock");
+    }
+
     /// Every Windows client, the probe and each request, opens the endpoint
     /// through `connect_endpoint_as`, so none writes before the check of the
     /// server's account: the module opens a pipe as a client in that one
@@ -4731,24 +4883,29 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn listener_round_trip_upgrade_checked_pipe() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         let pipe = PathBuf::from(format!(
             r"\\.\pipe\chan-test-upgrade-{}",
             std::process::id()
         ));
-        let _handle = start_listener(pipe.clone(), move |req| async move {
-            match req {
-                Request::Upgrade { check_only, .. } => {
-                    assert!(check_only, "test sends check_only=true");
-                    Response::UpgradeChecked {
-                        desktop_version: CHAN_VERSION.into(),
-                        available: Some("9.9.9".into()),
+        let _handle = start_claimed_listener(
+            claim_endpoint_in(&pipe, &dir).unwrap(),
+            move |req| async move {
+                match req {
+                    Request::Upgrade { check_only, .. } => {
+                        assert!(check_only, "test sends check_only=true");
+                        Response::UpgradeChecked {
+                            desktop_version: CHAN_VERSION.into(),
+                            available: Some("9.9.9".into()),
+                        }
                     }
+                    _ => Response::Error {
+                        message: "unexpected request".into(),
+                    },
                 }
-                _ => Response::Error {
-                    message: "unexpected request".into(),
-                },
-            }
-        })
+            },
+        )
         .unwrap();
         match try_upgrade_at(&pipe, true).await {
             UpgradeOutcome::Checked { available, .. } => {
@@ -4764,12 +4921,17 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn listener_round_trip_activated_pipe() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         let pipe = PathBuf::from(format!(
             r"\\.\pipe\chan-test-activate-{}",
             std::process::id()
         ));
-        let claim = claim_endpoint_at(&pipe).unwrap();
-        assert!(matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))));
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
+        assert!(matches!(
+            claim_endpoint_in(&pipe, &dir),
+            Err(ClaimError::Held(_))
+        ));
         let _handle = start_claimed_listener(claim, move |req| async move {
             match req {
                 Request::Activate { .. } => Response::Activated {
@@ -4835,12 +4997,14 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_request_sent_during_the_boot_is_never_served_late() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use std::sync::{Arc, Mutex};
         use tokio::io::AsyncWriteExt;
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let pipe = test_pipe("boot-late");
-        let claim = claim_endpoint_at(&pipe).unwrap();
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
         if let Ok(mut early) = ClientOptions::new().open(&pipe) {
             let mut line = serde_json::to_vec(&Request::OpenWorkspace {
                 protocol: PROTOCOL_VERSION,
@@ -4879,8 +5043,10 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_probe_during_the_boot_turns_no_client_away() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         let pipe = test_pipe("boot-probe");
-        let claim = claim_endpoint_at(&pipe).unwrap();
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
         let started = std::time::Instant::now();
         assert!(
             !desktop_is_live_at(&pipe).await,
@@ -4909,10 +5075,12 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_listener_whose_rearm_fails_keeps_the_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use tokio::net::windows::named_pipe::ClientOptions;
 
         let pipe = test_pipe("rearm");
-        let claim = claim_endpoint_at(&pipe).unwrap();
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
         let handle = start_listener_with_instances(
             claim,
             |_req| async {
@@ -4938,11 +5106,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(
-            matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))),
+            matches!(claim_endpoint_in(&pipe, &dir), Err(ClaimError::Held(_))),
             "the endpoint stays claimed while the desktop runs"
         );
         drop(handle);
-        assert!(claim_endpoint_at(&pipe).is_ok());
+        assert!(claim_endpoint_in(&pipe, &dir).is_ok());
     }
 
     /// A claim whose listener has not started reads as a desktop booting,
@@ -4951,10 +5119,12 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_claim_without_its_listener_reads_as_booting() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         let pipe = test_pipe("booting");
         assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
         assert!(!endpoint_is_booting_at(&pipe), "no claim");
-        let claim = claim_endpoint_at(&pipe).unwrap();
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
         assert_eq!(
             endpoint_listing_at(&pipe),
             PipeListing::Booting,
@@ -4974,7 +5144,7 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(claim_endpoint_at(&pipe).is_ok());
+        assert!(claim_endpoint_in(&pipe, &dir).is_ok());
     }
 
     /// A client writes nothing to an endpoint whose server runs as another
@@ -4984,12 +5154,14 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn a_pipe_served_by_another_account_is_never_written_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use std::sync::{Arc, Mutex};
 
         let pipe = test_pipe("other-account");
         let served = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&served);
-        let _handle = start_listener(pipe.clone(), move |req| {
+        let _handle = start_claimed_listener(claim_endpoint_in(&pipe, &dir).unwrap(), move |req| {
             let seen = Arc::clone(&seen);
             async move {
                 if let Request::OpenWorkspace { workspace_path, .. } = req {
@@ -5002,7 +5174,7 @@ mod tests {
         assert!(
             connect_endpoint_as(&pipe, CONNECT_TIMEOUT, "S-1-5-21-0-0-0-1")
                 .await
-                .is_none(),
+                .is_err(),
             "a server of another account is refused"
         );
         // A request written to the refused client would be served by now.
@@ -5016,13 +5188,14 @@ mod tests {
         assert_eq!(*served.lock().unwrap(), ["ours"]);
     }
 
-    /// The claim pipe and the endpoint's pipe grant this account alone: owned
-    /// by its SID, with a protected DACL whose one entry is that SID, read
-    /// back from the claim's own end and from two clients of the listener, the
-    /// second reaching the instance armed after the first.
+    /// The claim directory, lock file, marker and endpoint grant this account
+    /// alone. Their descriptors are read from the open handles, including two
+    /// clients of the listener so the rearmed pipe instance is checked too.
     #[cfg(windows)]
     #[tokio::test]
     async fn the_claim_and_the_endpoint_grant_this_account_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use tokio::net::windows::named_pipe::ClientOptions;
 
         const ERROR_PIPE_BUSY: i32 = 231;
@@ -5036,8 +5209,10 @@ mod tests {
             )
         };
         let pipe = test_pipe("owner-only");
-        let claim = claim_endpoint_at(&pipe).unwrap();
-        owner_only(chan_winpipe::security_sddl(&claim.claim_pipe).unwrap());
+        let claim = claim_endpoint_in(&pipe, &dir).unwrap();
+        owner_only(chan_winpipe::security_sddl(claim.windows._marker.as_ref().unwrap()).unwrap());
+        owner_only(chan_winpipe::file_security_sddl(&claim.windows._directory).unwrap());
+        owner_only(chan_winpipe::file_security_sddl(&claim.windows._lock).unwrap());
         let _handle = start_claimed_listener(claim, |_req| async { opened() }).unwrap();
         for _ in 0..2 {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -5064,6 +5239,8 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn an_endpoint_pipe_without_a_claim_pipe_holds_no_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use tokio::net::windows::named_pipe::ServerOptions;
 
         let pipe = test_pipe("endpoint-first");
@@ -5071,24 +5248,27 @@ mod tests {
             .first_pipe_instance(true)
             .create(&pipe)
             .unwrap();
-        let claim = claim_endpoint_at(&pipe).expect("no claim pipe holds the endpoint");
+        let claim = claim_endpoint_in(&pipe, &dir).expect("no claim pipe holds the endpoint");
         let failed = start_claimed_listener(claim, |_req| async { opened() })
             .err()
             .expect("the endpoint's name is taken");
-        assert!(matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))));
+        assert!(matches!(
+            claim_endpoint_in(&pipe, &dir),
+            Err(ClaimError::Held(_))
+        ));
         assert_eq!(endpoint_listing_at(&pipe), PipeListing::Served);
         assert!(!endpoint_is_booting_at(&pipe));
         drop((first, failed));
-        assert!(claim_endpoint_at(&pipe).is_ok());
+        assert!(claim_endpoint_in(&pipe, &dir).is_ok());
     }
 
-    /// A claim pipe of the endpoint's name that refuses this account access
-    /// is another account's, which no launch of this account can ask to come
-    /// forward: no holder of this account's. The test stands in for that
-    /// account with a claim pipe whose security grants LocalSystem alone.
+    /// A pipe granting LocalSystem alone stands in for another account's
+    /// pipe. Its name cannot keep this account from holding its own claim.
     #[cfg(windows)]
     #[tokio::test]
     async fn a_claim_pipe_this_account_cannot_open_is_no_holder() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
         use tokio::net::windows::named_pipe::ServerOptions;
 
         let pipe = test_pipe("foreign-claim");
@@ -5100,18 +5280,225 @@ mod tests {
             "D:P(A;;GA;;;SY)",
         )
         .unwrap();
+        let ours =
+            claim_endpoint_in(&pipe, &dir).expect("a foreign pipe cannot hold the file claim");
         assert!(
-            matches!(claim_endpoint_at(&pipe), Err(ClaimError::Foreign(_))),
-            "another account's claim pipe"
+            matches!(claim_endpoint_in(&pipe, &dir), Err(ClaimError::Held(_))),
+            "the file claim still excludes this account's second launch"
         );
-        let _ours = claim_endpoint_at(&test_pipe("own-claim")).unwrap();
+        drop(ours);
         assert!(
-            matches!(
-                claim_endpoint_at(&test_pipe("own-claim")),
-                Err(ClaimError::Held(_))
+            claim_endpoint_in(&pipe, &dir).is_ok(),
+            "the foreign pipe remains"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_busy_claim_pipe_cannot_hold_the_file_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("busy-foreign-claim");
+        let sid = chan_winpipe::current_account_sid().unwrap();
+        let _theirs = chan_winpipe::create_with_sddl(
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .access_outbound(false)
+                .max_instances(1),
+            claim_pipe_name(&pipe),
+            &chan_winpipe::owner_only_sddl(sid),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let _ours = claim_endpoint_in(&pipe, &dir).expect("a busy pipe cannot hold the file claim");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            claim_endpoint_in(&pipe, &dir),
+            Err(ClaimError::Held(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_pipe_alone_is_only_a_boot_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        let pipe = test_pipe("marker-only");
+        let _marker = create_claim_pipe(&pipe).unwrap();
+        assert!(endpoint_is_booting_at(&pipe));
+        let _ours = claim_endpoint_in(&pipe, &dir).expect("a boot marker holds no file claim");
+        assert!(matches!(
+            claim_endpoint_in(&pipe, &dir),
+            Err(ClaimError::Held(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_retries_the_boot_marker_until_its_holder_releases() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        let pipe = test_pipe("marker-retry");
+        let predecessor = create_claim_pipe(&pipe).unwrap();
+        let mut claim = claim_endpoint_in(&pipe, &dir).unwrap();
+        assert!(claim.windows._marker.is_none());
+        let releasing = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            drop(predecessor);
+        });
+        claim.refresh_boot_marker().await;
+        releasing.await.unwrap();
+        assert!(
+            claim.windows._marker.is_some(),
+            "the claim must create its own marker after the previous holder releases"
+        );
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Booting);
+        assert!(matches!(
+            claim_endpoint_in(&pipe, &dir),
+            Err(ClaimError::Held(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_directory_with_inherited_grants_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        std::fs::create_dir(&dir).unwrap();
+        let pipe = test_pipe("bad-directory");
+        let directory = chan_winpipe::open_dir(&dir).unwrap();
+        let descriptor = chan_winpipe::file_security_sddl(&directory).unwrap();
+        assert!(
+            !chan_winpipe::grants_account_alone(
+                &descriptor,
+                chan_winpipe::current_account_sid().unwrap()
             ),
-            "this account's claim pipe"
+            "the inherited descriptor must exercise the grant refusal: {descriptor}"
         );
+        assert_claim_permission_denied(claim_endpoint_in(&pipe, &dir));
+        assert!(
+            !dir.join(windows_claim_filename(&pipe).unwrap()).exists(),
+            "an untrusted directory must not receive a lock file"
+        );
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+    }
+
+    #[cfg(windows)]
+    fn assert_claim_permission_denied(result: Result<EndpointClaim, ClaimError>) {
+        match result {
+            Err(ClaimError::Unavailable(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected an unavailable permission-denied claim, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_lock_with_an_extra_grant_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        chan_winpipe::create_owner_only_dir(&dir).unwrap();
+        let pipe = test_pipe("bad-lock-grant");
+        let path = dir.join(windows_claim_filename(&pipe).unwrap());
+        let lock = chan_winpipe::open_owner_only_file(&path).unwrap();
+        let granted = std::process::Command::new("icacls")
+            .arg(&path)
+            .args(["/grant", "*S-1-1-0:(R)"])
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+        let descriptor = chan_winpipe::file_security_sddl(&lock).unwrap();
+        assert!(
+            !chan_winpipe::grants_account_alone(
+                &descriptor,
+                chan_winpipe::current_account_sid().unwrap()
+            ),
+            "the fixture must retain its extra grant: {descriptor}"
+        );
+        assert_claim_permission_denied(claim_endpoint_in(&pipe, &dir));
+        assert_eq!(chan_winpipe::file_security_sddl(&lock).unwrap(), descriptor);
+        lock.try_lock()
+            .expect("a refused claim must not hold the file");
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_lock_that_is_a_directory_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        chan_winpipe::create_owner_only_dir(&dir).unwrap();
+        let pipe = test_pipe("lock-directory");
+        let path = dir.join(windows_claim_filename(&pipe).unwrap());
+        chan_winpipe::create_owner_only_dir(&path).unwrap();
+        assert_claim_permission_denied(claim_endpoint_in(&pipe, &dir));
+        assert!(path.is_dir(), "the refused directory must be preserved");
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_lock_that_is_a_symlink_is_unavailable() {
+        use std::io::Write;
+        use std::os::windows::fs::{symlink_file, MetadataExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("run");
+        chan_winpipe::create_owner_only_dir(&dir).unwrap();
+        let pipe = test_pipe("lock-symlink");
+        let path = dir.join(windows_claim_filename(&pipe).unwrap());
+        let target = temp.path().join("target.lock");
+        let mut target_file = chan_winpipe::open_owner_only_file(&target).unwrap();
+        target_file.write_all(b"untouched target").unwrap();
+        symlink_file(&target, &path)
+            .expect("the Windows test account needs file-symlink creation permission");
+        assert_ne!(
+            std::fs::symlink_metadata(&path).unwrap().file_attributes() & 0x400,
+            0,
+            "the fixture must be a reparse point"
+        );
+        assert_claim_permission_denied(claim_endpoint_in(&pipe, &dir));
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched target");
+        target_file
+            .try_lock()
+            .expect("a refused reparse point must not lock its target");
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_directory_that_is_a_junction_is_unavailable() {
+        use std::os::windows::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        chan_winpipe::create_owner_only_dir(&target).unwrap();
+        let dir = temp.path().join("run");
+        let pipe = test_pipe("claim-junction");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&dir)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+        assert_ne!(
+            std::fs::symlink_metadata(&dir).unwrap().file_attributes() & 0x400,
+            0,
+            "the fixture must be a junction"
+        );
+        assert_claim_permission_denied(claim_endpoint_in(&pipe, &dir));
+        assert!(
+            !target.join(windows_claim_filename(&pipe).unwrap()).exists(),
+            "a refused junction must not receive a lock file in its target"
+        );
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(target.is_dir());
     }
 
     /// The pipe directory read by name, without case, and its failure: a

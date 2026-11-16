@@ -1,5 +1,5 @@
-//! The Win32 boundary of chan's named pipes: the account this process runs
-//! as, pipes whose security grants that account alone, and the account the
+//! The Win32 boundary of chan's named pipes and claim directories: the
+//! account this process runs as, owner-only objects, and the account the
 //! server of a pipe runs as.
 //!
 //! Every named pipe on a machine shares one namespace, and a pipe created
@@ -15,7 +15,8 @@
 
 #[cfg(windows)]
 pub use sys::{
-    create_owner_only, create_with_sddl, current_account_sid, grants_account_alone, sddl_sid,
+    create_owner_only, create_owner_only_dir, create_with_sddl, current_account_sid,
+    file_security_sddl, grants_account_alone, open_dir, open_owner_only_file, sddl_sid,
     security_sddl, server_account_sid,
 };
 
@@ -62,21 +63,32 @@ pub fn owner_only_parts(sddl: &str) -> Option<OwnerOnlyParts<'_>> {
 #[cfg(windows)]
 mod sys {
     use std::ffi::{c_void, OsStr};
+    use std::fs::{File, OpenOptions};
     use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
     use std::ptr::null_mut;
     use std::sync::OnceLock;
 
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-    use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
+    use windows_sys::Win32::Foundation::{
+        LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
         ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateDirectoryW, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        READ_CONTROL,
     };
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
     use windows_sys::Win32::System::Threading::{
@@ -115,6 +127,109 @@ mod sys {
         name: impl AsRef<OsStr>,
         sddl: &str,
     ) -> io::Result<NamedPipeServer> {
+        let descriptor = descriptor_from_sddl(sddl)?;
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `attributes` is a SECURITY_ATTRIBUTES whose descriptor lives
+        // until `descriptor` drops, after the call.
+        unsafe {
+            options.create_with_security_attributes_raw(
+                name,
+                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+            )
+        }
+    }
+
+    /// Create `path` with this account as its owner and sole grantee. The
+    /// parent must exist. An existing directory is not changed: the caller
+    /// must open it and validate its descriptor even after a successful create.
+    pub fn create_owner_only_dir(path: &Path) -> io::Result<()> {
+        create_dir_with_sddl(path, &owner_only_sddl(current_account_sid()?))
+    }
+
+    pub(super) fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+        let path = wide_path(path)?;
+        let descriptor = descriptor_from_sddl(sddl)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `path` is NUL-terminated and both it and the descriptor
+        // outlive the call. The descriptor is applied at creation.
+        if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Open a directory's final component without following a reparse point,
+    /// with the rights needed to read its attributes, owner and DACL. The
+    /// caller checks the returned handle is a directory and not a reparse
+    /// point before trusting its descriptor. Keeping the handle prevents the
+    /// directory from being renamed or deleted while it is in use.
+    pub fn open_dir(path: &Path) -> io::Result<File> {
+        // Attribute-only handles do not participate in share-access checks.
+        OpenOptions::new()
+            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    /// Open or create a file for reading, writing and locking, with an
+    /// owner-only descriptor on creation and without truncating existing
+    /// contents. An existing file keeps its descriptor: the caller validates
+    /// it and rejects reparse points and non-files before use. The final
+    /// component is not followed, and deletion is not shared.
+    pub fn open_owner_only_file(path: &Path) -> io::Result<File> {
+        open_file_with_sddl(path, &owner_only_sddl(current_account_sid()?))
+    }
+
+    pub(super) fn open_file_with_sddl(path: &Path, sddl: &str) -> io::Result<File> {
+        let path = wide_path(path)?;
+        let descriptor = descriptor_from_sddl(sddl)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `path` is NUL-terminated; the path, attributes and
+        // descriptor live through the call. No template handle is supplied.
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &attributes,
+                OPEN_ALWAYS,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW returned a valid handle that nothing else owns.
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if path.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        path.push(0);
+        Ok(path)
+    }
+
+    fn descriptor_from_sddl(sddl: &str) -> io::Result<Local> {
         let text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: `text` is NUL-terminated and outlives the call, and
@@ -131,20 +246,7 @@ mod sys {
         if converted == 0 {
             return Err(io::Error::last_os_error());
         }
-        let descriptor = Local(descriptor);
-        let mut attributes = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: 0,
-        };
-        // SAFETY: `attributes` is a SECURITY_ATTRIBUTES whose descriptor lives
-        // until `descriptor` drops, after the call.
-        unsafe {
-            options.create_with_security_attributes_raw(
-                name,
-                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
-            )
-        }
+        Ok(Local(descriptor))
     }
 
     /// The SID of the account the server of `pipe`, a client's end, runs as:
@@ -169,6 +271,19 @@ mod sys {
     /// The owner and the DACL of the object behind `handle`, as SDDL: what a
     /// pipe this process serves, or reached as a client, grants.
     pub fn security_sddl(handle: &impl AsRawHandle) -> io::Result<String> {
+        object_security_sddl(handle, SE_KERNEL_OBJECT)
+    }
+
+    /// The owner and the DACL of a file or directory behind `handle`, as
+    /// SDDL. The handle must grant READ_CONTROL; [`open_dir`] asks for it.
+    pub fn file_security_sddl(handle: &impl AsRawHandle) -> io::Result<String> {
+        object_security_sddl(handle, SE_FILE_OBJECT)
+    }
+
+    fn object_security_sddl(
+        handle: &impl AsRawHandle,
+        object_type: SE_OBJECT_TYPE,
+    ) -> io::Result<String> {
         let parts = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: the handle is open for the borrow of `handle`, the four part
@@ -177,7 +292,7 @@ mod sys {
         let status = unsafe {
             GetSecurityInfo(
                 handle.as_raw_handle(),
-                SE_KERNEL_OBJECT,
+                object_type,
                 parts,
                 null_mut(),
                 null_mut(),
@@ -372,6 +487,7 @@ mod tests {
     #[cfg(windows)]
     mod on_windows {
         use super::super::*;
+        use std::os::windows::fs::MetadataExt;
         use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
 
         const ERROR_ACCESS_DENIED: i32 = 5;
@@ -386,6 +502,180 @@ mod tests {
         /// form the system writes for this account.
         fn assert_owner_only(sddl: &str, sid: &str) {
             assert!(grants_account_alone(sddl, sid), "{sddl} for {sid}");
+        }
+
+        struct TestDir(std::path::PathBuf);
+
+        impl TestDir {
+            fn new(tag: &str) -> Self {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let path = std::env::temp_dir()
+                    .join(format!("chan-winpipe-{tag}-{}-{stamp}", std::process::id()));
+                std::fs::create_dir(&path).unwrap();
+                Self(path)
+            }
+        }
+
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).expect("remove test directory");
+            }
+        }
+
+        #[test]
+        fn an_owner_only_directory_grants_this_account_alone() {
+            let root = TestDir::new("owner-only-dir");
+            let path = root.0.join("run");
+            create_owner_only_dir(&path).unwrap();
+            let directory = open_dir(&path).unwrap();
+            let metadata = directory.metadata().unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.file_attributes() & 0x400, 0, "not a reparse point");
+            assert_owner_only(
+                &file_security_sddl(&directory).unwrap(),
+                current_account_sid().unwrap(),
+            );
+        }
+
+        #[test]
+        fn an_existing_directory_keeps_its_descriptor_for_the_caller_to_check() {
+            let root = TestDir::new("existing-dir");
+            let path = root.0.join("run");
+            let sid = current_account_sid().unwrap();
+            // Read the fixture from the directory, rather than judging the
+            // requested descriptor that Windows may have mapped.
+            super::super::sys::create_dir_with_sddl(
+                &path,
+                &format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GR;;;WD)"),
+            )
+            .unwrap();
+            let directory = open_dir(&path).unwrap();
+            let before = file_security_sddl(&directory).unwrap();
+            assert!(!grants_account_alone(&before, sid), "{before}");
+            assert_eq!(
+                create_owner_only_dir(&path).unwrap_err().kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(file_security_sddl(&directory).unwrap(), before);
+        }
+
+        #[test]
+        fn an_open_directory_cannot_be_replaced() {
+            let root = TestDir::new("stable-dir");
+            let path = root.0.join("run");
+            let moved = root.0.join("moved");
+            create_owner_only_dir(&path).unwrap();
+            let directory = open_dir(&path).unwrap();
+            assert!(std::fs::rename(&path, &moved).is_err());
+            assert!(std::fs::remove_dir(&path).is_err());
+            assert!(directory.metadata().unwrap().is_dir());
+            drop(directory);
+            std::fs::rename(&path, &moved).expect("rename after guard drops");
+        }
+
+        #[test]
+        fn a_directory_handle_opens_the_junction_instead_of_its_target() {
+            let root = TestDir::new("reparse-dir");
+            let target = root.0.join("target");
+            let junction = root.0.join("junction");
+            create_owner_only_dir(&target).unwrap();
+            let created = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(created.status.success(), "{created:?}");
+            let directory = open_dir(&junction).unwrap();
+            assert_ne!(
+                directory.metadata().unwrap().file_attributes() & 0x400,
+                0,
+                "the caller must see the junction, not the target"
+            );
+            drop(directory);
+            std::fs::remove_dir(&junction).unwrap();
+            assert!(target.is_dir());
+        }
+
+        #[test]
+        fn a_directory_path_with_nul_is_rejected_without_truncation() {
+            let root = TestDir::new("nul-dir");
+            let prefix = root.0.join("run");
+            let mut name = prefix.as_os_str().to_owned();
+            name.push("\0suffix");
+            let malformed = std::path::Path::new(&name);
+            assert_eq!(
+                create_owner_only_dir(malformed).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert!(!prefix.exists());
+            create_owner_only_dir(&prefix).unwrap();
+            assert_eq!(
+                open_dir(malformed).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+
+        #[test]
+        fn an_owner_only_file_keeps_its_descriptor_and_contents_when_reopened() {
+            use std::io::{Read, Write};
+
+            let root = TestDir::new("owner-only-file");
+            let path = root.0.join("desktop.lock");
+            let mut first = open_owner_only_file(&path).unwrap();
+            first.write_all(b"retained").unwrap();
+            let descriptor = file_security_sddl(&first).unwrap();
+            assert_owner_only(&descriptor, current_account_sid().unwrap());
+            let mut second = open_owner_only_file(&path).unwrap();
+            assert!(second.metadata().unwrap().is_file());
+            assert_eq!(file_security_sddl(&second).unwrap(), descriptor);
+            let mut contents = String::new();
+            second.read_to_string(&mut contents).unwrap();
+            assert_eq!(contents, "retained");
+            first.try_lock().unwrap();
+            assert!(matches!(
+                second.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            assert!(std::fs::remove_file(&path).is_err());
+            drop(first);
+            second.try_lock().expect("lock after first handle drops");
+            drop(second);
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        #[test]
+        fn an_existing_file_keeps_its_descriptor_for_the_caller_to_check() {
+            let root = TestDir::new("existing-file");
+            let path = root.0.join("desktop.lock");
+            let sid = current_account_sid().unwrap();
+            let file = super::super::sys::open_file_with_sddl(
+                &path,
+                &format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GR;;;WD)"),
+            )
+            .unwrap();
+            let before = file_security_sddl(&file).unwrap();
+            assert!(!grants_account_alone(&before, sid), "{before}");
+            let reopened = open_owner_only_file(&path).unwrap();
+            assert_eq!(file_security_sddl(&reopened).unwrap(), before);
+        }
+
+        #[test]
+        fn a_file_path_with_nul_is_rejected_without_truncation() {
+            let root = TestDir::new("nul-file");
+            let prefix = root.0.join("desktop.lock");
+            let mut name = prefix.as_os_str().to_owned();
+            name.push("\0suffix");
+            assert_eq!(
+                open_owner_only_file(std::path::Path::new(&name))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert!(!prefix.exists());
         }
 
         /// SDDL writes a well-known account by its alias, so the built-in
