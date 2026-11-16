@@ -93,8 +93,8 @@ export default {
       // Save draft: one file at the chosen path, and the editor follows.
       // The promoted file can exist before the server sends its response.
       const promotionResponse = page.waitForResponse(
-        (response) => response.url().includes("/api/drafts/promote"),
-        { timeout: 20_000 },
+        (response) => new URL(response.url()).pathname === "/api/drafts/promote" && response.request().method() === "POST",
+        { timeout: 60_000 },
       ).then((response) => ({ response }), (error) => ({ error }));
       mkdirSync(join(ctx.workspaceDir, dir));
       await saveDraftToWorkspace(page, target, () =>
@@ -120,7 +120,12 @@ export default {
       }
 
       const { response, error } = await promotionResponse;
-      if (error) throw new Error(`the draft promotion response did not arrive within 20000ms: ${error.message}`, { cause: error });
+      if (error) {
+        const reason = error.name === "TargetCloseError" ? "the page closed while waiting for the draft promotion response"
+          : error.name === "TimeoutError" ? "the draft promotion response timed out"
+          : "the draft promotion response wait failed";
+        throw new Error(`${reason} (60000ms limit from arming, before the Save dialog): ${error.message}`, { cause: error });
+      }
       const promotion = {
         status: response.status(),
         request: response.request().postData(),

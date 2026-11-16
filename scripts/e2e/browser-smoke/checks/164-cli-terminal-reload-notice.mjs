@@ -314,28 +314,62 @@ async function preSocketArm(ctx) {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector(".terminal-tab");
     await assertNotice(page);
-    const dismiss = await page.waitForSelector('.cli-reload-notice button[aria-label="Dismiss notice"]', { visible: true });
-    try {
-      await dismiss.scrollIntoView();
-      // The index status pill can cover the notice while earlier file operations settle.
-      details.dismissPoint = await poll("an unobstructed Dismiss notice click point", async () => {
-        const point = await dismiss.clickablePoint();
-        const hit = await dismiss.evaluate((button, point) => {
-          const cover = document.elementFromPoint(point.x, point.y);
-          return {
-            reachable: !button.disabled && !!cover && button.contains(cover),
-            cover: cover ? { tag: cover.tagName, id: cover.id, classes: String(cover.className), text: cover.textContent?.trim().slice(0, 160) } : null,
-          };
-        }, point);
+    const readDismissHit = (point, button = document.querySelector('.cli-reload-notice button[aria-label="Dismiss notice"]')) => {
+      const cover = document.elementFromPoint(point.x, point.y);
+      const describe = (node) => node ? {
+        tag: node.tagName, id: node.id, classes: node.getAttribute("class"),
+        role: node.getAttribute("role"), label: node.getAttribute("aria-label"),
+        text: node.textContent?.trim().slice(0, 160),
+      } : null;
+      const ancestor = cover?.closest('.app-statusbar, [role="dialog"], [role="alertdialog"], dialog')
+        ?? cover?.parentElement?.closest('[id], [aria-label]');
+      return {
+        connected: !!button?.isConnected,
+        disabled: !!button?.disabled,
+        reachable: !!button?.isConnected && !!cover && button.contains(cover),
+        statusbar: !!cover?.closest(".app-statusbar"),
+        cover: describe(cover), ancestor: describe(ancestor),
+      };
+    };
+    // A full suite can leave a 30 s index cooldown followed by rebuilding and embedding.
+    const dismissAttempt = await poll("an unobstructed Dismiss notice click point", async () => {
+      const dismiss = await page.$('.cli-reload-notice button[aria-label="Dismiss notice"]');
+      if (!dismiss) throw new Error("Dismiss notice button is absent");
+      try {
+        let point;
+        try {
+          await dismiss.scrollIntoView();
+          point = await dismiss.clickablePoint();
+        } catch (error) {
+          if (await dismiss.evaluate((button) => !button.isConnected)) return null;
+          return { error };
+        }
+        const hit = await page.evaluate(readDismissHit, point, dismiss);
         ctx.mark("dismiss-click-point", { point, ...hit });
-        if (!hit.reachable) throw new Error(`Dismiss notice is covered at ${JSON.stringify(point)} by ${JSON.stringify(hit.cover)}`);
-        return point;
-      }, 60_000);
-      await page.mouse.click(details.dismissPoint.x, details.dismissPoint.y);
-    } finally {
-      await dismiss.dispose();
+        if (!hit.connected) return null;
+        // poll retries thrown errors; return terminal failures so they escape it immediately.
+        if (hit.disabled) return { error: new Error("Dismiss notice button is disabled") };
+        if (!hit.reachable) {
+          const error = new Error(`Dismiss notice is covered at ${JSON.stringify(point)} by ${JSON.stringify(hit.cover)} in ${JSON.stringify(hit.ancestor)}`);
+          if (hit.statusbar) throw error;
+          return { error };
+        }
+        return { point };
+      } finally {
+        await dismiss.dispose();
+      }
+    }, 90_000);
+    if (dismissAttempt.error) throw dismissAttempt.error;
+    details.dismissPoint = dismissAttempt.point;
+    await page.mouse.click(details.dismissPoint.x, details.dismissPoint.y);
+    try {
+      await page.waitForSelector(".cli-reload-notice", { hidden: true });
+    } catch (error) {
+      const hit = await page.evaluate(readDismissHit, details.dismissPoint)
+        .catch((sampleError) => ({ sampleError: sampleError.message }));
+      ctx.mark("dismiss-click-missed", { point: details.dismissPoint, ...hit });
+      throw new Error(`Dismiss notice stayed visible after the pointer click at ${JSON.stringify(details.dismissPoint)}; current hit: ${JSON.stringify(hit)}; ${error.message}`, { cause: error });
     }
-    await page.waitForSelector(".cli-reload-notice", { hidden: true });
     await ctx.shot("before-socket-dismissed", page);
     await page.waitForFunction((before) => document.querySelector(".terminal-host")?.getBoundingClientRect().height > before,
       {}, details.firstHostHeight);
