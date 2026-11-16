@@ -940,15 +940,20 @@ fn render_consent_html(
         .unwrap_or(&user.username);
     let scopes = params.scopes.join(", ");
     let expires_phrase = humanize_expires(params.expires_in_secs);
-    // The loopback port the result is delivered to, parsed from the
-    // already-validated redirect_uri. A user who did not just start a
-    // sign-in from an app on the local machine sees a request they did not
-    // begin.
-    let port = Url::parse(&params.redirect_uri)
-        .ok()
-        .and_then(|u| u.port())
-        .map(|p| p.to_string())
-        .unwrap_or_default();
+    // The callback target the result is delivered to, named so a user
+    // who did not just start a sign-in sees a request they did not
+    // begin. The loopback arm names the local port; the mobile arm has
+    // no port, so it names the registered app callback instead.
+    let delivery = if validate_mobile_redirect_uri(&params.redirect_uri).is_ok() {
+        format!("in the Chan app at {MOBILE_CALLBACK_URI}")
+    } else {
+        let port = Url::parse(&params.redirect_uri)
+            .ok()
+            .and_then(|u| u.port())
+            .map(|p| p.to_string())
+            .unwrap_or_default();
+        format!("on the local machine at 127.0.0.1, port {port}")
+    };
     // Account-mode consent frames the grant by what it EXPOSES rather
     // than reassuring about who receives it; the requester's identity
     // cannot be verified for a public loopback client.
@@ -996,7 +1001,7 @@ fn render_consent_html(
       <div class="row"><span class="k">Scopes</span><span class="v">{scopes}</span></div>
       <div class="row"><span class="k">Expires in</span><span class="v">{expires_phrase}</span></div>
 {wireguard_rows}    </div>
-    {wireguard_blurb}<p class="muted small">It will receive the result on the local machine at 127.0.0.1, port {port}.</p>
+    {wireguard_blurb}<p class="muted small">It will receive the result {delivery}.</p>
     <form method="post" action="/desktop/authorize/confirm">
       <input type="hidden" name="csrf" value="{csrf}">
       <button class="btn" type="submit" name="action" value="deny">Cancel</button>
@@ -1007,7 +1012,7 @@ fn render_consent_html(
         label = pages::html_escape(&params.label),
         scopes = pages::html_escape(&scopes),
         expires_phrase = pages::html_escape(&expires_phrase),
-        port = pages::html_escape(&port),
+        delivery = pages::html_escape(&delivery),
         csrf = pages::html_escape(csrf),
     );
     pages::render(&pages::Page {
@@ -1634,6 +1639,18 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    #[test]
+    fn consent_html_mobile_names_the_app_callback() {
+        let mut p = params();
+        p.redirect_uri = MOBILE_CALLBACK_URI.into();
+        let html = render_consent_html(&p, &consent_user(), "csrf-token", &[]);
+        assert!(
+            html.contains("It will receive the result in the Chan app at chan://auth/callback."),
+            "{html}"
+        );
+        assert!(!html.contains("127.0.0.1, port"), "{html}");
     }
 
     #[test]
