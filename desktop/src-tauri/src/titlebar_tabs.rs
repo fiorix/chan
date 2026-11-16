@@ -589,6 +589,7 @@ pub(crate) enum WindowControl {
 /// to the same `on_close_requested`, so the desktop's close handling
 /// (`serve::on_close_requested`: the page's Hide, Close and Cancel prompt, a
 /// silent hide, the transfer guards) runs as it does for those.
+#[cfg(not(target_os = "ios"))]
 #[tauri::command]
 pub(crate) fn titlebar_window_control(
     window: WebviewWindow,
@@ -604,6 +605,18 @@ pub(crate) fn titlebar_window_control(
         WindowControl::Close => window.close(),
     };
     done.map_err(|e| format!("{action:?} on {}: {e}", window.label()))
+}
+
+/// Window controls are unsupported on iOS: the single webview has no chrome
+/// to minimize, maximize, or close.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+pub(crate) fn titlebar_window_control(
+    window: WebviewWindow,
+    action: WindowControl,
+) -> Result<(), String> {
+    let _ = (window, action);
+    Err("window controls are not supported on iOS".into())
 }
 
 /// Pop up one of the menus the bar draws in place of the launcher menubar:

@@ -283,6 +283,7 @@ enum Notice {
 
 impl Notice {
     /// The message's heading, which is also its window title.
+    #[cfg(not(target_os = "ios"))]
     fn title(self) -> &'static str {
         match self {
             Notice::NotAnswering => "Chan is not responding",
@@ -290,6 +291,7 @@ impl Notice {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn text(self) -> &'static str {
         match self {
             Notice::NotAnswering => {

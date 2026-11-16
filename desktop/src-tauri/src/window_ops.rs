@@ -155,6 +155,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             let _ =
                 reply.send(crate::forget_devserver_workspace_impl(&state, id, prefix, force).await);
         }
+        #[cfg(not(target_os = "ios"))]
         DesktopWindowOp::PickFolder { reply } => {
             // The launcher's New-Workspace "Browse…" button fires this over the
             // bridge to get a real native folder dialog. The picker is async-
@@ -179,6 +180,12 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
                 // to an error server-side.
                 tracing::warn!(error = %e, "scheduling the folder picker failed");
             }
+        }
+        // iOS has no folder picker: local workspaces are not an iOS story, so
+        // the launcher's Browse answers like a cancelled dialog.
+        #[cfg(target_os = "ios")]
+        DesktopWindowOp::PickFolder { reply } => {
+            let _ = reply.send(Ok(None));
         }
     }
 }

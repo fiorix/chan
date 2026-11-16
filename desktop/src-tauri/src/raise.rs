@@ -145,6 +145,8 @@ pub(crate) fn raise_window_from_launch<R: Runtime>(
 pub(crate) fn raise_window<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     let was_minimized = window.is_minimized().unwrap_or(false);
     let was_visible = window.is_visible().unwrap_or(true);
+    // iOS has no minimize to undo: the single webview is always front.
+    #[cfg(not(target_os = "ios"))]
     let _ = window.unminimize();
     window.show()?;
     window.set_focus()?;
