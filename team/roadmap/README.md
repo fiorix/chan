@@ -52,7 +52,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [downloads carry write temporaries][writetemps] | merged | closed |
 | [a gateway page may drop a layout][gwlayout] | merged | closed |
 | [cs window new prints a refused id][winid] | merged | gate |
-| [cs window new returns too early][winrace] | partly built | build |
+| [cs window new returns too early][winrace] | merged | owner |
 | [a diagram's clicks land off][diagclick] | merged | owner |
 | [a reattach replays into a TUI][altreplay] | merged | closed |
 | [a stale read reverts a preference][prefstale] | merged | closed |
