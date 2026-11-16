@@ -40,6 +40,8 @@ async function openWindow(ctx, page, name) {
   url.searchParams.set("w", `ctx-menu-206-${name}-${RUN}`);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+  // Each page owns its window id; a routed reply proves its watch is live.
+  await ctx.waitWindowLive(url.searchParams.get("w"));
 }
 
 /// Right-click a point with the browser's pointer; returns whether the event

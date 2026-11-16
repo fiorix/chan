@@ -314,6 +314,8 @@ export default {
       const frameStart = resizeFrames.length;
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane", { timeout: 30_000 });
+      // Settings writes update terminal colours through this page's watcher.
+      await ctx.waitWindowLive(windowId);
       await page.waitForSelector(selector, { visible: true, timeout: 60_000 });
       return rendererSnapshot(label, frameStart);
     }

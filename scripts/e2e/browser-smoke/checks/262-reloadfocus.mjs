@@ -420,6 +420,8 @@ async function trial(ctx, directory, engine, mode) {
     url.searchParams.set("w", windowId);
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+    // The preference refresh needs this page's watch subscription.
+    await ctx.waitWindowLive(windowId);
     originalPrefs = await readTerminalPrefs(page, token);
     originalStrip = await readPaneStripPreference(page, token);
     if (originalStrip.on) await writePaneStripPreference(page, token, false);
@@ -458,7 +460,17 @@ async function trial(ctx, directory, engine, mode) {
         await closeEveryTerminal(page, "reload focus cleanup", token);
       }
     } catch (error) { report.cleanupFailures.push({ step: "terminals", ...safeError(error) }); }
-    const preferencesPage = page.isClosed() ? ctx.page : page;
+    let preferencesPage = page.isClosed() ? ctx.page : page;
+    if ((originalPrefs || originalStrip?.on) && preferencesPage !== ctx.page) {
+      try {
+        // A restored document has a new watch, even with the same window id.
+        await ctx.waitWindowLive(windowId);
+      } catch (error) {
+        report.cleanupFailures.push({ step: "preference-watch", ...safeError(error) });
+        // The runner page has not navigated and retains its live subscription.
+        preferencesPage = ctx.page;
+      }
+    }
     try { if (originalPrefs) await writeTerminalPrefs(preferencesPage, token, { ghostty: originalPrefs.ghostty }); }
     catch (error) { report.cleanupFailures.push({ step: "terminal-preference", ...safeError(error) }); }
     try { if (originalStrip?.on) await writePaneStripPreference(preferencesPage, token, true); }
