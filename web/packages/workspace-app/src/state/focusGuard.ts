@@ -1,5 +1,6 @@
-// Terminal refocus and the command launcher's focus return share the same
-// keyboard owners so neither can take focus from a dialog or another webview.
+// Terminal refocus, its Rich Prompt composer's focus and the command
+// launcher's focus return share the same keyboard owners so none of them can
+// take focus from a dialog or another webview.
 
 import { modalDialogOpen } from "./store.svelte";
 import { surveyFor, type SurveySlot } from "./survey.svelte";
@@ -16,10 +17,11 @@ export function launcherShownOverWindow(): boolean {
   return document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR);
 }
 
-/// Whether a refocus of the terminal in `slot` is refused: a modal dialog is
-/// open, a survey covers that terminal, or the Computers launcher holds the
-/// keyboard over the window. Once those owners release the keyboard, the
-/// same refocus legitimately restores the terminal.
+/// Whether a refocus of the terminal in `slot`, or of its Rich Prompt
+/// composer, is refused: a modal dialog is open, a survey covers that
+/// terminal, or the Computers launcher holds the keyboard over the window.
+/// Once those owners release the keyboard, the same refocus legitimately
+/// restores the terminal or its composer.
 export function refocusRefused(slot: SurveySlot): boolean {
   return surveyFor(slot) !== null || launcherShownOverWindow() || modalDialogOpen();
 }
