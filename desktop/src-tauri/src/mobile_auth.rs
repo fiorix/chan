@@ -237,6 +237,7 @@ mod ios {
             let gateway_id = gateway_id.to_string();
             let attempt = Arc::clone(attempt);
             tauri::async_runtime::spawn(async move {
+                let mut shutdown = shutdown;
                 let _ = shutdown.changed().await;
                 let _ = app.run_on_main_thread(move || {
                     cancel_mobile_session_for(&gateway_id, &attempt);
@@ -263,7 +264,7 @@ mod ios {
     /// shutdown or completion can never cancel or release a successor's.
     struct MobileSession {
         session: Retained<AnyObject>,
-        provider: Retained<MobileAuthPresentationProvider>,
+        _provider: Retained<MobileAuthPresentationProvider>,
         gateway_id: String,
         attempt: Arc<GatewayAttempt>,
     }
@@ -352,7 +353,7 @@ mod ios {
         }
         MOBILE_SESSION.lock().unwrap().replace(MobileSession {
             session,
-            provider,
+            _provider: provider,
             gateway_id: gateway_id.to_string(),
             attempt: Arc::clone(attempt),
         });
@@ -377,17 +378,17 @@ mod ios {
             return MobileAuthOutcome::Failed("the sign-in sheet answered nothing".to_string());
         }
         let error = unsafe { &*error };
+        let domain = error.domain().to_string();
         // ASWebAuthenticationSessionErrorCodeCanceledLogin: the user dismissed
         // the sheet. Every other error fails the slot with the system's words.
-        if error.domain().to_string() == "com.apple.AuthenticationServices.WebAuthenticationSession"
+        if domain == "com.apple.AuthenticationServices.WebAuthenticationSession"
             && error.code() == 1
         {
             return MobileAuthOutcome::Cancelled;
         }
         MobileAuthOutcome::Failed(format!(
-            "sign-in failed in the browser: {} ({} {})",
-            error.localizedDescription(),
-            error.domain(),
+            "sign-in failed in the browser: {} ({domain} {})",
+            error.localizedDescription().to_string(),
             error.code(),
         ))
     }
@@ -406,14 +407,23 @@ mod ios {
             /// then fails through the completion instead of presenting nowhere.
             #[unsafe(method(presentationAnchorForWebAuthenticationSession:))]
             fn presentation_anchor(&self, _session: *mut AnyObject) -> *mut AnyObject {
+                // The shared application outlives the call, so no ownership
+                // is taken; a null answer fails the session through the
+                // completion instead of presenting nowhere.
+                let app: *mut AnyObject =
+                    unsafe { msg_send![class!(UIApplication), sharedApplication] };
+                if app.is_null() {
+                    return std::ptr::null_mut();
+                }
+                // SAFETY: non-null per the check above, and alive for the
+                // process; used immediately.
+                let app = unsafe { &*app };
                 unsafe {
-                    let app: Retained<AnyObject> =
-                        msg_send![class!(UIApplication), sharedApplication];
-                    let key: *mut AnyObject = msg_send![&app, keyWindow];
+                    let key: *mut AnyObject = msg_send![app, keyWindow];
                     if !key.is_null() {
                         return key;
                     }
-                    let windows: *mut AnyObject = msg_send![&app, windows];
+                    let windows: *mut AnyObject = msg_send![app, windows];
                     if windows.is_null() {
                         return std::ptr::null_mut();
                     }
