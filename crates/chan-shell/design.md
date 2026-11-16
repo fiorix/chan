@@ -91,7 +91,7 @@ flowchart TD
   F1 --> T1["require the exact connected window, then queue one command"]
   F2 --> T2["resolve by tab name and group, or by what the library knows"]
   F3 --> T3["push over the window bus, park a oneshot, hold until the SPA or a person answers"]
-  F4 --> T4["DesktopBridge to Tauri; a standalone chan serve refuses"]
+  F4 --> T4["DesktopBridge to Tauri; a standalone chan serve or a devserver refuses new/open/hide; rm also works headless"]
   F5 --> T5["a standalone serve exits; a host unmounts that tenant"]
   F6 --> T6["acknowledge, then hold the connection for the tunnel's lifetime"]
   T1 --> OK["Ok"]
@@ -99,8 +99,10 @@ flowchart TD
   T3 --> OK
   T3 --> TO["Timeout"]
   T4 --> OK
+  T4 --> TO
   T5 --> OK
   T6 --> OK
+  T6 --> TO
   MATCH --> ERR["Error"]
 ```
 

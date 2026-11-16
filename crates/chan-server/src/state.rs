@@ -71,7 +71,7 @@ pub struct AppState {
     pub server_config: Mutex<ServerConfig>,
     /// Editor preferences: fonts / theme / pane widths / line
     /// spacing / date format. Persisted to
-    /// `<config>/chan/preferences.toml`; mutated through the
+    /// `~/.chan/preferences.toml`; mutated through the
     /// /api/config PATCH path.
     pub editor_prefs: Mutex<EditorPrefs>,
     pub config_revision: AtomicU64,

@@ -5,10 +5,10 @@
 //! exposes a watcher WebSocket, and serves the embedded
 //! frontend.
 //!
-//! Auth: every `/api/*` route is gated by a bearer token. The
-//! token is persisted at `<state>/tokens/<workspace-key>` (mode 0600 on
-//! Unix) so a `cargo build && chan serve` cycle does not invalidate
-//! the browser's cached sessionStorage token. Clients pass it as
+//! Auth: every `/api/*` route is gated by a bearer token. A workspace's
+//! token is persisted at `~/.chan/workspaces/<metadata_key>/tokens/token`
+//! (mode 0600 on Unix) so a `cargo build && chan serve` cycle does not
+//! invalidate the browser's cached sessionStorage token. Clients pass it as
 //! `?t=TOKEN` query string or `Authorization: Bearer TOKEN` header.
 //! Pass `--no-token` to disable; loopback bind is the only check
 //! left in that mode (test / desktop-shell only).

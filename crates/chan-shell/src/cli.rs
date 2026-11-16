@@ -107,8 +107,11 @@ and `tunnel` work in a plain terminal window.
 
 No environment variable distinguishes a workspace window from a standalone
 terminal. A workspace-only command's refusal IS the check.
-`window new|open|hide` and `tunnel` additionally need the desktop app;
-`window rm` also works headless.
+`window new|open|hide` additionally need a terminal the desktop app serves
+itself; a devserver terminal the desktop views refuses them. `window rm`
+also works headless. `tunnel` needs a devserver terminal viewed in the
+desktop app; the desktop's own terminals and a standalone `chan serve`
+refuse it.
 
 EXAMPLES:
 Confirm you are in a chan terminal, and find out which one:
