@@ -181,9 +181,6 @@ fn write_queue_input_gap() -> Duration {
     })
 }
 
-const ALT_SCREEN_ENTER: &[u8] = b"\x1b[?1049h";
-const ALT_SCREEN_EXIT: &[u8] = b"\x1b[?1049l";
-const ALT_SCREEN_TAIL_BYTES: usize = ALT_SCREEN_ENTER.len() - 1;
 const REDRAW_WOBBLE_DELAY: Duration = Duration::from_millis(50);
 pub const ALT_SCREEN_ATTACH_PRELUDE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
 
@@ -201,11 +198,16 @@ pub const ALT_SCREEN_ATTACH_PRELUDE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
 /// here either -- it is handled by [`ALT_SCREEN_ATTACH_PRELUDE`].
 const TRACKED_PRIVATE_MODES: &[u16] = &[
     1,    // DECCKM -- application cursor keys (arrow encoding: \e[A vs \eOA)
+    9,    // mouse: X10 button-press tracking
     1000, // mouse: normal button (press/release) tracking
+    1001, // mouse: highlight tracking
     1002, // mouse: button-event (drag) tracking
     1003, // mouse: any-event (motion) tracking
     1004, // focus in/out reporting
+    1005, // mouse: UTF-8 extended coordinate encoding
     1006, // mouse: SGR extended coordinate encoding
+    1015, // mouse: urxvt extended coordinate encoding
+    1016, // mouse: SGR pixel coordinate encoding
     BRACKETED_PASTE_MODE,
 ];
 const BRACKETED_PASTE_MODE: u16 = 2004;
@@ -213,6 +215,54 @@ const BRACKETED_PASTE_MODE: u16 = 2004;
 /// across PTY reads: a handful of `;`-joined mode numbers. Past this, a dangling
 /// `\e[?…` is not a real mode toggle and is dropped rather than buffered.
 const PRIVATE_MODE_TAIL_CAP: usize = 64;
+
+/// Scan ordered DECSET/DECRST parameters, carrying a bounded partial CSI across
+/// reads. This recognizes private-mode toggles, not the full terminal grammar.
+fn scan_private_modes(tail: &mut Vec<u8>, bytes: &[u8], mut change: impl FnMut(u16, bool)) {
+    let mut scan = Vec::with_capacity(tail.len() + bytes.len());
+    scan.extend_from_slice(tail);
+    scan.extend_from_slice(bytes);
+    tail.clear();
+
+    let n = scan.len();
+    let mut i = 0;
+    while i < n {
+        if scan[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        // An incomplete prefix can still become a private-mode CSI next read.
+        if n - i < 3 {
+            tail.extend_from_slice(&scan[i..]);
+            break;
+        }
+        if scan[i + 1] != b'[' || scan[i + 2] != b'?' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 3;
+        while j < n && (scan[j].is_ascii_digit() || scan[j] == b';') {
+            j += 1;
+        }
+        if j == n {
+            if n - i <= PRIVATE_MODE_TAIL_CAP {
+                tail.extend_from_slice(&scan[i..]);
+            }
+            break;
+        }
+        let final_byte = scan[j];
+        if final_byte == b'h' || final_byte == b'l' {
+            for param in scan[i + 3..j].split(|&b| b == b';') {
+                if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
+                    change(mode, final_byte == b'h');
+                }
+            }
+        }
+        // ESC cancels an unfinished CSI and may start the next one itself.
+        i = if final_byte == 0x1b { j } else { j + 1 };
+    }
+}
+
 /// A DSR cursor-position query. Something has to answer this or the PTY stalls:
 /// on Windows it is ConPTY's OWN startup handshake -- conhost emits it before
 /// it will pump the child's output, so an unanswered query wedges the session
@@ -7594,33 +7644,17 @@ impl Session {
             .alt_screen_tail
             .lock()
             .expect("terminal alt-screen tail poisoned");
-        let mut scan = Vec::with_capacity(tail.len() + bytes.len());
-        scan.extend_from_slice(&tail);
-        scan.extend_from_slice(bytes);
-
-        let mut matched_transition = false;
-        if contains_subslice(&scan, ALT_SCREEN_ENTER) {
-            self.in_alt_screen.store(true, Ordering::Relaxed);
-            tracing::debug!(session = %self.id, "alt_screen entered");
-            matched_transition = true;
+        let mut last_transition = None;
+        scan_private_modes(&mut tail, bytes, |mode, on| {
+            if matches!(mode, 47 | 1047 | 1049) {
+                last_transition = Some(on);
+            }
+        });
+        if let Some(on) = last_transition {
+            self.in_alt_screen.store(on, Ordering::Relaxed);
+            tracing::debug!(session = %self.id, alt_screen = on, "alt_screen selected");
         }
-        if contains_subslice(&scan, ALT_SCREEN_EXIT) {
-            self.in_alt_screen.store(false, Ordering::Relaxed);
-            tracing::debug!(session = %self.id, "alt_screen exited");
-            matched_transition = true;
-        }
-
-        if matched_transition {
-            tail.clear();
-            return true;
-        }
-
-        if !scan.is_empty() {
-            let keep = scan.len().min(ALT_SCREEN_TAIL_BYTES);
-            tail.clear();
-            tail.extend_from_slice(&scan[scan.len() - keep..]);
-        }
-        false
+        last_transition.is_some()
     }
 
     /// Track the live [`TRACKED_PRIVATE_MODES`] set by parsing DEC private-mode
@@ -7635,56 +7669,12 @@ impl Session {
             .private_mode_tail
             .lock()
             .expect("terminal private-mode tail poisoned");
-        let mut scan = Vec::with_capacity(tail.len() + bytes.len());
-        scan.extend_from_slice(&tail);
-        scan.extend_from_slice(bytes);
-        tail.clear();
-
         let mut changes: Vec<(u16, bool)> = Vec::new();
-        let n = scan.len();
-        let mut i = 0;
-        while i < n {
-            if scan[i] != 0x1b {
-                i += 1;
-                continue;
+        scan_private_modes(&mut tail, bytes, |mode, on| {
+            if TRACKED_PRIVATE_MODES.contains(&mode) {
+                changes.push((mode, on));
             }
-            // A private-mode CSI begins ESC '[' '?'. Fewer than 3 trailing bytes
-            // could still grow into one on the next read -- carry from the ESC.
-            if n - i < 3 {
-                if n - i <= PRIVATE_MODE_TAIL_CAP {
-                    tail.extend_from_slice(&scan[i..]);
-                }
-                break;
-            }
-            if scan[i + 1] != b'[' || scan[i + 2] != b'?' {
-                i += 1;
-                continue;
-            }
-            // Consume `;`-joined decimal params up to the final byte.
-            let mut j = i + 3;
-            while j < n && (scan[j].is_ascii_digit() || scan[j] == b';') {
-                j += 1;
-            }
-            if j == n {
-                // Params not yet terminated -- carry the partial (bounded).
-                if n - i <= PRIVATE_MODE_TAIL_CAP {
-                    tail.extend_from_slice(&scan[i..]);
-                }
-                break;
-            }
-            let final_byte = scan[j];
-            if final_byte == b'h' || final_byte == b'l' {
-                let on = final_byte == b'h';
-                for param in scan[i + 3..j].split(|&b| b == b';') {
-                    if let Ok(mode) = std::str::from_utf8(param).unwrap_or("x").parse::<u16>() {
-                        if TRACKED_PRIVATE_MODES.contains(&mode) {
-                            changes.push((mode, on));
-                        }
-                    }
-                }
-            }
-            i = j + 1;
-        }
+        });
         drop(tail);
 
         if changes.is_empty() {
@@ -8312,6 +8302,7 @@ fn random_session_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    mod alt_screen_tests;
     mod control_socket_env_tests;
     mod program_status_tests;
     mod replay_regression_tests;
@@ -10789,13 +10780,6 @@ mod tests {
         assert_eq!(live, b"frame two");
         assert_eq!(attached.seq, end_at_attach);
         assert_eq!(attached.seq + live.len() as u64, ring_end(&session));
-    }
-
-    #[test]
-    fn alt_screen_sniffer_matches_expected_sequences() {
-        assert!(contains_subslice(b"abc\x1b[?1049hdef", b"\x1b[?1049h"));
-        assert!(contains_subslice(b"abc\x1b[?1049ldef", b"\x1b[?1049l"));
-        assert!(!contains_subslice(b"abc\x1b[?1048hdef", b"\x1b[?1049h"));
     }
 
     #[test]
