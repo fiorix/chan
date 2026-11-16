@@ -1,5 +1,5 @@
-//! OAuth-style PAT mint for chan-desktop, over a loopback redirect
-//! with PKCE.
+//! OAuth-style PAT mint for chan-desktop and the Chan mobile app,
+//! over a loopback or registered-app redirect with PKCE.
 //!
 //! chan-desktop binds a short-lived `http://127.0.0.1:<port>/auth/callback`
 //! listener in its own process, generates a PKCE `code_verifier` (kept
@@ -10,21 +10,30 @@
 //! browser back to the loopback listener carrying the code. The desktop
 //! then redeems `{code, code_verifier}` over TLS to the identity origin.
 //!
+//! The mobile app runs the same flow with the single registered
+//! custom-scheme callback `chan://auth/callback` in place of the
+//! loopback listener: consent delivers the same one-time code there,
+//! and the app redeems with the same PKCE verifier. Same scope, same
+//! challenge binding, same redeem.
+//!
 //! Four routes:
 //!
 //!   * `GET  /desktop/authorize?<query>` -- entry point. Validates the
-//!     query (loopback `redirect_uri`, `code_challenge` + `S256`
+//!     query (loopback or registered-mobile `redirect_uri`,
+//!     `code_challenge` + `S256`
 //!     method, `state`, `label`, `scopes`, `expires_in`), stashes a
 //!     [`AuthorizeParams`] struct in the session, and redirects: to `/`
 //!     if unauthenticated (SPA sign-in renders, then `auth_callback`
 //!     bounces back here), or straight to
 //!     `/desktop/authorize/consent` if authenticated.
 //!   * `GET  /desktop/authorize/consent` -- renders a server-side HTML
-//!     consent page. Because a loopback client is public and cannot
+//!     consent page. Because the client is public and cannot
 //!     authenticate itself, the page presents the requester as an
 //!     untrusted local app (the `label` is requester-supplied text,
-//!     not a verified identity) and names the local port the result
-//!     is delivered to. Includes a hidden CSRF nonce stored alongside
+//!     not a verified identity) and names the callback target the
+//!     result is delivered to (the local port on the loopback arm,
+//!     the registered app callback on the mobile arm). Includes a
+//!     hidden CSRF nonce stored alongside
 //!     the pending params.
 //!   * `POST /desktop/authorize/confirm` -- handles the `Authorize` /
 //!     `Cancel` action. Consumes the pending params + CSRF; on
@@ -33,7 +42,7 @@
 //!     with [`TokenOrigin::Desktop`], stashes it in the
 //!     [`RedemptionStore`] under a one-time code bound to the PKCE
 //!     challenge, and answers 200 with a handoff page that navigates
-//!     the browser to `http://127.0.0.1:<port>/auth/callback?code=&state=`
+//!     the browser to the validated callback carrying `?code=&state=`
 //!     (`deny` / blocked carry `?error=&state=` instead) via a
 //!     zero-delay meta refresh plus a manual fallback link. The no-3xx
 //!     ruling binds THIS response specifically: a 3xx answering the
@@ -65,8 +74,12 @@
 //!   * `redirect_uri` must be a loopback callback
 //!     (`http://127.0.0.1:<port>/auth/callback` or the `[::1]` form),
 //!     validated by parsed-enum host equality (see
-//!     `validate_loopback_redirect_uri`). A bad redirect_uri returns
-//!     400; the port is the only free field.
+//!     `validate_loopback_redirect_uri`), or the single registered
+//!     mobile callback `chan://auth/callback`, validated by
+//!     parsed-component equality (see
+//!     `validate_mobile_redirect_uri`). A bad redirect_uri returns
+//!     400; on the loopback arm the port is the only free field, and
+//!     on the mobile arm nothing is.
 //!   * `code_challenge_method` must be exactly `S256` and
 //!     `code_challenge` a 43-char base64url-no-pad value decoding to
 //!     32 bytes. The redeem verifies `SHA256(verifier)` equals the
@@ -92,7 +105,8 @@
 //!   * The redeem route has no session auth: the credential is
 //!     possession of the one-time code AND knowledge of the verifier
 //!     whose S256 hash keys the stored challenge (TLS assumed). This
-//!     is NOT takeover-proof: because a public loopback client cannot
+//!     is NOT takeover-proof on the loopback arm: because a public
+//!     loopback client cannot
 //!     authenticate itself and the `code_challenge` + `state` leak
 //!     through the browser-opener argv, a co-tenant who reads them can
 //!     bind their own consent to the victim's challenge and deliver
@@ -238,7 +252,7 @@ struct StoredRedemption {
 impl RedemptionStore {
     /// Stash `payload` under a fresh 256-bit code, bound to the PKCE
     /// `challenge`, and return the code. The code is the map key -- a
-    /// server secret the desktop learns only through the loopback
+    /// server secret the client learns only through the validated
     /// callback query, so an attacker who never sees that query cannot
     /// name an entry; the challenge is the PKCE proof the redeem must
     /// satisfy.
@@ -434,8 +448,9 @@ pub struct AuthorizeQuery {
 /// session across the OAuth roundtrip + the consent step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizeParams {
-    /// Already-validated loopback callback
-    /// (`http://127.0.0.1:<port>/auth/callback` or `[::1]`).
+    /// Already-validated callback: a loopback URL
+    /// (`http://127.0.0.1:<port>/auth/callback` or `[::1]`) or the
+    /// registered mobile `chan://auth/callback`.
     redirect_uri: String,
     state: String,
     label: String,
@@ -447,8 +462,8 @@ pub struct AuthorizeParams {
     wireguard_public_key: Option<String>,
 }
 
-/// Parse + validate. `Err` is a 400; the desktop client expects to fix
-/// and retry its query string before any loopback redirect happens.
+/// Parse + validate. `Err` is a 400; the client expects to fix and
+/// retry its query string before any callback redirect happens.
 fn validate(q: AuthorizeQuery, enrollment_offered: bool) -> Result<AuthorizeParams> {
     validate_loopback_redirect_uri(&q.redirect_uri)
         .or_else(|_| validate_mobile_redirect_uri(&q.redirect_uri))?;
@@ -520,12 +535,14 @@ fn validate(q: AuthorizeQuery, enrollment_offered: bool) -> Result<AuthorizePara
     })
 }
 
-/// Build the success redirect target: a loopback callback carrying the
-/// one-time redemption code and the echoed `state` as QUERY parameters
-/// -- never the PAT secret, never the token metadata (label/expiry ride
-/// the redeem response). The parameters ride the query because a local
-/// HTTP listener only ever receives the query; a fragment never reaches
-/// a server.
+/// Build the success redirect target: the validated callback carrying
+/// the one-time redemption code and the echoed `state` as QUERY
+/// parameters -- never the PAT secret, never the token metadata
+/// (label/expiry ride the redeem response). The parameters ride the
+/// query on both arms: a local HTTP listener only ever receives the
+/// query, so a fragment would strand the loopback arm, and the mobile
+/// arm carries the same query vocabulary so both clients parse one
+/// shape.
 pub fn success_url(params: &AuthorizeParams, code: &str) -> String {
     let mut query = String::new();
     push_pair(&mut query, "code", code);
@@ -584,7 +601,7 @@ fn generate_csrf() -> String {
 }
 
 /// Which handoff variant `confirm` renders: the copy differs, the
-/// mechanics (meta refresh + manual link to the loopback callback
+/// mechanics (meta refresh + manual link to the validated callback
 /// target) do not.
 enum Handoff {
     /// PAT minted; the target carries `?code=...`.
@@ -613,8 +630,8 @@ impl Handoff {
 }
 
 /// Render the handoff page `confirm` answers with: a zero-delay meta
-/// refresh to the loopback callback target plus a manual fallback link,
-/// so the navigation to `127.0.0.1` never rides THIS form POST's
+/// refresh to the validated callback target plus a manual fallback
+/// link, so the callback navigation never rides THIS form POST's
 /// redirect chain (see the module doc). The target appears exactly
 /// twice, both times attribute-escaped; its only user-influenced parts
 /// are percent-encoded by [`success_url`] / [`error_url`].
@@ -737,7 +754,7 @@ pub struct RedeemRequest {
     code: String,
     /// PKCE verifier. `SHA256(code_verifier)` must equal the challenge
     /// the code was stored under; the verifier's only appearance on any
-    /// wire, over TLS, to the identity origin the desktop holds.
+    /// wire, over TLS, to the identity origin the client holds.
     code_verifier: String,
 }
 
@@ -745,7 +762,8 @@ pub struct RedeemRequest {
 /// PKCE verifier for the minted PAT. No session auth: the credential is
 /// possession of the code AND knowledge of the verifier whose S256 hash
 /// keys the stored challenge (see the module doc's hardening notes).
-/// This is NOT takeover-proof -- a co-tenant who reads the argv-leaked
+/// This is NOT takeover-proof on the loopback arm -- a co-tenant who
+/// reads the argv-leaked
 /// challenge can bind their own consent to it (a login-CSRF residual);
 /// PKCE only raises the bar. Unknown, expired, replayed codes and a
 /// wrong verifier all share one 410 so an off-path caller cannot probe
@@ -794,7 +812,7 @@ pub async fn authorize(
         return Ok(Redirect::to("/"));
     };
     // Authenticated. Short-circuit a known-blocked user to the
-    // loopback error redirect so the desktop client gets a precise
+    // callback error redirect so the client gets a precise
     // reason instead of staring at a 403.
     let user = state
         .cfg
@@ -956,7 +974,7 @@ fn render_consent_html(
     };
     // Account-mode consent frames the grant by what it EXPOSES rather
     // than reassuring about who receives it; the requester's identity
-    // cannot be verified for a public loopback client.
+    // cannot be verified for a public client.
     let account_blurb = if params.scopes.iter().any(|s| s == DESKTOP_ACCOUNT_SCOPE) {
         format!(
             "<p class=\"muted\">Approving gives this application account-level access to \
@@ -1343,7 +1361,7 @@ mod tests {
         }
     }
 
-    // --- success_url / error_url: loopback QUERY, not fragment ---
+    // --- success_url / error_url: QUERY on both arms, not fragment ---
 
     #[test]
     fn success_url_uses_query_and_encodes_specials() {
