@@ -2644,7 +2644,12 @@ mod tests {
             .unwrap()
         });
         let mut readings = Vec::new();
-        let bounds = predecessor_bounds();
+        // Exceed CONNECT_TIMEOUT (1500 ms) + POLL (100 ms) + PROBE_TIMEOUT
+        // (250 ms), so a stalled request leaves time for repeated busy probes.
+        let bounds = Bounds {
+            ask: Duration::from_secs(3),
+            ..predecessor_bounds()
+        };
         let claim = claimed(&pipe);
         let started = Instant::now();
         let startup = check_predecessor_with(
@@ -2659,7 +2664,14 @@ mod tests {
             },
         );
         assert_eq!(readings.first(), Some(&handoff::EndpointProbe::SameAccount));
-        assert!(readings.contains(&handoff::EndpointProbe::Busy));
+        assert!(
+            readings
+                .iter()
+                .filter(|reading| **reading == handoff::EndpointProbe::Busy)
+                .count()
+                >= 2,
+            "stalled endpoint needs repeated busy probes: {readings:?}"
+        );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
         assert!(
             started.elapsed() >= bounds.ask,
