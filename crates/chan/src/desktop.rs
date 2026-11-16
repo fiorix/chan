@@ -167,9 +167,12 @@ pub(super) async fn maybe_handoff_to_desktop(
         // browser. A standalone binary that reached the desktop target only via
         // a live-desktop parentage instead falls through to a standalone serve:
         // its `current_exe` is NOT the desktop, so it must not try to spawn one.
-        // A desktop that holds the endpoint and has not started its listener
-        // yet (which only Windows tells apart) is booting: launching another
-        // would only meet it, so the CLI says why it serves on its own.
+        // On Windows a desktop still booting lists its boot-marker pipe in the
+        // pipe directory without its endpoint pipe, which `desktop_is_starting`
+        // reads (elsewhere it reads false), so the CLI says why it serves on
+        // its own. A marker pipe another account created reads the same and can
+        // make the message wrong; the serve is standalone either way, since the
+        // CLI launches no desktop off unix.
         chan_server::handoff::Outcome::NoDesktop => {
             if chan_server::handoff::desktop_is_starting() {
                 eprintln!(

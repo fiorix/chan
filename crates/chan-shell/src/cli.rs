@@ -102,8 +102,9 @@ FILESYSTEM REQUIRED:
 `open PATH` and `terminal new PATH` need a workspace window or a
 standalone terminal whose host serves a filesystem.
 
-Other `terminal` commands, `pane`, `copy`, `paste`, `upload`, `download`,
-and `tunnel` work in a plain terminal window.
+Other `terminal` commands, `pane`, `dashboard`, `copy`, `paste`, `upload`,
+`download`, `window`, the other `session` commands and `tunnel` work in a
+plain terminal window.
 
 No environment variable distinguishes a workspace window from a standalone
 terminal. A workspace-only command's refusal IS the check.

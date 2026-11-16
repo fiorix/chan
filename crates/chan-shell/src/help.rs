@@ -2006,7 +2006,7 @@ CAVEATS:
   Viewing a devserver in the desktop does not attach the desktop's
   window-management bridge to that server: `new`, `open` and `hide`
   still refuse from its terminals.
-  A standalone `chan serve` serve has no library window set, so
+  A standalone `chan serve` has no library window set, so
   `cs window list` is empty there.
   Subcommands infer (`cs w l`, `cs w n`, `cs w o`, `cs w r`), but
   `hide` needs at least `cs w hi`: a bare `h` is ambiguous with
