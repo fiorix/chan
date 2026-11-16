@@ -2798,59 +2798,110 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_temporarily_busy_predecessor_is_asked_after_retry() {
+        use std::cell::RefCell;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        use tokio::net::windows::named_pipe::ServerOptions;
+
         let pipe = test_pipe("transient-busy-endpoint");
-        let (server, client) = tauri::async_runtime::block_on(async {
-            let server = chan_winpipe::create_owner_only(
+        let server = RefCell::new(Some(tauri::async_runtime::block_on(async {
+            chan_winpipe::create_owner_only(
                 ServerOptions::new()
                     .first_pipe_instance(true)
                     .max_instances(1),
                 &pipe,
             )
-            .unwrap();
-            let client = ClientOptions::new().open(&pipe).unwrap();
-            server.connect().await.unwrap();
-            (server, client)
-        });
-        let task = tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(600)).await;
-            drop(client);
-            server.disconnect().unwrap();
-            let mut server = server;
-            loop {
-                server.connect().await.unwrap();
-                let mut stream = BufReader::new(server);
-                let mut line = String::new();
-                if stream.read_line(&mut line).await.unwrap_or(0) != 0 {
-                    let request: handoff::Request = serde_json::from_str(&line).unwrap();
-                    assert!(matches!(request, handoff::Request::Activate { .. }));
-                    let mut reply = serde_json::to_vec(&Response::Activated {
-                        desktop_version: "0.130.0".into(),
-                    })
-                    .unwrap();
-                    reply.push(b'\n');
-                    stream.get_mut().write_all(&reply).await.unwrap();
-                }
-                server = stream.into_inner();
-                server.disconnect().unwrap();
-            }
-        });
-        let startup = check_at(
-            &pipe,
+            .unwrap()
+        })));
+        let mut readings = Vec::new();
+        let mut asks = 0;
+        let startup = check_predecessor_with(
+            claimed(&pipe),
             Bounds {
                 boot: Duration::ZERO,
                 ask: Duration::from_secs(3),
                 release: Duration::ZERO,
                 drain: Duration::ZERO,
             },
-            &[],
+            |budget| {
+                asks += 1;
+                let reply = if asks == 1 {
+                    // The authenticated probe occupied the sole instance.
+                    // Retain it until a real Busy reading reaches the guard.
+                    let reply = tauri::async_runtime::block_on(handoff::try_activate_at(
+                        &pipe, None, budget,
+                    ));
+                    assert!(matches!(reply, ActivateReply::NoReply), "{reply:?}");
+                    reply
+                } else {
+                    assert_eq!(asks, 2, "the retry must receive the reply");
+                    let mut server = server.borrow_mut().take().unwrap();
+                    // Release the connect-only probe before serving Activate.
+                    server.disconnect().unwrap();
+                    tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(Duration::from_secs(3), async {
+                            let serve = async {
+                                server.connect().await.unwrap();
+                                let mut stream = BufReader::new(&mut server);
+                                let mut line = String::new();
+                                assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                                let request: handoff::Request =
+                                    serde_json::from_str(&line).unwrap();
+                                assert!(matches!(request, handoff::Request::Activate { .. }));
+                                let mut reply = serde_json::to_vec(&Response::Activated {
+                                    desktop_version: "0.130.0".into(),
+                                })
+                                .unwrap();
+                                reply.push(b'\n');
+                                stream.get_mut().write_all(&reply).await.unwrap();
+
+                                // DisconnectNamedPipe discards unread bytes.
+                                // Keep the reply until its client closes.
+                                line.clear();
+                                match stream.read_line(&mut line).await {
+                                    Ok(0) => {}
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                                    result => {
+                                        panic!("expected client closure: {result:?}, {line:?}")
+                                    }
+                                }
+                            };
+                            let ((), reply) =
+                                tokio::join!(serve, handoff::try_activate_at(&pipe, None, budget));
+                            reply
+                        })
+                        .await
+                        .expect("the predecessor exchange must finish")
+                    })
+                };
+                eprintln!("predecessor activation {asks}: {reply:?}");
+                reply
+            },
+            |budget| {
+                let reading =
+                    tauri::async_runtime::block_on(handoff::probe_endpoint_at(&pipe, budget));
+                eprintln!("predecessor probe: {reading:?}");
+                readings.push(reading);
+                if reading == handoff::EndpointProbe::Busy {
+                    assert_eq!(readings.len(), 2, "{readings:?}");
+                    server.borrow().as_ref().unwrap().disconnect().unwrap();
+                }
+                reading
+            },
         );
-        task.abort();
         assert!(
             matches!(&startup, Startup::HandedOver { version } if version == "0.130.0"),
             "{startup:?}"
         );
+        assert_eq!(
+            readings,
+            [
+                handoff::EndpointProbe::SameAccount,
+                handoff::EndpointProbe::Busy,
+                handoff::EndpointProbe::SameAccount,
+            ]
+        );
+        assert_eq!(asks, 2);
     }
 
     #[cfg(windows)]
