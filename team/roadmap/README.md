@@ -43,7 +43,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a minimized window stays minimized][unbury] | merged | vm |
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | merged | owner |
-| [another account holds the claim][winclaim] | not started | build |
+| [another account holds the claim][winclaim] | merged | closed |
 | [a reload focuses another pane][reloadfocus] | merged | closed |
 | [a close test fails a loaded gate][closetest] | merged | closed |
 | [an edit erases another window's keys][keysmerge] | merged | closed |
@@ -83,6 +83,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [pillcover]: v0.132.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md
 [persistwin]: v0.132.0/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md
 [taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
+[winclaimread]: v0.132.0/the-windows-claims-two-account-and-compatibility-readings.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
@@ -115,6 +116,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [the index pill covers Dismiss][pillcover] | not started | build |
 | [persist cannot replace an open file][persistwin] | not started | build |
 | [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
+| [the Windows claim's installed readings][winclaimread] | not started | build |
 
 ## Completed
 
