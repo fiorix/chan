@@ -1047,6 +1047,7 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.22.1",
+ "block2",
  "chan",
  "chan-revtunnel",
  "chan-server",

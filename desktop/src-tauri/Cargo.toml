@@ -152,12 +152,26 @@ gtk = "0.18"
 # supports Wayland. This is the version wry already links.
 gdkx11 = "0.18"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 # `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)
 # are main-thread-only and take the marker as proof. `define_class!` builds
 # the wake observer of src/wake_repaint.rs, a selector target, which needs no
-# block crate.
+# block crate. On iOS the same marker gates the sign-in sheet start and the
+# classes anchor the authentication session plus the lifecycle observer
+# (src/mobile_auth.rs).
 objc2 = "0.6"
+# `NSString` carries the dialog text and the pasteboard names and types;
+# `NSArray` carries the drag pasteboard's filename property list, and
+# `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
+# reads the running macOS version so the updater can refuse a build whose
+# minimum system version exceeds it (src/update_floor.rs). `NSNotification`
+# types the wake observer's argument and both notification centers
+# (src/wake_repaint.rs). On iOS `NSURL` carries the authorize URL, `NSError`
+# the session failure, and `NSNotificationCenter` the background/foreground
+# observer (src/mobile_auth.rs).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 # `NSAlert`, `NSApplication` and `NSButton` back the native confirm dialog
 # in src/native_dialog.rs; `NSPasteboard` backs the drag-pasteboard read in
 # src/dropped_paths.rs. objc2 declares a class under the features of its
@@ -169,14 +183,12 @@ objc2 = "0.6"
 # window's occlusion state, which the wake repaint observes
 # (src/wake_repaint.rs).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
-# `NSString` carries the dialog text and the pasteboard names and types;
-# `NSArray` carries the drag pasteboard's filename property list, and
-# `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
-# reads the running macOS version so the updater can refuse a build whose
-# minimum system version exceeds it (src/update_floor.rs). `NSNotification`
-# types the wake observer's argument and both notification centers
-# (src/wake_repaint.rs).
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSNotification", "NSProcessInfo", "NSString"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Blocks for the authentication session's completion handler
+# (src/mobile_auth.rs). The version wry already links, so Cargo builds no
+# second copy.
+block2 = "0.6"
 
 [dev-dependencies]
 # The recorded config and the ClientHello sink that show each client takes
