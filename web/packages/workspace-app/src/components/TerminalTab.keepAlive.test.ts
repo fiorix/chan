@@ -26,6 +26,8 @@ import { setSocketFactory } from "../api/transport";
 import { demoSocketFactory } from "../demo/socket";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { onWatchEvent } from "../state/store.svelte";
+import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
+import { terminalRelocations } from "../state/terminalDock.svelte";
 import {
   cancelPaneMode,
   closePane,
@@ -53,6 +55,7 @@ afterEach(async () => {
   xterm.fit.size = null;
   xterm.textareaFocus = false;
   richPrompt.byTab = {};
+  resetSurveysForTest();
 });
 
 function terminal(): HTMLElement {
@@ -427,5 +430,35 @@ describe("the keyboard after a relocation", () => {
     await settle();
 
     await vi.waitFor(() => expect(composer.contains(lastAskedInside(asked, root))).toBe(true));
+  });
+
+  // A survey over the terminal owns the keyboard, so the move asks nothing of
+  // the composer that held it before the survey showed.
+  test("leaves the composer alone while a survey over the terminal holds it", async () => {
+    const { root, beside } = await focusedHostBesideEmptyPane();
+    showRichPromptForTab(HOST);
+    await settle();
+    const composer = await vi.waitFor(() => {
+      const el = root.querySelector<HTMLElement>(".rich-prompt");
+      expect(el?.contains(document.activeElement)).toBe(true);
+      return el!;
+    });
+    showSurvey({ surveyId: "survey-move", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] }, HOST);
+    await settle();
+    await vi.waitFor(() => {
+      const card = root.querySelector<HTMLElement>(".survey-card");
+      expect(card).not.toBeNull();
+      expect(document.activeElement).toBe(card);
+    });
+    const moves = terminalRelocations(HOST);
+    const asked = recordFocusRequests();
+
+    await closePane(beside);
+    await settle();
+    await vi.waitFor(() => expect(terminalRelocations(HOST), "the terminal moved").toBe(moves + 1));
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+
+    expect(asked.filter((el) => composer.contains(el)), "the composer is asked for no focus").toEqual([]);
+    expect(composer.contains(document.activeElement), "the composer does not hold the keyboard").toBe(false);
   });
 });
