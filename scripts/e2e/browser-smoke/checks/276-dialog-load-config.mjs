@@ -267,6 +267,7 @@ export default {
           leg.savedHost = saved.host_name;
           leg.bootstrapKept = readFileSync(bootstrapPath, "utf8") === bootstrapBefore;
           if (requests.length !== 1) throw new Error(`expected one dialog write, read ${requests.length}`);
+          if (requests[0].dir !== dir) throw new Error(`dialog write dir=${JSON.stringify(requests[0].dir)}, expected ${JSON.stringify(dir)}`);
           const preserve = kind === "unchanged";
           if (preserve && after !== before) throw new Error("unchanged Load rewrote config.toml bytes");
           if (Boolean(requests[0].keep_config) !== preserve) throw new Error(`keep_config=${Boolean(requests[0].keep_config)}, expected ${preserve}`);
