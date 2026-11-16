@@ -54,7 +54,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [cs window new prints a refused id][winid] | merged | gate |
 | [cs window new returns too early][winrace] | partly built | build |
 | [a diagram's clicks land off][diagclick] | merged | owner |
-| [a reattach replays into a TUI][altreplay] | not started | build |
+| [a reattach replays into a TUI][altreplay] | merged | closed |
 | [a stale read reverts a preference][prefstale] | merged | closed |
 | [the dialog's Load rewrites the config][dialogload] | merged | closed |
 | [the gateway page says this computer][gwwording] | merged | closed |
