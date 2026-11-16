@@ -1765,8 +1765,9 @@ pub async fn desktop_is_live() -> bool {
 /// the well-known socket, sends an `OpenWorkspace` request, and parses
 /// the response. Any connect failure / stale socket / read error /
 /// malformed reply maps to `Outcome::NoDesktop`, the answer for an
-/// absent desktop: the CLI then launches chan-desktop (a forced-desktop
-/// invocation) or starts a standalone server.
+/// absent desktop: on unix a forced-desktop invocation of the CLI then
+/// launches chan-desktop, and otherwise the CLI starts a standalone
+/// server.
 ///
 /// A short connect+IO timeout bounds the case where a stale socket
 /// file exists but nothing is accepting; the CLI must not hang on a
