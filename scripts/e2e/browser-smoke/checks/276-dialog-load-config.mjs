@@ -2,7 +2,7 @@
 // the file on disk. Edited Load and New exercise the ordinary save path.
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
@@ -267,6 +267,7 @@ export default {
           leg.savedHost = saved.host_name;
           leg.bootstrapKept = readFileSync(bootstrapPath, "utf8") === bootstrapBefore;
           if (requests.length !== 1) throw new Error(`expected one dialog write, read ${requests.length}`);
+          if (requests[0].dir !== dir) throw new Error(`dialog write dir=${JSON.stringify(requests[0].dir)}, expected ${JSON.stringify(dir)}`);
           const preserve = kind === "unchanged";
           if (preserve && after !== before) throw new Error("unchanged Load rewrote config.toml bytes");
           if (Boolean(requests[0].keep_config) !== preserve) throw new Error(`keep_config=${Boolean(requests[0].keep_config)}, expected ${preserve}`);
@@ -365,6 +366,14 @@ export default {
       }
     } finally {
       page.off("pageerror", pageError);
+      for (const leg of report.legs) {
+        try {
+          rmSync(join(ctx.workspaceDir, leg.dir), { recursive: true, force: true });
+          leg.directoryRemoved = true;
+        } catch (error) {
+          report.cleanupErrors.push(maskTokens(error?.stack ?? String(error)));
+        }
+      }
       save();
     }
     const failures = report.legs.filter((leg) => !leg.passed);
