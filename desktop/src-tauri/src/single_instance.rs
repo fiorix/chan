@@ -1179,9 +1179,19 @@ mod tests {
     #[test]
     fn predecessor_transient_busy_is_authenticated_before_forwarding() {
         let mut probes = 0;
+        // A POLL sleep follows the Busy reading, and a SameAccount reading
+        // past the deadline ends the check unanswered without forwarding.
+        // The test asserts the decision, not the time, so its ask bound
+        // keeps that sleep far from the deadline however long the scheduler
+        // stretches it; the fakes answer at once, and the check still takes
+        // one POLL.
+        let bounds = Bounds {
+            ask: Duration::from_secs(10),
+            ..predecessor_bounds()
+        };
         let startup = check_predecessor_with(
             "claim",
-            predecessor_bounds(),
+            bounds,
             |_| activated(),
             |_| {
                 probes += 1;
