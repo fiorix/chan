@@ -342,7 +342,7 @@ async function preSocketArm(ctx) {
           point = await dismiss.clickablePoint();
         } catch (error) {
           if (await dismiss.evaluate((button) => !button.isConnected)) return null;
-          return { error };
+          return { error: new Error(`Dismiss notice click-point preparation failed: ${error.message}`, { cause: error }) };
         }
         const hit = await page.evaluate(readDismissHit, point, dismiss);
         ctx.mark("dismiss-click-point", { point, ...hit });
@@ -362,6 +362,11 @@ async function preSocketArm(ctx) {
     if (dismissAttempt.error) throw dismissAttempt.error;
     details.dismissPoint = dismissAttempt.point;
     await page.mouse.click(details.dismissPoint.x, details.dismissPoint.y);
+    const dismissHit = await page.evaluate(readDismissHit, details.dismissPoint);
+    ctx.mark("dismiss-click-result", { point: details.dismissPoint, ...dismissHit });
+    if (dismissHit.statusbar) {
+      throw new Error(`Dismiss notice pointer click hit the status bar at ${JSON.stringify(details.dismissPoint)}: ${JSON.stringify(dismissHit.cover)} in ${JSON.stringify(dismissHit.ancestor)}`);
+    }
     try {
       await page.waitForSelector(".cli-reload-notice", { hidden: true });
     } catch (error) {
@@ -370,6 +375,13 @@ async function preSocketArm(ctx) {
       ctx.mark("dismiss-click-missed", { point: details.dismissPoint, ...hit });
       throw new Error(`Dismiss notice stayed visible after the pointer click at ${JSON.stringify(details.dismissPoint)}; current hit: ${JSON.stringify(hit)}; ${error.message}`, { cause: error });
     }
+    // Switching tabs also hides the notice without dismissing it.
+    details.dismissedTab = await page.evaluate(() => ({
+      terminalActive: !!document.querySelector(".terminal-tab.active"),
+      activeTitle: document.querySelector('[role="tablist"] .tab.active')?.getAttribute("title") ?? null,
+    }));
+    assert.ok(details.dismissedTab.terminalActive, "the CLI terminal remains active after dismissing its notice");
+    assert.equal(details.dismissedTab.activeTitle, name, "notice dismissal keeps the CLI tab active in the strip");
     await ctx.shot("before-socket-dismissed", page);
     await page.waitForFunction((before) => document.querySelector(".terminal-host")?.getBoundingClientRect().height > before,
       {}, details.firstHostHeight);
