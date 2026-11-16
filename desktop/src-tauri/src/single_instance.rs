@@ -1226,9 +1226,11 @@ mod tests {
     #[test]
     fn predecessor_busy_after_authentication_does_not_boot_beside_it() {
         let mut probes = 0;
+        let bounds = predecessor_bounds();
+        let started = Instant::now();
         let startup = check_predecessor_with(
             "claim",
-            predecessor_bounds(),
+            bounds,
             |_| ActivateReply::NoReply,
             |_| {
                 probes += 1;
@@ -1240,6 +1242,41 @@ mod tests {
             },
         );
         assert_eq!(startup, Startup::Unanswered);
+        assert!(
+            started.elapsed() >= bounds.ask,
+            "busy needs the full ask bound"
+        );
+    }
+
+    #[test]
+    fn predecessor_busy_after_authentication_retries_before_handing_over() {
+        let mut probes = 0;
+        let mut asks = 0;
+        let startup = check_predecessor_with(
+            "claim",
+            Bounds {
+                ask: Duration::from_secs(2),
+                ..predecessor_bounds()
+            },
+            |_| {
+                asks += 1;
+                if asks == 1 {
+                    ActivateReply::NoReply
+                } else {
+                    activated()
+                }
+            },
+            |_| {
+                probes += 1;
+                if probes == 2 {
+                    handoff::EndpointProbe::Busy
+                } else {
+                    handoff::EndpointProbe::SameAccount
+                }
+            },
+        );
+        assert!(matches!(startup, Startup::HandedOver { .. }), "{startup:?}");
+        assert_eq!((probes, asks), (3, 2));
     }
 
     /// The guard's bounds for a test that never meets a holder still booting
@@ -2492,6 +2529,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn a_test_pipe_names_its_held_profile_lock() {
+        let pipe = test_pipe("claim-filename");
+        let _claim = claimed(&pipe);
+        assert!(
+            pipe.lock.is_file(),
+            "held claim lock: {}",
+            pipe.lock.display()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn a_launch_beside_a_busy_marker_does_not_wait_for_boot() {
         use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -2595,9 +2644,12 @@ mod tests {
             .unwrap()
         });
         let mut readings = Vec::new();
+        let bounds = predecessor_bounds();
+        let claim = claimed(&pipe);
+        let started = Instant::now();
         let startup = check_predecessor_with(
-            claimed(&pipe),
-            predecessor_bounds(),
+            claim,
+            bounds,
             |budget| tauri::async_runtime::block_on(handoff::try_activate_at(&pipe, None, budget)),
             |budget| {
                 let reading =
@@ -2609,6 +2661,10 @@ mod tests {
         assert_eq!(readings.first(), Some(&handoff::EndpointProbe::SameAccount));
         assert!(readings.contains(&handoff::EndpointProbe::Busy));
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
+        assert!(
+            started.elapsed() >= bounds.ask,
+            "busy needs the full ask bound"
+        );
     }
 
     #[cfg(windows)]

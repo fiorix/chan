@@ -750,7 +750,7 @@ struct WindowsClaim {
 
 #[cfg(windows)]
 impl EndpointClaim {
-    /// Retry the optional boot marker briefly while an older desktop drains.
+    /// Retry the optional boot marker for up to 200 ms while an older desktop drains.
     /// Its endpoint and marker can close at different times; the protected
     /// file lock remains authoritative if marker creation still fails.
     pub async fn refresh_boot_marker(&mut self) {
@@ -764,6 +764,9 @@ impl EndpointClaim {
                 deadline.min(tokio::time::Instant::now() + Duration::from_millis(20)),
             )
             .await;
+        }
+        if self.windows._marker.is_none() {
+            tracing::debug!(endpoint = %self.socket_path.display(), "boot marker refresh exhausted its 200 ms bound; keeping the file claim");
         }
     }
 }
