@@ -329,7 +329,9 @@ async function restoreArm(ctx, page, engine, adopt) {
     await sleep(25);
   }
   const state = await browserState(page);
-  return { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  await ctx.waitWindowLive(windowId);
+  return result;
 }
 
 async function engineWindow(ctx, dir, engine, failures) {

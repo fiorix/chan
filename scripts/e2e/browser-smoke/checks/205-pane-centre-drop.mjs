@@ -157,6 +157,7 @@ async function arm(ctx, page, token, { name, autoHide, rightHoldsATab, at, zone 
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await waitPanes(page, `${name}: the two panes`, (p) => p.length === 2 && p[0].tabs.length === 2 &&
     p[1].tabs.length === (rightHoldsATab ? 1 : 0));
+  await ctx.waitWindowLive(url.searchParams.get("w"));
   const pref = await readPaneStripPreference(page, token);
   if (pref.on !== autoHide) await writePaneStripPreference(page, token, autoHide);
   const before = await waitPanes(page, `${name}: the right strip under auto-hide ${autoHide}`, (p) =>
@@ -243,6 +244,7 @@ function assertTrusted(result, from = "strip") {
 export default {
   name: "pane-centre-drop",
   async run(ctx) {
+    if (!ctx.controlSocket) throw new Error("control socket required to wait for pane-strip preference readiness");
     for (const f of FILES) writeFileSync(join(ctx.workspaceDir, f), `# ${f}\n\n${"A line of text.\n\n".repeat(6)}`);
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const page = await ctx.browser.newPage();

@@ -1,7 +1,9 @@
 // Trusted typing returns both terminal backends to the cursor; passive PTY
 // output and the terminal's query reply leave the reader in history. The
 // controlled raw PTY records the key before echoing it, so an output-side
-// scroll cannot stand in for scrolling on input.
+// scroll cannot stand in for scrolling on input. Mouse and wheel reports
+// are read separately: xterm SGR reports scroll to the live screen; X10
+// reports and both Ghostty report encodings preserve the history view.
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -139,7 +141,7 @@ export default {
         });
         let opened = false;
         try {
-          await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", mouse_capture: false });
+          await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", mouse_capture: true });
           const spawnArgs = ["--command", "stty -opost -echo && " + fixture.command,
             ...Object.entries(fixture.env).flatMap(([key, value]) => ["--env", `${key}=${value}`])];
           // Child-process failures include argv. The fixture's private control
@@ -196,6 +198,68 @@ export default {
               || result.afterEcho.cursorX !== PROMPT.length + 1) {
             failures.push(`${backend}: the typed letter and cursor are not at the bottom: ${JSON.stringify(result.afterEcho)}`);
           }
+
+          result.reports = [];
+          for (const encoding of ["sgr", "x10"]) {
+            for (const kind of ["mouse", "wheel"]) {
+              const report = { encoding, kind };
+              result.reports.push(report);
+              // Scroll with tracking disabled, then enable it through real
+              // program output. The DSR reply proves the mode was parsed.
+              await outputAndDrain(fixture, "\x1b[?1000l\x1b[?1006l");
+              await page.mouse.move(box.x, box.y);
+              await page.mouse.wheel({ deltaY: -300 });
+              await waitFor(page, `${backend}/${encoding}/${kind}: wheel enters history`, read,
+                (state) => !state.bottom && state.rows.every((line) => !line.includes(PROMPT)));
+              await frame(page);
+              await frame(page);
+              const beforeMode = await read();
+              report.modeReply = await outputAndDrain(fixture,
+                `\x1b[?1000h\x1b[?1006${encoding === "sgr" ? "h" : "l"}`);
+              await frame(page);
+              await frame(page);
+              report.before = await read();
+              if (report.before.bottom || JSON.stringify(report.before.rows) !== JSON.stringify(beforeMode.rows)) {
+                throw new Error(`${backend}/${encoding}/${kind}: enabling mouse reports moved history`);
+              }
+              const surface = `${hostQuery} ${backend === "ghostty" ? "> canvas" : ".xterm-screen"}`;
+              const position = await page.$eval(surface, (node) => {
+                const rect = node.getBoundingClientRect();
+                return { x: rect.left + 5, y: rect.top + 8 };
+              });
+              await page.mouse.move(position.x, position.y);
+              const inputIndex = fixture.records.length;
+              const button = kind === "mouse" ? 0 : 64;
+              const pattern = encoding === "sgr"
+                ? new RegExp(`^(?:\\x1b\\[<${button};[1-9]\\d*;[1-9]\\d*M)+$`)
+                : new RegExp(`^(?:\\x1b\\[M${String.fromCharCode(button + 32)}[\\x21-\\xff]{2})+$`);
+              try {
+                if (kind === "mouse") await page.mouse.down();
+                else await page.mouse.wheel({ deltaY: -120 });
+                await fixture.waitFor(() => pattern.test(inputSince(fixture, inputIndex))).catch((error) => {
+                  throw new Error(`${backend}/${encoding}/${kind}: PTY report was not observed: ${error.message}`, { cause: error });
+                });
+                report.input = inputSince(fixture, inputIndex);
+                await frame(page);
+                await frame(page);
+                report.after = await read();
+                report.expectedBottom = backend === "xterm" && encoding === "sgr";
+                const sameHistory = !report.after.bottom
+                  && JSON.stringify(report.after.rows) === JSON.stringify(report.before.rows)
+                  && (backend === "ghostty" ? report.after.offset === report.before.offset
+                    : JSON.stringify(report.after.slider) === JSON.stringify(report.before.slider));
+                if (report.expectedBottom ? !report.after.bottom : !sameHistory) {
+                  failures.push(`${backend}/${encoding}/${kind}: report viewport rule failed: ${JSON.stringify(report)}`);
+                }
+                await ctx.shot(`229-${backend}-${encoding}-${kind}-report`);
+              } finally {
+                if (kind === "mouse") await page.mouse.up();
+              }
+            }
+          }
+          if (result.reports.length !== 4 || result.reports.some((report) => !report.input || !report.after)) {
+            throw new Error(`${backend}: mouse/wheel report coverage is incomplete`);
+          }
         } catch (error) {
           failures.push(`${backend}: ${error.message}`);
           await ctx.shot(`229-${backend}-failure`).catch(() => {});
@@ -224,7 +288,7 @@ export default {
       await writeTerminalPrefs(page, token, { ghostty: original.ghostty, mouse_capture: original.mouse_capture });
     }
     for (const [backend, result] of Object.entries(readings)) {
-      console.log(`[smoke]   ${backend}: history=${result.history ? !result.history.bottom : "unavailable"}, output-kept-history=${result.afterOutput ? !result.afterOutput.bottom : "unavailable"}, input-at-bottom=${result.beforeEcho?.bottom ?? "unavailable"}, cursor=${result.afterEcho?.cursorX ?? "unavailable"}; evidence 229-${backend}.json`);
+      console.log(`[smoke]   ${backend}: history=${result.history ? !result.history.bottom : "unavailable"}, output-kept-history=${result.afterOutput ? !result.afterOutput.bottom : "unavailable"}, input-at-bottom=${result.beforeEcho?.bottom ?? "unavailable"}, cursor=${result.afterEcho?.cursorX ?? "unavailable"}, reports=${result.reports?.length ?? 0}; evidence 229-${backend}.json`);
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },
