@@ -314,8 +314,75 @@ async function preSocketArm(ctx) {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector(".terminal-tab");
     await assertNotice(page);
-    await page.click('.cli-reload-notice button[aria-label="Dismiss notice"]');
-    await page.waitForSelector(".cli-reload-notice", { hidden: true });
+    const readDismissHit = (point, button = document.querySelector('.cli-reload-notice button[aria-label="Dismiss notice"]')) => {
+      const cover = document.elementFromPoint(point.x, point.y);
+      const describe = (node) => node ? {
+        tag: node.tagName, id: node.id, classes: node.getAttribute("class"),
+        role: node.getAttribute("role"), label: node.getAttribute("aria-label"),
+        text: node.textContent?.trim().slice(0, 160),
+      } : null;
+      const ancestor = cover?.closest('.app-statusbar, [role="dialog"], [role="alertdialog"], dialog')
+        ?? cover?.parentElement?.closest('[id], [aria-label]');
+      return {
+        connected: !!button?.isConnected,
+        disabled: !!button?.disabled,
+        reachable: !!button?.isConnected && !!cover && button.contains(cover),
+        statusbar: !!cover?.closest(".app-statusbar"),
+        cover: describe(cover), ancestor: describe(ancestor),
+      };
+    };
+    // A full suite can leave a 30 s index cooldown followed by rebuilding and embedding.
+    const dismissAttempt = await poll("an unobstructed Dismiss notice click point", async () => {
+      const dismiss = await page.$('.cli-reload-notice button[aria-label="Dismiss notice"]');
+      if (!dismiss) throw new Error("Dismiss notice button is absent");
+      try {
+        let point;
+        try {
+          await dismiss.scrollIntoView();
+          point = await dismiss.clickablePoint();
+        } catch (error) {
+          if (await dismiss.evaluate((button) => !button.isConnected)) return null;
+          return { error: new Error(`Dismiss notice click-point preparation failed: ${error.message}`, { cause: error }) };
+        }
+        const hit = await page.evaluate(readDismissHit, point, dismiss);
+        ctx.mark("dismiss-click-point", { point, ...hit });
+        if (!hit.connected) return null;
+        // poll retries thrown errors; return terminal failures so they escape it immediately.
+        if (hit.disabled) return { error: new Error("Dismiss notice button is disabled") };
+        if (!hit.reachable) {
+          const error = new Error(`Dismiss notice is covered at ${JSON.stringify(point)} by ${JSON.stringify(hit.cover)} in ${JSON.stringify(hit.ancestor)}`);
+          if (hit.statusbar) throw error;
+          return { error };
+        }
+        return { point };
+      } finally {
+        await dismiss.dispose();
+      }
+    }, 90_000);
+    if (dismissAttempt.error) throw dismissAttempt.error;
+    details.dismissPoint = dismissAttempt.point;
+    await page.mouse.click(details.dismissPoint.x, details.dismissPoint.y);
+    const dismissHit = await page.evaluate(readDismissHit, details.dismissPoint);
+    ctx.mark("dismiss-click-result", { point: details.dismissPoint, ...dismissHit });
+    if (dismissHit.statusbar) {
+      throw new Error(`Dismiss notice pointer click hit the status bar at ${JSON.stringify(details.dismissPoint)}: ${JSON.stringify(dismissHit.cover)} in ${JSON.stringify(dismissHit.ancestor)}`);
+    }
+    try {
+      await page.waitForSelector(".cli-reload-notice", { hidden: true });
+    } catch (error) {
+      const hit = await page.evaluate(readDismissHit, details.dismissPoint)
+        .catch((sampleError) => ({ sampleError: sampleError.message }));
+      ctx.mark("dismiss-click-missed", { point: details.dismissPoint, ...hit });
+      throw new Error(`Dismiss notice stayed visible after the pointer click at ${JSON.stringify(details.dismissPoint)}; current hit: ${JSON.stringify(hit)}; ${error.message}`, { cause: error });
+    }
+    // Switching tabs also hides the notice without dismissing it.
+    details.dismissedTab = await page.evaluate(() => ({
+      terminalActive: !!document.querySelector(".terminal-tab.active"),
+      activeTitle: document.querySelector('[role="tablist"] .tab.active')?.getAttribute("title") ?? null,
+    }));
+    assert.ok(details.dismissedTab.terminalActive, "the CLI terminal remains active after dismissing its notice");
+    assert.equal(details.dismissedTab.activeTitle, name, "notice dismissal keeps the CLI tab active in the strip");
+    await ctx.shot("before-socket-dismissed", page);
     await page.waitForFunction((before) => document.querySelector(".terminal-host")?.getBoundingClientRect().height > before,
       {}, details.firstHostHeight);
     details.dismissedHostHeight = await page.$eval(".terminal-host", (node) => node.getBoundingClientRect().height);
