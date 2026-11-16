@@ -92,7 +92,7 @@ Tunnel, the transports between a desktop, a devserver and a gateway:
 - [crates/chan-wireguard](crates/chan-wireguard/design.md) - the in-process WireGuard peer and TCP stack the devserver's dial can run through.
 - [crates/chan-tunnel-server](crates/chan-tunnel-server/design.md) - the terminator embedded by the gateway.
 - [crates/chan-revtunnel](crates/chan-revtunnel/design.md) - reverse port forwarding from a devserver to the connected desktop (`cs tunnel`); distinct from the gateway tunnel.
-- [crates/chan-tls](crates/chan-tls/design.md) - the TLS trust decision the tunnel dial, the desktop's gateway clients and the WireGuard agent share.
+- [crates/chan-tls](crates/chan-tls/design.md) - the TLS trust decision the desktop's clients and updater, the devserver's tunnel dial, the CLI's self-update and `chan metrics --url`, and the gateway's WireGuard agent share.
 
 Gateway, a separate Cargo workspace (the self-hosted account, sign-in, and proxy surface):
 

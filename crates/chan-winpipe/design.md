@@ -7,13 +7,13 @@ chan-winpipe is the Win32 boundary of chan's named pipes and claim directories: 
 ```mermaid
 flowchart LR
   Wp["chan-winpipe"]
-  Handoff["chan-server: handoff (the desktop's claim directory and pipes, the CLI's client)"]
+  Handoff["chan-server: handoff (the desktop's claim directory, lock file and pipes, the CLI's client)"]
   Desktop["chan-desktop: single_instance (the launch guard)"]
   Handoff --> Wp
   Desktop -->|"through chan-server's handoff"| Handoff
 ```
 
-chan-server's handoff module names the desktop's endpoint by the account's SID, creates the claim directory and both pipes through this crate, validates the directory's owner and grants, and checks the server's account on every client it opens. The guard in chan-desktop reaches the crate only through those handoff calls. The contract they implement (one desktop per account, a client that never writes to another account's desktop) is in [crates/chan-server/design.md](../chan-server/design.md); this crate is the mechanism.
+chan-server's handoff module names the desktop's endpoint by the account's SID, creates the claim directory, its lock file and both pipes through this crate, validates the owner and grants of the directory and the lock file, and checks the server's account on every client it opens. The guard in chan-desktop reaches the crate only through those handoff calls. The contract they implement (one desktop per account, a client that never writes to another account's desktop) is in [crates/chan-server/design.md](../chan-server/design.md); this crate is the mechanism.
 
 ## What it provides
 
@@ -26,8 +26,8 @@ chan-server's handoff module names the desktop's endpoint by the account's SID, 
 
 ## What it does not do
 
-It reads and writes nothing through a pipe; the transport is tokio's named pipes, and the handoff protocol, its timeouts and its retries stay in chan-server. It does not cover chan's other pipes: the control socket's and the devserver handoff's pipes keep the default descriptor.
+It reads and writes nothing through a pipe; the transport is tokio's named pipes, and the handoff protocol, its timeouts and its retries belong to chan-server and the desktop. It does not cover chan's other pipes: the control socket's and the devserver handoff's pipes keep the default descriptor.
 
-## Claim ownership and compatibility
+## Claim ownership
 
-The desktop claim is a `File::try_lock` lock on `%LOCALAPPDATA%\chan\run\desktop.lock`, with `run` created owner-only and checked on every claim. Its optional claim pipe is a booting sign and a signal an older desktop launch recognizes; a pipe another account holds under that name cannot hold the file lock. The launch guard retries a missing marker every 20 ms for up to 200 ms before booting; a permanent failure still leaves the file claim held. An elevated process that can write another account's profile or end its processes remains outside this boundary. Another account can also reserve the endpoint pipe's own name: the desktop retains its file claim and runs without a listener, so CLI handoffs fall back and a second launch cannot bring it forward. Across one release boundary, a new launch asks an older desktop whose endpoint is already serving; if the older desktop has only its claim pipe and is still booting, the new launch boots too, since treating that unauthenticated sign as a lock would restore the denial of service. That boot-window gap ends when no older desktop runs. An endpoint that cannot be opened because every pipe instance is busy is retried for up to five seconds. If no probe authenticates this account before that bound, the launch boots; a busy pipe held by another account can therefore delay a first launch by five seconds but cannot prevent it. An older desktop whose endpoint cannot be authenticated during those five seconds has the same compatibility gap as one still booting. Once a probe authenticates this account, a later busy reading does not erase it: expiry returns the unanswered, refusal or shutting-down outcome already established, using the applicable ask, release or drain bound. An unreadable server account is foreign and is not retried. The compatibility gaps end when no older desktop runs.
+The desktop claim is a `File::try_lock` lock on `%LOCALAPPDATA%\chan\run\desktop.lock`. Handoff creates `run` with `create_owner_only_dir` and the lock file with `open_owner_only_file`, holds both open without delete sharing through `open_dir` and the file's handle, and on every claim refuses either node when it is a reparse point, is not a directory or a regular file, or has a descriptor `grants_account_alone` rejects. The lock depends on no pipe, so a pipe another account creates under the boot marker's name cannot hold it. An elevated process that can write another account's profile or end its processes remains outside this boundary. The boot marker, the endpoint pipe, and the launch's retries, timeouts and compatibility with an older desktop are chan-server's and the desktop's, in [crates/chan-server/design.md](../chan-server/design.md) and [desktop/design.md](../../desktop/design.md).

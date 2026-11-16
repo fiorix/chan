@@ -5,8 +5,8 @@
 //!
 //! - `workspaces`: chan-workspace's Registry
 //!
-//! What's left lives here, persisted to
-//! `<config>/chan/preferences.toml`:
+//! What's left lives here, persisted to `~/.chan/preferences.toml`
+//! (under `$CHAN_HOME` when that is set):
 //!
 //!   - editor_theme (github / google_docs / word)
 //!   - editor_font_size (optional absolute body size)
@@ -53,7 +53,7 @@ use crate::Error;
 pub const EDITOR_FONT_SIZE_MIN: u32 = 10;
 pub const EDITOR_FONT_SIZE_MAX: u32 = 32;
 
-/// Fields persisted to `<config>/chan/preferences.toml`. A fresh
+/// Fields persisted to `~/.chan/preferences.toml`. A fresh
 /// install defaults to the GitHub editor theme so the renderer
 /// matches what most users expect from a markdown editor without
 /// any further configuration.

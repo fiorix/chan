@@ -64,7 +64,7 @@
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
-      <li>While the running copy is still starting, a second start opens nothing more: its windows are on their way.</li>
+      <li>While the running copy is still starting, a second start opens nothing more: its windows are on their way. On Windows, a newer build started while an older copy is still starting, or while all of the older copy's handoff connections stay busy for five seconds, can run as a second copy beside it.</li>
       <li>Each Windows account runs a copy of its own.</li>
       <li>On Windows a start waits up to 30 seconds for a copy that is still starting.</li>
       <li>Started from a terminal, a start that fails prints the reason there instead of showing a dialog, and exits with status 1.</li>

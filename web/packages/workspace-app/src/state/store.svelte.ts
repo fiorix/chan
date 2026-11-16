@@ -4090,7 +4090,8 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 
 // ---- session persistence (per-window, server-side) ---------------------
 //
-// PUT/GET hit `<state>/sessions/<workspace-key>/<window-id>.json`. The
+// PUT/GET `/api/session?w=<window-id>`, which a workspace server keeps at
+// `~/.chan/workspaces/<metadata_key>/sessions/<window-id>`. The
 // payload is the layout shape from `serializeLayout()` plus a
 // `treeExpanded` map (file browser directory state). Debounced more
 // than the URL-hash write since this hits the disk.
