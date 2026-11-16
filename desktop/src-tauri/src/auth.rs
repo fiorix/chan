@@ -80,10 +80,6 @@ use tokio::sync::watch;
 
 use crate::gateway::GatewayAttempt;
 
-#[cfg(any(target_os = "ios", test))]
-#[path = "mobile_auth.rs"]
-mod mobile_auth;
-
 #[derive(Clone)]
 struct GatewaySignin {
     id: String,
@@ -612,7 +608,7 @@ fn launch_signin<R: tauri::Runtime>(
     #[cfg(not(target_os = "ios"))]
     let label = format!("chan-desktop @ {}", hostname());
     #[cfg(target_os = "ios")]
-    let redirect_uri = mobile_auth::MOBILE_REDIRECT_URI.to_string();
+    let redirect_uri = crate::mobile_auth::MOBILE_REDIRECT_URI.to_string();
     #[cfg(not(target_os = "ios"))]
     let redirect_uri = loopback_redirect_uri(port);
     let url = authorize_url(
@@ -667,7 +663,7 @@ fn launch_signin<R: tauri::Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        match mobile_auth::start_mobile_signin(app, url.as_str(), id, attempt, shutdown_rx) {
+        match crate::mobile_auth::start_mobile_signin(app, url.as_str(), id, attempt, shutdown_rx) {
             Ok(()) => Ok(()),
             Err(error) => {
                 clear_gateway_signin(id, attempt);
@@ -2133,7 +2129,7 @@ pub(crate) mod tests {
         let discovery = crate::gateway::tests::runtime_with(Vec::new()).discovery;
         let url = authorize_url(
             &discovery,
-            mobile_auth::MOBILE_REDIRECT_URI,
+            crate::mobile_auth::MOBILE_REDIRECT_URI,
             "nonce-1",
             "chan-ios @ host".into(),
             "challenge".into(),
