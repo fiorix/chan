@@ -2803,22 +2803,27 @@ mod tests {
         use tokio::net::windows::named_pipe::ServerOptions;
 
         let pipe = test_pipe("transient-busy-endpoint");
-        let server = RefCell::new(Some(tauri::async_runtime::block_on(async {
-            chan_winpipe::create_owner_only(
-                ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .max_instances(1),
-                &pipe,
-            )
-            .unwrap()
-        })));
+        let fresh_server = || {
+            tauri::async_runtime::block_on(async {
+                chan_winpipe::create_owner_only(
+                    ServerOptions::new()
+                        .first_pipe_instance(true)
+                        .max_instances(1),
+                    &pipe,
+                )
+                .unwrap()
+            })
+        };
+        let server = RefCell::new(Some(fresh_server()));
         let mut readings = Vec::new();
         let mut asks = 0;
         let startup = check_predecessor_with(
             claimed(&pipe),
             Bounds {
                 boot: Duration::ZERO,
-                ask: Duration::from_secs(3),
+                // CONNECT_TIMEOUT (1500 ms) + two POLLs (200 ms) +
+                // PROBE_TIMEOUT (250 ms) leave about 3 s for the exchange.
+                ask: Duration::from_secs(5),
                 release: Duration::ZERO,
                 drain: Duration::ZERO,
             },
@@ -2884,7 +2889,11 @@ mod tests {
                 readings.push(reading);
                 if reading == handoff::EndpointProbe::Busy {
                     assert_eq!(readings.len(), 2, "{readings:?}");
-                    server.borrow().as_ref().unwrap().disconnect().unwrap();
+                    // A disconnected instance needs connect() before reuse.
+                    // A fresh object also avoids retaining Mio's read state.
+                    drop(server.borrow_mut().take().unwrap());
+                    let fresh = fresh_server();
+                    *server.borrow_mut() = Some(fresh);
                 }
                 reading
             },
