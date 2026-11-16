@@ -2696,24 +2696,30 @@ mod tests {
                 marker_name,
             )
             .unwrap();
+            // The listener's shape: the first instance refuses a name already
+            // served, and every later one joins it.
             let server = chan_winpipe::create_owner_only(
-                ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .max_instances(1),
+                ServerOptions::new().first_pipe_instance(true),
                 &pipe,
             )
             .unwrap();
             (server, marker)
         });
+        let pipe_name = pipe.as_os_str().to_owned();
         let mut task = tauri::async_runtime::spawn(async move {
-            let mut server = server;
+            let mut next = server;
             loop {
-                server.connect().await.unwrap();
-                let mut stream = BufReader::new(server);
+                next.connect().await.unwrap();
+                // A fresh instance replaces each accepted one before it is
+                // read, so a probe never finds the name without an instance,
+                // and no object is reused: Mio keeps a pipe object's read
+                // state across a disconnect, so a reused one reads the next
+                // connection as the last one's end of file.
+                let fresh =
+                    chan_winpipe::create_owner_only(&ServerOptions::new(), &pipe_name).unwrap();
+                let mut stream = BufReader::new(std::mem::replace(&mut next, fresh));
                 let mut line = String::new();
                 if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
-                    server = stream.into_inner();
-                    server.disconnect().unwrap();
                     continue;
                 }
                 let request: handoff::Request = serde_json::from_str(&line).unwrap();
@@ -2722,6 +2728,7 @@ mod tests {
                 reply.push(b'\n');
                 stream.get_mut().write_all(&reply).await.unwrap();
                 drop(stream);
+                drop(next);
                 drop(marker);
                 break;
             }
@@ -2742,7 +2749,7 @@ mod tests {
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
-                    panic!("the predecessor did not finish its shutdown reply");
+                    panic!("the predecessor did not finish its shutdown reply: {startup:?}");
                 }
             }
         });
