@@ -43,7 +43,6 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [a minimized window stays minimized][unbury] | merged | vm |
 | [slides and PDFs show raw wikilinks][wikirender] | merged | closed |
 | [typing leaves a ghostty view in history][typescroll] | merged | owner |
-| [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [another account holds the claim][winclaim] | not started | build |
 | [a reload focuses another pane][reloadfocus] | merged | closed |
 | [a close test fails a loaded gate][closetest] | merged | closed |
@@ -80,7 +79,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [wikirender]: v0.131.0/slides-and-pdf-export-show-wikilinks-as-raw-text.md
 [typescroll]: v0.131.0/typing-into-a-ghostty-terminal-leaves-a-scrolled-back-view-where-it-is.md
 [streamlag]: v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
-[conpty]: v0.131.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
+[conpty]: v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
@@ -101,7 +100,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 
 ### v0.132.0
 
-Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0.
+Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -109,6 +108,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [AppImage children get its environment][appenv] | partly built | build |
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
+| [ConPTY pulls history into the screen][conpty] | partly built | build |
 
 ## Completed
 
@@ -117,7 +117,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 Shipped 2026-11-14; see [release-v0.130.0](../release/release-v0.130.0.md). A no-rc release by the owner's word ("the ones pending we move to v0.131 and once the ones inflight complete we move to ga/tag"): sixteen `--no-ff` merges, fourteen from twelve branches and two of `main`, into the integration branch `v0130/int` over `main` at `8f427abce` (the v0.129.0 tag and the systemd-report row), with the integrator's thirteen documents commits between them, under fourteen rows; nine shipped and are in [`done/`](done/), and the five not started moved to v0.131.0 on 2026-11-14. The manual, rewritten as short pages with the product changes the owner ordered in that lane, and two fixes from its follow-ups shipped without a row.
 
 - [a-ghostty-terminal-leaves-a-pure-black-background-unpainted](done/a-ghostty-terminal-leaves-a-pure-black-background-unpainted.md) - A ghostty terminal leaves a pure black background unpainted.
-- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.131.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.131.0 on 2026-11-14, not started).
+- [a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller](v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md) - A ghostty terminal on a Windows PTY pulls history into the screen when it grows taller (moved to v0.131.0 on 2026-11-14, not started).
 - [a-ghostty-terminal-opening-in-a-background-pane-takes-the-keyboard-for-a-moment](done/a-ghostty-terminal-opening-in-a-background-pane-takes-the-keyboard-for-a-moment.md) - A ghostty terminal opening in a background pane takes the keyboard for a moment.
 - [a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges](done/a-pane-keeps-its-margin-and-rounded-corners-on-the-windows-own-edges.md) - A pane keeps its margin and rounded corners on the window's own edges.
 - [a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early](done/a-pasted-or-delivered-text-holding-esc-201-ends-its-bracketed-paste-early.md) - A pasted or delivered text holding `ESC[201~` ends its bracketed paste early.
