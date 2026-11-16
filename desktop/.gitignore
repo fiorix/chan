@@ -1,5 +1,7 @@
 /src-tauri/target/
-/src-tauri/gen/
+# The iOS Xcode project is committed; its nested gen/apple/.gitignore
+# covers build outputs, and Pods stay out if any are ever added.
+/src-tauri/gen/apple/Pods/
 /src-tauri/binaries/
 **/.DS_Store
 *.tmp

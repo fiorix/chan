@@ -10,6 +10,8 @@ mod dropped_paths;
 mod embedded;
 mod gateway;
 mod handoff_registrations;
+#[cfg(target_os = "ios")]
+mod ios;
 mod last_window;
 mod launch_paths;
 mod launcher_panel;
@@ -5657,6 +5659,20 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// iOS entry, called from Swift as `start_app` through Tauri's mobile
+/// entry point. The iOS library target shares this file as its root, so
+/// the entry lives here beside `main`; it runs the single-webview app
+/// and returns only when the process exits.
+#[cfg(target_os = "ios")]
+#[allow(dead_code)]
+#[tauri::mobile_entry_point]
+pub fn ios_entry() {
+    ios::run();
+}
+
+// The iOS library target shares this file, and its entry is `ios_entry`,
+// so `main` is unused there; the desktop binary still enters here.
+#[allow(dead_code)]
 fn main() {
     // Windows: a release chan-desktop.exe is GUI-subsystem (no console). When
     // invoked as the `chan` / `cs` CLI through a shim, reattach to the parent
