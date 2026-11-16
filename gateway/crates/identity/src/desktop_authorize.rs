@@ -20,8 +20,8 @@
 //!
 //!   * `GET  /desktop/authorize?<query>` -- entry point. Validates the
 //!     query (loopback or registered-mobile `redirect_uri`,
-//!     `code_challenge` + `S256`
-//!     method, `state`, `label`, `scopes`, `expires_in`), stashes a
+//!     `code_challenge` + `S256` method, `state`, `label`,
+//!     `scopes`, `expires_in`), stashes a
 //!     [`AuthorizeParams`] struct in the session, and redirects: to `/`
 //!     if unauthenticated (SPA sign-in renders, then `auth_callback`
 //!     bounces back here), or straight to
@@ -32,8 +32,8 @@
 //!     untrusted local app (the `label` is requester-supplied text,
 //!     not a verified identity) and names the callback target the
 //!     result is delivered to (the local port on the loopback arm,
-//!     the registered app callback on the mobile arm). Includes a
-//!     hidden CSRF nonce stored alongside
+//!     the registered app callback on the mobile arm), with a hidden
+//!     CSRF nonce stored alongside
 //!     the pending params.
 //!   * `POST /desktop/authorize/confirm` -- handles the `Authorize` /
 //!     `Cancel` action. Consumes the pending params + CSRF; on
@@ -46,7 +46,7 @@
 //!     (`deny` / blocked carry `?error=&state=` instead) via a
 //!     zero-delay meta refresh plus a manual fallback link. The no-3xx
 //!     ruling binds THIS response specifically: a 3xx answering the
-//!     form POST would put the loopback hop inside the form
+//!     form POST would put the callback hop inside the form
 //!     submission's redirect chain, which Chrome subjects to the
 //!     page's `form-action` CSP, and the handoff page keeps that
 //!     navigation out of any form chain entirely. It says nothing
@@ -105,12 +105,12 @@
 //!   * The redeem route has no session auth: the credential is
 //!     possession of the one-time code AND knowledge of the verifier
 //!     whose S256 hash keys the stored challenge (TLS assumed). This
-//!     is NOT takeover-proof on the loopback arm: because a public
-//!     loopback client cannot
-//!     authenticate itself and the `code_challenge` + `state` leak
-//!     through the browser-opener argv, a co-tenant who reads them can
-//!     bind their own consent to the victim's challenge and deliver
-//!     the result to the victim's listener (a login-CSRF residual).
+//!     is NOT takeover-proof on the loopback arm, because a public
+//!     loopback client cannot authenticate itself and the
+//!     `code_challenge` + `state` leak through the browser-opener
+//!     argv, a co-tenant who reads them can bind their own consent
+//!     to the victim's challenge and deliver the result to the
+//!     victim's listener (a login-CSRF residual).
 //!     PKCE raises the bar (attacker needs a gateway account, an
 //!     automated consent, and a won race) but does not close it under
 //!     a shared-host threat model. Single-user is the shipped scope.
@@ -762,9 +762,9 @@ pub struct RedeemRequest {
 /// PKCE verifier for the minted PAT. No session auth: the credential is
 /// possession of the code AND knowledge of the verifier whose S256 hash
 /// keys the stored challenge (see the module doc's hardening notes).
-/// This is NOT takeover-proof on the loopback arm -- a co-tenant who
-/// reads the argv-leaked
-/// challenge can bind their own consent to it (a login-CSRF residual);
+/// This is NOT takeover-proof on the loopback arm -- a co-tenant
+/// who reads the argv-leaked challenge can bind their own consent
+/// to it (a login-CSRF residual);
 /// PKCE only raises the bar. Unknown, expired, replayed codes and a
 /// wrong verifier all share one 410 so an off-path caller cannot probe
 /// code state or the challenge.
@@ -1220,6 +1220,23 @@ mod tests {
                 "{bad} should reject"
             );
         }
+    }
+
+    #[test]
+    fn mobile_redirect_uri_pins_whatwg_edge_spellings() {
+        // Empty userinfo is absent userinfo: `@` with nothing before
+        // it parses to an empty username, which the userinfo rule
+        // treats like no userinfo at all (the loopback arm agrees).
+        assert!(validate_mobile_redirect_uri("chan://@auth/callback").is_ok());
+        // Empty port is absent port: WHATWG drops an empty port
+        // buffer instead of erroring, and the registered value
+        // carries none. (The loopback arm rejects this spelling only
+        // because it requires a port.)
+        assert!(validate_mobile_redirect_uri("chan://auth:/callback").is_ok());
+        // An empty query or fragment is still present: a trailing `?`
+        // or `#` parses to Some(""), which the smuggle rule rejects.
+        assert!(validate_mobile_redirect_uri("chan://auth/callback?").is_err());
+        assert!(validate_mobile_redirect_uri("chan://auth/callback#").is_err());
     }
 
     // --- validate() ---
