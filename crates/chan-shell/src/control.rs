@@ -427,9 +427,9 @@ fn first_response_outcome(response: ControlResponse) -> Result<String> {
         // A bounded blocking request whose window elapsed. Surface it as a
         // typed error, NOT the generic bail, so a dispatch edge can downcast
         // it to a dedicated exit code (124) and never confuse a timeout with
-        // a real failure. `cs terminal survey`, `cs copy`, `cs paste` and
-        // `cs tunnel` do; `cs export` and `cs session self|handover` pass it
-        // up as an ordinary error (exit 1).
+        // a real failure. `cs terminal survey`, `cs copy`, `cs paste`,
+        // `cs tunnel` and `cs window new` do; `cs export` and
+        // `cs session self|handover` pass it up as an ordinary error (exit 1).
         ControlResponse::Timeout { message } => {
             Err(crate::exit_code::ControlTimeout { message }.into())
         }

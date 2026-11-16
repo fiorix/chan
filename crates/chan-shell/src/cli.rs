@@ -1428,7 +1428,19 @@ async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
 /// devserver's window is removed without that local check.
 async fn cmd_window_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
-    let message = send_control_request(&socket, req).await?;
+    let is_new = matches!(req, ControlRequest::WindowNew);
+    let result = send_control_request(&socket, req).await;
+    let message = if is_new {
+        match classify_control_result(result)? {
+            ControlOutcome::Replied(message) => message,
+            ControlOutcome::TimedOut(message) => {
+                eprintln!("{message}");
+                std::process::exit(crate::exit_code::CONTROL_TIMEOUT);
+            }
+        }
+    } else {
+        result?
+    };
     println!("{message}");
     Ok(())
 }
@@ -2924,13 +2936,14 @@ fn classify_term_write_result(result: Result<String>) -> Result<TermWriteControl
 }
 
 /// The terminal outcome of a bounded blocking control round-trip
-/// (`cs terminal survey`, `cs copy`, `cs paste`). Split from the commands so
-/// the print-stream + exit-code decision is unit-testable without a live
-/// server or a `process::exit`.
+/// (`cs terminal survey`, `cs copy`, `cs paste`, `cs window new`). Split from
+/// the commands so the print-stream + exit-code decision is unit-testable
+/// without a live server or a `process::exit`.
 #[derive(Debug)]
 enum ControlOutcome {
     /// The server replied: the message is the command's normal payload
-    /// (a survey answer line, a clipboard reply) and the process exits 0.
+    /// (a survey answer line, a clipboard reply, a window id) and the process
+    /// exits 0.
     Replied(String),
     /// The reply window elapsed: the message is printed to stderr and the
     /// process exits [`crate::exit_code::CONTROL_TIMEOUT`] (124).

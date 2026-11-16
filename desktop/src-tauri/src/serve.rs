@@ -525,6 +525,7 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
 /// relaunch does not restore it. Refused once a shutdown has started: the
 /// updater's relaunch starts the new process while this one still holds the
 /// handoff socket, and that process must boot rather than hand itself back.
+/// Returns the native label because the handoff caller raises the window by label.
 pub async fn spawn_throwaway_terminal_window(
     state: Arc<AppState>,
     cwd: std::path::PathBuf,
