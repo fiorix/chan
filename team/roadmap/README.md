@@ -32,7 +32,6 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [the launcher acts on a stale browser][fbtarget] | merged | closed |
 | [an accessibility press closes a tab][axclose] | merged | owner |
 | [a PDF export is images only][pdftext] | withdrawn | closed |
-| [the model download trusts bundled roots][modelroots] | not started | build |
 | [the self-update trusts bundled roots][updroots] | merged | closed |
 | [the Windows lint is red in chan][winlint] | merged | vm |
 | [a late heading has no fold chevron][foldlate] | merged | closed |
@@ -67,7 +66,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [fbtarget]: v0.131.0/the-launchers-file-commands-act-on-the-file-browser-focused-last-not-the-tab-just-made-active.md
 [axclose]: v0.131.0/an-accessibility-press-on-a-tab-also-closes-it.md
 [pdftext]: v0.131.0/an-exported-pdf-holds-each-page-as-one-image-with-no-text-to-select-or-search.md
-[modelroots]: v0.131.0/the-model-download-trusts-only-bundled-roots.md
+[modelroots]: v0.132.0/the-model-download-trusts-only-bundled-roots.md
 [updroots]: v0.131.0/the-clis-self-update-trusts-only-reqwests-bundled-roots.md
 [winlint]: v0.131.0/the-windows-target-clippy-of-chan-desktops-whole-dependency-graph-is-red-in-the-chan-crate.md
 [foldlate]: v0.131.0/a-heading-the-editors-parse-reaches-late-has-no-fold-chevron-until-an-edit.md
@@ -105,7 +104,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 
 ### v0.132.0
 
-Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]).
+Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]). Later that day the model download's trust row ([modelroots]) moved here unmerged, when its native Windows rerun stopped on its test kit.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -118,6 +117,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [persist cannot replace an open file][persistwin] | not started | build |
 | [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
 | [the Windows claim's installed readings][winclaimread] | not started | build |
+| [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
 
 ## Completed
