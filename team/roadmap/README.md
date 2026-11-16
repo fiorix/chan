@@ -80,6 +80,9 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [typescroll]: v0.131.0/typing-into-a-ghostty-terminal-leaves-a-scrolled-back-view-where-it-is.md
 [streamlag]: v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [conpty]: v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
+[pillcover]: v0.132.0/the-index-status-pill-covers-a-terminal-notices-dismiss-button.md
+[persistwin]: v0.132.0/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md
+[taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
@@ -109,6 +112,9 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [ConPTY pulls history into the screen][conpty] | partly built | build |
+| [the index pill covers Dismiss][pillcover] | not started | build |
+| [persist cannot replace an open file][persistwin] | not started | build |
+| [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
 
 ## Completed
 
