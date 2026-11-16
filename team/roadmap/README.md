@@ -84,6 +84,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
 [winclaimread]: v0.132.0/the-windows-claims-two-account-and-compatibility-readings.md
 [tlswin]: v0.132.0/the-tls-rows-windows-trust-readings.md
+[termredproofs]: v0.132.0/the-terminal-regression-browser-checks-red-proofs.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
@@ -119,6 +120,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [the Windows claim's installed readings][winclaimread] | not started | build |
 | [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
+| [terminal browser checks' red proofs][termredproofs] | not started | measure |
 
 ## Completed
 
