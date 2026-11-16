@@ -61,6 +61,7 @@
 //! the browser sign-in instead of replaying a dead credential.
 
 use std::collections::HashMap;
+#[cfg(any(not(target_os = "ios"), test))]
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -71,11 +72,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "ios"))]
 use tauri_plugin_opener::OpenerExt;
+#[cfg(any(not(target_os = "ios"), test))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 use crate::gateway::GatewayAttempt;
+
+#[cfg(any(target_os = "ios", test))]
+#[path = "mobile_auth.rs"]
+mod mobile_auth;
 
 #[derive(Clone)]
 struct GatewaySignin {
@@ -122,6 +129,7 @@ pub const AUTH_ERROR: &str = "auth-error";
 
 const KEYCHAIN_SERVICE: &str = "chan-desktop";
 /// Path the loopback listener answers and the `redirect_uri` names.
+#[cfg(not(target_os = "ios"))]
 const LOOPBACK_CALLBACK_PATH: &str = "/auth/callback";
 /// Account-level gateway scope: one PAT reads the account's devserver
 /// roster and mints entries for any of its devservers (own or shared).
@@ -141,20 +149,24 @@ const SLOT_TTL: Duration = crate::GATEWAY_SIGNIN_TIMEOUT;
 
 /// Concurrent in-flight callback handlers the listener will serve; a
 /// flood beyond this drops the excess connection immediately.
+#[cfg(not(target_os = "ios"))]
 const LISTENER_MAX_INFLIGHT: usize = 8;
 /// Deadline for reading a connection's request head. A GET has no body,
 /// so this bounds a slowloris to its own task. It deliberately does NOT
 /// cover the redeem, which owns its own 15s budget (see `serve_callback`):
 /// wrapping the whole handler would cancel a slow-network redeem after the
 /// answer was already flushed, a silent sign-in failure.
+#[cfg(not(target_os = "ios"))]
 const LISTENER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Header read cap. The callback is a bare GET with a handful of
 /// headers; anything larger is not our browser.
+#[cfg(not(target_os = "ios"))]
 const LISTENER_HEADER_CAP: usize = 8 * 1024;
 
 /// The single neutral page every callback answer carries, so a
 /// state-probing attacker cannot distinguish match from mismatch by the
 /// body.
+#[cfg(not(target_os = "ios"))]
 const NEUTRAL_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 <title>chan</title></head><body>You can close this tab.</body></html>";
 
@@ -168,6 +180,7 @@ const NEUTRAL_PAGE: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 /// resolve against `/` from `/profile` but would resolve under
 /// `/profile/` from `/profile/`, which the gateway's SPA fallback answers
 /// 404 for (it only falls back to `index.html` for extensionless paths).
+#[cfg(not(target_os = "ios"))]
 const PROFILE_LANDING_PATH: &str = "/profile?desktop_authorized=1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +338,7 @@ fn challenge_for(verifier: &str) -> String {
 /// The loopback `redirect_uri` the browser is sent back to. IPv4
 /// `127.0.0.1` literal only (never `[::1]`): the browser connects to
 /// `127.0.0.1`, so the listener is single-stack.
+#[cfg(not(target_os = "ios"))]
 fn loopback_redirect_uri(port: u16) -> String {
     format!("http://127.0.0.1:{port}{LOOPBACK_CALLBACK_PATH}")
 }
@@ -333,6 +347,7 @@ fn loopback_redirect_uri(port: u16) -> String {
 /// needed immediately for the `redirect_uri`; commands are sync). Adopted
 /// onto tokio inside the accept task, never here. Fail-closed: an `Err`
 /// is propagated so the caller touches nothing else (F3).
+#[cfg(not(target_os = "ios"))]
 fn bind_loopback_listener() -> Result<(std::net::TcpListener, u16), String> {
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .map_err(|e| format!("could not start the local sign-in listener: {e}"))?;
@@ -493,6 +508,60 @@ pub(super) fn clear_gateway_signin(id: &str, attempt: &Arc<GatewayAttempt>) {
     }
 }
 
+/// Settle a captured mobile callback query against the pending slot: the same
+/// compare-before-take classify plus settle the loopback listener runs, minus
+/// the browser answer, which the authentication session owns. Only this
+/// attempt's slot can be consumed; anything else ignores with the slot
+/// intact.
+#[cfg(any(target_os = "ios", test))]
+pub(super) fn settle_mobile_query<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    id: &str,
+    attempt: &Arc<GatewayAttempt>,
+    query: &str,
+) {
+    let action = {
+        let mut pending = pending_state().lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|slot| slot.gateway.matches(id, attempt))
+        {
+            classify_callback(query, &mut pending)
+        } else {
+            CallbackAction::Ignore
+        }
+    };
+    tauri::async_runtime::spawn(settle(app, action));
+}
+
+/// Fail this attempt's live mobile slot with a local (non-gateway) outcome:
+/// a dismissed sheet, or a session that never presented. The slot must still
+/// belong to the attempt; a successor's slot is left alone, and the failure
+/// settles through the same row path as a gateway-reported error.
+#[cfg(any(target_os = "ios", test))]
+pub(super) fn fail_mobile_signin<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    id: &str,
+    attempt: &Arc<GatewayAttempt>,
+    message: String,
+) {
+    let action = {
+        let mut pending = pending_state().lock().unwrap();
+        match pending.as_mut() {
+            Some(slot) if slot.gateway.matches(id, attempt) => {
+                let slot = pending.take().expect("slot matched");
+                CallbackAction::Fail {
+                    message,
+                    gateway: slot.gateway,
+                    shutdown: slot.shutdown,
+                }
+            }
+            _ => CallbackAction::Ignore,
+        }
+    };
+    tauri::async_runtime::spawn(settle(app, action));
+}
+
 pub(super) fn open_gateway_signin<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &Arc<crate::AppState>,
@@ -500,13 +569,26 @@ pub(super) fn open_gateway_signin<R: tauri::Runtime>(
     id: &str,
     attempt: &Arc<GatewayAttempt>,
 ) -> Result<(), String> {
-    launch_signin(app, state, discovery, id, attempt, bind_loopback_listener)
+    #[cfg(not(target_os = "ios"))]
+    {
+        launch_signin(app, state, discovery, id, attempt, bind_loopback_listener)
+    }
+    #[cfg(target_os = "ios")]
+    {
+        launch_signin(app, state, discovery, id, attempt, || {
+            Err("the loopback listener is compiled out on this target".to_string())
+        })
+    }
 }
 
 /// Install the slot, then publish the browser wait under its attempt guard.
-/// The listener and opener run only after that publication, so an immediate
-/// callback cannot be overwritten by a late pending publication. No manager
-/// or slot lock spans the opener. A cancel there leaves the browser no slot.
+/// The browser leg runs only after that publication, so an immediate callback
+/// cannot be overwritten by a late pending publication. No manager or slot
+/// lock spans the opener. A cancel there leaves the browser no slot. Desktop
+/// answers its callback on a loopback listener and opens the system browser;
+/// iOS presents the authorize page in an authentication session that captures
+/// the mobile callback in-process. Both settle through the same classify plus
+/// redeem plus commit path.
 fn launch_signin<R: tauri::Runtime>(
     app: &AppHandle<R>,
     app_state: &Arc<crate::AppState>,
@@ -519,11 +601,23 @@ fn launch_signin<R: tauri::Runtime>(
     let verifier = new_verifier()?;
     let challenge = challenge_for(&verifier);
     let enrolling = enrolling_key(app_state, id, discovery)?;
+    #[cfg(target_os = "ios")]
+    let _ = bind;
+    #[cfg(not(target_os = "ios"))]
     let (listener, port) = bind()?;
+    #[cfg(target_os = "ios")]
+    let port = 0u16;
+    #[cfg(target_os = "ios")]
+    let label = format!("chan-ios @ {}", hostname());
+    #[cfg(not(target_os = "ios"))]
     let label = format!("chan-desktop @ {}", hostname());
+    #[cfg(target_os = "ios")]
+    let redirect_uri = mobile_auth::MOBILE_REDIRECT_URI.to_string();
+    #[cfg(not(target_os = "ios"))]
+    let redirect_uri = loopback_redirect_uri(port);
     let url = authorize_url(
         discovery,
-        port,
+        &redirect_uri,
         &state_nonce,
         label,
         challenge,
@@ -553,31 +647,49 @@ fn launch_signin<R: tauri::Runtime>(
         clear_gateway_signin(id, attempt);
         return Ok(());
     }
-    tauri::async_runtime::spawn(serve_signin_listener(
-        app.clone(),
-        Arc::clone(app_state),
-        listener,
-        port,
-        shutdown_rx,
-        gateway.clone(),
-    ));
-    tauri::async_runtime::spawn(expire_slot(gateway));
-    if let Err(error) = open_authorize_url(app, attempt, url.as_str()) {
-        clear_gateway_signin(id, attempt);
-        crate::gateway::withdraw_pending_signin(app_state, id, attempt);
-        return Err(error);
+    tauri::async_runtime::spawn(expire_slot(gateway.clone()));
+    #[cfg(not(target_os = "ios"))]
+    {
+        tauri::async_runtime::spawn(serve_signin_listener(
+            app.clone(),
+            Arc::clone(app_state),
+            listener,
+            port,
+            shutdown_rx,
+            gateway.clone(),
+        ));
+        if let Err(error) = open_authorize_url(app, attempt, url.as_str()) {
+            clear_gateway_signin(id, attempt);
+            crate::gateway::withdraw_pending_signin(app_state, id, attempt);
+            return Err(error);
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(target_os = "ios")]
+    {
+        match mobile_auth::start_mobile_signin(app, url.as_str(), id, attempt, shutdown_rx) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                clear_gateway_signin(id, attempt);
+                crate::gateway::withdraw_pending_signin(app_state, id, attempt);
+                Err(error)
+            }
+        }
+    }
 }
 
 /// The WireGuard key this sign-in enrolls: the row's generated public key,
 /// read now, when the gateway's discovery offers enrollment; `None` when
-/// either is missing, and the sign-in then sends no key.
+/// either is missing, and the sign-in then sends no key. Always `None` on
+/// iOS, where there is no WireGuard fabric to enroll into.
+#[cfg_attr(target_os = "ios", allow(unused_variables))]
 fn enrolling_key(
     app_state: &crate::AppState,
     id: &str,
     discovery: &crate::devserver::GatewayDiscovery,
 ) -> Result<Option<Enrolling>, String> {
+    #[cfg(target_os = "ios")]
+    return Ok(None);
     let Some(entry) = &discovery.wireguard else {
         return Ok(None);
     };
@@ -598,19 +710,21 @@ fn enrolling_key(
     }))
 }
 
-/// The gateway's authorize page with the sign-in's parameters. A WireGuard
-/// public key rides as `wireguard_public_key` only when the discovery offers
-/// enrollment, so a gateway that enrolls no peers never receives one.
+/// The gateway's authorize page with the sign-in's parameters. The
+/// `redirect_uri` is the loopback callback on desktop and the mobile callback
+/// on iOS; every other parameter is identical on both. A WireGuard public key
+/// rides as `wireguard_public_key` only when the discovery offers enrollment,
+/// so a gateway that enrolls no peers never receives one.
 fn authorize_url(
     discovery: &crate::devserver::GatewayDiscovery,
-    port: u16,
+    redirect_uri: &str,
     state_nonce: &str,
     label: String,
     challenge: String,
     wireguard_public_key: Option<&str>,
 ) -> Result<url::Url, String> {
     let mut params = vec![
-        ("redirect_uri", loopback_redirect_uri(port)),
+        ("redirect_uri", redirect_uri.to_string()),
         ("state", state_nonce.to_string()),
         ("label", label),
         ("code_challenge", challenge),
@@ -625,6 +739,7 @@ fn authorize_url(
         .map_err(|e| format!("building authorize URL: {e}"))
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn serve_signin_listener<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: Arc<crate::AppState>,
@@ -651,6 +766,7 @@ async fn serve_signin_listener<R: tauri::Runtime>(
     .await;
 }
 
+#[cfg(not(target_os = "ios"))]
 fn adopt_listener(
     listener: std::net::TcpListener,
     _flow: &GatewaySignin,
@@ -662,6 +778,7 @@ fn adopt_listener(
     tokio::net::TcpListener::from_std(listener)
 }
 
+#[cfg(not(target_os = "ios"))]
 fn open_authorize_url<R: tauri::Runtime>(
     app: &AppHandle<R>,
     _attempt: &GatewayAttempt,
@@ -698,6 +815,7 @@ async fn expire_slot(flow: GatewaySignin) {
 /// blocks the next accept (F2). A semaphore bounds concurrent handlers;
 /// over-cap connections drop. Generic over the per-connection handler so
 /// the accept discipline is drivable in tests without the Tauri GUI.
+#[cfg(not(target_os = "ios"))]
 async fn accept_serve<F, Fut>(
     listener: tokio::net::TcpListener,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -740,6 +858,7 @@ async fn accept_serve<F, Fut>(
 /// the route rules, answer the neutral page, and (on a matching state)
 /// settle the sign-in. NEVER logs the request line or query (it carries
 /// the one-time code).
+#[cfg(not(target_os = "ios"))]
 async fn serve_callback<R: tauri::Runtime>(
     app: AppHandle<R>,
     mut stream: tokio::net::TcpStream,
@@ -790,6 +909,7 @@ async fn serve_callback<R: tauri::Runtime>(
 
 /// Read the HTTP request head (up to the `\r\n\r\n` terminator) with an
 /// 8 KiB cap. A GET has no body, so the head is the whole request.
+#[cfg(not(target_os = "ios"))]
 async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -817,6 +937,7 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String>
 /// `no-referrer` matters more on the landing form than on the neutral
 /// one: the URL being answered carries the one-time code, and the next
 /// hop is the gateway origin.
+#[cfg(not(target_os = "ios"))]
 fn callback_response(status_line: &str, location: Option<&str>) -> String {
     let location = location
         .map(|target| format!("Location: {target}\r\n"))
@@ -835,6 +956,7 @@ fn callback_response(status_line: &str, location: Option<&str>) -> String {
 
 /// The answer for a callback with no flow to complete: today's neutral
 /// page, byte for byte, with no `Location`.
+#[cfg(not(target_os = "ios"))]
 fn neutral_response(status_line: &str) -> String {
     callback_response(status_line, None)
 }
@@ -844,10 +966,12 @@ fn neutral_response(status_line: &str) -> String {
 /// GET navigation and is being sent to look at a different resource; the
 /// neutral body stays as the terminal page for a client that does not
 /// follow.
+#[cfg(not(target_os = "ios"))]
 fn landing_response(target: &str) -> String {
     callback_response("303 See Other", Some(target))
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn write_response(stream: &mut tokio::net::TcpStream, response: &str) -> std::io::Result<()> {
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await
@@ -913,6 +1037,7 @@ impl std::fmt::Debug for CallbackAction {
 /// The exact bytes a valid callback is answered with. The sole site that
 /// picks between the two forms, so the listener and the neutrality tests
 /// cannot drift apart.
+#[cfg(not(target_os = "ios"))]
 fn callback_answer(query: &str, pending: &Option<PendingAuth>) -> String {
     match callback_landing(query, pending) {
         Some(target) => landing_response(&target),
@@ -937,6 +1062,7 @@ fn callback_answer(query: &str, pending: &Option<PendingAuth>) -> String {
 /// Gating on `code` rather than on the absence of `error` is what leaves
 /// the deny and blocked arms on the neutral page: only a callback that
 /// could be a success lands on profile.
+#[cfg(not(target_os = "ios"))]
 fn callback_landing(query: &str, pending: &Option<PendingAuth>) -> Option<String> {
     let slot = pending.as_ref()?;
     if slot.created_at.elapsed() >= SLOT_TTL {
@@ -1169,6 +1295,12 @@ impl crate::gateway::CredentialWrites for SigninWrites {
             hook();
         }
         self.prior_pat = Some(read_stored_pat(&self.identity_origin)?);
+        // iOS signs in without WireGuard enrollment (no fabric); the slot's
+        // is always `None` there, and the enrollment record calls below are
+        // compiled out with it.
+        #[cfg(target_os = "ios")]
+        let _ = self.enrollment.take();
+        #[cfg(not(target_os = "ios"))]
         if let Some(enrollment) = self.enrollment.take() {
             let (recorded, _) = crate::config::record_wireguard_enrollment(
                 &self.state.store,
@@ -1211,6 +1343,9 @@ impl crate::gateway::CredentialWrites for SigninWrites {
                 "reading the credential store to undo a sign-in failed",
             ),
         }
+        #[cfg(target_os = "ios")]
+        let _ = self.recorded.take();
+        #[cfg(not(target_os = "ios"))]
         self.undo_enrollment();
     }
 
@@ -1223,7 +1358,9 @@ impl crate::gateway::CredentialWrites for SigninWrites {
             .is_ok_and(|cfg| !cfg.gateways.iter().any(|g| g.id == self.gateway_id))
     }
 
+    #[cfg_attr(target_os = "ios", allow(unused_variables))]
     fn kept(&mut self) {
+        #[cfg(not(target_os = "ios"))]
         if let Some(recorded) = &self.recorded {
             if let Err(error) = crate::config::finish_wireguard_enrollment(
                 &self.state.store,
@@ -1245,6 +1382,7 @@ impl SigninWrites {
         store_for(&self.account, &self.pat)
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn undo_enrollment(&mut self) {
         let Some(recorded) = self.recorded.take() else {
             return;
@@ -1458,13 +1596,17 @@ struct RedeemedPat {
 /// `None` when the sign-in sent no key, whatever the answer carries. A key
 /// sent and answered without parameters is refused, since the gateway never
 /// delivers a token without its peer, and so are parameters that name
-/// another peer or that the client file cannot hold.
+/// another peer or that the client file cannot hold. Always `None` on iOS,
+/// where the sign-in sends no key.
+#[cfg_attr(target_os = "ios", allow(unused_variables))]
 fn prepare_enrollment(
     state: &crate::AppState,
     gateway_id: &str,
     enrolling: Option<Enrolling>,
     params: Option<crate::wireguard_keys::EnrollmentParams>,
 ) -> Result<Option<crate::wireguard_keys::Enrollment>, String> {
+    #[cfg(target_os = "ios")]
+    return Ok(None);
     let Some(enrolling) = enrolling else {
         return Ok(None);
     };
@@ -1561,6 +1703,7 @@ fn signin_error_message(reason: &str) -> String {
 
 /// The structural verdict for a loopback request, before the state
 /// compare. Extracted (pure) so the route rules are unit-testable.
+#[cfg(not(target_os = "ios"))]
 #[derive(Debug, PartialEq, Eq)]
 enum RequestDecision {
     /// A route-rule violation (method/path/Host/Sec-Fetch-Dest): 400.
@@ -1577,6 +1720,7 @@ enum RequestDecision {
 ///   3. `Sec-Fetch-Dest` present and != `document` -> 400 (absent
 ///      allowed: old browsers, and a web attacker cannot both omit it
 ///      and know the secrets).
+#[cfg(not(target_os = "ios"))]
 fn classify_request(head: &str, port: u16) -> RequestDecision {
     let mut lines = head.split("\r\n");
     let request_line = lines.next().unwrap_or("");
@@ -1927,7 +2071,7 @@ pub(crate) mod tests {
             let enrolling = enrolling_key(&state, "gw-keychain", discovery).unwrap();
             authorize_url(
                 discovery,
-                54321,
+                "http://127.0.0.1:54321/auth/callback",
                 "nonce-1",
                 "chan-desktop @ host".into(),
                 "challenge".into(),
@@ -1968,11 +2112,53 @@ pub(crate) mod tests {
         with_key.push(("wireguard_public_key".into(), KEY.into()));
         assert_eq!(pairs(&url_for(&offering)), with_key);
         // The builder never sends one to a gateway that does not offer it.
-        let url =
-            authorize_url(&plain, 54321, "nonce-1", "l".into(), "c".into(), Some(KEY)).unwrap();
+        let url = authorize_url(
+            &plain,
+            "http://127.0.0.1:54321/auth/callback",
+            "nonce-1",
+            "l".into(),
+            "c".into(),
+            Some(KEY),
+        )
+        .unwrap();
         assert!(url
             .query_pairs()
             .all(|(name, _)| name != "wireguard_public_key"));
+    }
+
+    #[test]
+    fn authorize_url_with_the_mobile_redirect_keeps_every_other_parameter() {
+        // The iOS leg sends the registered mobile callback as its redirect;
+        // scope, PKCE, label, and expiry ride exactly as on desktop.
+        let discovery = crate::gateway::tests::runtime_with(Vec::new()).discovery;
+        let url = authorize_url(
+            &discovery,
+            mobile_auth::MOBILE_REDIRECT_URI,
+            "nonce-1",
+            "chan-ios @ host".into(),
+            "challenge".into(),
+            None,
+        )
+        .unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("redirect_uri", "chan://auth/callback"),
+                ("state", "nonce-1"),
+                ("label", "chan-ios @ host"),
+                ("code_challenge", "challenge"),
+                ("code_challenge_method", "S256"),
+                ("scopes", "desktop.account"),
+                ("expires_in", "2592000"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect::<Vec<_>>(),
+        );
     }
 
     // --- PKCE construction, pinned against silent drift ---
