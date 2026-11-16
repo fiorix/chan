@@ -2,15 +2,15 @@
 //
 // The Rich Prompt over a focused terminal takes the keyboard on its own: as
 // its editor mounts, when a delivered or drained message empties it, when a
-// recall gives its text back, and on each tab-focus pulse. A modal dialog, a
-// survey over the terminal and the Computers launcher own the keyboard
-// (`refocusRefused`), and while one does none of those moves focus into the
-// composer; once it lets go, the next pulse lands in the composer again. A
-// TerminalTab is mounted over the stand-in xterm and socket, so the phases
-// arrive as the server's frames.
+// recall gives its text back, on each tab-focus pulse, and when a submit held
+// for its images' paths is sent. A modal dialog, a survey over the terminal
+// and the Computers launcher own the keyboard (`refocusRefused`), and while
+// one does none of those moves focus into the composer; once it lets go, the
+// next pulse lands in the composer again. A TerminalTab is mounted over the
+// stand-in xterm and socket, so the phases arrive as the server's frames.
 
 import { EditorView } from "@codemirror/view";
-import { tick } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -19,25 +19,35 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+const draft = vi.hoisted(() => ({ content: "run the tests" }));
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
   return {
     ...actual,
     api: {
       ...actual.api,
-      read: vi.fn(async () => ({ content: "run the tests" })),
+      read: vi.fn(async () => ({ content: draft.content })),
       write: vi.fn(async () => ({})),
     },
   };
 });
 
+import Pane from "./Pane.svelte";
 import TerminalTab from "./TerminalTab.svelte";
-import type { SurveySpec } from "../api/client";
+import Terminals from "./Terminals.svelte";
+import { api, type SurveySpec } from "../api/client";
 import { closeConfirmState } from "../state/closeConfirm.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { workspace } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
-import { bumpTabFocusPulse, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import {
+  bumpTabFocusPulse,
+  layout,
+  selectTabInPane,
+  type LeafNode,
+  type TerminalTab as TerminalTabState,
+} from "../state/tabs.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
 import {
@@ -59,6 +69,12 @@ installEditorDom();
 
 const TEXT = "run the tests";
 const SURVEY: SurveySpec = { surveyId: "survey-owner", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] };
+// A workspace draft's text naming one of its images, and the path the server
+// gives that image.
+const IMAGE_TEXT = "see ![](shot.png)";
+const ON_SERVER = "/home/me/.chan/workspaces/k/Drafts/owner/shot.png";
+const workspaceInfo = workspace.info;
+const mountedPanes: Array<Record<string, unknown>> = [];
 
 beforeEach(() => {
   // The editors focus and measure on animation frames; a frame that runs at
@@ -68,7 +84,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const component of mountedPanes.splice(0)) unmount(component);
   resetTerminals();
+  draft.content = TEXT;
+  workspace.info = workspaceInfo;
   richPrompt.byTab = {};
   resetSurveysForTest();
   closeTeamDialog();
@@ -183,7 +202,7 @@ async function showComposer(terminal: Omit<Composer, "content" | "view">): Promi
     return el!;
   });
   const view = EditorView.findFromDOM(content)!;
-  await vi.waitFor(() => expect(view.state.doc.toString()).toBe(TEXT));
+  await vi.waitFor(() => expect(view.state.doc.toString()).toBe(draft.content));
   await settle();
   return { ...terminal, content, view };
 }
@@ -319,4 +338,121 @@ describe("a composer that opens", () => {
       expect(composer.view.hasFocus, "the pulse after the release gives the composer the keyboard").toBe(true);
     },
   );
+});
+
+function prompts(socket: TerminalSocket): Array<Record<string, unknown>> {
+  return sentFrames(socket).filter((f) => f.type === "prompt");
+}
+
+/// The texts of the prompts sent, without the trailing whitespace the
+/// delivery leaves after an image's path.
+function sentTexts(socket: TerminalSocket): string[] {
+  return prompts(socket).map((f) => String(f.data).trimEnd());
+}
+
+/// Submit a draft naming one of its images: the composer asks the server
+/// where the image is and holds the send until the answer, which the
+/// returned function gives.
+async function holdImageSubmit(composer: Composer): Promise<(paths: string[]) => void> {
+  let answer!: (paths: string[]) => void;
+  const ask = vi
+    .spyOn(api, "draftTerminalPaths")
+    .mockReturnValue(new Promise<string[]>((resolve) => { answer = resolve; }));
+  composer.socket.sent.splice(0);
+  press(composer.content, "Enter", { ctrlKey: true });
+  await settle();
+  expect(ask, "the submit asks where the image is").toHaveBeenCalledTimes(1);
+  expect(prompts(composer.socket), "and sends nothing before the answer").toEqual([]);
+  return answer;
+}
+
+describe("a submit held for its images' paths", () => {
+  beforeEach(() => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    draft.content = IMAGE_TEXT;
+  });
+
+  test.each(OWNERS.map((owner) => [owner.name, owner] as const))(
+    "sent once %s has taken the keyboard leaves the keyboard with it",
+    async (_name, owner) => {
+      const composer = await openComposer();
+      const answer = await holdImageSubmit(composer);
+      const holder = await owner.take(composer.target, composer.tab.id);
+      const focusAsks = vi.spyOn(EditorView.prototype, "focus");
+
+      answer([ON_SERVER]);
+      await settle();
+
+      expect(sentTexts(composer.socket), "the prompt is sent with the image's path").toEqual([`see ${ON_SERVER}`]);
+      expect(document.activeElement, "the owner keeps the keyboard").toBe(holder);
+      expect(focusAsks, "the composer asks for no focus").not.toHaveBeenCalled();
+    },
+  );
+
+  test("sent after a switch to another tab leaves the composer of the tab left behind without the keyboard", async () => {
+    const [first] = seatTerminals([
+      terminalTab({ id: "term-left", richPromptDraftPath: draftPath("owner") }),
+      terminalTab({ id: "term-next" }),
+    ]);
+    mountedPanes.push(mount(Terminals, { target: document.body.appendChild(document.createElement("div")) }));
+    mountedPanes.push(
+      mount(Pane, {
+        target: document.body.appendChild(document.createElement("div")),
+        props: { pane: layout.nodes[TERMINAL_PANE] as LeafNode },
+      }),
+    );
+    const socket = await vi.waitFor(() => {
+      const found = TerminalSocket.all.find((s) => s.url.includes(`tab_id=${first!.id}`));
+      expect(found).toBeDefined();
+      return found!;
+    });
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    const target = document.querySelector<HTMLElement>(`[data-terminal-tab-id="${first!.id}"]`)!;
+    const composer = await showComposer({ tab: first!, target, socket });
+    expect(composer.view.hasFocus, "the composer opens with the keyboard").toBe(true);
+    const answer = await holdImageSubmit(composer);
+
+    selectTabInPane(TERMINAL_PANE, "term-next");
+    await settle();
+    expect(composer.view.hasFocus, "the switch takes the keyboard from the composer").toBe(false);
+    const focusAsks = vi.spyOn(EditorView.prototype, "focus");
+
+    answer([ON_SERVER]);
+    await settle();
+
+    expect(sentTexts(socket), "the prompt is sent with the image's path").toEqual([`see ${ON_SERVER}`]);
+    expect(composer.view.hasFocus, "the tab left behind does not take the keyboard").toBe(false);
+    expect(focusAsks, "the composer asks for no focus").not.toHaveBeenCalled();
+  });
+
+  // The controls: a text-only submit sends at once, from the keymap or the
+  // strip's button, and leaves the composer with the keyboard as before.
+  test("a text-only submit from the keymap sends at once and the composer keeps the keyboard", async () => {
+    draft.content = TEXT;
+    const composer = await openComposer();
+    const ask = vi.spyOn(api, "draftTerminalPaths");
+    composer.socket.sent.splice(0);
+
+    press(composer.content, "Enter", { ctrlKey: true });
+    await settle();
+
+    expect(ask, "a text naming no image asks nothing").not.toHaveBeenCalled();
+    expect(sentTexts(composer.socket)).toEqual([TEXT]);
+    expect(composer.view.hasFocus, "the composer keeps the keyboard").toBe(true);
+  });
+
+  test("a text-only submit from the strip's button gives the composer the keyboard", async () => {
+    draft.content = TEXT;
+    const composer = await openComposer();
+    composer.socket.sent.splice(0);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(composer.view.hasFocus).toBe(false);
+
+    composer.target.querySelector<HTMLButtonElement>(".rp-primary")!.click();
+    await settle();
+
+    expect(sentTexts(composer.socket)).toEqual([TEXT]);
+    expect(composer.view.hasFocus, "the composer takes the keyboard").toBe(true);
+  });
 });

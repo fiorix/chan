@@ -691,7 +691,10 @@
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
     void flushWrite();
-    view.focus();
+    // A submit from the keymap or the strip leaves the keyboard here. One
+    // held for its images' paths sends later, when another tab, a dialog, a
+    // survey over this terminal or the launcher may have taken it.
+    if (focused && !refocusRefused(tab.id)) view.focus();
     pendingChipVisible = false;
     if (graceTimer !== null) clearTimeout(graceTimer);
     graceTimer = setTimeout(() => {
