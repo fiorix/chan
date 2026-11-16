@@ -568,8 +568,11 @@ async fn run_cs_response(
     let cs = dir.path().join("cs");
     symlink(env!("CARGO_BIN_EXE_chan"), &cs).expect("symlink cs -> chan");
     let mut cmd = Command::new(&cs);
+    // Pin the child's stderr bytes; anyhow adds backtraces under either variable.
     cmd.env_clear()
         .envs(child_env::scrubbed_process_env())
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
         .env("CHAN_CONTROL_SOCKET", &socket)
         .envs(case.env.iter().copied())
         .args(case.args)
