@@ -33,7 +33,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 | [an accessibility press closes a tab][axclose] | merged | owner |
 | [a PDF export is images only][pdftext] | withdrawn | closed |
 | [the model download trusts bundled roots][modelroots] | not started | build |
-| [the self-update trusts bundled roots][updroots] | not started | build |
+| [the self-update trusts bundled roots][updroots] | merged | closed |
 | [the Windows lint is red in chan][winlint] | merged | vm |
 | [a late heading has no fold chevron][foldlate] | merged | closed |
 | [a timed-out read fails the graph][graphtimeout] | merged | closed |
@@ -84,6 +84,7 @@ Opened at v0.130.0's planning on 2026-11-13 with the four rows the owner moved o
 [persistwin]: v0.132.0/writers-that-publish-through-tempfile-persist-cannot-replace-an-open-file-on-windows.md
 [taurifallback]: v0.132.0/the-desktop-makefiles-local-tauri-fallback-fails-on-windows.md
 [winclaimread]: v0.132.0/the-windows-claims-two-account-and-compatibility-readings.md
+[tlswin]: v0.132.0/the-tls-rows-windows-trust-readings.md
 [winclaim]: v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
 [reloadfocus]: v0.131.0/a-reloaded-window-can-come-back-focused-on-another-pane-than-it-saved.md
@@ -117,6 +118,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [persist cannot replace an open file][persistwin] | not started | build |
 | [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
 | [the Windows claim's installed readings][winclaimread] | not started | build |
+| [the TLS rows' Windows readings][tlswin] | not started | measure |
 
 ## Completed
 
