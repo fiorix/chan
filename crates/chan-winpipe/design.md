@@ -26,7 +26,7 @@ chan-server's handoff module names the desktop's endpoint by the account's SID, 
 
 ## What it does not do
 
-It reads and writes nothing through a pipe; the transport is tokio's named pipes, and the handoff protocol, its timeouts and its retries stay in chan-server. It does not cover chan's other pipes: the control socket's and the devserver handoff's pipes keep the default descriptor.
+It reads and writes nothing through a pipe; the transport is tokio's named pipes, and the handoff protocol, its timeouts and its retries belong to chan-server and the desktop. It does not cover chan's other pipes: the control socket's and the devserver handoff's pipes keep the default descriptor.
 
 ## Claim ownership
 

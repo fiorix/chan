@@ -803,8 +803,8 @@ file browser walks; `terminal team` refuses, for want of a workspace
 tree to write into. That makes a standalone terminal fully automatable
 and the right place to manage the chan library itself (`chan serve`,
 `chan close`, `chan workspace forget`, `chan ps`), while indexed work
-belongs in a workspace window, where the graph, search, export and
-session commands exist.
+belongs in a workspace window, where the graph, search and export
+commands and the leadership `session handover` and `takeover` exist.
 "#;
 
 /// `cs terminal` examples, side effects, and caveats.
@@ -2005,7 +2005,9 @@ CAVEATS:
   (not the desktop) owns the registry row.
   Viewing a devserver in the desktop does not attach the desktop's
   window-management bridge to that server: `new`, `open` and `hide`
-  still refuse from its terminals.
+  still refuse from its terminals. A `chan-term` window started with
+  a command, `--hold`, `--app-id` or `--title` runs in a process of
+  its own without that bridge, so they refuse there too.
   A standalone `chan serve` has no library window set, so
   `cs window list` is empty there.
   Subcommands infer (`cs w l`, `cs w n`, `cs w o`, `cs w r`), but

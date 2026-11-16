@@ -161,18 +161,19 @@ pub(super) async fn maybe_handoff_to_desktop(
             );
             None
         }
-        // No running desktop. A forced-desktop invocation (a
+        // No running desktop. On unix a forced-desktop invocation (a
         // `Personality::Desktop` binary, or `CHAN_DESKTOP_HANDOFF=1`) launches
-        // the GUI and opens the workspace in it -- and never falls back to the
-        // browser. A standalone binary that reached the desktop target only via
-        // a live-desktop parentage instead falls through to a standalone serve:
-        // its `current_exe` is NOT the desktop, so it must not try to spawn one.
-        // On Windows a desktop still booting lists its boot-marker pipe in the
-        // pipe directory without its endpoint pipe, which `desktop_is_starting`
-        // reads (elsewhere it reads false), so the CLI says why it serves on
-        // its own. A marker pipe another account created reads the same and can
-        // make the message wrong; the serve is standalone either way, since the
-        // CLI launches no desktop off unix.
+        // the GUI, opens the workspace in it and never falls back to the
+        // browser; off unix the CLI launches no desktop and serves standalone.
+        // A standalone binary that reached the desktop target only via a
+        // live-desktop parentage instead falls through to a standalone serve:
+        // its `current_exe` is NOT the desktop, so it must not try to spawn
+        // one. On Windows a desktop still booting lists its boot-marker pipe in
+        // the pipe directory without its endpoint pipe, which
+        // `desktop_is_starting` reads (elsewhere it reads false), so the CLI
+        // says why it serves on its own. A marker pipe another account created
+        // reads the same and can make the message wrong; the serve is
+        // standalone either way.
         chan_server::handoff::Outcome::NoDesktop => {
             if chan_server::handoff::desktop_is_starting() {
                 eprintln!(
