@@ -6,7 +6,7 @@ Record: found by browser check 164 in the whole browser suite at v0.131.0's inte
 
 ## What is there now
 
-While the search index rebuilds (after a directory rename, with its 30 s cooldown, `crates/chan-workspace/src/index/indexer.rs`), the app status bar's index pill (`web/packages/workspace-app/src/components/AppStatusBar.svelte`, `position: fixed`, `top: 48px`, `z-index: 28000`) sits over the top right of the pane. A terminal's CLI reload notice (`TerminalTab.svelte`, `.cli-reload-notice`) puts its Dismiss button there. A click on the button's centre lands on the pill's padding and does nothing; only the button's top few pixels stay clickable, and a click on the pill itself opens the indexing Dashboard.
+While the search index rebuilds (after a directory rename, with its 30 s cooldown, `REBUILD_COOLDOWN` in `crates/chan-server/src/indexer.rs`), the app status bar's index pill (`web/packages/workspace-app/src/components/AppStatusBar.svelte`, `position: fixed`, `top: 48px`, `z-index: 28000`) sits over the top right of the pane. A terminal's CLI reload notice (`TerminalTab.svelte`, `.cli-reload-notice`) puts its Dismiss button there. A click on the button's centre lands on the pill's padding and does nothing; only the button's top few pixels stay clickable, and a click on the pill itself opens the indexing Dashboard.
 
 ## Desired contract
 
