@@ -1,7 +1,10 @@
 /src-tauri/target/
 # The iOS Xcode project is committed; its nested gen/apple/.gitignore
-# covers build outputs, and Pods stay out if any are ever added.
+# covers build outputs. The CLI-regenerated schemas and any future Pods
+# stay out: the ACL manifest tracks the command list, so committing it
+# would churn on every command change.
 /src-tauri/gen/apple/Pods/
+/src-tauri/gen/schemas/
 /src-tauri/binaries/
 **/.DS_Store
 *.tmp
