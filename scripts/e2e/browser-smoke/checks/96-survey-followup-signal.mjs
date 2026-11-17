@@ -46,8 +46,11 @@ async function clickTab(page, label) {
   throw new Error(`tab not found: ${label}`);
 }
 
-/// Recursive scan for followup-file artifacts: any `followups/` dir and its
-/// entries, or any `followup-*.md` file under root, excluding a prior snapshot.
+/// Recursive scan for followup-file artifacts: any `followups/` dir and
+/// its entries, or any `followup-*.md` file under root, excluding a
+/// prior snapshot. An append or delete-and-recreate of an existing path
+/// is invisible to the snapshot. The scan roots at the workspace dir
+/// because every writer goes through the Workspace sandbox.
 function followupArtifacts(root, before = new Set()) {
   const hits = [];
   const walk = (dir, inFollowups = false) => {
@@ -346,7 +349,8 @@ export default {
         );
       }
 
-      // Earlier checks may leave team directories; only this check's writes count.
+      // Earlier checks may leave team directories; only this check's
+      // writes count.
       const hits = followupArtifacts(ctx.workspaceDir, beforeFollowup);
       if (hits.length) {
         throw new Error(`followup artifacts written: ${hits.join(", ")}`);

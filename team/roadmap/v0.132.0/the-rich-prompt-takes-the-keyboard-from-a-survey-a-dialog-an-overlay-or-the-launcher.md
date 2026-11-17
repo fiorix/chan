@@ -2,7 +2,7 @@
 
 Status: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
 
-Record: the one should-fix of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`, finding 1, and the lead's dispositions), older than v0.131.0. A fix was built on `v0131/promptguard` (`a086a88d6`, pushed, three commits on `f29a009c0`) with 36 mounted cases red first and a mutation per gate. Its review did not accept it (`dev/v0131-team/reviews/review-promptguard-1a.md`): the branch regresses one path, the Computers launcher's mark not being reactive state, and the right fix reaches the shared keyboard-ownership model. Building it found three focus residuals outside the Rich Prompt (`owner-candidates-6.md`, "Added ... three focus residuals", items 3 to 5), which this row takes with it ("Added ... the Rich Prompt takes the keyboard"). v0.131.0 ships as v0.130.0 behaved here. None of it loses data.
+Record: the one should-fix of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`, finding 1, and the lead's dispositions), older than v0.131.0. A fix was built on `v0131/promptguard` (`a086a88d6`, pushed, three commits on `f29a009c0`) with 36 mounted cases red first and a mutation per gate. Its review did not accept it (`dev/v0131-team/reviews/review-promptguard-1a.md`): the branch regresses one path, the Computers launcher's mark not being reactive state, and the right fix reaches the shared keyboard-ownership model. Building it found three focus residuals outside the Rich Prompt (`owner-candidates-6.md`, "Added ... three focus residuals", items 3 to 5), which this row takes with it ("Added ... the Rich Prompt takes the keyboard"). v0.131.0 ships as v0.130.0 behaved here. None of it loses data. Amended on 2026-11-17 with item 5 of `dev/v0131-team/reports/owner-candidates-2.md` (from `dev/v0131-team/reviews/review-surveykeys-3.md`, note 1), accepted by the owner the same day.
 
 ## What is there now
 
@@ -45,3 +45,33 @@ Read at `f453b0b2e`, by reading; not run. Paths are under `web/packages/workspac
 4. One mutation per guard turns a test red, and restoring it turns the test green: each path's read of the rule, the reactive launcher mark, each owner the rule names, the in-frame check in each editor, the survey overlay's check at its close and the pulse's check.
 5. A browser check in a guest, on both backends: a terminal's composer holds a queued prompt; a survey over the terminal shows; the prompt drains; a `1` answers the survey and the composer stays empty. And in chan-desktop in the desktop guest: the Computers launcher shown over a terminal whose queued prompt drains keeps the keyboard, and once it hides a swap between source and rendered leaves the composer holding the keyboard.
 6. `web/packages/workspace-app/src/design.md` names the owners and the paths that read the rule, in its dialog and survey paragraphs.
+
+## Amendment, 2026-11-17: a survey shown while its pane was unfocused
+
+Accepted by the owner by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"), with option (a) below as the draft recommended; he may revisit it before the build. Item 5 of `dev/v0131-team/reports/owner-candidates-2.md`, from `dev/v0131-team/reviews/review-surveykeys-3.md`, note 1, found pre-existing while [the survey row](../done/a-terminals-survey-takes-the-keyboard-from-another-pane.md) was reviewed. The same owner rule as contract 1, from the other side: a survey card that does not own the keyboard can still receive it.
+
+Read at `b73773a93`, by reading; not run. Paths are under `web/packages/workspace-app/src/`.
+
+- The survey overlay's focus effect (`components/BubbleOverlay.svelte:56-100`) remembers `focusedSurveyId` only when it gave the card the keyboard (`:95`). When the survey's pane is not the focused pane it releases a focused descendant of the card only `if (focusedSurveyId && !eligible && card?.contains(document.activeElement))` (`:79-82`). A survey that appeared while its pane was unfocused never set `focusedSurveyId`, so a descendant that gained the keyboard by another path is never released.
+- The card's option, follow-up and dismiss buttons are plain `<button>`s (`:160-192`), in the page's sequential focus order whatever pane is focused; the card itself has `tabindex="-1"` (`:146`). A Shift+Tab or Tab from the focused pane's element walks into them. No press happens, so `setActivePane` does not run: the pane runs it on `mousedown` only (`components/Pane.svelte:1515-1518`), and no `focusin` handler sets the active pane (by grep).
+- The card's keydown answers 1 to 9, F and X or Escape whenever the event reaches the card (`:109-130`, `onCardKeydown`), without reading `ownsKeyboard()` (`:43-47`). So with pane B focused and a survey over pane A's terminal, a Shift+Tab into A's last option button and a bare `1` answers A's survey while `activePaneId` is B, the focus ring visible on the button. Every pointer path sets the active pane first (`Pane.svelte:1515-1522`), so only keyboard navigation reaches this.
+- The survey row's tests model Tab in jsdom (`components/Pane.browserFocus.test.ts:233-257`) and pin that another pane's pulse and a typed `1` leave the browser's keyboard alone; none walks focus into the card.
+
+Contract lines added:
+
+8. A survey over a terminal whose pane is not the focused pane is not reachable by sequential keyboard navigation: its option, follow-up and dismiss buttons leave the Tab order while that pane is unfocused and return to it when the pane is focused. A press on them still answers, and sets the active pane first, as today.
+9. The card's keys (1 to 9, F, X, Escape) answer only while the survey owns the keyboard under contract 1; a key that reaches the card otherwise is not consumed. The overlay's release at a pulse or an ownership change applies to any focus inside the card, whether or not the card took the keyboard itself.
+
+Acceptance lines added:
+
+7. Mounted tests, red at the base: two panes, a survey appears over the unfocused pane's terminal; its buttons have `tabIndex` -1 while the other pane is focused and 0 once its pane is focused; focus placed on an option button by script (the Tab model of `Pane.browserFocus.test.ts`) and a typed `1` answer nothing while the other pane is focused, and the next pulse moves the keyboard off the card; a click on an option answers and makes its pane the focused one. One mutation per guard turns a case red: the Tab-order rule, the key guard, the release's dropped `focusedSurveyId` condition.
+8. A browser check in a guest, on both backends: pane B focused, a `cs terminal survey` on pane A's terminal; Shift+Tab from B's terminal does not land in A's card, and a `1` reaches B's PTY as byte 31; a click on A's option answers it.
+9. `design.md:205` and the manual's teams page (`web/packages/marketing/src/pages/manual/teams.html:155`) say that an unfocused pane's survey is answered by a press only.
+
+Boundary added: the card's buttons and keydown in `components/BubbleOverlay.svelte`, beside the focus effect the row already names.
+
+The options as drafted:
+
+- (a) Buttons leave the Tab order while the pane is unfocused, plus the key guard and the release (recommended: closes the only path in, inside the existing model where sequential focus never moves the active pane).
+- (b) Focus entering the card makes its pane the focused pane, as a press does. A new precedent: nowhere else does Tab across panes move the active pane.
+- (c) Key guard and release only: a focus ring sits on a button that answers nothing until the next pulse.
