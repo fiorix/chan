@@ -2718,18 +2718,21 @@ pub(crate) async fn open_devserver_workspace_impl(
         )
         .await;
     }
-    let conn = state
-        .devservers
-        .get(&id)
-        .ok_or_else(|| "devserver is not connected".to_string())?;
-    devserver::mint_library_window_with_start(
-        &conn,
-        chan_server::WindowKind::Workspace,
-        Some(path),
-        start_terminal,
-    )
-    .await?;
-    Ok(())
+    #[cfg(not(target_os = "ios"))]
+    {
+        let conn = state
+            .devservers
+            .get(&id)
+            .ok_or_else(|| "devserver is not connected".to_string())?;
+        devserver::mint_library_window_with_start(
+            &conn,
+            chan_server::WindowKind::Workspace,
+            Some(path),
+            start_terminal,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 /// Mint a standalone terminal window on a connected devserver's library (the
@@ -2754,12 +2757,15 @@ pub(crate) async fn open_devserver_terminal_impl(
         )
         .await;
     }
-    let conn = state
-        .devservers
-        .get(&id)
-        .ok_or_else(|| format!("devserver {id} is not connected"))?;
-    devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
-    Ok(())
+    #[cfg(not(target_os = "ios"))]
+    {
+        let conn = state
+            .devservers
+            .get(&id)
+            .ok_or_else(|| format!("devserver {id} is not connected"))?;
+        devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
+        Ok(())
+    }
 }
 
 /// Forget (unmount) a workspace on a connected devserver via its management
