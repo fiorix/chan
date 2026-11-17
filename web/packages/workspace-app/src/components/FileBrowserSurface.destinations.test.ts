@@ -90,18 +90,20 @@ type Case = {
   destination: string;
   standalone?: boolean;
   collapsed?: boolean;
+  menuAnchor?: string;
+  menuDestination?: string;
 };
 const CASES: Case[] = [
   { name: "list, empty selection", variant: "tab", selected: null, destination: "notes" },
-  { name: "list, directory selected", variant: "tab", selected: "notes/sub", destination: "notes" },
+  { name: "list, directory selected", variant: "tab", selected: "notes/sub", destination: "notes", menuAnchor: "notes/sub", menuDestination: "notes/sub" },
   { name: "list, file selected", variant: "tab", selected: "notes/a.md", destination: "notes" },
-  { name: "tree, empty selection", variant: "dock", selected: null, destination: "" },
+  { name: "tree, empty selection", variant: "dock", selected: null, destination: "", menuAnchor: "notes", menuDestination: "notes" },
   { name: "tree, directory selected", variant: "dock", selected: "notes", destination: "notes" },
   { name: "tree, file selected", variant: "dock", selected: "notes/a.md", destination: "notes" },
-  { name: "standalone tree, empty selection", variant: "dock", selected: null, destination: HOME, standalone: true },
+  { name: "standalone tree, empty selection", variant: "dock", selected: null, destination: HOME, standalone: true, menuAnchor: "notes", menuDestination: "notes" },
   { name: "standalone tree, directory selected", variant: "dock", selected: "notes", destination: "notes", standalone: true },
   { name: "standalone tree, file selected", variant: "dock", selected: "notes/a.md", destination: "notes", standalone: true },
-  { name: "tree, directory below collapsed parent", variant: "dock", selected: "notes/sub", destination: "notes/sub", collapsed: true },
+  { name: "tree, directory below collapsed parent", variant: "dock", selected: "notes/sub", destination: "notes/sub", collapsed: true, menuAnchor: "notes", menuDestination: "notes" },
 ];
 
 type Surface = { target: HTMLElement; tab: BrowserTab; id: string; scenario: Case };
@@ -133,13 +135,14 @@ const ACTIONS = {
 type Action = keyof typeof ACTIONS;
 type Origin = "menu" | "launcher";
 
-async function act(surface: Surface, action: Action, origin: Origin): Promise<void> {
+async function act(surface: Surface, action: Action, origin: Origin, anchorPath?: string): Promise<void> {
   const command = commandById(ACTIONS[action])!;
   if (origin === "launcher") {
     expect(command.available(commandContext()), `${action} offered`).toBe(true);
     void command.run();
   } else if (action === "Paste") {
-    const anchor = entry(surface.target, surface.scenario.selected ?? "notes")
+    const anchor = (anchorPath ? entry(surface.target, anchorPath) : undefined)
+      ?? entry(surface.target, surface.scenario.selected ?? "notes")
       ?? entry(surface.target, "notes") ?? entry(surface.target, "notes/a.md");
     expect(anchor, "a row anchors the selection menu").toBeDefined();
     anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
@@ -212,13 +215,14 @@ describe.each(CASES)("$name", (scenario) => {
     expect(pathPromptState.defaultValue).toBe(scenario.destination ? `${scenario.destination}/` : "");
   });
 
-  test.each(["menu", "launcher"] as const)("%s Paste targets the surface's directory", async (origin) => {
+  test.each(["menu", "launcher"] as const)("%s Paste targets its own directory", async (origin) => {
     const surface = await surfaceFor(scenario);
     const transfer = vi.spyOn(api, "fsTransfer");
     fbClipboardSet("copy", ["README.md"]);
-    await act(surface, "Paste", origin);
+    await act(surface, "Paste", origin, origin === "menu" ? scenario.menuAnchor : undefined);
     await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
-    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], scenario.destination);
+    const expected = origin === "launcher" ? scenario.destination : (scenario.menuDestination ?? scenario.destination);
+    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], expected);
   });
 
   test.each(["menu", "launcher"] as const)("%s Upload targets the surface's directory", async (origin) => {
@@ -229,6 +233,48 @@ describe.each(CASES)("$name", (scenario) => {
     expect(pick().multiple).toBe(true);
     expect(upload).toHaveBeenCalledExactlyOnceWith(scenario.destination, expect.any(Array), undefined);
     expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+describe("menu Paste follows the clicked row", () => {
+  async function pasteAtRow(surface: Surface, rowPath: string): Promise<void> {
+    const row = entry(surface.target, rowPath);
+    expect(row, `row ${rowPath} exists`).toBeDefined();
+    row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    await settle();
+  }
+
+  test("right-click on a sibling directory pastes there, selection untouched", async () => {
+    const surface = await surfaceFor({ name: "clicked dir", variant: "dock", selected: "notes/a.md", destination: "notes" });
+    const transfer = vi.spyOn(api, "fsTransfer");
+    fbClipboardSet("copy", ["README.md"]);
+    await pasteAtRow(surface, "notes/sub");
+    expect(fbTreeInstance(surface.id)!.selection.path, "right-click leaves the selection").toBe("notes/a.md");
+    button(".ctx button", commandById(ACTIONS.Paste)!.title).click();
+    await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
+    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], "notes/sub");
+  });
+
+  test("right-click on a file outside the selection pastes into its parent", async () => {
+    const surface = await surfaceFor({ name: "clicked file", variant: "dock", selected: "notes/a.md", destination: "notes" });
+    fbTreeInstance(surface.id)!.expanded["notes/sub"] = true;
+    await settle();
+    const transfer = vi.spyOn(api, "fsTransfer");
+    fbClipboardSet("copy", ["README.md"]);
+    await pasteAtRow(surface, "notes/sub/b.md");
+    button(".ctx button", commandById(ACTIONS.Paste)!.title).click();
+    await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
+    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], "notes/sub");
+  });
+
+  test("right-click on a folder row in a list pastes into that folder", async () => {
+    const surface = await surfaceFor({ name: "list clicked dir", variant: "tab", selected: "notes/a.md", destination: "notes" });
+    const transfer = vi.spyOn(api, "fsTransfer");
+    fbClipboardSet("copy", ["README.md"]);
+    await pasteAtRow(surface, "notes/sub");
+    button(".ctx button", commandById(ACTIONS.Paste)!.title).click();
+    await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
+    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], "notes/sub");
   });
 });
 
@@ -273,7 +319,11 @@ describe("landing below collapsed ancestors", () => {
   test.each(["menu", "launcher"] as const)("%s Paste reveals the destination's ancestors", async (origin) => {
     const surface = await surfaceFor(hidden);
     fbClipboardSet("copy", ["README.md"]);
-    await act(surface, "Paste", origin);
+    if (origin === "menu") {
+      fbTreeInstance(surface.id)!.expanded.notes = true;
+      await settle();
+    }
+    await act(surface, "Paste", origin, origin === "menu" ? "notes/sub" : undefined);
     await vi.waitFor(() => expect(fbTreeInstance(surface.id)!.selection.path).toBe("notes/sub/README.md"));
     expect(fbTreeInstance(surface.id)!.expanded.notes).toBe(true);
     expect(fbTreeInstance(surface.id)!.expanded["notes/sub"]).toBe(true);
@@ -354,7 +404,11 @@ test.each(["menu", "launcher"] as const)("%s Paste does not change a dock reopen
   });
   fbClipboardSet("copy", ["README.md"]);
   try {
-    await act(surface, "Paste", origin);
+    if (origin === "menu") {
+      fbTreeInstance(surface.id)!.expanded.notes = true;
+      await settle();
+    }
+    await act(surface, "Paste", origin, origin === "menu" ? "notes/sub" : undefined);
     expect(request).toHaveBeenCalledExactlyOnceWith("copy", ["README.md"], "notes/sub");
     mounted.splice(mounted.indexOf(component), 1);
     unmount(component);

@@ -959,7 +959,7 @@
         fbClipboardSet(command, paths);
         break;
       }
-      case "paste": void pasteIntoTarget(); break;
+      case "paste": void pasteIntoTarget(pasteDestination()); break;
       case "selectAll": fbSelectSet(rows.map((row) => row.path), selection.path ?? undefined); break;
       case "selectMode": selectionMode = !selectionMode; break;
       case "toggle":
@@ -1057,10 +1057,11 @@
     });
   });
 
-  /// New, Paste and Upload use the folder a list shows. A tree uses its
+  /// New and Upload use the folder a list shows. A tree uses its
   /// selected directory or file's parent, including a selection hidden
   /// under a collapsed ancestor; without a selection it uses the workspace
-  /// root or the standalone window's home.
+  /// root or the standalone window's home. The menu's Paste does not use
+  /// this: it takes the clicked row's folder as an explicit destination.
   function targetDirectory(): string {
     if (view === "list") return directory;
     const cur = selection.path;
@@ -1069,12 +1070,20 @@
     return parentDir(cur);
   }
 
+  /// The menu's Paste destination: the clicked row's folder, the row itself
+  /// when it is a directory and its parent when it is a file, in a tree and
+  /// in a list alike. Without an open menu (the chord, the launcher) the
+  /// shared rule applies.
+  function pasteDestination(): string {
+    if (menu) return menu.isDir ? menu.path : parentDir(menu.path);
+    return targetDirectory();
+  }
+
   /// Paste the clipboard into the resolved target dir, then select the
   /// landed entries so the user sees the result (and a cut's dimming
   /// clears as the clipboard empties).
-  async function pasteIntoTarget(): Promise<void> {
+  async function pasteIntoTarget(dest: string = targetDirectory()): Promise<void> {
     if (!fbClipboard.mode) return;
-    const dest = targetDirectory();
     const targetSelection = selection;
     const targetId = instanceId;
     const landed = await fbClipboardPaste(dest);
