@@ -4,8 +4,9 @@
 // shell over `cs terminal write`, the server sends the exit frame and
 // closes the socket itself, and the page's patched WebSocket records the
 // client's sockets, prompt frames and delivery acks. Sockets are scoped by
-// session: both legs run in one window, so the first leg's closed socket
-// must not satisfy the second leg's waits. Restart and cleanup go through
+// tab name (fresh dials carry no session value): both legs run in one
+// window, so the first leg's closed socket must not satisfy the second
+// leg's waits. Restart and cleanup go through
 // the page (the command launcher, the tab bus): `cs terminal` addresses
 // live sessions only, and an exited terminal has none.
 
@@ -31,7 +32,10 @@ function traceExitedTerminal() {
         return Reflect.construct(target, args);
       }
       const socket = Reflect.construct(target, args);
-      const record = { socket, ready: false, delivered: [] };
+      // Fresh dials carry no `session` value (only reattaches do); the tab
+      // name scopes the leg and survives a restart of the same tab.
+      const tab = new URL(args[0], location.href).searchParams.get("tab_name");
+      const record = { socket, tab, ready: false, delivered: [] };
       trace.sockets.push(record);
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;
@@ -67,11 +71,11 @@ async function state(page, card) {
       pending: composer?.classList.contains("pending") ?? null,
       note: note?.textContent ?? null,
       live: note?.getAttribute("aria-live") ?? null,
-      sockets: trace?.sockets.map(({ socket, ready, delivered }) => ({
+      sockets: trace?.sockets.map(({ socket, tab, ready, delivered }) => ({
         state: socket.readyState,
+        tab,
         ready,
         delivered,
-        session: new URL(socket.url, location.href).searchParams.get("session"),
       })) ?? [],
       prompts: trace?.prompts ?? [],
     };
@@ -140,7 +144,7 @@ export default {
             // End the shell for real: the server sends the exit frame and
             // closes the socket, and an exited tab never redials.
             await cs(["write", "--tab-name", name, "exit\n"]);
-            const own = (value) => value.sockets.filter((socket) => socket.session === session);
+            const own = (value) => value.sockets.filter((socket) => socket.tab === name);
             result.exited = await waitFor(page, card, "the server closed the exited socket with no redial",
               (value) => own(value).length === 1 && own(value)[0].state === 3, 30_000);
             if (backend === "xterm") {
@@ -160,15 +164,16 @@ export default {
             await ctx.shot(`291-${backend}-exited-note`);
             // Restart terminal through the command launcher: `cs terminal`
             // addresses live sessions only, and an exited terminal has none.
-            // A new session on a new socket takes the kept text.
-            const seen = (await state(page, card)).sockets.map((socket) => socket.session);
+            // A new session on a new socket takes the kept text. The restart
+            // opens exactly one new socket on the same tab name.
+            const seen = (await state(page, card)).sockets.length;
             await selectLauncherCommand(page, "Restart terminal");
             await page.keyboard.press("Enter");
             result.restarted = await waitFor(page, card, "the restarted terminal reattached", (value) => {
-              const next = value.sockets.filter((socket) => !seen.includes(socket.session));
-              return next.length === 1 && next[0].state === 1 && next[0].ready ? { ...value, next: next[0] } : false;
+              const next = value.sockets.filter((socket) => socket.tab === name && socket.state !== 3);
+              return value.sockets.filter((socket) => socket.tab === name).length === seen + 1
+                && next.length === 1 && next[0].ready ? { ...value, next: next[0] } : false;
             }, 30_000);
-            const restarted = result.restarted.next.session;
             if (backend === "xterm") {
               await page.keyboard.down("Control");
               await page.keyboard.press("Enter");
@@ -181,7 +186,7 @@ export default {
             assert.equal(typeof result.sent.prompts[0].id, "string");
             const id = result.sent.prompts[0].id;
             result.delivered = await waitFor(page, card, "the delivered retry clears the composer",
-              (value) => value.sockets.some((socket) => socket.session === restarted && socket.delivered.includes(id))
+              (value) => value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id))
                 && value.text === "" && !value.pending);
             assert.equal(result.delivered.note, null);
             assert.deepEqual(result.pageErrors, []);
