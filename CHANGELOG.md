@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Chan for iOS (Tauri app, TestFlight-ready build).** The iOS app runs the desktop embedded loopback stack on device and loads the launcher in a single webview: add a gateway URL in the existing Gateways form, sign in through the system authentication sheet, browse roster devservers on Computers, open them with entry plus tenant navigation, and swipe left-edge back to Computers. Roster polling pauses in background and resyncs on foreground; CHAN_HOME lives under Application Support and PATs in the iOS Keychain. App id `app.chan.ios`.
+- **Mobile sign-in for self-hosted gateways.** The identity authorize flow accepts the registered `chan://auth/callback` alongside the loopback callback, code-level with no per-deployment config; same scope, same PKCE, same redeem.
+
 ## [v0.130.0] - 2026-11-14
 
 v0.130.0 draws panes flush on the window's edges, sends the keyboard where the focus border goes when the focus moves between panes, and makes the devserver a source for systemd-report in place of the `io.chan.Metrics` Varlink interface, which is gone with no compatibility path. A file browser tab takes the keyboard when its pane becomes the focused one, and a ghostty terminal gives the keyboard up from whichever of its elements holds it and opens without taking it. A ghostty terminal keeps selected text in its own colour, paints a pure black background a program sets, and draws each underline style in its own shape and colour, and overline; a pasted or delivered text holding `ESC[201~` stays inside its bracketed paste; a window without a workspace, such as a standalone terminal window, uses the saved keyboard shortcuts; search results show `<`, `>` and `&` as written; file listings leave out the temporaries of a write in progress; and a browser tab on a devserver's standalone terminal window keeps a valid token across a devserver restart. The manual is rewritten as short pages in six groups, with the pages for hosting a gateway set apart, and the product follows it: the Computers screen is called Computers in the View menu, its page title and the help; the status bar's session role names the window that leads; `cs session self` prints where a window connects from; and loading a team keeps its brief.
