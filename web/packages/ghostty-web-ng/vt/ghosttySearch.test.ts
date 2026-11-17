@@ -202,7 +202,7 @@ describe("a search over the binding's terminal", () => {
       s.state();
       expect(feeds, "a select catches up on its own").toBe(3);
       t.write("w");
-      expect(s.step(1)).toBe("complete");
+      expect(s.step(1, () => 0)).toBe("complete");
       s.state();
       expect(feeds, "a step feeds when the search asks").toBe(4);
     } finally {
@@ -418,7 +418,7 @@ describe("a search over the binding's terminal", () => {
     expect(s.state()).toEqual({ total: 0, index: null, active: null, complete: true });
     expect(s.matchesBetween(0, 9, 10)).toEqual([]);
     expect(s.selectNext()).toBe(false);
-    expect(s.step(1)).toBe("complete");
+    expect(s.step(1, () => 0)).toBe("complete");
     s.free();
   });
 
@@ -433,7 +433,7 @@ describe("a search over the binding's terminal", () => {
     expect(s.matchesBetween(0, 9, 10)).toEqual([]);
     expect(s.selectNext()).toBe(false);
     expect(s.selectPrev()).toBe(false);
-    expect(s.step(1)).toBe("complete");
+    expect(s.step(1, () => 0)).toBe("complete");
     expect(() => s.feed()).not.toThrow();
     expect(() => s.setNeedle("fine")).not.toThrow();
     expect(() => s.free()).not.toThrow();
