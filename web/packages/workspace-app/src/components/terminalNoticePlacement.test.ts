@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { terminalNoticeTop } from "./terminalNoticePlacement";
+import { noticePillPad, terminalNoticeTop } from "./terminalNoticePlacement";
 
 function box(left: number, top: number, right: number, bottom: number): DOMRect {
   return { left, top, right, bottom } as DOMRect;
@@ -32,5 +32,23 @@ describe("terminal notice placement", () => {
   test("keeps the default place when boxes only touch in either axis", () => {
     expect(terminalNoticeTop(notice, box(1595, 48, 1700, 78), 5)).toBe(5);
     expect(terminalNoticeTop(notice, box(1447, 66, 1587, 90), 5)).toBe(5);
+  });
+});
+
+describe("noticePillPad", () => {
+  test("reserves nothing with no pill", () => {
+    expect(noticePillPad(box(0, 40, 1280, 70), null)).toBe(0);
+  });
+
+  test("reserves nothing when the pill sits clear of the row", () => {
+    expect(noticePillPad(box(0, 40, 900, 70), box(1000, 48, 1280, 76))).toBe(0);
+  });
+
+  test("reserves the overlap plus a gap when the pill covers the row's right end", () => {
+    expect(noticePillPad(box(0, 40, 1280, 70), box(1100, 48, 1280, 76))).toBe(188);
+  });
+
+  test("reserves nothing when the boxes only touch vertically", () => {
+    expect(noticePillPad(box(0, 40, 1280, 70), box(1100, 70, 1280, 100))).toBe(0);
   });
 });

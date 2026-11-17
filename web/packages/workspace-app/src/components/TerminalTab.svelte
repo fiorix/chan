@@ -242,6 +242,11 @@
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
   import TerminalConnectionNotice from "./TerminalConnectionNotice.svelte";
+  import {
+    APP_STATUS_PILL_SELECTOR,
+    noticePillPad,
+    terminalNoticeTop,
+  } from "./terminalNoticePlacement";
   import { connectionHealth } from "../state/connectionHealth.svelte";
 
   let {
@@ -459,6 +464,62 @@
   let statusDetail = $state("");
   let missedBytes = $state(0);
   let findOpen = $state(false);
+  /// Room the CLI reload notice reserves at its right end while the window
+  /// status pill overlaps it, so Dismiss stays clickable; 0 keeps the CSS.
+  let noticePadRight = $state(0);
+  /// The find bar's top while the status pill overlaps it; null keeps the CSS.
+  let findTop = $state<number | null>(null);
+
+  /// Keep one pane control clear of the window status pill while the pill
+  /// shows: read the pill's box from the page (the lane's selector) and
+  /// apply the overlap, if any. The observers live only while the control
+  /// using this action is mounted.
+  function watchStatusPill(node: HTMLElement, apply: (pill: DOMRect | null) => void): { destroy(): void } {
+    let observed: Element | null = null;
+    let sizes: ResizeObserver | null = null;
+    const measure = (): void => {
+      const pill = document.querySelector(APP_STATUS_PILL_SELECTOR);
+      if (pill !== observed) {
+        if (observed && sizes) sizes.unobserve(observed);
+        observed = pill;
+        if (pill && sizes) sizes.observe(pill);
+      }
+      apply(pill instanceof HTMLElement ? pill.getBoundingClientRect() : null);
+    };
+    const mutations = new MutationObserver(measure);
+    mutations.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+    if (typeof ResizeObserver !== "undefined") {
+      sizes = new ResizeObserver(measure);
+      sizes.observe(node);
+    }
+    window.addEventListener("resize", measure);
+    measure();
+    return {
+      destroy(): void {
+        mutations.disconnect();
+        sizes?.disconnect();
+        window.removeEventListener("resize", measure);
+      },
+    };
+  }
+
+  function keepNoticeClear(node: HTMLElement): { destroy(): void } {
+    return watchStatusPill(node, (pill) => {
+      noticePadRight = noticePillPad(node.getBoundingClientRect(), pill);
+    });
+  }
+
+  function keepFindClear(node: HTMLElement): { destroy(): void } {
+    return watchStatusPill(node, (pill) => {
+      const top = terminalNoticeTop(node.getBoundingClientRect(), pill, 8);
+      findTop = top === 8 ? null : top;
+    });
+  }
   let queuedMessages = $state<QueuedMessagePreview[] | null>(null);
   $effect(() => {
     const connected = status === "connected";
@@ -3585,7 +3646,7 @@
          here; the menus close on pointerdown and the panes activate on
          mousedown, which still bubble. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()}>
+    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()} use:keepFindClear style:top={findTop === null ? null : `${findTop}px`}>
       <input
         bind:this={searchInput}
         class="find"
@@ -3604,7 +3665,7 @@
   {/if}
   {#if active && tab.cliReloadNotice}
     <!-- This notice depends on same-origin sessionStorage; an origin change loses its marker. -->
-    <div class="cli-reload-notice" role="alert">
+    <div class="cli-reload-notice" role="alert" use:keepNoticeClear style:padding-right={noticePadRight === 0 ? null : `${noticePadRight}px`}>
       <span>After reload, this tab opened a plain shell. Its requested command was not restored here and may still be running in another session.</span>
       <button type="button" aria-label="Dismiss notice" onclick={dismissReloadNotice}>Dismiss notice</button>
     </div>
