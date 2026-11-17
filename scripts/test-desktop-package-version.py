@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -162,18 +163,20 @@ def fixture_pinned(root: Path, makefile: str, version: str, cargo_script: str) -
     return desktop, bin_dir
 
 
-def path_without_cargo_tauri(path: str) -> str:
-    kept = []
-    for directory in path.split(os.pathsep):
-        if not directory:
-            kept.append(directory)
-            continue
-        if os.path.isfile(os.path.join(directory, "cargo-tauri")) or os.path.isfile(
-            os.path.join(directory, "cargo-tauri.exe")
-        ):
-            continue
-        kept.append(directory)
-    return os.pathsep.join(kept)
+TOOLS = ("make", "sh", "bash", "env", "node", "python3", "cp", "mkdir", "chmod")
+
+
+def closed_tools(root: Path) -> Path:
+    tools = root / "tools"
+    tools.mkdir()
+    for name in TOOLS:
+        target = sys.executable if name == "python3" else shutil.which(name)
+        if not target:
+            raise AssertionError(f"harness setup failed: {name} does not resolve on the host PATH")
+        link = tools / name
+        if not link.exists():
+            os.symlink(target, link)
+    return tools
 
 
 def check_pinned_calls(
@@ -196,10 +199,10 @@ def check_pinned_calls(
             executable(pinned, PINNED_TAURI)
         record = root / "calls.jsonl"
         env = os.environ.copy()
-        host_path = path_without_cargo_tauri(env["PATH"])
+        tools = closed_tools(root)
         probe = subprocess.run(
             ["sh", "-c", "command -v cargo-tauri"],
-            env={**env, "PATH": host_path},
+            env={**env, "PATH": str(tools)},
             capture_output=True,
             text=True,
             check=False,
@@ -207,10 +210,10 @@ def check_pinned_calls(
         if probe.returncode == 0:
             raise AssertionError(
                 f"{label}: harness precondition failed: cargo-tauri still resolves"
-                f" on the scrubbed PATH ({probe.stdout.strip()})"
+                f" on the closed tool PATH ({probe.stdout.strip()})"
             )
         env.update(
-            PATH=f"{bin_dir}{os.pathsep}{host_path}",
+            PATH=f"{bin_dir}{os.pathsep}{tools}",
             TAURI_RECORD=str(record),
             TEST_UNAME="Linux",
             PINNED_STANDIN=str(root / "pinned-src/cargo-tauri"),
@@ -358,24 +361,25 @@ def main() -> None:
         else:
             raise AssertionError(f"{name}: mutant survived")
 
-    if makefile.count("TAURI_CLI_EXE = ") != 1:
-        raise AssertionError("recursive lookup: mutation site is not unique")
-    try:
-        check_pinned_calls(
-            makefile.replace("TAURI_CLI_EXE = ", "TAURI_CLI_EXE := ", 1),
-            VERSION,
-            expected_dashed(),
-            cargo_script=CARGO_INSTALL,
-            preinstall=False,
-            path_standin=False,
-            label="recursive lookup mutant",
-        )
-    except AssertionError as error:
-        if "make build failed" not in str(error):
-            raise AssertionError(f"recursive lookup: wrong failure: {error}") from error
-        print("MUTANT RED recursive lookup: make build failed")
-    else:
-        raise AssertionError("recursive lookup: mutant survived")
+    for site in ("TAURI_CLI_EXE = ", "TAURI = "):
+        if makefile.count(site) != 1:
+            raise AssertionError("recursive lookup: site is not unique: " + site)
+        try:
+            check_pinned_calls(
+                makefile.replace(site, site.replace("= ", ":= "), 1),
+                VERSION,
+                expected_dashed(),
+                cargo_script=CARGO_INSTALL,
+                preinstall=False,
+                path_standin=False,
+                label="recursive lookup mutant",
+            )
+        except AssertionError as error:
+            if "exec: cargo-tauri: not found" not in str(error):
+                raise AssertionError(f"recursive lookup: wrong failure: {error}") from error
+            print("MUTANT RED recursive lookup: exec: cargo-tauri: not found")
+        else:
+            raise AssertionError("recursive lookup: mutant survived")
 
     if sys.platform == "linux":
         check_stager()

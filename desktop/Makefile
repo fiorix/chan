@@ -25,8 +25,8 @@ TAURI_CLI_BIN := $(TAURI_CLI_ROOT)/bin/cargo-tauri
 # back to `cargo tauri`, which cargo resolves through its own bin directory
 # and PATH, covering a global install (as CI uses) but also running
 # unpinned, so a stale global with no local install runs as is, by design.
-# Picking by file test follows the tauri-cli target's own
-# [ ! -x ] shape rather than running the tool to validate it.
+# File-test picking follows the tauri-cli target's own `[ ! -x ]`
+# shape rather than running the tool to validate it.
 TAURI_CLI_EXE = $(firstword $(wildcard $(TAURI_CLI_BIN) $(TAURI_CLI_BIN).exe))
 TAURI = $(if $(TAURI_CLI_EXE),"$(TAURI_CLI_EXE)" tauri,cargo tauri)
 
