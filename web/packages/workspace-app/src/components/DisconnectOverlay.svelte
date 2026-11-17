@@ -347,7 +347,7 @@
             {pendingAction === "abandon" ? "Abandoning..." : "Abandon"}
           </button>
         </div>
-        <div class="action-note" id={restartNoteId}>Restart closes and reopens this computer's windows.</div>
+        <div class="action-note" id={restartNoteId}>Restart closes and reopens the windows served by this connection.</div>
       {/if}
     </div>
   </div>

@@ -551,7 +551,7 @@ describe("the reconnect overlay", () => {
     expect(button(target, "Restart connection")).toBeDefined();
     expect(button(target, "Abandon")).toBeDefined();
     const note = target.querySelector<HTMLElement>(".action-note")!;
-    expect(note.textContent).toBe("Restart closes and reopens this computer's windows.");
+    expect(note.textContent).toBe("Restart closes and reopens the windows served by this connection.");
     expect(button(target, "Restart connection").getAttribute("aria-describedby")).toBe(note.id);
     expect(document.activeElement).toBe(target.querySelector(".overlay"));
   });

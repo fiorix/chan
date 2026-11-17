@@ -538,7 +538,7 @@ async function runPass(ctx, bar, relay) {
       seen.focus?.includes("[data-cover=reconnect]"), Date.now() + 3_000, relay);
     requireFace(covered.at >= lastWatcherFrameAt + READ_DEADLINE_MS - 2_000 &&
       coveredReady.seen.cover.text === "reconnecting to the chan server" &&
-      coveredReady.seen.cover.actionNote === "Restart closes and reopens this computer's windows." &&
+      coveredReady.seen.cover.actionNote === "Restart closes and reopens the windows served by this connection." &&
       !coveredReady.seen.focus.startsWith("button"),
     "covered deadline, content and focus", coveredReady.seen, relay);
     if (bar) {
