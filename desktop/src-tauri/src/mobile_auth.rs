@@ -169,9 +169,12 @@ mod ios {
     use std::sync::{Arc, Mutex, OnceLock};
 
     use block2::RcBlock;
-    use objc2::rc::Retained;
+    use objc2::rc::{Allocated, Retained};
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-    use objc2::{class, define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
+    use objc2::{
+        class, define_class, extern_methods, msg_send, sel, AnyThread, DefinedClass,
+        MainThreadMarker,
+    };
     use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSString, NSURL};
     use tokio::sync::watch;
 
@@ -253,29 +256,42 @@ mod ios {
                 });
             });
         }
-        let gateway_id = gateway_id.to_string();
-        let attempt = Arc::clone(attempt);
-        let authorize_url = authorize_url.to_string();
-        app.clone()
-            .run_on_main_thread(move || {
+        let start = {
+            let app = app.clone();
+            let gateway_id = gateway_id.to_string();
+            let attempt = Arc::clone(attempt);
+            let authorize_url = authorize_url.to_string();
+            move || {
                 if let Err(error) =
                     start_mobile_session(&authorize_url, &gateway_id, &attempt, outcome_tx)
                 {
                     crate::auth::fail_mobile_signin(app, &gateway_id, &attempt, error);
                 }
-            })
+            }
+        };
+        app.run_on_main_thread(start)
             .map_err(|e| format!("starting the sign-in sheet: {e}"))?;
         Ok(())
     }
 
+    /// The presented session object. Neither `AnyObject` nor a plain
+    /// pointer to it carries `Send`, so the pointer rides a wrapper whose
+    /// `Send` holds by main-thread confinement: every store, message, and
+    /// reclaim runs on the main thread.
+    struct MainSession(NonNull<AnyObject>);
+
+    // SAFETY: main-thread confinement, as above; the holder is touched from
+    // the main thread at the start and from main-dispatched closures for
+    // cancel and release.
+    unsafe impl Send for MainSession {}
+
     /// A presented session plus its provider (the provider property is weak,
     /// so both are retained here) and the attempt they belong to, so a stale
     /// shutdown or completion can never cancel or release a successor's. The
-    /// session rides a raw pointer because `AnyObject` is not `Send`; the
-    /// holder owns its +1 from init, every lifetime op runs on the main
-    /// thread, and cancel plus release reclaim exactly once.
+    /// holder owns the session's +1 from init, and cancel plus release
+    /// reclaim exactly once.
     struct MobileSession {
-        session: NonNull<AnyObject>,
+        session: MainSession,
         _provider: Retained<MobileAuthPresentationProvider>,
         gateway_id: String,
         attempt: Arc<GatewayAttempt>,
@@ -303,9 +319,9 @@ mod ios {
                 // SAFETY: the holder owns this +1 and the object is alive
                 // here; the reclaim below releases exactly once.
                 unsafe {
-                    let session = &*presented.session.as_ptr();
+                    let session = &*presented.session.0.as_ptr();
                     let _: () = msg_send![session, cancel];
-                    drop(Retained::from_raw(presented.session.as_ptr()));
+                    drop(Retained::from_raw(presented.session.0.as_ptr()));
                 }
             }
         }
@@ -323,7 +339,7 @@ mod ios {
             if let Some(presented) = holder.take() {
                 // SAFETY: same ownership as the cancel path; the drop
                 // releases the +1 init handed over.
-                drop(unsafe { Retained::from_raw(presented.session.as_ptr()) });
+                drop(unsafe { Retained::from_raw(presented.session.0.as_ptr()) });
             }
         }
     }
@@ -357,12 +373,13 @@ mod ios {
         // SAFETY: the session's designated initializer; the session copies
         // (retains) the block, and the holder retains the session plus the
         // provider until the completion or a shutdown cancel releases them.
+        let allocated: Allocated<AnyObject> =
+            unsafe { msg_send![class!(ASWebAuthenticationSession), alloc] };
+        if allocated.as_ptr().is_null() {
+            return Err("allocating the sign-in sheet".to_string());
+        }
         let session: Retained<AnyObject> = unsafe {
-            let allocated: *mut AnyObject = msg_send![class!(ASWebAuthenticationSession), alloc];
-            if allocated.is_null() {
-                return Err("allocating the sign-in sheet".to_string());
-            }
-            msg_send![&*allocated, initWithURL: &*url, callbackURLScheme: &*scheme, completionHandler: &*completion]
+            msg_send![allocated, initWithURL: &*url, callbackURLScheme: &*scheme, completionHandler: &*completion]
         };
         unsafe {
             let _: () = msg_send![&session, setPresentationContextProvider: &*provider];
@@ -375,7 +392,9 @@ mod ios {
             // The +1 from init transfers into the holder; cancel and release
             // reclaim it exactly once. Non-null by construction from a live
             // object.
-            session: NonNull::new(Retained::into_raw(session)).expect("a live session"),
+            session: MainSession(
+                NonNull::new(Retained::into_raw(session)).expect("a live session"),
+            ),
             _provider: provider,
             gateway_id: gateway_id.to_string(),
             attempt: Arc::clone(attempt),
@@ -456,14 +475,14 @@ mod ios {
         }
     );
 
-    impl MobileAuthPresentationProvider {
-        fn new() -> Retained<Self> {
-            let this = Self::alloc();
-            // SAFETY: NSObject's designated initializer, sent once to a
-            // freshly allocated object.
-            unsafe { msg_send![super(this), init] }
+    extern_methods!(
+        // SAFETY: `new` allocates and runs NSObject's designated
+        // initializer; the provider holds no ivars.
+        unsafe impl MobileAuthPresentationProvider {
+            #[unsafe(method(new))]
+            fn new() -> Retained<Self>;
         }
-    }
+    );
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and the observer
@@ -478,13 +497,13 @@ mod ios {
         impl MobileLifecycleObserver {
             #[unsafe(method(mobileAppDidEnterBackground:))]
             fn did_enter_background(&self, _notification: &NSNotification) {
-                crate::gateway::set_roster_poll_suspended(self.ivars().1, true);
+                crate::gateway::set_roster_poll_suspended(&self.ivars().1, true);
             }
 
             #[unsafe(method(mobileAppWillEnterForeground:))]
             fn will_enter_foreground(&self, _notification: &NSNotification) {
-                crate::gateway::set_roster_poll_suspended(self.ivars().1, false);
-                crate::gateway::resync_roster_polls(self.ivars().0, self.ivars().1);
+                crate::gateway::set_roster_poll_suspended(&self.ivars().1, false);
+                crate::gateway::resync_roster_polls(&self.ivars().0, &self.ivars().1);
             }
         }
     );
