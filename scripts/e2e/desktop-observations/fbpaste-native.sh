@@ -3,10 +3,10 @@
 # The desktop guest counterpart of browser-smoke check 232: Xvfb, openbox,
 # `chan serve` on a throwaway workspace the shell seeds with keep.txt at the
 # root beside an empty notes folder, chan-desktop with the WebKit remote
-# inspector, then
-# fbpaste-native.mjs drives the real app file browser and asserts the landed
-# file on disk and its selection. Invoke under xvfb-run with a fixed screen
-# size. Layout mirrors terminal-size-native.sh in this directory.
+# inspector, then fbpaste-native.mjs drives the real app file browser and
+# asserts the landed file on disk and its selection. Invoke under xvfb-run
+# with a fixed screen size. Layout mirrors terminal-size-native.sh in this
+# directory.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,16 +39,6 @@ page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "/workspace-" "$1"; }
 # shellcheck disable=SC2329
 page_answers() { page_eval "document.readyState" | grep -q complete; }
 obs_wait 60 "the workspace page to answer the inspector" page_answers
-CHAN_WINDOW_ID="$(page_eval "new URLSearchParams(location.search).get('w')" | tr -d '"')"
-export CHAN_WINDOW_ID
-[ -n "$CHAN_WINDOW_ID" ] || obs_inconclusive "the workspace page names no window id"
-for socket in $(obs_control_sockets); do
-    CHAN_CONTROL_SOCKET="$socket"
-    export CHAN_CONTROL_SOCKET
-    if cs pane list --window "$CHAN_WINDOW_ID" --json > "$OBS_WORK/panes.out" 2>&1; then break; fi
-    CHAN_CONTROL_SOCKET=""
-done
-[ -n "${CHAN_CONTROL_SOCKET:-}" ] || obs_inconclusive "no private control socket addresses the workspace window"
 
 ENGINE_VERSION="$(pkg-config --modversion webkit2gtk-4.1 2>/dev/null || dpkg-query -W -f='${Version}' libwebkit2gtk-4.1-0 2>/dev/null || echo unknown)"
 echo "$ENGINE_VERSION" > "$output/engine-version.txt"

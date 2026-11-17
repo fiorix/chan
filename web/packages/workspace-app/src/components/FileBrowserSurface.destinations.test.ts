@@ -147,9 +147,6 @@ async function act(surface: Surface, action: Action, origin: Origin, anchorPath?
     expect(anchor, "a row anchors the selection menu").toBeDefined();
     anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
     await settle();
-    // The menu's Paste reads the row anchoring its menu, so re-select the scenario row before clicking.
-    fbSelectSingle(surface.scenario.selected, fbTreeInstance(surface.id)!.selection);
-    await settle();
     button(".ctx button", command.title).click();
   } else {
     if (surface.scenario.variant === "tab") openTabMenu(surface.tab.id, { left: 10, top: 10, right: 10, bottom: 10 });

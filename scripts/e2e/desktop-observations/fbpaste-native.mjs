@@ -53,7 +53,7 @@ function inspectorEval(endpoint, titleSub, expression, timeoutMs = 8000) {
       if (!target) { clearTimeout(timer); fail(new Error(`no inspectable page matches ${JSON.stringify(titleSub)}`)); return; }
       ws = new WebSocket(`ws://${target.socket}`);
       const send = (targetId) => {
-        const inner = JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } });
+        const inner = JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } });
         ws.send(JSON.stringify({ id: 1, method: "Target.sendMessageToTarget", params: { targetId, message: inner } }));
       };
       ws.onmessage = (event) => {
@@ -88,23 +88,36 @@ const need = (name, ok, detail) => record(name, ok, detail, "precondition");
 const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
 
 const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
-// The page relists after the seed and follows its selection after the file
-// lands, so every row read below polls to a bounded deadline instead of
-// reading once. An in-page deadline always fits inside the eval timeout.
-const waitRow = (path, timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
-    if (row) resolve(row.getAttribute("title"));
-    else if (Date.now() > deadline) resolve(null);
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
+// Every page expression below is synchronous and returns a value; the
+// deadline lives in node. WebKitGTK's Runtime.evaluate has no awaitPromise,
+// so an in-page promise would answer at once as an object and every wait
+// below would end at once. A rejected eval fails fast as "failed: ...".
+async function until(read, accept, label, bound = 15000) {
+  const deadline = Date.now() + bound;
+  for (;;) {
+    const value = await read();
+    if (accept(value)) return value;
+    if (Date.now() > deadline) throw new Error(`timeout waiting for ${label}`);
+    await sleep(250);
+  }
+}
+const rowTitleExpr = (path) => `(() => {
+  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+  const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
+  return row ? row.getAttribute("title") : null;
+})()`;
+const waitRow = async (path, timeoutMs = 15000) => {
+  try {
+    return await until(() => page(rowTitleExpr(path)).catch((err) => `failed: ${err.message}`),
+      (t) => typeof t === "string", `row ${path} to appear`, timeoutMs);
+  } catch (err) {
+    return String((err && err.message) || err).startsWith("timeout waiting for") ? null : `failed: ${String((err && err.message) || err).slice(0, 120)}`;
+  }
+};
 const openMenu = async (path) => {
-  const found = await waitRow(path).catch((err) => `failed: ${err.message}`);
-  if (typeof found !== "string") return found === null ? "missing" : found;
+  const found = await waitRow(path);
+  if (found === null) return "missing";
+  if (typeof found !== "string" || found.startsWith("failed:")) return found;
   return page(`(() => {
     const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
     const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
@@ -117,43 +130,56 @@ const clickMenu = (title) => page(`(() => {
   const button = [...document.querySelectorAll(".ctx button")].find(
     (b) => b.querySelector(".menu-row-label")?.textContent?.trim() === ${JSON.stringify(title)});
   if (!button) return "missing";
+  if (button.disabled) return "disabled";
   button.click();
   return "clicked";
 })()`);
-const waitSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/keep.txt"));
-    if (!row) {
-      if (Date.now() > deadline) resolve("absent");
-      else setTimeout(tick, 250);
-    } else if (row.getAttribute("aria-selected") === "true") resolve("true");
-    else if (Date.now() > deadline) resolve(row.getAttribute("aria-selected") ?? "unselected");
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
+const selectedExpr = `(() => {
+  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+  const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/keep.txt"));
+  if (!row) return "absent";
+  return row.getAttribute("aria-selected") ?? "unselected";
+})()`;
+const waitSelected = async (timeoutMs = 15000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let state;
+    try {
+      state = await page(selectedExpr);
+    } catch (err) {
+      return `failed: ${err && err.message ? err.message : err}`.slice(0, 120);
+    }
+    if (state === "true") return "true";
+    if (Date.now() > deadline) return state;
+    await sleep(250);
+  }
+};
 
 try {
   xdo(["windowactivate", "--sync", a.xid]);
   const ws = a.workspace;
-  mkdirSync(ws, { recursive: true });
   let seeded = null;
   try { seeded = readFileSync(join(ws, "keep.txt"), "utf8"); } catch {}
   need("shell seeded keep.txt", seeded === "keep me\n", seeded === null ? "absent" : JSON.stringify(seeded).slice(0, 60));
+  let preLanded = true;
+  try { readFileSync(join(ws, "notes", "keep.txt"), "utf8"); } catch { preLanded = false; }
+  need("landing absent before paste", preLanded === false, preLanded ? "present" : "absent");
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })); return "toggled"; })()`);
-  const listed = await page(`(() => new Promise((resolve, reject) => {
+  const listed = await (async () => {
     const deadline = Date.now() + 15000;
-    const tick = () => {
-      const el = document.querySelector('.browser [role="listbox"], .browser [role="tree"]');
-      if (el) resolve("files");
-      else if (Date.now() > deadline) reject(new Error("no file listing appeared"));
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 20000).catch((err) => `failed: ${err.message}`);
+    for (;;) {
+      let open = false;
+      try {
+        open = await page(`(() => !!document.querySelector('.browser [role="listbox"], .browser [role="tree"]'))()`);
+      } catch (err) {
+        return `failed: ${err.message}`;
+      }
+      if (open === true) return "files";
+      if (Date.now() > deadline) return "no file listing appeared";
+      await sleep(250);
+    }
+  })();
   need("open files", listed === "files", String(listed).slice(0, 120));
 
   const keep = await waitRow("keep.txt").catch((err) => `failed: ${err.message}`);
@@ -161,14 +187,16 @@ try {
   const copyMenu = await openMenu("keep.txt").catch((err) => `failed: ${err.message}`);
   need("copy menu opened", copyMenu === "opened", String(copyMenu));
   const copied = await clickMenu("Copy").catch((err) => `failed: ${err.message}`);
-  need("copy row clicked", copied === "clicked", String(copied));
+  if (copied === "disabled") need("copy row enabled", false, "disabled");
+  else need("copy row clicked", copied === "clicked", String(copied));
 
   const sub = await waitRow("notes").catch((err) => `failed: ${err.message}`);
   need("notes row present", typeof sub === "string" && sub.endsWith("/notes"), sub === null ? "absent" : String(sub).slice(0, 120));
   const pasteMenu = await openMenu("notes").catch((err) => `failed: ${err.message}`);
   need("paste menu opened", pasteMenu === "opened", String(pasteMenu));
   const pasted = await clickMenu("Paste").catch((err) => `failed: ${err.message}`);
-  need("paste row clicked", pasted === "clicked", String(pasted));
+  if (pasted === "disabled") need("paste row enabled", false, "disabled");
+  else need("paste row clicked", pasted === "clicked", String(pasted));
 
   let landed = null;
   for (let i = 0; i < 30; i++) {
