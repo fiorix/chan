@@ -55,8 +55,10 @@ test("copy body labels links on both sides of a frontmatter-looking rule", () =>
   const root = document.createElement("div");
   root.innerHTML = buildBaselineHtml(source, "notes/doc.md", "/ws");
   const text = root.textContent ?? "";
-  expect(text).toContain("b");
-  expect(text).toContain("c");
+  expect(text).toContain("Slide 2");
+  expect(text).toContain("Slide 3");
+  expect(text).not.toContain("[[b]]");
+  expect(text).not.toContain("[[c]]");
   expect(text).not.toContain("[[");
 });
 

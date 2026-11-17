@@ -161,6 +161,25 @@ test("a link preview leaves inline code and fenced code as typed", async () => {
   });
 });
 
+test("a link preview leaves frontmatter as typed and labels the body", async () => {
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]].\n',
+    mtime: null,
+    writable: true,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  open(anchor, "notes/a.md");
+  await vi.waitFor(() => {
+    const text = document.querySelector(".md-preview-md")?.textContent ?? "";
+    expect(text).toContain('up: "[[Projects/Parent]]"');
+  });
+  const text = document.querySelector(".md-preview-md")?.textContent ?? "";
+  expect(text).toContain("See a.");
+  expect(text).not.toContain("[[a]]");
+});
+
 test("a link preview gives a markup-carrying label no element", async () => {
   const label = '<img src=x onerror="alert(1)">';
   vi.mocked(api.read).mockResolvedValueOnce({

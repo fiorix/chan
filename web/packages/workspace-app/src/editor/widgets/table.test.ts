@@ -81,6 +81,18 @@ function expectTableMatchesMarkdown(
 }
 
 describe("tableDecorations", () => {
+  test.each([
+    ["an emphasis link in a div cell", "| <div>**[[c]]**</div> |", [["Name"], ["c"]]],
+    ["marked links in a list cell", "| <ul><li>*[[a]]*</li><li>~~[[b]]~~</li></ul> |", [["Name"], ["ab"]]],
+    ["an emphasis link beside a plain one", "| <p>__[[a]]__ and [[b]]</p> |", [["Name"], ["a and b"]]],
+    ["a link in a link's label in a div cell", "| <div>[see [[note]]](other.md)</div> |", [["Name"], ["see note"]]],
+  ])("%s renders the widget as the export", (_name, source, expected) => {
+    expectTableMatchesMarkdown(
+      ["| Name |", "|------|", source, "", "after"].join("\n"),
+      expected,
+    );
+  });
+
   test("renders a pipe table as a block widget without throwing", () => {
     const { parent, view } = mountTable(TABLE_DOC);
 
