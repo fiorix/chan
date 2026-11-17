@@ -1748,7 +1748,7 @@
     let ymin = Infinity, ymax = -Infinity;
     // The lowest edge of a node that is not a focal seed. The raised seat
     // is measured against the other nodes only: the focal's own disc does
-    // not count as below the root, so a lone root keeps today's seat.
+    // not count as below the root, so a lone root sits at the default seat.
     let ymaxBelowFocal = -Infinity;
     let focal: { x: number; y: number } | null = null;
     for (const n of dNodes) {

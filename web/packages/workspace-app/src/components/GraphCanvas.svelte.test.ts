@@ -874,6 +874,7 @@ describe("a root on a product-sized canvas", () => {
     expect(lowestBottom(api, ids), "the lowest disc at the fit's pad").toBeCloseTo(676, -1);
     const root = circle(api, "");
     expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the seat rose for the ring below the root").toBeLessThan(644);
   });
 
   test("the bounds framing publishes no seat", () => {
