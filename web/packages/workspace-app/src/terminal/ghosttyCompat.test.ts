@@ -529,10 +529,10 @@ describe("Ghostty overlay scrollbar clicks", () => {
   function ghosttyMouseSource() {
     const host = document.createElement("div");
     const claimStrip = vi.fn();
-    // Mirrors the pinned build: handleMouseDown is an own bound field and
+    // Mirrors the pinned build: handlePointerDown is an own bound field and
     // open() registers it on the host in the capture phase.
-    const terminal = { handleMouseDown: claimStrip, scrollbarOpacity: 0 };
-    host.addEventListener("mousedown", terminal.handleMouseDown, true);
+    const terminal = { handlePointerDown: claimStrip, scrollbarOpacity: 0 };
+    host.addEventListener("pointerdown", terminal.handlePointerDown, true);
     return { claimStrip, host, terminal };
   }
 
@@ -543,10 +543,10 @@ describe("Ghostty overlay scrollbar clicks", () => {
     const terminal = new Terminal({
       ghostty: new GhosttyVt(await WebAssembly.instantiate(module, {})),
     }) as unknown as {
-      handleMouseDown?: unknown;
+      handlePointerDown?: unknown;
     };
 
-    expect(typeof terminal.handleMouseDown).toBe("function");
+    expect(typeof terminal.handlePointerDown).toBe("function");
     expect(
       Object.prototype.hasOwnProperty.call(terminal, "scrollbarOpacity"),
     ).toBe(true);
@@ -556,7 +556,7 @@ describe("Ghostty overlay scrollbar clicks", () => {
     const { claimStrip, host, terminal } = ghosttyMouseSource();
 
     expect(gateGhosttyScrollbarClicks(terminal, host)).not.toBeNull();
-    host.dispatchEvent(new MouseEvent("mousedown"));
+    host.dispatchEvent(new PointerEvent("pointerdown"));
 
     expect(claimStrip).not.toHaveBeenCalled();
   });
@@ -566,22 +566,22 @@ describe("Ghostty overlay scrollbar clicks", () => {
     const dispose = gateGhosttyScrollbarClicks(terminal, host);
 
     terminal.scrollbarOpacity = 0.5;
-    host.dispatchEvent(new MouseEvent("mousedown"));
+    host.dispatchEvent(new PointerEvent("pointerdown"));
     // Upstream's own listener has to be gone, not merely shadowed: a second
     // live claimant would scroll-jump the clicks this gate exists to release.
     expect(claimStrip).toHaveBeenCalledTimes(1);
 
     dispose?.();
-    host.dispatchEvent(new MouseEvent("mousedown"));
+    host.dispatchEvent(new PointerEvent("pointerdown"));
     expect(claimStrip).toHaveBeenCalledTimes(1);
   });
 
   test("leaves upstream alone if the pinned build stops exposing its state", () => {
     const { claimStrip, host } = ghosttyMouseSource();
-    const terminal = { handleMouseDown: claimStrip };
+    const terminal = { handlePointerDown: claimStrip };
 
     expect(gateGhosttyScrollbarClicks(terminal, host)).toBeNull();
-    host.dispatchEvent(new MouseEvent("mousedown"));
+    host.dispatchEvent(new PointerEvent("pointerdown"));
     expect(claimStrip).toHaveBeenCalledTimes(1);
   });
 });
