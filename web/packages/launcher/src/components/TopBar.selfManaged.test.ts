@@ -14,6 +14,7 @@ vi.mock("../state/capabilities", () => ({
   hasDesktopBridge: false,
   selfManagedWindows: true,
   hostOs: "linux",
+  isIOS: false,
 }));
 
 let target: HTMLElement | null = null;

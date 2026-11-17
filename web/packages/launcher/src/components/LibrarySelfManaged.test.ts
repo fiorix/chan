@@ -20,6 +20,7 @@ vi.mock("../state/capabilities", () => ({
   hasDesktopBridge: false,
   selfManagedWindows: true,
   hostOs: "linux",
+  isIOS: false,
 }));
 
 vi.mock("../api/backend", async () => {
