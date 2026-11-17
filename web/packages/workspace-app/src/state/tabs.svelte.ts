@@ -3024,8 +3024,9 @@ export function registerTerminalPromptSink(
 }
 
 /// Send a prompt to a SPECIFIC terminal's write queue via its WS `prompt`
-/// frame. Returns false when that terminal has no live prompt sink OR its WS
-/// is not open yet (so the caller can retry). The team orchestrator uses this
+/// frame. Returns false when that terminal has no live prompt sink, when its
+/// WS is not open yet (so the caller can retry), or when its session is gone
+/// (no retry can succeed). The team orchestrator uses this
 /// to auto-deliver the lead's identity prompt to the freshly-spawned lead
 /// terminal once its socket connects. The lead is a normal terminal, so its
 /// identity arrives through the same queue as every prompt.
@@ -3046,7 +3047,7 @@ export function sendPromptToTerminal(
 /// Why a Rich Prompt submit was refused, read only after
 /// `sendPromptToTerminal` returns false: the terminal's shell or session is
 /// gone for good (`exited`; restart is the recovery) or its socket is down
-/// (`down`; it redials).
+/// (`down`; a live socket redials, a parked session waits for the server).
 export type TerminalPromptRefusal = "exited" | "down";
 type TerminalPromptRefusalReader = () => TerminalPromptRefusal;
 const terminalPromptRefusalReaders = new Map<string, TerminalPromptRefusalReader>();

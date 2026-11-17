@@ -2226,6 +2226,18 @@
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
+  /// Returns whether the send went out: false when the socket is not open,
+  /// so the orchestrator can retry a freshly-spawned lead, and when the
+  /// session is gone, where no retry can succeed.
+  function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    // The session is gone: restart is the only recovery, so refuse even
+    // while the socket is still open rather than feed a dead session.
+    if (promptRefusal() === "exited") return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    term?.scrollToBottom();
+    return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
+  }
+
   /// Rich Prompt's refusal note: after an `exit` frame, or a `closed` frame
   /// that ended the session, the server has closed the socket and restart is
   /// the only recovery, so the composer names Restart terminal. While the
@@ -2234,14 +2246,6 @@
   function promptRefusal(): TerminalPromptRefusal {
     if (status === "exited" && !tab.terminalSessionId) return "exited";
     return "down";
-  }
-  function sendPrompt(data: string, agent?: string, id?: string): boolean {
-    // The session is gone: restart is the only recovery, so refuse even
-    // while the socket is still open rather than feed a dead session.
-    if (status === "exited" && !tab.terminalSessionId) return false;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    term?.scrollToBottom();
-    return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });
   }
 
   /// Rich Prompt recall: ask the server to pull a still-queued message out of

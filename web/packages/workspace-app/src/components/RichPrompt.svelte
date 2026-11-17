@@ -642,14 +642,14 @@
     return true;
   }
 
+  const NOT_CONNECTED_NOTE = "terminal not connected; try again";
+  const EXITED_NOTE = "terminal exited; Restart terminal for a new shell";
+
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
   /// The composer keeps its text on any refusal; the note says why it was
   /// refused: the terminal is gone (restart is the recovery) or its socket
   /// is down and redialling.
-  const NOT_CONNECTED_NOTE = "terminal not connected; try again";
-  const EXITED_NOTE = "terminal exited; Restart terminal for a new shell";
-
   function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
