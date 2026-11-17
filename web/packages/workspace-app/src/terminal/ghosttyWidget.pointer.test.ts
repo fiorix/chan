@@ -165,6 +165,57 @@ describe("the ghostty widget's pointer handling", () => {
     }
   });
 
+  test("a press with a below-threshold move selects and copies nothing", async () => {
+    const { term, canvas } = await openTerminal();
+    const writes: string[] = [];
+    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    term.write("hello world\r\nsecond row");
+    pointer(canvas, "pointerdown", 1, 1);
+    // One pixel: below the half-cell drag threshold, so this stays a tap.
+    pointer(canvas, "pointermove", 2, 1);
+    pointer(canvas, "pointerup", 2, 1);
+    expect(writes, "a jittered press copies nothing").toEqual([]);
+    expect(term.hasSelection(), "a jittered press selects nothing").toBe(false);
+  });
+
+  test("a drag ended by capture loss alone keeps its selection and copies nothing", async () => {
+    const { term, canvas } = await openTerminal();
+    const writes: string[] = [];
+    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    term.write("hello world\r\nsecond row");
+    pointer(canvas, "pointerdown", 1, 1);
+    pointer(canvas, "pointermove", 60, 1);
+    expect(term.hasSelection()).toBe(true);
+    const selected = term.getSelection();
+    canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
+    // After the loss the drag is over: later moves and the release change nothing.
+    pointer(canvas, "pointermove", 100, 2);
+    pointer(canvas, "pointerup", 100, 2);
+    expect(writes, "the lost drag copies nothing").toEqual([]);
+    expect(term.getSelection(), "the lost drag keeps its selection").toBe(selected);
+  });
+
+  test("a press on the scrollbar track jumps the viewport to that position", async () => {
+    const { term, canvas } = await openTerminal();
+    term.write(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
+    const history = term.getScrollbackLength();
+    expect(history).toBeGreaterThan(20);
+    term.viewport.scrollTo(10);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
+    });
+    // The track's top stands for the oldest rows: the press jumps there, it
+    // does not start a thumb drag and it does not nudge by a page. The
+    // press lands one padding below the track's top edge.
+    const trackHeight = 96 - 4 * 2;
+    const expected = Math.round((1 - (8 - 4) / trackHeight) * history);
+    expect(expected, "the track top really moves the view").toBeGreaterThan(10);
+    const press = new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerId: 1, pointerType: "mouse", clientX: 310, clientY: 8 });
+    (term as unknown as { handlePointerDown(e: PointerEvent): void }).handlePointerDown(press);
+    expect((term as unknown as { isDraggingScrollbar: boolean }).isDraggingScrollbar).toBe(false);
+    expect(term.viewport.offset, "the track press jumps the viewport to that position").toBe(expected);
+  });
+
   test("an interrupted drag copies nothing and keeps the selection", async () => {
     const { term, canvas } = await openTerminal();
     const writes: string[] = [];
