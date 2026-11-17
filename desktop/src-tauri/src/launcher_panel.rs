@@ -1384,7 +1384,7 @@ mod tests {
         // through the page's focus guard; both sides spell it from one
         // constant each.
         const FOCUS_GUARD: &str =
-            include_str!("../../../web/packages/workspace-app/src/state/focusGuard.ts");
+            include_str!("../../../web/packages/workspace-app/src/state/focusGuard.svelte.ts");
         const TERMINAL_TAB: &str =
             include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
         const WINDOW_TAB_BAR: &str =
@@ -1396,7 +1396,7 @@ mod tests {
             .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
         assert!(FOCUS_GUARD.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";"));
         assert!(FOCUS_GUARD.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)"));
-        assert!(TERMINAL_TAB.contains("from \"../state/focusGuard\";"));
+        assert!(TERMINAL_TAB.contains("from \"../state/focusGuard.svelte\";"));
         assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
         assert!(WINDOW_TAB_BAR.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
     }

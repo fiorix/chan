@@ -154,10 +154,8 @@
   let content = $state("");
   // The editor takes the keyboard by itself while `autoFocus` holds: as it
   // mounts, and when its text changes from here, as a delivery empties it.
-  // The launcher's mark is a DOM attribute rather than state, so reading
-  // `content` makes each such change read the guard again.
+  // Every owner is reactive state, so the rule re-reads on each change.
   const editorAutoFocus = $derived.by(() => {
-    content;
     return focused && !refocusRefused(tab.id);
   });
   let loaded = $state(false);
@@ -651,7 +649,7 @@
     // images come from the server. A text that names none is sent at once.
     const images = draftImagesForDelivery(text, draftPath);
     if (images.length === 0) {
-      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root));
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root), false);
       return true;
     }
     resolvingDelivery = true;
@@ -665,7 +663,7 @@
       clearDeliveryTimer();
       resolvingDelivery = false;
       if (destroyed) return;
-      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths));
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths), true);
     };
     deliveryTimer = setTimeout(() => finish(new Map()), DELIVERY_PATHS_TIMEOUT_MS);
     void resolveDraftImagePaths(images, api.draftTerminalPaths).then(finish, () =>
@@ -676,7 +674,11 @@
 
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
-  function sendSubmitted(view: EditorView, text: string, delivered: string): void {
+  /// A keymap or strip submit takes the keyboard whenever no owner holds
+  /// it, even from an unfocused pane; only a submit held for its images'
+  /// paths still needs the composer focused, since the pane may have
+  /// changed while the server answered.
+  function sendSubmitted(view: EditorView, text: string, delivered: string, onlyWhenFocused: boolean): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
       showTransientNote("terminal not connected; try again");
@@ -691,10 +693,7 @@
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
     void flushWrite();
-    // A submit from the keymap or the strip leaves the keyboard here. One
-    // held for its images' paths sends later, when another tab, a dialog, a
-    // survey over this terminal or the launcher may have taken it.
-    if (focused && !refocusRefused(tab.id)) view.focus();
+    if ((!onlyWhenFocused || focused) && !refocusRefused(tab.id)) view.focus();
     pendingChipVisible = false;
     if (graceTimer !== null) clearTimeout(graceTimer);
     graceTimer = setTimeout(() => {

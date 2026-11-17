@@ -43,7 +43,7 @@
     onSuccess?: (item: DeckItem) => void;
     onError?: (item: DeckItem, error: unknown) => void;
     onFocusLost?: () => void;
-    mayTakeFocus?: () => boolean;
+    mayTakeFocus?: (heir: HTMLElement | null) => boolean;
     toggleChord?: (event: KeyboardEvent) => boolean;
     onClose?: () => void;
     onBack?: () => void;

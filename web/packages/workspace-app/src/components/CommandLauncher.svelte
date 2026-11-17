@@ -852,6 +852,14 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
-  mayTakeFocus={() => !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher")}
+  mayTakeFocus={(heir) => {
+    // A run that opens nothing hands the keyboard back to whatever asked
+    // for it under the open deck, even inside another overlay's panel: a
+    // dialog's button or an overlay's field owns the keyboard where it is.
+    // Anything else, and no heir at all, goes through the rule, which still
+    // refuses the terminal and its composer while an owner holds them.
+    if (heir && heir.closest('[role="dialog"], [role="alertdialog"], .survey-card')) return true;
+    return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
+  }}
   {toggleChord}
 />
