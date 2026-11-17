@@ -3,11 +3,16 @@
 // after Restart terminal. No proxy and no reload: `exit` reaches a bare
 // shell over `cs terminal write`, the server sends the exit frame and
 // closes the socket itself, and the page's patched WebSocket records the
-// client's sockets, prompt frames and delivery acks.
+// client's sockets, prompt frames and delivery acks. Sockets are scoped by
+// session: both legs run in one window, so the first leg's closed socket
+// must not satisfy the second leg's waits. Restart and cleanup go through
+// the page (the command launcher, the tab bus): `cs terminal` addresses
+// live sessions only, and an exited terminal has none.
 
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { dispatchCommand, selectLauncherCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -62,7 +67,12 @@ async function state(page, card) {
       pending: composer?.classList.contains("pending") ?? null,
       note: note?.textContent ?? null,
       live: note?.getAttribute("aria-live") ?? null,
-      sockets: trace?.sockets.map(({ socket, ready, delivered }) => ({ state: socket.readyState, ready, delivered })) ?? [],
+      sockets: trace?.sockets.map(({ socket, ready, delivered }) => ({
+        state: socket.readyState,
+        ready,
+        delivered,
+        session: new URL(socket.url, location.href).searchParams.get("session"),
+      })) ?? [],
       prompts: trace?.prompts ?? [],
     };
   }, card);
@@ -111,8 +121,10 @@ export default {
             await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
             const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend);
             opened = true;
-            const attachment = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === row.session_id);
+            const session = row.session_id;
+            const attachment = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === session);
             assert.ok(attachment.attached, `the ${backend} terminal is attached`);
+            await page.evaluate(() => { window.__prompt291.prompts.length = 0; });
             const terminal = attachment.selector;
             const card = `${terminal} .rich-prompt`;
             await page.click(`${terminal} .terminal-host`);
@@ -128,8 +140,9 @@ export default {
             // End the shell for real: the server sends the exit frame and
             // closes the socket, and an exited tab never redials.
             await cs(["write", "--tab-name", name, "exit\n"]);
+            const own = (value) => value.sockets.filter((socket) => socket.session === session);
             result.exited = await waitFor(page, card, "the server closed the exited socket with no redial",
-              (value) => value.sockets.length === 1 && value.sockets[0].state === 3, 30_000);
+              (value) => own(value).length === 1 && own(value)[0].state === 3, 30_000);
             if (backend === "xterm") {
               await page.keyboard.down("Control");
               await page.keyboard.press("Enter");
@@ -143,12 +156,19 @@ export default {
             assert.equal(result.refused.pending, false);
             assert.equal(result.refused.live, "polite");
             assert.deepEqual(result.refused.prompts, []);
-            assert.deepEqual(result.refused.sockets.map((socket) => socket.state), [3]);
+            assert.deepEqual(own(result.refused).map((socket) => socket.state), [3]);
             await ctx.shot(`291-${backend}-exited-note`);
-            // Restart terminal: a new session on a new socket takes the kept text.
-            await cs(["restart", "--tab-name", name]);
-            result.restarted = await waitFor(page, card, "the restarted terminal reattached",
-              (value) => value.sockets.length === 2 && value.sockets[1].state === 1 && value.sockets[1].ready, 30_000);
+            // Restart terminal through the command launcher: `cs terminal`
+            // addresses live sessions only, and an exited terminal has none.
+            // A new session on a new socket takes the kept text.
+            const seen = (await state(page, card)).sockets.map((socket) => socket.session);
+            await selectLauncherCommand(page, "Restart terminal");
+            await page.keyboard.press("Enter");
+            result.restarted = await waitFor(page, card, "the restarted terminal reattached", (value) => {
+              const next = value.sockets.filter((socket) => !seen.includes(socket.session));
+              return next.length === 1 && next[0].state === 1 && next[0].ready ? { ...value, next: next[0] } : false;
+            }, 30_000);
+            const restarted = result.restarted.next.session;
             if (backend === "xterm") {
               await page.keyboard.down("Control");
               await page.keyboard.press("Enter");
@@ -158,11 +178,11 @@ export default {
             }
             result.sent = await waitFor(page, card, "the kept text sends on the new session", (value) => value.prompts.length === 1);
             assert.equal(result.sent.prompts[0].data, text);
-            assert.equal(result.sent.prompts[0].connection, 2);
             assert.equal(typeof result.sent.prompts[0].id, "string");
             const id = result.sent.prompts[0].id;
             result.delivered = await waitFor(page, card, "the delivered retry clears the composer",
-              (value) => value.sockets[1].delivered.includes(id) && value.text === "" && !value.pending);
+              (value) => value.sockets.some((socket) => socket.session === restarted && socket.delivered.includes(id))
+                && value.text === "" && !value.pending);
             assert.equal(result.delivered.note, null);
             assert.deepEqual(result.pageErrors, []);
             await ctx.shot(`291-${backend}-restarted-delivered`);
@@ -182,7 +202,9 @@ export default {
               }
             };
             await cleanup("owned terminal cleanup", async () => {
-              try { await cs(["close", "--tab-name", name]); } catch (error) { if (opened) throw error; }
+              // The tab bus closes whatever tab is active, live session or
+              // not; `cs terminal close` only matches live sessions.
+              if (opened) await dispatchCommand(page, "app.tab.close");
             });
             if (result.passed && result.pageErrors.length) {
               result.passed = false;
