@@ -118,12 +118,11 @@ export interface ConnectionProbe {
   /// inside the send.
   pingSent(): void;
   /// A pong arrived, reported after `frameReceived` for the same frame.
-  /// Returns its round-trip time, or `null` where there is none to give: a
-  /// stray pong with no ping waiting, the pong of a ping that was not timed
-  /// (its timing forgotten, or the ping counted because CONNECTION_PENDING_CAP
-  /// timed ones already waited), or one that took longer than
-  /// CONNECTION_MAX_RTT_MS. All but the stray one still count as the socket
-  /// answering.
+  /// Returns the send time of the ping it answers, or `null` where it
+  /// answers none that was timed: a stray pong with no ping waiting, or the
+  /// pong of a ping that was not timed (its timing forgotten, or the ping
+  /// counted because CONNECTION_PENDING_CAP timed ones already waited). All
+  /// but the stray one still count as the socket answering.
   pongReceived(): number | null;
   /// A frame of any kind arrived, a pong included.
   frameReceived(): void;
@@ -196,18 +195,16 @@ export function createConnectionProbe(options: ConnectionProbeOptions = {}): Con
       else return null;
       answered = true;
       everAnswered = true;
-      let rtt: number | null = null;
       if (at !== null) {
         const took = Math.max(0, now() - at);
         if (took <= CONNECTION_MAX_RTT_MS) {
-          rtt = took;
-          rtts.push(rtt);
+          rtts.push(took);
           if (rtts.length > CONNECTION_RTT_RUN) rtts.shift();
-          options.onSample?.({ at, rttMs: rtt });
+          options.onSample?.({ at, rttMs: took });
         }
       }
       options.onChange?.();
-      return rtt;
+      return at;
     },
     frameReceived() {
       lastFrameAt = now();

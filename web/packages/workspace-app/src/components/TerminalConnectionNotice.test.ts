@@ -94,24 +94,21 @@ describe("terminal connection pill", () => {
     expect(region.textContent).toBe("");
   });
 
-  test("occupies only its top-right text box with opaque theme colours", () => {
+  test("occupies only its own text box with opaque theme colours", () => {
     // jsdom computes no layout, so the overlay's positioning is a source contract.
     const source = readFileSync("src/components/TerminalConnectionNotice.svelte", "utf8");
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bposition:\s*absolute;/);
-    expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\btop:\s*5px;/);
-    expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bright:\s*5px;/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bwidth:\s*max-content;/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bmax-width:\s*min\(70%, 36rem\);/);
     expect(source).not.toMatch(/\.terminal-connection-pill\s*\{[^}]*\binset:/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bbackground:\s*var\(--bg-card\);/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bborder:\s*1px solid var\(--border\);/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bfont-variant-numeric:\s*tabular-nums;/);
-    expect(source).toMatch(/style:top=\{`\$\{placedTop \?\? defaultTop\}px`\}/);
-    expect(source).toMatch(/style:right=\{inspectorOpen \? `\$\{inspectorWidth \+ 29\}px` : "5px"\}/);
     expect(source).not.toMatch(/\b(?:animation|transition):/);
   });
 
   test("keeps the permanent status region out of the terminal flex row", () => {
+    // The stable live region must take no space in the flex row: it stays absolutely positioned.
     const source = readFileSync("src/components/TerminalConnectionNotice.svelte", "utf8");
     expect(source).toMatch(/\.sr-only\s*\{[^}]*\bposition:\s*absolute;/);
   });

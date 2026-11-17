@@ -5,7 +5,7 @@ import { createConnectionProbe } from "../api/connectionProbe";
 import { WS_READ_DEADLINE_MS } from "../api/transport";
 import type { ConnectionState } from "../state/connectionHealth.svelte";
 
-/// Delay before a sent input with no answer asks the terminal socket for a pong.
+/// Delay after user input before its probe pings the terminal socket.
 export const TERMINAL_INPUT_PROBE_MS = 1_000;
 /// Limit input-triggered pings while a terminal is busy or the connection is silent.
 export const TERMINAL_INPUT_PROBE_SPACING_MS = 2_000;
@@ -41,6 +41,11 @@ export function createTerminalConnectionHealth(
   let lastRedialAt = Number.NEGATIVE_INFINITY;
   let inputOutstanding = false;
   let noticeInputOutstanding = false;
+  // The last user input's stamp, held below every ping sent after it.
+  // A pong answers only input sent before the ping it answers: a frame
+  // proves nothing about the client-to-server direction, but a pong
+  // arrives in send order.
+  let lastInputAt = Number.NEGATIVE_INFINITY;
   let noticePending = false;
   let noticeRemainingMs = TERMINAL_INPUT_NOTICE_MS;
   let noticeStartedAt = 0;
@@ -146,12 +151,14 @@ export function createTerminalConnectionHealth(
   const probe = createConnectionProbe({ now });
   const markInputWritten = () => {
     if (!open || disposed) return;
+    lastInputAt = now();
     inputOutstanding = true;
     updateRedial();
   };
   const retire = () => {
     if (state.notice || (open && noticeInputOutstanding)) noticePending = true;
     open = false;
+    lastInputAt = Number.NEGATIVE_INFINITY;
     inputOutstanding = false;
     noticeInputOutstanding = false;
     clearInput();
@@ -185,21 +192,24 @@ export function createTerminalConnectionHealth(
     },
     pingSent() {
       if (!open || disposed) return;
+      // Every input so far left this socket before this ping, whatever the clock says.
+      lastInputAt = Math.min(lastInputAt, now() - 1);
       probe.pingSent();
       sync();
     },
     frameArrived() {
       if (!open || disposed) return;
-      clearInput();
-      inputOutstanding = false;
-      noticeInputOutstanding = false;
-      const waiting = probe.answered && probe.oldestPingAt !== null;
       probe.frameReceived();
+      const waiting = probe.answered && probe.oldestPingAt !== null;
       if (waiting || state.stalled) sync();
     },
     pongArrived() {
       if (!open || disposed) return;
-      probe.pongReceived();
+      const answeredAt = probe.pongReceived();
+      if (answeredAt !== null && answeredAt > lastInputAt) {
+        inputOutstanding = false;
+        noticeInputOutstanding = false;
+      }
       sync();
     },
     inputSent() {

@@ -39,10 +39,16 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [graphroot]: v0.132.0/the-graph-tab-cuts-off-root-files-below-the-bottom-edge-in-a-workspace-whose-root-holds-many-entries.md
 [unburywin]: v0.132.0/the-minimized-window-raise-is-unread-on-windows.md
 [appenv]: v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md
+[fbpaste]: v0.132.0/the-file-browser-menus-paste-lands-in-the-selections-folder-not-the-right-clicked-folder.md
+[docktarget]: v0.132.0/the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes.md
+[detailsclear]: v0.132.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md
+[wikiplaces]: v0.132.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md
+[mousefamily]: v0.132.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
+[wakescale]: v0.132.0/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md
 
 ### v0.132.0
 
-Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]). Later that day the model download's trust row ([modelroots]) moved here unmerged, when its native Windows rerun stopped on its test kit. The same day added six rows the round found or carried: three from its candidates, taken by survey (the index pill over a notice's Dismiss [pillcover], `tempfile` persist on Windows [persistwin], the desktop Makefile's Windows tauri fallback [taurifallback]); the Windows claim's installed readings [winclaimread] and the two TLS rows' Windows trust readings [tlswin], carried when those rows merged on their other readings; and the red proofs of the terminal regression browser checks [termredproofs], carried when those checks merged on their vitest proofs. He also added the connection health lane's branch, written and tested outside the round, to merge after a redesign of its indicator's placement and a rebase ([linkhealth]). By a survey the same day he took four more the round found at its third milestone, each older than v0.131.0, which ships as v0.130.0 behaved on all four: the Rich Prompt taking the keyboard from a survey, a dialog, an overlay or the launcher, with three focus residuals ([keyowner]), a fresh shell keeping a dead full-screen program's input modes ([freshmodes]), the Rich Prompt's "try again" over a terminal that has exited ([exitedtry]) and the Graph tab cutting off root files below its bottom edge, whose fix shape is his choice ([graphroot]). On 2026-11-17 the minimized-window row's Windows reading followed, carried when its test kit stopped twice on the release candidate before any cycle ([unburywin]).
+Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and moved what was not ready to the next release ("ok let's cut to ga at m3 and move the rest to v0.132"): a fast stream that loses output past a lag ([streamlag]), the AppImage handing its environment to host programs ([appenv]) and the reading of the AppImage in FUSE mode ([fusemode]). The ghostty-web fork ([ghosttyng]) follows with part 4's tasks 2 to 6 and parts 5 and 6, after part 3 and part 4's first task shipped in v0.131.0. On 2026-11-16 he moved the ConPTY row's client half here by survey, after its Windows reading showed the drift unchanged; v0.131.0 ships the row's server field only ([conpty]). Later that day the model download's trust row ([modelroots]) moved here unmerged, when its native Windows rerun stopped on its test kit. The same day added six rows the round found or carried: three from its candidates, taken by survey (the index pill over a notice's Dismiss [pillcover], `tempfile` persist on Windows [persistwin], the desktop Makefile's Windows tauri fallback [taurifallback]); the Windows claim's installed readings [winclaimread] and the two TLS rows' Windows trust readings [tlswin], carried when those rows merged on their other readings; and the red proofs of the terminal regression browser checks [termredproofs], carried when those checks merged on their vitest proofs. He also added the connection health lane's branch, written and tested outside the round, to merge after a redesign of its indicator's placement and a rebase ([linkhealth]). By a survey the same day he took four more the round found at its third milestone, each older than v0.131.0, which ships as v0.130.0 behaved on all four: the Rich Prompt taking the keyboard from a survey, a dialog, an overlay or the launcher, with three focus residuals ([keyowner]), a fresh shell keeping a dead full-screen program's input modes ([freshmodes]), the Rich Prompt's "try again" over a terminal that has exited ([exitedtry]) and the Graph tab cutting off root files below its bottom edge, whose fix shape is his choice ([graphroot]). On 2026-11-17 the minimized-window row's Windows reading followed, carried when its test kit stopped twice on the release candidate before any cycle ([unburywin]). By a survey on 2026-11-17 he took five rows from the candidates v0.131.0 took with no row: the file browser menu's Paste ([fbpaste]), the launcher's file commands after a dock closes ([docktarget]), the Workspace details command's selection ([detailsclear]), wikilinks shown as typed in four places ([wikiplaces]) and the attach prelude's mouse modes ([mousefamily]); the same answer amended [keyowner] with a survey shown while its pane was unfocused. On 2026-11-17 the owner reported terminals drawn at half scale after a sleep on his Mac, and the round took it as a row ([wakescale]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -53,17 +59,23 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [the index pill covers Dismiss][pillcover] | not started | build |
 | [persist cannot replace an open file][persistwin] | not started | build |
-| [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
+| [the Makefile's tauri fallback on Windows][taurifallback] | merged | closed |
 | [the Windows claim's installed readings][winclaimread] | not started | build |
 | [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
 | [terminal browser checks' red proofs][termredproofs] | not started | measure |
-| [a lossy link freezes a window][linkhealth] | built | design |
+| [a lossy link freezes a window][linkhealth] | merged | owner |
 | [the composer takes a survey's keys][keyowner] | not started | build |
-| [a fresh shell keeps dead modes][freshmodes] | not started | build |
+| [a fresh shell keeps dead modes][freshmodes] | merged | closing |
 | [try again over an exited terminal][exitedtry] | not started | build |
-| [the graph cuts off root files][graphroot] | not started | owner |
+| [the graph cuts off root files][graphroot] | merged | closed |
 | [the minimized-window raise unread on Windows][unburywin] | not started | measure |
+| [the menu's Paste lands in the selection][fbpaste] | not started | build |
+| [file commands lose a closed dock's target][docktarget] | not started | build |
+| [Workspace details clears the wrong selection][detailsclear] | not started | build |
+| [four places show wikilinks as typed][wikiplaces] | not started | build |
+| [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
+| [terminals at half scale after a sleep][wakescale] | not started | build |
 
 ## Completed
 

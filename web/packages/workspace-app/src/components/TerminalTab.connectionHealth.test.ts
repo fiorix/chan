@@ -7,10 +7,10 @@ import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import { WS_PING_MS, WS_READ_DEADLINE_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { CONNECTION_STALLED_MS } from "../api/connectionProbe";
 import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
-import { TERMINAL_STALL_REDIAL_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
+import { TERMINAL_INPUT_PROBE_MS, TERMINAL_STALL_REDIAL_MS, TERMINAL_INPUT_NOTICE_MS, TERMINAL_INPUT_NOTICE_MIN_MS } from "./terminalConnectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { broadcastTerminalInput, sendPromptToTerminal } from "../state/tabs.svelte";
+import { broadcastTerminalInput, registerTerminalInputSink, sendPromptToTerminal } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -282,12 +282,50 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
+  test("a seeded tab with broadcast on sends nothing to the member", async () => {
+    const [tab, member] = seatTerminals([
+      terminalTab({ seedInput: "echo hi", broadcastEnabled: true }),
+      terminalTab({ id: "term-2", broadcastEnabled: true }),
+    ]);
+    const received: Array<[string, boolean | undefined]> = [];
+    const unregister = registerTerminalInputSink(member!.id, (data, binary) => received.push([data, binary]));
+    try {
+      await mountTerminal(TerminalTab, tab!, { focused: false });
+      const first = TerminalSocket.all.at(-1)!;
+      await attach(first);
+      await output(first, "motd");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(sentFrames(first).some((frame) => frame.type === "input")).toBe(true);
+      expect(received).toEqual([]);
+    } finally {
+      unregister();
+    }
+  });
+
+  test("a stall right after the automatic prompt seed does not redial with it in flight", async () => {
+    const tab = terminalTab({ seedInput: "echo hi" });
+    await mountTerminal(TerminalTab, tab, { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    await output(first, "motd");
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
+    await tick();
+    await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS * 2);
+    expect(TerminalSocket.all).toHaveLength(1);
+  });
+
   test("an answered input and an idle socket retire without a warning", async () => {
     const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const first = TerminalSocket.all.at(-1)!;
     await attach(first);
+    await receive(first, { type: "pong" });
     term.type("x");
-    await output(first, "answer");
+    await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
+    await receive(first, { type: "pong" });
     first.close();
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
@@ -297,6 +335,57 @@ describe("terminal connection in the tab", () => {
     await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
     await attach(TerminalSocket.all.at(-1)!);
     await tick();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("an echoed key answered by a pong leaves no notice across a wake recycle", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    term.type("x");
+    await output(first, "x");
+    await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(3900);
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    await tick();
+    const recycled = TerminalSocket.all.at(-1)!;
+    expect(recycled).not.toBe(first);
+    await attach(recycled);
+    await tick();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("an echoed key answered by a pong leaves no notice across an unexpected close", async () => {
+    const { target, term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    term.type("x");
+    await output(first, "x");
+    await vi.advanceTimersByTimeAsync(TERMINAL_INPUT_PROBE_MS + 100);
+    await receive(first, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(3900);
+    first.close();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS + 1);
+    expect(TerminalSocket.all.length).toBeGreaterThan(1);
+    await attach(TerminalSocket.all.at(-1)!);
+    await tick();
+    expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
+
+  test("a wake recycle of a healthy socket shows no connection-lost pill", async () => {
+    const { target } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
+    const first = TerminalSocket.all.at(-1)!;
+    await attach(first);
+    await receive(first, { type: "pong" });
+    const dials = TerminalSocket.all.length;
+    vi.setSystemTime(Date.now() + 30_000);
+    await vi.advanceTimersByTimeAsync(2100);
+    await tick();
+    expect(TerminalSocket.all.length).toBeGreaterThan(dials);
     expect(target.querySelector('[data-terminal-connection-pill]')).toBeNull();
   });
 
@@ -693,7 +782,7 @@ describe("terminal connection in the tab", () => {
     expect(target.querySelector("[data-terminal-connection-pill]")).toBeNull();
   });
 
-  test("binary PTY output cancels a pending input probe", async () => {
+  test("binary PTY output does not cancel a pending input probe", async () => {
     const { term } = await mountTerminal(TerminalTab, terminalTab(), { focused: false });
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
@@ -702,7 +791,7 @@ describe("terminal connection in the tab", () => {
     await vi.advanceTimersByTimeAsync(500);
     await output(socket, "answer");
     await vi.advanceTimersByTimeAsync(500);
-    expect(pings(socket)).toBe(1);
+    expect(pings(socket)).toBe(2);
   });
 
   test("hides the stalled pill under the window reconnecting cover", async () => {

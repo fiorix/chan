@@ -8,13 +8,27 @@ CHAN_REPO ?= ..
 CARGO ?= cargo
 NPM ?= npm
 TAURI_CLI_VERSION ?= ^2
-# Under .build-tools/, never target/. CI caches target/, and this root is
-# PREPENDED to PATH below whether or not it exists, so a cached copy would
-# silently outrank the pinned tool a job just installed -- and TAURI_CLI_VERSION
-# is applied at install time only, so a restored one is never re-checked.
+# Under .build-tools/, never target/. CI caches target/, and a cached copy
+# would silently outrank the pinned tool a job just installed -- and
+# TAURI_CLI_VERSION is applied at install time only, so a restored one is
+# never re-checked.
 TAURI_CLI_ROOT := $(abspath $(CHAN_REPO)/.build-tools/tauri-cli)
 TAURI_CLI_BIN := $(TAURI_CLI_ROOT)/bin/cargo-tauri
-TAURI := PATH="$(TAURI_CLI_ROOT)/bin:$$PATH" cargo tauri
+# Run the pinned tool by its path when it exists: a PATH prepend joins with
+# a colon, and on Windows the absolute root already holds a colon after the
+# drive letter, so cargo never finds the local install there. This form
+# uses no PATH list separator at all. Both variables are recursive on
+# purpose: the lookup happens when a recipe expands, after the tauri-cli
+# prerequisite below has installed the tool, so the run that installs it
+# already uses it. Once the pinned tool exists it outranks any stale
+# cargo-tauri on PATH or in the cargo home. Without it the recipes fall
+# back to `cargo tauri`, which cargo resolves through its own bin directory
+# and PATH, covering a global install (as CI uses) but also running
+# unpinned, so a stale global with no local install runs as is, by design.
+# File-test picking follows the tauri-cli target's own `[ ! -x ]`
+# shape rather than running the tool to validate it.
+TAURI_CLI_EXE = $(firstword $(wildcard $(TAURI_CLI_BIN) $(TAURI_CLI_BIN).exe))
+TAURI = $(if $(TAURI_CLI_EXE),"$(TAURI_CLI_EXE)" tauri,cargo tauri)
 
 # Finder-less DMG packaging (packaging/desktop/build-dmg.sh + dmg_settings.py). The
 # layout is pinned by the settings file, so any dmgbuild 1.x yields the same

@@ -120,17 +120,22 @@ describe("terminal connection", () => {
     connection.dispose();
   });
 
-  test("leaves input in flight on its socket until a frame answers and a new stall qualifies", () => {
+  test("holds input in flight through an unrelated frame and releases it on a later pong", () => {
     const { connection, runs, contact } = redialRig();
     connection.windowChanged("ok", false);
-    answeredStall(connection);
+    connection.pingSent();
+    connection.pongArrived();
+    vi.advanceTimersByTime(1000);
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pingSent();
+    connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
     contact(Date.now());
     connection.windowChanged("ok", false);
-    connection.inputSent();
-    expect(vi.getTimerCount()).toBe(2);
-    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS * 2);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
     expect(runs).not.toHaveBeenCalled();
-    connection.frameArrived();
     connection.pongArrived();
     connection.pingSent();
     vi.advanceTimersByTime(CONNECTION_STALLED_MS);
@@ -138,6 +143,9 @@ describe("terminal connection", () => {
     connection.windowChanged("ok", false);
     vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
     expect(runs).toHaveBeenCalledTimes(1);
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
     connection.dispose();
   });
 
@@ -199,13 +207,195 @@ describe("terminal connection", () => {
     connection.dispose();
   });
 
-  test("does not warn without input or after a frame answers it", () => {
+  test("an unrelated frame does not answer in-flight input", () => {
+    const { connection, runs, contact } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.inputSent();
+    vi.advanceTimersByTime(1000);
+    connection.pingSent();
+    connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).not.toHaveBeenCalled();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("does not warn without input", () => {
     const { connection } = rig();
     connection.retired();
     connection.opened();
     expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a ping stamped in the same millisecond as the input does not answer it", () => {
+    const { connection, runs, contact } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
     connection.inputSent();
+    connection.pongArrived();
+    connection.pingSent();
     connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).not.toHaveBeenCalled();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a key in the same millisecond as the probe fire, key first, is answered by that ping", () => {
+    let t = 0;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    vi.advanceTimersByTime(999);
+    t = 1000;
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a backward clock step between a key and its probe leaves no false notice", () => {
+    let t = 2000;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    t = 500;
+    vi.advanceTimersByTime(1000);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a pong before the probe fires does not cancel the input probe", () => {
+    const { connection, pings } = rig();
+    connection.pingSent();
+    connection.inputSent();
+    vi.advanceTimersByTime(500);
+    connection.pongArrived();
+    vi.advanceTimersByTime(500);
+    expect(pings).toHaveLength(1);
+    connection.dispose();
+  });
+
+  test("a pong for a ping sent after the key answers it across a new socket", () => {
+    const { connection } = rig();
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a late pong for a ping sent before the input does not answer it once the probe has left", () => {
+    const { connection, pings } = rig();
+    connection.pingSent();
+    vi.advanceTimersByTime(500);
+    connection.inputSent();
+    vi.advanceTimersByTime(1000);
+    expect(pings).toHaveLength(1);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a pong for the first of two pings after a key still answers it", () => {
+    let t = 0;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    t = 100;
+    connection.pingSent();
+    t = 200;
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a pong for a ping sent before the input does not answer it", () => {
+    const { connection, runs, contact } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    vi.advanceTimersByTime(500);
+    connection.inputSent();
+    connection.pongArrived();
+    connection.pingSent();
+    connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).not.toHaveBeenCalled();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a pong that answers a forgotten ping does not clear later input", () => {
+    const { connection } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.pingSent();
+    vi.advanceTimersByTime(50_000);
+    connection.inputSent();
+    vi.advanceTimersByTime(100);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("warns when only a frame arrived after input", () => {
+    const { connection } = rig();
+    connection.pingSent();
+    connection.pongArrived();
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pingSent();
+    connection.frameArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("does not warn when a later pong answered the input", () => {
+    const { connection } = rig();
+    connection.pingSent();
+    connection.pongArrived();
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pingSent();
+    connection.pongArrived();
     connection.retired();
     connection.opened();
     expect(connection.state.notice).toBe(false);
@@ -494,13 +684,13 @@ describe("terminal connection", () => {
     expect(pings).toEqual([1_000, 3_000]);
   });
 
-  test("an inbound frame cancels an input probe", () => {
+  test("an inbound frame does not cancel an input probe", () => {
     const { connection, pings } = rig();
     connection.inputSent();
     vi.advanceTimersByTime(999);
     connection.frameArrived();
     vi.advanceTimersByTime(3_000);
-    expect(pings).toHaveLength(0);
+    expect(pings).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 

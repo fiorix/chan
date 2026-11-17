@@ -576,9 +576,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Backspace', 'Backspace'));
 
       expect(dataReceived.length).toBe(1);
-      // Backspace should produce 0x7F (DEL) or 0x08 (BS)
-      const code = dataReceived[0].charCodeAt(0);
-      expect(code === 0x7f || code === 0x08).toBe(true);
+      // The handler sends DEL (0x7F) for Backspace (simple-output table).
+      expect(dataReceived[0]).toBe('\x7F');
     });
   });
 
@@ -594,8 +593,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('ArrowUp', 'ArrowUp'));
 
       expect(dataReceived.length).toBe(1);
-      // Arrow keys produce ESC[A, ESC[B, ESC[C, ESC[D or ESCOA, ESCOB, ESCOC, ESCOD
-      expect(dataReceived[0]).toMatch(/\x1b(\[A|OA)/);
+      // No cursor-mode callback, so the encoder default is CSI (normal mode): ESC[A.
+      expect(dataReceived[0]).toBe('\x1b[A');
     });
 
     test('encodes Down arrow', () => {
@@ -609,7 +608,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('ArrowDown', 'ArrowDown'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toMatch(/\x1b(\[B|OB)/);
+      // Encoder default is CSI (normal mode): ESC[B.
+      expect(dataReceived[0]).toBe('\x1b[B');
     });
 
     test('encodes Left arrow', () => {
@@ -623,7 +623,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('ArrowLeft', 'ArrowLeft'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toMatch(/\x1b(\[D|OD)/);
+      // Encoder default is CSI (normal mode): ESC[D.
+      expect(dataReceived[0]).toBe('\x1b[D');
     });
 
     test('encodes Right arrow', () => {
@@ -637,7 +638,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('ArrowRight', 'ArrowRight'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0]).toMatch(/\x1b(\[C|OC)/);
+      // Encoder default is CSI (normal mode): ESC[C.
+      expect(dataReceived[0]).toBe('\x1b[C');
     });
 
     test('sends CSI sequences in normal cursor mode (mode 1 off)', () => {
@@ -703,8 +705,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('F1', 'F1'));
 
       expect(dataReceived.length).toBe(1);
-      // F1 produces ESC[11~ or ESCOP
-      expect(dataReceived[0]).toMatch(/\x1b(\[11~|OP)/);
+      // The handler sends SS3 P for F1 (simple-output table), not the rxvt / old-xterm ESC[11~ form.
+      expect(dataReceived[0]).toBe('\x1bOP');
     });
 
     test('encodes F12', () => {
@@ -718,8 +720,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('F12', 'F12'));
 
       expect(dataReceived.length).toBe(1);
-      // F12 produces ESC[24~
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends CSI 24~ for F12 (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[24~');
     });
   });
 
@@ -735,7 +737,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Home', 'Home'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends ESC[H for Home in normal cursor mode (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[H');
     });
 
     test('encodes End', () => {
@@ -749,7 +752,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('End', 'End'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends ESC[F for End in normal cursor mode (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[F');
     });
 
     test('encodes PageUp', () => {
@@ -763,7 +767,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('PageUp', 'PageUp'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends CSI 5~ for PageUp (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[5~');
     });
 
     test('encodes PageDown', () => {
@@ -777,7 +782,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('PageDown', 'PageDown'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends CSI 6~ for PageDown (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[6~');
     });
 
     test('encodes Delete', () => {
@@ -791,7 +797,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Delete', 'Delete'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends CSI 3~ for Delete (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[3~');
     });
 
     test('encodes Insert', () => {
@@ -805,7 +812,8 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Insert', 'Insert'));
 
       expect(dataReceived.length).toBe(1);
-      expect(dataReceived[0].includes('\x1b')).toBe(true);
+      // The handler sends CSI 2~ for Insert (simple-output table).
+      expect(dataReceived[0]).toBe('\x1b[2~');
     });
   });
 
@@ -882,11 +890,31 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('KeyA', 'A', { ctrl: true, shift: true }));
 
       expect(dataReceived.length).toBe(1);
-      // Should still encode something
-      expect(dataReceived[0].length).toBeGreaterThan(0);
+      // Ctrl+Shift+A encodes to 0x01, as Ctrl+A does: SHIFT changes nothing here (core encoder).
+      expect(dataReceived[0]).toBe('\x01');
     });
 
-    test('handles Alt combinations', () => {
+    test('encodes Alt+Up with the Alt modifier', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (_mode: number) => false // Normal cursor mode
+      );
+
+      simulateKey(container, createKeyEvent('ArrowUp', 'ArrowUp', { alt: true }));
+
+      expect(dataReceived.length).toBe(1);
+      // Alt+Up encodes with the Alt modifier: CSI 1;3 A in normal cursor mode (core encoder).
+      expect(dataReceived[0]).toBe('\x1b[1;3A');
+    });
+  });
+
+  describe('Composition Guard Arms', () => {
+    test('ignores a plain keydown while the handler is composing (state arm)', () => {
       new InputHandler(
         ghostty,
         container as any,
@@ -894,11 +922,251 @@ describe('InputHandler', () => {
         vi.fn()
       );
 
-      simulateKey(container, createKeyEvent('KeyA', 'a', { alt: true }));
+      container.dispatchEvent(createCompositionEvent('compositionstart', ''));
 
-      expect(dataReceived.length).toBe(1);
-      // Alt+A often produces ESC a or similar
-      expect(dataReceived[0].length).toBeGreaterThan(0);
+      // No isComposing flag and no 229 keyCode: only the handler's own state guards this.
+      simulateKey(container, createKeyEvent('KeyA', 'a'));
+      expect(dataReceived.length).toBe(0);
+
+      container.dispatchEvent(createCompositionEvent('compositionend', 'a'));
+      expect(dataReceived).toEqual(['a']);
+    });
+
+    test('ignores a keydown flagged isComposing with no composition started (event arm)', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+
+      // No compositionstart: only the event's own flag guards this.
+      const keyEvent = createKeyEvent('KeyA', 'a');
+      Object.defineProperty(keyEvent, 'isComposing', { value: true });
+      simulateKey(container, keyEvent);
+
+      expect(dataReceived.length).toBe(0);
+    });
+
+    test('ignores a keydown with keyCode 229 with no composition started (229 arm)', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+
+      // No compositionstart: only the 229 keyCode guards this.
+      const keyEvent = createKeyEvent('KeyA', 'a');
+      Object.defineProperty(keyEvent, 'keyCode', { value: 229 });
+      simulateKey(container, keyEvent);
+
+      expect(dataReceived.length).toBe(0);
+    });
+  });
+
+  describe('Modifier Pins', () => {
+    test('sends Shift+Up as CSI 1;2 A in normal cursor mode', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        (_mode: number) => false // Normal cursor mode
+      );
+
+      simulateKey(container, createKeyEvent('ArrowUp', 'ArrowUp', { shift: true }));
+
+      // Dropping SHIFT from the modifier mask would send plain ESC[A instead.
+      expect(dataReceived).toEqual(['\x1b[1;2A']);
+    });
+
+    test('sends Alt+Enter as ESC CR', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+
+      simulateKey(container, createKeyEvent('Enter', 'Enter', { alt: true }));
+
+      // Dropping ALT from the modifier mask would send plain CR instead.
+      expect(dataReceived).toEqual(['\x1b\r']);
+    });
+
+    test('sends Shift+Tab as backtab', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+
+      simulateKey(container, createKeyEvent('Tab', 'Tab', { shift: true }));
+
+      expect(dataReceived).toEqual(['\x1b[Z']);
+    });
+
+    test('types Ctrl+Alt+letter as its character (AltGr)', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn()
+      );
+
+      // Ctrl+Alt together (AltGr on some layouts) produce printable characters.
+      simulateKey(container, createKeyEvent('KeyA', 'a', { ctrl: true, alt: true }));
+
+      expect(dataReceived).toEqual(['a']);
+    });
+  });
+
+  describe('BeforeInput Kinds', () => {
+    test('maps a newline in insertText to CR', () => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+
+      inputElement.dispatchEvent(createBeforeInputEvent('insertText', 'a\nb'));
+
+      expect(dataReceived).toEqual(['a\rb']);
+    });
+
+    test('maps insertLineBreak to CR', () => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+
+      inputElement.dispatchEvent(createBeforeInputEvent('insertLineBreak', null));
+
+      expect(dataReceived).toEqual(['\r']);
+    });
+
+    test('maps deleteContentBackward to DEL', () => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+
+      inputElement.dispatchEvent(createBeforeInputEvent('deleteContentBackward', null));
+
+      expect(dataReceived).toEqual(['\x7F']);
+    });
+
+    test('maps deleteContentForward to CSI 3~', () => {
+      const inputElement = createMockContainer();
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        inputElement as any
+      );
+
+      inputElement.dispatchEvent(createBeforeInputEvent('deleteContentForward', null));
+
+      expect(dataReceived).toEqual(['\x1b[3~']);
+    });
+  });
+
+  describe('Mouse Reporting', () => {
+    function mouseConfig(sgr: boolean) {
+      return {
+        hasMouseTracking: () => true,
+        hasSgrMouseMode: () => sgr,
+        getCellDimensions: () => ({ width: 10, height: 20 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+      };
+    }
+
+    function mouseEvent(type: string, button: number) {
+      return {
+        type,
+        clientX: 5,
+        clientY: 5,
+        button,
+        shiftKey: false,
+        metaKey: false,
+        ctrlKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+    }
+
+    test('reports press and release in SGR mode', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mouseConfig(true)
+      );
+
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+
+      // SGR press ends in M and release in m; without the release byte the pair is identical.
+      expect(dataReceived).toEqual(['\x1b[<0;1;1M', '\x1b[<0;1;1m']);
+    });
+
+    test('reports the non-SGR release as button 3', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mouseConfig(false)
+      );
+
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+
+      // The non-SGR release is button 3; without the mapping the release repeats the press bytes. The handler calls this normal-tracking form X10, though ctlseqs' mode 9 reports no release.
+      expect(dataReceived).toEqual(['\x1b[M !!', '\x1b[M#!!']);
     });
   });
 
