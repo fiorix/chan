@@ -47,7 +47,7 @@ import { terminalPreferences } from "../__tests__/standalone";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
 import { attach, installTerminalDom, output, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket } from "../__tests__/terminalTab";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
-import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+import { confirmState } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 const TEXT = "keep this prompt";
@@ -293,8 +293,12 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     expect(redial, "the redial opens a second socket").not.toBe(socket);
     expect(redial.readyState).toBe(0);
     expect(note()).toBe(NOTICE);
+    submit();
+    await flush();
+    expect(note()).toBe(NOTICE);
+    expect(sentFrames(redial).filter((frame) => frame.type === "prompt")).toEqual([]);
     redial.open();
-    await attach(redial, { id: "sess-2" });
+    await attach(redial, { id: "sess-2", submit_agent: "claude" });
     await receive(redial, { type: "ready", cols: 80, rows: 24 });
     await flush();
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
@@ -302,7 +306,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     submit();
     await flush();
     expect(sentFrames(redial).filter((frame) => frame.type === "prompt")).toEqual([
-      { type: "prompt", data: TEXT, agent: expect.any(String), id: expect.any(String) },
+      { type: "prompt", data: TEXT, agent: "claude", id: expect.any(String) },
     ]);
     expect(note()).not.toBe(NOTICE);
   });
@@ -334,11 +338,11 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     expect(note()).toBe(EXITED);
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     await flush();
-    if (confirmState.open) resolveConfirm(true);
+    expect(confirmState.open, "an exited tab restarts without asking").toBe(false);
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     const next = TerminalSocket.all.at(-1)!;
     expect(next, "the restart dials a new socket").not.toBe(socket);
-    await attach(next, { id: "sess-2" });
+    await attach(next, { id: "sess-2", submit_agent: "claude" });
     await receive(next, { type: "ready", cols: 80, rows: 24 });
     await flush();
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
@@ -348,7 +352,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     submit();
     await flush();
     expect(sentFrames(next).filter((frame) => frame.type === "prompt")).toEqual([
-      { type: "prompt", data: TEXT, agent: expect.any(String), id: expect.any(String) },
+      { type: "prompt", data: TEXT, agent: "claude", id: expect.any(String) },
     ]);
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
     expect(note()).not.toBe(EXITED);
