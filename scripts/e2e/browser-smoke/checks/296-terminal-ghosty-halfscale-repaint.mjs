@@ -22,8 +22,8 @@
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
-const TAB = "SmokeHalfscale293";
-const MARK = "HS293_";
+const TAB = "SmokeHalfscale296";
+const MARK = "HS296_";
 const LINES = 60;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
