@@ -1148,7 +1148,7 @@ describe('InputHandler', () => {
       expect(dataReceived).toEqual(['\x1b[<0;1;1M', '\x1b[<0;1;1m']);
     });
 
-    test('reports the X10 release as button 3', () => {
+    test('reports the non-SGR release as button 3', () => {
       new InputHandler(
         ghostty,
         container as any,
@@ -1165,7 +1165,7 @@ describe('InputHandler', () => {
       container.dispatchEvent(mouseEvent('mousedown', 0));
       container.dispatchEvent(mouseEvent('mouseup', 0));
 
-      // X10 release is button 3; without the mapping the release repeats the press bytes.
+      // The non-SGR release is button 3; without the mapping the release repeats the press bytes. The handler calls this normal-tracking form X10, though ctlseqs' mode 9 reports no release.
       expect(dataReceived).toEqual(['\x1b[M !!', '\x1b[M#!!']);
     });
   });
