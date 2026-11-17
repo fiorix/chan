@@ -1057,11 +1057,12 @@
     });
   });
 
-  /// New and Upload use the folder a list shows. A tree uses its
-  /// selected directory or file's parent, including a selection hidden
-  /// under a collapsed ancestor; without a selection it uses the workspace
-  /// root or the standalone window's home. The menu's Paste does not use
-  /// this: it takes the clicked row's folder as an explicit destination.
+  /// New, Upload and the chord's and launcher's Paste use the folder a
+  /// list shows. A tree uses its selected directory or file's parent,
+  /// including a selection hidden under a collapsed ancestor; without a
+  /// selection it uses the workspace root or the standalone window's home.
+  /// The menu's Paste does not use this: it takes the clicked row's folder
+  /// as an explicit destination.
   function targetDirectory(): string {
     if (view === "list") return directory;
     const cur = selection.path;
@@ -1082,7 +1083,7 @@
   /// Paste the clipboard into the resolved target dir, then select the
   /// landed entries so the user sees the result (and a cut's dimming
   /// clears as the clipboard empties).
-  async function pasteIntoTarget(dest: string = targetDirectory()): Promise<void> {
+  async function pasteIntoTarget(dest: string): Promise<void> {
     if (!fbClipboard.mode) return;
     const targetSelection = selection;
     const targetId = instanceId;

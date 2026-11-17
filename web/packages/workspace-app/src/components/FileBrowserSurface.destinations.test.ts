@@ -147,7 +147,7 @@ async function act(surface: Surface, action: Action, origin: Origin, anchorPath?
     expect(anchor, "a row anchors the selection menu").toBeDefined();
     anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
     await settle();
-    // Paste reads the selection rather than the entry anchoring its menu.
+    // The menu's Paste reads the row anchoring its menu; the re-select keeps the shared expectation.
     fbSelectSingle(surface.scenario.selected, fbTreeInstance(surface.id)!.selection);
     await settle();
     button(".ctx button", command.title).click();
