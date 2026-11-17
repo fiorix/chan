@@ -39,3 +39,17 @@ The owner accepted this row by survey at 2026-11-17T09:50Z, answering the first 
 - (a) Paste lands in the clicked row's folder, the selection untouched (recommended: matches the menu's own New, Copy and Cut, and desktop file managers).
 - (b) A right-click selects the row first, as a left click does, so every menu row acts through the selection. Changes the selection on every right-click, which the Copy and Cut rows today deliberately avoid (`:956-960`).
 - (c) Leave as is and have the manual say the menu's Paste follows the selection.
+
+## Built, 2026-11-17
+
+The menu's Paste takes the clicked row's folder - the row itself for a directory, its parent for a file, in a tree and in a list alike - while the chord and the launcher's Paste keep the shared `targetDirectory` rule. Built on `v0132/fbpaste` and merged into `v0132/int` as `e3a300af7`: the paste destination rule in `FileTree.svelte`, check 232 in Chrome, the `fbpaste-native` desktop driver pair, the manual sentence (`files.html:40`, keys named), and `design.md:233`.
+
+Acceptance 1: the three clicked-row cases in `FileBrowserSurface.destinations.test.ts` ("right-click on a sibling directory pastes there, selection untouched", "right-click on a file outside the selection pastes into its parent", "right-click on a folder row in a list pastes into that folder") fail at the base and pass at the tip; the suite passes 77 at `7ad836d76`. Red log `dev/v0132-team/evidence/Input132/fbpaste-1/red.log`, on review 1's reading.
+
+Acceptance 2: making the menu's Paste read `targetDirectory` again turns those three cases red, and restoring it turns them green (`dev/v0132-team/evidence/Input132/fbpaste-1/mutation-red.log`, on review 2's reading); the product logic is unchanged since `42f818d28`.
+
+Acceptance 3: check 232 passes in Chrome (J58 at `81c0f8679`, `ALL GREEN`); the `fbpaste-native` driver passes on WebKitGTK at the tip (J81 at `7ad836d76`, twelve `ok` lines and `PASS`) and faults at the base on the two property lines (`FAIL landed on disk absent`, `FAIL landed entry selected absent`, `exitCode: 10`). Records under `dev/v0132-team/evidence/Ops132/J58/` and `dev/v0132-team/evidence/Ops132/J81/`.
+
+Acceptance 4: the manual's Files page and `design.md:233` say the menu's Paste follows the clicked row and the chord and launcher the shared rule.
+
+What the WebKitGTK leg does not exercise: it enters at a dispatched `contextmenu` event with a synthesized click, so the pointer press through the engine, the engine's own context menu being suppressed, and a trusted click are read on Chrome (check 232's pointer events) and by a person, not by this driver; no handler on the path reads `isTrusted` (ruling 77).
