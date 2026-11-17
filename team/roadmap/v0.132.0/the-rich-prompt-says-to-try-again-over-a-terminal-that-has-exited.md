@@ -30,3 +30,7 @@ Read at `f453b0b2e`, by reading; not run.
 2. Removing the exited check turns the exited case red, and restoring it turns the case green.
 3. A browser check in a guest, on both backends: a terminal's program exits; a submit from its composer shows the exited note and keeps its text; after Restart terminal a submit reaches the new shell.
 4. `web/packages/workspace-app/src/design.md` and the manual's Rich Prompt page say which note shows when.
+
+## Closing
+
+Recorded 2026-11-17, fix round 1. Restart terminal hands the keyboard to the new terminal; the retry returns focus to the composer first with a click, and the check pins it. A session parked for a devserver restart keeps the not-connected note: the tab's session id is kept, no redial is armed, and the exited note is not shown.
