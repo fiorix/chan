@@ -127,6 +127,7 @@ describe("terminal connection", () => {
     connection.pongArrived();
     vi.advanceTimersByTime(1000);
     connection.inputSent();
+    vi.advanceTimersByTime(1);
     connection.pingSent();
     connection.frameArrived();
     vi.advanceTimersByTime(CONNECTION_STALLED_MS);
@@ -136,6 +137,12 @@ describe("terminal connection", () => {
     vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
     expect(runs).not.toHaveBeenCalled();
     connection.pongArrived();
+    connection.pingSent();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).toHaveBeenCalledTimes(1);
     connection.retired();
     connection.opened();
     expect(connection.state.notice).toBe(false);
@@ -229,11 +236,70 @@ describe("terminal connection", () => {
     connection.dispose();
   });
 
+  test("a ping stamped in the same millisecond as the input does not answer it", () => {
+    const { connection, runs, contact } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    connection.inputSent();
+    connection.pongArrived();
+    connection.pingSent();
+    connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).not.toHaveBeenCalled();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a pong for a ping sent before the input does not answer it", () => {
+    const { connection, runs, contact } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    vi.advanceTimersByTime(500);
+    connection.inputSent();
+    connection.pongArrived();
+    connection.pingSent();
+    connection.frameArrived();
+    vi.advanceTimersByTime(CONNECTION_STALLED_MS);
+    expect(connection.state.stalled).toBe(true);
+    contact(Date.now());
+    connection.windowChanged("ok", false);
+    vi.advanceTimersByTime(TERMINAL_STALL_REDIAL_MS);
+    expect(runs).not.toHaveBeenCalled();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a pong that answers a forgotten ping does not clear later input", () => {
+    const { connection } = redialRig();
+    connection.windowChanged("ok", false);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.pingSent();
+    vi.advanceTimersByTime(50_000);
+    connection.inputSent();
+    vi.advanceTimersByTime(100);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
   test("warns when only a frame arrived after input", () => {
     const { connection } = rig();
     connection.pingSent();
     connection.pongArrived();
     connection.inputSent();
+    vi.advanceTimersByTime(1);
     connection.pingSent();
     connection.frameArrived();
     connection.retired();
@@ -247,6 +313,7 @@ describe("terminal connection", () => {
     connection.pingSent();
     connection.pongArrived();
     connection.inputSent();
+    vi.advanceTimersByTime(1);
     connection.pingSent();
     connection.pongArrived();
     connection.retired();
@@ -537,13 +604,13 @@ describe("terminal connection", () => {
     expect(pings).toEqual([1_000, 3_000]);
   });
 
-  test("an inbound frame cancels an input probe", () => {
+  test("an inbound frame does not cancel an input probe", () => {
     const { connection, pings } = rig();
     connection.inputSent();
     vi.advanceTimersByTime(999);
     connection.frameArrived();
     vi.advanceTimersByTime(3_000);
-    expect(pings).toHaveLength(0);
+    expect(pings).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 

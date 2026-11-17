@@ -196,16 +196,14 @@ export function createTerminalConnectionHealth(
     },
     frameArrived() {
       if (!open || disposed) return;
-      clearInput();
-      const waiting = probe.answered && probe.oldestPingAt !== null;
       probe.frameReceived();
+      const waiting = probe.answered && probe.oldestPingAt !== null;
       if (waiting || state.stalled) sync();
     },
     pongArrived() {
       if (!open || disposed) return;
-      const answeredAt = probe.oldestPingAt;
-      probe.pongReceived();
-      if (answeredAt !== null && answeredAt >= lastInputAt) {
+      const answeredAt = probe.pongReceived();
+      if (answeredAt !== null && answeredAt > lastInputAt) {
         inputOutstanding = false;
         noticeInputOutstanding = false;
       }

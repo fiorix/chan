@@ -83,13 +83,13 @@ describe("pong timing", () => {
     expect(r.probe.oldestPingAt).toBe(T0);
 
     r.wait(50); // T0 + 300
-    expect(r.pong()).toBe(300);
+    expect(r.pong()).toBe(T0);
     expect(r.probe.oldestPingAt).toBe(T0 + 100);
     r.wait(20); // T0 + 320
-    expect(r.pong()).toBe(220);
+    expect(r.pong()).toBe(T0 + 100);
     expect(r.probe.oldestPingAt).toBe(T0 + 250);
     r.wait(580); // T0 + 900
-    expect(r.pong()).toBe(650);
+    expect(r.pong()).toBe(T0 + 250);
     expect(r.probe.oldestPingAt).toBeNull();
 
     expect(r.probe.rttMs).toBe(650);
@@ -114,16 +114,17 @@ describe("pong timing", () => {
     // The ping sent after it is not answered by it.
     r.probe.pingSent();
     r.wait(40);
-    expect(r.pong()).toBe(40);
+    expect(r.pong()).toBe(T0);
   });
 
   test("the default clock is the wall clock", () => {
     vi.useFakeTimers();
     const probe = createConnectionProbe();
+    const at = Date.now();
     probe.pingSent();
     vi.advanceTimersByTime(75);
     probe.frameReceived();
-    expect(probe.pongReceived()).toBe(75);
+    expect(probe.pongReceived()).toBe(at);
     expect(probe.lastFrameAt).toBe(Date.now());
   });
 });
@@ -217,7 +218,7 @@ describe("a clock jump", () => {
     expect(r.pong()).toBeNull();
     expect(r.probe.oldestPingAt).toBe(probeAt);
     r.wait(35);
-    expect(r.pong()).toBe(45);
+    expect(r.pong()).toBe(probeAt);
     expect(r.probe.hasPendingPing).toBe(false);
     expect(r.probe.rttMs).toBe(45);
     expect(r.samples).toEqual([
@@ -250,12 +251,12 @@ describe("an over-long round trip", () => {
     r.probe.pingSent(); // sent before the late pong arrives
     r.wait(20);
 
-    expect(r.pong()).toBeNull();
+    expect(r.pong()).toBe(T0 + 30);
     expect(r.probe.answered).toBe(true);
     expect(r.probe.rttMs).toBe(30);
     expect(r.probe.oldestPingAt).toBe(later);
     // The next pong is the later ping's own.
-    expect(r.pong()).toBe(20);
+    expect(r.pong()).toBe(later);
     expect(r.samples).toEqual([
       { at: T0, rttMs: 30 },
       { at: later, rttMs: 20 },
@@ -266,7 +267,7 @@ describe("an over-long round trip", () => {
     const r = rig();
     r.probe.pingSent();
     r.wait(CONNECTION_MAX_RTT_MS);
-    expect(r.pong()).toBe(CONNECTION_MAX_RTT_MS);
+    expect(r.pong()).toBe(T0);
     expect(r.samples).toEqual([{ at: T0, rttMs: CONNECTION_MAX_RTT_MS }]);
   });
 
@@ -274,7 +275,7 @@ describe("an over-long round trip", () => {
     const r = rig();
     r.probe.pingSent();
     r.wait(CONNECTION_MAX_RTT_MS + 1);
-    expect(r.pong()).toBeNull();
+    expect(r.pong()).toBe(T0);
     expect(r.probe.answered).toBe(true);
     expect(r.probe.rttMs).toBeNull();
     expect(r.samples).toEqual([]);
@@ -302,7 +303,7 @@ describe("a long queue", () => {
 
     r.wait(500);
     for (let i = 0; i < CONNECTION_PENDING_CAP; i += 1) {
-      expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
+      expect(r.pong(), `pong ${i}`).toBe(sent[i]);
     }
     expect(r.probe.oldestPingAt).toBeNull();
     // The three sent past the cap: answered in their turn, with no time.
@@ -310,8 +311,9 @@ describe("a long queue", () => {
 
     // Each was consumed once: the next round trip is timed as itself.
     r.probe.pingSent();
+    const atCap = r.now();
     r.wait(25);
-    expect(r.pong()).toBe(25);
+    expect(r.pong()).toBe(atCap);
     expect(r.samples).toHaveLength(1 + CONNECTION_PENDING_CAP + 1);
   });
 
@@ -320,18 +322,19 @@ describe("a long queue", () => {
     r.roundTrip(30);
     const sent = pings(r, CONNECTION_PENDING_CAP + 1);
     r.wait(100);
-    expect(r.pong()).toBe(r.now() - sent[0]); // a timed place is free again
+    expect(r.pong()).toBe(sent[0]); // a timed place is free again
     r.wait(100);
     r.probe.pingSent(); // behind the counted one, so it cannot take that place
     r.wait(100);
     for (let i = 1; i < CONNECTION_PENDING_CAP; i += 1) {
-      expect(r.pong(), `pong ${i}`).toBe(r.now() - sent[i]);
+      expect(r.pong(), `pong ${i}`).toBe(sent[i]);
     }
     // The counted one, then the one sent behind it.
     expect([r.pong(), r.pong()]).toEqual([null, null]);
     r.probe.pingSent();
+    const atBehind = r.now();
     r.wait(25);
-    expect(r.pong()).toBe(25);
+    expect(r.pong()).toBe(atBehind);
   });
 
   test("once the timed ones are answered, counted ones ahead do not keep the next from being timed", () => {
@@ -347,7 +350,7 @@ describe("a long queue", () => {
     expect(r.probe.oldestPingAt).toBe(at);
     r.wait(40);
     expect([r.pong(), r.pong()]).toEqual([null, null]);
-    expect(r.pong()).toBe(40);
+    expect(r.pong()).toBe(at);
   });
 
   test("a retired socket's misses stop at the cap", () => {
@@ -373,7 +376,7 @@ describe("a long queue", () => {
     for (let i = 0; i < CONNECTION_PENDING_CAP + 2; i += 1) {
       expect(r.pong(), `pong ${i}`).toBeNull();
     }
-    expect(r.pong()).toBe(35);
+    expect(r.pong()).toBe(at);
     // None of the forgotten ones is a miss.
     r.probe.reset();
     expect(r.samples.filter((s) => s.rttMs === null)).toEqual([]);
@@ -481,9 +484,10 @@ describe("the state", () => {
     const r = rig();
     r.roundTrip(30);
     r.probe.pingSent();
+    const atSlow = r.now();
     r.wait(CONNECTION_SLOW_WAIT_MS);
     expect(r.probe.classify()).toBe("slow");
-    expect(r.pong()).toBe(CONNECTION_SLOW_WAIT_MS);
+    expect(r.pong()).toBe(atSlow);
     // Two fast round trips in a row would end it, but the next ping is late.
     r.roundTrip(30);
     r.roundTrip(30);

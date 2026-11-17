@@ -2117,9 +2117,10 @@
     const seed = ` ${pendingPromptSeed}\x01`;
     clearTerminalSeedInput(tab);
     setTimeout(() => {
-      // Tracked as user input (but not probe-armed and not broadcast): a
-      // stall right after the seed must not redial with it in flight.
-      sendUserInput(seed, false, false);
+      // Mark the seed as written input if it went out, so a stall holds
+      // the redial with it in flight. It sets no lost-input notice and,
+      // sent directly, reaches no broadcast group.
+      if (sendInput(seed)) terminalConnection.inputWritten();
       focusTerminal();
       scheduleTerminalSessionSave();
     }, 150);
