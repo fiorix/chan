@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Chan for iOS (Tauri app, TestFlight-ready build).** The iOS app runs the desktop embedded loopback stack on device and loads the launcher in a single webview: add a gateway URL in the existing Gateways form, sign in through the system authentication sheet, browse roster devservers on Computers, open them with entry plus tenant navigation, and swipe left-edge back to Computers. Roster polling pauses in background and resyncs on foreground; CHAN_HOME lives under Application Support and PATs in the iOS Keychain. App id `app.chan.ios`.
+- **Mobile sign-in for self-hosted gateways.** The identity authorize flow accepts the registered `chan://auth/callback` alongside the loopback callback, code-level with no per-deployment config; same scope, same PKCE, same redeem.
+
 ## [v0.133.0] - 2026-11-22
 
 v0.133.0 keeps a fast stream whole in a ghostty terminal, keeps a terminal's connection through a stalled page, and closes the screen lock's remaining ways through to the window under it. A click on a terminal link opens a menu, with Open in editor for a file a program marked. The Computers screen lists its keys in a bar along the bottom, `o` and `t` act from a selected card, and the connection chart scrolls smoothly with equal margins. Messages queued for a Muse agent arrive as one turn, a command Muse prints across rows copies as one line, and a tap on a touch screen opens a file. These changes were read in Chrome, except the chart, read in Chan Desktop under WebKitGTK alone. The links, the card letters, the stream and the stalled page were read there too. None has been read yet in Chan Desktop on macOS or Windows, or on a real phone.
