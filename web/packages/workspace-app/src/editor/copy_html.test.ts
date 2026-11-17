@@ -60,6 +60,22 @@ test("copy body labels links on both sides of a frontmatter-looking rule", () =>
   expect(text).not.toContain("[[b]]");
   expect(text).not.toContain("[[c]]");
   expect(text).not.toContain("[[");
+  const spans = [...root.querySelectorAll("span")].map((el) => el.textContent);
+  expect(spans).toContain("b");
+  expect(spans).toContain("c");
+});
+
+test("a copy from the document start keeps frontmatter as typed and labels the body", () => {
+  const md = '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]] ![](./x.png)';
+  const view = viewWith(md, 0, md.length);
+  const ev = copyEvent();
+  expect(handleClipboardCopy(view, ev, ctx, false)).toBe(true);
+  const doc = new DOMParser().parseFromString(ev.store["text/html"], "text/html");
+  const text = doc.querySelector("[data-chan-doc]")?.textContent ?? "";
+  expect(text).toContain('up: "[[Projects/Parent]]"');
+  expect(text).toContain("See a");
+  expect(text).not.toContain("[[a]]");
+  view.destroy();
 });
 
 test("copy body leaves inline code and fenced code as typed", () => {
@@ -273,6 +289,17 @@ describe("buildInlinedHtml (fetch + degrade + budget)", () => {
     const html = await buildInlinedHtml(md, "notes/foo.md", "/ws");
     expect(html).toContain("data:image/png;base64,");
     expect(html).toContain("/api/fs/notes/missing.png");
+  });
+
+  test("the inlined payload keeps frontmatter as typed when asked", async () => {
+    const md = '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]] ![](./x.png)';
+    const html = await buildInlinedHtml(md, "notes/doc.md", "/ws", true);
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const text = root.querySelector("[data-chan-doc]")?.textContent ?? "";
+    expect(text).toContain('up: "[[Projects/Parent]]"');
+    expect(text).toContain("See a");
+    expect(text).not.toContain("[[a]]");
   });
 
   test("an over-budget image keeps its absolute URL", async () => {

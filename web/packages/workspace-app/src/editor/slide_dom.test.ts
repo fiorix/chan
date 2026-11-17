@@ -56,6 +56,14 @@ test("slide Markdown renders wikilink labels", () => {
   expect(root.querySelector("p")?.textContent).toBe("note alias");
 });
 
+test("a slide page skips the frontmatter rule", () => {
+  const root = document.createElement("div");
+  root.innerHTML = renderSlideMarkdown('---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]');
+  const text = root.textContent ?? "";
+  expect(text).toContain('up: "Parent"');
+  expect(text).toContain("See a");
+});
+
 function mount(html: string): HTMLElement {
   const root = document.createElement("div");
   root.innerHTML = html;
