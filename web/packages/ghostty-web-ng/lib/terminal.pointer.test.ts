@@ -8,6 +8,7 @@
 // and the canvas the way the engine retargets them under capture; the
 // selection is read back only through the terminal's public API.
 import { readFileSync } from "node:fs";
+import type { FontMetrics } from "./renderer";
 import { Terminal } from "./terminal";
 import { GhosttyVt } from "../vt/ghosttyVt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
@@ -43,7 +44,9 @@ function pointer(target: Element, type: string, x: number, y: number, extra: Poi
     new PointerEvent(type, {
       bubbles: true,
       cancelable: true,
-      button: 0,
+      // Engines send button -1 on moves (no button changed); only the
+      // buttons bitmask says what is held.
+      button: type === "pointermove" ? -1 : 0,
       buttons: type === "pointerup" || type === "pointercancel" ? 0 : 1,
       pointerId: 1,
       pointerType: "mouse",
@@ -61,6 +64,8 @@ async function openPinned(input = ""): Promise<{
   canvas: HTMLCanvasElement;
   captureCanvas: ReturnType<typeof vi.fn>;
   captureHost: ReturnType<typeof vi.fn>;
+  metrics: FontMetrics;
+  px: (col: number, row: number) => [number, number];
 }> {
   const ghostty = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
   const term = new Terminal({ ghostty, cols: COLS, rows: ROWS, cursorBlink: false, smoothScrollDuration: 0 });
@@ -99,7 +104,7 @@ afterEach(() => {
 });
 
 function installClipboard() {
-  const writeText = vi.fn(() => Promise.resolve());
+  const writeText = vi.fn((_text: string) => Promise.resolve());
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   return writeText;
 }
@@ -125,7 +130,7 @@ describe("the ghostty widget's pointer handling", () => {
   });
 
   test("a press captures its pointer, for a selection drag and for the thumb", async () => {
-    const { term, host, canvas, captureCanvas, captureHost } = await openPinned("hello world\r\nsecond row");
+    const { term, canvas, captureCanvas, captureHost } = await openPinned("hello world\r\nsecond row");
     expect(term.hasSelection()).toBe(false);
     pointer(canvas, "pointerdown", 1, 1, { pointerId: 7 });
     expect(captureCanvas, "the drag captures the pointer to the canvas").toHaveBeenCalledWith(7);
@@ -141,11 +146,23 @@ describe("the ghostty widget's pointer handling", () => {
     const trackHeight = 96 - 4 * 2;
     const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
     const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
-    scrolled.host.dispatchEvent(
-      new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 1, pointerId: 9, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY }),
+    const writeText = installClipboard();
+    const bubbled: Event[] = [];
+    const capturedBefore = captureCanvas.mock.calls.length;
+    scrolled.host.addEventListener("pointerdown", (e) => void bubbled.push(e));
+    scrolled.canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 9, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY }),
     );
     expect(scrolled.captureHost, "the thumb press captures the pointer to the host").toHaveBeenCalledWith(9);
-    scrolled.host.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 9, pointerType: "mouse" }));
+    expect(bubbled, "the press still bubbles to the page").toHaveLength(1);
+    expect(captureCanvas.mock.calls.length, "the selection never captures a strip press").toBe(capturedBefore);
+    scrolled.canvas.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, buttons: 1, pointerId: 9, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY + 5 }),
+    );
+    scrolled.canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 9, pointerType: "mouse" }));
+    expect(scrolled.term.hasSelection(), "a thumb press selects nothing").toBe(false);
+    expect(writeText, "a thumb press copies nothing").not.toHaveBeenCalled();
+    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a thumb drag moves the view through the real parent listeners", async () => {
@@ -160,7 +177,7 @@ describe("the ghostty widget's pointer handling", () => {
     const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
     const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
     const press = (type: string, y: number) =>
-      host.dispatchEvent(
+      (type === "pointerdown" ? canvas : host).dispatchEvent(
         new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: type === "pointerup" ? 0 : 1, pointerId: 3, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: y }),
       );
     press("pointerdown", thumbY);
@@ -184,10 +201,11 @@ describe("the ghostty widget's pointer handling", () => {
     const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
     const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history);
     const press = (type: string, y: number) =>
-      host.dispatchEvent(
+      (type === "pointerdown" ? canvas : host).dispatchEvent(
         new PointerEvent(type, { bubbles: true, button: 0, buttons: type === "pointerup" ? 0 : 1, pointerId: 5, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: y }),
       );
     press("pointerdown", thumbY);
+    expect(term.viewport.offset, "the press alone holds the view").toBe(10);
     term.write(Array.from({ length: 5 }, (_, n) => `stream ${n}`).join("\r\n"));
     const anchored = term.viewport.offset;
     expect(anchored, "streaming while held grows the offset").toBeGreaterThan(10);
@@ -210,10 +228,59 @@ describe("the ghostty widget's pointer handling", () => {
     const trackHeight = 96 - 4 * 2;
     const expected = Math.round((1 - (8 - 4) / trackHeight) * history);
     expect(expected, "the track top really moves the view").toBeGreaterThan(10);
-    host.dispatchEvent(
+    canvas.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 1, pointerId: 6, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: 8 }),
     );
     expect(term.viewport.offset, "the track press jumps the viewport to that position").toBe(expected);
+    host.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, buttons: 1, pointerId: 6, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: 8 }),
+    );
+    expect(term.viewport.offset, "a track press starts no drag").toBe(expected);
+  });
+
+  test("a buttonless move during a thumb drag ends the drag, and a held button does not", async () => {
+    const { term, host, canvas } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
+    term.viewport.scrollTo(10);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
+    });
+    const history = term.getScrollbackLength();
+    const trackHeight = 96 - 4 * 2;
+    const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
+    const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
+    const at = (type: string, y: number, buttons: number) =>
+      (type === "pointerdown" ? canvas : host).dispatchEvent(
+        new PointerEvent(type, { bubbles: true, button: 0, buttons, pointerId: 8, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: y }),
+      );
+    at("pointerdown", thumbY, 1);
+    expect(term.viewport.offset, "the press alone holds the view").toBe(10);
+    at("pointermove", thumbY + 11, 0);
+    expect(term.viewport.offset, "a buttonless move ends the thumb drag").toBe(10);
+    at("pointermove", thumbY + 22, 1);
+    expect(term.viewport.offset, "a later move after the release changes nothing").toBe(10);
+    at("pointerup", thumbY + 22, 0);
+  });
+
+  test("a lost capture ends the thumb drag", async () => {
+    const { term, host, canvas } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
+    term.viewport.scrollTo(10);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
+    });
+    const history = term.getScrollbackLength();
+    const trackHeight = 96 - 4 * 2;
+    const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
+    const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 1, pointerId: 11, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY }),
+    );
+    expect(term.viewport.offset, "the press alone holds the view").toBe(10);
+    host.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: true, pointerId: 11, pointerType: "mouse" }));
+    host.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, buttons: 1, pointerId: 11, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY + 11 }),
+    );
+    expect(term.viewport.offset, "the capture loss released the thumb drag").toBe(10);
+    host.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 11, pointerType: "mouse" }));
   });
 });
 
@@ -312,20 +379,37 @@ describe("the ghostty widget's selection mechanics", () => {
     delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
-  test("a move without a pressed button ends the drag and copies nothing", async () => {
+  test("a buttonless move keeps selecting while the canvas holds the pointer, and ends the drag once it is gone", async () => {
     const writeText = installClipboard();
     const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
     const [x0, y0] = px(0, 0);
     const [x1, y1] = px(10, 0);
-    pointer(canvas, "pointerdown", x0, y0);
-    pointer(canvas, "pointermove", x1, y1);
-    expect(term.hasSelection()).toBe(true);
-    canvas.dispatchEvent(
-      new PointerEvent("pointermove", { bubbles: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x1 + 4, clientY: y1 }),
-    );
-    pointer(canvas, "pointerup", x1 + 4, y1);
-    expect(term.hasSelection(), "the buttonless move ended the drag").toBe(false);
-    expect(writeText, "an ended drag copies nothing").not.toHaveBeenCalled();
+    // jsdom implements no pointer capture: model the held drag explicitly.
+    if (typeof canvas.hasPointerCapture !== "function") canvas.hasPointerCapture = () => false;
+    const held = vi.spyOn(canvas, "hasPointerCapture").mockImplementation(() => true);
+    try {
+      pointer(canvas, "pointerdown", x0, y0);
+      pointer(canvas, "pointermove", x1, y1);
+      expect(term.hasSelection()).toBe(true);
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x1 + 4, clientY: y1 }),
+      );
+      expect(term.hasSelection(), "the held drag keeps selecting").toBe(true);
+      pointer(canvas, "pointerup", x1 + 4, y1);
+      expect(writeText, "the release copies once").toHaveBeenCalledTimes(1);
+      held.mockImplementation(() => false);
+      pointer(canvas, "pointerdown", x0, y0);
+      pointer(canvas, "pointermove", x1, y1);
+      expect(term.hasSelection()).toBe(true);
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x1 + 4, clientY: y1 }),
+      );
+      expect(term.hasSelection(), "the released drag keeps the selection").toBe(true);
+      pointer(canvas, "pointerup", x1 + 4, y1);
+      expect(writeText, "an ended drag copies nothing more").toHaveBeenCalledTimes(1);
+    } finally {
+      held.mockRestore();
+    }
     term.dispose();
     delete (navigator as { clipboard?: unknown }).clipboard;
   });
@@ -337,12 +421,29 @@ describe("the ghostty widget's selection mechanics", () => {
     pointer(canvas, "pointermove", x, -50);
     pointer(canvas, "pointerup", x, -50);
     expect(term.getSelection(), "above the canvas the drag starts at column zero").toBe("hello world");
-    const { term: term2, canvas: canvas2 } = await openPinned("hello world\r\nsecond row");
-    const [x2, y2] = px(2, 0);
+    const { term: term2, canvas: canvas2, px: px2 } = await openPinned(
+      ["hello world", "", "", "", "", "last row here"].join("\r\n"),
+    );
+    const [x2, y2] = px2(2, 0);
     pointer(canvas2, "pointerdown", x2, y2);
     pointer(canvas2, "pointermove", x2, ROWS * metrics.height + 50);
     pointer(canvas2, "pointerup", x2, ROWS * metrics.height + 50);
-    expect(term2.getSelection(), "below the canvas the drag runs to the last column").toBe("llo world\nsecond row\n\n\n\n");
+    expect(term2.getSelection(), "below the canvas the drag runs to the last row").toContain("last row here");
+    expect(term2.getSelection(), "the whole row is selected").toMatch(/^llo world\n(\n*)last row here$/);
+  });
+
+  test("a press whose capture throws still selects", async () => {
+    const { term, canvas, captureCanvas, px } = await openPinned("hello world\r\nsecond row");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    captureCanvas.mockImplementationOnce(() => {
+      throw new DOMException("unknown pointer id");
+    });
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    expect(term.hasSelection(), "the drag started without capture").toBe(true);
+    pointer(canvas, "pointerup", x1, y1);
+    expect(term.getSelection(), "the drag still selects").toBe("hello");
   });
 
   test("a touch press starts no selection drag and copies nothing", async () => {
@@ -359,6 +460,28 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(writeText, "a touch drag copies nothing").not.toHaveBeenCalled();
     term.dispose();
     delete (navigator as { clipboard?: unknown }).clipboard;
+  });
+
+  test("a primary pen press selects", async () => {
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons: 1, pointerId: 2, pointerType: "pen", isPrimary: true, clientX: x0, clientY: y0 }));
+    canvas.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1, pointerId: 2, pointerType: "pen", isPrimary: true, clientX: x1, clientY: y1 }));
+    expect(term.hasSelection(), "a primary pen press starts a selection drag").toBe(true);
+    canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 2, pointerType: "pen", isPrimary: true, clientX: x1, clientY: y1 }));
+    expect(term.getSelection(), "the pen drag selected").toBe("hello");
+  });
+
+  test("mouse reports outside the grid clamp to it through the wired dimensions", async () => {
+    const reports: string[] = [];
+    const { term, canvas } = await openPinned("");
+    term.onData((data) => void reports.push(data));
+    term.write("\x1b[?1002h\x1b[?1006h");
+    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: 5000, clientY: 5000 }));
+    canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 5000, clientY: 5000 }));
+    expect(reports.join(""), "the far move reports the clamped cell").toContain("\x1b[<32;40;6M");
+    canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: 5000, clientY: 5000 }));
   });
 
   test("a non-primary press starts no selection drag", async () => {
@@ -381,7 +504,7 @@ describe("the ghostty widget's selection mechanics", () => {
     const trackHeight = 96 - 4 * 2;
     const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
     const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
-    host.dispatchEvent(
+    canvas.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, button: 2, buttons: 2, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: 310, clientY: thumbY }),
     );
     expect(captureHost, "a right press captures nothing").not.toHaveBeenCalled();

@@ -354,10 +354,13 @@ export class SelectionManager {
 
     // Pointer down - start selection or clear existing
     canvas.addEventListener('pointerdown', (e: PointerEvent) => {
-      // A touch drag is no selection gesture of its own: before this
-      // stage a touch drag never selected, and touch selection stays a
-      // design of its own. Only the primary pointer of a mouse or pen
-      // press starts a drag.
+      // A press the widget already claimed (the scrollbar strip) starts
+      // no selection, while still bubbling to the page's own closers.
+      if (e.defaultPrevented) return;
+      // A touch drag is no selection gesture of its own: touch selection
+      // stays a design of its own, and the compat mouse events a tap
+      // produces keep focusing. Only the primary pointer of a mouse or
+      // pen press starts a drag.
       if (e.pointerType === 'touch' || e.isPrimary === false) return;
       if (e.button === 0) {
         // Primary button only
@@ -370,8 +373,14 @@ export class SelectionManager {
 
         // Capture the pointer so the move and the release outside the
         // canvas still reach it. Guarded: jsdom has no pointer capture,
-        // where tests dispatch on the canvas itself.
-        canvas.setPointerCapture?.(e.pointerId);
+        // where tests dispatch on the canvas itself. A pointer id the
+        // engine does not know throws, so a failing capture must not stop
+        // the drag from starting.
+        try {
+          canvas.setPointerCapture?.(e.pointerId);
+        } catch {
+          // No capture: moves and the release still reach the canvas.
+        }
 
         const rect = canvas.getBoundingClientRect();
         const cell = this.pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
@@ -409,12 +418,12 @@ export class SelectionManager {
     // carries positions outside the canvas, clamped to it by pixelToCell.
     canvas.addEventListener('pointermove', (e: PointerEvent) => {
       if (this.isSelecting) {
-        // A move with no button pressed ends a drag whose release the
-        // canvas never saw (its element detached, capture lost without
-        // the event). The press is stale, so the drag is dropped rather
-        // than kept selecting.
-        if ((e.buttons & 1) === 0) {
-          this.clearSelection();
+        // A move with no button pressed ends a drag only once the canvas
+        // no longer holds the pointer: on macOS the last queued moves of
+        // a quick drag carry 0 after the physical release, and a chorded
+        // release (right held, left up) reports buttons 2. Clearing here
+        // would erase a live selection and swallow its copy.
+        if ((e.buttons & 1) === 0 && canvas.hasPointerCapture?.(e.pointerId) !== true) {
           endDrag(false);
           return;
         }
@@ -637,7 +646,7 @@ export class SelectionManager {
 
     // Start scrolling interval
     this.autoScrollInterval = setInterval(() => {
-      if (!this.isSelecting) {
+      if (!this.isSelecting || !this.renderer.getCanvas().isConnected) {
         this.stopAutoScroll();
         return;
       }

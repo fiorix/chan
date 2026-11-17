@@ -1550,8 +1550,8 @@ export class Terminal {
    */
   private handlePointerDown = (e: PointerEvent): void => {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
-    // The thumb drag is a left-press gesture; any other button leaves
-    // the strip alone, as the base did without capture.
+    // The thumb drag is a left-press gesture; any other button passes
+    // through to the canvas and to mouse reports.
     if (e.button !== 0) return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
@@ -1571,10 +1571,10 @@ export class Terminal {
 
     // Check if press is in scrollbar area
     if (mouseX >= scrollbarX && mouseX <= scrollbarX + scrollbarWidth) {
-      // Prevent default and stop propagation to prevent text selection
+      // Prevent default so the press selects nothing: the selection
+      // manager returns on a default-prevented press, while the press
+      // still bubbles to the page's own pointerdown closers.
       e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation(); // Stop SelectionManager from seeing this event
 
       // Calculate scrollbar thumb position and size
       const scrollbarTrackHeight = canvasHeight - scrollbarPadding * 2;
@@ -1589,10 +1589,15 @@ export class Terminal {
         // Start dragging thumb, captured to the parent element so the
         // moves and the release outside it still reach it. All supported
         // engines implement pointer capture; the guarded call keeps
-        // environments without it (jsdom) compiling and running.
+        // environments without it (jsdom) compiling and running, and an
+        // unknown id must not stop the drag from starting.
         this.isDraggingScrollbar = true;
         this.scrollbarDragLastY = mouseY;
-        this.element?.setPointerCapture?.(e.pointerId);
+        try {
+          this.element?.setPointerCapture?.(e.pointerId);
+        } catch {
+          // No capture: moves and the release still reach the parent.
+        }
 
         // Prevent text selection during drag
         if (this.canvas) {
