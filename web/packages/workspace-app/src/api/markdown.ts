@@ -12,6 +12,7 @@ import { marked } from "marked";
 import { GFM, parser } from "@lezer/markdown";
 import { embedIframeHtml, isAllowedEmbedSrc } from "./embed";
 import { parseWikiBody } from "../editor/links";
+import { Frontmatter } from "../editor/markdown/frontmatter";
 import { RefAwareLink } from "../editor/markdown/refAwareLink";
 import { WikiLink } from "../editor/markdown/wikilink";
 
@@ -36,11 +37,12 @@ marked.use({
   },
 });
 
-/// The link finder runs without the frontmatter rule: fragments (a copy
-/// selection, a survey body, a table cell) start at a `---` rule more
-/// often than documents carry metadata, and a metadata block holds no
-/// wikilinks to protect.
+/// Two link finders: whole documents keep the frontmatter rule, since
+/// metadata can hold bracket text that is not a link (a parent's path,
+/// a grid of numbers); fragments (a copy selection, a survey body, a
+/// table cell) skip it, since a fragment can start at a `---` rule.
 const wikiParser = parser.configure([...GFM, WikiLink, RefAwareLink]);
+const wikiFrontmatterParser = parser.configure([Frontmatter, ...GFM, WikiLink, RefAwareLink]);
 
 interface WikiSpan {
   from: number;
@@ -48,40 +50,33 @@ interface WikiSpan {
 }
 
 /// The `[[...]]` spans to label. The block parse handles emphasis and
-/// the document structure; a cell that opens with a block-level HTML tag
-/// is one HTML block to it, so the inline renderer also scans the flat
-/// inline elements, where nested tags yield their links beside the tags.
-/// Inline spans that overlap a block span keep the block span: the two
-/// agree everywhere both read.
-function wikiLinkSpans(input: string, inline: boolean): WikiSpan[] {
+/// the document structure; for the inline renderer the source is read
+/// as one paragraph (a `| ` prefix the offsets account for), so a cell
+/// that opens with a block-level tag still yields its links beside the
+/// tags. The walk visits spans in order.
+function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): WikiSpan[] {
   if (!input.includes("[[")) return [];
+  const source = inline ? `| ${input}` : input;
+  const base = inline ? 2 : 0;
+  const finder = !inline && frontmatter ? wikiFrontmatterParser : wikiParser;
   const spans: WikiSpan[] = [];
   // Parse the original source so code, URLs and HTML cannot manufacture
   // wikilinks by hiding delimiters from a later Markdown pass.
-  wikiParser.parse(input).iterate({
+  finder.parse(source).iterate({
     enter(node) {
       if (node.name === "Image") return false; // Alt text becomes an attribute; keep span markup out of it.
       if (node.name !== "WikiLink") return;
-      spans.push({ from: node.from, to: node.to });
+      spans.push({ from: node.from - base, to: node.to - base });
       return false;
     },
   });
-  if (inline) {
-    const names = wikiParser.nodeSet.types;
-    for (const el of wikiParser.parseInline(input, 0)) {
-      if (names[el.type]?.name !== "WikiLink") continue;
-      if (spans.some((s) => s.from < el.to && el.from < s.to)) continue;
-      spans.push({ from: el.from, to: el.to });
-    }
-    spans.sort((a, b) => a.from - b.from);
-  }
   return spans;
 }
 
-function renderWikiLabels(input: string, inline: boolean): string {
+function renderWikiLabels(input: string, inline: boolean, frontmatter: boolean): string {
   let output = "";
   let end = 0;
-  for (const span of wikiLinkSpans(input, inline)) {
+  for (const span of wikiLinkSpans(input, inline, frontmatter)) {
     const { label } = parseWikiBody(input.slice(span.from + 2, span.to - 2));
     // Character references keep every label literal to marked, including
     // emphasis and URL syntax. The span preserves the inline boundary
@@ -137,12 +132,14 @@ const SANITIZE_OPTS: Config = {
 /// and DOMPurify on the result) so callers can use it inline in
 /// templates without `await`.
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
-/// labels; other callers keep the authored syntax.
-export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}): string {
+/// labels; a call without the option keeps the authored syntax.
+/// Whole documents also pass `{ frontmatter: true }` so metadata keeps
+/// its brackets; fragments never do.
+export function renderMarkdown(input: string, opts: { wikilinks?: boolean; frontmatter?: boolean } = {}): string {
   // marked.parse can return Promise<string> if any extension is
   // async; we use no async extensions, so cast through unknown.
   const source = input ?? "";
-  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false) : source, { async: false }) as string;
+  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false, !!opts.frontmatter) : source, { async: false }) as string;
   return DOMPurify.sanitize(raw, SANITIZE_OPTS);
 }
 
@@ -153,10 +150,10 @@ export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}
 /// `breaks: false` (which preserves paragraph boundaries elsewhere). The
 /// per-call options merge over the instance defaults, so `gfm` stays on.
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
-/// labels; other callers keep the authored syntax.
+/// labels; a call without the option keeps the authored syntax.
 export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean } = {}): string {
   const source = input ?? "";
-  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false) : source, {
+  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false, false) : source, {
     async: false,
     breaks: true,
     gfm: true,
@@ -170,9 +167,9 @@ export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: bool
 /// that need marked's inline pass but must stay in flow. Goes through
 /// the same `DOMPurify.sanitize` chokepoint as the block renderers.
 /// Pass `{ wikilinks: true }` where the surface shows editor wikilink
-/// labels; other callers keep the authored syntax.
+/// labels; a call without the option keeps the authored syntax.
 export function renderMarkdownInline(input: string, opts: { wikilinks?: boolean } = {}): string {
   const source = input ?? "";
-  const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source, true) : source, { async: false }) as string;
+  const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source, true, false) : source, { async: false }) as string;
   return DOMPurify.sanitize(raw, SANITIZE_OPTS);
 }
