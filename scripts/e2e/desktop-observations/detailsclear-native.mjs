@@ -13,6 +13,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function argsOf(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -51,7 +53,7 @@ function inspectorEval(endpoint, titleSub, expression, timeoutMs = 8000) {
       if (!target) { clearTimeout(timer); fail(new Error(`no inspectable page matches ${JSON.stringify(titleSub)}`)); return; }
       ws = new WebSocket(`ws://${target.socket}`);
       const send = (targetId) => {
-        const inner = JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } });
+        const inner = JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } });
         ws.send(JSON.stringify({ id: 1, method: "Target.sendMessageToTarget", params: { targetId, message: inner } }));
       };
       ws.onmessage = (event) => {
@@ -87,90 +89,65 @@ const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8",
 
 const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
 const DOCK = 'aside[aria-label="left file browser"]';
-// The page relists after the seed and follows its selection after the
-// command, so every row and selection read below polls to a bounded deadline
-// instead of reading once. An in-page deadline always fits inside the eval
-// timeout. An inspector failure ("failed: ...") is recorded with need, never
-// check, so the instrument cannot report a fault.
+// Every page expression below is synchronous and returns a value; the
+// deadline lives in node. WebKitGTK's Runtime.evaluate has no awaitPromise,
+// so an in-page promise would answer at once as an object and every wait
+// below would end at once. A rejected eval fails fast as "failed: ...".
+async function until(read, accept, label, bound = 15000) {
+  const deadline = Date.now() + bound;
+  for (;;) {
+    const value = await read();
+    if (accept(value)) return value;
+    if (Date.now() > deadline) throw new Error(`timeout waiting for ${label}`);
+    await sleep(250);
+  }
+}
 const failed = (value) => typeof value === "string" && value.startsWith("failed:");
-const waitTabRow = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
-    if (row) resolve(row.getAttribute("title"));
-    else if (Date.now() > deadline) resolve(null);
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
-const waitDockRow = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('${DOCK} [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
-    if (row) resolve(row.getAttribute("title"));
-    else if (Date.now() > deadline) resolve(null);
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
-const waitTabSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
-    if (!row) {
-      if (Date.now() > deadline) resolve("absent");
-      else setTimeout(tick, 250);
-    } else if (row.getAttribute("aria-selected") === "true") resolve("selected");
-    else if (Date.now() > deadline) resolve(row.getAttribute("aria-selected") ?? "unselected");
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
-const waitChip = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const chips = [...document.querySelectorAll('.browser:not(.dock) .kind-chip.workspace')];
-    if (chips.some((c) => c.textContent.trim() === "workspace")) resolve("workspace");
-    else if (Date.now() > deadline) resolve("absent");
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
-const waitDockSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('${DOCK} [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
-    if (!row) {
-      if (Date.now() > deadline) resolve("absent");
-      else setTimeout(tick, 250);
-    } else if (Date.now() > deadline || row.getAttribute("aria-selected") === "true") resolve(row.getAttribute("aria-selected") ?? "unselected");
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
-const waitTabCleared = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
-  const deadline = Date.now() + ${timeoutMs};
-  const tick = () => {
-    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
-    if (!row) {
-      if (Date.now() > deadline) resolve("absent");
-      else setTimeout(tick, 250);
-    } else if (row.getAttribute("aria-selected") !== "true") resolve(row.getAttribute("aria-selected") ?? "unselected");
-    else if (Date.now() > deadline) resolve("true");
-    else setTimeout(tick, 250);
-  };
-  tick();
-})())`, timeoutMs + 5000);
+const readOf = (expr) => () => page(expr).catch((err) => `failed: ${err.message}`);
+// The page loads its listing while the driver runs and follows its selection
+// after the command, so a single read can miss. An inspector failure
+// ("failed: ...") is recorded with need, never check, so the instrument
+// cannot report a fault.
+const waitTitle = (expr, label, timeoutMs = 15000) =>
+  until(readOf(expr), (t) => typeof t === "string", label, timeoutMs).catch(() => null);
+const waitForValue = async (expr, accept, label, timeoutMs = 15000) => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await readOf(expr)();
+    if (failed(value)) return value;
+    if (accept(value)) return value;
+    if (Date.now() > deadline) return typeof value === "string" ? value : "unreadable";
+    await sleep(250);
+  }
+};
+const tabRowExpr = `(() => {
+  const row = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')]
+    .find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
+  return row ? row.getAttribute("title") : null;
+})()`;
+const dockRowExpr = `(() => {
+  const row = [...document.querySelectorAll('${DOCK} [role="treeitem"]')]
+    .find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
+  return row ? row.getAttribute("title") : null;
+})()`;
+const tabSelectedExpr = `(() => {
+  const row = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')]
+    .find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
+  return row ? row.getAttribute("aria-selected") : "absent";
+})()`;
+const chipExpr = `(() => {
+  const chips = [...document.querySelectorAll('.browser:not(.dock) .kind-chip.workspace')];
+  return chips.some((c) => c.textContent.trim() === "workspace") ? "workspace" : "absent";
+})()`;
+const dockSelectedExpr = `(() => {
+  const row = [...document.querySelectorAll('${DOCK} [role="treeitem"]')]
+    .find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
+  return row ? row.getAttribute("aria-selected") : "absent";
+})()`;
 
 try {
   xdo(["windowactivate", "--sync", a.xid]);
   const ws = a.workspace;
-  mkdirSync(ws, { recursive: true });
   let seededDock = null;
   let seededTab = null;
   try { seededDock = readFileSync(join(ws, "dock-a.md"), "utf8"); } catch {}
@@ -179,16 +156,20 @@ try {
     seededDock === null || seededTab === null ? "absent" : `${JSON.stringify(seededDock).slice(0, 40)} ${JSON.stringify(seededTab).slice(0, 40)}`);
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })); return "toggled"; })()`);
-  const listed = await page(`(() => new Promise((resolve, reject) => {
+  const listed = await (async () => {
     const deadline = Date.now() + 15000;
-    const tick = () => {
-      const el = document.querySelector('.browser [role="listbox"], .browser [role="tree"]');
-      if (el) resolve("files");
-      else if (Date.now() > deadline) reject(new Error("no file listing appeared"));
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 20000).catch((err) => `failed: ${err.message}`);
+    for (;;) {
+      let open = false;
+      try {
+        open = await page(`(() => !!document.querySelector('.browser [role="listbox"], .browser [role="tree"]'))()`);
+      } catch (err) {
+        return `failed: ${err.message}`;
+      }
+      if (open === true) return "files";
+      if (Date.now() > deadline) return "no file listing appeared";
+      await sleep(250);
+    }
+  })();
   need("open files", listed === "files", String(listed).slice(0, 120));
 
   const docked = await page(`(() => (async () => {
@@ -206,19 +187,13 @@ try {
     return "docked";
   })())()`).catch((err) => `failed: ${err.message}`);
   need("left dock enabled", docked === "docked", String(docked).slice(0, 120));
-  const dockVisible = await page(`(() => new Promise((resolve, reject) => {
-    const deadline = Date.now() + 15000;
-    const tick = () => {
-      const el = document.querySelector('${DOCK} .browser .tree');
-      if (el && el.checkVisibility()) resolve("dock");
-      else if (Date.now() > deadline) reject(new Error("no dock tree appeared"));
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 20000).catch((err) => `failed: ${err.message}`);
-  need("dock tree visible", dockVisible === "dock", String(dockVisible).slice(0, 120));
+  const dockVisible = await waitForValue(
+    `(() => { const el = document.querySelector('${DOCK} .browser .tree'); return el && el.checkVisibility() ? "dock" : null; })()`,
+    (v) => v === "dock" || failed(v), "dock tree", 15000);
+  if (failed(dockVisible)) need("dock tree readable", false, String(dockVisible).slice(0, 120));
+  else need("dock tree visible", dockVisible === "dock", String(dockVisible).slice(0, 120));
 
-  const tabRow = await waitTabRow().catch((err) => `failed: ${err.message}`);
+  const tabRow = await waitTitle(tabRowExpr, "tab-b.md row");
   need("tab file row present", typeof tabRow === "string" && tabRow.endsWith("/tab-b.md"),
     tabRow === null ? "absent" : String(tabRow).slice(0, 120));
   const clicked = await page(`(() => {
@@ -229,10 +204,11 @@ try {
     return "clicked";
   })()`).catch((err) => `failed: ${err.message}`);
   need("tab file clicked", clicked === "clicked", String(clicked).slice(0, 120));
-  const tabSelected = await waitTabSelected().catch((err) => `failed: ${err.message}`);
-  need("tab file selected", tabSelected === "selected", String(tabSelected).slice(0, 120));
+  const tabSelected = await waitForValue(tabSelectedExpr, (v) => v === "selected" || failed(v), "tab file selected", 15000);
+  if (failed(tabSelected)) need("selection readable", false, String(tabSelected).slice(0, 120));
+  else need("tab file selected", tabSelected === "selected", String(tabSelected).slice(0, 120));
 
-  const dockRow = await waitDockRow().catch((err) => `failed: ${err.message}`);
+  const dockRow = await waitTitle(dockRowExpr, "dock-a.md row");
   need("dock file row present", typeof dockRow === "string" && dockRow.endsWith("/dock-a.md"),
     dockRow === null ? "absent" : String(dockRow).slice(0, 120));
   const dockTarget = await page(`(() => {
@@ -251,50 +227,36 @@ try {
   need("dock row targeted last", dockTarget === "targeted", String(dockTarget).slice(0, 120));
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.launcher.toggle" } })); return "toggled"; })()`);
-  const launcherOpen = await page(`(() => new Promise((resolve, reject) => {
-    const deadline = Date.now() + 10000;
-    const tick = () => {
-      const input = document.querySelector('[role="dialog"][aria-label="Command launcher"] input[role="combobox"]');
-      if (input && input === document.activeElement) resolve("open");
-      else if (Date.now() > deadline) reject(new Error("launcher input never took focus"));
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 15000).catch((err) => `failed: ${err.message}`);
-  need("launcher open and focused", launcherOpen === "open", String(launcherOpen).slice(0, 120));
+  const launcherOpen = await waitForValue(
+    `(() => { const input = document.querySelector('[role="dialog"][aria-label="Command launcher"] input[role="combobox"]');
+      return input && input === document.activeElement ? "open" : null; })()`,
+    (v) => v === "open" || failed(v), "launcher input", 10000);
+  if (failed(launcherOpen)) need("launcher readable", false, String(launcherOpen).slice(0, 120));
+  else need("launcher open and focused", launcherOpen === "open", String(launcherOpen).slice(0, 120));
   xdo(["type", "--delay", "60", "Workspace details"]);
-  const launcherPick = await page(`(() => new Promise((resolve, reject) => {
-    const deadline = Date.now() + 10000;
-    const tick = () => {
-      const title = document.querySelector('[role="dialog"][aria-label="Command launcher"] [role="option"][aria-selected="true"] .deck-result-title');
-      if (title && title.textContent.trim() === "Workspace details") resolve("picked");
-      else if (Date.now() > deadline) reject(new Error("Workspace details never selected"));
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 15000).catch((err) => `failed: ${err.message}`);
-  need("launcher picked Workspace details", launcherPick === "picked", String(launcherPick).slice(0, 120));
+  const launcherPick = await waitForValue(
+    `(() => { const title = document.querySelector('[role="dialog"][aria-label="Command launcher"] [role="option"][aria-selected="true"] .deck-result-title');
+      return title && title.textContent.trim() === "Workspace details" ? "picked" : null; })()`,
+    (v) => v === "picked" || failed(v), "launcher pick", 10000);
+  if (failed(launcherPick)) need("launcher readable", false, String(launcherPick).slice(0, 120));
+  else need("launcher picked Workspace details", launcherPick === "picked", String(launcherPick).slice(0, 120));
   xdo(["key", "Return"]);
-  const launcherGone = await page(`(() => new Promise((resolve) => {
-    const deadline = Date.now() + 10000;
-    const tick = () => {
-      if (!document.querySelector('[role="dialog"][aria-label="Command launcher"]')) resolve("closed");
-      else if (Date.now() > deadline) resolve("stuck");
-      else setTimeout(tick, 250);
-    };
-    tick();
-  })())`, 15000).catch((err) => `failed: ${err.message}`);
-  need("launcher dispatched", launcherGone === "closed", String(launcherGone).slice(0, 120));
+  const launcherGone = await waitForValue(
+    `(() => document.querySelector('[role="dialog"][aria-label="Command launcher"]') ? null : "closed")()`,
+    (v) => v === "closed" || failed(v), "launcher close", 10000);
+  if (failed(launcherGone)) need("launcher readable", false, String(launcherGone).slice(0, 120));
+  else need("launcher dispatched", launcherGone === "closed", String(launcherGone).slice(0, 120));
 
-  const body = await waitChip().catch((err) => `failed: ${err.message}`);
+  const body = await waitForValue(chipExpr, (v) => v === "workspace" || failed(v), "workspace chip", 15000);
   if (failed(body)) need("inspector readable", false, String(body).slice(0, 120));
   else check("tab inspector shows the workspace", body === "workspace", String(body).slice(0, 120));
-  const dockKept = await waitDockSelected().catch((err) => `failed: ${err.message}`);
+  const dockKept = await waitForValue(dockSelectedExpr, (v) => v === "true" || failed(v), "dock selection", 15000);
   if (failed(dockKept)) need("inspector readable", false, String(dockKept).slice(0, 120));
   else check("dock keeps its selection", dockKept === "true", JSON.stringify(dockKept));
-  const tabCleared = await waitTabCleared().catch((err) => `failed: ${err.message}`);
-  if (failed(tabCleared)) need("inspector readable", false, String(tabCleared).slice(0, 120));
-  else check("tab selection cleared", tabCleared !== "true" && tabCleared !== "absent", JSON.stringify(tabCleared));
+  const tabSel = await waitForValue(tabSelectedExpr,
+    (v) => failed(v) || (v !== null && v !== "true"), "tab selection clear", 15000);
+  if (failed(tabSel)) need("inspector readable", false, String(tabSel).slice(0, 120));
+  else check("tab selection cleared", tabSel !== null && tabSel !== "true" && tabSel !== "absent", JSON.stringify(tabSel));
 
   run.finished = new Date().toISOString();
   const preFailed = failures.some((f) => f.kind === "precondition");
