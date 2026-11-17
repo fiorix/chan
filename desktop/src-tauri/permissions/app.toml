@@ -373,3 +373,8 @@ commands.allow = ["read_primary_selection"]
 identifier = "allow-write-primary-selection"
 description = "Writes the native PRIMARY selection on Linux and FreeBSD."
 commands.allow = ["write_primary_selection"]
+
+[[permission]]
+identifier = "allow-mobile-back-to-computers"
+description = "Enables the mobile_back_to_computers command (back-to-Computers navigation on iOS)."
+commands.allow = ["mobile_back_to_computers"]
