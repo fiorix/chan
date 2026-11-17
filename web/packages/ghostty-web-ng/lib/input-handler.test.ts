@@ -705,7 +705,7 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('F1', 'F1'));
 
       expect(dataReceived.length).toBe(1);
-      // The handler sends SS3 P for F1 (simple-output table), not xterm's ESC[11~.
+      // The handler sends SS3 P for F1 (simple-output table), not the rxvt / old-xterm ESC[11~ form.
       expect(dataReceived[0]).toBe('\x1bOP');
     });
 
@@ -737,7 +737,7 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('Home', 'Home'));
 
       expect(dataReceived.length).toBe(1);
-      // The handler sends ESC[H for Home (simple-output table).
+      // The handler sends ESC[H for Home in normal cursor mode (simple-output table).
       expect(dataReceived[0]).toBe('\x1b[H');
     });
 
@@ -752,7 +752,7 @@ describe('InputHandler', () => {
       simulateKey(container, createKeyEvent('End', 'End'));
 
       expect(dataReceived.length).toBe(1);
-      // The handler sends ESC[F for End (simple-output table).
+      // The handler sends ESC[F for End in normal cursor mode (simple-output table).
       expect(dataReceived[0]).toBe('\x1b[F');
     });
 
@@ -1100,6 +1100,73 @@ describe('InputHandler', () => {
       inputElement.dispatchEvent(createBeforeInputEvent('deleteContentForward', null));
 
       expect(dataReceived).toEqual(['\x1b[3~']);
+    });
+  });
+
+  describe('Mouse Reporting', () => {
+    function mouseConfig(sgr: boolean) {
+      return {
+        hasMouseTracking: () => true,
+        hasSgrMouseMode: () => sgr,
+        getCellDimensions: () => ({ width: 10, height: 20 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+      };
+    }
+
+    function mouseEvent(type: string, button: number) {
+      return {
+        type,
+        clientX: 5,
+        clientY: 5,
+        button,
+        shiftKey: false,
+        metaKey: false,
+        ctrlKey: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+    }
+
+    test('reports press and release in SGR mode', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mouseConfig(true)
+      );
+
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+
+      // SGR press ends in M and release in m; without the release byte the pair is identical.
+      expect(dataReceived).toEqual(['\x1b[<0;1;1M', '\x1b[<0;1;1m']);
+    });
+
+    test('reports the X10 release as button 3', () => {
+      new InputHandler(
+        ghostty,
+        container as any,
+        (data) => dataReceived.push(data),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        mouseConfig(false)
+      );
+
+      container.dispatchEvent(mouseEvent('mousedown', 0));
+      container.dispatchEvent(mouseEvent('mouseup', 0));
+
+      // X10 release is button 3; without the mapping the release repeats the press bytes.
+      expect(dataReceived).toEqual(['\x1b[M !!', '\x1b[M#!!']);
     });
   });
 
