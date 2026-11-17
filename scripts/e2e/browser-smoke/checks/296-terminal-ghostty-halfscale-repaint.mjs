@@ -129,9 +129,21 @@ export default {
         throw new Error(`precondition: the stable paint was not at scale 2: ${JSON.stringify(baseline)}`);
       }
       // Arm the PTY observation: any grid publication resizes the pty and
-      // the shell reports it. The marker proves the trap ran before any
-      // resize the resume could publish.
-      await cs(["write", "--tab-name", TAB, `trap 'echo ${MARK}WINCH' WINCH; echo ${MARK}TRAP_SET\n`]);
+      // the shell reports it. The trap install goes out alone, then a
+      // readback proves it landed intact: a truncated write (as one guest
+      // run showed) reads back without the mark and fails here as an
+      // instrument fault, not as a resize.
+      // Settle: the trap write follows a scrollback poll within milliseconds,
+      // and one guest run lost the head of that write to the prompt redraw.
+      await sleep(1_000);
+      await cs(["write", "--tab-name", TAB, `trap 'echo ${MARK}WINCH' WINCH\n`]);
+      await cs(["write", "--tab-name", TAB, `trap -p WINCH\n`]);
+      try {
+        await waitScrollback(`${MARK}WINCH`, 30_000);
+      } catch (error) {
+        throw new Error(`instrument fault: the WINCH trap did not arm: ${error.message}`);
+      }
+      await cs(["write", "--tab-name", TAB, `echo ${MARK}TRAP_SET\n`]);
       await waitScrollback(`${MARK}TRAP_SET`, 30_000);
 
       // HIDE
