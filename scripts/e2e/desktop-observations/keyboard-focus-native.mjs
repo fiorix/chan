@@ -251,6 +251,16 @@ async function dispatch(name) {
   );
 }
 
+async function paneIds() {
+  return page.evaluate(() =>
+    [...document.querySelectorAll(".pane[data-pane-id]")].map((node) => ({
+      id: node.getAttribute("data-pane-id"),
+      focused: node.classList.contains("focused"),
+      terminals: node.querySelectorAll(".terminal-tab").length,
+    })),
+  );
+}
+
 async function waitForCard(card, timeout = 30_000) {
   await until(`composer ${card}`, () => page.evaluate((card) => Boolean(document.querySelector(`${card} .cm-content`)), card), Boolean, timeout);
 }
@@ -340,6 +350,58 @@ async function main() {
   ).catch(() => null);
   if (!after) throw new Error("the next key did not reach the composer with no click");
   pass("click submits and the next key types", { where: after.where });
+  const tabA = await readTerminalId(".terminal-tab.active");
+
+  // Two panes: B's composer is open while A is active. A real click on
+  // B's Submit sends without activating B; the check records whether B
+  // became the active pane on this engine.
+  await dispatch("app.pane.splitRight");
+  await until("the split lands", () => paneIds(), (panes) => panes.length === 2);
+  const emptyPane = await page.evaluate(() => {
+    const panes = [...document.querySelectorAll(".pane[data-pane-id]")];
+    const empty = panes.find((pane) => !pane.querySelector(".terminal-tab"));
+    if (!empty) return null;
+    const box = empty.getBoundingClientRect();
+    return { id: empty.getAttribute("data-pane-id"), x: box.left + box.width / 2, y: box.top + 40 };
+  });
+  if (!emptyPane) inconclusive("the split left no empty pane", null);
+  await x([], "mousemove", String(emptyPane.x), String(emptyPane.y), "click", "1");
+  await until(
+    "the empty pane activates",
+    () => paneIds().then((panes) => panes.find((pane) => pane.id === emptyPane.id)?.focused ?? false),
+    Boolean,
+  );
+  await cs("terminal", "new", "--window", windowId, "--tab-name", "KbdB");
+  const otherId = await until(
+    "terminal B attached",
+    () =>
+      page.evaluate(() => [...document.querySelectorAll(".terminal-tab")].map((node) => node.getAttribute("data-terminal-tab-id"))),
+    (ids) => ids.length === 2 && ids.some((id) => id && id !== tabA),
+    60_000,
+  ).then((ids) => ids.find((id) => id && id !== tabA));
+  const cardB = `.terminal-tab[data-terminal-tab-id="${otherId}"] .rich-prompt`;
+  await openComposer(`.terminal-tab[data-terminal-tab-id="${otherId}"]`);
+  await x([], "type", "--delay", "12", "KbdFocusB");
+  await until("B's draft is editable", () => focusState(cardB), (s) => (s.text === "KbdFocusB" && s.editable ? s : false));
+  const hostA = await screenPoint(`.terminal-tab[data-terminal-tab-id="${tabA}"] .terminal-host`);
+  await x([], "mousemove", String(hostA.x), String(hostA.y), "click", "1");
+  const paneA = await activePaneId(page);
+  const pressB = await screenPoint(`${cardB} .rp-primary`);
+  await x([], "mousemove", String(pressB.x), String(pressB.y), "mousedown", "1");
+  await delay(300);
+  const heldB = await focusState(cardB);
+  await x([], "mouseup", "1");
+  if (heldB.where !== "composer") throw new Error(`press moved focus out of B's composer: ${heldB.where}`);
+  const sentB = await until("B's submit sends and clears", () => focusState(cardB), (s) =>
+    s.text === "" || s.text === null ? s : false,
+  );
+  const paneNow = await activePaneId(page);
+  pass("two-pane submit keeps focus and pane", {
+    focus: sentB.where,
+    paneA,
+    paneNow,
+    paneBecameActive: paneNow !== paneA,
+  });
 
   // The Computers launcher keeps the keyboard while a deck run settles.
   await x([], "key", "ctrl+shift+p");
