@@ -8,10 +8,11 @@
 
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
-/// CSS pixels the graph keeps between the workspace's node and the bottom
-/// edge of its canvas, where it seats that node halfway across: GraphCanvas's
-/// bottom anchor.
-const ROOT_BOTTOM_MARGIN = 56;
+/// The seat GraphCanvas publishes on its canvas as `data-focal-seat`,
+/// "x,y" in CSS pixels: where the fit seated the focal node, halfway
+/// across and, with nothing below the root, 56 px above the bottom edge.
+/// Read from the page, never recomputed here, so the check follows the
+/// fit's seat when the layout puts nodes below the root and the seat rises.
 
 /// Start recording the discs of every canvas under `hostSelector`. Install it
 /// before the graph first paints: a graph at rest paints nothing new.
@@ -58,12 +59,14 @@ export async function untraceGraphDiscs(page) {
 }
 
 /// The last frame's discs on the canvas under `hostSelector`, in device
-/// pixels: how many, their box, the room it leaves to each edge, and how far
-/// the disc nearest the root's seat is from it, `[across, down]`; with the
-/// nodes the host's status line counts as drawn at the same moment
-/// (`counted`, null when it shows none).
+/// pixels: how many, their box, the room it leaves to each edge, the fit's
+/// seat as the page published it (`seat`, null when the canvas exposes
+/// none), and how far the disc nearest that seat is from it, `[across,
+/// down]` (`rootOff`, null without a seat); with the nodes the host's
+/// status line counts as drawn at the same moment (`counted`, null when it
+/// shows none).
 export function readGraphDiscs(page, hostSelector) {
-  return page.evaluate(({ host, margin }) => {
+  return page.evaluate(({ host }) => {
     const canvas = document.querySelector(`${host} canvas`);
     const frame = canvas && window.__smokeGraphDiscs?.frames.get(canvas);
     if (!canvas || !frame) return { missing: `no traced frame on ${host} canvas` };
@@ -78,18 +81,24 @@ export function readGraphDiscs(page, hostSelector) {
     const top = Math.min(...discs.map((d) => d.y - d.r));
     const bottom = Math.max(...discs.map((d) => d.y + d.r));
     const scale = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : 1;
-    const seat = { x: canvas.width / 2, y: canvas.height - margin * scale };
+    const raw = canvas.dataset?.focalSeat ?? null;
+    const parts = typeof raw === "string" ? raw.split(",").map(Number) : [];
+    const seat =
+      parts.length === 2 && parts.every((n) => Number.isFinite(n))
+        ? { x: parts[0] * scale, y: parts[1] * scale }
+        : null;
     const off = (d) => Math.hypot(d.x - seat.x, d.y - seat.y);
-    const nearest = discs.reduce((best, d) => (off(d) < off(best) ? d : best));
+    const nearest = seat === null ? null : discs.reduce((best, d) => (off(d) < off(best) ? d : best));
     return {
       canvas: [canvas.width, canvas.height],
       count: discs.length,
       box: [round(left), round(top), round(right), round(bottom)],
       room: { left: round(left), right: round(canvas.width - right), above: round(top), below: round(canvas.height - bottom) },
-      rootOff: [round(nearest.x - seat.x), round(nearest.y - seat.y)],
+      seat,
+      rootOff: nearest === null ? null : [round(nearest.x - seat.x), round(nearest.y - seat.y)],
       counted,
     };
-  }, { host: hostSelector, margin: ROOT_BOTTOM_MARGIN });
+  }, { host: hostSelector });
 }
 
 /// The last frame's discs on the canvas under `hostSelector`, in the order
@@ -144,10 +153,10 @@ export async function draftDiscs(page, token) {
 /// Failures of a rooted graph: a disc for each of the `expected` nodes the
 /// status line counts and each of the `drafts` discs it does not (see
 /// `draftDiscs`) and no other, every disc inside the canvas, and one of them
-/// on the root's seat, halfway across and `ROOT_BOTTOM_MARGIN` above the
-/// bottom edge, within `tolerance` device pixels.
+/// on the fit's seat as the page published it (see `readGraphDiscs`),
+/// within `tolerance` device pixels.
 export function rootedFailures(read, expected, drafts, tolerance = 3) {
-  if (!read.room || !read.rootOff) return [`nothing framed: ${JSON.stringify(read)}`];
+  if (!read.room) return [`nothing framed: ${JSON.stringify(read)}`];
   if (!Number.isInteger(drafts)) throw new Error(`rootedFailures needs the draft disc count, got ${drafts}`);
   const failures = [];
   if (read.count !== expected + drafts) {
@@ -156,9 +165,13 @@ export function rootedFailures(read, expected, drafts, tolerance = 3) {
   for (const [side, px] of Object.entries(read.room)) {
     if (px < 0) failures.push(`a node is ${-px} px past the canvas's ${side === "left" || side === "right" ? side : side === "above" ? "top" : "bottom"} edge`);
   }
-  const [across, down] = read.rootOff;
-  if (Math.abs(across) > tolerance || Math.abs(down) > tolerance) {
-    failures.push(`no node on the root's seat: the nearest is ${across} px across and ${down} px down from it`);
+  if (!read.seat || !read.rootOff) {
+    failures.push(`no seat on the page: the canvas exposes no focal seat (read ${JSON.stringify(read.seat)})`);
+  } else {
+    const [across, down] = read.rootOff;
+    if (Math.abs(across) > tolerance || Math.abs(down) > tolerance) {
+      failures.push(`no node on the root's seat: the nearest is ${across} px across and ${down} px down from it`);
+    }
   }
   return failures;
 }
