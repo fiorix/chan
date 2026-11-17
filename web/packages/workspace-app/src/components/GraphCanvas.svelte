@@ -249,6 +249,14 @@
   /// handlers; consumed once per paint pass.
   let transform = { x: 0, y: 0, k: 1 };
 
+  /// The fit's seat for the focal node in canvas CSS pixels, "x,y", when
+  /// the view is bottom-anchored on a focal node; null for the bbox-center
+  /// branch and the "bounds" framing, which seat nothing. The smoke suite
+  /// reads the seat the fit chose from the canvas instead of recomputing
+  /// the rule (graph-discs.mjs); the root maps exactly here while the view
+  /// is untouched, and a user pan, zoom or drag moves the view off it.
+  let focalSeat: string | null = null;
+
   /// Auto-fit state. While `refitUntil` is in the future, or the
   /// layout still moves under an untouched view, the rAF loop
   /// recomputes `fitTarget` each frame from the current bbox so the
@@ -1142,6 +1150,13 @@
       canvas.width / (dpr * transform.k),
       canvas.height / (dpr * transform.k),
     );
+    // Publish the fit's seat for the smoke suite; a write only when the
+    // seat changed, so a settled graph pays no DOM churn per frame.
+    if (focalSeat === null) {
+      if ("focalSeat" in canvas.dataset) delete canvas.dataset.focalSeat;
+    } else if (canvas.dataset.focalSeat !== focalSeat) {
+      canvas.dataset.focalSeat = focalSeat;
+    }
 
     // World-space bounds of what is actually on screen. Anything fully
     // outside is skipped: the rasteriser would discard it anyway, but the
@@ -1759,25 +1774,57 @@
     }
     // Bottom anchor, the prop's default: seat the focal node near the
     // bottom edge instead of the vertical center, so the spine grows
-    // upward from it. The fittable height is then the room ABOVE the
-    // bottom anchor, not half the canvas.
-    const bottomAnchored = focalAnchor === "bottom" && focal !== null;
+    // upward from it. The room under the seat goes to what lies under
+    // the root: when nodes below the root need more than that room at
+    // the zoom the room above allows, the seat rises so the whole set
+    // still fits; with nothing below the root the seat and zoom are
+    // exactly as before.
     const FOCAL_BOTTOM_MARGIN = 56;
-    const anchorY = bottomAnchored ? ch - FOCAL_BOTTOM_MARGIN : ch / 2;
     const availHalfW = Math.max(1, cw / 2 - pad);
-    const availHalfH = bottomAnchored
-      ? Math.max(1, ch - FOCAL_BOTTOM_MARGIN - pad)
-      : Math.max(1, ch / 2 - pad);
     // Clamp to the wheel-zoom range, with the same upper cap so a
     // tiny cluster (1-2 nodes) doesn't zoom in past a sensible level.
-    let k = Math.min(
-      6,
-      Math.max(
-        0.15,
-        Math.min(availHalfW / Math.max(1, halfW), availHalfH / Math.max(1, halfH)),
-      ),
-    );
-    if (maxK !== undefined) k = Math.min(k, maxK);
+    const kFit = (room: number, need: number): number => room / Math.max(1, need);
+    const focalNode = focalAnchor === "bottom" ? focal : null;
+    let anchorY: number;
+    let k: number;
+    if (focalNode !== null) {
+      const aboveNeed = Math.max(0, focalNode.y - ymin);
+      const belowNeed = Math.max(0, ymax - focalNode.y);
+      const roomAboveSeat = Math.max(1, ch - FOCAL_BOTTOM_MARGIN - pad);
+      const roomBelowSeat = Math.max(1, FOCAL_BOTTOM_MARGIN - pad);
+      let kAbove = Math.min(6, kFit(availHalfW, halfW), kFit(roomAboveSeat, aboveNeed));
+      if (maxK !== undefined) kAbove = Math.min(kAbove, maxK);
+      if (kAbove * belowNeed <= roomBelowSeat) {
+        anchorY = ch - FOCAL_BOTTOM_MARGIN;
+        k = Math.max(0.15, kAbove);
+      } else {
+        // The seat rises: fit the whole height, seating as low as it fits.
+        const totalNeed = Math.max(1, aboveNeed + belowNeed);
+        let kRaised = Math.min(6, kFit(availHalfW, halfW), kFit(Math.max(1, ch - 2 * pad), totalNeed));
+        if (maxK !== undefined) kRaised = Math.min(kRaised, maxK);
+        anchorY = pad + kRaised * aboveNeed;
+        k = kRaised;
+        if (anchorY > ch - FOCAL_BOTTOM_MARGIN) {
+          // Above dominates: keep the seat and shrink the zoom instead, so
+          // the seat only ever rises, never sinks below its default.
+          anchorY = ch - FOCAL_BOTTOM_MARGIN;
+          k = Math.min(kRaised, kFit(roomAboveSeat, aboveNeed), kFit(roomBelowSeat, belowNeed));
+        }
+        k = Math.max(0.15, k);
+      }
+    } else {
+      anchorY = ch / 2;
+      const availHalfH = Math.max(1, ch / 2 - pad);
+      k = Math.min(
+        6,
+        Math.max(
+          0.15,
+          Math.min(availHalfW / Math.max(1, halfW), availHalfH / Math.max(1, halfH)),
+        ),
+      );
+      if (maxK !== undefined) k = Math.min(k, maxK);
+    }
+    focalSeat = focalNode !== null ? `${cw / 2},${anchorY}` : null;
     return { x: cw / 2 - cx * k, y: anchorY - cy * k, k };
   }
 
