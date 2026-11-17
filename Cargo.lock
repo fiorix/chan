@@ -1380,6 +1380,7 @@ dependencies = [
  "candle-transformers",
  "cap-std",
  "chan-report",
+ "chan-tls",
  "chrono",
  "csv",
  "dirs 5.0.1",
@@ -1388,6 +1389,7 @@ dependencies = [
  "gray_matter",
  "hf-hub",
  "ignore",
+ "indicatif",
  "libc",
  "notify",
  "percent-encoding",
@@ -1406,6 +1408,8 @@ dependencies = [
  "tokenizers 0.21.4",
  "toml 0.8.2",
  "tracing",
+ "ureq",
+ "url",
  "walkdir",
  "windows-sys 0.59.0",
  "xattr",
@@ -3581,17 +3585,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "629d8f3bbeda9d148036d6b0de0a3ab947abd08ce90626327fc3547a49d59d97"
 dependencies = [
  "dirs 6.0.0",
- "http",
- "indicatif",
- "libc",
  "log",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "ureq",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8720,8 +8714,6 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
- "serde",
- "serde_json",
  "socks",
  "url",
  "webpki-roots 0.26.11",

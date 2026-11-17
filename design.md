@@ -55,7 +55,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `chan-tunnel-proto`, `chan-tunnel-client`, `chan-tunnel-server` | The gateway tunnel: the wire contract, the dial side the devserver embeds, and the terminating side the gateway embeds. |
 | `chan-wireguard` | The in-process WireGuard peer and TCP/IP stack the devserver's tunnel dial runs through when a wg-quick file is given, with no interface or privilege on the host. |
 | `chan-revtunnel` | Reverse port forwarding from a devserver to the connected desktop (`cs tunnel`). |
-| `chan-tls` | The one TLS trust decision of the Rust clients that reach a gateway: the platform verifier on macOS and Windows, the system bundle beside the bundled WebPKI roots elsewhere. |
+| `chan-tls` | Shared TLS trust for every Rust TLS client `crates/chan-tls/design.md` lists: the platform verifier on macOS and Windows, the system bundle beside the bundled WebPKI roots elsewhere. |
 | `chan` | The CLI binary: argument parsing, `chan serve`, the devserver verbs, workspace management, self-upgrade. |
 | `desktop` | chan-desktop, the Tauri shell: native windows, the launcher, devserver and gateway connections. The same binary is the CLI when invoked as `chan`, `cs`, `chan-files` or `chan-edit`, and a terminal window as `chan-term`. |
 | `web/packages/workspace-app` | The workspace SPA: terminal, editor, file browser, graph, dashboard, search, settings. |
@@ -63,7 +63,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `web/packages/marketing` | The chan.app site and the user manual. |
 | `gateway` | The gateway services: identity, profile, devserver-control, devserver-proxy, and the admin CLI. |
 
-The dependency direction is the point of the split. `chan-workspace` knows nothing of HTTP; `chan-library` composes workspaces and terminals without a frontend; `chan-server` wraps a tenant in routes and the embedded bundle; `chan` and `chan-desktop` drive the stack. The gateway consumes the core only through the tunnel protocol, so the single-binary build never links Postgres or OAuth.
+The dependency direction is the point of the split. `chan-workspace` owns no HTTP serving; its optional embedding model downloader takes TLS trust from `chan-tls`. `chan-library` composes workspaces and terminals without a frontend; `chan-server` wraps a tenant in routes and the embedded bundle; `chan` and `chan-desktop` drive the stack. The gateway consumes the core only through the tunnel protocol, so the single-binary build never links Postgres or OAuth.
 
 ```mermaid
 flowchart LR

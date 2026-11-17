@@ -7,8 +7,7 @@
 //!   flags for the picker.
 //! * `PATCH /model` - persist the workspace's configured model.
 //! * `POST /download` -- synchronously fetch the model into the
-//!   per-machine cache (hf-hub). v1 is blocking; progress-streaming
-//!   is a follow-up.
+//!   per-machine model cache; the response waits for completion.
 //! * `POST /enable` -- flip the workspace's `semantic_enabled` to true.
 //!   Refuses with 409 if the model isn't on disk.
 //! * `POST /disable` -- flip back to BM25-only.
@@ -113,7 +112,7 @@ pub struct PatchSemanticModel {
 
 /// Recursive size of every regular file under `dir`. Used for the
 /// `model_size_bytes` reporting field; sums the snapshots + refs
-/// trio plus any other on-disk artifacts hf-hub left behind.
+/// trio plus any other on-disk artifacts the downloader left behind.
 fn dir_total_size(dir: &std::path::Path) -> u64 {
     fn walk(dir: &std::path::Path, total: &mut u64) {
         let Ok(it) = std::fs::read_dir(dir) else {
@@ -316,15 +315,11 @@ pub async fn api_semantic_disable(State(state): State<Arc<AppState>>) -> Respons
 }
 
 /// `POST /api/index/semantic/download`. Synchronously fetches the
-/// model into `global_models_dir()` via hf-hub. Returns the
+/// model into `global_models_dir()` via the workspace embedder. Returns the
 /// post-download state on success.
 ///
-/// v1 is blocking from the caller's perspective: the response
-/// arrives when the download completes (or fails). Progress-event
-/// streaming via the watcher channel is a follow-up -- see the
-/// task tail's "deferred to follow-up" note. The blocking work
-/// runs on a Tokio blocking thread so it doesn't tie up the
-/// async runtime.
+/// The response arrives when the download completes or fails. The work
+/// runs on a Tokio blocking thread so it doesn't tie up the async runtime.
 pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
@@ -340,9 +335,9 @@ pub async fn api_semantic_download(State(state): State<Arc<AppState>>) -> Respon
             return *response;
         }
         if let Err(e) = Embedder::open(&model_name, &cache_dir).map(|_| ()) {
-            // EmbedError → IndexError::Embed → ChanError → `err_from`
-            // funnels every model-side failure (network, hf-hub
-            // checksum, candle load) through the same error
+            // EmbedError -> IndexError::Embed -> ChanError -> `err_from`
+            // funnels every model-side failure (download, certificate
+            // verification, candle load) through the same error
             // rendering as the rest of the search surface. The
             // bridge is feature-gated alongside this whole module.
             let chan_err: chan_workspace::ChanError =

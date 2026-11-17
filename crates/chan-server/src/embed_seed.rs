@@ -34,8 +34,8 @@ static MODEL_BUNDLE: &[u8] = include_bytes!("../resources/models.tar.zst");
 /// Every branch prints a one-line marker on stderr so a single run
 /// (no `RUST_LOG=info` required) reveals whether the binary shipped
 /// a populated bundle, the cache was already good, or extraction
-/// failed. Errors do not block startup: the runtime path falls back
-/// to hf-hub's HuggingFace download, the same UX as a dev build.
+/// failed. Errors do not block startup; a missing model can still be
+/// downloaded explicitly through chan-workspace, as in a dev build.
 pub fn seed_models_from_bundle() {
     if MODEL_BUNDLE.is_empty() {
         eprintln!(
@@ -111,7 +111,7 @@ fn repo_dir_name(model: &str) -> String {
 /// model: `refs/main` present, plus at least one `snapshots/<hash>/`
 /// directory containing `config.json`, `tokenizer.json`, and
 /// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, blobs-only state from an aborted hf-hub
+/// downloaded snapshot, blobs-only state from an aborted model
 /// fetch) fails the check and the seeder re-extracts. `is_file`
 /// follows symlinks, so the native hf-hub layout (snapshots/ ->
 /// blobs/) and the tarball layout (regular files under snapshots/)

@@ -127,7 +127,7 @@ fn cmd_index_list_models(json: bool) -> Result<()> {
 }
 
 /// Stub when the binary is built without
-/// `--features embeddings`. The candle + hf-hub stack is gated
+/// `--features embeddings`. The candle stack and downloader are gated
 /// behind that feature; without it there's nothing to download.
 /// Bail with a clear message instead of a missing-symbol error.
 #[cfg(not(feature = "embeddings"))]
@@ -151,7 +151,7 @@ fn cmd_index_status(_path: Option<PathBuf>, _json: bool) -> Result<()> {
 }
 
 /// Download the embedding model into the per-machine
-/// cache. Blocking; the hf-hub backend prints its own progress to
+/// cache. Blocking; the model downloader prints its progress to
 /// stderr when stderr is a TTY. Idempotent -- if the model is
 /// already laid out in the cache the call returns immediately.
 #[cfg(feature = "embeddings")]

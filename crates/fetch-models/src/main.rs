@@ -9,7 +9,7 @@
 //! Two-stage:
 //!
 //!   1. Open the candle embedder against a stable staging dir under
-//!      `target/fetch-models-cache/`. hf-hub downloads the model
+//!      `target/fetch-models-cache/`. chan-workspace downloads the model
 //!      there if missing; a re-run with the cache populated skips
 //!      the network. With the default target dir, `cargo clean`
 //!      wipes it and the next build re-downloads.
@@ -23,7 +23,8 @@
 //! `cargo run -p fetch-models`. Idempotent: re-running with the
 //! model already cached AND the tarball up-to-date is a fast
 //! no-op. Honors `HTTPS_PROXY` / `HTTP_PROXY` for restricted
-//! networks; hf-hub's underlying HTTP client picks them up.
+//! networks; chan-workspace's ureq client picks them up and verifies
+//! certificates through chan-tls's trust decision on the build host.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -59,7 +60,7 @@ fn main() -> Result<()> {
         staging.display()
     );
 
-    // Open the embedder pointing at the staging dir. hf-hub
+    // Open the embedder pointing at the staging dir. Its downloader
     // downloads the model there if missing; if already present
     // from a prior run it skips the network and returns instantly.
     Embedder::open(DEFAULT_MODEL, &staging).context("download default embedding model")?;
@@ -100,7 +101,7 @@ fn crates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Stable staging dir for the hf-hub cache. Lives under the repo's
+/// Stable staging dir for the model cache. Lives under the repo's
 /// default `target/`, so `cargo clean` there wipes it; survives normal
 /// builds so re-runs of fetch-models hit the on-disk cache and skip the
 /// network. Keep this OUT of `crates/chan-server/resources/` so
@@ -143,7 +144,7 @@ fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
 }
 
 /// Walk `src` and emit a zstd-compressed tar archive at `dst`.
-/// Skips hf-hub's bookkeeping cruft (`*.lock`, `*.no_exists`) and
+/// Skips cache bookkeeping (`*.lock`, `*.no_exists`) and
 /// the `blobs/` subdir (snapshots/ symlinks already point to the
 /// same bytes; tar follows symlinks by default, so blobs/ would
 /// double the archive).
@@ -242,7 +243,7 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Filenames hf-hub emits that we don't want in the bundle.
+/// Cache entries excluded from the bundle.
 fn should_skip(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
     if s.contains("/blobs/") || s.starts_with("blobs/") {
@@ -267,9 +268,8 @@ fn humanize(bytes: u64) -> String {
     }
 }
 
-/// Report which (if any) HTTP proxy env var is in effect, with
-/// HTTPS_PROXY taking precedence (hf-hub uses HTTPS to hit the
-/// HuggingFace CDN).
+/// Report a configured HTTPS or HTTP proxy variable with credentials
+/// redacted. This diagnostic does not include ureq's ALL_PROXY override.
 fn active_proxy() -> Option<(&'static str, String)> {
     for var in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(v) = std::env::var(var) {

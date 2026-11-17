@@ -132,6 +132,7 @@
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
+      <li>The model download verifies HTTPS with the machine's certificate store. On Linux and other Unixes it also keeps the bundled public roots; <code>SSL_CERT_FILE</code> and <code>SSL_CERT_DIR</code> select the system bundle there. On macOS and Windows it uses the platform's verifier. A certificate refusal appears in the download error; verification cannot be disabled.</li>
       <li>When a search, the graph or a file report is missing something, check the Search slide and <strong>Settings → This workspace</strong>.</li>
       <li>The index skips what ignore rules and excluded directories leave out. Code reports are kept apart from the embeddings.</li>
       <li><code>cs dashboard --carousel-index</code> picks the first slide: 3 Metrics, 0 Workspace, 1 Search, 2 About.</li>

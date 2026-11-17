@@ -61,7 +61,7 @@ r2d2 = "0.8"
 r2d2_sqlite = "0.25"
 
 # Pure-Rust embedding stack. candle handles tensor math + transformer
-# kernels, tokenizers does HF WordPiece/BPE, hf-hub fetches the
+# kernels, tokenizers does HF WordPiece/BPE, ureq fetches the
 # config.json + tokenizer.json + model.safetensors trio on first use.
 # All optional + gated by the `embeddings` feature so a build can opt
 # out via `--no-default-features` and still get BM25.
@@ -76,10 +76,12 @@ candle-transformers = { version = "0.10", default-features = false, optional = t
 # WordPiece doesn't need them. unstable_wasm pulls fancy-regex in
 # pure Rust for the few normalizers that want a regex engine.
 tokenizers = { version = "0.21", default-features = false, optional = true, features = ["unstable_wasm"] }
-# `ureq` selects hf-hub's blocking sync API (`hf_hub::api::sync`).
-# rustls-tls keeps the TLS stack pure Rust; default-tls would pull
-# native-tls + reqwest.
-hf-hub = { version = "0.4", default-features = false, optional = true, features = ["ureq", "rustls-tls"] }
+# The blocking download shares chan's trust decision and keeps ureq's proxy
+# selection and SOCKS support. Model files retain the Hub cache layout.
+chan-tls = { workspace = true, optional = true }
+ureq = { version = "=2.12.1", optional = true, features = ["socks-proxy"] }
+indicatif = { version = "0.17", optional = true }
+url = { workspace = true, optional = true }
 
 # Pure-Rust extended-attribute access. Used by atomic_write to
 # preserve user xattrs (Finder tags on macOS, SELinux labels and
@@ -121,10 +123,12 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+chan-tls = { workspace = true, features = ["test-support"] }
+hf-hub = { version = "=0.4.3", default-features = false }
 
 [features]
 default = ["embeddings"]
-# Hybrid search (BM25 + dense). Pulls candle + tokenizers + hf-hub.
+# Hybrid search (BM25 + dense). Pulls candle + tokenizers + the downloader.
 # Opt out (`--no-default-features`) for a build without the candle
 # stack; the resulting binary still has BM25 search via tantivy.
 embeddings = [
@@ -132,7 +136,10 @@ embeddings = [
     "dep:candle-nn",
     "dep:candle-transformers",
     "dep:tokenizers",
-    "dep:hf-hub",
+    "dep:chan-tls",
+    "dep:ureq",
+    "dep:indicatif",
+    "dep:url",
 ]
 # macOS-only: link candle's Metal backend so bge-small runs on the
 # Apple GPU. The chan binary forwards this automatically on macOS

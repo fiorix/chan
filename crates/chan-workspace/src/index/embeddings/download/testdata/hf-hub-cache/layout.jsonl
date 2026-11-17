@@ -1,0 +1,15 @@
+{"link_target": null, "path": "models--fixture--model", "sha256": null, "size": null, "type": "directory"}
+{"link_target": null, "path": "models--fixture--model/blobs", "sha256": null, "size": null, "type": "directory"}
+{"link_target": null, "path": "models--fixture--model/blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd", "sha256": "2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd", "size": 38, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd.lock", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd", "sha256": "411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd", "size": 10, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd.lock", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d", "sha256": "e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d", "size": 18, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d.lock", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "size": 0, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/refs", "sha256": null, "size": null, "type": "directory"}
+{"link_target": null, "path": "models--fixture--model/refs/main", "sha256": "deb87fabd17715bb31ad4cf4ffb9494eeb15f8d33d85b031a301c64ab3417eaa", "size": 40, "type": "file"}
+{"link_target": null, "path": "models--fixture--model/snapshots", "sha256": null, "size": null, "type": "directory"}
+{"link_target": null, "path": "models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567", "sha256": null, "size": null, "type": "directory"}
+{"link_target": "../../blobs/2f8be3bcfba53ccc1387a414a701a631b75c7d34a43df0be3ce2f5bfb4c556fd", "path": "models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/config.json", "sha256": "5f46591ef7e89c4118cbb8f539d2e0ec336f40ef399f9401aafd911961af33c8", "size": 76, "type": "symlink"}
+{"link_target": "../../blobs/411a485216e432ece6b9af94fa32154cf79a2a56d4f81266baa50063f45092bd", "path": "models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/model.safetensors", "sha256": "e0c74a9b40d2a37beea5b3ec9bf3f8dead0164125d595f7c4bd6dfa8d59217b8", "size": 76, "type": "symlink"}
+{"link_target": "../../blobs/e4c5e2a41b2a136d0ee312fbb56f3a1c38608f21b72503435b8877d034ba8f9d", "path": "models--fixture--model/snapshots/0123456789abcdef0123456789abcdef01234567/tokenizer.json", "sha256": "2f0f02eafd116082d9fd76bdcbb11678ef8d4214b3ec11d45e19dd2ee22c29e5", "size": 76, "type": "symlink"}
