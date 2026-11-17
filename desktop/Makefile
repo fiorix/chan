@@ -17,11 +17,17 @@ TAURI_CLI_BIN := $(TAURI_CLI_ROOT)/bin/cargo-tauri
 # Run the pinned tool by its path when it exists: a PATH prepend joins with
 # a colon, and on Windows the absolute root already holds a colon after the
 # drive letter, so cargo never finds the local install there. This form
-# uses no PATH list separator at all, and the pinned tool still outranks
-# any stale cargo-tauri on PATH whenever it is installed. Without it (CI
-# installs tauri-cli globally instead) fall back to the PATH lookup.
-TAURI_CLI_EXE := $(firstword $(wildcard $(TAURI_CLI_BIN) $(TAURI_CLI_BIN).exe))
-TAURI := $(if $(TAURI_CLI_EXE),"$(TAURI_CLI_EXE)" tauri,cargo tauri)
+# uses no PATH list separator at all. Both variables are recursive on
+# purpose: the lookup happens when a recipe expands, after the tauri-cli
+# prerequisite below has installed the tool, so the run that installs it
+# already uses it. Once the pinned tool exists it outranks any stale
+# cargo-tauri on PATH or in the cargo home. Without it the recipes fall
+# back to the PATH lookup, which covers a global install (as CI uses) but
+# also runs unpinned, so a stale global with no local install runs as is,
+# by design. Picking by file test follows the tauri-cli target's own
+# [ ! -x ] shape rather than running the tool to validate it.
+TAURI_CLI_EXE = $(firstword $(wildcard $(TAURI_CLI_BIN) $(TAURI_CLI_BIN).exe))
+TAURI = $(if $(TAURI_CLI_EXE),"$(TAURI_CLI_EXE)" tauri,cargo tauri)
 
 # Finder-less DMG packaging (packaging/desktop/build-dmg.sh + dmg_settings.py). The
 # layout is pinned by the settings file, so any dmgbuild 1.x yields the same
