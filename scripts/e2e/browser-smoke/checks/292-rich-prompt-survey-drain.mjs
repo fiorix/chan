@@ -15,9 +15,11 @@ import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The page's patched WebSocket records prompt frames and delivery acks with
-// the session they rode on. Installed before the leg's terminal opens; each
-// leg resets the prompt list. Fresh window per check, so every traced
-// upgrade is this check's.
+// the tab and session they rode on. Installed before the first leg opens;
+// each leg resets the prompt list. Fresh dials carry no `session` value
+// (only reattaches do): both legs run in one window, so the tab name scopes
+// each leg's waits and the first leg's closed socket cannot satisfy the
+// second leg's.
 function traceSurveyDrain() {
   const NativeSocket = window.WebSocket;
   const trace = window.__prompt292 = { sockets: [], prompts: [] };
@@ -28,8 +30,11 @@ function traceSurveyDrain() {
         return Reflect.construct(target, args);
       }
       const socket = Reflect.construct(target, args);
+      // Fresh dials carry no `session` value (only reattaches do); the tab
+      // name scopes the leg.
+      const tab = url.searchParams.get("tab_name");
       const session = url.searchParams.get("session");
-      const record = { socket, session, ready: false, delivered: [] };
+      const record = { socket, tab, session, ready: false, delivered: [] };
       trace.sockets.push(record);
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;
@@ -69,8 +74,8 @@ async function state(page, card) {
         : active.closest(".survey-card") ? "survey"
         : composer?.contains(active) ? "composer" : `${active.tagName}.${active.className?.toString?.() ?? ""}`,
       card: Boolean(composer?.closest(".terminal-tab")?.querySelector(".survey-card")),
-      sockets: trace?.sockets.map(({ socket, session, ready, delivered }) => ({
-        state: socket.readyState, session, ready, delivered,
+      sockets: trace?.sockets.map(({ socket, tab, session, ready, delivered }) => ({
+        state: socket.readyState, tab, session, ready, delivered,
       })) ?? [],
       prompts: trace?.prompts ?? [],
     };
@@ -159,7 +164,7 @@ export default {
             assert.equal(typeof result.sent.prompts[0].id, "string");
             const id = result.sent.prompts[0].id;
             result.delivered = await waitFor(page, card, "the prompt drains without taking the keyboard",
-              (value) => value.sockets.some((socket) => socket.session === session && socket.delivered.includes(id))
+              (value) => value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id))
                 && value.text === "" && !value.pending && value.focus !== "composer" && value.note === null, 10_000);
             await ctx.shot(`292-${backend}-drained-under-survey`);
             // The click left DOM focus on the Send button; selecting the
