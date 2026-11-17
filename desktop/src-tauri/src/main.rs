@@ -106,8 +106,8 @@ pub struct PendingUpdate {
 }
 
 /// Reconnect hook for a rostered row whose registration moved proxy nodes:
-/// fires the normal connect flow ([`connect_devserver_impl`]) for one
-/// synthesized row id. Mirror of [`config::DevserverRemoveHook`], filled
+/// fires the normal connect flow (`connect_devserver_impl`) for one
+/// synthesized row id. Mirror of `config::DevserverRemoveHook`, filled
 /// once Tauri setup runs because gateway.rs cannot see the concrete
 /// `AppHandle`.
 pub type DevserverReconnectHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -218,9 +218,9 @@ pub struct AppState {
     /// revocation and roster invalidation bump it.
     native_policy_generations: Mutex<HashMap<String, u64>>,
     /// Teardown hook the launcher's
-    /// [`DevserverConfigRegistry`](config::DevserverConfigRegistry) fires after an
+    /// `DevserverConfigRegistry` fires after an
     /// HTTP `DELETE /api/library/devservers/{id}` drops a row, so that path
-    /// reaps a live connection/windows through [`teardown_devserver_connection`]
+    /// reaps a live connection/windows through `teardown_devserver_connection`
     /// (shared with `disconnect_devserver`). The registry (chan-server side) can't see the `AppHandle`,
     /// so it's installed with this shared cell and the desktop fills it (with a
     /// closure over the `AppHandle`) once Tauri setup runs.
@@ -629,11 +629,11 @@ impl AppState {
 /// embedded host merges them into the local launcher surface (one launcher lists
 /// local + remote alike). Installed on the host via
 /// `WorkspaceHost::install_devserver_feed`; the desktop registers a devserver on
-/// connect ([`connect_devserver_impl`]) and drops it on disconnect
-/// ([`teardown_devserver_connection`]). The trait reads are sync: the window
+/// connect (`connect_devserver_impl`) and drops it on disconnect
+/// (`teardown_devserver_connection`). The trait reads are sync: the window
 /// snapshots are the SAME `Arc<Mutex<…>>` each devserver window-watcher feed task
 /// writes, and the async-fetched workspaces are served from a cache a per-devserver
-/// poll task refreshes ([`spawn_devserver_workspace_poll`]).
+/// poll task refreshes (`spawn_devserver_workspace_poll`).
 #[derive(Default)]
 pub struct DevserverFeed {
     /// Devserver id -> its live window snapshot (shared with the watcher feed task).
