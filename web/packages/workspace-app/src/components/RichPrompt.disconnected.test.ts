@@ -298,7 +298,8 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     expect(note()).toBe(NOTICE);
     expect(sentFrames(redial).filter((frame) => frame.type === "prompt")).toEqual([]);
     redial.open();
-    await attach(redial, { id: "sess-2", submit_agent: "claude" });
+    const redialPrelude = { id: "sess-2", submit_agent: "claude" };
+    await attach(redial, redialPrelude);
     await receive(redial, { type: "ready", cols: 80, rows: 24 });
     await flush();
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
@@ -342,7 +343,8 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
     const next = TerminalSocket.all.at(-1)!;
     expect(next, "the restart dials a new socket").not.toBe(socket);
-    await attach(next, { id: "sess-2", submit_agent: "claude" });
+    const nextPrelude = { id: "sess-2", submit_agent: "claude" };
+    await attach(next, nextPrelude);
     await receive(next, { type: "ready", cols: 80, rows: 24 });
     await flush();
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
