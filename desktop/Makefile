@@ -22,9 +22,10 @@ TAURI_CLI_BIN := $(TAURI_CLI_ROOT)/bin/cargo-tauri
 # prerequisite below has installed the tool, so the run that installs it
 # already uses it. Once the pinned tool exists it outranks any stale
 # cargo-tauri on PATH or in the cargo home. Without it the recipes fall
-# back to the PATH lookup, which covers a global install (as CI uses) but
-# also runs unpinned, so a stale global with no local install runs as is,
-# by design. Picking by file test follows the tauri-cli target's own
+# back to `cargo tauri`, which cargo resolves through its own bin directory
+# and PATH, covering a global install (as CI uses) but also running
+# unpinned, so a stale global with no local install runs as is, by design.
+# Picking by file test follows the tauri-cli target's own
 # [ ! -x ] shape rather than running the tool to validate it.
 TAURI_CLI_EXE = $(firstword $(wildcard $(TAURI_CLI_BIN) $(TAURI_CLI_BIN).exe))
 TAURI = $(if $(TAURI_CLI_EXE),"$(TAURI_CLI_EXE)" tauri,cargo tauri)
