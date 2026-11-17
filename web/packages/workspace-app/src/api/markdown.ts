@@ -53,7 +53,8 @@ interface WikiSpan {
 /// the document structure; for the inline renderer the source is read
 /// as one paragraph (a `| ` prefix the offsets account for), so a cell
 /// that opens with a block-level tag still yields its links beside the
-/// tags. The walk visits spans in order.
+/// tags. The walk visits spans in order. Every caller sends one line,
+/// so the paragraph reading holds.
 function wikiLinkSpans(input: string, inline: boolean, frontmatter: boolean): WikiSpan[] {
   if (!input.includes("[[")) return [];
   const source = inline ? `| ${input}` : input;
