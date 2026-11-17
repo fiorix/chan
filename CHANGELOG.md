@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Chan for iOS (Tauri app, TestFlight-ready build).** The iOS app runs the desktop embedded loopback stack on device and loads the launcher in a single webview: add a gateway URL in the existing Gateways form, sign in through the system authentication sheet, browse roster devservers on Computers, open them with entry plus tenant navigation, and swipe left-edge back to Computers. Roster polling pauses in background and resyncs on foreground; CHAN_HOME lives under Application Support and PATs in the iOS Keychain. App id `app.chan.ios`.
+- **Mobile sign-in for self-hosted gateways.** The identity authorize flow accepts the registered `chan://auth/callback` alongside the loopback callback, code-level with no per-deployment config; same scope, same PKCE, same redeem.
+
 ## [v0.135.0] - 2026-11-27
 
 v0.135.0 takes xterm.js out of chan: a terminal whose view fails to load shows a card with Retry in its place instead of falling back to a second engine. The terminal core moves to libghostty-vt 1.0.2, find runs on chan's own terminal widget with every match highlighted, and scrollback is a byte budget whose default rises to 50 MB. A reconnect that lost output now resets the modes an exited program left on and shows a full-screen program's last output, and a reconnect that lost nothing no longer makes the program redraw. A survey over a pane that is not focused is answered by a click only, a queued message reaches an idle program behind a stopped page on macOS and Windows within about a second, and the graph of a workspace over the listing cap keeps every folder. These changes were read in Chrome, in Chan Desktop under WebKitGTK on Linux and in Chan Desktop on macOS, except two fixes made after the macOS reading, Retry on WebKit and a full-screen program's last output after a reconnect, which were read under WebKitGTK only. None was read in Chan Desktop on Windows, where the queued message was read by native tests.
