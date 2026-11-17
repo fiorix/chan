@@ -149,6 +149,22 @@ describe("the ghostty widget's pointer handling", () => {
     expect(term.viewport.offset, "the drag did not undo the rows the write anchored").toBe(anchored);
   });
 
+  test("a context menu reset hides the textarea when it loses the keyboard", async () => {
+    const { canvas, textarea } = await openTerminal();
+    vi.useFakeTimers();
+    try {
+      canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 30 }));
+      expect(textarea.style.pointerEvents, "the menu arms the textarea").toBe("auto");
+      vi.advanceTimersByTime(10);
+      textarea.blur();
+      expect(textarea.style.pointerEvents, "losing the keyboard hides it again").toBe("none");
+      expect(textarea.style.width).toBe("0px");
+      expect(textarea.value).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("an interrupted drag copies nothing and keeps the selection", async () => {
     const { term, canvas } = await openTerminal();
     const writes: string[] = [];
