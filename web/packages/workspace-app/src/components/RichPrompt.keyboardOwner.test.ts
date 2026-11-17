@@ -37,8 +37,8 @@ import TerminalTab from "./TerminalTab.svelte";
 import Terminals from "./Terminals.svelte";
 import { api, type SurveySpec } from "../api/client";
 import { closeConfirmState } from "../state/closeConfirm.svelte";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
-import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
+import { richPrompt, showRichPromptForTab, toggleRichPromptSource } from "../state/richPrompt.svelte";
 import { workspace } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import {
@@ -454,5 +454,29 @@ describe("a submit held for its images' paths", () => {
 
     expect(sentTexts(composer.socket)).toEqual([TEXT]);
     expect(composer.view.hasFocus, "the composer takes the keyboard").toBe(true);
+  });
+});
+
+describe("the launcher mark regression (acceptance 2)", () => {
+  test("a prompt delivered under the launcher, released, then a source swap mounts the editor with the keyboard", async () => {
+    const composer = await openComposer();
+    const id = await queue(composer, "delivered");
+    const launcher = OWNERS.find((owner) => owner.name === "the Computers launcher")!;
+    const holder = await launcher.take(composer.target, composer.tab.id);
+
+    await land(composer, "delivered", id);
+
+    // At the base the delivered phase is unguarded and takes the keyboard
+    // here; the branch and the rule refuse it. Either way, the release and
+    // the swap below decide this test.
+    launcher.release();
+    holder.blur();
+    await settle();
+    toggleRichPromptSource(composer.tab.id);
+    await settle();
+
+    const content = composer.target.querySelector<HTMLElement>(".rich-prompt .cm-content")!;
+    const view = EditorView.findFromDOM(content)!;
+    expect(view.hasFocus, "the editor that mounts after the release has the keyboard").toBe(true);
   });
 });

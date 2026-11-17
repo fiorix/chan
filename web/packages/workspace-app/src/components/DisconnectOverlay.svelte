@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow } from "../state/focusGuard";
+  import { launcherShownOverWindow } from "../state/focusGuard.svelte";
   import { onDestroy, tick } from "svelte";
 
   // Recovery actions (Reconnect / Abandon) are offered only on a devserver-backed

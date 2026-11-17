@@ -122,7 +122,7 @@
   import { api } from "../api/client";
   import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
-  import { refocusRefused } from "../state/focusGuard";
+  import { refocusRefused } from "../state/focusGuard.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,

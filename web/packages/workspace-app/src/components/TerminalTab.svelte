@@ -236,7 +236,7 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
+  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 

@@ -87,7 +87,7 @@
     activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { refocusRefused } from "../state/focusGuard";
+  import { keyboardOwned } from "../state/focusGuard.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -852,6 +852,6 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
-  mayTakeFocus={() => !refocusRefused(activeTerminalTab()?.id ?? null)}
+  mayTakeFocus={() => !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher")}
   {toggleChord}
 />
