@@ -17,17 +17,26 @@ describe("wikilink labels", () => {
     }
   });
 
-  test("leaves inline code and fenced code as typed in every renderer", () => {
+  test("leaves inline code and fenced code as typed in every renderer that opts in", () => {
     const source = "`[[note]]`\n\n```text\n[[note]]\n```\n";
-    for (const html of [renderMarkdown(source), renderMarkdownWithBreaks(source)]) {
+    for (const html of [renderMarkdown(source, { wikilinks: true }), renderMarkdownWithBreaks(source, { wikilinks: true })]) {
       const root = document.createElement("div");
       root.innerHTML = html;
       expect(root.querySelector("p code")?.textContent).toBe("[[note]]");
       expect(root.querySelector("pre code")?.textContent).toBe("[[note]]\n");
     }
     const inline = document.createElement("div");
-    inline.innerHTML = renderMarkdownInline("`[[note]]`");
+    inline.innerHTML = renderMarkdownInline("`[[note]]`", { wikilinks: true });
     expect(inline.querySelector("code")?.textContent).toBe("[[note]]");
+  });
+
+  test("a call without the option keeps the authored syntax in every renderer", () => {
+    const source = "[[note]] [[note|alias]]";
+    for (const html of [renderMarkdown(source), renderMarkdownWithBreaks(source), renderMarkdownInline(source)]) {
+      const root = document.createElement("div");
+      root.innerHTML = html;
+      expect(root.textContent?.trim()).toBe(source);
+    }
   });
 
   test("keeps a markup-carrying label literal and element-free in every renderer that opts in", () => {
