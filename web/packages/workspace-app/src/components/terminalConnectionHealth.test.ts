@@ -256,6 +256,45 @@ describe("terminal connection", () => {
     connection.dispose();
   });
 
+  test("a key in the same millisecond as the probe fire, key first, is answered by that ping", () => {
+    let t = 0;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    vi.advanceTimersByTime(999);
+    t = 1000;
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a backward clock step between a key and its probe leaves no false notice", () => {
+    let t = 2000;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    t = 500;
+    vi.advanceTimersByTime(1000);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a pong before the probe fires does not cancel the input probe", () => {
+    const { connection, pings } = rig();
+    connection.pingSent();
+    connection.inputSent();
+    vi.advanceTimersByTime(500);
+    connection.pongArrived();
+    vi.advanceTimersByTime(500);
+    expect(pings).toHaveLength(1);
+    connection.dispose();
+  });
+
   test("a pong for a ping sent before the input does not answer it", () => {
     const { connection, runs, contact } = redialRig();
     connection.windowChanged("ok", false);

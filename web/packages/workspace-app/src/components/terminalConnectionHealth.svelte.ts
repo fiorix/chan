@@ -5,7 +5,7 @@ import { createConnectionProbe } from "../api/connectionProbe";
 import { WS_READ_DEADLINE_MS } from "../api/transport";
 import type { ConnectionState } from "../state/connectionHealth.svelte";
 
-/// Delay before a sent input with no answer asks the terminal socket for a pong.
+/// Delay after user input before its probe pings the terminal socket.
 export const TERMINAL_INPUT_PROBE_MS = 1_000;
 /// Limit input-triggered pings while a terminal is busy or the connection is silent.
 export const TERMINAL_INPUT_PROBE_SPACING_MS = 2_000;
@@ -41,9 +41,9 @@ export function createTerminalConnectionHealth(
   let lastRedialAt = Number.NEGATIVE_INFINITY;
   let inputOutstanding = false;
   let noticeInputOutstanding = false;
-  // When the last user input went out. A pong answers only input sent no
-  // later than the ping it answers: a frame proves nothing about the
-  // client-to-server direction, but a pong arrives in send order.
+  // When the last user input went out. A pong answers only input sent before
+  // the ping it answers: a frame proves nothing about the client-to-server
+  // direction, but a pong arrives in send order.
   let lastInputAt = Number.NEGATIVE_INFINITY;
   let noticePending = false;
   let noticeRemainingMs = TERMINAL_INPUT_NOTICE_MS;
@@ -191,6 +191,8 @@ export function createTerminalConnectionHealth(
     },
     pingSent() {
       if (!open || disposed) return;
+      // Every input so far left this socket before this ping, whatever the clock says.
+      lastInputAt = Math.min(lastInputAt, now() - 1);
       probe.pingSent();
       sync();
     },
