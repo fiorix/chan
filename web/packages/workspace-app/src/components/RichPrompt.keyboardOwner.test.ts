@@ -389,7 +389,7 @@ describe("a submit held for its images' paths", () => {
     },
   );
 
-  test("sent after a switch to another tab leaves the composer of the tab left behind without the keyboard", async () => {
+  test("sent after a switch to another tab focuses the composer left behind, as after a text-only submit", async () => {
     const [first] = seatTerminals([
       terminalTab({ id: "term-left", richPromptDraftPath: draftPath("owner") }),
       terminalTab({ id: "term-next" }),
@@ -422,8 +422,8 @@ describe("a submit held for its images' paths", () => {
     await settle();
 
     expect(sentTexts(socket), "the prompt is sent with the image's path").toEqual([`see ${ON_SERVER}`]);
-    expect(composer.view.hasFocus, "the tab left behind does not take the keyboard").toBe(false);
-    expect(focusAsks, "the composer asks for no focus").not.toHaveBeenCalled();
+    expect(focusAsks, "the composer asks for the keyboard").toHaveBeenCalled();
+    expect(composer.view.hasFocus, "the tab left behind takes the keyboard").toBe(true);
   });
 
   // The controls: a text-only submit sends at once, from the keymap or the
@@ -499,21 +499,57 @@ describe("a strip-button submit in an unfocused pane", () => {
   });
 });
 
+describe("an image-bearing strip submit in an unfocused pane", () => {
+  test("the composer takes the keyboard", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    draft.content = IMAGE_TEXT;
+    const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("owner-image-unfocused") })]);
+    const { target } = await mountTerminal(TerminalTab, tab!, { focused: false });
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    const composer = await showComposer({ tab: tab!, target, socket });
+    expect(composer.view.hasFocus, "nothing is focused before the submit").toBe(false);
+    const ask = vi.spyOn(api, "draftTerminalPaths").mockResolvedValue([ON_SERVER]);
+    socket.sent.splice(0);
+    target.querySelector<HTMLButtonElement>(".rp-primary")!.click();
+    await settle();
+    expect(ask, "the submit asks where the image is").toHaveBeenCalledTimes(1);
+    expect(sentTexts(socket), "the prompt is sent with the image's path").toEqual([`see ${ON_SERVER}`]);
+    expect(composer.view.hasFocus, "the strip submit focuses the composer").toBe(true);
+  });
+});
+
 describe("the strip buttons keep the composer focused on press", () => {
-  test("a pointerdown on either strip button is cancelled", async () => {
+  test("a pointerdown on each strip button is cancelled", async () => {
     const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("owner-guard") })]);
     const { target } = await mountTerminal(TerminalTab, tab!);
     const socket = TerminalSocket.all.at(-1)!;
     await attach(socket);
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    await showComposer({ tab: tab!, target, socket });
-    const buttons = [...target.querySelectorAll<HTMLButtonElement>(".rp-strip .rp-action")];
-    expect(buttons.length, "the strip renders its actions").toBeGreaterThan(0);
-    for (const button of buttons) {
+    const composer = await showComposer({ tab: tab!, target, socket });
+    composer.socket.sent.splice(0);
+    target.querySelector<HTMLButtonElement>(".rp-primary")!.click();
+    await settle();
+    const id = sentTexts(socket).length;
+    expect(id, "the draft submits").toBe(1);
+    const prompt = sentFrames(socket).find((frame) => frame.type === "prompt") as { id: string };
+    await receive(socket, { type: "prompt-ack", id: prompt.id, queued: false, depth: 0 });
+    await settle();
+    tab.queueDepth = 1;
+    await settle();
+    composer.view.dispatch({ changes: { from: 0, to: composer.view.state.doc.length, insert: "" } });
+    await settle();
+    const primary = target.querySelector<HTMLButtonElement>(".rp-primary");
+    const recall = target.querySelector<HTMLButtonElement>(".rp-action:not(.rp-primary)");
+    expect(primary, "the strip renders its submit").not.toBeNull();
+    expect(recall, "the strip renders its recall").not.toBeNull();
+    expect(recall!.textContent, "the recall names itself").toContain("recall");
+    expect(recall!.disabled, "the cleared composer enables the recall").toBe(false);
+    for (const button of [primary!, recall!]) {
       const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
       button.dispatchEvent(event);
       expect(event.defaultPrevented, "the strip button cancels its pointerdown").toBe(true);
     }
   });
 });
-
