@@ -288,8 +288,8 @@
   }
 
   /// Whether the heir sits inside the current top overlay's own panel.
-  /// OverlayShell stamps each panel with its overlay id, so the check
-  /// follows a rename with no label map to keep.
+  /// OverlayShell stamps each panel with its overlay id, so the check does
+  /// not depend on the panel's accessible name.
   function topOverlayPanelContains(heir: Element): boolean {
     const top = topOverlay();
     if (!top) return false;

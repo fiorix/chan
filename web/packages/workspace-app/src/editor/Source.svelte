@@ -78,8 +78,8 @@
     /// editor unfocused on mount; otherwise the unconditional
     /// mount focus would race past the host's gate.
     autoFocus?: boolean;
-    /// Decides a delayed focus at the moment it would run. Defaults
-    /// to the `autoFocus` snapshot.
+    /// Decides a delayed focus at the moment it would run. Defaults to the
+    /// host's `autoFocus` as it reads when the frame runs.
     mayTakeFocus?: () => boolean;
     /// Empty-state placeholder text. Mirrors the same prop on
     /// `Wysiwyg.svelte` so a mode-toggle keeps the placeholder

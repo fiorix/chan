@@ -120,7 +120,8 @@
     /// Decides a delayed focus at the moment it would run: the mount,
     /// caret-restore and reset frames ask this instead of reading the
     /// `autoFocus` snapshot they scheduled with, so an owner that took
-    /// the keyboard meanwhile keeps it. Defaults to the snapshot.
+    /// the keyboard meanwhile keeps it. Defaults to the host's `autoFocus`
+    /// as it reads when the frame runs.
     mayTakeFocus?: () => boolean;
     /// Whether the host shows this editor, independently of keyboard focus.
     shown?: boolean;

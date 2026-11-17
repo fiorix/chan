@@ -134,8 +134,9 @@
   // (keep-alive, like the terminal body), so an ungated focus would let a
   // background tab's composer steal the keyboard. A focused terminal's
   // composer still yields to what its terminal's own refocus yields to
-  // (`refocusRefused`): a modal dialog, a survey over this terminal and the
-  // Computers launcher own the keyboard while they show.
+  // (`refocusRefused`): a modal dialog, a survey over this terminal, the
+  // Computers launcher and an overlay over the panes own the keyboard while
+  // they show.
   let { tab, focused = false, shown = true }: { tab: TerminalTab; focused?: boolean; shown?: boolean } =
     $props();
 
@@ -503,8 +504,8 @@
   // FileEditorTab's focus effect (same pulse + same !focused gates); the
   // terminal's own pulse effect defers to the bubble while it is open. Like
   // the terminal's refocus, it yields while a dialog, a survey over this
-  // terminal or the launcher owns the keyboard, and the next pulse after
-  // they let go lands here again.
+  // terminal, the launcher or an overlay over the panes owns the keyboard,
+  // and the next pulse after they let go lands here again.
   $effect(() => {
     if (!focused) return;
     tabFocusPulse.value;
@@ -515,8 +516,9 @@
   });
 
   /// Give the composer the keyboard without touching its selection, as a focus
-  /// pulse does, unless a dialog, a survey over this terminal or the launcher
-  /// owns it. Its terminal asks after a move to another pane drops it.
+  /// pulse does, unless a dialog, a survey over this terminal, the launcher
+  /// or an overlay over the panes owns it. Its terminal asks after a move to
+  /// another pane drops it.
   export function focus(): void {
     if (refocusRefused(tab.id)) return;
     activeEditor()?.focus();

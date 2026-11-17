@@ -255,10 +255,11 @@
     focused: boolean;
   } = $props();
 
-  // Modal dialogs, a survey over this terminal and the Computers launcher
-  // own the keyboard. Centralizing their guard keeps every refocus path
-  // from taking it, the mount and pane focus included; once those owners
-  // release it, the same calls legitimately restore the terminal.
+  // Modal dialogs, a survey over this terminal, the Computers launcher and
+  // overlays over the panes own the keyboard. Centralizing their guard keeps
+  // every refocus path from taking it, the mount and pane focus included;
+  // once those owners release it, the same calls legitimately restore the
+  // terminal.
   function focusTerminal(): void {
     if (refocusRefused(tab.id)) return;
     term?.focus();
