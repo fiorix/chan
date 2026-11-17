@@ -398,7 +398,7 @@ describe("the Workspace details command", () => {
     expect(tab.showWorkspace, "the tab carries the flag").toBe(true);
     expect(tab.inspectorOpen, "the tab opens its inspector").toBe(true);
     // The empty flagged selection is what renders the workspace body instead of file details (FileBrowserSurface.svelte).
-    expect(list.querySelector(".inspector"), "the tab inspector shows the workspace").not.toBeNull();
+    expect(list.querySelector(".inspector .kind-chip.workspace"), "the tab inspector shows the workspace body").not.toBeNull();
   });
 
   test("opens a tab showing the workspace when no file browser tab is active, leaving the dock", async () => {
@@ -420,7 +420,18 @@ describe("the Workspace details command", () => {
     expect(fbTreeInstance("fb-dock-left")!.selection.path, "the dock keeps its selection").toBe("notes/a.md");
     const fresh = await render({ variant: "tab", tab: opened! });
     expect(fbTreeInstance(`fb-tab-${opened!.id}`)!.selection.path, "the new tab starts unselected").toBeNull();
-    expect(fresh.querySelector(".inspector"), "the new tab's inspector shows the workspace").not.toBeNull();
+    expect(opened!.showWorkspace, "the new tab carries the flag").toBe(true);
+    expect(fresh.querySelector(".inspector .kind-chip.workspace"), "the new tab's inspector shows the workspace body").not.toBeNull();
+  });
+
+  test("shows the workspace for a tab with no mounted surface", async () => {
+    const tab = seat(browserTab({ directory: "notes", selected: "notes/a.md", selectedPaths: ["notes/a.md"] }));
+    expect(fbTreeInstance(`fb-tab-${tab.id}`), "no surface mounted").toBeNull();
+    commandById("app.browser.showWorkspaceInfo")!.run();
+    await settle();
+    expect(tab.showWorkspace, "the tab carries the flag").toBe(true);
+    const fresh = await render({ variant: "tab", tab });
+    expect(fresh.querySelector(".inspector .kind-chip.workspace"), "the workspace body shows without a prior surface").not.toBeNull();
   });
 });
 
