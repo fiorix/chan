@@ -65,7 +65,7 @@ async function pointIn(page, selector) {
 // them, and can drop the recall's cancel frame for the failed-recall leg.
 function tracePrompts() {
   const NativeSocket = window.WebSocket;
-  const trace = (window.__prompt293 = { prompts: [], dropCancel: false, droppedCancels: 0 });
+  const trace = (window.__prompt294 = { prompts: [], dropCancel: false, droppedCancels: 0 });
   window.WebSocket = new Proxy(NativeSocket, {
     construct(target, args) {
       const url = new URL(args[0], location.href);
@@ -196,16 +196,16 @@ export default {
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
-    const boxPath = join(ctx.workspaceDir, "box293.png");
+    const boxPath = join(ctx.workspaceDir, "box294.png");
     writeFileSync(boxPath, ONE_PX_PNG);
-    const shot = (label) => ctx.shot(`293-${label}`).catch(() => {});
+    const shot = (label) => ctx.shot(`294-${label}`).catch(() => {});
     const failures = [];
     try {
       await page.evaluate(tracePrompts);
       try {
         for (const backend of ["xterm", "ghostty"]) {
-          const name = `Press293-${backend}`;
-          const text = `PROMPT293-${backend}`;
+          const name = `Press294-${backend}`;
+          const text = `PROMPT294-${backend}`;
           const result = { backend, passed: false, pageErrors: [], cleanupErrors: [], steps: {} };
           const onError = (error) => result.pageErrors.push(String(error));
           page.on("pageerror", onError);
@@ -215,20 +215,20 @@ export default {
             const { card } = await openComposer(ctx, page, cs, windowId, backend, name, text);
             opened = true;
             await page.evaluate(() => {
-              window.__prompt293.prompts.length = 0;
+              window.__prompt294.prompts.length = 0;
             });
 
             // Step 1: a real press on Submit holds the composer, and the
             // next key reaches it with no click. The release submits the
             // draft; once it delivers, the typed key starts the next one.
-            await pressSubmit(page, card, "293-press-held", shot);
+            await pressSubmit(page, card, "294-press-held", shot);
             await waitFor(page, card, "the submit delivers",
               (value) => (value.text === "" && !value.pending ? value : false));
             await page.keyboard.type("x");
             result.steps.press = await waitFor(page, card, "the next key reaches the composer",
               (value) => (value.text === "x" && value.where === "composer" ? value : false));
             assert.equal(result.steps.press.editable, true);
-            await shot(`293-${backend}-pressed`);
+            await shot(`294-${backend}-pressed`);
             await page.keyboard.down("Control");
             await page.keyboard.press("Enter");
             await page.keyboard.up("Control");
@@ -251,34 +251,34 @@ export default {
             if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
               throw new Error("never caught a pending prompt in 4 submits");
             }
-            await pressSubmit(page, card, "293-recall-press", shot);
+            await pressSubmit(page, card, "294-recall-press", shot);
             result.steps.recall = await waitFor(page, card, "the run recalls",
               (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
             assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
-            await shot(`293-${backend}-recalled`);
+            await shot(`294-${backend}-recalled`);
 
             // The failed recall: the cancel frame never goes out, so the
             // ack timer fails the run instead. The drop is installed before
             // the catch so no cancel can slip out first.
             await page.evaluate(() => {
-              window.__prompt293.dropCancel = true;
+              window.__prompt294.dropCancel = true;
             });
             const failText = `${text}-recall-fail`;
             if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
               throw new Error("never caught a pending prompt for the failed recall");
             }
-            await pressSubmit(page, card, "293-failed-press", shot);
+            await pressSubmit(page, card, "294-failed-press", shot);
             await sleep(6500);
             const failed = await focusState(page, card);
-            const dropped = await page.evaluate(() => window.__prompt293.droppedCancels);
+            const dropped = await page.evaluate(() => window.__prompt294.droppedCancels);
             assert.ok(dropped > 0, "the cancel frame was dropped");
             assert.equal(failed.where, "composer", "focus holds through the failed recall");
             assert.equal(failed.text, failText, "the failed recall keeps the text");
             await page.evaluate(() => {
-              window.__prompt293.dropCancel = false;
+              window.__prompt294.dropCancel = false;
             });
             result.steps.failedRecall = { where: failed.where, text: failed.text, dropped };
-            await shot(`293-${backend}-failed`);
+            await shot(`294-${backend}-failed`);
 
             // The secondary action, when the window has a queued prompt to
             // recall. Absent here unless a submit left one queued.
@@ -346,7 +346,7 @@ export default {
             const sentB = await waitFor(page, cardB, "B's submit sends and clears",
               (value) => (value.text === "" && !value.pending ? value : false));
             const promptsB = await page.evaluate(
-              (tab) => window.__prompt293.prompts.filter((prompt) => prompt.tab === tab),
+              (tab) => window.__prompt294.prompts.filter((prompt) => prompt.tab === tab),
               nameB,
             );
             assert.equal(promptsB.length, 1, "exactly one prompt left B");
@@ -354,7 +354,7 @@ export default {
             assert.equal(sentB.where, "composer", "B's composer keeps the keyboard");
             assert.equal(await activePaneId(page), paneA, "A is still the active pane");
             result.steps.twoPane = { pane: paneA, prompts: promptsB.length };
-            await shot(`293-${backend}-twopane`);
+            await shot(`294-${backend}-twopane`);
 
             // The image leg only records: whether the composer takes focus
             // when the paths arrive and whether B activates are open owner
@@ -363,7 +363,7 @@ export default {
             await page.click(`${cardB} .cm-content`);
             await page.keyboard.type(imageText);
             await waitFor(page, cardB, "the image draft is editable",
-              (value) => value.text.includes("box293.png") && value.editable && !value.pending);
+              (value) => value.text.includes("box294.png") && value.editable && !value.pending);
             const pointI = await pointIn(page, `${cardB} .rp-primary`);
             await page.mouse.move(pointI.x, pointI.y);
             await page.mouse.down();
@@ -383,7 +383,7 @@ export default {
               composerFocusedAtEnd: samples[samples.length - 1].focus === "composer",
               paneBecameActive: samples.some((sample) => sample.pane && sample.pane !== paneA),
             };
-            await shot(`293-${backend}-image`);
+            await shot(`294-${backend}-image`);
 
             // A deck run opened over Search returns to the Search input.
             await dispatchCommand(page, "app.search.toggle");
@@ -417,7 +417,7 @@ export default {
             await page.keyboard.type("Q");
             const query = await page.$eval(searchInput, (input) => input.value);
             assert.ok(query.includes("Q"), `typed text lands in the Search input, got ${JSON.stringify(query)}`);
-            await shot(`293-${backend}-search`);
+            await shot(`294-${backend}-search`);
             result.steps.search = { query };
             await dispatchCommand(page, "app.search.toggle");
 
@@ -426,7 +426,7 @@ export default {
             result.failure = String(error.message ?? error);
             failures.push(`${backend}: ${result.failure}`);
             result.final = await focusState(page, null).catch(() => null);
-            await shot(`293-${backend}-failure`).catch(() => {});
+            await shot(`294-${backend}-failure`).catch(() => {});
           } finally {
             page.off("pageerror", onError);
             if (opened) {
@@ -440,7 +440,7 @@ export default {
                 result.cleanupErrors.push(`terminal cleanup: ${error.message}`);
               });
             }
-            writeFileSync(join(ctx.outDir, `293-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
+            writeFileSync(join(ctx.outDir, `294-${backend}.json`), `${JSON.stringify(result, null, 2)}\n`);
           }
           if (result.passed && result.pageErrors.length) {
             result.passed = false;
@@ -448,7 +448,7 @@ export default {
           }
         }
       } finally {
-        await page.evaluate(() => window.__prompt293?.restore?.());
+        await page.evaluate(() => window.__prompt294?.restore?.());
       }
     } finally {
       await writeTerminalPrefs(page, token, { ghostty: original.ghosty });
