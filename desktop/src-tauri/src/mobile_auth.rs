@@ -375,7 +375,7 @@ mod ios {
         // provider until the completion or a shutdown cancel releases them.
         let allocated: Allocated<AnyObject> =
             unsafe { msg_send![class!(ASWebAuthenticationSession), alloc] };
-        if allocated.as_ptr().is_null() {
+        if Allocated::as_ptr(&allocated).is_null() {
             return Err("allocating the sign-in sheet".to_string());
         }
         let session: Retained<AnyObject> = unsafe {
