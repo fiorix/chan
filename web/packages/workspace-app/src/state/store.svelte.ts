@@ -170,9 +170,11 @@ import { basename, parentDir } from "./format";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import {
+  activeBrowserTab,
   allTerminalTabs,
   applyFsWritable,
   applyTerminalRoster,
+  bumpTabFocusPulse,
   clearTabError,
   findTeamWorkPendingLead,
   flagExternalChange,
@@ -5551,6 +5553,20 @@ export function fbActivateInstance(id: string): void {
 
 export function fbActiveInstanceId(): string | null {
   return browserFocus.instanceId;
+}
+
+/// Hand the command target to the focused pane's active file browser tab,
+/// called when the dock that held the target closes. The tab becomes the
+/// target through the existing activation path, so the selection commands
+/// read the tab's own selection, and the keyboard returns through the focus
+/// pulse the tab's surface already answers, as a pane press or tab switch
+/// does. With no file browser active, the target stays empty and only the
+/// pulse runs, which the terminal or the editor answers. A background pane
+/// never takes the keyboard: the pulse effects refuse while unfocused.
+export function handBrowserTargetToFocusedTab(): void {
+  const tab = activeBrowserTab();
+  if (tab) fbActivateInstance(`fb-tab-${tab.id}`);
+  bumpTabFocusPulse();
 }
 
 /// Set the selection to a single entry (a plain click / programmatic

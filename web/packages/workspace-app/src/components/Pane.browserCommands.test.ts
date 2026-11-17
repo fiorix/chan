@@ -13,17 +13,18 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm"
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).webglAddonModule());
 
-import { demoData, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
+import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { api } from "../api/client";
-import { fileTab } from "../__tests__/tabs";
+import { fileTab, terminalTab } from "../__tests__/tabs";
+import { xterm } from "../__tests__/xterm";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
 import {
-  browserSelection, browserSidePanes, fbActiveInstanceId, fbClipboard, fbClipboardClear,
+  browserSelection, browserSidePanes, disposeFbTreeInstance, fbActiveInstanceId, fbClipboard, fbClipboardClear,
   fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet,
 } from "../state/store.svelte";
 import {
-  activeBrowserTab, activeFileTab, cancelPaneMode, layout, paneMode, restoreLayout,
+  activeBrowserTab, activeFileTab, cancelPaneMode, enterPaneMode, layout, paneMode, restoreLayout,
   type BrowserTab, type LeafNode, type Tab,
 } from "../state/tabs.svelte";
 
@@ -56,6 +57,10 @@ afterEach(async () => {
   cancelPaneMode();
   fbClipboardClear();
   await unmountApp();
+  // A targeted dock hands its target to the focused pane's tab as it
+  // unmounts, so the handover can outlive the test: release the leftover.
+  const leftover = fbActiveInstanceId();
+  if (leftover) disposeFbTreeInstance(leftover);
   browserSelection.path = null;
   browserSelection.paths = [];
   vi.restoreAllMocks();
@@ -296,35 +301,176 @@ test("a detached selection does not give commands a surface", async () => {
   expect(fileOps.createFileOrDir).toHaveBeenCalledExactlyOnceWith("");
 });
 
-test("disposing the targeted dock does not fall back to the still-visible tab", async () => {
-  await layOut();
-  await focusRight("label");
-  await showDock();
-  await click(row(dock(), LEFT_PATH));
-  const paste = commandById("app.browser.pasteSelection")!;
-  expect(paste.available(commandContext())).toBe(false);
-  expect(commandUnavailableReason(paste, commandContext())).toBe("Needs a copied or cut selection");
-  await run("app.browser.copySelection");
-  expect(paste.available(commandContext())).toBe(true);
-  browserSidePanes.left = false;
-  await settleLong();
-  expect(activeBrowserTab()?.selected).toBe(RIGHT_PATH);
-  expect(fbActiveInstanceId()).toBeNull();
-  expect(commandSurfaceId()).toBeNull();
-  expect(commandById("app.browser.open")!.available(commandContext())).toBe(false);
-  const upload = commandById("app.browser.uploadSelection")!;
-  expect(upload.available(commandContext()), "Upload needs a browser to answer it").toBe(false);
-  expect(commandUnavailableReason(upload, commandContext())).toBe("Focus a file browser");
-  const pickers = document.querySelectorAll('input[type="file"]').length;
-  await upload.run();
-  await settleLong();
-  expect(document.querySelectorAll('input[type="file"]')).toHaveLength(pickers);
-  expect(paste.available(commandContext()), "Paste needs its recorded destination browser").toBe(false);
-  expect(commandUnavailableReason(paste, commandContext())).toBe("Focus a file browser");
-  const transfer = vi.spyOn(api, "fsTransfer");
-  await paste.run();
-  await settleLong();
-  expect(transfer).not.toHaveBeenCalled();
+describe("closing the targeted dock hands the target to the focused pane", () => {
+  async function targetDock(): Promise<void> {
+    await layOut();
+    await focusRight("label");
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+    expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+    await run("app.browser.copySelection");
+  }
+
+  async function expectHandedToTab(): Promise<void> {
+    expect(commandSurfaceId(), "the tab takes the target").toBe(`fb-tab-${RIGHT_TAB}`);
+    expect(fbActiveInstanceId()).toBe(`fb-tab-${RIGHT_TAB}`);
+    await expectCommandsTarget(`fb-tab-${RIGHT_TAB}`, RIGHT_PATH);
+    const transfer = vi.spyOn(api, "fsTransfer");
+    await run("app.browser.pasteSelection");
+    await settleLong();
+    expect(transfer, "paste lands in the tab's folder").toHaveBeenCalledWith("copy", [LEFT_PATH], "notes");
+    await vi.waitFor(() => expect(fbTreeInstance(`fb-tab-${RIGHT_TAB}`)?.selection.paths).toContain("notes/a.md"));
+  }
+
+  async function closeDockFromChord(): Promise<void> {
+    // Enter pane mode through the same function the Mod+. chord dispatches;
+    // the ">" keypress below is the chord under test, read straight off e.key.
+    enterPaneMode();
+    await settleLong();
+    expect(paneMode.active, "pane mode entered").toBe(true);
+    press({ key: ">", code: "Period", shiftKey: true });
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+  }
+
+  async function closeDockFromLauncher(): Promise<void> {
+    hostCommand("app.launcher.toggle");
+    await settleLong();
+    const dialog = document.querySelector('[role="dialog"][aria-label="Command launcher"]');
+    expect(dialog, "the launcher opened").toBeTruthy();
+    await vi.waitFor(() => {
+      const rows = [...dialog!.querySelectorAll(".deck-result")];
+      if (!rows.some((row) => row.querySelector(".deck-result-title")?.textContent === "Left file browser dock")) {
+        throw new Error("no dock row yet");
+      }
+    });
+    const target = [...dialog!.querySelectorAll<HTMLElement>(".deck-result")].find(
+      (row) => row.querySelector(".deck-result-title")?.textContent === "Left file browser dock",
+    )!;
+    target.click();
+    await settleLong();
+    if (document.querySelector('[role="dialog"][aria-label="Command launcher"]')) {
+      press({ key: "Escape", code: "Escape" });
+      await settleLong();
+    }
+    expect(document.querySelector('[role="dialog"][aria-label="Command launcher"]'), "launcher closed").toBeNull();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+  }
+
+  async function closeDockFromMenu(): Promise<void> {
+    await click(element('.browser.dock .browser-toolbar button[aria-label="Menu"]'));
+    const menuRow = [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
+      (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Left file browser dock",
+    );
+    expect(menuRow, "the dock menu names its toggle").toBeTruthy();
+    menuRow!.click();
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+  }
+
+  test("dock chord", async () => {
+    await targetDock();
+    await closeDockFromChord();
+    await expectHandedToTab();
+  });
+
+  test("launcher toggle", async () => {
+    await targetDock();
+    await closeDockFromLauncher();
+    await expectHandedToTab();
+  });
+
+  test("dock menu row", async () => {
+    await targetDock();
+    await closeDockFromMenu();
+    await expectHandedToTab();
+  });
+
+  test("terminal active in the focused pane: the target is empty", async () => {
+    await layOut([terminalTab({ id: "term-1" })]);
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+    expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+    await closeDockFromMenu();
+    expect(activeBrowserTab()).toBeNull();
+    expect(fbActiveInstanceId(), "no fallback without a file browser tab").toBeNull();
+    expect(commandSurfaceId()).toBeNull();
+    const upload = commandById("app.browser.uploadSelection")!;
+    expect(upload.available(commandContext())).toBe(false);
+    // Not on a browser surface: the placement reason names the tab the
+    // command needs, before the command's own reason is even read.
+    expect(commandUnavailableReason(upload, commandContext())).toBe("Needs a file browser tab");
+  });
+
+  test("the keyboard returns to the tab's tree", async () => {
+    await targetDock();
+    // The menu path, not the chord: the chord's commit clones the layout and
+    // the tab remounts into focus on its own, while the menu path leaves the
+    // return to the handover's pulse alone.
+    await closeDockFromMenu();
+    expect(document.activeElement === document.body, "focus left the body").toBe(false);
+    expect(element(".browser", pane(RIGHT)).contains(document.activeElement), "focus is inside the tab's tree").toBe(true);
+  });
+
+  test("the keyboard returns to the terminal's input", async () => {
+    xterm.textareaFocus = true;
+    try {
+      await layOut([terminalTab({ id: "term-1" })]);
+      await showDock();
+      await click(row(dock(), LEFT_PATH));
+      expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+      await closeDockFromMenu();
+      expect(commandSurfaceId()).toBeNull();
+      const textarea = xterm.terminals.at(-1)?.textarea;
+      expect(textarea, "the terminal opened a textarea").toBeTruthy();
+      await vi.waitFor(() => expect(document.activeElement).toBe(textarea));
+    } finally {
+      xterm.textareaFocus = false;
+    }
+  });
+
+  test("a dock closing while another surface is the target changes nothing", async () => {
+    await layOut();
+    await focusRight("label");
+    await click(row(browser(RIGHT), RIGHT_PATH));
+    expect(fbActiveInstanceId(), "the tab holds the target").toBe(`fb-tab-${RIGHT_TAB}`);
+    await showDock();
+    await click(row(browser(RIGHT), RIGHT_PATH));
+    expect(fbActiveInstanceId(), "showing the dock moves nothing").toBe(`fb-tab-${RIGHT_TAB}`);
+    await closeDockFromLauncher();
+    expect(fbActiveInstanceId(), "the target stays").toBe(`fb-tab-${RIGHT_TAB}`);
+    expect(commandSurfaceId()).toBe(`fb-tab-${RIGHT_TAB}`);
+    expect(fbTreeInstance(`fb-tab-${RIGHT_TAB}`)?.selection.path).toBe(RIGHT_PATH);
+  });
+
+  test("a paste in flight from the dock lands where it was aimed", async () => {
+    await layOut();
+    await focusRight("label");
+    await showDock();
+    await click(row(dock(), LEFT_PATH));
+    const original = fbTreeInstance("fb-dock-left")!.selection;
+    const transfer = api.fsTransfer;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const request = vi.spyOn(api, "fsTransfer").mockImplementation(async (...args) => {
+      await held;
+      return transfer(...args);
+    });
+    fbClipboardSet("copy", [RIGHT_PATH]);
+    const paste = commandById("app.browser.pasteSelection")!;
+    expect(paste.available(commandContext()), "paste is offered").toBe(true);
+    try {
+      void paste.run();
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+      expect(request).toHaveBeenCalledWith("copy", [RIGHT_PATH], "docs");
+      await closeDockFromLauncher();
+      expect(browserSidePanes.left, "the targeted dock closed mid-flight").toBe(false);
+    } finally {
+      release();
+    }
+    await vi.waitFor(() => expect(original.path).toBe("docs/b.md"));
+    expect(commandSurfaceId(), "the focused pane's tab takes the target").toBe(`fb-tab-${RIGHT_TAB}`);
+  });
 });
 
 test("pressing a browser pane's Hybrid Nav preview does not activate an unmounted surface", async () => {
