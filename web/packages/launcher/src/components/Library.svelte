@@ -77,7 +77,7 @@
     type TmuxControlRow,
     type WorkspaceNode,
   } from "../lib/machineTree";
-  import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
+  import { readOnly, hasDesktopBridge, hostOs, isIOS } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import { contradictingState, powerWord, unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, TmuxWindowEntry, WorkspaceEntry } from "../api/library";
@@ -586,15 +586,17 @@
         <div class="card-actions machine-actions">
           {@render windowCount(machineWindowCount(node))}
           {#if !readOnly}
-            <button
-              class="icon-btn"
-              type="button"
-              title="New terminal (t)"
-              data-deck-key="t"
-              aria-label="New local terminal"
-              onclick={() => run(newTerminal())}>
-              <SquareTerminal size={16} />
-            </button>
+            {#if !isIOS}
+              <button
+                class="icon-btn"
+                type="button"
+                title="New terminal (t)"
+                data-deck-key="t"
+                aria-label="New local terminal"
+                onclick={() => run(newTerminal())}>
+                <SquareTerminal size={16} />
+              </button>
+            {/if}
             <button
               class="icon-btn"
               type="button"
@@ -704,7 +706,7 @@
         {/if}
         <div class="card-actions machine-actions">
           {@render windowCount(machineWindowCount(node))}
-          {#if hasDesktopBridge && connected(ds)}
+          {#if hasDesktopBridge && connected(ds) && !isIOS}
             <button
               class="icon-btn"
               type="button"

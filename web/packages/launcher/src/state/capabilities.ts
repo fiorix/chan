@@ -75,3 +75,22 @@ export const hostOs =
     : (document
         .querySelector('meta[name="chan-launcher-host-os"]')
         ?.getAttribute("content") ?? "");
+
+/** True for an iOS WebView user agent: the iPhone/iPad/iPod tokens, or an
+ * iPad reporting the desktop UA (MacIntel platform with touch points).
+ * Desktop Safari/Chrome/Firefox and jsdom read false. */
+export function isIOSUserAgent(
+  ua: string | null | undefined,
+  platform = "",
+  maxTouchPoints = 0,
+): boolean {
+  if (typeof ua === "string" && /iPhone|iPad|iPod/.test(ua)) return true;
+  return platform === "MacIntel" && maxTouchPoints > 1;
+}
+
+/** The single iOS webview: no window management, so no terminal creation
+ * anywhere. Read once at boot like the injected metas. */
+export const isIOS: boolean =
+  typeof navigator === "undefined"
+    ? false
+    : isIOSUserAgent(navigator.userAgent, navigator.platform, navigator.maxTouchPoints);
