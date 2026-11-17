@@ -9,7 +9,7 @@
 # Used by: make linux-chan-desktop DISTRO=ubuntu (root Makefile).
 #
 # tauri-cli is NOT baked here: desktop/Makefile installs it per-build into
-# the seeded repo's target/, so it tracks the repo's pin instead of going
+# the seeded repo's .build-tools/, so it tracks the repo's pin instead of going
 # stale in the rootfs. The pinned compiler (rust-toolchain.toml) likewise
 # auto-installs on the first cargo call against the seeded repo; baking the
 # rustup default keeps cargo ready without coupling the rootfs to the pin.
