@@ -354,6 +354,11 @@ export class SelectionManager {
 
     // Pointer down - start selection or clear existing
     canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+      // A touch drag is no selection gesture of its own: before this
+      // stage a touch drag never selected, and touch selection stays a
+      // design of its own. Only the primary pointer of a mouse or pen
+      // press starts a drag.
+      if (e.pointerType === 'touch' || e.isPrimary === false) return;
       if (e.button === 0) {
         // Primary button only
 
@@ -389,8 +394,9 @@ export class SelectionManager {
     });
 
     // A compat-mouse press focuses the parent too, for dispatchers that
-    // never fire pointer events. After a real pointer press this repeats
-    // the focus above and changes nothing.
+    // never fire pointer events. After a real pointer press the widget
+    // focuses the textarea for the keyboard first, so this listener moves
+    // the keyboard back to the parent. It is load-bearing, not a leftover.
     canvas.addEventListener('mousedown', (e: MouseEvent) => {
       if (e.button === 0) {
         if (canvas.parentElement) {
@@ -403,6 +409,15 @@ export class SelectionManager {
     // carries positions outside the canvas, clamped to it by pixelToCell.
     canvas.addEventListener('pointermove', (e: PointerEvent) => {
       if (this.isSelecting) {
+        // A move with no button pressed ends a drag whose release the
+        // canvas never saw (its element detached, capture lost without
+        // the event). The press is stale, so the drag is dropped rather
+        // than kept selecting.
+        if ((e.buttons & 1) === 0) {
+          this.clearSelection();
+          endDrag(false);
+          return;
+        }
         const rect = canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
@@ -424,7 +439,11 @@ export class SelectionManager {
 
         const cell = this.pixelToCell(x, y);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
-        this.selectionEnd = { col: cell.col, absoluteRow };
+        // Past an edge the clamped cell keeps the pointer's column, which
+        // reads as a sliver: above the canvas the drag starts at column
+        // zero, past the bottom it runs to the last column.
+        const col = y < 0 ? 0 : y > rect.height ? this.terminal.cols - 1 : cell.col;
+        this.selectionEnd = { col, absoluteRow };
         this.requestRender();
 
         // Auto-scroll at the canvas edges and past them, where the
@@ -585,10 +604,9 @@ export class SelectionManager {
 
     canvas.addEventListener('contextmenu', this.boundContextMenuHandler);
 
-    // A click outside the terminal element keeps the selection: the
-    // selection is also find's active-match highlight, and clearing it on
-    // a click in the find bar took find's highlight. A press inside the
-    // canvas starts a new drag and clears the old selection there.
+    // A click outside the terminal element keeps the selection, which
+    // find reads as its active-match highlight. A press inside the canvas
+    // starts a new drag and clears the old selection there.
   }
 
   /**
@@ -625,8 +643,8 @@ export class SelectionManager {
       }
 
       // Scroll the terminal to reveal more content in the direction user is
-      // dragging, through the viewport API: unlike the unwired write it
-      // cancels a smooth scroll and keeps the target with the view. A drag
+      // dragging, through the viewport API, which cancels a smooth scroll
+      // and keeps the target with the view. A drag
       // upward (direction -1) grows the offset, a downward one shrinks it.
       this.terminal.viewport.scrollBy(-SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection);
 

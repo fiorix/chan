@@ -422,6 +422,7 @@ export class Terminal {
           const rect = canvas.getBoundingClientRect();
           return { left: rect.left, top: rect.top };
         },
+        getGridDimensions: () => ({ cols: this.cols, rows: this.rows }),
       };
 
       // Create input handler
@@ -490,6 +491,10 @@ export class Terminal {
       // listener is needed.
       parent.addEventListener('pointerup', this.handlePointerUp);
       parent.addEventListener('pointercancel', this.handlePointerUp);
+      // The thumb drag's moves arrive here: a cancelled pointerdown
+      // suppresses the compat mousemove, but capture retargets pointermove.
+      parent.addEventListener('pointermove', this.handlePointerMove);
+      parent.addEventListener('lostpointercapture', this.handlePointerUp);
 
       // Setup wheel event handling for scrolling (Phase 2)
       // Use capture phase to ensure we get the event before browser scrolling
@@ -1174,6 +1179,8 @@ export class Terminal {
       this.element.removeEventListener('click', this.handleClick);
       this.element.removeEventListener('pointerup', this.handlePointerUp);
       this.element.removeEventListener('pointercancel', this.handlePointerUp);
+      this.element.removeEventListener('pointermove', this.handlePointerMove);
+      this.element.removeEventListener('lostpointercapture', this.handlePointerUp);
 
       // Remove contenteditable and accessibility attributes added in open()
       this.element.removeAttribute('contenteditable');
@@ -1249,6 +1256,22 @@ export class Terminal {
         this.processMouseMove(pending);
       }
     }, 16);
+  };
+
+  /**
+   * Handle pointer moves for the scrollbar thumb drag. The strip press
+   * cancels its pointerdown, which suppresses the compat mousemove, so
+   * the drag reads pointermove here instead; capture retargets the moves
+   * to the parent. A move with no button pressed ends a drag whose
+   * release the element never saw.
+   */
+  private handlePointerMove = (e: PointerEvent): void => {
+    if (!this.isDraggingScrollbar) return;
+    if ((e.buttons & 1) === 0) {
+      this.handlePointerUp();
+      return;
+    }
+    this.processScrollbarDrag(e);
   };
 
   /**
@@ -1527,6 +1550,9 @@ export class Terminal {
    */
   private handlePointerDown = (e: PointerEvent): void => {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
+    // The thumb drag is a left-press gesture; any other button leaves
+    // the strip alone, as the base did without capture.
+    if (e.button !== 0) return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
     if (scrollbackLength === 0) return; // No scrollbar if no scrollback
@@ -1609,7 +1635,7 @@ export class Terminal {
    * last processed position through the viewport API, so rows the write
    * path anchored while the thumb is held are not undone by the next move.
    */
-  private processScrollbarDrag(e: MouseEvent): void {
+  private processScrollbarDrag(e: PointerEvent | MouseEvent): void {
     if (!this.canvas || !this.renderer || !this.wasmTerm || this.scrollbarDragLastY === null)
       return;
 

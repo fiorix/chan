@@ -169,6 +169,8 @@ export interface MouseTrackingConfig {
   getCellDimensions: () => { width: number; height: number };
   /** Get canvas/container offset for accurate position calculation */
   getCanvasOffset: () => { left: number; top: number };
+  /** Get grid dimensions for clamping reports, when the embedder knows them */
+  getGridDimensions?: () => { cols: number; rows: number };
 }
 
 export class InputHandler {
@@ -735,10 +737,13 @@ export class InputHandler {
     const col = Math.floor(x / dims.width) + 1;
     const row = Math.floor(y / dims.height) + 1;
 
-    // Clamp to valid range (at least 1)
+    // Clamp to the grid: a captured drag retargets moves from outside
+    // the canvas to the container, and without the upper clamp those
+    // positions report columns and rows past the grid.
+    const grid = this.mouseConfig.getGridDimensions?.();
     return {
-      col: Math.max(1, col),
-      row: Math.max(1, row),
+      col: grid ? Math.max(1, Math.min(col, grid.cols)) : Math.max(1, col),
+      row: grid ? Math.max(1, Math.min(row, grid.rows)) : Math.max(1, row),
     };
   }
 

@@ -1092,3 +1092,48 @@ describe('InputHandler', () => {
     });
   });
 });
+
+describe('mouse tracking reports', () => {
+  let grid: GhosttyVt;
+
+  beforeAll(async () => {
+    const module = await WebAssembly.compile(readFileSync('vendor/ghostty-vt/ghostty-vt.wasm'));
+    grid = new GhosttyVt(await WebAssembly.instantiate(module, {}));
+  });
+
+  function trackedHandler(onData: (data: string) => void) {
+    const container = createMockContainer();
+    const handler = new InputHandler(
+      grid,
+      container as any,
+      onData,
+      vi.fn(),
+      undefined,
+      undefined,
+      (mode: number) => mode === 1002,
+      undefined,
+      undefined,
+      {
+        hasMouseTracking: () => true,
+        hasSgrMouseMode: () => true,
+        getCellDimensions: () => ({ width: 8, height: 16 }),
+        getCanvasOffset: () => ({ left: 0, top: 0 }),
+        getGridDimensions: () => ({ cols: 80, rows: 24 }),
+      }
+    );
+    return { handler, container };
+  }
+
+  function fire(container: ReturnType<typeof createMockContainer>, type: string, init: Record<string, unknown>) {
+    for (const handler of container._listeners.get(type) ?? []) handler({ preventDefault() {}, stopPropagation() {}, ...init } as any);
+  }
+
+  test('a drag past the grid reports the clamped cell, not past it', () => {
+    const received: string[] = [];
+    const { container } = trackedHandler((data) => received.push(data));
+    fire(container, 'mousedown', { button: 0, buttons: 1, clientX: 41, clientY: 17 });
+    fire(container, 'mousemove', { button: 0, buttons: 1, clientX: 5000, clientY: 5000 });
+    // Button 32 is motion with the left button held; the grid is 80 by 24.
+    expect(received.at(-1)).toBe('\x1b[<32;80;24M');
+  });
+});
