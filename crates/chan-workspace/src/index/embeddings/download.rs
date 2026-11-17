@@ -510,23 +510,13 @@ fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
 fn publish_ref(repo: &Path, commit: &str) -> io::Result<()> {
     let refs = repo.join("refs");
     std::fs::create_dir_all(&refs)?;
-    // Normal file attributes survive std's rename; tempfile's persist clears
-    // its temporary attribute but cannot replace an open reader on Windows.
-    let mut temporary = tempfile::Builder::new().make_in(&refs, |path| {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(path)
-    })?;
+    // The temporary carries tempfile's temporary attribute on Windows; the
+    // helper clears it on publish, so the reference keeps normal attributes.
+    let builder = tempfile::Builder::new();
+    let mut temporary = builder.tempfile_in(&refs)?;
     temporary.write_all(commit.as_bytes())?;
     temporary.as_file().sync_all()?;
-    let mut temporary = temporary.into_temp_path();
-    std::fs::rename(&temporary, refs.join("main"))?;
-    temporary.disable_cleanup(true);
+    crate::fs_ops::persist_tempfile(temporary, &refs.join("main"))?;
     Ok(())
 }
 

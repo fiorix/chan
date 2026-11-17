@@ -957,9 +957,32 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| ChanError::from(e.error))?;
+    persist_tempfile(tmp, path)?;
     apply_metadata(path, preserved);
     sync_dir(dir)?;
+    Ok(())
+}
+
+/// Publish an already-synced `tempfile` at `target` with `std::fs::rename`.
+///
+/// The helper syncs nothing itself: a caller that needs the publication
+/// durable syncs the file before publishing and fsyncs the parent
+/// directory after. `atomic_write` and `atomic_file::write` do both;
+/// `publish_ref` syncs the file only. The temporary must live in the
+/// target's directory, as atomicity rests on the rename staying on one
+/// filesystem. On Windows the rename replaces an open target only when
+/// the open handle shares delete and the filesystem supports the
+/// POSIX-style rename; otherwise the rename fails and the target is left
+/// as it was. tempfile makes its paths absolute at creation, so re-arming
+/// cleanup cannot fail for a missing current directory. `keep` clears the
+/// temporary attribute tempfile sets on Windows, so the published file
+/// carries normal attributes. On failure the re-armed temporary is removed
+/// by its drop; on success cleanup is disabled after the move.
+pub fn persist_tempfile(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    let kept = tmp.into_temp_path().keep()?;
+    let mut staged = tempfile::TempPath::try_from_path(kept)?;
+    std::fs::rename(&staged, target)?;
+    staged.disable_cleanup(true);
     Ok(())
 }
 
@@ -2325,6 +2348,123 @@ mod tests {
             Some(&b"hello"[..]),
             "xattr lost on overwrite"
         );
+    }
+
+    #[test]
+    fn persist_tempfile_publishes_bytes_and_cleans_up() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let target = dir.join("out.bin");
+        let mut staged = tempfile::Builder::new()
+            .prefix(atomic_write_temp::PREFIX)
+            .rand_bytes(8)
+            .tempfile_in(dir)
+            .unwrap();
+        use std::io::Write;
+        staged.write_all(b"published").unwrap();
+        staged.as_file().sync_all().unwrap();
+        let staged_path = staged.path().to_path_buf();
+        persist_tempfile(staged, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published");
+        assert!(!staged_path.exists(), "temporary left behind after publish");
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .all(|entry| !is_atomic_write_temp_name(
+                    entry.unwrap().file_name().to_str().unwrap_or("")
+                )),
+            "temporary left behind after publish"
+        );
+    }
+
+    #[test]
+    fn persist_tempfile_failure_removes_the_temporary() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("file"), b"not a dir").unwrap();
+        let target = dir.join("file").join("out.bin");
+        let mut staged = tempfile::Builder::new()
+            .prefix(atomic_write_temp::PREFIX)
+            .rand_bytes(8)
+            .tempfile_in(dir)
+            .unwrap();
+        use std::io::Write;
+        staged.write_all(b"unpublished").unwrap();
+        staged.as_file().sync_all().unwrap();
+        let staged_path = staged.path().to_path_buf();
+        assert!(
+            persist_tempfile(staged, &target).is_err(),
+            "rename into a file-directory unexpectedly succeeded"
+        );
+        assert!(!target.exists(), "failed publish left a target");
+        assert!(
+            !staged_path.exists(),
+            "temporary left behind after failed publish"
+        );
+    }
+
+    #[test]
+    fn atomic_write_failure_leaves_no_temporaries() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let target = dir.join("out");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), b"kept").unwrap();
+        // Renaming a file over a non-empty directory fails on every
+        // platform, after the temporary is written and synced.
+        let result = atomic_write(&target, b"unpublished");
+        assert!(
+            result.is_err(),
+            "write over a directory unexpectedly published"
+        );
+        assert_eq!(
+            std::fs::read(target.join("keep")).unwrap(),
+            b"kept",
+            "failed write disturbed the directory's content"
+        );
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .all(|entry| !is_atomic_write_temp_name(
+                    entry.unwrap().file_name().to_str().unwrap_or("")
+                )),
+            "temporary left behind after failed write"
+        );
+    }
+
+    /// A reader holding the old file open keeps the old bytes while a fresh
+    /// open sees the replacement. The open handle shares delete access, so
+    /// the rename replaces the target instead of failing on it.
+    #[test]
+    fn atomic_write_replaces_a_file_open_by_another_handle() {
+        use std::io::Read;
+
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("shared.bin");
+        std::fs::write(&target, b"old-bytes").unwrap();
+        let mut reader = std::fs::File::open(&target).unwrap();
+        atomic_write(&target, b"new-bytes").unwrap();
+        let mut old = Vec::new();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new-bytes",
+            "fresh open did not see the replacement"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY;
+            let attributes = std::fs::metadata(&target)
+                .expect("stat published file")
+                .file_attributes();
+            assert_eq!(
+                attributes & FILE_ATTRIBUTE_TEMPORARY,
+                0,
+                "published file kept the temporary attribute"
+            );
+        }
     }
 
     #[test]

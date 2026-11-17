@@ -70,10 +70,13 @@ CHAN_SERVER_WINDOWS_TESTS := \
 	handoff::tests::a_claim_lock_that_is_a_symlink_is_unavailable \
 	handoff::tests::a_claim_directory_that_is_a_junction_is_unavailable \
 	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
-	devserver_handoff::tests::listener_round_trip_registered_pipe
+	devserver_handoff::tests::listener_round_trip_registered_pipe \
+	atomic_file::tests::write_replaces_a_file_open_by_another_handle \
+	atomic_file::tests::write_onto_a_directory_preserves_its_entries_and_cleans_up
 
 # The chan-workspace tests that drive native rename races, model cache
-# publication and recovery, and model download TLS and proxy handling.
+# publication and recovery, the open-reader replacement and published
+# attributes, and model download TLS and proxy handling.
 CHAN_WORKSPACE_WINDOWS_TESTS := \
 	no_replace::tests::the_native_arm_refuses_an_existing_file_or_empty_directory \
 	no_replace::tests::the_fallback_arm_refuses_an_existing_file_or_empty_directory \
@@ -139,7 +142,11 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tls_tests::https_metadata_redirect_refuses_http_before_connecting \
 	index::embeddings::download::tls_tests::https_payload_redirect_refuses_http_before_connecting \
 	index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error \
-	index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload
+	index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload \
+	fs_ops::tests::atomic_write_replaces_a_file_open_by_another_handle \
+	fs_ops::tests::atomic_write_failure_leaves_no_temporaries \
+	fs_ops::tests::persist_tempfile_failure_removes_the_temporary \
+	workspace::tests::write_bytes_replaces_a_file_open_by_another_handle
 
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a
 # macOS workstation can produce Linux bundles. DISTRO selects the rootfs +
@@ -642,10 +649,14 @@ ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS pack
 	# paths, chan-desktop includes
 	# the registry-backed user-PATH assertion when CHAN_TEST_REAL_USER_PATH arms
 	# it, and chan-server covers the tenant builder's named-pipe control socket,
-	# the handoff named-pipe path and upgrade cases, and the devserver named-pipe
-	# path and registration round trip. chan-workspace runs only the named
-	# no-replace rename tests, which exercise the MoveFileExW arm. The remaining
-	# chan-server, chan-workspace, and tunnel harnesses stay
+	# the handoff named-pipe path and upgrade cases, the devserver named-pipe
+	# path and registration round trip, and the atomic file replacement of an
+	# open file. chan-workspace runs its named selection, which covers the
+	# native no-replace rename races, model cache publication and recovery,
+	# the open-reader replacement and published attributes, and model
+	# download TLS and proxy handling. The resolve-and-not-ignored gate
+	# holds for the server target; the workspace target resolves names
+	# only. Tests outside the two named selections stay
 	# outside this Windows-specific subset: they are Unix-only, exercise Unix
 	# facilities such as POSIX shells, Unix-domain sockets, `/tmp` path semantics,
 	# or real PTYs, or have no Windows transport arm to exercise.
