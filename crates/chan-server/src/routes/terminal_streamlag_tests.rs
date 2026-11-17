@@ -716,8 +716,9 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // Socket B drains everything the program writes, prelude replay included.
     // A stalled drain is an idle transport: read the socket with the hang
     // guard directly, so a run where the program is never released fails
-    // with its own name instead of a generic read timeout.
-    let drain_hang = std::time::Duration::from_secs(200);
+    // with its own name instead of a generic read timeout. Same 60 s as
+    // the elapsed hang guard below.
+    let drain_hang = std::time::Duration::from_secs(60);
     loop {
         // The marker ends the stream, so only the tail can complete the
         // wait; rescanning the whole buffer per frame is quadratic.
@@ -739,22 +740,19 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
             ClientMessage::Text(text) => {
                 let frame: Value = serde_json::from_str(&text).expect("control JSON");
                 assert_ne!(frame["type"], "error", "live view error frame: {frame}");
-                match frame["type"].as_str() {
-                    // The draining view may be released and recover without
-                    // loss on a slow schedule; only loss or a new generation
-                    // fails it here, and the byte comparison below judges.
-                    Some("session") => {
-                        assert_eq!(
-                            frame["generation"], b_session["generation"],
-                            "draining view changed incarnation: {frame}"
-                        );
-                        assert_eq!(
-                            frame["missed_bytes"].as_u64(),
-                            Some(0),
-                            "draining view lost bytes: {frame}"
-                        );
-                    }
-                    _ => {}
+                // The draining view may be released and recover without
+                // loss on a slow schedule; only loss or a new generation
+                // fails it here, and the byte comparison below judges.
+                if let Some("session") = frame["type"].as_str() {
+                    assert_eq!(
+                        frame["generation"], b_session["generation"],
+                        "draining view changed incarnation: {frame}"
+                    );
+                    assert_eq!(
+                        frame["missed_bytes"].as_u64(),
+                        Some(0),
+                        "draining view lost bytes: {frame}"
+                    );
                 }
             }
             other => panic!("live view ended before the flood: {other:?}"),
@@ -765,12 +763,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
-    // Hang guard, not a contract bound: the drain's duration is the
-    // machine's, through small debug buffers. 200 s is an order of
-    // magnitude above the worst measured run (20.40 s total, 18.05 s
-    // elapsed over fifty slot and suite runs), so only a hang reaches it.
+    // Hang guard, not a contract bound: ten times the worst measured
+    // elapsed, 5.42 s over the 40-run series in streamlag-4/series-40c.log
+    // (host load 8 to 18 throughout), rounded up, so only a hang reaches it.
     assert!(
-        elapsed <= std::time::Duration::from_secs(200),
+        elapsed <= std::time::Duration::from_secs(60),
         "the drain did not complete within the hang guard: {elapsed:?}"
     );
     assert!(
@@ -811,10 +808,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     }
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
-    // is the machine's like the drain's, so its bound is the same hang
-    // guard, not a contract bound.
+    // is the machine's like the drain's: a hang guard at ten times the
+    // worst measured resume, 10.3 ms over the same 40-run series, rounded
+    // up, not a contract bound.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_secs(200);
+    let resume_bound = std::time::Duration::from_millis(150);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
