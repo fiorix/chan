@@ -27,6 +27,8 @@ import StandInSurface, { type SurfaceGrab } from "./CommandLauncher.testSurface.
 import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import BubbleOverlay from "./BubbleOverlay.svelte";
+import SearchPanel from "./SearchPanel.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { allCommands, registerCommands } from "../state/commands";
@@ -36,10 +38,12 @@ import {
   closeCommandLauncher,
   launcherPanel,
   openCommandLauncher,
+  overlayStack,
   pathPromptState,
   promptState,
   resolvePathPrompt,
   resolvePrompt,
+  searchPanel,
   uiPrompt,
 } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
@@ -584,5 +588,81 @@ describe("the keyboard while the launcher is open", () => {
     document.documentElement.setAttribute("data-launcher-shown", "");
     await runFromLauncher(target, "Stand-in prompt");
     expect(document.activeElement).toBe(field());
+  });
+});
+
+describe("the launcher's return under another overlay", () => {
+  // jsdom has no ResizeObserver; the search panel's hits effect needs the
+  // stub the terminal tests install with their DOM helper.
+  const realResizeObserver = globalThis.ResizeObserver;
+  beforeEach(() => {
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+  afterEach(() => {
+    globalThis.ResizeObserver = realResizeObserver;
+  });
+  test("a run that opens nothing returns the keyboard to the Search input", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      await runFromLauncher(target, "Toggle nothing");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(document.activeElement, "focus returns to the Search input").toBe(input);
+    } finally {
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
+  });
+
+  test("a run that settles while the Computers launcher is shown moves no focus", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+      await flush();
+      await runFromLauncher(target, "Toggle nothing");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(document.activeElement, "focus stays on the body while the launcher covers the window").toBe(document.body);
+    } finally {
+      document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
   });
 });

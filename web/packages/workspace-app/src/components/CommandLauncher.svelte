@@ -62,6 +62,7 @@
     launcherDraft,
     openSettings,
     persistLauncherDraft,
+    topOverlay,
   } from "../state/store.svelte";
   import {
     SURFACE_LABELS,
@@ -87,7 +88,7 @@
     activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { keyboardOwned } from "../state/focusGuard.svelte";
+  import { keyboardOwned, launcherShownOverWindow } from "../state/focusGuard.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -273,6 +274,23 @@
 
   /// The window as the catalog builders read it. Read inside each derived
   /// list, so the catalog and the settings index are as they stand now.
+  /// Overlay ids to the panel labels the top overlay is found by. Kept
+  /// next to the predicate so a label rename fails the deck tests, not
+  /// silently.
+  const TOP_OVERLAY_PANELS = {
+    launcher: "Command launcher",
+    search: "Search",
+    settings: "Settings",
+  } as const;
+
+  /// Whether the heir sits inside the current top overlay's own panel.
+  function topOverlayPanelContains(heir: Element): boolean {
+    const top = topOverlay();
+    if (!top) return false;
+    const panel = document.querySelector('[role="dialog"][aria-label="' + TOP_OVERLAY_PANELS[top] + '"]');
+    return !!panel?.contains(heir);
+  }
+
   function deckSource(): DeckSource {
     return {
       ctx,
@@ -853,12 +871,16 @@
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
   mayTakeFocus={(heir) => {
-    // A run that opens nothing hands the keyboard back to whatever asked
-    // for it under the open deck, even inside another overlay's panel: a
-    // dialog's button or an overlay's field owns the keyboard where it is.
-    // Anything else, and no heir at all, goes through the rule, which still
-    // refuses the terminal and its composer while an owner holds them.
-    if (heir && heir.closest('[role="dialog"], [role="alertdialog"], .survey-card')) return true;
+    // The Computers launcher owns the keyboard outright: a focus change in
+    // the page while it shows would take the window's first responder back
+    // (the launcher reads the DOM attribute directly, so the check is
+    // fresh). Otherwise a run hands the keyboard back when the heir owns
+    // it where it is: a modal dialog, a survey card, or the top overlay's
+    // own panel. Anything else, and no heir at all, goes through the
+    // shared rule, which still refuses the terminal and its composer
+    // while an owner holds them.
+    if (launcherShownOverWindow()) return false;
+    if (heir && (heir.closest("[aria-modal=\"true\"], .survey-card") || topOverlayPanelContains(heir))) return true;
     return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
   }}
   {toggleChord}

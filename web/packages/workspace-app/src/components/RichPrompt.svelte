@@ -155,9 +155,7 @@
   // The editor takes the keyboard by itself while `autoFocus` holds: as it
   // mounts, and when its text changes from here, as a delivery empties it.
   // Every owner is reactive state, so the rule re-reads on each change.
-  const editorAutoFocus = $derived.by(() => {
-    return focused && !refocusRefused(tab.id);
-  });
+  const editorAutoFocus = $derived(focused && !refocusRefused(tab.id));
   let loaded = $state(false);
   let mounting = $state(false);
   let mountError = $state<string | null>(null);
@@ -1037,16 +1035,11 @@
         {secondaryAction.label}
       </button>
     {/if}
-    <!-- No pointerdown guard on the submit: in an unfocused pane the press
-         activates the pane first, and the submit then brings the keyboard
-         back, as it always has. -->
-    <!-- No pointerdown guard on the submit: in an unfocused pane the press
-         activates the pane first, and the submit then brings the keyboard
-         back, as it always has. -->
     <button
       type="button"
       class="rp-action rp-primary"
       disabled={primaryAction.disabled}
+      onpointerdown={keepComposerFocus}
       onclick={onPrimaryClick}
     >
       {primaryAction.label}
