@@ -36,11 +36,13 @@ import {
 import { GhosttyViewportController } from "../terminal/ghosttyViewport";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
 import { terminalPreferences } from "../__tests__/standalone";
+import { FRESH_SHELL_ALT_EXIT, FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
 import {
   attach,
   installTerminalDom,
   output,
   receive,
+  resetClearsMode,
   resetTerminals,
   seatTerminals,
   sentFrames,
@@ -180,23 +182,28 @@ describe("a Ghostty tab reconnecting to a session", () => {
       spy.mockClear();
       const written = () =>
         spy.mock.calls.map(([data]) => (typeof data === "string" ? data : new TextDecoder().decode(data))).join("");
-      const clears = (bytes: string) =>
-        bytes.split("\x1b[?").slice(1).some((rest) => {
-          const end = rest.search(/[^0-9;]/);
-          return end !== -1 && rest[end] === "l" && rest.slice(0, end).split(";").includes("1001");
-        });
 
       const resumed = await reconnect(socket, SESSION);
       await receive(resumed, { type: "ready", cols: 80, rows: 24 });
-      expect(clears(written()), "a same-id resume writes no reset").toBe(false);
+      expect(resetClearsMode(written(), 1001), "a same-id resume writes no reset").toBe(false);
 
       const replaced = await reconnect(resumed, "sess-fresh");
       await receive(replaced, { type: "ready", cols: 80, rows: 24 });
-      expect(clears(written()), "the fresh shell's reset clears highlight tracking").toBe(true);
+      expect(resetClearsMode(written(), 1001), "the fresh shell's reset clears highlight tracking").toBe(true);
       expect(ghostty.terminals).toEqual([term]);
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test("ties the mounted case list to the reset list", () => {
+    // The cases above stay literal so a dropped mode goes red at its own
+    // case; this ties that literal list to the reset list. Ghostty's core
+    // keeps no highlight-tracking state, so 1001 has the byte-reading case
+    // above instead, and the alternate-screen exit rides alongside.
+    expect(new Set([1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 1049])).toEqual(
+      new Set([...FRESH_SHELL_RESET_MODES.filter((mode) => mode !== 1001), FRESH_SHELL_ALT_EXIT]),
+    );
   });
 });
 

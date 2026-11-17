@@ -1797,7 +1797,9 @@
         // no ring bytes were lost: then the replay chunks that follow are just
         // the delta past the cached cursor and append cleanly on top. On any
         // mismatch the server has already fallen back to a full replay, so drop
-        // the stale snapshot and let those chunks repaint from scratch. Written
+        // the stale snapshot and let those chunks repaint from scratch. A
+        // snapshot cached under the old session id is another session's
+        // screen: a fresh id drops it with the wrong modes it carries. Written
         // inside the replay window so xterm's device-report replies stay
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
@@ -1819,6 +1821,7 @@
         }
         if (
           pendingSnapshot &&
+          frame.id === priorId &&
           frame.generation === pendingSnapshot.generation &&
           (frame.missed_bytes ?? 0) === 0
         ) {

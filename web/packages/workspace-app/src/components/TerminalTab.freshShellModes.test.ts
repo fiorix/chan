@@ -17,13 +17,15 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
-import { FRESH_SHELL_RESET_MODES } from "../terminal/freshShellReset";
+import { FRESH_SHELL_RESET_MODES, freshShellResetSequence } from "../terminal/freshShellReset";
+import { clearTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
 import {
   attach,
   installTerminalDom,
   mountTerminal,
   output,
   receive,
+  resetClearsMode,
   resetTerminals,
   seatTerminals,
   terminalTab,
@@ -52,17 +54,6 @@ async function reconnect(socket: TerminalSocket, id: string) {
   const next = TerminalSocket.all.at(-1)!;
   await attach(next, { id });
   return next;
-}
-
-/// Whether the bytes written to the stand-in xterm clear this DEC private
-/// mode: some `CSI ? ... l` sequence names it exactly. A set sequence (`h`)
-/// never counts.
-function resetClearsMode(written: string, mode: number): boolean {
-  return written.split("\x1b[?").slice(1).some((rest) => {
-    const end = rest.search(/[^0-9;]/);
-    if (end === -1 || rest[end] !== "l") return false;
-    return rest.slice(0, end).split(";").includes(String(mode));
-  });
 }
 
 describe("a fresh shell after a dead full-screen program on xterm", () => {
@@ -101,30 +92,80 @@ describe("a fresh shell after a dead full-screen program on xterm", () => {
     const replaced = await reconnect(socket, FRESH);
     await output(replaced, "first-prompt\x1b[?2004h\x1b[?1h");
     await receive(replaced, { type: "ready", cols: 80, rows: 24 });
-    // The reset is the only `l`-final private-mode sequence here: the dead
-    // program's set and the fresh shell's output are `h`-final.
+    // The reset is the exact tracked-mode sequence: the dead program's set
+    // and the fresh shell's output are `h`-final.
     const written = term.written.join("");
-    const resetMatch = /\x1b\[\?[0-9;]+l/.exec(written);
-    expect(resetMatch, "the fresh shell's reset is written").not.toBeNull();
-    expect(written.indexOf("first-prompt"), "the fresh shell's first output follows the reset").toBeGreaterThan(resetMatch!.index);
+    const resetAt = written.indexOf(freshShellResetSequence());
+    expect(resetAt, "the fresh shell's reset is written").toBeGreaterThanOrEqual(0);
+    expect(written.indexOf("first-prompt"), "the fresh shell's first output follows the reset").toBeGreaterThan(resetAt);
+  });
+
+  test("drops a cached snapshot of the dead session for a fresh shell", async () => {
+    // A reload with a snapshot cached under the old session id: the server
+    // has since minted a fresh shell, whose frame confirms the cached
+    // generation with nothing missed. The snapshot is another session's
+    // screen and modes and must not paint after the reset.
+    writeTerminalSnapshot(SESSION, {
+      ansi: "SNAPSHOT SCREEN\x1b[?2004h\x1b[?1h",
+      generation: 7,
+      lastSeq: 42,
+      cols: 80,
+      rows: 24,
+      updatedAt: 1,
+    });
+    try {
+      const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
+      const { term } = await mountTerminal(TerminalTab, tab!);
+      const socket = TerminalSocket.all.at(-1)!;
+      await attach(socket, { id: FRESH, generation: 7, seq: 0, missed_bytes: 0 });
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+
+      const written = term.written.join("");
+      const resetAt = written.indexOf(freshShellResetSequence());
+      expect(resetAt, "the fresh shell's reset is written").toBeGreaterThanOrEqual(0);
+      expect(written, "a fresh id drops the dead session's cached snapshot").not.toContain("SNAPSHOT SCREEN");
+      expect(
+        written.slice(resetAt),
+        "no mode-set follows the reset before ready",
+      ).not.toMatch(/\x1b\[\?[0-9;]+h/);
+    } finally {
+      clearTerminalSnapshot(SESSION);
+    }
   });
 });
 
 describe("the fresh-shell reset list", () => {
   test("matches the server's tracked set", () => {
+    // Contract: a mode the server tracks is a mode the reset clears, so the
+    // test reads the const the server's attach prelude filters on.
     // Relative to the package directory vitest runs from, as the other
     // source-reading tests do (`App.coverWindowChords.test.ts`).
     const rust = readFileSync("../../../crates/chan-library/src/terminal_sessions.rs", "utf8");
     const block = rust.match(/TRACKED_PRIVATE_MODES: &\[u16\] = &\[([\s\S]*?)\];/)?.[1];
     expect(block, "TRACKED_PRIVATE_MODES found").toBeDefined();
-    const bracketed = Number(rust.match(/BRACKETED_PASTE_MODE: u16 = (\d+);/)?.[1]);
+    const consts = new Map<string, number>();
+    for (const m of rust.matchAll(/const (\w+): u16 = (\d+);/g)) consts.set(m[1]!, Number(m[2]));
+    const unparsed: string[] = [];
     const server = block!.split("\n").flatMap((line) => {
+      if (/^\s*(?:\/\/|$)/.test(line)) return [];
       const n = line.match(/^\s*(\d+),/);
       if (n) return [Number(n[1])];
-      if (/^\s*BRACKETED_PASTE_MODE,/.test(line)) return [bracketed];
+      const id = line.match(/^\s*(\w+),/);
+      if (id && consts.has(id[1]!)) return [consts.get(id[1]!)!];
+      unparsed.push(line.trim());
       return [];
     });
-    expect(server.length, "the server tracks twelve modes").toBe(12);
+    expect(unparsed, "every line of the block parsed to a mode").toEqual([]);
+    expect(server.length, "every line of the block parsed to a mode").toBe(12);
     expect([...FRESH_SHELL_RESET_MODES].sort((a, b) => a - b)).toEqual([...server].sort((a, b) => a - b));
+    // The mounted xterm cases stay literal so a dropped mode goes red at its
+    // own case; this ties that literal list to the reset list.
+    expect(new Set([1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004])).toEqual(
+      new Set(FRESH_SHELL_RESET_MODES),
+    );
+    // xterm.js holds 32 parameters and upstream ghostty 16: past the longer
+    // cap a core would silently drop the reset's tail while this tie stays
+    // green.
+    expect(FRESH_SHELL_RESET_MODES.length).toBeLessThanOrEqual(16);
   });
 });
