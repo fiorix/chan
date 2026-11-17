@@ -167,6 +167,7 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
+import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import {
@@ -4982,18 +4983,18 @@ export function clearLauncherDraft(): void {
   persistLauncherDraft();
 }
 
+/// Element holding the keyboard when the launcher last opened from closed:
+/// the deck's heir while it stays open. Captured in `openCommandLauncher`,
+/// where every open funnels (the deck captures the same element); refreshed
+/// on each closed-to-open transition, never on a branch re-open, and read
+/// only while the launcher is open, so no close path needs to clear it.
+let launcherOpener: HTMLElement | null = null;
+
 /// Open this window's launcher. From closed it starts at the root with no
 /// scope, the first row selected and the last query kept, so the chord never
 /// lands in the branch or scope of an earlier visit. With `path` it opens
 /// inside that branch instead, on an empty query, whether or not it was
 /// already open. Idempotent when already open with no `path`.
-/// Element holding the keyboard when the launcher last opened from closed:
-/// the deck's heir while it stays open. Captured here, where every open
-/// funnels (the deck captures the same element); refreshed on each
-/// closed-to-open transition, never on a branch re-open, and read only
-/// while the launcher is open, so no close path needs to clear it.
-let launcherOpener: HTMLElement | null = null;
-
 export function openCommandLauncher(path: readonly string[] = []): void {
   if (!launcherDraft.visible && typeof document !== "undefined") {
     launcherOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -5571,9 +5572,8 @@ export function fbActiveInstanceId(): string | null {
 /// tab; terminal and editor surfaces answer without taking the target).
 /// With no file browser active the target stays empty and only the pulse
 /// runs. A background pane never takes the keyboard: the pulse effects
-/// refuse while unfocused. Accepted option (a): the target follows the
-/// keyboard.
-function handBrowserTargetToFocusedTab(): void {
+/// refuse while unfocused. The target follows the keyboard.
+function pulseFocusedTab(): void {
   bumpTabFocusPulse();
 }
 
@@ -5766,21 +5766,25 @@ export function persistDateFormat(formatId: string): void {
   });
 }
 
-/// The closing dock held the keyboard when focus is inside it, when nothing
-/// holds it (the body or nothing), when its dock menu is open on it, or
-/// when the open launcher's opener is inside it; the launcher's own
-/// dismissal then returns the keyboard through the surface that asked.
-/// Anywhere else (an overlay, a dialog, a survey, a field in another
-/// surface), the close moves nothing: the dock's dispose empties the target
+/// The dock whose close is running held the keyboard when its holder is
+/// inside it or in its open menu. The holder is the launcher's opener while
+/// the launcher is open, else the active element. A holder that cannot take
+/// focus (nothing, the body, or a node that left the document) hands over
+/// only with no Search or Settings overlay open and no dialog or survey up;
+/// anything else moves nothing, and the dock's dispose empties the target
 /// until a file browser is focused.
 function dockHeldKeyboard(side: "left" | "right"): boolean {
   if (typeof document === "undefined") return true;
   const root = document.querySelector(`.browser-side-pane.${side}`);
-  const ae = document.activeElement;
-  if (ae === null || ae === document.body) return true;
-  if (root?.contains(ae)) return true;
-  if (root?.querySelector('.hamburger-trigger[aria-expanded="true"]') && ae.closest(".hamburger-menu")) return true;
-  return launcherPanel.open && launcherOpener !== null && (root?.contains(launcherOpener) ?? false);
+  const holder = launcherPanel.open ? launcherOpener : document.activeElement;
+  if (holder !== null && (root?.contains(holder) === true ||
+    (root?.querySelector('.hamburger-trigger[aria-expanded="true"]') !== null && holder.closest(".hamburger-menu") !== null))) {
+    return true;
+  }
+  if (holder === null || !canTakeFocus(holder)) {
+    return !searchPanel.open && !settingsPanel.open && !modalDialogOpen();
+  }
+  return false;
 }
 
 export function setBrowserSidePane(side: "left" | "right", open: boolean): void {
@@ -5792,7 +5796,7 @@ export function setBrowserSidePane(side: "left" | "right", open: boolean): void 
   // window, `chan config set`) bypasses the setter and hands nothing over;
   // the dock's dispose then empties the target. Direct writes of the flag
   // (prefs hydration, standalone bootstrap, tests) bypass it the same way.
-  if (!open && browserFocus.instanceId === `fb-dock-${side}` && dockHeldKeyboard(side)) handBrowserTargetToFocusedTab();
+  if (!open && browserFocus.instanceId === `fb-dock-${side}` && dockHeldKeyboard(side)) pulseFocusedTab();
   browserSidePanes[side] = open;
   persistBrowserSidePanes();
 }

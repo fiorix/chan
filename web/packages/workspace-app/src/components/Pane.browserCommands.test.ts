@@ -21,8 +21,8 @@ import { xterm } from "../__tests__/xterm";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
 import {
-  browserSelection, browserSidePanes, fbActiveInstanceId, fbClipboard, fbClipboardClear,
-  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet, openSettings, setBrowserSidePane,
+  browserSelection, browserSidePanes, closeSettings, fbActiveInstanceId, fbClipboard, fbClipboardClear,
+  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet, openSettings, setBrowserSidePane, settingsPanel,
 } from "../state/store.svelte";
 import {
   activeBrowserTab, activeFileTab, cancelPaneMode, enterPaneMode, layout, paneMode, restoreLayout,
@@ -57,6 +57,7 @@ beforeEach(async () => {
 afterEach(async () => {
   cancelPaneMode();
   fbClipboardClear();
+  closeSettings();
   await unmountApp();
   browserSelection.path = null;
   browserSelection.paths = [];
@@ -385,8 +386,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     expect(browserSidePanes.left, "left dock closed").toBe(false);
   }
 
-  // Characterization: passes at the base and under the reviewer's four
-  // mutants; it pins the chord path, not acceptance 1.
+  // Characterization: pins the chord path, whose remount focuses on its own.
   test("dock chord", async () => {
     await targetDock();
     await closeDockFromChord();
@@ -405,8 +405,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     await expectHandedToTab();
   });
 
-  // Characterization: passes at the base and under the reviewer's four
-  // mutants; it pins the no-fallback shape, not acceptance 1.
+  // Characterization: pins the no-fallback shape with a terminal active.
   test("terminal active in the focused pane: the target is empty", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
     await showDock();
@@ -450,7 +449,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     }
   });
 
-  test("a dock closing while another surface is the target changes nothing", async () => {
+  test("a dock closing while another surface is the target changes nothing (characterization)", async () => {
     await layOut();
     await focusRight("label");
     await click(row(browser(RIGHT), RIGHT_PATH));
@@ -535,10 +534,10 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     }
   });
 
-  test("a chord toggle with Settings focused moves no keyboard", async () => {
-    // The user-assigned chord path dispatches the toggle command with no
-    // overlay check (App.svelte:929-934); running the command below is that
-    // path, not the launcher or menu rows above.
+  test("a toggle command with Settings focused moves no keyboard", async () => {
+    // A user-assigned chord dispatches the toggle command with no overlay
+    // check; running the command below is that path, not the launcher or
+    // menu rows above.
     await targetDock();
     const control = await focusSettingsControl();
     await run("app.browser.toggleLeftDock");
@@ -547,10 +546,96 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
   });
 
+  async function remountWithChord(): Promise<void> {
+    await unmountApp();
+    await mountApp(demoData(files), {
+      preferences: { shortcuts: { "app.browser.toggleLeftDock": { web: "Ctrl+Alt+Y" } } },
+    });
+  }
+
+  async function focusEditorFontSize(): Promise<HTMLElement> {
+    openSettings();
+    await settleLong();
+    const editor = [...document.querySelectorAll<HTMLElement>('[aria-label="Settings sections"] .section-tab')]
+      .find((tab) => tab.textContent?.trim() === "Editor");
+    expect(editor, "Editor section listed").toBeTruthy();
+    editor!.click();
+    await settleLong();
+    const field = await vi.waitFor(() => {
+      const input = document.querySelector<HTMLElement>(".editor-font-size");
+      expect(input, "Editor font size field rendered").toBeTruthy();
+      return input!;
+    });
+    field.focus();
+    await settleLong();
+    expect(fbActiveInstanceId(), "focusing settings moves no target").toBe("fb-dock-left");
+    return field;
+  }
+
+  test("a chord with the keyboard on the body under Settings moves nothing", async () => {
+    await remountWithChord();
+    await targetDock();
+    const field = await focusEditorFontSize();
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    await settleLong();
+    expect(document.activeElement, "Enter blurred the field to the body").toBe(document.body);
+    press({ key: "y", code: "KeyY", ctrlKey: true, altKey: true });
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(document.activeElement, "focus stays on the body under Settings").toBe(document.body);
+    expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
+  });
+
+  test("an assigned chord pressed from inside the dock hands over", async () => {
+    await remountWithChord();
+    await targetDock();
+    expect(document.activeElement === document.body, "focus starts out of the body").toBe(false);
+    expect(element(".browser-side-pane.left").contains(document.activeElement), "focus starts inside the dock").toBe(true);
+    press({ key: "y", code: "KeyY", ctrlKey: true, altKey: true });
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(element(".browser", pane(RIGHT)).contains(document.activeElement), "focus is inside the tab's tree").toBe(true);
+    expect(commandSurfaceId(), "the tab takes the target").toBe(`fb-tab-${RIGHT_TAB}`);
+  });
+
+  test("a launcher opened from the body hands over on close", async () => {
+    await targetDock();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settleLong();
+    expect(document.activeElement, "keyboard parked on the body").toBe(document.body);
+    await closeDockFromLauncher();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(element(".browser", pane(RIGHT)).contains(document.activeElement), "focus is inside the tab's tree").toBe(true);
+    expect(commandSurfaceId(), "the tab takes the target").toBe(`fb-tab-${RIGHT_TAB}`);
+  });
+
+  test("a dock menu row with the keyboard on the body hands over", async () => {
+    await targetDock();
+    await click(element('.browser.dock .browser-toolbar button[aria-label="Menu"]'));
+    const row = [...document.querySelectorAll<HTMLButtonElement>(".hamburger-menu button")].find(
+      (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Left file browser dock",
+    );
+    expect(row, "the dock menu names its toggle").toBeTruthy();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settleLong();
+    expect(document.activeElement, "keyboard parked on the body").toBe(document.body);
+    row!.click();
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(element(".browser", pane(RIGHT)).contains(document.activeElement), "focus is inside the tab's tree").toBe(true);
+    expect(commandSurfaceId(), "the tab takes the target").toBe(`fb-tab-${RIGHT_TAB}`);
+  });
+
+  test("a fresh mount starts with no overlay", async () => {
+    await layOut();
+    expect(settingsPanel.open, "Settings closed by the previous teardown").toBe(false);
+    expect(document.querySelector('[aria-label="Settings sections"]'), "no settings surface mounted").toBeNull();
+  });
+
   test("a no-pulse close leaves Upload and Paste refusing", async () => {
-    // The Files-tab-with-no-target state the rewrite dropped its pins for
-    // is still reachable: a close that moves no keyboard empties the target
-    // through the dock's dispose while the tab stays active.
+    // The Files-tab-with-no-target state is still reachable: a close that
+    // moves no keyboard empties the target through the dock's dispose
+    // while the tab stays active.
     await targetDock();
     await focusSettingsControl();
     await run("app.browser.toggleLeftDock");
