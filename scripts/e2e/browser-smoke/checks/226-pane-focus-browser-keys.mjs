@@ -329,11 +329,12 @@ async function restoreArm(ctx, page, engine, adopt) {
     await sleep(25);
   }
   const state = await browserState(page);
-  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline, barrier: "waitWindowLive passed" };
+  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline, barrier: "not attempted" };
   try {
     await ctx.waitWindowLive(windowId);
+    result.barrier = "waitWindowLive passed";
   } catch (error) {
-    result.barrier = `waitWindowLive timed out: ${error.message}`;
+    result.barrier = `waitWindowLive failed: ${error.message}`;
   }
   return result;
 }
