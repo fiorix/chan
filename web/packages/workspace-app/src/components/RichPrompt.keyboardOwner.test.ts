@@ -628,6 +628,9 @@ describe("the command launcher's return under another overlay", () => {
     searchPanel.open = false;
     launcherPanel.open = false;
     overlayStack.ids = [];
+  });
+});
+
 describe("a tab-focus pulse while an owner holds the keyboard", () => {
   // The pulse must leave focus where the owner holds it. Owners with real
   // DOM here are the survey cards and the ModalShell dialog; the other

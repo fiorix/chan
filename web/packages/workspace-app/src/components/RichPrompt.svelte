@@ -1040,6 +1040,9 @@
     <!-- No pointerdown guard on the submit: in an unfocused pane the press
          activates the pane first, and the submit then brings the keyboard
          back, as it always has. -->
+    <!-- No pointerdown guard on the submit: in an unfocused pane the press
+         activates the pane first, and the submit then brings the keyboard
+         back, as it always has. -->
     <button
       type="button"
       class="rp-action rp-primary"
