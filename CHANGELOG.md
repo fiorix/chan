@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Chan for iOS (Tauri app, TestFlight-ready build).** The iOS app runs the desktop embedded loopback stack on device and loads the launcher in a single webview: add a gateway URL in the existing Gateways form, sign in through the system authentication sheet, browse roster devservers on Computers, open them with entry plus tenant navigation, and swipe left-edge back to Computers. Roster polling pauses in background and resyncs on foreground; CHAN_HOME lives under Application Support and PATs in the iOS Keychain. App id `app.chan.ios`.
+- **Mobile sign-in for self-hosted gateways.** The identity authorize flow accepts the registered `chan://auth/callback` alongside the loopback callback, code-level with no per-deployment config; same scope, same PKCE, same redeem.
 ## [v0.131.0] - 2026-11-17
 
 v0.131.0 fixes what earlier releases left in the terminal, the graph, the file browser's commands, window focus and saved settings. It also renames the devserver's systemd-report source to `app.chan.Devserver`. Typing into a scrolled-back ghostty terminal brings the view back to the cursor; a reattach to a full-screen program keeps its screen and its mouse modes; a large workspace's graph and the Dashboard's Search slide no longer hold the window for seconds; a shortcut edit and a team Load no longer overwrite what another window or a hand edit saved, and a workspace read already under way no longer undoes a setting you just changed; `cs window new` prints an id the next `--window` command takes; and more of the windows Chan opens or brings back come forward focused. On Windows another account can no longer keep Chan Desktop from starting. On every platform, the standalone CLI's `chan upgrade` trusts the system's certificate store.
