@@ -213,11 +213,11 @@ Unsaved editor content is mirrored, debounced, to localStorage under a key of th
 
 A Markdown file whose frontmatter declares a slides spec (an aspect ratio of 16:9 or 4:3 and a zoom factor) is a deck. Pages split at page breaks, an `<hr>` whose only attribute is the class `chan-page-break`, which `@pagebreak` writes and which every surface recognizes through one module so a line is a page break everywhere or nowhere. The outline shows numbered thumbnails rendered from the buffer, Preview shows one slide at a time in a fullscreen viewer and Present plays the deck. The slide DOM, its diagram and image hydration and its page CSS come from `slide_dom.ts`, shared with the PDF export, so a slide looks the same in play, in a thumbnail and on paper.
 
-## PDF export
-
 ## Wikilink labels
 
 Wikilink labels reach every renderer through `api/markdown.ts` and its DOMPurify boundary: slides and printable documents, Copy as HTML, the link preview, survey bodies and table cells each pass `{ wikilinks: true }` at their render call (whole documents also pass `{ frontmatter: true }` so metadata keeps its brackets), while a call without the option keeps the authored syntax. The editor's Markdown grammar identifies the links in the original source, and its label parser in `links.ts` trims an explicit alias or shows the last path component without its `.md` suffix, omitting heading and block anchors. Character references keep labels literal through the Markdown renderer, including markup and entities; inline code and fenced blocks keep their authored brackets.
+
+## PDF export
 
 `exportMarkdownToPdf` renders in the page itself: a deck gives one A4 landscape page per slide, a document is paginated A4 portrait, each page is composed as DOM, made self-contained and rasterized, and embedded as one PNG through pdf-lib, loaded on first use. A page is drawn from an SVG document holding the page in a `foreignObject`, which loads no external resource, so images, fonts and CSS URLs are inlined first and an audit refuses anything left external; a missed reference would rasterize as a blank, and a named failure beats a silently incomplete PDF. Images are the one thing that SVG document is not trusted to paint, because an engine may report it loaded before the images nested in it have decoded: each image is decoded in the app document, the page keeps an empty stand-in of its size, a marker raster says where the stand-in landed, and the bitmap is drawn there with its object-fit and clipping. An image the lift cannot place (a rotation, a clip path, a mask) stays in the page document.
 
