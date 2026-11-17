@@ -556,7 +556,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     await run("app.browser.toggleLeftDock");
     expect(browserSidePanes.left, "left dock closed").toBe(false);
     expect(fbActiveInstanceId(), "target emptied").toBeNull();
-    expect(activeBrowserTab()?.selected).toBe(LEFT_PATH);
+    expect(activeBrowserTab()?.selected).toBe(RIGHT_PATH);
     const upload = commandById("app.browser.uploadSelection")!;
     expect(upload.available(commandContext())).toBe(false);
     expect(commandUnavailableReason(upload, commandContext())).toBe("Focus a file browser");
