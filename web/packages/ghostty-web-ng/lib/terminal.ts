@@ -81,7 +81,6 @@ export class Terminal {
   private isOpen = false;
   private isDisposed = false;
   private animationFrameId?: number;
-  private focusRetry?: ReturnType<typeof setTimeout>;
   private writeQueue: Uint8Array[] = [];
   private awaitingEcho = false;
 
@@ -739,20 +738,14 @@ export class Terminal {
   }
 
   /**
-   * Focus terminal input
+   * Focus terminal input. Synchronous: what holds the keyboard after this
+   * call is the element, and a focus taken elsewhere afterwards stays
+   * there. A call before the element attaches is dropped: with no timer
+   * there is no second chance for it to land later.
    */
   focus(): void {
-    if (this.isOpen && this.element) {
-      // Focus immediately for immediate keyboard/wheel event handling
+    if (this.isOpen && this.element && this.element.isConnected) {
       this.element.focus();
-
-      // Also schedule a delayed focus as backup to ensure it sticks
-      // (some browsers may need this if DOM isn't fully settled)
-      clearTimeout(this.focusRetry);
-      this.focusRetry = setTimeout(() => {
-        this.focusRetry = undefined;
-        this.element?.focus();
-      }, 0);
     }
   }
 
@@ -761,10 +754,6 @@ export class Terminal {
    */
   blur(): void {
     if (this.isOpen && this.element) {
-      // A focus() still owes its delayed retry, which would take the
-      // keyboard back after this blur.
-      clearTimeout(this.focusRetry);
-      this.focusRetry = undefined;
       // A press on the canvas can leave the hidden textarea holding focus
       // rather than the element, and blur() acts only on the focused element,
       // so blur whichever of the two holds it. Focus outside stays put.
@@ -1049,8 +1038,6 @@ export class Terminal {
 
     this.isDisposed = true;
     this.isOpen = false;
-    clearTimeout(this.focusRetry);
-    this.focusRetry = undefined;
 
     // Stop render loop and clear write queue
     this.cancelRenderLoop();
