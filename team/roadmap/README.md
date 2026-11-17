@@ -70,7 +70,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [try again over an exited terminal][exitedtry] | not started | build |
 | [the graph cuts off root files][graphroot] | merged | closed |
 | [the minimized-window raise unread on Windows][unburywin] | not started | measure |
-| [the menu's Paste lands in the selection][fbpaste] | merged | closing |
+| [the menu's Paste lands in the selection][fbpaste] | merged | closed |
 | [file commands lose a closed dock's target][docktarget] | not started | build |
 | [Workspace details clears the wrong selection][detailsclear] | not started | build |
 | [four places show wikilinks as typed][wikiplaces] | not started | build |
