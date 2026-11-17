@@ -329,8 +329,13 @@ async function restoreArm(ctx, page, engine, adopt) {
     await sleep(25);
   }
   const state = await browserState(page);
-  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
-  await ctx.waitWindowLive(windowId);
+  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline, barrier: "not attempted" };
+  try {
+    await ctx.waitWindowLive(windowId);
+    result.barrier = "waitWindowLive passed";
+  } catch (error) {
+    result.barrier = `waitWindowLive failed: ${error.message}`;
+  }
   return result;
 }
 
@@ -388,6 +393,7 @@ async function engineWindow(ctx, dir, engine, failures) {
     if (!chrome.focus.startsWith("browser-")) failures.push(`${chrome.arm}: a press on ${chrome.target} left the keyboard on ${chrome.focus}`);
     const restore = await restoreArm(ctx, page, engine, (reopened) => { page = reopened; });
     results.push(restore);
+    if (restore.barrier !== "waitWindowLive passed") failures.push(`${restore.arm}: ${restore.barrier}`);
     if (!restore.focusedPane) failures.push(`${restore.arm}: the restored window focused another pane than the saved one`);
     if (!restore.focus.startsWith("browser-")) failures.push(`${restore.arm}: the restored window left the keyboard on ${restore.focus}`);
     await ctx.shot(`226-${engine}`, page);
