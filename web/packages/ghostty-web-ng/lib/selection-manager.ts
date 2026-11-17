@@ -11,6 +11,7 @@
  */
 
 import { EventEmitter } from './event-emitter';
+import { copiedText } from '../vt/ghosttyCopy';
 import { VtCells, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import type { CanvasRenderer } from './renderer';
 import type { Terminal } from './terminal';
@@ -26,6 +27,26 @@ export interface SelectionCoordinates {
   endRow: number;
 }
 
+/// One cell of a selection: `absoluteRow` 0 is the oldest history row and
+/// the active rows follow.
+export type SelectionAnchor = { col: number; absoluteRow: number };
+
+/// A selection as two corners, both cells included.
+export type SelectionRange = { start: SelectionAnchor; end: SelectionAnchor };
+
+/// Word characters: letters, numbers, and common path/URL characters.
+// Matches native Ghostty behavior where double-click selects entire paths.
+// Includes: / (path sep), . (extensions), ~ (home), @ (emails), + (encodings)
+const WORD_CHAR = /[\w\-./~@+]/;
+
+function isWordCell(cell: VtCell | undefined): boolean {
+  return !!cell && cell.codepoint !== 0 && WORD_CHAR.test(String.fromCodePoint(cell.codepoint));
+}
+
+function isBlankCell(cell: VtCell | undefined): boolean {
+  return !cell || cell.codepoint === 0 || cell.codepoint === 32;
+}
+
 // ============================================================================
 // SelectionManager Class
 // ============================================================================
@@ -38,8 +59,11 @@ export class SelectionManager {
 
   // Selection state - coordinates are in ABSOLUTE buffer space (viewportY + viewportRow)
   // This ensures selection persists correctly when scrolling
-  private selectionStart: { col: number; absoluteRow: number } | null = null;
-  private selectionEnd: { col: number; absoluteRow: number } | null = null;
+  private selectionStart: SelectionAnchor | null = null;
+  private selectionEnd: SelectionAnchor | null = null;
+  // Where a copy goes. The terminal hands this in; the widget's own
+  // clipboard write applies when it does not.
+  private copy?: (text: string) => void;
   private isSelecting: boolean = false;
   private pressClientX: number = 0;
   private pressClientY: number = 0;
@@ -97,12 +121,14 @@ export class SelectionManager {
     terminal: Terminal,
     renderer: CanvasRenderer,
     wasmTerm: VtTerminal,
-    textarea: HTMLTextAreaElement
+    textarea: HTMLTextAreaElement,
+    copy?: (text: string) => void
   ) {
     this.terminal = terminal;
     this.renderer = renderer;
     this.wasmTerm = wasmTerm;
     this.textarea = textarea;
+    this.copy = copy;
 
     // Attach mouse event listeners
     this.attachEventListeners();
@@ -113,9 +139,27 @@ export class SelectionManager {
   // ==========================================================================
 
   /**
-   * Get the selected text as a string
+   * Get the selected text as a string: the binding formats the whole
+   * selection in one core call, joining soft wraps and reading wide
+   * glyphs and clusters whole, less what the screen does not draw.
+   * Falls back to a row-by-row read when the core cannot format it.
    */
   getSelection(): string {
+    if (!this.selectionStart || !this.selectionEnd) return '';
+
+    const text = this.wasmTerm.plainText({
+      startCol: this.selectionStart.col,
+      startRow: this.selectionStart.absoluteRow,
+      endCol: this.selectionEnd.col,
+      endRow: this.selectionEnd.absoluteRow,
+    });
+    return copiedText(text ?? this.readOwnSelection());
+  }
+
+  /**
+   * The old row-by-row read, kept for when the core cannot format.
+   */
+  private readOwnSelection(): string {
     if (!this.selectionStart || !this.selectionEnd) return '';
 
     // Get absolute row coordinates (not clamped to viewport)
@@ -200,7 +244,7 @@ export class SelectionManager {
 
     const text = this.getSelection();
     if (text) {
-      this.copyToClipboard(text);
+      this.writeCopy(text);
       return true;
     }
     return false;
@@ -229,15 +273,48 @@ export class SelectionManager {
   }
 
   /**
-   * Select all text in the terminal
+   * Select the history and the screen, as one buffer.
    */
   selectAll(): void {
     const dims = this.wasmTerm.getDimensions();
-    const viewportY = this.getViewportY();
-    this.selectionStart = { col: 0, absoluteRow: viewportY };
-    this.selectionEnd = { col: dims.cols - 1, absoluteRow: viewportY + dims.rows - 1 };
+    this.selectionStart = { col: 0, absoluteRow: 0 };
+    this.selectionEnd = { col: dims.cols - 1, absoluteRow: this.wasmTerm.getScrollbackLength() + dims.rows - 1 };
     this.requestRender();
     this.selectionChangedEmitter.fire();
+  }
+
+  /**
+   * Set the selection to a range of absolute buffer rows, or clear it
+   * with null. A programmatic selection: it never copies to the clipboard.
+   */
+  setSelection(range: SelectionRange | null): void {
+    if (!range) {
+      this.clearSelection();
+      return;
+    }
+    this.markCurrentSelectionDirty();
+    this.selectionStart = { ...range.start };
+    this.selectionEnd = { ...range.end };
+    this.requestRender();
+    this.selectionChangedEmitter.fire();
+  }
+
+  /**
+   * The current selection anchors, or null when nothing is selected.
+   */
+  getSelectionRange(): SelectionRange | null {
+    if (!this.selectionStart || !this.selectionEnd) return null;
+    return { start: { ...this.selectionStart }, end: { ...this.selectionEnd } };
+  }
+
+  /**
+   * The cell under a client pixel of the canvas: its column, its viewport
+   * row and its absolute buffer row. Clamped to the grid.
+   */
+  cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } {
+    const rect = this.renderer.getCanvas().getBoundingClientRect();
+    const cell = this.pixelToCell(clientX - rect.left, clientY - rect.top);
+    return { ...cell, absoluteRow: this.viewportRowToAbsolute(cell.row) };
   }
 
   /**
@@ -454,7 +531,7 @@ export class SelectionManager {
         if (copy && this.hasSelection()) {
           const text = this.getSelection();
           if (text) {
-            this.copyToClipboard(text);
+            this.writeCopy(text);
             this.selectionChangedEmitter.fire();
           }
         }
@@ -473,55 +550,35 @@ export class SelectionManager {
       const rect = canvas.getBoundingClientRect();
       const at = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (e.detail === 2) {
-        // Double-click - select word
+        // Double-click - select the word under the cell, carrying across
+        // soft wraps the way xterm.js does. No word under the cell selects
+        // nothing.
         const cell = this.pixelToCell(at.x, at.y);
-        const word = this.getWordAtCell(cell.col, cell.row);
+        const extent = this.wordAcrossWraps(cell.col, this.viewportRowToAbsolute(cell.row));
+        if (!extent) return;
+        this.selectionStart = extent.start;
+        this.selectionEnd = extent.end;
+        this.requestRender();
 
-        if (word) {
-          const absoluteRow = this.viewportRowToAbsolute(cell.row);
-          this.selectionStart = { col: word.startCol, absoluteRow };
-          this.selectionEnd = { col: word.endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
+        const text = this.getSelection();
+        if (text) {
+          this.writeCopy(text);
+          this.selectionChangedEmitter.fire();
         }
       } else if (e.detail >= 3) {
-        // Triple-click (or more) - select line content (like native Ghostty)
+        // Triple-click (or more) - select the whole wrapped line, to its
+        // last cell that is not blank. An empty line selects nothing.
         const cell = this.pixelToCell(at.x, at.y);
-        const absoluteRow = this.viewportRowToAbsolute(cell.row);
+        const extent = this.lineAcrossWraps(this.viewportRowToAbsolute(cell.row));
+        if (!extent) return;
+        this.selectionStart = extent.start;
+        this.selectionEnd = extent.end;
+        this.requestRender();
 
-        // Find actual line length (exclude trailing empty cells)
-        // Use scrollback-aware line retrieval (like getSelection does)
-        const scrollbackLength = this.wasmTerm.getScrollbackLength();
-        // Find last non-empty cell (-1 means empty line)
-        let endCol = -1;
-        if (this.readAbsoluteRow(absoluteRow, scrollbackLength)) {
-          const line = this.cells;
-          for (let i = line.length - 1; i >= 0; i--) {
-            const cell = line.at(i)!;
-            if (cell.codepoint !== 0 && cell.codepoint !== 32) {
-              endCol = i;
-              break;
-            }
-          }
-        }
-
-        // Only select if line has content (endCol >= 0)
-        if (endCol >= 0) {
-          // Select line content only (not trailing whitespace)
-          this.selectionStart = { col: 0, absoluteRow };
-          this.selectionEnd = { col: endCol, absoluteRow };
-          this.requestRender();
-
-          const text = this.getSelection();
-          if (text) {
-            this.copyToClipboard(text);
-            this.selectionChangedEmitter.fire();
-          }
+        const text = this.getSelection();
+        if (text) {
+          this.writeCopy(text);
+          this.selectionChangedEmitter.fire();
         }
       }
     });
@@ -725,39 +782,79 @@ export class SelectionManager {
   }
 
   /**
-   * Get word boundaries at a cell position
+   * The word under a cell, carried across the soft wraps that join its
+   * rows, as xterm.js's double click does. Null when the cell holds no
+   * word character.
    */
-  private getWordAtCell(col: number, row: number): { startCol: number; endCol: number } | null {
-    const absoluteRow = this.viewportRowToAbsolute(row);
-    const scrollbackLength = this.wasmTerm.getScrollbackLength();
-    if (!this.readAbsoluteRow(absoluteRow, scrollbackLength)) return null;
-    const line = this.cells;
-
-    // Word characters: letters, numbers, and common path/URL characters
-    // Matches native Ghostty behavior where double-click selects entire paths
-    // Includes: / (path sep), . (extensions), ~ (home), @ (emails), + (encodings)
-    const isWordChar = (cell: VtCell | undefined) => {
-      if (!cell || cell.codepoint === 0) return false;
-      const char = String.fromCodePoint(cell.codepoint);
-      return /[\w\-./~@+]/.test(char);
-    };
-
-    // Only return if we're actually on a word character
-    if (!isWordChar(line.at(col))) return null;
-
-    // Find start of word
-    let startCol = col;
-    while (startCol > 0 && isWordChar(line.at(startCol - 1))) {
-      startCol--;
+  private wordAcrossWraps(col: number, absoluteRow: number): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    const cells = this.readCells(absoluteRow);
+    if (!cells || !isWordCell(cells.at(col))) return null;
+    let start = { col, absoluteRow };
+    let startCells = cells;
+    for (;;) {
+      while (start.col > 0 && isWordCell(startCells.at(start.col - 1))) start.col--;
+      if (start.col > 0 || !this.continuesAbove(start.absoluteRow)) break;
+      const above = this.readCells(start.absoluteRow - 1);
+      if (!above || !isWordCell(above.at(above.length - 1))) break;
+      start = { col: above.length - 1, absoluteRow: start.absoluteRow - 1 };
+      startCells = above;
     }
-
-    // Find end of word
-    let endCol = col;
-    while (endCol < line.length - 1 && isWordChar(line.at(endCol + 1))) {
-      endCol++;
+    let end = { col, absoluteRow };
+    let endCells = cells;
+    for (;;) {
+      while (end.col < endCells.length - 1 && isWordCell(endCells.at(end.col + 1))) end.col++;
+      if (end.col < endCells.length - 1 || !this.continuesAbove(end.absoluteRow + 1)) break;
+      const below = this.readCells(end.absoluteRow + 1);
+      if (!below || !isWordCell(below.at(0))) break;
+      end = { col: 0, absoluteRow: end.absoluteRow + 1 };
+      endCells = below;
     }
+    return { start, end };
+  }
 
-    return { startCol, endCol };
+  /**
+   * The whole line a row belongs to, every row a soft wrap joins to it,
+   * to its last cell that is not blank, the way xterm.js's triple click
+   * selects it. Null when the line is blank.
+   */
+  private lineAcrossWraps(absoluteRow: number): { start: SelectionAnchor; end: SelectionAnchor } | null {
+    let first = absoluteRow;
+    while (first > 0 && this.continuesAbove(first)) first--;
+    let last = absoluteRow;
+    while (this.continuesAbove(last + 1)) last++;
+    for (let row = last; row >= first; row--) {
+      const cells = this.readCells(row);
+      if (!cells) continue;
+      for (let col = cells.length - 1; col >= 0; col--) {
+        if (!isBlankCell(cells.at(col))) {
+          return { start: { col: 0, absoluteRow: first }, end: { col, absoluteRow: row } };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether row `row` continues the row above it through a soft wrap.
+   */
+  private continuesAbove(absoluteRow: number): boolean {
+    const history = this.wasmTerm.getScrollbackLength();
+    return absoluteRow < history
+      ? this.wasmTerm.isScrollbackRowWrapped(absoluteRow)
+      : this.wasmTerm.isRowWrapped(absoluteRow - history);
+  }
+
+  /**
+   * Row `row` of the history and the screen, 0 the oldest history row, in
+   * a view of its own. Null when no such row exists.
+   */
+  private readCells(absoluteRow: number): VtCells | null {
+    const cells = new VtCells();
+    const history = this.wasmTerm.getScrollbackLength();
+    const read = absoluteRow < history
+      ? this.wasmTerm.readHistoryRow(absoluteRow, cells)
+      : this.wasmTerm.readRow(absoluteRow - history, cells);
+    return read ? cells : null;
   }
 
   /**
@@ -768,6 +865,15 @@ export class SelectionManager {
     return row < scrollbackLength
       ? this.wasmTerm.readHistoryRow(row, this.cells)
       : this.wasmTerm.readRow(row - scrollbackLength, this.cells);
+  }
+
+  /**
+   * A copy goes to the terminal's writer when one is set, else to the
+   * widget's own clipboard write.
+   */
+  private writeCopy(text: string): void {
+    if (this.copy) this.copy(text);
+    else this.copyToClipboard(text);
   }
 
   /**

@@ -9,7 +9,6 @@ import { readFileSync } from "node:fs";
 import { Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
-import { installGhosttySelection } from "./ghosttySelection";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
@@ -38,9 +37,9 @@ afterEach(() => {
 
 /// A ghostty-web terminal on the vendored core, opened in a host; `sent` is
 /// every string the terminal handed the program.
-async function openTerminal() {
+async function openTerminal(copy?: (text: string) => void) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
-  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0 });
+  const term = new Terminal({ cols: 40, rows: 6, ghostty: vt, cursorBlink: false, smoothScrollDuration: 0, copy });
   const host = document.createElement("div");
   document.body.append(host);
   term.open(host);
@@ -69,9 +68,8 @@ describe("the ghostty widget's pointer handling", () => {
   });
 
   test("a selection drag that leaves the canvas keeps selecting by pointer capture", async () => {
-    const { term, canvas } = await openTerminal();
     const writes: string[] = [];
-    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    const { term, canvas } = await openTerminal((text) => void writes.push(text));
     term.write("hello world\r\nsecond row");
     pointer(canvas, "pointerdown", 1, 1);
     // Far outside the canvas: under pointer capture the move still reaches it.
@@ -166,9 +164,8 @@ describe("the ghostty widget's pointer handling", () => {
   });
 
   test("a press with a below-threshold move selects and copies nothing", async () => {
-    const { term, canvas } = await openTerminal();
     const writes: string[] = [];
-    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    const { term, canvas } = await openTerminal((text) => void writes.push(text));
     term.write("hello world\r\nsecond row");
     pointer(canvas, "pointerdown", 1, 1);
     // One pixel: below the half-cell drag threshold, so this stays a tap.
@@ -179,9 +176,8 @@ describe("the ghostty widget's pointer handling", () => {
   });
 
   test("a drag ended by capture loss alone keeps its selection and copies nothing", async () => {
-    const { term, canvas } = await openTerminal();
     const writes: string[] = [];
-    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    const { term, canvas } = await openTerminal((text) => void writes.push(text));
     term.write("hello world\r\nsecond row");
     pointer(canvas, "pointerdown", 1, 1);
     pointer(canvas, "pointermove", 60, 1);
@@ -217,9 +213,8 @@ describe("the ghostty widget's pointer handling", () => {
   });
 
   test("an interrupted drag copies nothing and keeps the selection", async () => {
-    const { term, canvas } = await openTerminal();
     const writes: string[] = [];
-    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
+    const { term, canvas } = await openTerminal((text) => void writes.push(text));
     term.write("hello world\r\nsecond row");
     pointer(canvas, "pointerdown", 1, 1);
     pointer(canvas, "pointermove", 60, 1);

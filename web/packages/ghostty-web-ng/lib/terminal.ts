@@ -31,7 +31,8 @@ import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
 import { CanvasRenderer } from './renderer';
-import { SelectionManager } from './selection-manager';
+import { HighlightsManager } from './highlights';
+import { SelectionManager, type SelectionRange } from './selection-manager';
 import type { ILink } from './types';
 
 // ============================================================================
@@ -58,6 +59,13 @@ export class Terminal {
   public renderer?: CanvasRenderer;
   private inputHandler?: InputHandler;
   private selectionManager?: SelectionManager;
+
+  // Where copies go. The terminal's own clipboard write applies when the
+  // constructor got no copy option.
+  private copyOption?: (text: string) => void;
+
+  // Named highlight layers, painted over cell backgrounds under glyphs.
+  public readonly highlights = new HighlightsManager();
   private canvas?: HTMLCanvasElement;
 
   // Link detection system
@@ -139,6 +147,7 @@ export class Terminal {
 
     this.cols = this.options.cols;
     this.rows = this.options.rows;
+    this.copyOption = options.copy;
 
     // Initialize buffer API
     this.buffer = new BufferNamespace(this);
@@ -462,11 +471,13 @@ export class Terminal {
         this,
         this.renderer,
         this.wasmTerm,
-        this.textarea
+        this.textarea,
+        this.copyOption
       );
 
-      // Connect selection manager to renderer
+      // Connect selection manager and highlights to renderer
       this.renderer.setSelectionManager(this.selectionManager);
+      this.renderer.setHighlights(this.highlights);
 
       // Initialize link detection system
       this.linkDetector = new LinkDetector(this);
@@ -788,6 +799,35 @@ export class Terminal {
    */
   public clearSelection(): void {
     this.selectionManager?.clearSelection();
+  }
+
+  /**
+   * Set the selection to a range of absolute buffer rows, or clear it
+   * with null. A programmatic selection: it never copies to the clipboard.
+   */
+  public setSelection(range: SelectionRange | null): void {
+    this.selectionManager?.setSelection(range);
+  }
+
+  /**
+   * The current selection anchors, or null when nothing is selected.
+   */
+  public getSelectionRange(): SelectionRange | null {
+    return this.selectionManager?.getSelectionRange() ?? null;
+  }
+
+  /**
+   * The cell under a client pixel: its column, its viewport row and its
+   * absolute buffer row. Clamped to the grid.
+   */
+  public cellAt(clientX: number, clientY: number): { col: number; row: number; absoluteRow: number } {
+    return (
+      this.selectionManager?.cellAt(clientX, clientY) ?? {
+        col: 0,
+        row: 0,
+        absoluteRow: this.getScrollbackLength(),
+      }
+    );
   }
 
   /**
@@ -1139,6 +1179,9 @@ export class Terminal {
       this.renderer.dispose();
       this.renderer = undefined;
     }
+
+    // Drop highlight layers with the terminal that owns them
+    this.highlights.dispose();
 
     // Remove canvas from DOM
     if (this.canvas && this.canvas.parentNode) {

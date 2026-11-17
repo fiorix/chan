@@ -116,6 +116,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
         this.renderer as never,
         this.wasmTerm,
         document.createElement("textarea"),
+        this.options.copy,
       );
     }
     attachCustomKeyEventHandler() {}

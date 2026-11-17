@@ -82,16 +82,18 @@
 /// that has not landed yet needs no keeping: it starts from no match
 /// selected anyway.
 ///
-/// The highlight is ghostty-web's own selection, written through its
-/// SelectionManager's anchors. ghostty-web's public `select()` counts its
-/// viewport offset as an absolute row, so it is never called. A selection the
-/// user makes while the bar is open is theirs: the controller moves and
-/// clears only the selection it wrote last.
+/// The highlight is the widget's highlight layer, named below: it never
+/// touches the selection, so a selection the user makes while the bar is
+/// open stays theirs. The controller moves and clears only the layer it
+/// wrote last, and reads the user's own selection only to know whether a
+/// waiting step may land.
 
-import type { Terminal } from "@chan/ghostty-web-ng";
-import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
+import type { HighlightsManager, Terminal } from "@chan/ghostty-web-ng";
 import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
 import { type MatchRange, type SearchState, type VtSearch, VtTerminal, type VtTrackedCell } from "@chan/ghostty-web-ng/vt";
+
+/// The widget highlight layer the active match paints on.
+export const FIND_HIGHLIGHT_LAYER = "find-active";
 
 /// The find bar's match count. `index` counts from the newest match (1 is
 /// the one closest to the prompt) and is null when it is not knowable;
@@ -176,9 +178,12 @@ const animationFrames: FrameScheduler = {
 
 export type GhosttyFindOptions = {
   viewport: FindViewport;
-  /// ghostty-web's selection manager. Without one the active match is
+  /// The widget's highlight layers. Without one the active match is
   /// counted and scrolled to but not highlighted.
-  selection: SelectionManagerLike | null;
+  highlights: HighlightsManager | null;
+  /// The user's own selection. The highlight never touches it; the
+  /// controller reads it only to know whether a waiting step may reveal.
+  getSelection: () => MatchRange | null;
   /// Takes the count each time the controller reads the search.
   onCount(count: FindCount): void;
   frames?: FrameScheduler;
@@ -199,12 +204,19 @@ export class GhosttyFind {
   static attach(term: Terminal, viewport: FindViewport, onCount: (count: FindCount) => void): GhosttyFind | null {
     const core = term.wasmTerm;
     if (!(core instanceof VtTerminal)) return null;
-    return new GhosttyFind(core, { viewport, selection: selectionManagerOf(term), onCount });
+    const getSelection = (): MatchRange | null => {
+      const range = term.getSelectionRange();
+      return range === null
+        ? null
+        : { startRow: range.start.absoluteRow, startCol: range.start.col, endRow: range.end.absoluteRow, endCol: range.end.col };
+    };
+    return new GhosttyFind(core, { viewport, highlights: term.highlights ?? null, getSelection, onCount });
   }
 
   private readonly core: VtTerminal;
   private readonly viewport: FindViewport;
-  private readonly selection: SelectionManagerLike | null;
+  private readonly highlights: HighlightsManager | null;
+  private readonly getSelection: () => MatchRange | null;
   private readonly onCount: (count: FindCount) => void;
   private readonly frames: FrameScheduler;
   private readonly budgetMs: number;
@@ -217,7 +229,7 @@ export class GhosttyFind {
   /// behind a new query's selection of its newest match while that has not
   /// landed, or behind selecting the kept match again after a resize.
   private waiting: Waiting[] = [];
-  /// The selection when the bar last asked for a match.
+  /// The user's own selection when the bar last asked for a match.
   private askedOver: MatchRange | null = null;
   /// The terminal changed since the search was last fed.
   private dirty = false;
@@ -258,7 +270,8 @@ export class GhosttyFind {
   constructor(core: VtTerminal, options: GhosttyFindOptions) {
     this.core = core;
     this.viewport = options.viewport;
-    this.selection = options.selection;
+    this.highlights = options.highlights;
+    this.getSelection = options.getSelection;
     this.onCount = options.onCount;
     this.frames = options.frames ?? animationFrames;
     this.budgetMs = options.budgetMs ?? FIND_SCAN_BUDGET_MS;
@@ -276,7 +289,7 @@ export class GhosttyFind {
     }
     if (this.prepare(query)) {
       this.waiting.push({ step: "newest", at: this.clock() });
-      this.askedOver = this.selectionRange();
+      this.askedOver = this.getSelection();
     }
     this.schedule();
   }
@@ -298,7 +311,7 @@ export class GhosttyFind {
     if (this.prepare(query)) this.search!.feed();
     else this.catchUp();
     this.waiting.push({ step: direction, at: this.clock() });
-    this.askedOver = this.selectionRange();
+    this.askedOver = this.getSelection();
     const selected = this.applyWaiting();
     // A press that only waits changes nothing yet; the frames show the
     // count as the scan goes.
@@ -492,7 +505,7 @@ export class GhosttyFind {
       return;
     }
     this.kept = range;
-    if (this.selectionRange() === null || this.ownsSelection()) this.highlight(range);
+    if (this.getSelection() === null || this.ownsHighlight()) this.highlight(range);
     if (this.keptOnScreen) this.viewport.reveal(range.startRow);
     // A resize during the walk sends it back to the start: the core forgot
     // the match it had walked to.
@@ -525,11 +538,11 @@ export class GhosttyFind {
   }
 
   /// The kept match is at `range` now: the highlight follows it while the
-  /// selection is still the controller's own.
+  /// layer still shows what the controller wrote.
   private follow(range: MatchRange): void {
     if (sameRange(range, this.kept)) return;
     this.kept = range;
-    if (this.ownsSelection()) this.highlight(range);
+    if (this.ownsHighlight()) this.highlight(range);
   }
 
   /// The kept match where its cells are now; null when either is gone.
@@ -694,15 +707,15 @@ export class GhosttyFind {
   /// Whether a step that waited may write its highlight: the user has not
   /// selected anything of their own since the bar asked.
   private askStands(): boolean {
-    const now = this.selectionRange();
-    return now === null || sameRange(now, this.askedOver) || this.ownsSelection();
+    const now = this.getSelection();
+    return now === null || sameRange(now, this.askedOver) || this.ownsHighlight();
   }
 
   /// Show what the search holds: the count, and the active match as the
-  /// selection. With `reveal`, a match the user asked for, the highlight is
-  /// written over whatever is selected and scrolled to. Otherwise it follows
-  /// its match only when the match moved and the selection is still the
-  /// controller's own, and goes when no match is active any more.
+  /// highlight. With `reveal`, a match the user asked for is highlighted
+  /// and scrolled to, over whatever is selected. Otherwise it follows its
+  /// match only when the match moved and the layer still shows what the
+  /// controller wrote, and goes when no match is active any more.
   private show(reveal: boolean): void {
     const state = this.search!.state();
     this.held = state.complete ? state.total : Math.max(state.total, this.held);
@@ -720,7 +733,7 @@ export class GhosttyFind {
     if (active && reveal) {
       this.highlight(active);
       this.viewport.reveal(active.startRow);
-    } else if (!sameRange(active, this.written) && this.ownsSelection()) {
+    } else if (!sameRange(active, this.written) && this.ownsHighlight()) {
       if (active) this.highlight(active);
       else this.dropHighlight();
     }
@@ -730,37 +743,37 @@ export class GhosttyFind {
 
   private highlight(range: MatchRange): void {
     this.written = range;
-    const manager = this.selection;
-    if (!manager) return;
-    // Dropping the selection it replaces marks that selection's rows for
-    // repaint. At the bottom of the buffer ghostty-web repaints only rows
-    // marked so, and the old highlight would stay painted.
-    manager.clearSelection();
-    manager.selectionStart = { col: range.startCol, absoluteRow: range.startRow };
-    manager.selectionEnd = { col: range.endCol, absoluteRow: range.endRow };
-    manager.requestRender();
-    manager.selectionChangedEmitter.fire();
+    // Painting the new range dirties its rows; replacing a layer dirties
+    // the rows it held, so the old highlight repaints away. At the bottom
+    // of the buffer only dirty rows repaint.
+    this.highlights?.set(FIND_HIGHLIGHT_LAYER, [
+      {
+        start: { col: range.startCol, absoluteRow: range.startRow },
+        end: { col: range.endCol, absoluteRow: range.endRow },
+      },
+    ]);
   }
 
   private dropHighlight(): void {
-    if (this.selection && this.ownsSelection()) {
-      this.selection.clearSelection();
-      this.selection.selectionChangedEmitter.fire();
-    }
+    if (this.ownsHighlight()) this.highlights?.clear(FIND_HIGHLIGHT_LAYER);
     this.written = null;
   }
 
-  /// Whether the selection is still the range written last.
-  private ownsSelection(): boolean {
-    return this.written !== null && sameRange(this.selectionRange(), this.written);
+  /// Whether the highlight layer still shows the range written last.
+  private ownsHighlight(): boolean {
+    return this.written !== null && sameRange(this.highlightRange(), this.written);
   }
 
-  /// The selection as a match range; null when nothing is selected.
-  private selectionRange(): MatchRange | null {
-    const start = this.selection?.selectionStart;
-    const end = this.selection?.selectionEnd;
-    if (!start || !end) return null;
-    return { startRow: start.absoluteRow, startCol: start.col, endRow: end.absoluteRow, endCol: end.col };
+  /// The highlight layer as a match range; null when it shows nothing.
+  private highlightRange(): MatchRange | null {
+    const range = this.highlights?.get(FIND_HIGHLIGHT_LAYER)?.ranges[0];
+    if (!range) return null;
+    return {
+      startRow: range.start.absoluteRow,
+      startCol: range.start.col,
+      endRow: range.end.absoluteRow,
+      endCol: range.end.col,
+    };
   }
 }
 

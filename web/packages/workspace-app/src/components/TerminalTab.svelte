@@ -214,7 +214,6 @@
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { handleXtermPaste, pasteIntoXterm } from "../terminal/xtermPaste";
-  import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import { ghosttyScrollbackText, type GhosttyVt } from "@chan/ghostty-web-ng/vt";
   import type { SubmitAgent } from "../terminal/submitMode";
@@ -560,7 +559,7 @@
   // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
   // ghostty backend.
   let ghosttyKeyParity: (() => void) | null = null;
-  let ghosttyClickExtents: (() => void) | null = null;
+
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path) and the one
@@ -1241,6 +1240,10 @@
       const ghosttyTerm = new ghosttyKit.Terminal({
         cursorBlink: false,
         cursorStyle: "block",
+        copy: (text) => {
+          void copyToClipboard(text);
+          if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
+        },
         fontFamily,
         fontSize: rendererFontSize,
         ghostty: ghosttyInstance,
@@ -1407,22 +1410,9 @@
           "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
         );
       }
-      // ghostty-web's own copies (mouse release, double and triple click)
-      // write through the same writer as the chord and the menu.
-      if (!installGhosttySelection(ghosttyTerm, (text) => {
-        void copyToClipboard(text);
-        if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
-      })) {
-        console.warn(
-          "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
-        );
-      }
-      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm);
-      if (!ghosttyClickExtents) {
-        console.warn(
-          "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
-        );
-      }
+      // The widget's own copies (mouse release, double and triple click)
+      // write through the same writer as the chord and the menu, through
+      // the copy option the terminal was constructed with above.
       ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
       if (!ghosttyScrollbarClickGate) {
         console.warn(
@@ -2630,8 +2620,6 @@
     primarySelectionCleanup = null;
     ghosttyKeyParity?.();
     ghosttyKeyParity = null;
-    ghosttyClickExtents?.();
-    ghosttyClickExtents = null;
     ghosttyReportedFocus = null;
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);

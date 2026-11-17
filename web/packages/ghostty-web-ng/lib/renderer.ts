@@ -13,6 +13,7 @@
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
+import type { HighlightsManager, HighlightStyle } from './highlights';
 
 // ============================================================================
 // Type Definitions
@@ -109,6 +110,13 @@ export class CanvasRenderer {
     endCol: number;
     endRow: number;
   } | null = null;
+
+  // Highlight source and cached spans for current render pass
+  // (viewport-relative, first span wins on overlap)
+  private highlightSource?: HighlightsManager;
+  private currentHighlightSpans:
+    | { startRow: number; endRow: number; startCol: number; endCol: number; style: HighlightStyle }[]
+    | null = null;
 
   // Link rendering state
   private hoveredHyperlinkId: number = 0;
@@ -316,6 +324,22 @@ export class CanvasRenderer {
       }
     }
 
+    // Cache highlight spans for this pass and mark their rows for redraw,
+    // including rows a cleared or moved layer used to cover.
+    this.currentHighlightSpans = this.highlightSpans(scrollbackLength, historyRows, dims.rows, dims.cols);
+    if (this.currentHighlightSpans) {
+      for (const span of this.currentHighlightSpans) {
+        for (let row = span.startRow; row <= span.endRow; row++) selectionRows.add(row);
+      }
+    }
+    if (this.highlightSource) {
+      for (const dirty of this.highlightSource.getDirtyAbsoluteRows()) {
+        const row = dirty - scrollbackLength + historyRows;
+        if (row >= 0 && row < dims.rows) selectionRows.add(row);
+      }
+      this.highlightSource.clearDirtyAbsoluteRows();
+    }
+
     // Track rows with hyperlinks that need redraw when hover changes
     const hyperlinkRows = new Set<number>();
     const hyperlinkChanged = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId;
@@ -493,6 +517,15 @@ export class CanvasRenderer {
       return; // Selection background replaces cell background
     }
 
+    // A highlight paints over the cell's background. The selection above
+    // wins, so existing selections paint exactly as before.
+    const highlight = this.highlightAt(x, y);
+    if (highlight) {
+      this.ctx.fillStyle = highlight.background ?? this.theme.selectionBackground;
+      this.ctx.fillRect(cellX, cellY, cellWidth, this.metrics.height);
+      return;
+    }
+
     // A default background paints nothing over the row's theme fill, which
     // a see-through theme leaves clear. Its colour cannot say it is the
     // default: a see-through theme's resolves to black in the core, as a
@@ -521,6 +554,7 @@ export class CanvasRenderer {
 
     // Check if this cell is selected
     const isSelected = this.isInSelection(x, y);
+    const highlight = isSelected ? null : this.highlightAt(x, y);
 
     // Set text style
     let fontStyle = '';
@@ -528,11 +562,14 @@ export class CanvasRenderer {
     if (cell.flags & VtFlag.BOLD) fontStyle += 'bold ';
     this.ctx.font = `${fontStyle}${this.fontSize}px ${this.fontFamily}`;
 
-    // Set text color - use override, selection foreground, or normal color
+    // Set text color - use override, selection foreground, highlight
+    // foreground, or normal color, in that order.
     if (colorOverride) {
       this.ctx.fillStyle = colorOverride;
     } else if (isSelected && this.theme.selectionForeground) {
       this.ctx.fillStyle = this.theme.selectionForeground;
+    } else if (highlight?.foreground) {
+      this.ctx.fillStyle = highlight.foreground;
     } else {
       // Extract colors and handle inverse: when inverted, foreground
       // becomes background
@@ -874,6 +911,76 @@ export class CanvasRenderer {
    */
   public setSelectionManager(manager: SelectionManager): void {
     this.selectionManager = manager;
+  }
+
+  /**
+   * Set highlights source (for rendering highlight layers)
+   */
+  public setHighlights(source: HighlightsManager | undefined): void {
+    this.highlightSource = source;
+  }
+
+  /**
+   * The highlight layers' ranges as viewport spans for this pass, first
+   * set layer wins on overlap, like one selection per layer.
+   */
+  private highlightSpans(
+    scrollbackLength: number,
+    historyRows: number,
+    rows: number,
+    cols: number
+  ): {
+    startRow: number;
+    endRow: number;
+    startCol: number;
+    endCol: number;
+    style: HighlightStyle;
+  }[] | null {
+    if (!this.highlightSource) return null;
+    const spans: {
+      startRow: number;
+      endRow: number;
+      startCol: number;
+      endCol: number;
+      style: HighlightStyle;
+    }[] = [];
+    for (const layer of this.highlightSource.entries()) {
+      for (const range of layer.ranges) {
+        const startRow = range.start.absoluteRow - scrollbackLength + historyRows;
+        const endRow = range.end.absoluteRow - scrollbackLength + historyRows;
+        if (endRow < 0 || startRow >= rows) continue;
+        spans.push({
+          startRow: Math.max(0, startRow),
+          endRow: Math.min(rows - 1, endRow),
+          startCol: Math.max(0, Math.min(range.start.col, cols - 1)),
+          endCol: Math.max(0, Math.min(range.end.col, cols - 1)),
+          style: layer.style,
+        });
+      }
+    }
+    return spans.length ? spans : null;
+  }
+
+  /**
+   * The first highlight span covering a cell, or null. The selection
+   * paints over highlights: callers check it first.
+   */
+  private highlightAt(x: number, y: number): HighlightStyle | null {
+    const spans = this.currentHighlightSpans;
+    if (!spans) return null;
+    for (const span of spans) {
+      const { startCol, startRow, endCol, endRow } = span;
+      const inside =
+        startRow === endRow
+          ? y === startRow && x >= startCol && x <= endCol
+          : y === startRow
+            ? x >= startCol
+            : y === endRow
+              ? x <= endCol
+              : y > startRow && y < endRow;
+      if (inside) return span.style;
+    }
+    return null;
   }
 
   /**

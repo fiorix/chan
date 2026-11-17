@@ -20,6 +20,10 @@ export interface ITerminalOptions {
 
   // The core this terminal runs on, through chan's libghostty-vt binding.
   ghostty: GhosttyVt;
+
+  /// Where a copy on mouse release, double and triple click goes. The
+  /// widget's own clipboard write when absent.
+  copy?: (text: string) => void;
 }
 
 export interface ITheme {

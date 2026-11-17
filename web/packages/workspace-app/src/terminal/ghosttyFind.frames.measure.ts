@@ -25,7 +25,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { env, hrtime, version } from "node:process";
-import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
+import { HighlightsManager } from "@chan/ghostty-web-ng";
 import { beforeAll, expect, test } from "vitest";
 import { type FindCount, type FrameScheduler, GhosttyFind, FIND_SCAN_BUDGET_MS } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
@@ -144,14 +144,7 @@ async function fixture(cols: number, rows: number, scrollbackLimit: number) {
     isAlternateScreen: () => core.isAlternateScreen(),
     cellHeight: () => 16,
   });
-  const canvas = document.createElement("canvas");
-  const renderer = { getCanvas: () => canvas, getMetrics: () => ({ width: 8, height: 16, baseline: 12 }) };
-  const manager = new SelectionManager(
-    view as unknown as Terminal,
-    renderer as unknown as ConstructorParameters<typeof SelectionManager>[1],
-    core as unknown as ConstructorParameters<typeof SelectionManager>[2],
-    document.createElement("textarea"),
-  );
+  const highlights = new HighlightsManager();
   const frames = timedFrames();
   const counts: FindCount[] = [];
   const split: Split = { feedMs: 0, stepMs: 0, feeds: 0, steps: 0, restarts: 0, needles: 0 };
@@ -163,7 +156,8 @@ async function fixture(cols: number, rows: number, scrollbackLimit: number) {
   };
   const find = new GhosttyFind(core, {
     viewport,
-    selection: manager as unknown as ConstructorParameters<typeof GhosttyFind>[1]["selection"],
+    highlights,
+    getSelection: () => null,
     onCount: (count) => counts.push(count),
     frames,
   });
