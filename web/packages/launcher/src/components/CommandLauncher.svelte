@@ -119,7 +119,7 @@
   import { clearControlAttention, hasControlAttention } from "../state/controlAttention.svelte";
   import { demoState } from "../state/demo.svelte";
   import { openEditDevserver, openEditGateway, openNewDialog } from "../state/dialog.svelte";
-  import { hasDesktopBridge, hostOs, readOnly } from "../state/capabilities";
+  import { hasDesktopBridge, hostOs, readOnly, isIOS } from "../state/capabilities";
   import { dsKey, isPending, servedKey, wsKey } from "../state/pending.svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
   import { setThemeChoice, themeState } from "../state/theme.svelte";
@@ -402,10 +402,11 @@
       // devserver or a gateway through, and the demo's hero keeps its New
       // workspace button for resetting the demo.
       may: {
-        terminal: true,
-        remoteTerminal: hasDesktopBridge,
+        // No terminals on the single iOS webview (local, devserver, or window).
+        terminal: !isIOS,
+        remoteTerminal: hasDesktopBridge && !isIOS,
         window: true,
-        terminalWindow: true,
+        terminalWindow: !isIOS,
         power: true,
         connect: hasDesktopBridge,
         tmux: true,
