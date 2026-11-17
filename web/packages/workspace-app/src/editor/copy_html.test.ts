@@ -30,11 +30,39 @@ import { draftClientPath } from "../api/fileIdentity";
 
 const MARK = String.fromCharCode(0);
 
-test("Copy as HTML leaves wikilinks as authored", () => {
+test("Copy as HTML shows wikilink labels in the body", () => {
   const source = "[[note]] [[note|alias]]";
   const root = document.createElement("div");
   root.innerHTML = buildBaselineHtml(source, "notes/doc.md", "/ws");
-  expect(root.querySelector("p")?.textContent).toBe(source);
+  expect(root.querySelector("p")?.textContent).toBe("note alias");
+});
+
+test("copy flavors keep the authored Markdown in text and in the wrapper attribute", () => {
+  const md = "[[note|alias]] ![](./a.png)";
+  const view = viewWith(md, 0, md.length);
+  const ev = copyEvent();
+  expect(handleClipboardCopy(view, ev, ctx, false)).toBe(true);
+  expect(ev.store["text/plain"]).toBe(md);
+  const doc = new DOMParser().parseFromString(ev.store["text/html"], "text/html");
+  expect(doc.querySelector("[data-chan-markdown]")?.getAttribute("data-chan-markdown")).toBe(md);
+  expect(doc.querySelector("p")?.textContent).toContain("alias");
+  expect(doc.querySelector("p")?.textContent).not.toContain("[[");
+  view.destroy();
+});
+
+test("copy body leaves inline code and fenced code as typed", () => {
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml("`[[note]]`\n\n```text\n[[note]]\n```\n", "notes/doc.md", "/ws");
+  expect(root.querySelector("p code")?.textContent).toBe("[[note]]");
+  expect(root.querySelector("pre code")?.textContent).toBe("[[note]]\n");
+});
+
+test("copy body gives a markup-carrying label no element", () => {
+  const label = '<img src=x onerror="alert(1)">';
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml(`[[note|${label}]]`, "notes/doc.md", "/ws");
+  expect(root.querySelector("img")).toBeNull();
+  expect(root.querySelector("p")?.textContent).toContain(label);
 });
 
 const ctx: ChanClipboardContext = {

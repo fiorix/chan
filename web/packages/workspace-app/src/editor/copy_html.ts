@@ -181,7 +181,7 @@ function renderBody(
   // The HTML leaves the app, so an author's `<style>` element goes with it;
   // `body` and the wrapper are never connected to the app's document, so
   // its rules reach nothing here.
-  body.innerHTML = renderMarkdown(markdown, { keepStyleElements: true });
+  body.innerHTML = renderMarkdown(markdown, { wikilinks: true, keepStyleElements: true });
   const refs = findWorkspaceImageRefs(markdown);
   const imgs = Array.from(body.querySelectorAll("img")).filter((img) =>
     isWorkspaceImageSrc(img.getAttribute("src") ?? ""),

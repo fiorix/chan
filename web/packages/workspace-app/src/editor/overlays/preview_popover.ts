@@ -151,7 +151,7 @@ export function openPreviewPopover(
         const md = document.createElement("div");
         md.className = "md-preview-md";
         const template = document.createElement("template");
-        template.innerHTML = renderMarkdown(resp.content ?? "");
+        template.innerHTML = renderMarkdown(resp.content ?? "", { wikilinks: true });
         for (const img of template.content.querySelectorAll("img")) {
           const src = img.getAttribute("src");
           if (src !== null) img.setAttribute("src", resolveImageSrc(src, opts.path));
