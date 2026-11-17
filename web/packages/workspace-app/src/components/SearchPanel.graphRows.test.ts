@@ -69,7 +69,7 @@ beforeEach(async () => {
   // The panel's first load streams the whole graph as one batch and then
   // fails, which keeps that batch as a partial view.
   vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
-    opts?.onNodes?.(whole.nodes, whole);
+    opts?.onView?.(whole);
     throw new Error("stream down");
   });
   searchPanel.open = true;

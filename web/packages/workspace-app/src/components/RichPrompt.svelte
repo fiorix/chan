@@ -645,7 +645,15 @@
   /// composer as pending until the terminal acknowledges it.
   function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
-    if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) return;
+    if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
+      showTransientNote("terminal not connected; try again");
+      return;
+    }
+    if (transientNote === "terminal not connected; try again") {
+      if (noteTimer !== null) clearTimeout(noteTimer);
+      noteTimer = null;
+      transientNote = null;
+    }
     content = text;
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);

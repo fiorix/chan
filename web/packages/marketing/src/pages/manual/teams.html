@@ -40,7 +40,7 @@
     </li>
     <li>
       <h3>Bootstrap</h3>
-      <p>chan saves the team, starts the lead, then the workers. Only the lead gets a first prompt, submitted the way its agent expects: it names the workers and points at the team's <code>bootstrap.md</code>. The workers wait for the lead to hand them tasks.</p>
+      <p>chan saves the team, starts the lead, then the workers. Only the lead gets a first prompt, submitted the way its agent expects: it names the workers and points at the team's <code>bootstrap.md</code>. The workers wait for the lead to hand them tasks. When Bootstrap closes the dialog, keyboard focus returns to the active terminal in the lead's pane.</p>
     </li>
   </ol>
 </section>
@@ -54,7 +54,7 @@
         <tr><th>In the team directory</th><th>Holds</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>config.toml</code></td><td>The team. You may edit it; it is checked again on every load.</td></tr>
+        <tr><td><code>config.toml</code></td><td>The team. You may edit it; it is checked again on every load. Loading a team into the dialog and bootstrapping it without changes keeps an existing file byte for byte. Editing the loaded team or choosing New writes the dialog's fields, dropping comments, custom key order and keys the dialog does not model. A missing file is created.</td></tr>
         <tr><td><code>bootstrap.md</code></td><td>The process every member reads: the roster, the brief, task files, journals, and how the lead reaches you. Creating a new team writes it; loading a saved team keeps an existing copy.</td></tr>
         <tr><td><code>tasks/</code></td><td>One file per task, <code>task-{from}-{to}-{n}.md</code>.</td></tr>
         <tr><td><code>journals/</code></td><td>One journal per member, <code>journal-{member}.md</code>.</td></tr>

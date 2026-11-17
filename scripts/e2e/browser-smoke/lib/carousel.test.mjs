@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { setTimeout as delay } from "node:timers/promises";
+import { setImmediate as nextTurn, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { showCarouselCard } from "./carousel.mjs";
 
@@ -29,16 +29,22 @@ function fixture(t, options = {}) {
     finish();
     state.animation = null;
   }
-  globalThis.requestAnimationFrame = (callback) => setTimeout(() => {
-    state.frames += 1;
-    if (state.pendingAt === state.frames) {
-      state.pendingAt = null;
-      state.starts += 1;
-      state.animation = { playState: "running", pending: false, finished: new Promise((resolve) => { finish = resolve; }) };
-      if (options.autoFinish !== false) setTimeout(end, 0);
-    }
-    callback();
-  }, 0);
+  let onFrameQueued;
+  const frameQueued = new Promise((resolve) => { onFrameQueued = resolve; });
+  globalThis.requestAnimationFrame = (callback) => {
+    const frame = setTimeout(() => {
+      state.frames += 1;
+      if (state.pendingAt === state.frames) {
+        state.pendingAt = null;
+        state.starts += 1;
+        state.animation = { playState: "running", pending: false, finished: new Promise((resolve) => { finish = resolve; }) };
+        if (options.autoFinish !== false) setTimeout(end, 0);
+      }
+      callback();
+    }, 0);
+    onFrameQueued();
+    return frame;
+  };
   globalThis.cancelAnimationFrame = clearTimeout;
   // The turn's transition runs on each slot, a child of the ring; the ring
   // itself carries no transform and so never animates.
@@ -93,7 +99,7 @@ function fixture(t, options = {}) {
       return { asElement: () => element, dispose: async () => { state.disposed += 1; } };
     },
   };
-  return { page, state, end };
+  return { page, state, end, frameQueued };
 }
 
 test("the deck arrows bring the control forward after each observed animation ends", async (t) => {
@@ -129,13 +135,23 @@ test("reduced motion needs the front card but no invented animation", async (t) 
 });
 
 test("a transition that never finishes fails with the active card and motion state", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const f = fixture(t, { active: 2, pending: true, autoFinish: false });
-  await assert.rejects(showCarouselCard(f.page, TARGET, 30), (error) => {
+  const rejected = assert.rejects(showCarouselCard(f.page, TARGET, 30), (error) => {
     assert.match(error.message, /carousel motion did not settle within 30ms/);
     assert.match(error.message, /"target":"shared-lab, 3 of 3"/);
     assert.match(error.message, /"animations":\[\{"state":"running","pending":false\}\]/);
     return true;
   });
+  await f.frameQueued;
+  t.mock.timers.tick(0);
+  assert.equal(f.state.frames, 2);
+  assert.equal(f.state.starts, 1);
+  assert.ok(f.state.runningReads > 0, "the barrier observes the running transition");
+  // Let resolved animation promises settle before advancing the deadline.
+  await nextTurn();
+  t.mock.timers.tick(30);
+  await rejected;
   f.end();
 });
 

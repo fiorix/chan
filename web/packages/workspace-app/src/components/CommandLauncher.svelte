@@ -577,7 +577,7 @@
     id: "computers:status",
     title:
       scopedLibraryLoading && scopedLibraryError === null
-        ? "Connecting to this computer\u2026"
+        ? "Connecting to the local machine\u2026"
         : "Computers unavailable",
     breadcrumb: scopedLibraryError
       ? "This window was not granted library access"

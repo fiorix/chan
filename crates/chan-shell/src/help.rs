@@ -803,8 +803,8 @@ file browser walks; `terminal team` refuses, for want of a workspace
 tree to write into. That makes a standalone terminal fully automatable
 and the right place to manage the chan library itself (`chan serve`,
 `chan close`, `chan workspace forget`, `chan ps`), while indexed work
-belongs in a workspace window, where the graph, search, export and
-session commands exist.
+belongs in a workspace window, where the graph, search and export
+commands and the leadership `session handover` and `takeover` exist.
 "#;
 
 /// `cs terminal` examples, side effects, and caveats.
@@ -1699,11 +1699,11 @@ submit.
 CHAN_AGENT is read from the TARGET session's spawn environment
 (it overrides the command sniff there); CHAN_MODE is read by
 nothing. Chord templates resolve where the derivation runs, in
-the SERVER's environment: env CHAN_SUBMIT_<AGENT>, then the
-server's <config>/chan/submit.toml, then the built-in default. A
-CHAN_SUBMIT_* value in the WRITER's environment has no effect.
-Discover a target's agent with cs terminal list (the agent
-column, null/- for a shell session).
+the SERVER's environment: env CHAN_SUBMIT_<AGENT>, then submit.toml
+in the server's chan home (CHAN_HOME, default ~/.chan), then the
+built-in default. A CHAN_SUBMIT_* value in the WRITER's environment
+has no effect. Discover a target's agent with cs terminal list
+(the agent column, null/- for a shell session).
 "#;
 
 /// `cs terminal write` examples, side effects, and caveats.
@@ -1928,7 +1928,11 @@ records, with the caption in `label`.
 The lifecycle verbs drive real windows. `new` opens one whose kind
 is derived from the calling tenant: a standalone terminal spawns
 another terminal window, a workspace spawns another window of that
-workspace. `open <id>` focuses a window, un-hiding it if it was
+workspace. `new` waits up to ten seconds after the desktop mints
+the window for its event socket to connect, then prints its id.
+The next `--window` command can use that id without a wait of its
+own. This confirms the connection, not operating-system focus.
+`open <id>` focuses a window, un-hiding it if it was
 hidden. `hide <id>` is the OS close-button behavior: terminals and
 layout stay warm and reopenable. `rm <id>` destroys the window and
 deletes its saved layout. Titles are library-owned and
@@ -1946,7 +1950,10 @@ pub(crate) const CS_WINDOW_AFTER: &str = r#"EXAMPLES:
     or offline
 
   cs window new
-    -> the new window id, printed on stdout
+    -> the connected window id, printed on stdout
+
+  w=$(cs window new) && cs open README.md --window "$w"
+    -> opens README.md in the new workspace window
 
   cs window hide win-3
     -> "hid window win-3"; bring it back with
@@ -1964,6 +1971,9 @@ SIDE EFFECTS:
   first, so a refused `rm` changes nothing. Each verb prints one
   line on stdout (`new` prints the id); failures go to stderr and
   exit non-zero.
+  If a minted window does not connect within ten seconds, `new`
+  prints no id on stdout, names it in the error on stderr, and
+  exits 124. The window record remains and may connect later.
 
 CAUTIONS:
   `rm` is destructive and has no undo: the saved layout is gone, so
@@ -1993,7 +2003,12 @@ CAVEATS:
   desktop attached they refuse with "window management requires the
   chan desktop app". `rm` still works headless, because the server
   (not the desktop) owns the registry row.
-  A standalone `chan serve` serve has no library window set, so
+  Viewing a devserver in the desktop does not attach the desktop's
+  window-management bridge to that server: `new`, `open` and `hide`
+  still refuse from its terminals. A `chan-term` window started with
+  a command, `--hold`, `--app-id` or `--title` runs in a process of
+  its own without that bridge, so they refuse there too.
+  A standalone `chan serve` has no library window set, so
   `cs window list` is empty there.
   Subcommands infer (`cs w l`, `cs w n`, `cs w o`, `cs w r`), but
   `hide` needs at least `cs w hi`: a bare `h` is ambiguous with

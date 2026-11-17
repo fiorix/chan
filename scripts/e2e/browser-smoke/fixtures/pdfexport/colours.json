@@ -1,0 +1,10 @@
+{
+  "tallBody": [20, 90, 200],
+  "tallFoot": [230, 60, 20],
+  "wideLeft": [128, 0, 200],
+  "wideBody": [0, 150, 80],
+  "wideRight": [255, 176, 0],
+  "boundaryEdges": [220, 20, 120],
+  "boundaryUpper": [0, 128, 128],
+  "boundaryLower": [17, 95, 211]
+}

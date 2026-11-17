@@ -99,6 +99,7 @@ url = { workspace = true }
 # forbids unsafe code, does not make itself.
 [target.'cfg(windows)'.dependencies]
 chan-winpipe = { workspace = true }
+sha2 = { workspace = true }
 
 # The CLI and desktop's second launch can read X11 server time without
 # initializing GTK. x11rb is the pure Rust connection already used by arboard.

@@ -476,7 +476,7 @@ describe("the shared graph load", () => {
     graphData.view = null;
     let finish!: (view: GraphView) => void;
     vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
-      opts?.onNodes?.(people().nodes, people());
+      opts?.onView?.(people());
       return new Promise<GraphView>((resolve) => {
         finish = resolve;
       });
@@ -496,7 +496,7 @@ describe("the shared graph load", () => {
   test("the contacts name a failed first load's error, not its partial view", async () => {
     graphData.view = null;
     vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
-      opts?.onNodes?.(people().nodes, people());
+      opts?.onView?.(people());
       throw new Error("stream down");
     });
     const target = await render();

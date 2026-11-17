@@ -39,11 +39,11 @@ Authenticated `GET /api/metrics` is available on the launcher root and tenant ro
 
 ## systemd-report
 
-`systemd-report`, in systemd 260 and later, collects metrics from a machine's services through systemd's metrics interface, `io.systemd.Metrics`. `chan metrics --varlink` makes the devserver one of its user sources: systemd starts it for each connection to a socket named `io.chan.Devserver` in `$XDG_RUNTIME_DIR/systemd/report/`, the directory `systemd-report --user` reads, and it serves `List`, `Describe` and the standard `org.varlink.service` introspection on that connection, under systemd's own description of the interface. It owns no sampler or history.
+`systemd-report`, in systemd 260 and later, collects metrics from a machine's services through systemd's metrics interface, `io.systemd.Metrics`. `chan metrics --varlink` makes the devserver one of its user sources: systemd starts it for each connection to a socket named `app.chan.Devserver` in `$XDG_RUNTIME_DIR/systemd/report/`, the directory `systemd-report --user` reads, and it serves `List`, `Describe` and the standard `org.varlink.service` introspection on that connection, under systemd's own description of the interface. It owns no sampler or history.
 
 `List`, which systemd-report calls with `more` set, reads the running devserver once, without history, and sends one reply per metric, every reply but the last marked `continues`. It finds the devserver's address and token afresh on every call, as `chan metrics` does without `--url`, so it follows a restart and a rotated token, and it never starts the devserver. Each `List` is a read like any other: while systemd-report calls it more often than every five minutes, the devserver keeps scanning the chan home, once a minute, as [Collection](#collection) describes. When the devserver cannot be read, or answers with a `schemaVersion` this build does not know, `List` answers `io.systemd.Metrics.NoSuchMetric`, which systemd-report reads as a source with nothing to report, and the source writes one line to stderr, the unit's journal, saying why. A reading that is null is not sent: before the first sample, without process readings, for I/O the platform cannot count, and for a chan-home scan that is pending or failed before its first total. `Describe` sends every family from the same table `List` reads and needs no devserver. Both answer `org.varlink.service.ExpectedMore` when called without `more`, and `org.varlink.service.InvalidParameter` for any parameter.
 
-A report is a snapshot, so the families are counters and gauges, not rates: two reports give a rate, and `chan metrics --json --history` has chan's own rates and the last ten minutes. Counters start over when the devserver restarts, and `InstanceId` changes with it. Sequence numbers, sample timing, the hostname (systemd-report reports the machine's), the chan-home path and the scan error are left out. Each family is `io.chan.Devserver.` followed by its name; values are JSON integers, except in the three string families:
+A report is a snapshot, so the families are counters and gauges, not rates: two reports give a rate, and `chan metrics --json --history` has chan's own rates and the last ten minutes. Counters start over when the devserver restarts, and `InstanceId` changes with it. Sequence numbers, sample timing, the hostname (systemd-report reports the machine's), the chan-home path and the scan error are left out. Each family is `app.chan.Devserver.` followed by its name; values are JSON integers, except in the three string families:
 
 - `Version`, `Build`, `InstanceId` (string): `identity.version`, `.build` and `.instanceId`. `InstanceId` changes on every restart, when every counter starts over.
 - `PID` (gauge): `identity.pid`.
@@ -57,16 +57,16 @@ A report is a snapshot, so the families are counters and gauges, not rates: two 
 - `GatewayTunnels`, `ReverseListeners`, `YamuxWaiting`, `YamuxServing`, `YamuxServiceCapacity`, `YamuxStreamLimit` (gauge) and `TunnelDialFailures` (counter): the sample's `gatewayTunnels`, `reverseListeners`, `yamuxWaiting`, `yamuxServing`, `yamuxServiceCapacity`, `yamuxStreamLimit` and `tunnelDialFailures`.
 - `HomeLogicalBytes`, `HomeAllocatedBytes`, `HomeFiles` (gauge): `storage.logicalBytes`, `.allocatedBytes` and `.files`, the totals of the last completed scan, which a failed refresh keeps.
 
-Example user units are in [systemd/chan-metrics.socket](systemd/chan-metrics.socket) and [systemd/chan-metrics@.service](systemd/chan-metrics@.service), and the manual's [systemd integration](https://chan.app/manual/systemd/#systemd-report) page has a block that writes them. Install them in `~/.config/systemd/user/`, set `ExecStart` to your installed chan binary, and set the same `CHAN_HOME` as the devserver if it uses a non-default home. The socket is private to the user, and each connected client has one activated process, capped at 16 connections. A connection carries any number of calls; one whose client sends no call for 60 seconds, or does not read a reply within 10 seconds, is closed. That ends its process with status 0, as the client's own close does; a frame that breaks the protocol ends it with an error.
+Example user units are in [systemd/chan-metrics.socket](systemd/chan-metrics.socket) and [systemd/chan-metrics@.service](systemd/chan-metrics@.service), and the manual's [systemd integration](https://chan.app/manual/systemd/#systemd-report) page has a block that writes them. Install them in `~/.config/systemd/user/`, set `ExecStart` to your installed chan binary, and set the same `CHAN_HOME` as the devserver if it uses a non-default home. The socket is private to the user, and each connected client has one activated process, capped at 16 connections. A connection carries any number of calls; one whose client sends no call for 60 seconds, or does not read a reply within 10 seconds, is closed. That ends its process with status 0, as the client's own close does; a frame that breaks the protocol ends it with an error. A socket that is already running does not take a changed path until it is restarted.
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now chan-metrics.socket
+systemctl --user enable chan-metrics.socket && systemctl --user restart chan-metrics.socket
 /usr/lib/systemd/systemd-report --user list-sources
-/usr/lib/systemd/systemd-report --user describe io.chan.Devserver
-/usr/lib/systemd/systemd-report --user metrics io.chan.Devserver
-varlinkctl introspect "$XDG_RUNTIME_DIR/systemd/report/io.chan.Devserver" io.systemd.Metrics
-varlinkctl --more call "$XDG_RUNTIME_DIR/systemd/report/io.chan.Devserver" io.systemd.Metrics.List '{}'
+/usr/lib/systemd/systemd-report --user describe app.chan.Devserver
+/usr/lib/systemd/systemd-report --user metrics app.chan.Devserver
+varlinkctl introspect "$XDG_RUNTIME_DIR/systemd/report/app.chan.Devserver" io.systemd.Metrics
+varlinkctl --more call "$XDG_RUNTIME_DIR/systemd/report/app.chan.Devserver" io.systemd.Metrics.List '{}'
 ```
 
 systemd installs `systemd-report` in `/usr/lib/systemd/`, outside `PATH`, and systemd 260 names its `describe` command `describe-metrics`. The units do not restart, stop, or socket-activate the devserver itself. Disable the source with `systemctl --user disable --now chan-metrics.socket`.

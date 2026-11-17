@@ -288,8 +288,8 @@ pub(super) struct TerminalState {
 
 #[cfg(target_os = "linux")]
 impl TerminalState {
-    /// The header's state region: flags, then one slot per private mode
-    /// that is on, 0 for an empty slot.
+    /// The header's state region: flags (including extended mouse modes),
+    /// then slots for the remaining private modes, 0 for an empty slot.
     fn encode(&self, stopped: bool) -> [u8; layout::STATE_LEN] {
         let mut flags = 0u16;
         if self.alt_screen {
@@ -298,15 +298,20 @@ impl TerminalState {
         if stopped {
             flags |= layout::FLAG_STOPPED;
         }
+        for &(mode, flag) in layout::FLAG_MODES {
+            if self.private_modes.contains(&mode) {
+                flags |= flag;
+            }
+        }
         let mut region = [0u8; layout::STATE_LEN];
         region[..2].copy_from_slice(&flags.to_le_bytes());
-        debug_assert!(self.private_modes.len() <= layout::MODE_SLOTS);
-        for (slot, mode) in self
-            .private_modes
-            .iter()
-            .take(layout::MODE_SLOTS)
-            .enumerate()
-        {
+        let slotted = self.private_modes.iter().filter(|mode| {
+            !layout::FLAG_MODES
+                .iter()
+                .any(|(flag_mode, _)| flag_mode == *mode)
+        });
+        debug_assert!(slotted.clone().count() <= layout::MODE_SLOTS);
+        for (slot, mode) in slotted.take(layout::MODE_SLOTS).enumerate() {
             region[2 + 2 * slot..4 + 2 * slot].copy_from_slice(&mode.to_le_bytes());
         }
         region
@@ -315,11 +320,16 @@ impl TerminalState {
     /// The state in a header's region and whether it marks a stop.
     fn decode(region: &[u8; layout::STATE_LEN]) -> (Self, bool) {
         let flags = u16::from_le_bytes([region[0], region[1]]);
-        let private_modes = region[2..]
+        let mut private_modes: BTreeSet<u16> = region[2..]
             .chunks_exact(2)
             .map(|slot| u16::from_le_bytes([slot[0], slot[1]]))
             .filter(|mode| *mode != 0)
             .collect();
+        for &(mode, flag) in layout::FLAG_MODES {
+            if flags & flag != 0 {
+                private_modes.insert(mode);
+            }
+        }
         let state = Self {
             alt_screen: flags & layout::FLAG_ALT_SCREEN != 0,
             private_modes,
@@ -359,15 +369,43 @@ mod layout {
     /// The process that wrote the file stopped mirroring after a failed
     /// write, so the session went on past the file's end.
     pub(super) const FLAG_STOPPED: u16 = 2;
+    /// Extended mouse modes use reserved flag bits so the sealed file's
+    /// header and data offsets stay fixed. Readers without these modes
+    /// ignore the bits and still read all seven original mode slots.
+    pub(super) const FLAG_MODES: &[(u16, u16)] = &[
+        (9, 1 << 2),
+        (1001, 1 << 3),
+        (1005, 1 << 4),
+        (1015, 1 << 5),
+        (1016, 1 << 6),
+    ];
 }
 
 // The state region follows the window, so one write can publish both.
 #[cfg(target_os = "linux")]
 const _: () = assert!(layout::STATE_AT == layout::WINDOW_AT + layout::WINDOW_LEN);
 
-// Every tracked mode that is on has a slot in the header.
+// Every tracked mode that has no flag fits in the header's slots.
 #[cfg(target_os = "linux")]
-const _: () = assert!(super::TRACKED_PRIVATE_MODES.len() <= layout::MODE_SLOTS);
+const _: () = {
+    let mut slotted = 0;
+    let mut i = 0;
+    while i < super::TRACKED_PRIVATE_MODES.len() {
+        let mut has_flag = false;
+        let mut j = 0;
+        while j < layout::FLAG_MODES.len() {
+            if super::TRACKED_PRIVATE_MODES[i] == layout::FLAG_MODES[j].0 {
+                has_flag = true;
+            }
+            j += 1;
+        }
+        if !has_flag {
+            slotted += 1;
+        }
+        i += 1;
+    }
+    assert!(slotted <= layout::MODE_SLOTS);
+};
 
 /// A parked session's ring as it crosses a restart: a memfd the systemd fd
 /// store keeps beside the PTY master. The byte numbered `seq` lives at data
@@ -716,6 +754,122 @@ mod tests {
         RingFile::adopt(fd)
             .map_err(|error| error.to_string())?
             .read()
+    }
+
+    #[test]
+    fn all_input_modes_survive_ring_state_and_stop_mark_round_trips() {
+        let modes = [
+            1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004,
+        ];
+        for mask in 0..1u16 << modes.len() {
+            let state = TerminalState {
+                alt_screen: true,
+                private_modes: modes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(bit, mode)| (mask & (1 << bit) != 0).then_some(*mode))
+                    .collect(),
+            };
+            for stopped in [false, true] {
+                let encoded = state.encode(stopped);
+                assert_eq!(
+                    TerminalState::decode(&encoded),
+                    (state.clone(), stopped),
+                    "every input-mode subset survives the state header"
+                );
+                assert_eq!(
+                    TerminalState::decode(&TerminalState::with_stop(encoded)),
+                    (state.clone(), true),
+                    "marking a stop preserves every input mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extended_mode_flags_keep_their_persisted_bit_numbers() {
+        for (mode, flag) in [(9, 4u16), (1001, 8), (1005, 16), (1015, 32), (1016, 64)] {
+            let state = TerminalState {
+                alt_screen: false,
+                private_modes: [mode].into_iter().collect(),
+            };
+            let encoded = state.encode(false);
+            assert_eq!(
+                u16::from_le_bytes(encoded[..2].try_into().unwrap()),
+                flag,
+                "mode {mode} keeps its assigned flag bit"
+            );
+            assert_eq!(encoded[2..], [0; 14], "extended modes consume no mode slot");
+        }
+    }
+
+    #[test]
+    fn captured_ring_headers_restore_only_the_modes_their_writer_recorded() {
+        // Complete files copied from the real memfd writers: the seven-mode
+        // writer at 826adee91 and the writer with extended input-mode flags.
+        let cases: [(&[u8], &[u16]); 2] = [
+            (
+                include_bytes!("tests/fixtures/ring-v130.bin"),
+                &[1, 1000, 1002, 1003, 1004, 1006, 2004],
+            ),
+            (
+                include_bytes!("tests/fixtures/ring-input-modes.bin"),
+                &[
+                    1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004,
+                ],
+            ),
+        ];
+        for (bytes, modes) in cases {
+            let file = tempfile::tempfile().unwrap();
+            file.write_all_at(bytes, 0).unwrap();
+            let mut restored = RingFile::adopt(file.into()).unwrap();
+            assert_eq!(restored.read().unwrap(), (200, stream(200)[136..].to_vec()));
+            assert!(restored.stopped());
+            assert_eq!(
+                restored.terminal_state(),
+                Some(TerminalState {
+                    alt_screen: true,
+                    private_modes: modes.iter().copied().collect(),
+                }),
+                "a captured header restores exactly its writer's modes"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interrupted_append_publishes_all_modes_with_their_bytes() {
+        let state = TerminalState {
+            alt_screen: true,
+            private_modes: [
+                1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let bytes = stream(30);
+        for writes in 0..8 {
+            let mut file = RingFile::create(16).unwrap();
+            file.append(0, &bytes[..22]).unwrap();
+            file.writes_left.set(Some(writes));
+            let appended = file.append_with_state(22, &bytes[22..], Some(state.encode(false)));
+            file.writes_left.set(None);
+            let fd = file.shared_file().as_fd().try_clone_to_owned().unwrap();
+            let mut restored = RingFile::adopt(fd).unwrap();
+            let (end, replay) = restored.read().unwrap();
+            assert_eq!(replay, bytes[end as usize - replay.len()..end as usize]);
+            if appended.is_ok() {
+                assert_eq!(end, 30);
+                assert_eq!(restored.terminal_state(), Some(state));
+                return;
+            }
+            assert_eq!(end, 22, "an interrupted append leaves the old end");
+            assert_eq!(
+                restored.terminal_state(),
+                Some(TerminalState::default()),
+                "an interrupted append leaves the old modes with the old bytes"
+            );
+        }
+        panic!("the state and bytes were never published");
     }
 
     #[test]

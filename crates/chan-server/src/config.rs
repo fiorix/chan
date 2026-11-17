@@ -1,7 +1,7 @@
 //! chan-server preferences.
 //!
-//! Persisted at `<config>/chan/server.toml` (sibling of
-//! `<config>/chan/preferences.toml`). Holds chan-server-specific
+//! Persisted at `~/.chan/server.toml` (under `$CHAN_HOME` when that is
+//! set), beside `preferences.toml`. Holds chan-server-specific
 //! paths and toggles that aren't user content (those live in the
 //! workspace).
 //!

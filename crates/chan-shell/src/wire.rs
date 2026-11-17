@@ -1837,12 +1837,12 @@ pub enum ControlResponse {
     },
     /// A blocking request the server abandoned because its reply window
     /// elapsed (a survey, a clipboard round-trip, a tunnel's ready window,
-    /// an export, an identification or a handover). Distinct from `Error`
-    /// so the client can map it to a dedicated exit code (124) instead of
-    /// the generic failure path, as `cs terminal survey`, `cs copy`, `cs
-    /// paste` and `cs tunnel` do, and never has to infer a timeout from a
-    /// dropped connection. `message` is the elapsed-window line the CLI
-    /// prints (e.g. `no reply within 600s`).
+    /// a new window's connection, an export, an identification or a handover).
+    /// Distinct from `Error` so the client can map it to a dedicated exit
+    /// code (124) instead of the generic failure path, as `cs terminal
+    /// survey`, `cs copy`, `cs paste`, `cs tunnel` and `cs window new` do,
+    /// and never has to infer a timeout from a dropped connection. `message`
+    /// is the elapsed-window line the CLI prints (e.g. `no reply within 600s`).
     Timeout {
         message: String,
     },

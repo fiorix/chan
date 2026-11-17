@@ -2,7 +2,7 @@
 
 export const FILE_LIST = '[role="listbox"][aria-label="Directory contents"]';
 export const FILE_ROW = `${FILE_LIST} [role="option"]`;
-const TABS = '[role="tablist"] [role="tab"]';
+const TABS = '[role="tablist"] .tab > [role="tab"]';
 
 export function filePath(path) {
   if (typeof path !== "string" || path.startsWith("/") || path.includes("\0")) {
@@ -28,7 +28,7 @@ export async function browserTab(page, scope = "") {
   const candidates = [];
   for (const tab of tabs) {
     const info = await tab.evaluate((el) => ({
-      title: el.title, active: el.getAttribute("aria-selected") === "true",
+      title: el.closest(".tab").title, active: el.getAttribute("aria-selected") === "true",
       focused: el.closest('[role="region"][aria-label="editor pane"]')?.classList.contains("focused"),
     }));
     if (info.title !== "File Browser" && !info.title.startsWith("File Browser: ")) {
@@ -105,7 +105,7 @@ export async function showFiles(page, scope = "") {
       if (!tab) await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  if (!tab) throw new Error(`Files tab did not appear; tabs=${JSON.stringify(await page.$$eval(TABS, (tabs) => tabs.map((el) => el.title)))}`);
+  if (!tab) throw new Error(`Files tab did not appear; tabs=${JSON.stringify(await page.$$eval(TABS, (tabs) => tabs.map((el) => el.closest(".tab").title)))}`);
   await tab.click();
   await tab.dispose();
   scope = await paneScope(page, scope);

@@ -15,10 +15,11 @@
 //! A bounded blocking request whose window elapses is answered with
 //! `ControlResponse::Timeout`, which the first-response mapping that every
 //! request path in [`crate::control`] shares turns into a [`ControlTimeout`].
-//! Four commands exit [`CONTROL_TIMEOUT`]
+//! Five commands exit [`CONTROL_TIMEOUT`]
 //! (124) on it: a `cs terminal survey` whose `--timeout` elapsed, a `cs copy`
-//! / `cs paste` whose clipboard round-trip got no window reply, and a
-//! `cs tunnel` no listener acknowledged in time. Their dispatch edges
+//! / `cs paste` whose clipboard round-trip got no window reply, a
+//! `cs tunnel` no listener acknowledged in time, and a `cs window new` whose
+//! minted window did not connect in time. Their dispatch edges
 //! downcast it, print the elapsed-window line, and exit with
 //! [`CONTROL_TIMEOUT`], so a caller can tell "no answer in time" apart from a
 //! real error (exit 1) and from a delivered reply (exit 0). `cs export`,

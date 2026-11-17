@@ -1,6 +1,6 @@
 # chan-tls design
 
-chan-tls holds the shared TLS trust decision for chan's gateway clients and embedding model download. It is one function, `client_config()`, which returns a rustls client config with no ALPN around one certificate verifier the process shares. The desktop's HTTP clients, its WebSocket feeds and `cs tunnel` sockets, its updater, the devserver's tunnel dial, the CLI's `chan metrics --url`, the model downloader and the gateway's WireGuard agent all take their config from it. Each caller sets the ALPN its transport speaks on its own copy and changes nothing else about verification.
+chan-tls holds the TLS trust decision of chan's Rust clients. It is one function, `client_config()`, which returns a rustls client config with no ALPN around one certificate verifier the process shares. The desktop's HTTP clients, its WebSocket feeds and `cs tunnel` sockets, its updater, the devserver's tunnel dial, the CLI's self-update and `chan metrics --url`, the model downloader and the gateway's WireGuard agent all take their config from it, so a server one of them trusts is trusted by all of them and a server one of them refuses is refused by all of them. Each caller sets the ALPN its transport speaks on its own copy and changes nothing else about verification.
 
 ## Where it sits
 
@@ -15,6 +15,7 @@ The callers and what each keeps of its own:
 - chan-tunnel-client's `build_tls_config`: ALPN `h2`, built once per `run` and reused across reconnects.
 - wireguard-agent's `IdentityClient`: ALPN `http/1.1`, with its 5-second total and 2-second connect timeouts and no redirects.
 - The CLI's `chan metrics --url` client (`crates/chan/src/http_client.rs`, `explicit_url`): ALPN `http/1.1`, keeping the user's proxy settings and refusing redirects, since the URL can name any server, a remote devserver behind a gateway included.
+- The CLI's self-update client (`crates/chan/src/update.rs`, `http_client`): ALPN `http/1.1` for the silent background probe, release metadata, archives and their HTTPS redirects. The probe and upgrade retain their own timeouts and the user's proxy settings; every production request and redirect requires HTTPS.
 - chan-workspace's embedding model download (`index::embeddings::download`): ureq metadata and payload agents with no ALPN, retaining ureq's environment proxy lookup and the Hub cache layout. Cache hits initialize neither agent; metadata follows relative redirects explicitly, while the payload agent follows its bounded redirect policy.
 
 reqwest uses a preconfigured config as it is, ALPN included, so a reqwest caller sets the ALPN of the HTTP versions its build enables; neither reqwest here is built with HTTP/2, so those callers offer `http/1.1` alone, which is what reqwest's own config would offer. tokio-tungstenite's own connector offers no ALPN, and the WebSocket callers keep that.
@@ -29,6 +30,8 @@ On Linux and the other Unixes WebPKI verifies, rustls's `WebPkiServerVerifier`, 
 
 `client_config()` fails only when the verifier cannot be built: the platform verifier refusing to start on macOS or Windows, or WebPKI refusing its root store elsewhere, which the floor keeps from being empty. This crate does not cache a failure, so its next call tries again, and each caller surfaces it where it builds its client: a desktop client fails to build with the message, the tunnel's `run` returns it as a configuration error, and the agent refuses to start. A caller may keep the failure itself: the desktop's devserver HTTP clients (`desktop/src-tauri/src/devserver.rs`, `http_client` and `http_client_no_redirect`) memoize their first build, error included, for the life of the process, so there a failure holds until restart. A system bundle that reads with errors is not a failure, since the bundled roots still verify a public CA: one warning names how many errors there were and the first, and another counts the certificates that are not usable trust anchors. When the verifier is built, once per process, the number of anchors the system store gave is logged at info beside the bundled count, and a store that gave none, absent or empty, warns, since a private CA cannot verify then. A refused certificate reaches each caller's own error as `invalid peer certificate: UnknownIssuer` for a CA in neither store: the tunnel's dial failure, the desktop's discovery, roster and window-feed errors, and the agent's warn line.
 
+The first client to build the shared verifier emits these one-time system-store diagnostics; the CLI update probe builds its client silently, so later clients do not replay diagnostics suppressed by it.
+
 The crate uses ring for every config it builds and installs ring as the process's default provider the first time, so a rustls config built from the default elsewhere in the process (tokio-tungstenite's own connector, the updater plugin's) negotiates with the same provider. The configs offer TLS 1.3 and TLS 1.2.
 
 ## What it never offers
@@ -37,7 +40,7 @@ There is no option to turn verification off, to accept a certificate by hand or 
 
 ## Clients outside it
 
-- The CLI's self-update (`crates/chan/src/update.rs`) builds its reqwest client over reqwest's bundled roots, which the `chan` crate selects with `rustls-tls`: it reaches chan.app and GitHub, behind public CAs. The CLI's local devserver client speaks cleartext to loopback and runs no TLS.
+- The CLI's local devserver client speaks cleartext to loopback and runs no TLS.
 - chan-server's extension proxy reaches loopback extension servers over reqwest's bundled roots.
 - The gateway's services (gateway-common, identity, devserver-proxy, admin) keep reqwest's bundled roots. devserver-proxy's identity client is one of them, so an `https://` identity internal listener behind a private CA verifies for the WireGuard agent and not for the devserver-proxy beside it. Identity's OAuth exchange runs on oauth2 4.4, which owns a reqwest 0.11 client on rustls 0.21, a different rustls whose config this crate cannot build.
 - The webviews use the operating system's own TLS stack and take no Rust config.

@@ -111,6 +111,10 @@ export function paginateDocBlocks(
     if (end > start) windows.push({ startPx: start, endPx: end });
     start = end;
   };
+  const containsContent = (end: number) => blocks.some((block) =>
+    !block.pageBreak && block.bottom > block.top &&
+    block.bottom > start && block.top < end,
+  );
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!;
@@ -139,6 +143,13 @@ export function paginateDocBlocks(
         push(start + pageHeightPx);
         continue;
       }
+      // Hard-cut only an oversized block or a pulled heading group:
+      // a fitting block after a margin must move whole.
+      const pageEnd = start + pageHeightPx;
+      if (
+        (cut < block.top || block.bottom - block.top > pageHeightPx) &&
+        !containsContent(cut) && containsContent(pageEnd)
+      ) cut = pageEnd;
       push(cut);
     }
   }

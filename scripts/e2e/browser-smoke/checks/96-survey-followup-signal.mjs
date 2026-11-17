@@ -6,10 +6,8 @@
 // overlay -- option pick, [X] dismiss, [F] follow up. A one-byte shell read
 // proves the survey key never reaches the PTY, then its cleanup byte proves
 // focus returned to the terminal. Also asserts the three distinct stdout
-// lines the asking agent branches on, and that [F] writes NO followup
-// artifact anywhere under the workspace (the retired followup-file
-// machinery only ever wrote through the Workspace sandbox, so the workspace
-// tree is the complete universe of possible write targets).
+// lines the asking agent branches on, and that setup and all three surveys
+// create NO followup artifacts anywhere under the workspace.
 
 import { join } from "node:path";
 import { maskTokens } from "../lib/token-mask.mjs";
@@ -48,11 +46,11 @@ async function clickTab(page, label) {
   throw new Error(`tab not found: ${label}`);
 }
 
-/// Recursive scan for followup-file artifacts: any `followups/` dir or
-/// any `followup-*.md` file anywhere under root.
-function followupArtifacts(root) {
+/// Recursive scan for followup-file artifacts: any `followups/` dir and its
+/// entries, or any `followup-*.md` file under root, excluding a prior snapshot.
+function followupArtifacts(root, before = new Set()) {
   const hits = [];
-  const walk = (dir) => {
+  const walk = (dir, inFollowups = false) => {
     let names;
     try {
       names = readdirSync(dir);
@@ -68,15 +66,15 @@ function followupArtifacts(root) {
         continue;
       }
       if (st.isDirectory()) {
-        if (name === "followups") hits.push(p);
-        walk(p);
-      } else if (/^followup-.*\.md$/.test(name)) {
+        if (inFollowups || name === "followups") hits.push(p);
+        walk(p, inFollowups || name === "followups");
+      } else if (inFollowups || /^followup-.*\.md$/.test(name)) {
         hits.push(p);
       }
     }
   };
   walk(root);
-  return hits;
+  return hits.filter((path) => !before.has(path));
 }
 
 export default {
@@ -309,6 +307,7 @@ export default {
     }
 
     try {
+      const beforeFollowup = new Set(followupArtifacts(ctx.workspaceDir));
       // Open target + away tabs. A survey needs a LIVE target session matching
       // the selector, and each session registers only once the SPA's terminal
       // WS connects.
@@ -347,8 +346,8 @@ export default {
         );
       }
 
-      // No followup artifact anywhere under the workspace.
-      const hits = followupArtifacts(ctx.workspaceDir);
+      // Earlier checks may leave team directories; only this check's writes count.
+      const hits = followupArtifacts(ctx.workspaceDir, beforeFollowup);
       if (hits.length) {
         throw new Error(`followup artifacts written: ${hits.join(", ")}`);
       }

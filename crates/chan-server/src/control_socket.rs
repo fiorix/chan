@@ -1970,7 +1970,9 @@ where
         ControlRequest::ClipboardPaste { window_id, prefer } => {
             handle_clipboard_paste(window_id, prefer, events_tx, window_bus).await
         }
-        ControlRequest::WindowNew => handle_window_new(desktop, workspace_cell, tenant).await,
+        ControlRequest::WindowNew => {
+            handle_window_new(desktop, workspace_cell, tenant, session_registry).await
+        }
         ControlRequest::WindowOpen { id } => into_response(
             desktop
                 .dispatch(|reply| DesktopWindowOp::Open {
@@ -3948,14 +3950,19 @@ fn handover_error_message(error: HandoverError) -> String {
 /// `cs window new`: ask the desktop to spawn a window whose kind is
 /// derived from the calling tenant -- a terminal tenant spawns a terminal
 /// window, a workspace tenant spawns another window of that workspace.
-/// Replies with the new window id. Refuses ([`crate::NO_DESKTOP`]) when
-/// no desktop is attached.
+/// Replies with the new window id once that window's event socket is live,
+/// or a timeout ten seconds after the desktop's mint reply. Refuses
+/// ([`crate::NO_DESKTOP`]) when no desktop is attached.
 async fn handle_window_new(
     desktop: &crate::desktop_window_ops::DesktopBridge,
     workspace_cell: &Arc<RwLock<Option<WorkspaceCell>>>,
     tenant: ControlTenant,
+    session_registry: &SessionRegistry,
 ) -> ControlResponse {
     use crate::desktop_window_ops::{DesktopWindowOp, NewWindowKind};
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
     let kind = match tenant {
         ControlTenant::TerminalOnly => NewWindowKind::Terminal,
         ControlTenant::Workspace => {
@@ -3968,13 +3975,34 @@ async fn handle_window_new(
             }
         }
     };
-    // The reply is the new window id, which is exactly the message the
-    // CLI prints.
-    into_response(
-        desktop
-            .dispatch(|reply| DesktopWindowOp::New { kind, reply })
-            .await,
-    )
+    let window_id = match desktop
+        .dispatch(|reply| DesktopWindowOp::New { kind, reply })
+        .await
+    {
+        Ok(id) => id,
+        Err(message) => return ControlResponse::Error { message },
+    };
+    // The registry's set-once change notifier belongs to the host. Poll the
+    // same predicate the next --window command uses without replacing it.
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        let connected = require_connected_window(session_registry, &window_id).is_ok();
+        let observed_at = tokio::time::Instant::now();
+        // The first poll at or after the deadline accepts a live window or ends the wait.
+        if connected {
+            return ControlResponse::Ok { message: window_id };
+        }
+        if observed_at >= deadline {
+            return ControlResponse::Timeout {
+                message: format!(
+                    "timed out waiting for window {window_id:?} to connect after {} seconds",
+                    CONNECT_TIMEOUT.as_secs()
+                ),
+            };
+        }
+        let next_poll = observed_at + POLL_INTERVAL;
+        tokio::time::sleep_until(next_poll.min(deadline)).await;
+    }
 }
 
 /// `cs window rm`: authoritatively remove the window. The host weak drops the
@@ -9510,6 +9538,330 @@ mod tests {
             matches!(&resp, ControlResponse::Ok { message } if message == "removed window w-1"),
             "a hidden row the desktop discarded read as {resp:?}"
         );
+    }
+
+    fn window_new_test_ctx() -> (
+        ControlSocketCtx,
+        tokio::sync::mpsc::Receiver<crate::desktop_window_ops::DesktopWindowOp>,
+    ) {
+        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::TerminalOnly);
+        let (ops_tx, ops_rx) = tokio::sync::mpsc::channel(1);
+        ctx.desktop.window_ops = Some(ops_tx);
+        (ctx, ops_rx)
+    }
+
+    fn window_new_test_reply(
+        ops_rx: &mut tokio::sync::mpsc::Receiver<crate::desktop_window_ops::DesktopWindowOp>,
+    ) -> tokio::sync::oneshot::Sender<Result<String, String>> {
+        use crate::desktop_window_ops::{DesktopWindowOp, NewWindowKind};
+
+        match ops_rx.try_recv().expect("new-window operation dispatched") {
+            DesktopWindowOp::New {
+                kind: NewWindowKind::Terminal,
+                reply,
+            } => reply,
+            other => panic!("expected a terminal-window mint, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_workspace_waits_for_its_window_to_connect() {
+        let (_cfg, _root, cell) = bound_empty_cell();
+        let expected_key = workspace_from_cell(&cell)
+            .expect("workspace")
+            .root()
+            .to_string_lossy()
+            .into_owned();
+        let mut ctx = test_ctx(cell, ControlTenant::Workspace);
+        let (ops_tx, mut ops_rx) = tokio::sync::mpsc::channel(1);
+        ctx.desktop.window_ops = Some(ops_tx);
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        match ops_rx.try_recv().expect("new workspace operation") {
+            DesktopWindowOp::New {
+                kind: crate::desktop_window_ops::NewWindowKind::Workspace { key },
+                reply,
+            } => {
+                assert_eq!(key, expected_key);
+                reply.send(Ok("w-workspace".into())).expect("mint reply");
+            }
+            other => panic!("expected a workspace window, got {other:?}"),
+        }
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "the workspace id returned before its window connected"
+        );
+        let _live = ctx.session_registry.join("w-workspace", true, None).guard;
+        assert!(
+            matches!(request.await, ControlResponse::Ok { message } if message == "w-workspace")
+        );
+        require_connected_window(&ctx.session_registry, "w-workspace")
+            .expect("the returned workspace id takes commands");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_waits_for_its_window_to_connect() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-new".into()))
+            .expect("desktop mint reply");
+
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "window new returned the minted id before its window connected"
+        );
+
+        let _live = ctx.session_registry.join("w-new", true, None).guard;
+        let response = request.await;
+        eprintln!(
+            "window-new-success: {}",
+            serde_json::to_string(&response).expect("encode reply")
+        );
+        match response {
+            ControlResponse::Ok { message } => assert_eq!(message, "w-new"),
+            other => panic!("expected the connected window's bare id, got {other:?}"),
+        }
+        require_connected_window(&ctx.session_registry, "w-new")
+            .expect("the returned id is immediately usable by --window");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_does_not_accept_another_live_window() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let _other = ctx.session_registry.join("w-other", true, None).guard;
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-new".into()))
+            .expect("desktop mint reply");
+
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "another live id satisfied the wait"
+        );
+
+        let _live = ctx.session_registry.join("w-new", true, None).guard;
+        match request.await {
+            ControlResponse::Ok { message } => assert_eq!(message, "w-new"),
+            other => panic!("expected the requested window's bare id, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_does_not_accept_a_non_live_window() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        drop(ctx.session_registry.join("w-new", true, None).guard);
+        let snapshot = ctx.session_registry.snapshot(std::time::Instant::now());
+        assert_eq!(snapshot.participants.len(), 1);
+        assert_eq!(snapshot.participants[0].window_id, "w-new");
+        assert_ne!(snapshot.participants[0].status, ParticipantState::Live);
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-new".into()))
+            .expect("desktop mint reply");
+
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "a remembered id without a live socket satisfied the wait"
+        );
+
+        let _live = ctx.session_registry.join("w-new", true, None).guard;
+        match request.await {
+            ControlResponse::Ok { message } => assert_eq!(message, "w-new"),
+            other => panic!("expected the reconnected window's bare id, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_accepts_a_window_connected_before_the_desktop_reply() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let reply = window_new_test_reply(&mut ops_rx);
+        let _live = ctx.session_registry.join("w-new", true, None).guard;
+        reply.send(Ok("w-new".into())).expect("desktop mint reply");
+
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Ok { message }) => {
+                assert_eq!(message, "w-new");
+            }
+            other => panic!("an already connected window should answer immediately, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_times_out_at_its_first_deadline_poll_and_names_the_minted_id() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-never-shown".into()))
+            .expect("desktop mint reply");
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "minting a window is not proof that it can take commands"
+        );
+
+        tokio::time::advance(std::time::Duration::from_millis(9_999)).await;
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "the connection wait ended before its ten-second bound"
+        );
+        // Tokio's timer wheel has millisecond granularity.
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        let response = futures::poll!(request.as_mut());
+        if let std::task::Poll::Ready(response) = &response {
+            eprintln!(
+                "window-new-timeout: {}",
+                serde_json::to_string(response).expect("encode reply")
+            );
+        }
+        match response {
+            std::task::Poll::Ready(ControlResponse::Timeout { message }) => {
+                assert!(
+                    message.contains("w-never-shown"),
+                    "timeout lost the minted id: {message}"
+                );
+                assert!(
+                    message.contains("timed out") || message.contains("timeout"),
+                    "the refusal must explain that waiting for the connection timed out: {message}"
+                );
+            }
+            other => {
+                panic!("an unconnected minted window must time out at the first deadline poll, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_accepts_a_connection_when_its_deadline_poll_wakes_late() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-at-deadline".into()))
+            .expect("desktop mint reply");
+        assert!(futures::poll!(request.as_mut()).is_pending());
+
+        tokio::time::advance(std::time::Duration::from_millis(9_990)).await;
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        let _live = ctx.session_registry.join("w-at-deadline", true, None).guard;
+        // A real timer wake and registry snapshot finish after the deadline.
+        tokio::time::advance(std::time::Duration::from_millis(6)).await;
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Ok { message }) => {
+                assert_eq!(message, "w-at-deadline");
+            }
+            other => panic!(
+                "a connection made before the deadline must win when the final poll wakes late, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_keeps_its_timeout_when_the_window_joins_after_the_final_poll() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Ok("w-late".into()))
+            .expect("desktop mint reply");
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "the connection wait must start after the mint reply"
+        );
+
+        tokio::time::advance(std::time::Duration::from_millis(9_990)).await;
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(std::time::Duration::from_millis(11)).await;
+        let response = match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(response) => response,
+            other => panic!("the unconnected window must finish at the final poll, got {other:?}"),
+        };
+        tokio::time::advance(std::time::Duration::from_millis(25)).await;
+        let _live = ctx.session_registry.join("w-late", true, None).guard;
+        require_connected_window(&ctx.session_registry, "w-late")
+            .expect("the window can connect after the request completes");
+        match response {
+            ControlResponse::Timeout { message } => {
+                assert!(
+                    message.contains("w-late"),
+                    "timeout lost the minted id: {message}"
+                );
+            }
+            other => panic!(
+                "a connection made after the final poll must leave its timeout intact, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_connection_bound_starts_after_the_desktop_reply() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let reply = window_new_test_reply(&mut ops_rx);
+
+        // Desktop dispatch has its own lifetime; none of it spends the connection bound.
+        tokio::time::advance(std::time::Duration::from_secs(12)).await;
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "the connection deadline must not expire while waiting for the desktop to mint"
+        );
+        reply
+            .send(Ok("w-slow-mint".into()))
+            .expect("desktop mint reply");
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "a delayed mint reply must receive a fresh connection bound"
+        );
+
+        tokio::time::advance(std::time::Duration::from_millis(9_999)).await;
+        assert!(
+            futures::poll!(request.as_mut()).is_pending(),
+            "the connection wait ended before ten seconds after the desktop reply"
+        );
+        // Allow for Tokio's millisecond timer granularity without awaiting the request.
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Timeout { message }) => {
+                assert!(message.contains("w-slow-mint"), "timeout lost the minted id: {message}");
+            }
+            other => panic!("the connection wait must expire ten seconds after the desktop reply, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_without_a_desktop_keeps_its_immediate_refusal() {
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::TerminalOnly);
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Error { message }) => {
+                assert_eq!(message, crate::NO_DESKTOP);
+            }
+            other => panic!("headless window creation must refuse immediately, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_new_preserves_the_desktops_mint_refusal() {
+        let (ctx, mut ops_rx) = window_new_test_ctx();
+        let mut request = std::pin::pin!(handle_request(ControlRequest::WindowNew, &ctx));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        window_new_test_reply(&mut ops_rx)
+            .send(Err("desktop mint refused".into()))
+            .expect("desktop refusal reply");
+
+        match futures::poll!(request.as_mut()) {
+            std::task::Poll::Ready(ControlResponse::Error { message }) => {
+                assert_eq!(message, "desktop mint refused");
+            }
+            other => panic!("a mint refusal must be preserved without waiting, got {other:?}"),
+        }
     }
 
     /// `cs window hide` answers the desktop's refusal as its error, so the CLI

@@ -64,8 +64,9 @@ function holdGraphStreams(): void {
         streams.push({
           at: Date.now(),
           signal: opts.signal,
-          batch: (v) => opts.onNodes?.(v.nodes, v),
+          batch: (v) => { opts.onProgress?.(); opts.onView?.(v); },
           answer: (v) => {
+            opts.onProgress?.();
             opts.onDone?.(v);
             resolve(v);
           },

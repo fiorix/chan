@@ -4090,7 +4090,8 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 
 // ---- session persistence (per-window, server-side) ---------------------
 //
-// PUT/GET hit `<state>/sessions/<workspace-key>/<window-id>.json`. The
+// PUT/GET `/api/session?w=<window-id>`, which a workspace server keeps at
+// `~/.chan/workspaces/<metadata_key>/sessions/<window-id>`. The
 // payload is the layout shape from `serializeLayout()` plus a
 // `treeExpanded` map (file browser directory state). Debounced more
 // than the URL-hash write since this hits the disk.
@@ -5401,8 +5402,10 @@ export function keyboardOwnedAbovePanes(): boolean {
 /// Team Work setup, the workspace warnings, the contacts import and the
 /// desktop's close prompt) or the window-wide survey. The window key handler,
 /// the host-command bridge and the pane's reopen-closed-tab listener read it
-/// and act on nothing under the dialog, which an overlay does not ask of
-/// them: an overlay's own chord still closes it. The window-wide slot counts whatever survey shows there, a terminal's
+/// and act on nothing under the dialog. The shared refocus guard also reads
+/// it so terminals and the command launcher's focus return yield the keyboard.
+/// An overlay does not block its own closing chord. The window-wide slot
+/// counts whatever survey shows there, a terminal's
 /// survey whose `tabName` no terminal here carries included, since it covers
 /// the whole window until answered. A survey over one terminal does not
 /// count: it covers only that terminal and leaves the rest of the window

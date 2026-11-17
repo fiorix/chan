@@ -1,0 +1,17 @@
+# PDF export inputs
+
+Copy this directory into the workspace and open `document.md` or `deck.md` as real files. Export both in the light and dark editor themes. These are source inputs; none is a pre-rendered PDF page or screenshot.
+
+- `board.excalidraw` is an unchanged copy of `../../seed/board.excalidraw`, the browser suite's real scene containing a rounded rectangle and overlapping ellipse. Both inputs embed it through the app's Excalidraw renderer.
+- `tall.png` is an unchanged copy of `../../seed/tall.png`: a 100 by 200 pixel bitmap with a blue body and orange foot. The document requests a 600 pixel width, giving a 1200 pixel height; the deck requests 250 pixels, giving 500 pixels before slide fitting.
+- `wide.svg` is a 1800 by 240 image with a violet left cap, green middle, amber right cap and white centre line. It deliberately exceeds the document's printable width and tests fitting of a wide source image.
+- `boundary.svg` is a 520 by 260 image with rose top and bottom bands, teal and blue halves and a white vertical stripe. The document places it at y=850..1110 inside a 1250 pixel top-level block; the deck places it at y=440..700 inside a 700 pixel block.
+- `colours.json` names the fixed image colours for the existing `colourBox` reader. It does not prescribe Mermaid or Excalidraw colours: those need observation in each theme.
+
+The document includes normal-flow Mermaid and separate image, Mermaid and Excalidraw boundary cases. Its explicit page breaks separate those cases; pagination within each case is the app's. The current printable height computed by `docPageGeometry()` is approximately 998 CSS pixels. The oversized image container deliberately spans that height and puts pixels on both sides of a cut. The 710 pixel spacers before the two diagrams aim at a natural block boundary; the actual diagram positions, whether either moves, and the resulting blank space must be recorded from the rendered pages for each engine and theme. Source positions are not runtime evidence.
+
+The deck has six slides: wide image, Mermaid, Excalidraw, tall image, lower-edge image and lower-edge Mermaid. The latter three deliberately challenge the virtual slide's available height. Record whether they scale, clip or move and whether all content remains visible. One PDF page per authored slide is the expected deck shape, but the reading must report the actual count and size.
+
+The ordinary text, bold text and inline code provide foreground/background references. Mermaid uses its default theme-aware palette. The Excalidraw file is unchanged from the seed; its renderer flips the palette in dark mode and omits the scene background. Inspect page backgrounds, text and both diagram types independently; fixed-colour image markers alone cannot establish theme retention.
+
+Browser check 260 copies these inputs into its private fixture directory and exports the document and deck in both themes. It records the document's measured blocks and actual cloned page windows, rejects a page containing only an inter-block gap, checks image markers, document diagram content and page backgrounds, and saves the PDFs and page rasters for inspection. It expects ten document pages and six deck pages; an explicit break's trailing space before the oversized boundary-image block stays with that block. Diagram labels and arrows in the rasters, including the deck's diagrams, also require visual inspection.

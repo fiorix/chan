@@ -29,7 +29,7 @@ async function waitFor(read, accept, label, timeoutMs = 15_000) {
 
 async function tabPoint(page, name) {
   const point = await page.evaluate((want) => {
-    const tab = [...document.querySelectorAll('.tab[role="tab"]')]
+    const tab = [...document.querySelectorAll('.tab > [role="tab"]')]
       .find((el) => el.querySelector(".path")?.textContent?.trim() === want);
     if (!tab) return null;
     const box = tab.getBoundingClientRect();

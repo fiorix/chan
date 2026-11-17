@@ -41,11 +41,11 @@ import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { startRecorder } from "../lib/pty-recorder.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const TERMINAL = ".pane .terminal-tab.active";
 const MENU = ".terminal-tab-menu-bubble";
-const ENGINE = { xterm: ".terminal.xterm .xterm-screen", ghostty: ".terminal-host canvas" };
 const OPEN = "\x1b[200~";
 const CLOSE = "\x1b[201~";
 

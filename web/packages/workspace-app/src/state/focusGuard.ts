@@ -1,8 +1,7 @@
-// The two signals under which this page must not move focus to a terminal:
-// a survey modal over it, and the window's Computers launcher shown over the
-// page. TerminalTab's refocus paths and the command launcher's post-run
-// restore read them through one function so they cannot drift.
+// Terminal refocus and the command launcher's focus return share the same
+// keyboard owners so neither can take focus from a dialog or another webview.
 
+import { modalDialogOpen } from "./store.svelte";
 import { surveyFor, type SurveySlot } from "./survey.svelte";
 
 /// The attribute chan-desktop sets on the page's root while the window's
@@ -17,10 +16,10 @@ export function launcherShownOverWindow(): boolean {
   return document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR);
 }
 
-/// Whether a refocus of the terminal in `slot` is refused: a survey is modal
-/// over that terminal, or the Computers launcher holds the keyboard over the
-/// window. Once the survey clears or the launcher hides, the same refocus
-/// legitimately restores the terminal.
+/// Whether a refocus of the terminal in `slot` is refused: a modal dialog is
+/// open, a survey covers that terminal, or the Computers launcher holds the
+/// keyboard over the window. Once those owners release the keyboard, the
+/// same refocus legitimately restores the terminal.
 export function refocusRefused(slot: SurveySlot): boolean {
-  return surveyFor(slot) !== null || launcherShownOverWindow();
+  return surveyFor(slot) !== null || launcherShownOverWindow() || modalDialogOpen();
 }

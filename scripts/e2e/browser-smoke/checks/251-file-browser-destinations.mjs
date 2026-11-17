@@ -292,6 +292,8 @@ export default {
       await page.setViewport({ width: 1440, height: 1000 });
       await page.reload({ waitUntil: "domcontentloaded" });
       await page.waitForSelector(".pane");
+      // Reload discards the runner's subscription barrier for this page.
+      await ctx.waitWindowLive(new URL(page.url()).searchParams.get("w"));
       await setDock(page, "left", false, authToken);
       await setDock(page, "right", false, authToken);
       assert.equal(await page.$(".browser"), null, "fresh window has no file browser surface");

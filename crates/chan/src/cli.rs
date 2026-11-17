@@ -1085,7 +1085,9 @@ pub(super) enum IndexAction {
     },
     /// Download the embedding model semantic search needs
     ///
-    /// Lands in `<user-config>/chan/models/<model-name>/` and is shared by
+    /// Lands in `chan/models/models--<org>--<name>/` under the OS cache
+    /// directory (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or
+    /// `~/.cache` on Linux, `%LOCALAPPDATA%` on Windows) and is shared by
     /// every workspace. Idempotent: a re-run with the model already
     /// present is a fast no-op.
     #[command(verbatim_doc_comment)]
@@ -1818,7 +1820,7 @@ mod tests {
                 "CHAN_METRICS_TOKEN",
                 "/proc/net/tcp",
                 "io.systemd.Metrics",
-                "io.chan.Devserver",
+                "app.chan.Devserver",
                 "EXAMPLES:",
             ]
             .map(String::from),

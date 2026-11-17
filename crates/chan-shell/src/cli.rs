@@ -102,13 +102,18 @@ FILESYSTEM REQUIRED:
 `open PATH` and `terminal new PATH` need a workspace window or a
 standalone terminal whose host serves a filesystem.
 
-Other `terminal` commands, `pane`, `copy`, `paste`, `upload`, `download`,
-and `tunnel` work in a plain terminal window.
+Other `terminal` commands, `pane`, `dashboard`, `copy`, `paste`, `upload`,
+`download`, `window`, the other `session` commands and `tunnel` work in a
+plain terminal window.
 
 No environment variable distinguishes a workspace window from a standalone
 terminal. A workspace-only command's refusal IS the check.
-`window new|open|hide` and `tunnel` additionally need the desktop app;
-`window rm` also works headless.
+`window new|open|hide` additionally need a terminal the desktop app serves
+itself; a devserver terminal the desktop views refuses them, and so does a
+`chan-term` window started with a command, `--hold`, `--app-id` or
+`--title`, which runs in a process of its own. `window rm` also works
+headless. `tunnel` needs a devserver terminal viewed in the desktop app;
+the desktop's own terminals and a standalone `chan serve` refuse it.
 
 EXAMPLES:
 Confirm you are in a chan terminal, and find out which one:
@@ -1428,7 +1433,19 @@ async fn cmd_window_list(json: bool, pretty: bool) -> Result<()> {
 /// devserver's window is removed without that local check.
 async fn cmd_window_op(req: ControlRequest) -> Result<()> {
     let socket = control_socket_env()?;
-    let message = send_control_request(&socket, req).await?;
+    let is_new = matches!(req, ControlRequest::WindowNew);
+    let result = send_control_request(&socket, req).await;
+    let message = if is_new {
+        match classify_control_result(result)? {
+            ControlOutcome::Replied(message) => message,
+            ControlOutcome::TimedOut(message) => {
+                eprintln!("{message}");
+                std::process::exit(crate::exit_code::CONTROL_TIMEOUT);
+            }
+        }
+    } else {
+        result?
+    };
     println!("{message}");
     Ok(())
 }
@@ -2924,13 +2941,14 @@ fn classify_term_write_result(result: Result<String>) -> Result<TermWriteControl
 }
 
 /// The terminal outcome of a bounded blocking control round-trip
-/// (`cs terminal survey`, `cs copy`, `cs paste`). Split from the commands so
-/// the print-stream + exit-code decision is unit-testable without a live
-/// server or a `process::exit`.
+/// (`cs terminal survey`, `cs copy`, `cs paste`, `cs window new`). Split from
+/// the commands so the print-stream + exit-code decision is unit-testable
+/// without a live server or a `process::exit`.
 #[derive(Debug)]
 enum ControlOutcome {
     /// The server replied: the message is the command's normal payload
-    /// (a survey answer line, a clipboard reply) and the process exits 0.
+    /// (a survey answer line, a clipboard reply, a window id) and the process
+    /// exits 0.
     Replied(String),
     /// The reply window elapsed: the message is printed to stderr and the
     /// process exits [`crate::exit_code::CONTROL_TIMEOUT`] (124).

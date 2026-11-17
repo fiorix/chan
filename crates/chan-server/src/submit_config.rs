@@ -1,7 +1,7 @@
 //! Runtime overrides for the per-agent submit chords. The DEFAULT chord
 //! bytes live in chan-shell (`SubmitAgent::default_template`); this module
-//! lets a user override them without a rebuild by editing
-//! `<config>/chan/submit.toml`, so a client
+//! lets a user override them without a rebuild by editing `submit.toml` in
+//! the chan home (`$CHAN_HOME`, default `~/.chan`), so a client
 //! (agy/claude/codex/gemini/kimi/muse/opencode) changing its submit behavior
 //! is a config edit, not a release. Env
 //! `CHAN_SUBMIT_<AGENT>` still takes precedence over the file (resolved in
@@ -69,11 +69,12 @@ impl SubmitOverridesFile {
     }
 }
 
-/// Load `<config>/chan/submit.toml` (if present) and install any per-agent
-/// chord template overrides into chan-shell. Missing file: no-op, so
-/// whatever an earlier install in this process set stands (the built-in
-/// defaults until one installs some). Malformed file: logged and ignored,
-/// matching the fall-back-on-malformed policy of the editor/server configs.
+/// Load `submit.toml` from the chan home (`$CHAN_HOME`, default `~/.chan`) if
+/// present, and install any per-agent chord template overrides into chan-shell.
+/// Missing file: no-op, so whatever an earlier install in this process set
+/// stands (the built-in defaults until one installs some). Malformed file:
+/// logged and ignored, matching the fall-back-on-malformed policy of the
+/// editor/server configs.
 pub fn install() {
     let path = chan_workspace::paths::config_dir().join("submit.toml");
     let file: SubmitOverridesFile = match crate::store::load_toml(&path) {

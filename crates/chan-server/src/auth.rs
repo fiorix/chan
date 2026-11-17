@@ -69,8 +69,8 @@ pub(crate) fn replace_token_at(token_path: &Path) -> std::io::Result<String> {
     Ok(token)
 }
 
-/// Make sure `<state>/tokens/<workspace-key>/` is a directory we can write
-/// inside. Self-heals one specific corruption case: a regular file
+/// Make sure `~/.chan/workspaces/<metadata_key>/tokens/` is a directory we
+/// can write inside. Self-heals one specific corruption case: a regular file
 /// sitting at that path (typically left by manual fiddling) makes
 /// `create_dir_all` fail with `AlreadyExists` and would otherwise
 /// abort the whole serve. We remove the stray file and retry. Any
@@ -471,8 +471,8 @@ mod tests {
         assert_eq!(extract_token(None, &h), None);
     }
 
-    /// Some on-disk state has `<state>/tokens/<key>` as a regular file
-    /// (32-byte token blob) instead of a directory.
+    /// Some on-disk state has a regular file (32-byte token blob) where
+    /// the tokens directory belongs.
     /// `create_dir_all` cannot turn a file into a directory, so `chan
     /// open` would die with `io: File exists (os error 17)`.
     /// `ensure_tokens_dir` must self-heal: drop the stray file, make

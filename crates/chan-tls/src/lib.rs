@@ -1,9 +1,10 @@
 //! The TLS trust decision chan's Rust clients share.
 //!
-//! [`client_config`] is where every client that reaches a gateway gets its
-//! certificate verification: the desktop's HTTP clients, its WebSocket feeds,
-//! its updater, the devserver's tunnel dial and the gateway's WireGuard
-//! agent. A gateway one of them trusts is trusted by all of them.
+//! [`client_config`] supplies certificate verification for the desktop's HTTP
+//! clients, its WebSocket feeds and `cs tunnel` sockets, its updater, the
+//! devserver's tunnel dial, the CLI's self-update and `chan metrics --url`,
+//! and the gateway's WireGuard agent. A server one of them trusts is trusted
+//! by all of them.
 //!
 //! The decision depends on the platform. On macOS and Windows the operating
 //! system verifies each chain, through `rustls-platform-verifier`, so a CA

@@ -177,6 +177,14 @@ FunctionEnd
     !insertmacro chanRemoveOwnedShim "chan" "# chan-desktop"
     !insertmacro chanRemoveOwnedShim "cs.cmd" ":: chan-desktop"
     !insertmacro chanRemoveOwnedShim "cs" "# chan-desktop"
+    System::Call 'kernel32::GetFileAttributesW(w "$LOCALAPPDATA\chan\run") i .R0'
+    ; The wildcard must not follow a redirected run directory.
+    IntOp $R1 $R0 & 0x410
+    ${If} $R0 <> -1
+    ${AndIf} $R1 = 0x10
+      Delete "$LOCALAPPDATA\chan\run\*.lock"
+      RMDir "$LOCALAPPDATA\chan\run"
+    ${EndIf}
     ; Without recursion, so a directory holding anything else stays. On the
     ; default layout the second is $INSTDIR, which the template cannot remove
     ; while the shim directory is inside it.

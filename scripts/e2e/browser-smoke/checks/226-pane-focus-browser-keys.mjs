@@ -24,12 +24,12 @@ import {
 } from "../lib/pane-strip.mjs";
 import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { TERMINAL_SURFACES as ENGINE } from "../lib/terminal-attach.mjs";
 
 const RUN = Date.now().toString(36);
 const DIR = `pane-focus-226-${RUN}`;
 const FILES = 60;
 const TERMINAL = ".pane .terminal-tab.active";
-const ENGINE = { xterm: ".terminal.xterm .xterm-screen", ghostty: ".terminal-host canvas" };
 const MENU = ".terminal-tab-menu-bubble";
 const TYPED = "78";
 
@@ -329,7 +329,9 @@ async function restoreArm(ctx, page, engine, adopt) {
     await sleep(25);
   }
   const state = await browserState(page);
-  return { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  const result = { arm, focus: await focusOf(page), focusedPane: state.focusedPane, timeline };
+  await ctx.waitWindowLive(windowId);
+  return result;
 }
 
 async function engineWindow(ctx, dir, engine, failures) {

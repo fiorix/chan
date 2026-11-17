@@ -59,7 +59,7 @@ export async function readPaneStrip(page, paneSelector = ".pane") {
       display: tabs ? getComputedStyle(tabs).display : null,
       height: rect ? Math.round(rect.height) : 0,
       tabs: tabs
-        ? [...tabs.querySelectorAll('[role="tab"]')].map((tab) => tab.getAttribute("title") || tab.textContent?.trim() || "")
+        ? [...tabs.querySelectorAll('.tab > [role="tab"]')].map((tab) => tab.closest(".tab").getAttribute("title") || tab.textContent?.trim() || "")
         : [],
       side: pane.querySelector(".pane-card-inner")?.getAttribute("data-side-label") ?? null,
       terminals: pane.querySelectorAll(".terminal-tab").length,

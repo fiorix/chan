@@ -1724,6 +1724,44 @@ mod installer_hook_tests {
     }
 
     #[test]
+    fn run_locks_are_removed_only_from_a_plain_directory() {
+        let nsh = hooks();
+        let (_, post) = macros(&nsh)
+            .into_iter()
+            .find(|(name, _)| name == "NSIS_HOOK_POSTUNINSTALL")
+            .expect("the post-uninstall hook");
+        let statements = statements(&post);
+        let guarded_cleanup = [
+            r#"System::Call 'kernel32::GetFileAttributesW(w "$LOCALAPPDATA\chan\run") i .R0'"#,
+            "IntOp $R1 $R0 & 0x410",
+            "${If} $R0 <> -1",
+            "${AndIf} $R1 = 0x10",
+            r#"Delete "$LOCALAPPDATA\chan\run\*.lock""#,
+            r#"RMDir "$LOCALAPPDATA\chan\run""#,
+            "${EndIf}",
+        ];
+        assert!(
+            statements
+                .windows(guarded_cleanup.len())
+                .any(|lines| lines == guarded_cleanup),
+            "the run directory cleanup must reject missing paths, files and reparse points"
+        );
+        for statement in &guarded_cleanup[4..6] {
+            assert_eq!(
+                statements.iter().filter(|line| *line == statement).count(),
+                1,
+                "{statement} must occur only inside the directory guard"
+            );
+            assert!(
+                conditions_at(&post, statement)
+                    .iter()
+                    .any(|condition| condition == "$UpdateMode <> 1"),
+                "{statement} must not run during an update"
+            );
+        }
+    }
+
+    #[test]
     fn the_hooks_remove_state_only_with_the_state_choice_and_show_nothing() {
         let nsh = hooks();
         let (_, post) = macros(&nsh)

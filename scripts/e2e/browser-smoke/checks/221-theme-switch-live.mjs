@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { showFiles } from "../lib/files.mjs";
-import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB = "SmokeThemeSwitch221";
@@ -286,7 +286,7 @@ async function command(page, name) {
 async function openOutline(page, path) {
   let last = "";
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const tab = await page.evaluateHandle((title) => [...document.querySelectorAll('[role="tablist"] [role="tab"]')].find((el) => el.title === title) ?? null, path);
+    const tab = await page.evaluateHandle((title) => [...document.querySelectorAll('[role="tablist"] .tab > [role="tab"]')].find((el) => el.closest(".tab").title === title) ?? null, path);
     if (!(await tab.evaluate((el) => el !== null))) throw new Error(`no tab for ${path}`);
     await tab.asElement().click();
     await tab.dispose();
@@ -303,11 +303,11 @@ async function openOutline(page, path) {
 
 async function waitActiveTab(page, path, label) {
   await page.waitForFunction(
-    (title) => [...document.querySelectorAll('[role="tablist"] [role="tab"][aria-selected="true"]')].some((tab) => tab.title === title),
+    (title) => [...document.querySelectorAll('[role="tablist"] .tab > [role="tab"][aria-selected="true"]')].some((tab) => tab.closest(".tab").title === title),
     { timeout: 30_000 },
     path,
   ).catch(async () => {
-    const tabs = await page.$$eval('[role="tablist"] [role="tab"]', (all) => all.map((tab) => `${tab.title}${tab.getAttribute("aria-selected") === "true" ? "*" : ""}`));
+    const tabs = await page.$$eval('[role="tablist"] .tab > [role="tab"]', (all) => all.map((tab) => `${tab.closest(".tab").title}${tab.getAttribute("aria-selected") === "true" ? "*" : ""}`));
     throw new Error(`${label}: ${path} never became an active tab; tabs ${JSON.stringify(tabs)}`);
   });
 }
@@ -339,8 +339,11 @@ async function stableReading(page, surface, label) {
   if (surface !== "terminal") {
     const title = { doc: DOC, deck: DECK, board: BOARD, files: null }[surface];
     const tab = await page.evaluateHandle((title) => {
-      const tabs = [...document.querySelectorAll('[role="tablist"] [role="tab"]')];
-      return tabs.find((el) => (title ? el.title === title : el.title === "File Browser" || el.title.startsWith("File Browser: "))) ?? null;
+      const tabs = [...document.querySelectorAll('[role="tablist"] .tab > [role="tab"]')];
+      return tabs.find((el) => {
+        const tooltip = el.closest(".tab").title;
+        return title ? tooltip === title : tooltip === "File Browser" || tooltip.startsWith("File Browser: ");
+      }) ?? null;
     }, title);
     if (!(await tab.evaluate((el) => el !== null))) throw new Error(`${label}: no tab for the ${surface}`);
     if (!(await tab.evaluate((el) => el.getAttribute("aria-selected") === "true"))) await tab.asElement().click();
@@ -350,7 +353,7 @@ async function stableReading(page, surface, label) {
   const deadline = Date.now() + 30_000;
   let previous = null;
   for (;;) {
-    const reading = await page.evaluate(readSurface, surface, { doc: DOC, deck: DECK, board: BOARD });
+    const reading = await page.evaluate(readSurface, surface, { doc: DOC, deck: DECK, board: BOARD }, TERMINAL_SURFACES);
     if (reading.ready && previous?.ready && JSON.stringify(reading) === JSON.stringify(previous)) return reading.rows;
     if (Date.now() > deadline) throw new Error(`${label}: no stable reading in 30 s; the last: ${JSON.stringify(reading).slice(0, 600)}`);
     previous = reading;
@@ -362,7 +365,7 @@ async function stableReading(page, surface, label) {
 /// tag, classes (less scope hashes and focus state) and computed colours; for
 /// the terminal, the canvas pixels at fixed cells of the loop's line and of
 /// unstyled cells, and the tab's own colours.
-function readSurface(surface, files) {
+function readSurface(surface, files, terminalSurfaces) {
   const visible = (el) => {
     const s = getComputedStyle(el);
     if (s.visibility !== "visible" || s.display === "none") return false;
@@ -382,12 +385,12 @@ function readSurface(surface, files) {
     return rows;
   };
   const paneOf = (title) => [...document.querySelectorAll('[role="region"][data-pane-id]')]
-    .find((pane) => [...pane.querySelectorAll('[role="tablist"] [role="tab"]')].some((tab) => tab.title === title));
+    .find((pane) => [...pane.querySelectorAll('[role="tablist"] .tab > [role="tab"]')].some((tab) => tab.closest(".tab").title === title));
   const left = paneOf(files.doc);
   if (!left) return { ready: false, why: "no pane holds the document" };
   if (surface === "terminal") {
     const host = [...document.querySelectorAll(".terminal-tab.active .terminal-host")].find(visible);
-    const canvas = host?.querySelector("canvas");
+    const canvas = host?.querySelector(terminalSurfaces.ghostty);
     if (!canvas || !canvas.width) return { ready: false, why: "no terminal canvas" };
     const tab = host.closest(".terminal-tab");
     // The loop's line fixes the cell geometry: the grid's first row starts
@@ -436,7 +439,7 @@ function readSurface(surface, files) {
     const diagram = tab.querySelector(".cm-content svg");
     const keyword = [...tab.querySelectorAll(".cm-line span")].some((el) => el.textContent === "const");
     if (!img || !diagram || !keyword) {
-      const title = left.querySelector('[role="tab"][aria-selected="true"]')?.title;
+      const title = left.querySelector('.tab > [role="tab"][aria-selected="true"]')?.closest(".tab").title;
       return { ready: false, why: { title, imgs: imgs.map((el) => [el.getAttribute("src"), el.complete, el.naturalWidth, el.className]), diagram: !!diagram, keyword } };
     }
   }

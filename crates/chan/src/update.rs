@@ -44,9 +44,12 @@ use sha2::{Digest, Sha256};
 
 const CLI_METADATA_BASE: &str = "https://chan.app/dl/cli";
 
-// Compile-time-only seam for the native Windows installer/upgrade smoke.
-// Production release builds do not set it and remain pinned to chan.app.
+// The Windows installer smoke builds a separate debug binary. Release
+// binaries remain pinned to chan.app even if the build environment sets it.
+#[cfg(debug_assertions)]
 const TEST_CLI_METADATA_BASE: Option<&str> = option_env!("CHAN_TEST_CLI_METADATA_BASE");
+#[cfg(not(debug_assertions))]
+const TEST_CLI_METADATA_BASE: Option<&str> = None;
 
 /// Disable the probe (banner still prints from cached state).
 const ENV_DISABLE: &str = "CHAN_UPDATE_CHECK";
@@ -302,6 +305,14 @@ fn ensure_update_url_with_test_base(url: &str, test_base: Option<&str>) -> Resul
     let Some(test_base) = test_base else {
         bail!("refusing non-https URL: {url}");
     };
+    let base = loopback_update_base(test_base)?;
+    if parsed.scheme() != "http" || parsed.origin() != base.origin() {
+        bail!("refusing non-https URL outside the compiled test origin: {url}");
+    }
+    Ok(())
+}
+
+fn loopback_update_base(test_base: &str) -> Result<reqwest::Url> {
     let base = reqwest::Url::parse(test_base)
         .with_context(|| format!("invalid compiled test metadata base: {test_base}"))?;
     let loopback = match base.host_str() {
@@ -314,10 +325,7 @@ fn ensure_update_url_with_test_base(url: &str, test_base: Option<&str>) -> Resul
     if base.scheme() != "http" || !loopback {
         bail!("compiled test metadata base must be loopback http: {test_base}");
     }
-    if parsed.scheme() != "http" || parsed.origin() != base.origin() {
-        bail!("refusing non-https URL outside the compiled test origin: {url}");
-    }
-    Ok(())
+    Ok(base)
 }
 
 /// A parsed `X.Y.Z` or `X.Y.Z-pre` version, ordered like semver at the
@@ -507,13 +515,60 @@ fn normalize_sha256(hash: &str, name: &str) -> Result<String> {
 }
 
 fn http_client(connect: Duration, total: Duration) -> Result<reqwest::Client> {
+    let tls = chan_tls::client_config().context("building the TLS trust for self-update")?;
+    let builder = http_client_builder(connect, total, tls);
+    #[cfg(debug_assertions)]
+    let builder = match TEST_CLI_METADATA_BASE {
+        Some(base) => with_loopback_test_base(builder, base)?,
+        None => builder,
+    };
+    builder.build().context("building http client")
+}
+
+fn http_client_builder(
+    connect: Duration,
+    total: Duration,
+    mut tls: chan_tls::rustls::ClientConfig,
+) -> reqwest::ClientBuilder {
+    // A preconfigured reqwest client takes ALPN as supplied. This build
+    // speaks HTTP/1.1 alone.
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
     reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .https_only(true)
         .connect_timeout(connect)
         .timeout(total)
         .user_agent(format!("chan/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("building http client")
 }
+
+#[cfg(any(test, debug_assertions))]
+fn with_loopback_test_base(
+    builder: reqwest::ClientBuilder,
+    test_base: &str,
+) -> Result<reqwest::ClientBuilder> {
+    let origin = loopback_update_base(test_base)?.origin();
+    // Only the compiled debug/test fixture can use HTTP, and every hop
+    // stays on its origin. Keep reqwest's redirect bound as well.
+    Ok(builder
+        .https_only(false)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.url().origin() != origin
+                || attempt.previous().iter().any(|url| url.origin() != origin)
+            {
+                attempt.error("refusing redirect outside the compiled test origin")
+            } else {
+                reqwest::redirect::Policy::default().redirect(attempt)
+            }
+        })))
+}
+
+#[cfg(test)]
+#[path = "update/tls_tests.rs"]
+mod tls_tests;
+
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
+#[path = "update/probe_tests.rs"]
+mod probe_tests;
 
 async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
     ensure_update_url(url)?;
@@ -647,6 +702,14 @@ fn probe_due(state: Option<&State>) -> bool {
     now_unix().saturating_sub(s.checked_at) >= interval
 }
 
+fn probe_http_client() -> Result<reqwest::Client> {
+    // Trust-store initialization can warn. The background probe stays silent;
+    // its async request and debug diagnostics keep the caller's dispatcher.
+    tracing::dispatcher::with_default(&tracing::Dispatch::none(), || {
+        http_client(PROBE_CONNECT_TIMEOUT, PROBE_TOTAL_TIMEOUT)
+    })
+}
+
 /// Background probe. Designed to be `tokio::spawn`'d from
 /// `chan serve` startup. Swallows errors so an offline / proxied
 /// host stays silent; failures are logged at `debug` so they're
@@ -660,7 +723,7 @@ pub async fn run_probe() {
     if !probe_due(prior.as_ref()) {
         return;
     }
-    let client = match http_client(PROBE_CONNECT_TIMEOUT, PROBE_TOTAL_TIMEOUT) {
+    let client = match probe_http_client() {
         Ok(c) => c,
         Err(e) => {
             tracing::debug!(error = ?e, "update probe: client build failed");

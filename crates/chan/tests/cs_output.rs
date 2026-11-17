@@ -10,7 +10,7 @@
 //!
 //! Each case runs the `cs` binary (the chan binary invoked as `cs`, as in
 //! cs_alias.rs) against a one-shot fake control server on a temp Unix
-//! socket that answers one fixed `Ok { message }` line. The reply payloads
+//! socket that answers one fixed control response line. The reply payloads
 //! keep their keys out of alphabetical order on purpose, so the three paths
 //! are told apart by the expected strings alone. Unix-only: the control
 //! socket is a named pipe on Windows.
@@ -489,6 +489,24 @@ enum Answer {
 /// under a private temp directory with a short name, inside the Unix socket
 /// path limit on macOS.
 async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run {
+    run_cs_response(
+        case,
+        ControlResponse::Ok {
+            message: reply.to_string(),
+        },
+        mode,
+        answer,
+    )
+    .await
+}
+
+/// Run the same CLI against a typed response, including timeout and refusal.
+async fn run_cs_response(
+    case: &Case,
+    reply: ControlResponse,
+    mode: &[&str],
+    answer: Answer,
+) -> Run {
     let dir = tempfile::Builder::new()
         .prefix("cs-out-")
         .tempdir()
@@ -497,9 +515,6 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
     let socket: PathBuf = dir.path().join("control.sock");
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).expect("bind fake control socket");
-    let reply = ControlResponse::Ok {
-        message: reply.to_string(),
-    };
     let mut line = serde_json::to_string(&reply).expect("encode reply");
     line.push('\n');
     let server = tokio::spawn(async move {
@@ -553,8 +568,11 @@ async fn run_cs(case: &Case, reply: &str, mode: &[&str], answer: Answer) -> Run 
     let cs = dir.path().join("cs");
     symlink(env!("CARGO_BIN_EXE_chan"), &cs).expect("symlink cs -> chan");
     let mut cmd = Command::new(&cs);
+    // Pin the child's stderr bytes; anyhow adds backtraces under either variable.
     cmd.env_clear()
         .envs(child_env::scrubbed_process_env())
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE")
         .env("CHAN_CONTROL_SOCKET", &socket)
         .envs(case.env.iter().copied())
         .args(case.args)
@@ -599,6 +617,80 @@ async fn stdout_of(case: &Case, mode: &[&str]) -> String {
         String::from_utf8_lossy(&run.output.stderr)
     );
     String::from_utf8(run.output.stdout).expect("utf-8 stdout")
+}
+
+#[tokio::test]
+async fn window_new_reports_success_timeout_and_refusal_on_the_right_streams() {
+    let case = Case {
+        name: "window new",
+        args: &["window", "new"],
+        noun: "window new",
+        env: &[],
+        reply: "",
+        pretty: "",
+        markdown: "",
+        request: |request| matches!(request, ControlRequest::WindowNew),
+    };
+    let timeout_message =
+        "timed out waiting for window \"w-never-shown\" to connect after 10 seconds";
+    for (reply, code, stdout, stderr) in [
+        (
+            ControlResponse::Ok {
+                message: "w-new".into(),
+            },
+            0,
+            "w-new\n",
+            String::new(),
+        ),
+        (
+            ControlResponse::Timeout {
+                message: timeout_message.into(),
+            },
+            124,
+            "",
+            format!("{timeout_message}\n"),
+        ),
+        (
+            ControlResponse::Error {
+                message: "desktop mint refused".into(),
+            },
+            1,
+            "",
+            "Error: desktop mint refused\n".into(),
+        ),
+    ] {
+        let run = run_cs_response(&case, reply, &[], Answer::AfterClientEof).await;
+        assert!((case.request)(&run.request), "{:?}", run.request);
+        assert_eq!(
+            run.output.status.code(),
+            Some(code),
+            "stderr: {}",
+            String::from_utf8_lossy(&run.output.stderr)
+        );
+        assert_eq!(run.output.stdout, stdout.as_bytes());
+        assert_eq!(run.output.stderr, stderr.as_bytes());
+    }
+
+    // Only `new` owns the connection wait and its dedicated timeout exit.
+    let case = Case {
+        name: "window hide",
+        args: &["window", "hide", "w-existing"],
+        request: |request| matches!(request, ControlRequest::WindowHide { id } if id == "w-existing"),
+        ..case
+    };
+    let run = run_cs_response(
+        &case,
+        ControlResponse::Timeout {
+            message: "window operation timed out".into(),
+        },
+        &[],
+        Answer::AfterClientEof,
+    )
+    .await;
+    assert!((case.request)(&run.request), "{:?}", run.request);
+    assert_eq!(run.output.status.code(), Some(1));
+    assert!(run.output.stdout.is_empty());
+    assert_eq!(run.output.stderr, b"Error: window operation timed out\n");
 }
 
 #[tokio::test]
