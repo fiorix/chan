@@ -165,5 +165,6 @@ test("Ghostty publishes its resized PTY grid before scanning and painting rewrap
   for (let column = 6; column < 20; column += 1) expect(pixel(column, 0)).toEqual(mask);
   for (let column = 0; column < 10; column += 1) expect(pixel(column, 1)).toEqual(mask);
   expect(pixel(5, 0), "the assignment name stays unmasked").not.toEqual(mask);
+  expect(pixel(10, 1), "the mask ends at the wrapped value").not.toEqual(mask);
   expect(pixel(11, 1), "the mask ends with the wrapped value").not.toEqual(mask);
 });
