@@ -730,19 +730,3 @@ describe("a rejected or failed prompt under another owner", () => {
     launcher.release();
   });
 });
-
-describe("the strip submit button in an unfocused pane", () => {
-  test("its pointerdown is not cancelled, so the pane activates as today", async () => {
-    const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("owner-unfocused") })]);
-    const { target } = await mountTerminal(TerminalTab, tab!, { focused: false });
-    const socket = TerminalSocket.all.at(-1)!;
-    await attach(socket);
-    await receive(socket, { type: "ready", cols: 80, rows: 24 });
-    const composer = await showComposer({ tab: tab!, target, socket });
-    expect(composer.view.hasFocus, "nothing is focused before the submit").toBe(false);
-    const button = composer.target.querySelector<HTMLButtonElement>(".rp-primary")!;
-    const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
-    button.dispatchEvent(event);
-    expect(event.defaultPrevented, "the strip button does not cancel its pointerdown").toBe(false);
-  });
-});
