@@ -355,6 +355,25 @@ describe("the tab variant", () => {
     expect(target.querySelector(".inspector"), "the inspector opened").not.toBeNull();
     expect(menu()).toBeNull();
   });
+
+  test("the tree's row menu flips the pane through the host", async () => {
+    const tab = seat(browserTab());
+    const onFlip = vi.fn();
+    const target = await render({ variant: "tab", tab, onFlip });
+
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find((el) =>
+      el.textContent?.includes("README.md"),
+    );
+    expect(row, "the tree listed the workspace").toBeDefined();
+    row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const flip = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx button")].find(
+      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip pane",
+    );
+    expect(flip).toBeDefined();
+    flip!.click();
+    expect(onFlip).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("the Workspace details command", () => {
