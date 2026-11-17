@@ -367,7 +367,7 @@ async function preSocketArm(ctx) {
     if (dismissHit.statusbar) {
       await new Promise((r) => setTimeout(r, 500));
       const retryHit = await page.evaluate(readDismissHit, details.dismissPoint);
-      ctx.mark("dismiss-click-retry", { point: details.dismissPoint, ...retryHit });
+      ctx.mark("dismiss-click-resample", { point: details.dismissPoint, ...retryHit });
       if (retryHit.statusbar) {
         throw new Error(`Dismiss notice pointer click hit the status bar at ${JSON.stringify(details.dismissPoint)}: ${JSON.stringify(dismissHit.cover)} then ${JSON.stringify(retryHit.cover)} in ${JSON.stringify(retryHit.ancestor)}`);
       }
@@ -387,7 +387,8 @@ async function preSocketArm(ctx) {
     }));
     ctx.mark("dismiss-tab", details.dismissedTab);
     assert.ok(details.dismissedTab.terminalActive, "the CLI terminal remains active after dismissing its notice");
-    assert.ok(details.dismissedTab.activeTitle === name || details.dismissedTab.activeTitle.startsWith(`${name}: `) || details.dismissedTab.activeTitle.startsWith(`${name}-`), "notice dismissal keeps the CLI tab active in the strip");
+    const activeTitle = details.dismissedTab.activeTitle ?? "";
+    assert.ok(activeTitle === name || activeTitle.startsWith(`${name}: `) || activeTitle.startsWith(`${name}-`), "notice dismissal keeps the CLI tab active in the strip");
     await ctx.shot("before-socket-dismissed", page);
     await page.waitForFunction((before) => document.querySelector(".terminal-host")?.getBoundingClientRect().height > before,
       {}, details.firstHostHeight);
