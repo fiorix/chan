@@ -2,7 +2,7 @@
 
 Status: accepted for v0.132.0 by the owner on 2026-11-16, by survey ("Take all my recommendations (recommended)", answering `dev/v0131-team/reports/owner-candidates-6.md`); not started.
 
-Record: note 3 of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`), entry T117 of the round's terminal regression list (`dev/v0131-team/terminal-regressions.md`), and item 1 of `owner-candidates-6.md`. The client's reset always left these modes out; v0.131.0's [reattach row](../v0.131.0/a-reattach-replays-the-normal-screen-into-a-full-screen-program-and-drops-its-mouse-modes.md) grew the server's tracked set to twelve modes and left the reset as it was. Rare; nothing is lost.
+Record: note 3 of the third terminal milestone review of v0.131.0 (`dev/v0131-team/reviews/terminal-milestone-3.md`), entry T117 of the round's terminal regression list (`dev/v0131-team/terminal-regressions.md`), and item 1 of `owner-candidates-6.md`. The client's reset always left these modes out; v0.131.0's [reattach row](../done/a-reattach-replays-the-normal-screen-into-a-full-screen-program-and-drops-its-mouse-modes.md) grew the server's tracked set to twelve modes and left the reset as it was. Rare; nothing is lost.
 
 ## What is there now
 

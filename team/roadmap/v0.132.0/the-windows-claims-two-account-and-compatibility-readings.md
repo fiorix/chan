@@ -2,7 +2,7 @@
 
 Status: carried from v0.131.0 on 2026-11-16 under the owner's release-first ruling ("if things get more complicated we move to next version"); not started.
 
-Record: [the Windows claim row](../v0.131.0/the-windows-claim-is-a-name-another-account-can-hold.md) merged in v0.131.0 on its native tests (acceptance 1) and documents (acceptance 4). Its acceptances 2 and 3, the installed-build readings, did not run: the test kit's matrix and uninstall reading stopped on two defects of the kit itself (job J234, `dev/v0131-team/evidence/Ops131/J234/`).
+Record: [the Windows claim row](../done/the-windows-claim-is-a-name-another-account-can-hold.md) merged in v0.131.0 on its native tests (acceptance 1) and documents (acceptance 4). Its acceptances 2 and 3, the installed-build readings, did not run: the test kit's matrix and uninstall reading stopped on two defects of the kit itself (job J234, `dev/v0131-team/evidence/Ops131/J234/`).
 
 ## What is there now
 
