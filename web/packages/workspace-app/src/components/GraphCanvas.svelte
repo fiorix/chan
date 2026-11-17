@@ -1746,6 +1746,10 @@
     if (cw <= 0 || ch <= 0) return null;
     let xmin = Infinity, xmax = -Infinity;
     let ymin = Infinity, ymax = -Infinity;
+    // The lowest edge of a node that is not a focal seed. The raised seat
+    // is measured against the other nodes only: the focal's own disc does
+    // not count as below the root, so a lone root keeps today's seat.
+    let ymaxBelowFocal = -Infinity;
     let focal: { x: number; y: number } | null = null;
     for (const n of dNodes) {
       if (ids !== null && !ids.has(n.id)) continue;
@@ -1755,6 +1759,7 @@
       if (n.y - n.radius < ymin) ymin = n.y - n.radius;
       if (n.y + n.radius > ymax) ymax = n.y + n.radius;
       if (anchorFocal && n.isFocal && !focal) focal = { x: n.x, y: n.y };
+      if (!(anchorFocal && n.isFocal) && n.y + n.radius > ymaxBelowFocal) ymaxBelowFocal = n.y + n.radius;
     }
     if (!isFinite(xmin)) return null;
     let cx: number, cy: number, halfW: number, halfH: number;
@@ -1789,7 +1794,7 @@
     let k: number;
     if (focalNode !== null) {
       const aboveNeed = Math.max(0, focalNode.y - ymin);
-      const belowNeed = Math.max(0, ymax - focalNode.y);
+      const belowNeed = ymaxBelowFocal === -Infinity ? 0 : Math.max(0, ymaxBelowFocal - focalNode.y);
       const roomAboveSeat = Math.max(1, ch - FOCAL_BOTTOM_MARGIN - pad);
       const roomBelowSeat = Math.max(1, FOCAL_BOTTOM_MARGIN - pad);
       let kAbove = Math.min(6, kFit(availHalfW, halfW), kFit(roomAboveSeat, aboveNeed));
@@ -1799,18 +1804,13 @@
         k = Math.max(0.15, kAbove);
       } else {
         // The seat rises: fit the whole height, seating as low as it fits.
+        // The top then sits at or above `pad` because the raised zoom fits
+        // the whole height in the canvas minus both pads.
         const totalNeed = Math.max(1, aboveNeed + belowNeed);
         let kRaised = Math.min(6, kFit(availHalfW, halfW), kFit(Math.max(1, ch - 2 * pad), totalNeed));
         if (maxK !== undefined) kRaised = Math.min(kRaised, maxK);
-        anchorY = pad + kRaised * aboveNeed;
-        k = kRaised;
-        if (anchorY > ch - FOCAL_BOTTOM_MARGIN) {
-          // Above dominates: keep the seat and shrink the zoom instead, so
-          // the seat only ever rises, never sinks below its default.
-          anchorY = ch - FOCAL_BOTTOM_MARGIN;
-          k = Math.min(kRaised, kFit(roomAboveSeat, aboveNeed), kFit(roomBelowSeat, belowNeed));
-        }
-        k = Math.max(0.15, k);
+        anchorY = Math.min(ch - FOCAL_BOTTOM_MARGIN, ch - pad - kRaised * belowNeed);
+        k = Math.max(0.15, kRaised);
       }
     } else {
       anchorY = ch / 2;

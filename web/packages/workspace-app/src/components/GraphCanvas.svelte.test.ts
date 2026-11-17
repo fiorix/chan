@@ -807,6 +807,85 @@ describe("a root with many direct entries", () => {
   }
 });
 
+describe("a root on a product-sized canvas", () => {
+  /// A workspace whose root holds `count` direct files. Mirrors the suite
+  /// shape that check 218 meets: the ring of root children wraps under
+  /// the root.
+  function wideFan(count: number): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+    const nodes = [n.dir("")];
+    const edges: CanvasEdge[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const p = `f${i}.md`;
+      nodes.push(n.file(p));
+      edges.push(n.edge("", p, "contains"));
+    }
+    return { nodes, edges };
+  }
+
+  /// Tick the simulation on d3's timer until it rests, painting a frame per
+  /// tick, as a browser runs it; the tests drive the timer by hand.
+  function wideSettle(): void {
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(120);
+  }
+
+  /// The lowest disc edge in the canvas, in canvas pixels.
+  function lowestBottom(api: CanvasApi, ids: string[]): number {
+    const discs = ids.map((id) => circle(api, id));
+    return Math.max(...discs.map((d) => d.y + d.r));
+  }
+
+  test("a lone root keeps its seat 56 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = { nodes: [n.dir("")], edges: [] as CanvasEdge[] };
+    const { api, target } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the root 56 px above the bottom edge").toBeCloseTo(644, 0);
+    const seat = target.querySelector("canvas")?.getAttribute("data-focal-seat")?.split(",").map(Number);
+    expect(seat?.length, "the canvas publishes the fit's seat").toBe(2);
+    expect(seat![0], "the published seat sits halfway across").toBeCloseTo(root.x, 0);
+    expect(seat![1], "the published seat is the root's painted centre").toBeCloseTo(root.y, 0);
+  });
+
+  test("a one-level fan of 5 files keeps its seat 56 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(5);
+    const { api } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+    expect(root.y, "the root 56 px above the bottom edge").toBeCloseTo(644, 0);
+  });
+
+  test("a raised fan of 110 files ends its lowest disc 24 px above the bottom edge", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(110);
+    const ids = graph.nodes.map((x) => x.id);
+    const { api } = render(props(graph, { focalIds: [""] }));
+    wideSettle();
+    expect(lowestBottom(api, ids), "the lowest disc at the fit's pad").toBeCloseTo(676, -1);
+    const root = circle(api, "");
+    expect(root.x, "the root halfway across").toBeCloseTo(640, 0);
+  });
+
+  test("the bounds framing publishes no seat", () => {
+    canvasHost.width = 1280;
+    canvasHost.height = 700;
+    const graph = wideFan(5);
+    const { target } = render(props(graph, { focalIds: [""], focalAnchor: "bounds" }));
+    wideSettle();
+    expect(target.querySelector("canvas")?.getAttribute("data-focal-seat")).toBeNull();
+  });
+});
+
 describe("the bounds framing", () => {
   const ids = spine().nodes.map((node) => node.id);
 
