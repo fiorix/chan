@@ -32,13 +32,17 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
+import CommandLauncher from "./CommandLauncher.svelte";
 import Pane from "./Pane.svelte";
+import SearchPanel from "./SearchPanel.svelte";
 import TerminalTab from "./TerminalTab.svelte";
 import Terminals from "./Terminals.svelte";
 import { api, type SurveySpec } from "../api/client";
 import { closeConfirmState } from "../state/closeConfirm.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
+import { registerCommands } from "../state/commands";
 import { richPrompt, showRichPromptForTab, toggleRichPromptSource } from "../state/richPrompt.svelte";
+import { launcherPanel, overlayStack, searchPanel } from "../state/store.svelte";
 import { workspace } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import {
@@ -477,6 +481,76 @@ describe("the launcher mark regression (acceptance 2)", () => {
 
     const content = composer.target.querySelector<HTMLElement>(".rich-prompt .cm-content")!;
     const view = EditorView.findFromDOM(content)!;
+    expect(view, "the swap mounted a new editor").not.toBe(composer.view);
     expect(view.hasFocus, "the editor that mounts after the release has the keyboard").toBe(true);
+  });
+});
+
+// A command whose run opens nothing, so the deck's focus return is what the
+// test observes.
+registerCommands([
+  {
+    id: "test.focusNoop",
+    title: "Test Focus Noop",
+    category: "Global",
+    scope: "window",
+    requirement: "any",
+    available: () => true,
+    run: () => {},
+  },
+]);
+
+describe("a strip-button submit in an unfocused pane", () => {
+  test("the composer takes the keyboard", async () => {
+    const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("owner-unfocused") })]);
+    const { target } = await mountTerminal(TerminalTab, tab!, { focused: false });
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    const composer = await showComposer({ tab: tab!, target, socket });
+    expect(composer.view.hasFocus, "nothing is focused before the submit").toBe(false);
+    socket.sent.splice(0);
+    composer.target.querySelector<HTMLButtonElement>(".rp-primary")!.click();
+    await settle();
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toHaveLength(1);
+    expect(composer.view.hasFocus, "the strip submit focuses the composer").toBe(true);
+  });
+});
+
+describe("the command launcher's return under another overlay", () => {
+  test("a run that opens nothing returns the keyboard to the Search input", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    const search = mount(SearchPanel, { target: searchTarget });
+    searchPanel.open = true;
+    overlayStack.ids = ["search"];
+    await settle();
+    const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+    expect(input, "the search panel shows its input").not.toBeNull();
+    input!.focus();
+    await settle();
+    // The launcher opens over the search panel.
+    const deckTarget = document.createElement("div");
+    document.body.append(deckTarget);
+    const deck = mount(CommandLauncher, { target: deckTarget });
+    launcherPanel.open = true;
+    overlayStack.ids = ["search", "launcher"];
+    await settle();
+    // Run a command that opens nothing; the deck closes and the return
+    // hands the keyboard back.
+    const rows = [...deckTarget.querySelectorAll<HTMLButtonElement>(".deck-result")];
+    const row = rows.find((r) => r.querySelector(".deck-result-title")?.textContent === "Test Focus Noop");
+    expect(row, "the deck lists the no-op command").toBeDefined();
+    row!.click();
+    await settle();
+    await vi.waitFor(() => expect(deckTarget.querySelector('[role="dialog"][aria-label="Command launcher"]')).toBeNull());
+    expect(document.activeElement, "focus returns to the Search input").toBe(input);
+    unmount(deck);
+    deckTarget.remove();
+    unmount(search);
+    searchTarget.remove();
+    searchPanel.open = false;
+    launcherPanel.open = false;
+    overlayStack.ids = [];
   });
 });
