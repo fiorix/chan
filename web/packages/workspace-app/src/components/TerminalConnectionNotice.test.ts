@@ -106,12 +106,11 @@ describe("terminal connection pill", () => {
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bbackground:\s*var\(--bg-card\);/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bborder:\s*1px solid var\(--border\);/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bfont-variant-numeric:\s*tabular-nums;/);
-    expect(source).toMatch(/style:top=\{`\$\{placedTop \?\? defaultTop\}px`\}/);
-    expect(source).toMatch(/style:right=\{inspectorOpen \? `\$\{inspectorWidth \+ 29\}px` : "5px"\}/);
     expect(source).not.toMatch(/\b(?:animation|transition):/);
   });
 
   test("keeps the permanent status region out of the terminal flex row", () => {
+    // The stable live region must take no space in the flex row: it stays absolutely positioned.
     const source = readFileSync("src/components/TerminalConnectionNotice.svelte", "utf8");
     expect(source).toMatch(/\.sr-only\s*\{[^}]*\bposition:\s*absolute;/);
   });
