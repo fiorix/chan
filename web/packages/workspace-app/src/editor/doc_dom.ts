@@ -124,7 +124,7 @@ export function buildDocDom(opts: DocDomOptions): DocDom {
   // inside a BFC, and a collapsed-through margin would shift every
   // measured cut by the first block's margin.
   content.style.display = "flow-root";
-  content.innerHTML = renderMarkdown(opts.markdown, { wikilinks: true });
+  content.innerHTML = renderMarkdown(opts.markdown, { wikilinks: true, frontmatter: true });
   // The page breaks are decided here, once, and the stylesheet and the
   // block measurement below read nothing but the mark this leaves.
   markPageBreaks(content);
