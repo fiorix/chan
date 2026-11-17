@@ -41,6 +41,10 @@ export function createTerminalConnectionHealth(
   let lastRedialAt = Number.NEGATIVE_INFINITY;
   let inputOutstanding = false;
   let noticeInputOutstanding = false;
+  // When the last user input went out. A pong answers only input sent no
+  // later than the ping it answers: a frame proves nothing about the
+  // client-to-server direction, but a pong arrives in send order.
+  let lastInputAt = Number.NEGATIVE_INFINITY;
   let noticePending = false;
   let noticeRemainingMs = TERMINAL_INPUT_NOTICE_MS;
   let noticeStartedAt = 0;
@@ -146,12 +150,14 @@ export function createTerminalConnectionHealth(
   const probe = createConnectionProbe({ now });
   const markInputWritten = () => {
     if (!open || disposed) return;
+    lastInputAt = now();
     inputOutstanding = true;
     updateRedial();
   };
   const retire = () => {
     if (state.notice || (open && noticeInputOutstanding)) noticePending = true;
     open = false;
+    lastInputAt = Number.NEGATIVE_INFINITY;
     inputOutstanding = false;
     noticeInputOutstanding = false;
     clearInput();
@@ -191,15 +197,18 @@ export function createTerminalConnectionHealth(
     frameArrived() {
       if (!open || disposed) return;
       clearInput();
-      inputOutstanding = false;
-      noticeInputOutstanding = false;
       const waiting = probe.answered && probe.oldestPingAt !== null;
       probe.frameReceived();
       if (waiting || state.stalled) sync();
     },
     pongArrived() {
       if (!open || disposed) return;
+      const answeredAt = probe.oldestPingAt;
       probe.pongReceived();
+      if (answeredAt !== null && answeredAt >= lastInputAt) {
+        inputOutstanding = false;
+        noticeInputOutstanding = false;
+      }
       sync();
     },
     inputSent() {

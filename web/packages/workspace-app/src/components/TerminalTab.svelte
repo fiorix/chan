@@ -2117,7 +2117,9 @@
     const seed = ` ${pendingPromptSeed}\x01`;
     clearTerminalSeedInput(tab);
     setTimeout(() => {
-      sendInput(seed);
+      // Tracked as user input (but not probe-armed and not broadcast): a
+      // stall right after the seed must not redial with it in flight.
+      sendUserInput(seed, false, false);
       focusTerminal();
       scheduleTerminalSessionSave();
     }, 150);
