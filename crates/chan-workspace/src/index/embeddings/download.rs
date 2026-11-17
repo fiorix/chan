@@ -512,14 +512,7 @@ fn publish_ref(repo: &Path, commit: &str) -> io::Result<()> {
     std::fs::create_dir_all(&refs)?;
     // The temporary carries tempfile's temporary attribute on Windows; the
     // helper clears it on publish, so the reference keeps normal attributes.
-    // Mode stays 0o600 on Unix, as the base required.
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut builder = tempfile::Builder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(std::fs::Permissions::from_mode(0o600));
-    }
+    let builder = tempfile::Builder::new();
     let mut temporary = builder.tempfile_in(&refs)?;
     temporary.write_all(commit.as_bytes())?;
     temporary.as_file().sync_all()?;

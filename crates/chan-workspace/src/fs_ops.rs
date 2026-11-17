@@ -965,11 +965,16 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Publish an already-synced `tempfile` at `target` with `std::fs::rename`.
 ///
-/// Callers must sync the file before publishing and fsync the parent
-/// directory after (`publish_ref` keeps its base shape and does not fsync
-/// the directory). On Windows the rename replaces an open target only
-/// when the open handle shares delete and the filesystem supports the
-/// POSIX-style rename; otherwise it fails as before. `keep` clears the
+/// The helper syncs nothing itself: a caller that needs the publication
+/// durable syncs the file before publishing and fsyncs the parent
+/// directory after. `atomic_write` and `atomic_file::write` do both;
+/// `publish_ref` syncs the file only. The temporary must live in the
+/// target's directory, as atomicity rests on the rename staying on one
+/// filesystem. On Windows the rename replaces an open target only when
+/// the open handle shares delete and the filesystem supports the
+/// POSIX-style rename; otherwise the rename fails and the target is left
+/// as it was. tempfile makes its paths absolute at creation, so re-arming
+/// cleanup cannot fail for a missing current directory. `keep` clears the
 /// temporary attribute tempfile sets on Windows, so the published file
 /// carries normal attributes. On failure the re-armed temporary is removed
 /// by its drop; on success cleanup is disabled after the move.
