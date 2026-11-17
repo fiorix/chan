@@ -4,8 +4,7 @@
 // unchanged size: the backing store, CSS size and box are the same, but
 // the 2D transform is back to identity. A full pass must paint at full
 // scale again, filling the last cell's background in that cell's device
-// rectangle. Red at the base, where the pass keeps painting at one device
-// pixel per CSS pixel.
+// rectangle.
 import { readFileSync } from "node:fs";
 import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
@@ -73,11 +72,9 @@ describe("a ghostty canvas reset at an unchanged size", () => {
     const target = deviceRectOfLastCell(renderer, 2);
     expect(term.renderer, "a renderer").toBeDefined();
     expect(covers(context.fills, target), "the baseline paints the last cell").toBe(true);
-    // The host reset: same backing store and CSS size with an identity
-    // transform, the page not told. The real host also blanks the pixels;
-    // the double keeps them, and this test only reads new fills.
+    // The host reset: a same-size assignment, which resets the state and
+    // blanks the pixels, the page not told.
     canvas.width = canvas.width;
-    context.setTransform(1, 0, 0, 1, 0, 0);
     expect(context.getTransform().a, "the reset dropped the scale").toBe(1);
     context.fills.length = 0;
     renderer.render(term.wasmTerm!, true, 0, 0);
@@ -86,19 +83,18 @@ describe("a ghostty canvas reset at an unchanged size", () => {
     term.dispose();
   });
 
-  // The task's adjacent note: a product like 105 columns at ratio 1.5 is
-  // inexact in floating point, and an inexact backing width resizes on
-  // every frame. The widget's own measure rounds cell widths up to whole
-  // CSS pixels, so at this base the products stay exact: no render in a
-  // settled pair resizes. This test refutes the note at this base; a grid
-  // with fractional cell widths would fail it.
-  test("a 105-column grid at ratio 1.5 settles instead of resizing every frame", async () => {
-    const { term, renderer } = await openAt(1.5, 105, 8);
-    term.write("x");
-    const resize = vi.spyOn(renderer, "resize");
+  test("a forced pass after a grid change fills the new last cell at full scale", async () => {
+    const { term, context, renderer } = await openAt(2, 20, 8);
+    term.write(`${"x".repeat(20)}\r\n`.repeat(8));
     renderer.render(term.wasmTerm!, true, 0, 0);
-    renderer.render(term.wasmTerm!, false, 0, 0);
-    expect(resize, "no frame resized a settled grid").not.toHaveBeenCalled();
+    // Grow the grid behind the widget: the next render resizes mid-frame,
+    // and the resize must re-establish the scale the size assignment reset.
+    term.wasmTerm!.resize(30, 8);
+    const target = deviceRectOfLastCell(renderer, 2, 30, 8);
+    context.fills.length = 0;
+    renderer.render(term.wasmTerm!, true, 0, 0);
+    expect(context.getTransform().a, "the post-resize pass restores the scale").toBe(2);
+    expect(covers(context.fills, target), "the post-resize pass fills the new last cell at full scale").toBe(true);
     term.dispose();
   });
 });

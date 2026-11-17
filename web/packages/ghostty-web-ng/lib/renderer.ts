@@ -204,9 +204,9 @@ export class CanvasRenderer {
     this.canvas.width = cssWidth * this.devicePixelRatio;
     this.canvas.height = cssHeight * this.devicePixelRatio;
 
-    // Scale context to match DPI absolutely: setting canvas.width/height
-    // resets the context, so a relative scale would compound it here on a
-    // host that preserves the drawing state.
+    // Scale context to match DPI absolutely: assigning the canvas size
+    // above reset the transform render had set, so a relative scale here
+    // would compound it.
     this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0);
 
     // Set text rendering properties for crisp text
