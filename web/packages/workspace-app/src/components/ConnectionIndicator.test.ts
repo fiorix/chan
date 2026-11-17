@@ -330,6 +330,7 @@ test("blocked indicator announces its disabled state without losing its face col
   await tick();
   expect(button()?.getAttribute("aria-disabled")).toBe("true");
   expect(button()?.getAttribute("data-state")).toBe("down");
+  // The disabled cursor and hover rule live in the stylesheet, which jsdom does not apply.
   const source = readFileSync("src/components/ConnectionIndicator.svelte", "utf8");
   expect(source).toMatch(/\.connection-indicator\[aria-disabled="true"\]\s*\{\s*cursor:\s*default;/);
   expect(source).toMatch(/\.connection-indicator:not\(\[aria-disabled="true"\]\):hover/);

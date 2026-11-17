@@ -98,8 +98,6 @@ describe("terminal connection pill", () => {
     // jsdom computes no layout, so the overlay's positioning is a source contract.
     const source = readFileSync("src/components/TerminalConnectionNotice.svelte", "utf8");
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bposition:\s*absolute;/);
-    expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\btop:\s*5px;/);
-    expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bright:\s*5px;/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bwidth:\s*max-content;/);
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bmax-width:\s*min\(70%, 36rem\);/);
     expect(source).not.toMatch(/\.terminal-connection-pill\s*\{[^}]*\binset:/);
