@@ -20,26 +20,27 @@ pub(crate) fn open<R: tauri::Runtime>(
     if let Some(commands) =
         chan_server::appimage_browser_commands(url.as_str(), std::env::vars_os())
     {
-        let mut last_error = String::from("no browser launcher started");
+        let mut tried: Vec<String> = Vec::new();
         for mut command in commands {
-            match command.spawn() {
-                Ok(mut child) => {
-                    // Reap the launcher without holding a sign-in attempt or the UI thread.
-                    tauri::async_runtime::spawn_blocking(move || match child.wait() {
-                        Ok(status) if !status.success() => {
-                            tracing::warn!(%status, "the host link opener failed");
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "waiting for the host link opener failed")
-                        }
-                        Ok(_) => {}
-                    });
-                    return Ok(());
-                }
-                Err(error) => last_error = format!("starting the host link opener: {error}"),
+            tried.push(command.get_program().to_string_lossy().into_owned());
+            if let Ok(mut child) = command.spawn() {
+                // Reap the launcher without holding a sign-in attempt or the UI thread.
+                tauri::async_runtime::spawn_blocking(move || match child.wait() {
+                    Ok(status) if !status.success() => {
+                        tracing::warn!(%status, "the host link opener failed");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "waiting for the host link opener failed")
+                    }
+                    Ok(_) => {}
+                });
+                return Ok(());
             }
         }
-        return Err(last_error);
+        return Err(format!(
+            "starting the host link opener (tried {})",
+            tried.join(", ")
+        ));
     }
     app.opener()
         .open_url(url.as_str(), None::<&str>)
@@ -126,13 +127,15 @@ mod tests {
         // Executable stand-ins distinguish PATH lookup as well as argv shape.
         for (directory, script) in [
             (&bundled_bin, "#!/bin/sh\nexit 91\n"),
-            (&host_bin, "#!/bin/sh\n[ \"$#\" = 1 ] || exit 92\n[ -z \"${APPDIR+x}${APPIMAGE+x}${PYTHONHOME+x}${LD_LIBRARY_PATH+x}\" ] || exit 93\nprintf '%s' \"$1\"\n"),
+            (&host_bin, "#!/bin/sh\n[ \"$#\" = 1 ] || exit 92\n[ -z \"${APPDIR+x}${APPIMAGE+x}${PYTHONHOME+x}${LD_LIBRARY_PATH+x}${GDK_BACKEND+x}${GTK_THEME+x}\" ] || exit 93\nprintf '%s' \"$1\"\n"),
         ] {
             let path = directory.join("xdg-open");
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let url = validated_url("https://example.com/path?q=a%20b&other=x#part").unwrap();
+        // Reduced fixture like the serve tests: one mount entry plus a
+        // trailing empty entry, with the GTK keys the terminal scrub drops.
         let parent = vec![
             ("APPDIR".into(), mount.as_os_str().to_owned()),
             (
@@ -147,6 +150,11 @@ mod tests {
             (
                 "LD_LIBRARY_PATH".into(),
                 format!("{}/usr/lib:", mount.display()).into(),
+            ),
+            ("GDK_BACKEND".into(), "x11".into()),
+            (
+                "GTK_THEME".into(),
+                mount.join("usr/share/themes/Bundle").into_os_string(),
             ),
         ];
         let mut commands = chan_server::appimage_browser_commands(url.as_str(), parent)

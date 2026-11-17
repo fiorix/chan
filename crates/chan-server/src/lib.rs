@@ -236,9 +236,10 @@ pub use chan_library::{
 /// var. Returns false if the flag is off or if `BROWSER` is set to
 /// an empty string. The empty-string case is a Unix convention
 /// (python's `webbrowser`, several CLIs) for "I have no browser;
-/// don't try". A non-empty `BROWSER` falls through: the `open`
-/// crate honors it on Linux, and we leave macOS/Windows to their
-/// platform default opener.
+/// don't try". A non-empty `BROWSER` falls through to the platform
+/// opener, which honors it only if that opener reads `BROWSER`
+/// (`open` 5.x ignores it for http/https URLs unless the resolved
+/// launcher does, as `xdg-open`'s generic branch does).
 fn should_open_browser(open_browser: bool) -> bool {
     if !open_browser {
         return false;
@@ -251,12 +252,13 @@ fn should_open_browser(open_browser: bool) -> bool {
 /// host environment; `None` otherwise, in which case callers keep their
 /// platform opener. Candidates follow the `open` crate's order (`xdg-open`,
 /// then `gio open` and the other fallbacks); callers spawn the first that
-/// starts. Linux only: off an AppImage the platform opener runs as today.
+/// starts. Linux only: off an AppImage the platform opener runs.
 #[cfg(target_os = "linux")]
 pub fn appimage_browser_commands(
     url: &str,
     parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> Option<Vec<std::process::Command>> {
+    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
     let parent: Vec<_> = parent.into_iter().collect();
@@ -275,7 +277,8 @@ pub fn appimage_browser_commands(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .process_group(0);
     }
     Some(commands)
 }
@@ -286,19 +289,18 @@ pub fn appimage_browser_commands(
 #[cfg(target_os = "linux")]
 fn open_browser(url: &str) -> Result<(), String> {
     if let Some(commands) = appimage_browser_commands(url, std::env::vars_os()) {
-        let mut last_error = String::from("no browser launcher started");
+        let mut tried: Vec<String> = Vec::new();
         for mut command in commands {
-            match command.spawn() {
-                Ok(mut child) => {
-                    std::thread::spawn(move || drop(child.wait()));
-                    return Ok(());
-                }
-                Err(error) => {
-                    last_error = format!("could not start browser launcher: {error}");
-                }
+            tried.push(command.get_program().to_string_lossy().into_owned());
+            if let Ok(mut child) = command.spawn() {
+                let _ = std::thread::Builder::new().spawn(move || drop(child.wait()));
+                return Ok(());
             }
         }
-        return Err(last_error);
+        return Err(format!(
+            "could not start browser launcher (tried {})",
+            tried.join(", ")
+        ));
     }
     open::that_detached(url).map_err(|error| format!("could not open browser: {error}"))
 }
@@ -337,6 +339,10 @@ mod serve_browser_tests {
         host_bin: &std::path::Path,
     ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
         use std::ffi::OsString;
+        // Reduced from the O*10 E / O*10 H X*10 E blocks the terminal scrub
+        // pins in platform.rs (`a_host_command_gets_the_terminal_scrub`,
+        // `a_host_command_scrubs_both_apprun_library_shapes`): one mount
+        // entry plus a trailing empty entry exercises the same rules here.
         let mut parent: Vec<(OsString, OsString)> = Vec::new();
         parent.push(("APPDIR".into(), mount.as_os_str().to_os_string()));
         parent.push((
@@ -352,7 +358,21 @@ mod serve_browser_tests {
             "LD_LIBRARY_PATH".into(),
             format!("{}/usr/lib:", mount.display()).into(),
         ));
+        parent.push(("GDK_BACKEND".into(), "x11".into()));
+        parent.push((
+            "GTK_THEME".into(),
+            mount.join("usr/share/themes/Bundle").into_os_string(),
+        ));
         parent
+    }
+
+    fn own_pgid() -> String {
+        let pid = std::process::id().to_string();
+        let output = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid])
+            .output()
+            .expect("ps reads the test's process group");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     /// Spawn the first candidate that starts, as the serve site does.
@@ -382,7 +402,7 @@ mod serve_browser_tests {
         write_launcher(
             &host_bin,
             "xdg-open",
-            "#!/bin/sh\n[ \"$#\" = 1 ] || exit 92\n[ -z \"${APPDIR+x}${APPIMAGE+x}${PYTHONHOME+x}${LD_LIBRARY_PATH+x}\" ] || exit 93\nprintf '%s' \"$1\"\n",
+            "#!/bin/sh\n[ \"$#\" = 1 ] || exit 92\n[ -z \"${APPDIR+x}${APPIMAGE+x}${PYTHONHOME+x}${LD_LIBRARY_PATH+x}${GDK_BACKEND+x}${GTK_THEME+x}\" ] || exit 93\ntarget=$1;read -r line </proc/self/stat;line=${line#*) };set -- $line\nprintf '%s pgid=%s' \"$target\" \"$3\"\n",
         );
         let url = "https://example.com/path?q=a%20b&other=x#part";
         let parent = appimage_parent(&mount, &bundled_bin, &host_bin);
@@ -397,7 +417,16 @@ mod serve_browser_tests {
         );
         let output = spawn_first_available(commands).expect("a launcher starts");
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, url.as_bytes());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let (echoed, pgid) = printed
+            .rsplit_once(" pgid=")
+            .expect("stand-in prints its process group");
+        assert_eq!(echoed, url);
+        assert_ne!(
+            pgid.trim(),
+            own_pgid(),
+            "launcher left the test's process group"
+        );
         assert!(output.stderr.is_empty());
     }
 
