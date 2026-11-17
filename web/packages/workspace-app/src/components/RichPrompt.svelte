@@ -648,8 +648,8 @@
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
   /// The composer keeps its text on any refusal; the note says why it was
-  /// refused: the terminal is gone (restart is the recovery) or its socket
-  /// is down and redialling.
+  /// refused: the terminal is gone (restart is the recovery), its socket
+  /// is down and redialling, or its session is parked.
   function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {

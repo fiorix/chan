@@ -3008,8 +3008,8 @@ export function registerTerminalInputSink(tabId: string, sink: TerminalInputSink
 // where it shares one FIFO with `cs terminal write` and auto-submits in order.
 // Keeping it a separate registry lets the Rich Prompt bubble reach the active
 // terminal without touching TerminalTab internals. The sink returns whether the
-// frame actually went out (the WS was open) so callers can retry a freshly-
-// spawned terminal whose socket has not connected yet (the team lead bootstrap).
+// frame actually went out (the WS was open and the session live) so callers can
+// retry a freshly-spawned terminal whose socket has not connected yet (the team lead bootstrap).
 type TerminalPromptSink = (data: string, agent?: string, id?: string) => boolean;
 const terminalPromptSinks = new Map<string, TerminalPromptSink>();
 
@@ -3047,7 +3047,7 @@ export function sendPromptToTerminal(
 /// Why a Rich Prompt submit was refused, read only after
 /// `sendPromptToTerminal` returns false: the terminal's shell or session is
 /// gone for good (`exited`; restart is the recovery) or its socket is down
-/// (`down`; a live socket redials, a parked session waits for the server).
+/// (`down`; a dropped socket redials, a parked session waits for the server).
 export type TerminalPromptRefusal = "exited" | "down";
 type TerminalPromptRefusalReader = () => TerminalPromptRefusal;
 const terminalPromptRefusalReaders = new Map<string, TerminalPromptRefusalReader>();

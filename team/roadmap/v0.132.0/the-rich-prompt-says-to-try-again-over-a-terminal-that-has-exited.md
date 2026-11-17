@@ -33,4 +33,4 @@ Read at `f453b0b2e`, by reading; not run.
 
 ## Closing
 
-Recorded 2026-11-17, fix round 1. Restart terminal hands the keyboard to the new terminal; the retry returns focus to the composer first with a click, and the check pins it. A session parked for a devserver restart keeps the not-connected note: the tab's session id is kept, no redial is armed, and the exited note is not shown.
+Restart terminal hands the keyboard to the new terminal; the retry clicks the composer first. A session parked for a devserver restart keeps the not-connected note: the tab's session id is kept, no redial is armed, and the exited note is not shown.
