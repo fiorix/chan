@@ -191,10 +191,12 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
     expect(install()).toBe(true);
     const at = (col: number, row: number) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at(0, 0) }));
-    canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(4, 1) }));
-    // ghostty-web hears the release on the document.
-    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(4, 1) }));
+    const press = (type: string, col: number, row: number, button = 0) =>
+      canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, button, pointerId: 1, pointerType: "mouse", ...at(col, row) }));
+    press("pointerdown", 0, 0);
+    press("pointermove", 4, 1);
+    // The release reaches the canvas under pointer capture.
+    press("pointerup", 4, 1);
     expect(writes).toEqual([COMMAND]);
     expect(writes[0]).toBe(chordText(term));
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -206,8 +208,10 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
     expect(install()).toBe(true);
     const at = { clientX: 2 * cell.width + 1, clientY: 1 };
-    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at }));
-    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at }));
+    const tap = (type: string) =>
+      canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, pointerType: "mouse", ...at }));
+    tap("pointerdown");
+    tap("pointerup");
     expect(writes).toEqual([]);
     expect(term.hasSelection()).toBe(false);
     expect(clipboard.write).not.toHaveBeenCalled();

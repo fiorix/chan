@@ -97,8 +97,7 @@ export class Terminal {
 
   // Scrollbar interaction state
   private isDraggingScrollbar: boolean = false;
-  private scrollbarDragStart: number | null = null;
-  private scrollbarDragStartViewportY: number = 0;
+  private scrollbarDragLastY: number | null = null;
 
   // Scrollbar visibility/auto-hide state
   private scrollbarVisible: boolean = false;
@@ -479,15 +478,18 @@ export class Terminal {
       // URL regex second (fallback for plain text URLs)
       this.linkDetector.registerProvider(new UrlRegexProvider(this));
 
-      // Setup mouse event handling for links and scrollbar
-      // Use capture phase to intercept scrollbar clicks before SelectionManager
-      parent.addEventListener('mousedown', this.handleMouseDown, { capture: true });
+      // Setup pointer event handling for links and scrollbar
+      // Use capture phase to intercept scrollbar presses before SelectionManager
+      parent.addEventListener('pointerdown', this.handlePointerDown, { capture: true });
       parent.addEventListener('mousemove', this.handleMouseMove);
       parent.addEventListener('mouseleave', this.handleMouseLeave);
       parent.addEventListener('click', this.handleClick);
 
-      // Setup document-level mouseup for scrollbar drag (so drag works even outside canvas)
-      document.addEventListener('mouseup', this.handleMouseUp);
+      // The scrollbar thumb captures its pointer to the parent element,
+      // so the release outside it still reaches the parent: no document
+      // listener is needed.
+      parent.addEventListener('pointerup', this.handlePointerUp);
+      parent.addEventListener('pointercancel', this.handlePointerUp);
 
       // Setup wheel event handling for scrolling (Phase 2)
       // Use capture phase to ensure we get the event before browser scrolling
@@ -1166,21 +1168,18 @@ export class Terminal {
     // Remove event listeners
     if (this.element) {
       this.element.removeEventListener('wheel', this.handleWheel);
-      this.element.removeEventListener('mousedown', this.handleMouseDown, { capture: true });
+      this.element.removeEventListener('pointerdown', this.handlePointerDown, { capture: true });
       this.element.removeEventListener('mousemove', this.handleMouseMove);
       this.element.removeEventListener('mouseleave', this.handleMouseLeave);
       this.element.removeEventListener('click', this.handleClick);
+      this.element.removeEventListener('pointerup', this.handlePointerUp);
+      this.element.removeEventListener('pointercancel', this.handlePointerUp);
 
       // Remove contenteditable and accessibility attributes added in open()
       this.element.removeAttribute('contenteditable');
       this.element.removeAttribute('role');
       this.element.removeAttribute('aria-label');
       this.element.removeAttribute('aria-multiline');
-    }
-
-    // Remove document-level listeners (only if opened)
-    if (this.isOpen && typeof document !== 'undefined') {
-      document.removeEventListener('mouseup', this.handleMouseUp);
     }
 
     // Clean up scrollbar timers
@@ -1524,9 +1523,9 @@ export class Terminal {
   };
 
   /**
-   * Handle mouse down for scrollbar interaction
+   * Handle pointer down for scrollbar interaction
    */
-  private handleMouseDown = (e: MouseEvent): void => {
+  private handlePointerDown = (e: PointerEvent): void => {
     if (!this.canvas || !this.renderer || !this.wasmTerm) return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
@@ -1544,7 +1543,7 @@ export class Terminal {
     const scrollbarX = canvasWidth - scrollbarWidth - 4;
     const scrollbarPadding = 4;
 
-    // Check if click is in scrollbar area
+    // Check if press is in scrollbar area
     if (mouseX >= scrollbarX && mouseX <= scrollbarX + scrollbarWidth) {
       // Prevent default and stop propagation to prevent text selection
       e.preventDefault();
@@ -1559,12 +1558,15 @@ export class Terminal {
       const scrollPosition = this.viewportY / scrollbackLength;
       const thumbY = scrollbarPadding + (scrollbarTrackHeight - thumbHeight) * (1 - scrollPosition);
 
-      // Check if click is on thumb
+      // Check if press is on thumb
       if (mouseY >= thumbY && mouseY <= thumbY + thumbHeight) {
-        // Start dragging thumb
+        // Start dragging thumb, captured to the parent element so the
+        // moves and the release outside it still reach it. All supported
+        // engines implement pointer capture; the guarded call keeps
+        // environments without it (jsdom) compiling and running.
         this.isDraggingScrollbar = true;
-        this.scrollbarDragStart = mouseY;
-        this.scrollbarDragStartViewportY = this.viewportY;
+        this.scrollbarDragLastY = mouseY;
+        this.element?.setPointerCapture?.(e.pointerId);
 
         // Prevent text selection during drag
         if (this.canvas) {
@@ -1572,7 +1574,7 @@ export class Terminal {
           this.canvas.style.webkitUserSelect = 'none';
         }
       } else {
-        // Click on track - jump to position
+        // Press on track - jump to position
         const relativeY = mouseY - scrollbarPadding;
         const scrollFraction = 1 - relativeY / scrollbarTrackHeight; // Inverted: top = 1, bottom = 0
         const targetViewportY = Math.round(scrollFraction * scrollbackLength);
@@ -1582,12 +1584,12 @@ export class Terminal {
   };
 
   /**
-   * Handle mouse up for scrollbar drag
+   * Handle pointer up for scrollbar drag
    */
-  private handleMouseUp = (): void => {
+  private handlePointerUp = (): void => {
     if (this.isDraggingScrollbar) {
       this.isDraggingScrollbar = false;
-      this.scrollbarDragStart = null;
+      this.scrollbarDragLastY = null;
 
       // Restore text selection
       if (this.canvas) {
@@ -1603,10 +1605,12 @@ export class Terminal {
   };
 
   /**
-   * Process scrollbar drag movement
+   * Process scrollbar drag movement. Each move applies the delta since the
+   * last processed position through the viewport API, so rows the write
+   * path anchored while the thumb is held are not undone by the next move.
    */
   private processScrollbarDrag(e: MouseEvent): void {
-    if (!this.canvas || !this.renderer || !this.wasmTerm || this.scrollbarDragStart === null)
+    if (!this.canvas || !this.renderer || !this.wasmTerm || this.scrollbarDragLastY === null)
       return;
 
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
@@ -1615,10 +1619,11 @@ export class Terminal {
     const rect = this.canvas.getBoundingClientRect();
     const mouseY = e.clientY - rect.top;
 
-    // Calculate how much the mouse moved
-    const deltaY = mouseY - this.scrollbarDragStart;
+    // How far the pointer moved since the last processed position
+    const deltaY = mouseY - this.scrollbarDragLastY;
+    this.scrollbarDragLastY = mouseY;
 
-    // Convert mouse delta to viewport delta
+    // Convert pointer delta to viewport delta
     // Use rect height which is already in CSS pixels
     const canvasHeight = rect.height;
     const scrollbarPadding = 4;
@@ -1626,14 +1631,12 @@ export class Terminal {
     const visibleRows = this.rows;
     const totalLines = scrollbackLength + visibleRows;
     const thumbHeight = Math.max(20, (visibleRows / totalLines) * scrollbarTrackHeight);
+    if (scrollbarTrackHeight - thumbHeight <= 0) return;
 
-    // Calculate scroll fraction from thumb movement
     // Note: thumb moves in opposite direction to viewport (thumb down = scroll down = viewportY decreases)
+    // The fraction stays exact: scrollBy carries it into the fractional offset.
     const scrollFraction = -deltaY / (scrollbarTrackHeight - thumbHeight);
-    const viewportDelta = Math.round(scrollFraction * scrollbackLength);
-
-    const newViewportY = this.scrollbarDragStartViewportY + viewportDelta;
-    this.viewport.scrollTo(newViewportY);
+    this.viewport.scrollBy(scrollFraction * scrollbackLength);
   }
 
   /**

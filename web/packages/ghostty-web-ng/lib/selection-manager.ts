@@ -41,10 +41,9 @@ export class SelectionManager {
   private selectionStart: { col: number; absoluteRow: number } | null = null;
   private selectionEnd: { col: number; absoluteRow: number } | null = null;
   private isSelecting: boolean = false;
-  private mouseDownX: number = 0;
-  private mouseDownY: number = 0;
+  private pressClientX: number = 0;
+  private pressClientY: number = 0;
   private dragThresholdMet: boolean = false;
-  private mouseDownTarget: EventTarget | null = null; // Track where mousedown occurred
 
   // Track rows that need redraw for clearing old selection
   // Using a Set prevents the overwrite bug where mousemove would clobber
@@ -55,10 +54,7 @@ export class SelectionManager {
   private selectionChangedEmitter = new EventEmitter<void>();
 
   // Store bound event handlers for cleanup
-  private boundMouseUpHandler: ((e: MouseEvent) => void) | null = null;
   private boundContextMenuHandler: ((e: MouseEvent) => void) | null = null;
-  private boundClickHandler: ((e: MouseEvent) => void) | null = null;
-  private boundDocumentMouseMoveHandler: ((e: MouseEvent) => void) | null = null;
 
   // The row a read of the selection's text or a click's word or line looks
   // at, one row at a time.
@@ -73,11 +69,7 @@ export class SelectionManager {
    * Get current viewport Y position (how many lines scrolled into history)
    */
   private getViewportY(): number {
-    const rawViewportY =
-      typeof (this.terminal as any).getViewportY === 'function'
-        ? (this.terminal as any).getViewportY()
-        : (this.terminal as any).viewportY || 0;
-    return Math.max(0, Math.floor(rawViewportY));
+    return Math.max(0, Math.floor(this.terminal.getViewportY()));
   }
 
   /**
@@ -338,29 +330,11 @@ export class SelectionManager {
     // Stop auto-scroll if active
     this.stopAutoScroll();
 
-    // Clean up document event listener
-    if (this.boundMouseUpHandler) {
-      document.removeEventListener('mouseup', this.boundMouseUpHandler);
-      this.boundMouseUpHandler = null;
-    }
-
-    // Clean up document mousemove listener
-    if (this.boundDocumentMouseMoveHandler) {
-      document.removeEventListener('mousemove', this.boundDocumentMouseMoveHandler);
-      this.boundDocumentMouseMoveHandler = null;
-    }
-
     // Clean up context menu event listener
     if (this.boundContextMenuHandler) {
       const canvas = this.renderer.getCanvas();
       canvas.removeEventListener('contextmenu', this.boundContextMenuHandler);
       this.boundContextMenuHandler = null;
-    }
-
-    // Clean up document click listener
-    if (this.boundClickHandler) {
-      document.removeEventListener('click', this.boundClickHandler);
-      this.boundClickHandler = null;
     }
 
     // Canvas event listeners will be cleaned up when canvas is removed from DOM
@@ -371,15 +345,17 @@ export class SelectionManager {
   // ==========================================================================
 
   /**
-   * Attach mouse event listeners to canvas
+   * Attach pointer event listeners to the canvas. Everything lives on the
+   * canvas: a press captures its pointer, so moves and the release outside
+   * the canvas still reach it, and no document listener is needed.
    */
   private attachEventListeners(): void {
     const canvas = this.renderer.getCanvas();
 
-    // Mouse down - start selection or clear existing
-    canvas.addEventListener('mousedown', (e: MouseEvent) => {
+    // Pointer down - start selection or clear existing
+    canvas.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button === 0) {
-        // Left click only
+        // Primary button only
 
         // CRITICAL: Focus the terminal so it can receive keyboard input
         // The canvas doesn't have tabindex, but the parent container does
@@ -387,9 +363,15 @@ export class SelectionManager {
           canvas.parentElement.focus();
         }
 
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        // Capture the pointer so the move and the release outside the
+        // canvas still reach it. Guarded: jsdom has no pointer capture,
+        // where tests dispatch on the canvas itself.
+        canvas.setPointerCapture?.(e.pointerId);
 
-        // Always clear previous selection on new click
+        const rect = canvas.getBoundingClientRect();
+        const cell = this.pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+
+        // Always clear previous selection on new press
         const hadSelection = this.hasSelection();
         if (hadSelection) {
           this.clearSelection();
@@ -400,19 +382,35 @@ export class SelectionManager {
         this.selectionStart = { col: cell.col, absoluteRow };
         this.selectionEnd = { col: cell.col, absoluteRow };
         this.isSelecting = true;
-        this.mouseDownX = e.offsetX;
-        this.mouseDownY = e.offsetY;
+        this.pressClientX = e.clientX;
+        this.pressClientY = e.clientY;
         this.dragThresholdMet = false;
       }
     });
 
-    // Mouse move on canvas - update selection
-    canvas.addEventListener('mousemove', (e: MouseEvent) => {
+    // A compat-mouse press focuses the parent too, for dispatchers that
+    // never fire pointer events. After a real pointer press this repeats
+    // the focus above and changes nothing.
+    canvas.addEventListener('mousedown', (e: MouseEvent) => {
+      if (e.button === 0) {
+        if (canvas.parentElement) {
+          canvas.parentElement.focus();
+        }
+      }
+    });
+
+    // Pointer move on canvas - update selection. Under capture this also
+    // carries positions outside the canvas, clamped to it by pixelToCell.
+    canvas.addEventListener('pointermove', (e: PointerEvent) => {
       if (this.isSelecting) {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
         // Check if drag threshold has been met
         if (!this.dragThresholdMet) {
-          const dx = e.offsetX - this.mouseDownX;
-          const dy = e.offsetY - this.mouseDownY;
+          const dx = e.clientX - this.pressClientX;
+          const dy = e.clientY - this.pressClientY;
           // Use 50% of cell width as threshold to scale with font size
           const threshold = this.renderer.getMetrics().width * 0.5;
           if (dx * dx + dy * dy < threshold * threshold) {
@@ -424,111 +422,36 @@ export class SelectionManager {
         // Mark current selection rows as dirty before updating
         this.markCurrentSelectionDirty();
 
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const cell = this.pixelToCell(x, y);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
         this.selectionEnd = { col: cell.col, absoluteRow };
         this.requestRender();
 
-        // Check if near edges for auto-scroll
-        this.updateAutoScroll(e.offsetY, canvas.clientHeight);
-      }
-    });
-
-    // Mouse leave - check for auto-scroll when leaving canvas during drag
-    canvas.addEventListener('mouseleave', (e: MouseEvent) => {
-      if (this.isSelecting) {
-        // Determine scroll direction based on where mouse left
-        const rect = canvas.getBoundingClientRect();
-        if (e.clientY < rect.top) {
+        // Auto-scroll at the canvas edges and past them, where the
+        // captured pointer reports outside positions instead of leaving
+        const edgeSize = SelectionManager.AUTO_SCROLL_EDGE_SIZE;
+        if (y < edgeSize) {
           this.startAutoScroll(-1); // Scroll up
-        } else if (e.clientY > rect.bottom) {
+        } else if (y > rect.height - edgeSize) {
           this.startAutoScroll(1); // Scroll down
+        } else {
+          this.stopAutoScroll();
         }
       }
     });
 
-    // Mouse enter - stop auto-scroll when mouse returns to canvas
-    canvas.addEventListener('mouseenter', () => {
-      if (this.isSelecting) {
-        this.stopAutoScroll();
-      }
-    });
-
-    // Document-level mousemove for tracking mouse position during drag outside canvas
-    this.boundDocumentMouseMoveHandler = (e: MouseEvent) => {
-      if (this.isSelecting) {
-        // Check drag threshold (same as canvas mousemove)
-        if (!this.dragThresholdMet) {
-          const dx = e.clientX - (canvas.getBoundingClientRect().left + this.mouseDownX);
-          const dy = e.clientY - (canvas.getBoundingClientRect().top + this.mouseDownY);
-          const threshold = this.renderer.getMetrics().width * 0.5;
-          if (dx * dx + dy * dy < threshold * threshold) {
-            return;
-          }
-          this.dragThresholdMet = true;
-        }
-
-        const rect = canvas.getBoundingClientRect();
-
-        // Update selection based on clamped position
-        const clampedX = Math.max(rect.left, Math.min(e.clientX, rect.right));
-        const clampedY = Math.max(rect.top, Math.min(e.clientY, rect.bottom));
-
-        // Convert to canvas-relative coordinates
-        const offsetX = clampedX - rect.left;
-        const offsetY = clampedY - rect.top;
-
-        // Only update if mouse is outside the canvas
-        if (
-          e.clientX < rect.left ||
-          e.clientX > rect.right ||
-          e.clientY < rect.top ||
-          e.clientY > rect.bottom
-        ) {
-          // Update auto-scroll direction based on mouse position
-          if (e.clientY < rect.top) {
-            this.startAutoScroll(-1);
-          } else if (e.clientY > rect.bottom) {
-            this.startAutoScroll(1);
-          } else {
-            this.stopAutoScroll();
-          }
-
-          // Only update selection position if NOT auto-scrolling
-          // During auto-scroll, the scroll handler extends the selection
-          if (this.autoScrollDirection === 0) {
-            // Mark current selection rows as dirty before updating
-            this.markCurrentSelectionDirty();
-
-            const cell = this.pixelToCell(offsetX, offsetY);
-            const absoluteRow = this.viewportRowToAbsolute(cell.row);
-            this.selectionEnd = { col: cell.col, absoluteRow };
-            this.requestRender();
-          }
-        }
-      }
-    };
-    document.addEventListener('mousemove', this.boundDocumentMouseMoveHandler);
-
-    // Track mousedown on document to know if a click started inside the canvas
-    document.addEventListener('mousedown', (e: MouseEvent) => {
-      this.mouseDownTarget = e.target;
-    });
-
-    // CRITICAL FIX: Listen for mouseup on DOCUMENT, not just canvas
-    // This catches mouseup events that happen outside the canvas (common during drag)
-    this.boundMouseUpHandler = (_e: MouseEvent) => {
+    const endDrag = (copy: boolean): void => {
       if (this.isSelecting) {
         this.isSelecting = false;
         this.stopAutoScroll();
 
-        // Check if this was a click without drag (threshold never met).
+        // Check if this was a press without drag (threshold never met).
         if (!this.dragThresholdMet) {
           this.clearSelection();
           return;
         }
 
-        if (this.hasSelection()) {
+        if (copy && this.hasSelection()) {
           const text = this.getSelection();
           if (text) {
             this.copyToClipboard(text);
@@ -537,15 +460,21 @@ export class SelectionManager {
         }
       }
     };
-    document.addEventListener('mouseup', this.boundMouseUpHandler);
+    canvas.addEventListener('pointerup', () => endDrag(true));
+    // An interrupted drag keeps its selection but copies nothing. The
+    // implicit release after a pointerup lands here with nothing to end.
+    canvas.addEventListener('pointercancel', () => endDrag(false));
+    canvas.addEventListener('lostpointercapture', () => endDrag(false));
 
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
     canvas.addEventListener('click', (e: MouseEvent) => {
       // event.detail: 1 = single, 2 = double, 3 = triple click
+      const rect = canvas.getBoundingClientRect();
+      const at = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       if (e.detail === 2) {
         // Double-click - select word
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const cell = this.pixelToCell(at.x, at.y);
         const word = this.getWordAtCell(cell.col, cell.row);
 
         if (word) {
@@ -562,7 +491,7 @@ export class SelectionManager {
         }
       } else if (e.detail >= 3) {
         // Triple-click (or more) - select line content (like native Ghostty)
-        const cell = this.pixelToCell(e.offsetX, e.offsetY);
+        const cell = this.pixelToCell(at.x, at.y);
         const absoluteRow = this.viewportRowToAbsolute(cell.row);
 
         // Find actual line length (exclude trailing empty cells)
@@ -629,7 +558,9 @@ export class SelectionManager {
       // After a short delay, restore the textarea to its hidden state
       // This allows the context menu to appear first
       setTimeout(() => {
-        // Listen for when the context menu closes (user clicks away or selects an option)
+        // Reset when the menu closes: a menu choice or a click away moves
+        // the keyboard off the textarea (blur), and a press on the canvas
+        // starts a drag or focuses past it. All element-scoped.
         const resetTextarea = () => {
           this.textarea.style.pointerEvents = 'none';
           this.textarea.style.zIndex = '-10';
@@ -640,15 +571,13 @@ export class SelectionManager {
           this.textarea.value = '';
 
           // Remove the one-time listeners
-          document.removeEventListener('click', resetTextarea);
-          document.removeEventListener('contextmenu', resetTextarea);
           this.textarea.removeEventListener('blur', resetTextarea);
+          canvas.removeEventListener('pointerdown', resetTextarea);
         };
 
         // Reset on any of these events (menu closed)
-        document.addEventListener('click', resetTextarea, { once: true });
-        document.addEventListener('contextmenu', resetTextarea, { once: true });
         this.textarea.addEventListener('blur', resetTextarea, { once: true });
+        canvas.addEventListener('pointerdown', resetTextarea, { once: true });
       }, 10);
 
       // Don't prevent default - let browser show the context menu on the textarea
@@ -656,34 +585,10 @@ export class SelectionManager {
 
     canvas.addEventListener('contextmenu', this.boundContextMenuHandler);
 
-    // Click outside canvas - clear selection
-    // This allows users to deselect by clicking anywhere outside the terminal
-    this.boundClickHandler = (e: MouseEvent) => {
-      // Don't clear selection if we're actively selecting
-      if (this.isSelecting) {
-        return;
-      }
-
-      // A click is only valid for clearing selection if BOTH mousedown and mouseup
-      // happened outside the canvas. If mousedown was inside (drag selection),
-      // don't clear even if mouseup/click is outside.
-      const mouseDownWasInCanvas =
-        this.mouseDownTarget && canvas.contains(this.mouseDownTarget as Node);
-      if (mouseDownWasInCanvas) {
-        return;
-      }
-
-      // Check if the click is outside the canvas
-      const target = e.target as Node;
-      if (!canvas.contains(target)) {
-        // Clicked outside the canvas - clear selection
-        if (this.hasSelection()) {
-          this.clearSelection();
-        }
-      }
-    };
-
-    document.addEventListener('click', this.boundClickHandler);
+    // A click outside the terminal element keeps the selection: the
+    // selection is also find's active-match highlight, and clearing it on
+    // a click in the find bar took find's highlight. A press inside the
+    // canvas starts a new drag and clears the old selection there.
   }
 
   /**
@@ -695,24 +600,6 @@ export class SelectionManager {
       for (let row = coords.startRow; row <= coords.endRow; row++) {
         this.dirtySelectionRows.add(row);
       }
-    }
-  }
-
-  /**
-   * Update auto-scroll based on mouse Y position within canvas
-   */
-  private updateAutoScroll(offsetY: number, canvasHeight: number): void {
-    const edgeSize = SelectionManager.AUTO_SCROLL_EDGE_SIZE;
-
-    if (offsetY < edgeSize) {
-      // Near top edge - scroll up
-      this.startAutoScroll(-1);
-    } else if (offsetY > canvasHeight - edgeSize) {
-      // Near bottom edge - scroll down
-      this.startAutoScroll(1);
-    } else {
-      // In middle - stop scrolling
-      this.stopAutoScroll();
     }
   }
 
@@ -737,12 +624,11 @@ export class SelectionManager {
         return;
       }
 
-      // Scroll the terminal to reveal more content in the direction user is dragging
-      // autoScrollDirection: -1 = dragging up (wants to see history), 1 = dragging down (wants to see newer)
-      // scrollLines convention: negative = scroll up into history, positive = scroll down to newer
-      // So direction maps directly to scrollLines sign
-      const scrollAmount = SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection;
-      (this.terminal as any).scrollLines(scrollAmount);
+      // Scroll the terminal to reveal more content in the direction user is
+      // dragging, through the viewport API: unlike the unwired write it
+      // cancels a smooth scroll and keeps the target with the view. A drag
+      // upward (direction -1) grows the offset, a downward one shrinks it.
+      this.terminal.viewport.scrollBy(-SelectionManager.AUTO_SCROLL_SPEED * this.autoScrollDirection);
 
       // Extend selection in the scroll direction
       // Key insight: we need to EXTEND the selection, not reset it to viewport edge
