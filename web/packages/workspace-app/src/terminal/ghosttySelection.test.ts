@@ -192,7 +192,7 @@ describe("ghostty-web's own copies write through chan's writer", () => {
     expect(install()).toBe(true);
     const at = (col: number, row: number) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
     const press = (type: string, col: number, row: number, button = 0) =>
-      canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, button, pointerId: 1, pointerType: "mouse", ...at(col, row) }));
+      canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, button, buttons: type === "pointerup" ? 0 : 1, pointerId: 1, pointerType: "mouse", isPrimary: true, ...at(col, row) }));
     press("pointerdown", 0, 0);
     press("pointermove", 4, 1);
     // The release reaches the canvas under pointer capture.

@@ -1504,11 +1504,11 @@ describe("terminal find on the ghostty backend", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
     const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
-    const press = { bubbles: true, cancelable: true, button: 0, pointerId: 1, pointerType: "mouse" } as const;
+    const press = { bubbles: true, cancelable: true, button: 0, pointerId: 1, pointerType: "mouse", isPrimary: true } as const;
     try {
-      term.canvas.dispatchEvent(new PointerEvent("pointerdown", { ...press, ...at(from) }));
-      term.canvas.dispatchEvent(new PointerEvent("pointermove", { ...press, ...at(to) }));
-      term.canvas.dispatchEvent(new PointerEvent("pointerup", { ...press, ...at(to) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointerdown", { ...press, buttons: 1, ...at(from) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointermove", { ...press, buttons: 1, ...at(to) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointerup", { ...press, buttons: 0, ...at(to) }));
       term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard;
@@ -1516,9 +1516,9 @@ describe("terminal find on the ghostty backend", () => {
     return writeText;
   }
 
-  // ghostty-web drops its selection on a click anywhere outside its canvas,
-  // and find's highlight is that selection. The bar is the terminal's own:
-  // a click in it keeps the highlight.
+  // ghostty-web keeps its selection on a click outside the terminal
+  // element, and find's highlight is that selection. The bar is the
+  // terminal's own: a click in it keeps the highlight with no guard.
   test.each(["input", "count", "box"] as const)("a click on the find bar's %s keeps find's highlight", async (part) => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);

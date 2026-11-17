@@ -285,10 +285,10 @@ async function renderGhostty(command = COMMAND) {
 /// ghostty-web's own pointer code; its release copies.
 function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }): void {
   const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
-  const press = { bubbles: true, cancelable: true, button: 0, pointerId: 1, pointerType: "mouse" } as const;
-  term.canvas.dispatchEvent(new PointerEvent("pointerdown", { ...press, ...at(from) }));
-  term.canvas.dispatchEvent(new PointerEvent("pointermove", { ...press, ...at(to) }));
-  term.canvas.dispatchEvent(new PointerEvent("pointerup", { ...press, ...at(to) }));
+  const press = { bubbles: true, cancelable: true, button: 0, pointerId: 1, pointerType: "mouse", isPrimary: true } as const;
+  term.canvas.dispatchEvent(new PointerEvent("pointerdown", { ...press, buttons: 1, ...at(from) }));
+  term.canvas.dispatchEvent(new PointerEvent("pointermove", { ...press, buttons: 1, ...at(to) }));
+  term.canvas.dispatchEvent(new PointerEvent("pointerup", { ...press, buttons: 0, ...at(to) }));
 }
 
 /// Where chan's writer puts a copy on each platform, and what reads it back.

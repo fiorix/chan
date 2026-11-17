@@ -1426,7 +1426,7 @@
       ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
       if (!ghosttyScrollbarClickGate) {
         console.warn(
-          "[chan] ghostty-web mousedown hook unavailable; its overlay scrollbar claims clicks while hidden.",
+          "[chan] ghostty-web pointerdown gate unavailable; its overlay scrollbar claims clicks while hidden.",
         );
       }
     }
@@ -3516,14 +3516,13 @@
     </div>
   {/if}
   {#if findOpen}
-    <!-- ghostty-web drops its selection on a click anywhere in the page
-         outside its canvas, and on ghostty find's highlight is that
-         selection, so a click in the bar (to place the caret) would take the
-         highlight away. The bar is the terminal's own, so its clicks stop
-         here; the menus close on pointerdown and the panes activate on
+    <!-- The widget keeps its selection on a click outside the terminal
+         element, and find's highlight is that selection, so a click in
+         the bar (to place the caret) keeps the highlight with no guard.
+         The menus close on pointerdown and the panes activate on
          mousedown, which still bubble. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()}>
+    <div class="terminal-find" role="search" aria-label="find in terminal">
       <input
         bind:this={searchInput}
         class="find"
