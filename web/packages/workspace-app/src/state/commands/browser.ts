@@ -152,7 +152,7 @@ function openSelectionInFileBrowser(): void {
 /// act on keeps its selection and flags.
 function showWorkspaceInfo(): void {
   const tab = activeBrowserTab() ?? openBrowserInActivePane({});
-  const surface = fbTreeInstance(`fb-tab-${tab.id}`)?.selection;
+  const surface = fbTreeInstance(activeBrowserInstanceId(tab) ?? "")?.selection;
   if (surface) {
     fbClearSelection(surface);
     surface.showWorkspace = true;

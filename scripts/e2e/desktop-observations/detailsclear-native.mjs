@@ -78,13 +78,21 @@ const run = { engine: "webkitgtk", engineVersion: a["engine-version"], worktreeS
 // Exit codes follow the directory's convention: 10 a property failed, 3 a
 // precondition or the instrument itself failed, 0 the contract held.
 let failures = [];
+const mask = (value) => String(value ?? "").replace(/([?&]t=)[^&\s"']*/g, "$1<token>");
 const record = (name, ok, detail, kind) => {
-  run.steps.push({ name, ok, detail: detail ?? "" });
+  run.steps.push({ name, ok, detail: mask(detail ?? "") });
   console.log(`detailsclear-native: ${ok ? "ok" : "FAIL"} ${name}${detail ? ` ${detail}` : ""}`);
   if (!ok) failures.push({ name, kind, detail });
 };
 const check = (name, ok, detail) => record(name, ok, detail, "property");
-const need = (name, ok, detail) => record(name, ok, detail, "precondition");
+const need = (name, ok, detail) => {
+  record(name, ok, detail, "precondition");
+  if (!ok) throw new Error(`precondition failed: ${name}${detail ? ` ${detail}` : ""}`.slice(0, 200));
+};
+const countKinds = () => ({
+  preconditions: failures.filter((f) => f.kind === "precondition").length,
+  properties: failures.filter((f) => f.kind === "property").length,
+});
 const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
 
 const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
@@ -211,7 +219,7 @@ try {
   const dockRow = await waitTitle(dockRowExpr, "dock-a.md row");
   need("dock file row present", typeof dockRow === "string" && dockRow.endsWith("/dock-a.md"),
     dockRow === null ? "absent" : String(dockRow).slice(0, 120));
-  const dockTarget = await page(`(() => {
+  const dockClicked = await page(`(() => {
     const row = [...document.querySelectorAll('${DOCK} [role="treeitem"]')]
       .find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
     if (!row) return "missing";
@@ -221,10 +229,18 @@ try {
     const tree = document.querySelector('${DOCK} .tree');
     if (!tree) return "no-tree";
     tree.focus();
-    const active = document.getElementById(tree.getAttribute("aria-activedescendant") ?? "");
-    return (active?.getAttribute("title") || "").endsWith("/dock-a.md") ? "targeted" : "unfocused";
+    return "focused";
   })()`).catch((err) => `failed: ${err.message}`);
-  need("dock row targeted last", dockTarget === "targeted", String(dockTarget).slice(0, 120));
+  need("dock row clicked, tree focused", dockClicked === "focused", String(dockClicked).slice(0, 120));
+  // The tree's aria-activedescendant updates on a later microtask, so read
+  // it from node after the click and focus above.
+  const dockTarget = await waitForValue(`(() => {
+    const tree = document.querySelector('${DOCK} .tree');
+    const active = document.getElementById(tree && tree.getAttribute("aria-activedescendant") || "");
+    return (active && active.getAttribute("title") || "").endsWith("/dock-a.md") ? "targeted" : null;
+  })()`, (v) => v === "targeted" || failed(v), "dock row targeted", 15000);
+  if (failed(dockTarget)) need("dock readable", false, String(dockTarget).slice(0, 120));
+  else need("dock row targeted last", dockTarget === "targeted", String(dockTarget).slice(0, 120));
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.launcher.toggle" } })); return "toggled"; })()`);
   const launcherOpen = await waitForValue(
@@ -251,18 +267,21 @@ try {
   if (failed(body)) need("inspector readable", false, String(body).slice(0, 120));
   else check("tab inspector shows the workspace", body === "workspace", String(body).slice(0, 120));
   const dockKept = await waitForValue(dockSelectedExpr, (v) => v === "true" || failed(v), "dock selection", 15000);
-  if (failed(dockKept)) need("inspector readable", false, String(dockKept).slice(0, 120));
+  if (failed(dockKept)) need("dock readable", false, String(dockKept).slice(0, 120));
+  else if (dockKept === "absent") need("dock row readable", false, "absent");
   else check("dock keeps its selection", dockKept === "true", JSON.stringify(dockKept));
   const tabSel = await waitForValue(tabSelectedExpr,
-    (v) => failed(v) || (v !== null && v !== "true"), "tab selection clear", 15000);
-  if (failed(tabSel)) need("inspector readable", false, String(tabSel).slice(0, 120));
-  else check("tab selection cleared", tabSel !== null && tabSel !== "true" && tabSel !== "absent", JSON.stringify(tabSel));
+    (v) => failed(v) || v === "false" || v === "unselected", "tab selection clear", 15000);
+  if (failed(tabSel)) need("tab readable", false, String(tabSel).slice(0, 120));
+  else if (tabSel === "absent") need("tab row readable", false, "absent");
+  else check("tab selection cleared", tabSel === "false" || tabSel === "unselected", JSON.stringify(tabSel));
 
   run.finished = new Date().toISOString();
   const preFailed = failures.some((f) => f.kind === "precondition");
   const code = preFailed ? 3 : failures.length > 0 ? 10 : 0;
   run.ok = code === 0;
   run.exitCode = code;
+  run.counts = countKinds();
   writeFileSync(join(a.out, "detailsclear-native.json"), `${JSON.stringify(run, null, 2)}\n`);
   console.log(code === 0 ? "detailsclear-native: PASS" : `detailsclear-native: ${failures.length} check(s) failed`);
   process.exitCode = code;
@@ -270,7 +289,8 @@ try {
   run.finished = new Date().toISOString();
   run.ok = false;
   run.exitCode = 3;
-  run.error = String(error && error.message ? error.message : error).slice(0, 300);
+  run.counts = countKinds();
+  run.error = mask(String(error && error.message ? error.message : error).slice(0, 300));
   try { writeFileSync(join(a.out, "detailsclear-native.json"), `${JSON.stringify(run, null, 2)}\n`); } catch {}
   console.error(`detailsclear-native: FAIL ${run.error}`);
   process.exitCode = 3;

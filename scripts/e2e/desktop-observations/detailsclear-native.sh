@@ -52,4 +52,5 @@ node "$HERE/detailsclear-native.mjs" --inspector "$INSPECTOR" --out "$output/rec
 verdict=$?
 echo "driver exit $verdict"
 cat "$output/driver.log" | obs_masked
-obs_judge "$verdict" "workspace details cleared the focused dock"
+import -window "$xid" "$output/verdict.png" 2>/dev/null || true
+obs_judge "$verdict" "detailsclear-native: see the FAIL lines above"
