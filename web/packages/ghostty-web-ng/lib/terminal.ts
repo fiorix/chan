@@ -30,7 +30,7 @@ import type {
 import { LinkDetector } from './link-detector';
 import { OSC8LinkProvider } from './providers/osc8-link-provider';
 import { UrlRegexProvider } from './providers/url-regex-provider';
-import { CanvasRenderer } from './renderer';
+import { CanvasRenderer, type PaintLayer } from './renderer';
 import { HighlightsManager } from './highlights';
 import { SelectionManager, type SelectionRange } from './selection-manager';
 import type { ILink } from './types';
@@ -126,6 +126,9 @@ export class Terminal {
       scrollback: options.scrollback ?? 10000,
       fontSize: options.fontSize ?? 15,
       fontFamily: options.fontFamily ?? 'monospace',
+      lineHeight: options.lineHeight ?? 1,
+      boxGlyphs: options.boxGlyphs ?? false,
+      scrollbar: options.scrollbar,
       disableStdin: options.disableStdin ?? false,
       smoothScrollDuration: options.smoothScrollDuration ?? 100, // Default: 100ms smooth scroll
     };
@@ -410,6 +413,9 @@ export class Terminal {
         cursorStyle: this.options.cursorStyle,
         cursorBlink: this.options.cursorBlink,
         theme: this.options.theme,
+        lineHeight: this.options.lineHeight,
+        boxGlyphs: this.options.boxGlyphs,
+        scrollbar: this.options.scrollbar,
       });
 
       // Size canvas to terminal dimensions (use renderer.resize for proper DPI scaling)
@@ -867,6 +873,24 @@ export class Terminal {
    */
   public getViewportY(): number {
     return this.viewportY;
+  }
+
+  /**
+   * Add a paint layer over the frame, run after the cells, the cursor
+   * and the scrollbar in ascending order. Returns a disposer.
+   */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    if (!this.renderer) throw new Error("Terminal must be opened before adding a paint layer. Call terminal.open(parent) first.");
+    return this.renderer.addPaintLayer(layer);
+  }
+
+  /**
+   * Force a full frame on the next paint: the renderer repaints every
+   * row and runs every paint layer over it.
+   */
+  public refresh(): void {
+    if (!this.renderer || !this.wasmTerm) throw new Error("Terminal must be opened before refreshing. Call terminal.open(parent) first.");
+    this.renderer.render(this.wasmTerm, true, this.viewportY, this.scrollbarOpacity);
   }
 
   // ==========================================================================

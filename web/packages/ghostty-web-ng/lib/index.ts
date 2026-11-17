@@ -16,7 +16,7 @@ export { Key, KeyEncoderOption } from './types';
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';
-export type { FontMetrics } from './renderer';
+export type { FontMetrics, PaintFrame, PaintLayer } from './renderer';
 export { InputHandler } from './input-handler';
 export { SelectionManager } from './selection-manager';
 export { HighlightsManager } from './highlights';

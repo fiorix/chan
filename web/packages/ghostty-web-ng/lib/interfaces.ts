@@ -13,6 +13,9 @@ export interface ITerminalOptions {
   scrollback?: number; // Default: 10000
   fontSize?: number; // Default: 15
   fontFamily?: string; // Default: 'monospace'
+  lineHeight?: number; // Default: 1; multiplies the measured cell height, xterm-style
+  boxGlyphs?: boolean; // Default: false; draw box-drawing and block elements as cell paths
+  scrollbar?: 'overlay'; // Paint the translucent overlay scrollbar onto the content
   disableStdin?: boolean; // Disable keyboard input (default: false)
 
   // Scrolling options

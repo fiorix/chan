@@ -11,6 +11,7 @@
  */
 
 import { ABI, VtCells, VtFlag, type VtCell, type VtTerminal } from '../vt/ghosttyVt';
+import { drawBoxGlyph } from './box-glyphs';
 import type { ITheme } from './interfaces';
 import type { SelectionManager } from './selection-manager';
 import type { HighlightsManager, HighlightStyle } from './highlights';
@@ -26,6 +27,30 @@ export interface RendererOptions {
   cursorBlink?: boolean; // Default: false
   theme?: ITheme;
   devicePixelRatio?: number; // Default: window.devicePixelRatio
+  lineHeight?: number; // Default: 1; multiplies the measured cell height, xterm-style
+  boxGlyphs?: boolean; // Default: false; draw box-drawing and block elements as cell paths
+  scrollbar?: 'overlay'; // Paint the translucent overlay scrollbar onto the content
+}
+
+/// What a paint layer sees of the frame it paints over: the context and the
+/// grid it paints on, whether every row is being repainted, and which view
+/// rows this frame repainted.
+export interface PaintFrame {
+  ctx: CanvasRenderingContext2D;
+  metrics: FontMetrics;
+  pixelRatio: number;
+  viewportOffset: number;
+  full: boolean;
+  changedRows: number[];
+  rows: number;
+  cols: number;
+}
+
+/// One coat of paint over the frame, after the cells, the cursor and the
+/// scrollbar, in ascending order. The returned disposer removes the layer.
+export interface PaintLayer {
+  order: number;
+  paint(frame: PaintFrame): void;
 }
 
 export interface FontMetrics {
@@ -84,6 +109,9 @@ export class CanvasRenderer {
   private cursorBlink: boolean;
   private theme: RendererTheme;
   private devicePixelRatio: number;
+  private lineHeight: number;
+  private boxGlyphs: boolean;
+  private scrollbar?: 'overlay';
   private metrics: FontMetrics;
 
   // Cursor blinking state
@@ -118,6 +146,15 @@ export class CanvasRenderer {
     | { startRow: number; endRow: number; startCol: number; endCol: number; style: HighlightStyle }[]
     | null = null;
 
+  // Paint layers, in ascending order, run after the cells, the cursor and
+  // the scrollbar.
+  private paintLayers: PaintLayer[] = [];
+
+  // Whether the previous frame painted the overlay scrollbar: its pixels
+  // stay translucent composites, so the frame after it stops needs fresh
+  // pixels under them too.
+  private paintedOverlay = false;
+
   // Link rendering state
   private hoveredHyperlinkId: number = 0;
   private previousHoveredHyperlinkId: number = 0;
@@ -147,6 +184,9 @@ export class CanvasRenderer {
     this.cursorBlink = options.cursorBlink ?? false;
     this.theme = { ...DEFAULT_THEME, ...options.theme };
     this.devicePixelRatio = options.devicePixelRatio ?? window.devicePixelRatio ?? 1;
+    this.lineHeight = options.lineHeight !== undefined && options.lineHeight >= 1 ? options.lineHeight : 1;
+    this.boxGlyphs = options.boxGlyphs ?? false;
+    this.scrollbar = options.scrollbar;
 
     // Measure font metrics
     this.metrics = this.measureFont();
@@ -162,6 +202,32 @@ export class CanvasRenderer {
   // ==========================================================================
 
   private measureFont(): FontMetrics {
+    const natural = this.measureNatural();
+    if (this.lineHeight === 1) return natural;
+    // A taller line keeps xterm's grid: the W ink box rounded to device
+    // pixels with the height multiplied, and the baseline carried over
+    // from the widget's own measure so text sits where it did.
+    const wide = this.measureWide();
+    if (!wide) {
+      return {
+        width: natural.width,
+        height: natural.height * this.lineHeight,
+        baseline: natural.baseline,
+      };
+    }
+    const ratio = this.devicePixelRatio > 0 ? this.devicePixelRatio : 1;
+    const width = Math.floor(wide.width * ratio) / ratio;
+    const height = Math.floor(Math.ceil(wide.height * ratio) * this.lineHeight) / ratio;
+    const baseline = Math.max(
+      0,
+      Math.min(height, natural.baseline + (height - natural.height) / 2),
+    );
+    return { width, height, baseline };
+  }
+
+  /// The widget's own cell measure: the M ink width and the ascent and
+  /// descent with two pixels of padding for overflowing glyphs.
+  private measureNatural(): FontMetrics {
     // Use an offscreen canvas for measurement
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
@@ -171,18 +237,43 @@ export class CanvasRenderer {
 
     // Measure width using 'M' (typically widest character)
     const widthMetrics = ctx.measureText('M');
-    const width = Math.ceil(widthMetrics.width);
+    const nwidth = Math.ceil(widthMetrics.width);
 
     // Measure height using ascent + descent with padding for glyph overflow
-    const ascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
-    const descent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
+    const nascent = widthMetrics.actualBoundingBoxAscent || this.fontSize * 0.8;
+    const ndescent = widthMetrics.actualBoundingBoxDescent || this.fontSize * 0.2;
 
     // Add 2px padding to height to account for glyphs that overflow (like 'f', 'd', 'g', 'p')
     // and anti-aliasing pixels
-    const height = Math.ceil(ascent + descent) + 2;
-    const baseline = Math.ceil(ascent) + 1; // Offset baseline by half the padding
+    const nheight = Math.ceil(nascent + ndescent) + 2;
+    const nbaseline = Math.ceil(nascent) + 1; // Offset baseline by half the padding
 
-    return { width, height, baseline };
+    return { width: nwidth, height: nheight, baseline: nbaseline };
+  }
+
+  /// The xterm cell measure: the W ink box through an offscreen canvas, or
+  /// null where the engine has none.
+  private measureWide(): { width: number; height: number } | null {
+    try {
+      if (typeof OffscreenCanvas === "undefined") return null;
+      const context = new OffscreenCanvas(100, 100).getContext("2d");
+      if (!context) return null;
+      const probe = context.measureText("W");
+      if (
+        !("fontBoundingBoxAscent" in probe) ||
+        !("fontBoundingBoxDescent" in probe)
+      ) {
+        return null;
+      }
+      context.font = `${this.fontSize}px ${this.fontFamily}`;
+      const metrics = context.measureText("W");
+      return {
+        width: metrics.width,
+        height: metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent,
+      };
+    } catch {
+      return null;
+    }
   }
 
   // ==========================================================================
@@ -250,6 +341,13 @@ export class CanvasRenderer {
     // the scrollbar reads the fraction.
     const historyRows = Math.max(0, Math.floor(viewportY));
 
+    // The overlay scrollbar paints translucent ink over content: without
+    // fresh pixels under it the thumb composites over its own previous
+    // alpha. Force a full repaint on every frame that paints it and the
+    // first frame after it stops.
+    const overlay = this.scrollbar === 'overlay';
+    if (overlay && (scrollbarOpacity > 0 || this.paintedOverlay)) forceAll = true;
+
     // A resize, a screen switch, new colours or output that scrolled change
     // every row.
     if (term.beginFrame() === ABI.GhosttyRenderStateDirty.FULL) {
@@ -275,6 +373,7 @@ export class CanvasRenderer {
     // Check if cursor position changed or if blinking (need to redraw cursor line).
     // A cursor hidden or shown where it stands repaints its line as a move
     // does: the core marks no row dirty for it.
+    const cursorPainted: number[] = [];
     const cursorMoved =
       cursor.x !== this.lastCursorPosition.x || cursor.y !== this.lastCursorPosition.y;
     const cursorShownChanged = cursor.visible !== this.lastCursorShown;
@@ -284,6 +383,7 @@ export class CanvasRenderer {
         // Need to redraw cursor line
         if (term.readRow(cursor.y, this.cells)) {
           this.renderLine(this.cells, cursor.y, dims.cols);
+          cursorPainted.push(cursor.y);
         }
       }
       if (cursorMoved && this.lastCursorPosition.y !== cursor.y) {
@@ -291,6 +391,7 @@ export class CanvasRenderer {
         if (!forceAll && !term.isRowDirty(this.lastCursorPosition.y)) {
           if (term.readRow(this.lastCursorPosition.y, this.cells)) {
             this.renderLine(this.cells, this.lastCursorPosition.y, dims.cols);
+            cursorPainted.push(this.lastCursorPosition.y);
           }
         }
       }
@@ -429,6 +530,26 @@ export class CanvasRenderer {
     // Render scrollbar if scrolled or scrollback exists (with opacity for fade effect)
     if (scrollbarOpacity > 0) {
       this.renderScrollbar(viewportY, scrollbackLength, dims.rows, scrollbarOpacity);
+    }
+    this.paintedOverlay = overlay && scrollbarOpacity > 0 && scrollbackLength > 0;
+
+    // Paint layers run after the cells, the cursor and the scrollbar, in
+    // ascending order, over the rows this frame repainted.
+    if (this.paintLayers.length > 0) {
+      const painted = new Set<number>(rowsToRender);
+      for (const row of cursorPainted) painted.add(row);
+      const changedRows = [...painted].sort((a, b) => a - b);
+      const frame: PaintFrame = {
+        ctx: this.ctx,
+        metrics: this.getMetrics(),
+        pixelRatio: this.devicePixelRatio,
+        viewportOffset: viewportY,
+        full: forceAll,
+        changedRows,
+        rows: dims.rows,
+        cols: dims.cols,
+      };
+      for (const layer of [...this.paintLayers]) layer.paint(frame);
     }
 
     // Update last cursor position and visibility
@@ -586,9 +707,25 @@ export class CanvasRenderer {
     const textY = cellY + this.metrics.baseline;
 
     // The character to render: the cell's whole cluster for complex
-    // scripts, else its codepoint, a space if it has none
+    // scripts, else its codepoint, a space if it has none. With box
+    // glyphs a box-drawing or block element draws as cell paths instead
+    // of the font, so runs of them tile without seams.
     const char = cell.cluster ?? String.fromCodePoint(cell.codepoint || 32);
-    this.ctx.fillText(char, textX, textY);
+    const boxed =
+      this.boxGlyphs &&
+      cell.cluster === null &&
+      drawBoxGlyph(
+        this.ctx,
+        this.metrics,
+        cell.codepoint,
+        x,
+        y,
+        (cell.flags & VtFlag.FAINT) !== 0,
+        this.devicePixelRatio > 0 ? this.devicePixelRatio : window.devicePixelRatio || 1,
+      );
+    // The paths carry the cell's fill style already; decorations below
+    // draw either way.
+    if (!boxed) this.ctx.fillText(char, textX, textY);
 
     // Reset alpha
     if (cell.flags & VtFlag.FAINT) {
@@ -859,6 +996,10 @@ export class CanvasRenderer {
     visibleRows: number,
     opacity: number = 1
   ): void {
+    if (this.scrollbar === 'overlay') {
+      this.renderOverlayScrollbar(viewportY, scrollbackLength, visibleRows, opacity);
+      return;
+    }
     const ctx = this.ctx;
     const canvasHeight = this.canvas.height / this.devicePixelRatio;
     const canvasWidth = this.canvas.width / this.devicePixelRatio;
@@ -895,8 +1036,51 @@ export class CanvasRenderer {
     ctx.fillStyle = `rgba(128, 128, 128, ${baseOpacity * opacity})`;
     ctx.fillRect(scrollbarX, thumbY, scrollbarWidth, thumbHeight);
   }
+
+  /**
+   * Render the overlay scrollbar: the same translucent track and thumb in
+   * the same place, painted straight onto the content with no opaque
+   * strip clear, so the columns under it stay readable.
+   */
+  private renderOverlayScrollbar(
+    viewportY: number,
+    scrollbackLength: number,
+    visibleRows: number,
+    opacity: number = 1,
+  ): void {
+    if (opacity <= 0 || scrollbackLength === 0) return;
+    const ratio = this.devicePixelRatio > 0 ? this.devicePixelRatio : 1;
+    const ctx = this.ctx;
+    const barX = this.canvas.width / ratio - 8 - 4;
+    const trackHeight = this.canvas.height / ratio - 4 * 2;
+    const thumbHeight = Math.max(20, (visibleRows / (scrollbackLength + visibleRows)) * trackHeight);
+    const thumbY = 4 + (trackHeight - thumbHeight) * (1 - viewportY / scrollbackLength);
+    const thumbAlpha = viewportY > 0 ? 0.5 : 0.3;
+
+    ctx.save();
+    ctx.fillStyle = `rgba(128, 128, 128, ${0.1 * opacity})`;
+    ctx.fillRect(barX, 4, 8, trackHeight);
+    ctx.fillStyle = `rgba(128, 128, 128, ${thumbAlpha * opacity})`;
+    ctx.fillRect(barX, thumbY, 8, thumbHeight);
+    ctx.restore();
+  }
   public getMetrics(): FontMetrics {
     return { ...this.metrics };
+  }
+
+  /**
+   * Add a paint layer over the frame, run after the cells, the cursor and
+   * the scrollbar in ascending order. Returns a disposer that removes it.
+   */
+  public addPaintLayer(layer: PaintLayer): () => void {
+    this.paintLayers.push(layer);
+    this.paintLayers.sort((a, b) => a.order - b.order);
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      this.paintLayers = this.paintLayers.filter((l) => l !== layer);
+    };
   }
 
   /**
@@ -1064,6 +1248,7 @@ export class CanvasRenderer {
    * Cleanup resources
    */
   public dispose(): void {
+    this.paintLayers = [];
     this.stopCursorBlink();
   }
 }
