@@ -16,6 +16,8 @@ mod last_window;
 mod launch_paths;
 mod launcher_panel;
 mod linux_gui_stack;
+#[cfg(any(target_os = "ios", test))]
+mod mobile_auth;
 mod native_dialog;
 mod native_transfer;
 mod open_events;
@@ -2371,6 +2373,11 @@ async fn connect_rostered_devserver(
         .map_err(|e| format!("authenticating gateway devserver proxy: {e}"))?;
     recheck()?;
     state.devservers.set(id.clone(), conn.clone());
+    #[cfg(target_os = "ios")]
+    {
+        mobile_auth::stash_mobile_app_handle(&app);
+        mobile_auth::ensure_mobile_lifecycle_observer(&app, &state);
+    }
 
     seed_devserver_color(
         &state,
@@ -2706,18 +2713,32 @@ pub(crate) async fn open_devserver_workspace_impl(
     path: String,
     start_terminal: bool,
 ) -> Result<(), String> {
-    let conn = state
-        .devservers
-        .get(&id)
-        .ok_or_else(|| "devserver is not connected".to_string())?;
-    devserver::mint_library_window_with_start(
-        &conn,
-        chan_server::WindowKind::Workspace,
-        Some(path),
-        start_terminal,
-    )
-    .await?;
-    Ok(())
+    #[cfg(target_os = "ios")]
+    {
+        return mobile_auth::mobile_open_devserver(
+            state,
+            &id,
+            chan_server::WindowKind::Workspace,
+            Some(path),
+            start_terminal,
+        )
+        .await;
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let conn = state
+            .devservers
+            .get(&id)
+            .ok_or_else(|| "devserver is not connected".to_string())?;
+        devserver::mint_library_window_with_start(
+            &conn,
+            chan_server::WindowKind::Workspace,
+            Some(path),
+            start_terminal,
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 /// Mint a standalone terminal window on a connected devserver's library (the
@@ -2731,12 +2752,26 @@ pub(crate) async fn open_devserver_terminal_impl(
     state: &Arc<AppState>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state
-        .devservers
-        .get(&id)
-        .ok_or_else(|| format!("devserver {id} is not connected"))?;
-    devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
-    Ok(())
+    #[cfg(target_os = "ios")]
+    {
+        return mobile_auth::mobile_open_devserver(
+            state,
+            &id,
+            chan_server::WindowKind::Terminal,
+            None,
+            false,
+        )
+        .await;
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let conn = state
+            .devservers
+            .get(&id)
+            .ok_or_else(|| format!("devserver {id} is not connected"))?;
+        devserver::mint_library_window(&conn, chan_server::WindowKind::Terminal, None).await?;
+        Ok(())
+    }
 }
 
 /// Forget (unmount) a workspace on a connected devserver via its management
@@ -5652,6 +5687,10 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         titlebar_tabs::set_titlebar_tabs_preference,
         titlebar_tabs::titlebar_window_control,
         titlebar_tabs::titlebar_menu_popup,
+        // Back to Computers on the single-webview build: re-navigates to
+        // the loopback launcher URL.
+        #[cfg(target_os = "ios")]
+        mobile_auth::mobile_back_to_computers,
     ]
 }
 

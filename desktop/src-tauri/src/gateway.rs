@@ -193,6 +193,10 @@ struct GatewayState {
     discovery_errors: HashMap<String, String>,
     attempts: HashMap<String, Arc<GatewayAttempt>>,
     teardowns: HashMap<String, Arc<CancellationToken>>,
+    /// Roster polling is background-paused on mobile: ticks skip their fetch
+    /// while set, and the foreground transition resyncs immediately. Never
+    /// set on desktop, where the flag reads false always.
+    suspended: bool,
 }
 
 #[derive(Default)]
@@ -1779,6 +1783,53 @@ pub(super) fn fail_gateway_signin<R: tauri::Runtime>(
     signal_rows_changed(app, state);
 }
 
+/// Pause or resume roster polling on mobile. Ticks skip their fetch while
+/// suspended; the loop itself keeps sleeping, so resume needs no restart.
+#[cfg(any(target_os = "ios", test))]
+pub(super) fn set_roster_poll_suspended(state: &Arc<AppState>, suspended: bool) {
+    state.gateway_manager.state.lock().unwrap().suspended = suspended;
+}
+
+/// Run one immediate roster tick per polled gateway: the foreground resync.
+/// Runtimes without a poll (never connected, or torn down) are skipped.
+#[cfg(any(target_os = "ios", test))]
+pub(super) fn resync_roster_polls<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+) {
+    let polls: Vec<(String, String, String, CancellationToken)> = {
+        let live = state.gateway_manager.state.lock().unwrap();
+        live.runtimes
+            .iter()
+            .filter_map(|(id, rt)| {
+                let cancel = rt.poll_cancel.clone()?;
+                let roster_url = rt.discovery.roster_url.clone()?;
+                Some((
+                    id.clone(),
+                    rt.discovery.identity_origin.clone(),
+                    roster_url,
+                    cancel,
+                ))
+            })
+            .collect()
+    };
+    for (gateway_id, identity_origin, roster_url, cancel) in polls {
+        let app = app.clone();
+        let state = Arc::clone(state);
+        tauri::async_runtime::spawn(async move {
+            let _ = roster_poll_tick(
+                &app,
+                &state,
+                &gateway_id,
+                &identity_origin,
+                &roster_url,
+                &cancel,
+            )
+            .await;
+        });
+    }
+}
+
 fn spawn_roster_poll<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
@@ -1840,6 +1891,11 @@ async fn roster_poll_tick<R: tauri::Runtime>(
     roster_url: &str,
     cancel: &CancellationToken,
 ) -> ControlFlow<()> {
+    // A backgrounded mobile app skips the fetch but keeps the loop: the
+    // foreground transition resyncs immediately (resync_roster_polls).
+    if state.gateway_manager.state.lock().unwrap().suspended {
+        return ControlFlow::Continue(());
+    }
     // Re-read the PAT each tick: a re-sign-in mid-poll swaps the
     // credential without restarting the loop.
     let loaded = auth::load_gateway_pat(identity_origin);
@@ -7958,6 +8014,121 @@ pub(crate) mod tests {
     /// No gateway listens here: a tick that got past the PAT load would
     /// record a refused connection instead of the load's own error.
     const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/desktop/v1/devservers";
+
+    /// A roster origin answering `status` to one request and reporting the
+    /// hit. The tick under test runs detached for resync, so the hit crosses
+    /// a channel with a bound.
+    fn counting_roster_stub(status: &'static str) -> (String, std::sync::mpsc::Receiver<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/desktop/v1/devservers",
+            listener.local_addr().unwrap()
+        );
+        let (hit_tx, hit_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match sock.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        head.extend_from_slice(&buf[..n]);
+                        if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            let body = "{}";
+            let resp = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+            let _ = hit_tx.send(());
+        });
+        (url, hit_rx)
+    }
+
+    #[tokio::test]
+    async fn suspended_poll_tick_skips_the_fetch() {
+        // A fetch would queue a connection on the origin's listener even
+        // unaccepted, so an empty accept queue proves the tick fetched
+        // nothing.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.set_nonblocking(true).unwrap();
+        let roster_url = format!(
+            "http://{}/desktop/v1/devservers",
+            probe.local_addr().unwrap()
+        );
+        let (_dir, state) = pat_load_test_state("https://id.example");
+        set_roster_poll_suspended(&state, true);
+        let app = tauri::test::mock_app();
+        let tick = roster_poll_tick(
+            app.handle(),
+            &state,
+            "gw-suspend",
+            "https://id.example",
+            &roster_url,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            tick.is_continue(),
+            "a suspended tick continues without fetching"
+        );
+        assert!(
+            probe.accept().is_err(),
+            "a suspended tick opens no roster connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_runs_one_immediate_tick_per_polled_gateway() {
+        let (polled_url, polled_hit) = counting_roster_stub("500 Internal Server Error");
+        let (idle_url, idle_hit) = counting_roster_stub("500 Internal Server Error");
+        // A 500 answers the hit-count without decoding a roster; the PAT load
+        // is what the tick under test must get past. A unique origin keeps
+        // the seeded PAT clear of every other test's.
+        let origin = format!("https://resync-{}.example", uuid::Uuid::new_v4());
+        let (_dir, state) = pat_load_test_state(&origin);
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "t-1".into(),
+                secret: "chan_pat_x".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        {
+            let mut live = state.gateway_manager.state.lock().unwrap();
+            let mut polled = runtime_with(Vec::new());
+            polled.discovery.identity_origin = origin.clone();
+            polled.discovery.roster_url = Some(polled_url);
+            polled.poll_cancel = Some(CancellationToken::new());
+            live.runtimes.insert("gw-polled".into(), polled);
+            let mut idle = runtime_with(Vec::new());
+            idle.discovery.identity_origin = origin.clone();
+            idle.discovery.roster_url = Some(idle_url);
+            live.runtimes.insert("gw-idle".into(), idle);
+        }
+        let app = tauri::test::mock_app();
+        resync_roster_polls(app.handle(), &state);
+        polled_hit
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the polled gateway ticks immediately on resync");
+        assert!(
+            idle_hit.recv_timeout(Duration::from_millis(500)).is_err(),
+            "a runtime without a poll gets no resync tick",
+        );
+        auth::test_gateway_pats().lock().unwrap().remove(&origin);
+    }
 
     #[tokio::test]
     async fn connect_adopts_a_row_whose_file_is_not_running_and_refuses_a_bad_file() {
