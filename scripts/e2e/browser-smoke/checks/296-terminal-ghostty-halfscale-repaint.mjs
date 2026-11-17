@@ -145,6 +145,14 @@ export default {
       }
       await cs(["write", "--tab-name", TAB, `echo ${MARK}TRAP_SET\n`]);
       await waitScrollback(`${MARK}TRAP_SET`, 30_000);
+      // Count the mark now: the typed trap line and the readback above both
+      // carry it, so the end state must hold exactly this many. A resize
+      // across the resume adds one more.
+      const countMarks = (text) => (text.match(new RegExp(`${MARK}WINCH`, "g")) || []).length;
+      const armedMarks = countMarks((await cs(["scrollback", "--tab-name", TAB])).stdout);
+      if (armedMarks === 0) {
+        throw new Error("instrument fault: the trap arming lines left no mark to count");
+      }
 
       // HIDE
       front = await ctx.browser.newPage();
@@ -196,7 +204,7 @@ export default {
       if (!endScrollback.includes(`${MARK}TRAP_SET`)) {
         throw new Error("the WINCH trap never armed: no size published to the PTY can be ruled out");
       }
-      if (endScrollback.includes(`${MARK}WINCH`)) {
+      if (countMarks(endScrollback) !== armedMarks) {
         throw new Error(`a resize reached the PTY across the resume: ${JSON.stringify(endScrollback.slice(-500))}`);
       }
       return readings;
