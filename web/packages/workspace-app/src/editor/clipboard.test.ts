@@ -86,7 +86,14 @@ describe("Copy", () => {
   test("writes the rich flavors for a selection holding a workspace image", async () => {
     await copySelection(editor(WITH_IMAGE, 0, WITH_IMAGE.length), CTX);
 
-    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX);
+    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX, true);
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  test("a selection below the document start asks for no frontmatter rule", async () => {
+    await copySelection(editor(`xx\n${WITH_IMAGE}`, 3, 3 + WITH_IMAGE.length), CTX);
+
+    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX, false);
     expect(writeText).not.toHaveBeenCalled();
   });
 
@@ -142,7 +149,7 @@ describe("Cut", () => {
 
     await cutSelection(view, CTX);
 
-    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX);
+    expect(rich.write).toHaveBeenCalledWith(WITH_IMAGE, CTX, true);
     expect(writeText).not.toHaveBeenCalled();
     expect(view.state.doc.toString()).toBe("");
   });

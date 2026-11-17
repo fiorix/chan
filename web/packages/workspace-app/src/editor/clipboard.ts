@@ -32,10 +32,11 @@ async function writeSelection(
   text: string,
   ctx: ChanClipboardContext | undefined,
   verb: "copy" | "cut",
+  frontmatter = false,
 ): Promise<boolean> {
   if (ctx && findWorkspaceImageRefs(text).length > 0) {
     try {
-      await writeDocSelectionToClipboard(text, ctx);
+      await writeDocSelectionToClipboard(text, ctx, frontmatter);
       return true;
     } catch (err) {
       console.warn(`editor rich ${verb} failed, falling back to text`, err);
@@ -62,7 +63,7 @@ export async function copySelection(
 ): Promise<void> {
   const text = selectionText(view);
   if (!text) return;
-  await writeSelection(text, ctx, "copy");
+  await writeSelection(text, ctx, "copy", view.state.selection.main.from === 0);
 }
 
 /// Copy then delete the primary selection, leaving the caret where the
@@ -74,7 +75,7 @@ export async function cutSelection(
 ): Promise<void> {
   const { from, to } = view.state.selection.main;
   if (from === to) return;
-  if (!(await writeSelection(view.state.sliceDoc(from, to), ctx, "cut"))) return;
+  if (!(await writeSelection(view.state.sliceDoc(from, to), ctx, "cut", from === 0))) return;
   view.dispatch({
     changes: { from, to, insert: "" },
     selection: EditorSelection.cursor(from),

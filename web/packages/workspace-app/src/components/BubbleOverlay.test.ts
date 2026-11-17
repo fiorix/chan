@@ -177,6 +177,18 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open alias now");
   });
 
+  test("a survey body skips the frontmatter rule", async () => {
+    surveyState.windowWide = { spec: spec({ bodyMarkdown: '---\nup: "[[Projects/Parent]]"\n---\n\nSee [[a]]' }), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+
+    const text = target.querySelector(".survey-body")?.textContent ?? "";
+    expect(text).toContain('up: "Parent"');
+    expect(text).toContain("See a");
+  });
+
   test("a survey body leaves inline code and fenced code as typed", async () => {
     surveyState.windowWide = { spec: spec({ bodyMarkdown: "Type `[[note]]` here\n\n```text\n[[note]]\n```" }), busy: false };
     const target = document.createElement("div");

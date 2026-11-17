@@ -176,9 +176,10 @@ function toAbsoluteUrl(url: string): string {
 function renderBody(
   markdown: string,
   fromPath: string | null,
+  frontmatter = false,
 ): { body: HTMLDivElement; imgs: HTMLImageElement[] } {
   const body = document.createElement("div");
-  body.innerHTML = renderMarkdown(markdown, { wikilinks: true });
+  body.innerHTML = renderMarkdown(markdown, { wikilinks: true, frontmatter });
   const refs = findWorkspaceImageRefs(markdown);
   const imgs = Array.from(body.querySelectorAll("img")).filter((img) =>
     isWorkspaceImageSrc(img.getAttribute("src") ?? ""),
@@ -245,8 +246,9 @@ export function buildBaselineHtml(
   markdown: string,
   fromPath: string | null,
   workspaceRoot: string | null,
+  frontmatter = false,
 ): string {
-  const { body } = renderBody(markdown, fromPath);
+  const { body } = renderBody(markdown, fromPath, frontmatter);
   return wrapBody(body, markdown, workspaceRoot, fromPath);
 }
 
@@ -280,8 +282,9 @@ export async function buildInlinedHtml(
   markdown: string,
   fromPath: string | null,
   workspaceRoot: string | null,
+  frontmatter = false,
 ): Promise<string> {
-  const { body, imgs } = renderBody(markdown, fromPath);
+  const { body, imgs } = renderBody(markdown, fromPath, frontmatter);
   // Only the tagged imgs (count guard passed) are eligible; an untagged
   // set means the paste side can't map ordinals anyway.
   let budget = MAX_INLINE_BYTES;
@@ -314,11 +317,13 @@ export async function buildInlinedHtml(
 export async function writeDocSelectionToClipboard(
   markdown: string,
   ctx: ChanClipboardContext,
+  frontmatter = false,
 ): Promise<void> {
   const html = await buildInlinedHtml(
     markdown,
     ctx.getCurrentPath(),
     ctx.getWorkspaceRoot(),
+    frontmatter,
   );
   if (isTauriDesktop()) {
     await writeClipboardHtml(html, markdown);
@@ -352,8 +357,11 @@ export function handleClipboardCopy(
   event.preventDefault();
   const fromPath = ctx.getCurrentPath();
   const workspaceRoot = ctx.getWorkspaceRoot();
+  // A selection from the document's start reads as the editor reads it:
+  // frontmatter there is metadata, not a rule with links under it.
+  const frontmatter = sel.from === 0;
   cd.setData("text/plain", markdown);
-  cd.setData("text/html", buildBaselineHtml(markdown, fromPath, workspaceRoot));
+  cd.setData("text/html", buildBaselineHtml(markdown, fromPath, workspaceRoot, frontmatter));
   if (isCut && view.state.facet(EditorView.editable)) {
     view.dispatch({
       changes: { from: sel.from, to: sel.to, insert: "" },
@@ -362,7 +370,7 @@ export function handleClipboardCopy(
   }
   // Fire-and-forget upgrade to self-contained data: URIs. The sync
   // baseline above stays correct if this is rejected.
-  void writeDocSelectionToClipboard(markdown, ctx).catch((err) => {
+  void writeDocSelectionToClipboard(markdown, ctx, frontmatter).catch((err) => {
     console.warn("clipboard rich copy upgrade failed", err);
   });
   return true;
