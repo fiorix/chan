@@ -64,11 +64,11 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
 | [terminal browser checks' red proofs][termredproofs] | not started | measure |
-| [a lossy link freezes a window][linkhealth] | built | review |
+| [a lossy link freezes a window][linkhealth] | merged | owner |
 | [the composer takes a survey's keys][keyowner] | not started | build |
-| [a fresh shell keeps dead modes][freshmodes] | not started | build |
+| [a fresh shell keeps dead modes][freshmodes] | merged | closing |
 | [try again over an exited terminal][exitedtry] | not started | build |
-| [the graph cuts off root files][graphroot] | not started | build |
+| [the graph cuts off root files][graphroot] | merged | closed |
 | [the minimized-window raise unread on Windows][unburywin] | not started | measure |
 | [the menu's Paste lands in the selection][fbpaste] | not started | build |
 | [file commands lose a closed dock's target][docktarget] | not started | build |
