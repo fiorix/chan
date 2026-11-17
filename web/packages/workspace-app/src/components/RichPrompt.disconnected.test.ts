@@ -47,6 +47,7 @@ import { terminalPreferences } from "../__tests__/standalone";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
 import { attach, installTerminalDom, output, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TERMINAL_PANE, TerminalSocket } from "../__tests__/terminalTab";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 const TEXT = "keep this prompt";
@@ -230,10 +231,11 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     await receive(socket, { type: "exit", code: 0 });
     await flush();
     // The server closes the socket after the exit frame.
-    socket.readyState = 3;
+    socket.close();
     // Whatever the exit frame's own output did to the view, the refusal
     // must not move it.
     const before = history(term);
+    expect(before).toBeGreaterThan(0);
     submit();
     await flush();
     expect(note()).toBe(EXITED);
@@ -253,6 +255,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     // Whatever the exit frame's own output did to the view, the refusal
     // must not move it.
     const before = history(term);
+    expect(before).toBeGreaterThan(0);
     submit();
     await flush();
     expect(note()).toBe(EXITED);
@@ -265,7 +268,7 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     const { socket, view, submit, note } = await composer(backend);
     await receive(socket, { type: "closed", reason: "idle" });
     await flush();
-    socket.readyState = 3;
+    socket.close();
     submit();
     await flush();
     expect(note()).toBe(EXITED);
@@ -274,42 +277,80 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended termi
     expect(view.state.readOnly).toBe(false);
   });
 
-  test("with the socket down and redialling a submit shows the not-connected note as today", async () => {
+  test("with the socket down and redialling a submit shows the not-connected note", async () => {
     const { socket, view, submit, note } = await composer(backend);
-    socket.readyState = 0;
+    TerminalSocket.connecting = true;
+    socket.close();
     submit();
     await flush();
     expect(note()).toBe(NOTICE);
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
     expect(view.state.doc.toString()).toBe(TEXT);
     expect(view.state.readOnly).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    await flush();
+    const redial = TerminalSocket.all.at(-1)!;
+    expect(redial, "the redial opens a second socket").not.toBe(socket);
+    expect(redial.readyState).toBe(0);
+    expect(note()).toBe(NOTICE);
+    redial.open();
+    await attach(redial, { id: "sess-2" });
+    await receive(redial, { type: "ready", cols: 80, rows: 24 });
+    await flush();
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(sentFrames(redial).filter((frame) => frame.type === "prompt")).toEqual([]);
+    submit();
+    await flush();
+    expect(sentFrames(redial).filter((frame) => frame.type === "prompt")).toEqual([
+      { type: "prompt", data: TEXT, agent: expect.any(String), id: expect.any(String) },
+    ]);
+    expect(note()).not.toBe(NOTICE);
   });
 
-  test("a restart after the exited note takes the kept text on the next submit", async () => {
-    const { socket, submit, note } = await composer(backend);
+  test("with the session parked a submit shows the not-connected note and never redials", async () => {
+    const { tab, socket, view, submit, note } = await composer(backend);
+    await receive(socket, { type: "closed", reason: "parked" });
+    await flush();
+    socket.close();
+    submit();
+    await flush();
+    expect(note()).toBe(NOTICE);
+    expect(tab.terminalSessionId).toBeTruthy();
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flush();
+    expect(TerminalSocket.all).toHaveLength(1);
+  });
+
+  test("a restart after the exited note sends nothing by itself and keeps the text", async () => {
+    const { socket, view, submit, note } = await composer(backend);
     await receive(socket, { type: "exit", code: 0 });
     await flush();
-    socket.readyState = 3;
+    socket.close();
     submit();
     await flush();
     expect(note()).toBe(EXITED);
-    await receive(socket, {
-      type: "session",
-      id: "sess-2",
-      seq: 0,
-      generation: 2,
-      missed_bytes: 0,
-      bytes_since_focus: 0,
-      submit_agent: "claude",
-    });
-    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
     await flush();
-    socket.readyState = 1;
+    if (confirmState.open) resolveConfirm(true);
+    await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
+    const next = TerminalSocket.all.at(-1)!;
+    expect(next, "the restart dials a new socket").not.toBe(socket);
+    await attach(next, { id: "sess-2" });
+    await receive(next, { type: "ready", cols: 80, rows: 24 });
+    await flush();
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(sentFrames(next).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
     submit();
     await flush();
-    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([
-      { type: "prompt", data: TEXT, agent: "claude", id: expect.any(String) },
+    expect(sentFrames(next).filter((frame) => frame.type === "prompt")).toEqual([
+      { type: "prompt", data: TEXT, agent: expect.any(String), id: expect.any(String) },
     ]);
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
     expect(note()).not.toBe(EXITED);
   });
 });
