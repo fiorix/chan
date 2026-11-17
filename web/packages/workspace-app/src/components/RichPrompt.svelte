@@ -122,7 +122,7 @@
   import { api } from "../api/client";
   import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
-  import { refocusRefused } from "../state/focusGuard.svelte";
+  import { keyboardOwned, refocusRefused } from "../state/focusGuard.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -984,6 +984,7 @@
         bind:value={content}
         path={draftPath}
         autoFocus={editorAutoFocus}
+        mayTakeFocus={() => focused && !keyboardOwned(tab.id)}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
         extraExtensions={editorExtensions}
@@ -996,6 +997,7 @@
         bind:value={content}
         currentPath={draftPath}
         autoFocus={editorAutoFocus}
+        mayTakeFocus={() => focused && !keyboardOwned(tab.id)}
         {shown}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}

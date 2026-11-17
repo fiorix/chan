@@ -236,7 +236,8 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { keyboardOwned, launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { surveyFor } from "../state/survey.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 
@@ -779,6 +780,14 @@
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
+      // A survey over the terminal that moved gets the keyboard back, as
+      // the find bar, the composer and the terminal do. Any other owner
+      // yields like every other refocus: the move hands it to nothing.
+      if (surveyFor(tab.id)) {
+        tabEl?.querySelector<HTMLElement>(".survey-card")?.focus({ preventScroll: true });
+        return;
+      }
+      if (keyboardOwned(tab.id)) return;
       const owner = document.activeElement;
       if (
         owner !== null &&
