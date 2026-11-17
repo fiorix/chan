@@ -664,7 +664,7 @@ describe("a capture lost mid-drag ends it as a release", () => {
 
   test("a capture lost after the release ends nothing", async () => {
     const writeText = installClipboard();
-    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const { canvas, px } = await openPinned("hello world\r\nsecond row");
     const [x0, y0] = px(0, 0);
     const [x1, y1] = px(4, 0);
     pointer(canvas, "pointerdown", x0, y0);
