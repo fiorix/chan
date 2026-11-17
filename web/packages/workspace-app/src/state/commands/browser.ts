@@ -37,7 +37,6 @@ import type { FileActionId, FileActionSet } from "../fileActions";
 import { exportPathToPdf } from "../fileActionExecutors";
 import { openMediaViewer } from "../mediaOpen";
 import {
-  browserSelection,
   browserSidePanes,
   collapseAllFoldersForInstance,
   copyTextToClipboard,
@@ -48,6 +47,7 @@ import {
   fbClipboard,
   fbClipboardClear,
   fbClipboardSet,
+  fbTreeInstance,
   fileOps,
   openFsGraphForDirectory,
   openFsGraphForFile,
@@ -148,10 +148,18 @@ function openSelectionInFileBrowser(): void {
 
 /// Show the workspace's details in a file browser's inspector: the active
 /// file browser tab's, or a new tab's when another surface is focused.
+/// Only that tab's selection changes; the surface the launcher commands
+/// act on keeps its selection and flags.
 function showWorkspaceInfo(): void {
   const tab = activeBrowserTab() ?? openBrowserInActivePane({});
-  fbClearSelection();
-  browserSelection.showWorkspace = true;
+  const surface = fbTreeInstance(`fb-tab-${tab.id}`)?.selection;
+  if (surface) {
+    fbClearSelection(surface);
+    surface.showWorkspace = true;
+  } else {
+    tab.selected = undefined;
+    tab.selectedPaths = [];
+  }
   tab.showWorkspace = true;
   tab.inspectorOpen = true;
 }

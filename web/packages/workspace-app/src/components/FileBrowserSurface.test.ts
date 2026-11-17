@@ -355,24 +355,53 @@ describe("the tab variant", () => {
     expect(target.querySelector(".inspector"), "the inspector opened").not.toBeNull();
     expect(menu()).toBeNull();
   });
+});
 
-  test("the tree's row menu flips the pane through the host", async () => {
-    const tab = seat(browserTab());
-    const onFlip = vi.fn();
-    const target = await render({ variant: "tab", tab, onFlip });
-
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find((el) =>
-      el.textContent?.includes("README.md"),
-    );
-    expect(row, "the tree listed the workspace").toBeDefined();
-    row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+describe("the Workspace details command", () => {
+  test("clears the tab whose inspector shows the details, not the focused dock", async () => {
+    const tab = seat(browserTab({ directory: "notes" }));
+    const list = await render({ variant: "tab", tab });
+    const dock = await render({ variant: "dock", side: "left" });
+    const tabId = `fb-tab-${tab.id}`;
+    fbSelectSingle("notes/a.md", fbTreeInstance("fb-dock-left")!.selection);
+    fbSelectSingle("README.md", fbTreeInstance(tabId)!.selection);
+    dock.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     await settle();
-    const flip = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx button")].find(
-      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip pane",
-    );
-    expect(flip).toBeDefined();
-    flip!.click();
-    expect(onFlip).toHaveBeenCalledTimes(1);
+    expect(browserSelection.path, "the shared selection is the dock's").toBe("notes/a.md");
+
+    commandById("app.browser.showWorkspaceInfo")!.run();
+    await settle();
+
+    expect(fbTreeInstance("fb-dock-left")!.selection.path, "the dock keeps its selection").toBe("notes/a.md");
+    expect(fbTreeInstance("fb-dock-left")!.selection.showWorkspace, "no flag leaks to the dock").toBe(false);
+    expect(fbTreeInstance(tabId)!.selection.path, "the tab's selection is cleared").toBeNull();
+    expect(fbTreeInstance(tabId)!.selection.showWorkspace, "the tab is flagged").toBe(true);
+    expect(tab.showWorkspace, "the tab carries the flag").toBe(true);
+    expect(tab.inspectorOpen, "the tab opens its inspector").toBe(true);
+    // The empty flagged selection is what renders the workspace body instead of file details (FileBrowserSurface.svelte).
+    expect(list.querySelector(".inspector"), "the tab inspector shows the workspace").not.toBeNull();
+  });
+
+  test("opens a tab showing the workspace when no file browser tab is active, leaving the dock", async () => {
+    seat(browserTab({ directory: "notes" }));
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs = [terminalTab({ id: "term-1" }) as unknown as BrowserTab];
+    pane.activeTabId = "term-1";
+    const dock = await render({ variant: "dock", side: "left" });
+    fbSelectSingle("notes/a.md", fbTreeInstance("fb-dock-left")!.selection);
+    dock.querySelector(".browser")!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await settle();
+    expect(browserSelection.path, "the shared selection is the dock's").toBe("notes/a.md");
+
+    commandById("app.browser.showWorkspaceInfo")!.run();
+    await settle();
+
+    const opened = (layout.nodes[PANE] as LeafNode).tabs.find((t): t is BrowserTab => t.kind === "browser");
+    expect(opened, "a new browser tab opens").toBeDefined();
+    expect(fbTreeInstance("fb-dock-left")!.selection.path, "the dock keeps its selection").toBe("notes/a.md");
+    const fresh = await render({ variant: "tab", tab: opened! });
+    expect(fbTreeInstance(`fb-tab-${opened!.id}`)!.selection.path, "the new tab starts unselected").toBeNull();
+    expect(fresh.querySelector(".inspector"), "the new tab's inspector shows the workspace").not.toBeNull();
   });
 });
 
