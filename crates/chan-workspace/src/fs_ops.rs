@@ -963,15 +963,19 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Publish an already-synced `tempfile` at `target` with
-/// `std::fs::rename`, which on Windows replaces an open target while that
-/// handle keeps reading the old bytes (`tempfile`'s `persist` refuses with
-/// `ERROR_ACCESS_DENIED` instead). On failure the temporary is removed by
-/// its drop; on success cleanup is disabled after the move. Callers sync
-/// the file and set its mode before publishing, and fsync the parent
-/// directory after.
+/// Publish an already-synced `tempfile` at `target` with `std::fs::rename`.
+///
+/// Callers must sync the file before publishing and fsync the parent
+/// directory after (`publish_ref` keeps its base shape and does not fsync
+/// the directory). On Windows the rename replaces an open target only
+/// when the open handle shares delete and the filesystem supports the
+/// POSIX-style rename; otherwise it fails as before. `keep` clears the
+/// temporary attribute tempfile sets on Windows, so the published file
+/// carries normal attributes. On failure the re-armed temporary is removed
+/// by its drop; on success cleanup is disabled after the move.
 pub fn persist_tempfile(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
-    let mut staged = tmp.into_temp_path();
+    let kept = tmp.into_temp_path().keep()?;
+    let mut staged = tempfile::TempPath::try_from_path(kept)?;
     std::fs::rename(&staged, target)?;
     staged.disable_cleanup(true);
     Ok(())
@@ -2398,16 +2402,21 @@ mod tests {
     fn atomic_write_failure_leaves_no_temporaries() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        std::fs::write(dir.join("file"), b"not a dir").unwrap();
-        // A file where a directory is expected fails for every user,
-        // including root, unlike a read-only directory.
-        let target = dir.join("file").join("out.bin");
+        let target = dir.join("out");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), b"kept").unwrap();
+        // Renaming a file over a non-empty directory fails on every
+        // platform, after the temporary is written and synced.
         let result = atomic_write(&target, b"unpublished");
         assert!(
             result.is_err(),
-            "write through a file-directory unexpectedly published"
+            "write over a directory unexpectedly published"
         );
-        assert!(!target.exists(), "failed write left a target");
+        assert_eq!(
+            std::fs::read(target.join("keep")).unwrap(),
+            b"kept",
+            "failed write disturbed the directory's content"
+        );
         assert!(
             std::fs::read_dir(dir)
                 .unwrap()
@@ -2419,13 +2428,11 @@ mod tests {
     }
 
     /// A reader holding the old file open keeps the old bytes while a fresh
-    /// open sees the replacement. Windows-only: `File::open` shares by
-    /// default there, so `std::fs::rename` replaces the open target; on Unix
-    /// the same holds, where `tempfile::persist` already worked.
-    #[cfg(windows)]
+    /// open sees the replacement. The open handle shares delete access, so
+    /// the rename replaces the target instead of failing on it.
     #[test]
     fn atomic_write_replaces_a_file_open_by_another_handle() {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::Read;
 
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("shared.bin");
@@ -2433,7 +2440,6 @@ mod tests {
         let mut reader = std::fs::File::open(&target).unwrap();
         atomic_write(&target, b"new-bytes").unwrap();
         let mut old = Vec::new();
-        reader.seek(SeekFrom::Start(0)).unwrap();
         reader.read_to_end(&mut old).unwrap();
         assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
         assert_eq!(
@@ -2441,6 +2447,19 @@ mod tests {
             b"new-bytes",
             "fresh open did not see the replacement"
         );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY;
+            let attributes = std::fs::metadata(&target)
+                .expect("stat published file")
+                .file_attributes();
+            assert_eq!(
+                attributes & FILE_ATTRIBUTE_TEMPORARY,
+                0,
+                "published file kept the temporary attribute"
+            );
+        }
     }
 
     #[test]

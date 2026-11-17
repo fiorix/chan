@@ -510,8 +510,10 @@ fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
 fn publish_ref(repo: &Path, commit: &str) -> io::Result<()> {
     let refs = repo.join("refs");
     std::fs::create_dir_all(&refs)?;
-    // Normal file attributes survive std's rename; tempfile's persist clears
-    // its temporary attribute but cannot replace an open reader on Windows.
+    // The temporary carries tempfile's temporary attribute on Windows; the
+    // helper clears it on publish, so the reference keeps normal attributes.
+    // Mode stays 0o600 on Unix, as the base required.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
     {
