@@ -764,8 +764,9 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         "the hold engaged before the drain completed: {elapsed:?}"
     );
     // Hang guard, not a contract bound: ten times the worst measured
-    // elapsed, 5.42 s over the 40-run series in streamlag-4/series-40c.log
-    // (host load 8 to 18 throughout), rounded up, so only a hang reaches it.
+    // elapsed, 5.41 s over the 40-run series in
+    // streamlag-5/series-40-final.log (host load 8 to 16 throughout),
+    // rounded up, so only a hang reaches it.
     assert!(
         elapsed <= std::time::Duration::from_secs(60),
         "the drain did not complete within the hang guard: {elapsed:?}"
@@ -809,10 +810,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
     // is the machine's like the drain's: a hang guard at ten times the
-    // worst measured resume, 10.3 ms over the same 40-run series, rounded
-    // up, not a contract bound.
+    // worst measured resume, 46.3 ms over the 40-run series in
+    // streamlag-5/series-40-final.log (host load 8 to 16 throughout),
+    // rounded up, not a contract bound.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_millis(150);
+    let resume_bound = std::time::Duration::from_millis(500);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
