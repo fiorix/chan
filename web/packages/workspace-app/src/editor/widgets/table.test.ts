@@ -70,7 +70,7 @@ function expectTableMatchesMarkdown(
   expect(widget).toBeTruthy();
 
   const rendered = document.createElement("div");
-  rendered.innerHTML = renderMarkdown(source);
+  rendered.innerHTML = renderMarkdown(source, { wikilinks: true });
   const exported = rendered.querySelector("table");
   expect(exported).toBeTruthy();
   expect(tableText(widget!)).toEqual(expected);
@@ -142,6 +142,56 @@ describe("tableDecorations", () => {
     );
 
     expect(parent.querySelector(".cm-md-table td code")?.textContent).toBe("[[note]]");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("an escaped alias in a cell shows its label as text", () => {
+    const { parent, view } = mountTable(
+      [
+        "| Name |",
+        "|------|",
+        "| [[note\\|alias]] |",
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td")?.textContent).toBe("alias");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a markup-carrying label in a cell gets no element", () => {
+    const label = '<img src=x onerror="alert(1)">';
+    const { parent, view } = mountTable(
+      [
+        "| Name |",
+        "|------|",
+        `| [[note\\|${label}]] |`,
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td img")).toBeNull();
+    expect(parent.querySelector(".cm-md-table td")?.textContent).toContain(label);
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test.each([
+    ["a list cell", "| <ul><li>[[a]]</li><li>[[b]]</li></ul> |", "ab"],
+    ["a div cell", "| <div>[[c]]</div> |", "c"],
+  ])("%s shows its labels as text", (_name, cell, expected) => {
+    const { parent, view } = mountTable(
+      ["| Name |", "|------|", cell, "", "after"].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td")?.textContent).toBe(expected);
 
     view.destroy();
     parent.remove();

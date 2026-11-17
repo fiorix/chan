@@ -50,6 +50,16 @@ test("copy flavors keep the authored Markdown in text and in the wrapper attribu
   view.destroy();
 });
 
+test("copy body labels links on both sides of a frontmatter-looking rule", () => {
+  const source = "---\n# Slide 2\n[[b]] ![](./x.png)\n---\n# Slide 3\n[[c]]";
+  const root = document.createElement("div");
+  root.innerHTML = buildBaselineHtml(source, "notes/doc.md", "/ws");
+  const text = root.textContent ?? "";
+  expect(text).toContain("b");
+  expect(text).toContain("c");
+  expect(text).not.toContain("[[");
+});
+
 test("copy body leaves inline code and fenced code as typed", () => {
   const root = document.createElement("div");
   root.innerHTML = buildBaselineHtml("`[[note]]`\n\n```text\n[[note]]\n```\n", "notes/doc.md", "/ws");
