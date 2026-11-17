@@ -647,7 +647,7 @@
     // images come from the server. A text that names none is sent at once.
     const images = draftImagesForDelivery(text, draftPath);
     if (images.length === 0) {
-      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root), false);
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root));
       return true;
     }
     resolvingDelivery = true;
@@ -661,7 +661,7 @@
       clearDeliveryTimer();
       resolvingDelivery = false;
       if (destroyed) return;
-      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths), true);
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths));
     };
     deliveryTimer = setTimeout(() => finish(new Map()), DELIVERY_PATHS_TIMEOUT_MS);
     void resolveDraftImagePaths(images, api.draftTerminalPaths).then(finish, () =>
@@ -673,10 +673,8 @@
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
   /// A keymap or strip submit takes the keyboard whenever no owner holds
-  /// it, even from an unfocused pane; only a submit held for its images'
-  /// paths still needs the focused pane, since the pane may have
-  /// changed while the server answered.
-  function sendSubmitted(view: EditorView, text: string, delivered: string, onlyWhenFocused: boolean): void {
+  /// it, even from an unfocused pane.
+  function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
       showTransientNote("terminal not connected; try again");
@@ -691,7 +689,7 @@
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
     void flushWrite();
-    if ((!onlyWhenFocused || focused) && !refocusRefused(tab.id)) view.focus();
+    if (!refocusRefused(tab.id)) view.focus();
     pendingChipVisible = false;
     if (graceTimer !== null) clearTimeout(graceTimer);
     graceTimer = setTimeout(() => {

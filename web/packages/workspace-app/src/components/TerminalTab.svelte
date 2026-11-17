@@ -2211,8 +2211,7 @@
   /// terminal WS as a `prompt` frame so the server ENQUEUES it into this
   /// session's write queue (shared FIFO with `cs terminal write`) and applies
   /// the submit encoding when the agent is idle. Deliberately NOT `sendInput`
-  /// (the raw keystroke path bypasses the queue). Returns whether the WS was
-  /// open so the orchestrator can retry a freshly-spawned lead. `agent` picks
+  /// (the raw keystroke path bypasses the queue). `agent` picks
   /// the encoding (claude CSI, codex/opencode bracketed paste + CR, gemini
   /// and muse split CR); omitted defaults to claude server-side, and a name
   /// the server does not know as an agent ("none") gets no chord. A Rich
