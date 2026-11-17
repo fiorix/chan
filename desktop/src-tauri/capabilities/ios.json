@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/iOS-schema.json",
+  "identifier": "ios",
+  "description": "The single iOS webview (label main) on the loopback launcher origin: back-to-Computers navigation only.",
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "windows": ["main"],
+  "permissions": ["allow-mobile-back-to-computers"]
+}

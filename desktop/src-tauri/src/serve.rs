@@ -4128,6 +4128,7 @@ mod tests {
     const LOCAL_DROP_CAPABILITY_JSON: &str = include_str!("../capabilities/local-drop.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
     const LOCAL_UPLOAD_CAPABILITY_JSON: &str = include_str!("../capabilities/local-upload.json");
+    const IOS_CAPABILITY_JSON: &str = include_str!("../capabilities/ios.json");
     const APP_PERMISSIONS_TOML: &str = include_str!("../permissions/app.toml");
 
     // The SPA side of the IPC bridge: api/desktop.ts is the single
@@ -4867,8 +4868,9 @@ mod tests {
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability
     /// cannot land without joining the origin-aware walk.
-    const CAPABILITY_FILES: [(&str, &str); 4] = [
+    const CAPABILITY_FILES: [(&str, &str); 5] = [
         ("about.json", ABOUT_CAPABILITY_JSON),
+        ("ios.json", IOS_CAPABILITY_JSON),
         ("local-drop.json", LOCAL_DROP_CAPABILITY_JSON),
         ("local-upload.json", LOCAL_UPLOAD_CAPABILITY_JSON),
         ("workspace.json", WORKSPACE_CAPABILITY_JSON),
