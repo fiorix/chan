@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 // The Workspace details command clears the tab that shows the details, not the focused dock, on WebKitGTK.
-// The desktop guest counterpart of browser-smoke check 233: Xvfb, openbox,
-// `chan serve` on a throwaway workspace seeded with two root files, chan-desktop
-// with the WebKit remote inspector, then detailsclear-native.mjs drives the real
-// app file browser and launcher and asserts the tab's inspector shows the
-// workspace while the dock keeps its selection. DOM events are dispatched in-page;
-// the engine, dispatch, handlers and rendering are WebKitGTK's own.
+// The desktop guest counterpart of browser-smoke check 233: the shell seeds
+// dock-a.md and tab-b.md at the workspace root; the driver selects the tab
+// file, focuses the dock last, and runs Workspace details through the real
+// launcher. It asserts the tab's inspector shows the workspace body while the
+// dock keeps its selection and the tab's own selection is gone. DOM events
+// are dispatched in-page; the engine, dispatch, handlers and rendering are
+// WebKitGTK's own.
 // Usage: node detailsclear-native.mjs --inspector HOST:PORT --out DIR --xid XID
-//   --window ID --workspace DIR --sha SHA --engine-version V
+//   --workspace DIR --sha SHA --engine-version V
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function argsOf(argv) {
   const out = {};
@@ -23,8 +22,8 @@ function argsOf(argv) {
 }
 
 const a = argsOf(process.argv.slice(2));
-for (const k of ["inspector", "out", "xid", "window", "workspace", "sha", "engine-version"]) {
-  if (!a[k]) throw new Error(`usage: detailsclear-native.mjs --inspector H:P --out DIR --xid XID --window ID --workspace DIR --sha SHA --engine-version V (missing --${k})`);
+for (const k of ["inspector", "out", "xid", "workspace", "sha", "engine-version"]) {
+  if (!a[k]) throw new Error(`usage: detailsclear-native.mjs --inspector H:P --out DIR --xid XID --workspace DIR --sha SHA --engine-version V (missing --${k})`);
 }
 mkdirSync(a.out, { recursive: true });
 
@@ -39,12 +38,12 @@ async function targets() {
   return found;
 }
 
-function inspectorEval(endpoint, titleSub, expression) {
+function inspectorEval(endpoint, titleSub, expression, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const done = (fn) => (...args) => { if (settled) return; settled = true; try { ws.close(); } catch {} fn(...args); };
     const ok = done(resolve), fail = done(reject);
-    const timer = setTimeout(() => fail(new Error("inspector did not answer in 8s")), 8000);
+    const timer = setTimeout(() => fail(new Error(`inspector did not answer in ${timeoutMs}ms`)), timeoutMs);
     let ws;
     let page = null;
     targets().then((found) => {
@@ -84,18 +83,100 @@ const record = (name, ok, detail, kind) => {
 };
 const check = (name, ok, detail) => record(name, ok, detail, "property");
 const need = (name, ok, detail) => record(name, ok, detail, "precondition");
-const xdo = (args, opts = {}) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000, ...opts });
+const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
 
-const page = (expr) => inspectorEval(a.inspector, "/workspace-", expr);
+const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
 const DOCK = 'aside[aria-label="left file browser"]';
+// The page relists after the seed and follows its selection after the
+// command, so every row and selection read below polls to a bounded deadline
+// instead of reading once. An in-page deadline always fits inside the eval
+// timeout. An inspector failure ("failed: ...") is recorded with need, never
+// check, so the instrument cannot report a fault.
+const failed = (value) => typeof value === "string" && value.startsWith("failed:");
+const waitTabRow = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
+    if (row) resolve(row.getAttribute("title"));
+    else if (Date.now() > deadline) resolve(null);
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const waitDockRow = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('${DOCK} [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
+    if (row) resolve(row.getAttribute("title"));
+    else if (Date.now() > deadline) resolve(null);
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const waitTabSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
+    if (!row) {
+      if (Date.now() > deadline) resolve("absent");
+      else setTimeout(tick, 250);
+    } else if (row.getAttribute("aria-selected") === "true") resolve("selected");
+    else if (Date.now() > deadline) resolve(row.getAttribute("aria-selected") ?? "unselected");
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const waitChip = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const chips = [...document.querySelectorAll('.browser:not(.dock) .kind-chip.workspace')];
+    if (chips.some((c) => c.textContent.trim() === "workspace")) resolve("workspace");
+    else if (Date.now() > deadline) resolve("absent");
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const waitDockSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('${DOCK} [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
+    if (!row) {
+      if (Date.now() > deadline) resolve("absent");
+      else setTimeout(tick, 250);
+    } else if (Date.now() > deadline || row.getAttribute("aria-selected") === "true") resolve(row.getAttribute("aria-selected") ?? "unselected");
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const waitTabCleared = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
+    if (!row) {
+      if (Date.now() > deadline) resolve("absent");
+      else setTimeout(tick, 250);
+    } else if (row.getAttribute("aria-selected") !== "true") resolve(row.getAttribute("aria-selected") ?? "unselected");
+    else if (Date.now() > deadline) resolve("true");
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
 
 try {
   xdo(["windowactivate", "--sync", a.xid]);
   const ws = a.workspace;
   mkdirSync(ws, { recursive: true });
-  writeFileSync(join(ws, "dock-a.md"), "dock file\n");
-  writeFileSync(join(ws, "tab-b.md"), "tab file\n");
-  need("seed workspace", true);
+  let seededDock = null;
+  let seededTab = null;
+  try { seededDock = readFileSync(join(ws, "dock-a.md"), "utf8"); } catch {}
+  try { seededTab = readFileSync(join(ws, "tab-b.md"), "utf8"); } catch {}
+  need("shell seeded root files", seededDock === "dock file\n" && seededTab === "tab file\n",
+    seededDock === null || seededTab === null ? "absent" : `${JSON.stringify(seededDock).slice(0, 40)} ${JSON.stringify(seededTab).slice(0, 40)}`);
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })); return "toggled"; })()`);
   const listed = await page(`(() => new Promise((resolve, reject) => {
@@ -107,7 +188,7 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 20000).catch((err) => `failed: ${err.message}`);
   need("open files", listed === "files", String(listed).slice(0, 120));
 
   const docked = await page(`(() => (async () => {
@@ -134,18 +215,26 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 20000).catch((err) => `failed: ${err.message}`);
   need("dock tree visible", dockVisible === "dock", String(dockVisible).slice(0, 120));
 
-  const tabSelected = await page(`(() => {
+  const tabRow = await waitTabRow().catch((err) => `failed: ${err.message}`);
+  need("tab file row present", typeof tabRow === "string" && tabRow.endsWith("/tab-b.md"),
+    tabRow === null ? "absent" : String(tabRow).slice(0, 120));
+  const clicked = await page(`(() => {
     const row = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')]
       .find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
     if (!row) return "missing";
     row.click();
-    return row.getAttribute("aria-selected") === "true" ? "selected" : "unselected";
+    return "clicked";
   })()`).catch((err) => `failed: ${err.message}`);
+  need("tab file clicked", clicked === "clicked", String(clicked).slice(0, 120));
+  const tabSelected = await waitTabSelected().catch((err) => `failed: ${err.message}`);
   need("tab file selected", tabSelected === "selected", String(tabSelected).slice(0, 120));
 
+  const dockRow = await waitDockRow().catch((err) => `failed: ${err.message}`);
+  need("dock file row present", typeof dockRow === "string" && dockRow.endsWith("/dock-a.md"),
+    dockRow === null ? "absent" : String(dockRow).slice(0, 120));
   const dockTarget = await page(`(() => {
     const row = [...document.querySelectorAll('${DOCK} [role="treeitem"]')]
       .find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
@@ -171,7 +260,7 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 15000).catch((err) => `failed: ${err.message}`);
   need("launcher open and focused", launcherOpen === "open", String(launcherOpen).slice(0, 120));
   xdo(["type", "--delay", "60", "Workspace details"]);
   const launcherPick = await page(`(() => new Promise((resolve, reject) => {
@@ -183,7 +272,7 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 15000).catch((err) => `failed: ${err.message}`);
   need("launcher picked Workspace details", launcherPick === "picked", String(launcherPick).slice(0, 120));
   xdo(["key", "Return"]);
   const launcherGone = await page(`(() => new Promise((resolve) => {
@@ -194,26 +283,18 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 15000).catch((err) => `failed: ${err.message}`);
   need("launcher dispatched", launcherGone === "closed", String(launcherGone).slice(0, 120));
 
-  const body = await page(`(() => {
-    const chips = [...document.querySelectorAll('.browser:not(.dock) .kind-chip.workspace')];
-    return chips.some((c) => c.textContent.trim() === "workspace") ? "workspace" : "absent";
-  })()`).catch((err) => `failed: ${err.message}`);
-  check("tab inspector shows the workspace", body === "workspace", String(body).slice(0, 120));
-  const dockKept = await page(`(() => {
-    const rows = [...document.querySelectorAll('${DOCK} [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/dock-a.md"));
-    return row ? row.getAttribute("aria-selected") : "absent";
-  })()`).catch((err) => `failed: ${err.message}`);
-  check("dock keeps its selection", dockKept === "true", JSON.stringify(dockKept));
-  const tabCleared = await page(`(() => {
-    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/tab-b.md"));
-    return row ? row.getAttribute("aria-selected") : "absent";
-  })()`).catch((err) => `failed: ${err.message}`);
-  check("tab selection cleared", tabCleared !== "true" && tabCleared !== "absent", JSON.stringify(tabCleared));
+  const body = await waitChip().catch((err) => `failed: ${err.message}`);
+  if (failed(body)) need("inspector readable", false, String(body).slice(0, 120));
+  else check("tab inspector shows the workspace", body === "workspace", String(body).slice(0, 120));
+  const dockKept = await waitDockSelected().catch((err) => `failed: ${err.message}`);
+  if (failed(dockKept)) need("inspector readable", false, String(dockKept).slice(0, 120));
+  else check("dock keeps its selection", dockKept === "true", JSON.stringify(dockKept));
+  const tabCleared = await waitTabCleared().catch((err) => `failed: ${err.message}`);
+  if (failed(tabCleared)) need("inspector readable", false, String(tabCleared).slice(0, 120));
+  else check("tab selection cleared", tabCleared !== "true" && tabCleared !== "absent", JSON.stringify(tabCleared));
 
   run.finished = new Date().toISOString();
   const preFailed = failures.some((f) => f.kind === "precondition");

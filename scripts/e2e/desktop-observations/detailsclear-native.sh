@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # The Workspace details command clears the tab that shows the details, not the focused dock, on WebKitGTK.
 # The desktop guest counterpart of browser-smoke check 233: Xvfb, openbox,
-# `chan serve` on a throwaway workspace seeded with two root files, chan-desktop
-# with the WebKit remote inspector, then detailsclear-native.mjs drives the real
-# app file browser and launcher and asserts the tab's inspector shows the
-# workspace while the dock keeps its selection. Invoke under xvfb-run with a
-# fixed screen size. Layout mirrors terminal-size-native.sh in this directory.
+# `chan serve` on a throwaway workspace the shell seeds with dock-a.md and
+# tab-b.md at the root, chan-desktop with the WebKit remote inspector, then
+# detailsclear-native.mjs drives the real app file browser and launcher and
+# asserts the tab's inspector shows the workspace while the dock keeps its
+# selection. Invoke under xvfb-run with a fixed screen size. Layout mirrors
+# terminal-size-native.sh in this directory.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +29,8 @@ obs_start_desktop
 
 WS="$OBS_WORK/ws"
 mkdir -p "$WS"
+printf 'dock file\n' > "$WS/dock-a.md"
+printf 'tab file\n' > "$WS/tab-b.md"
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
 workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
@@ -50,13 +53,12 @@ done
 
 ENGINE_VERSION="$(pkg-config --modversion webkit2gtk-4.1 2>/dev/null || dpkg-query -W -f='${Version}' libwebkit2gtk-4.1-0 2>/dev/null || echo unknown)"
 echo "$ENGINE_VERSION" > "$output/engine-version.txt"
-SHA="${P6NET2_SHA:-$(git -C /work/chan rev-parse HEAD 2>/dev/null || echo unknown)}"
-export CHAN_DESKTOP_BIN CHAN_BIN
+SHA="$OBS_SHA"
 obs_log "window $xid is visible on $DISPLAY; engine $ENGINE_VERSION; sha $SHA"
-set +e
+obs_verdict
 node "$HERE/detailsclear-native.mjs" --inspector "$INSPECTOR" --out "$output/recordings" --xid "$xid" \
-  --window "$CHAN_WINDOW_ID" --workspace "$WS" --sha "$SHA" --engine-version "$ENGINE_VERSION" > "$output/driver.log" 2>&1
+  --workspace "$WS" --sha "$SHA" --engine-version "$ENGINE_VERSION" > "$output/driver.log" 2>&1
 verdict=$?
-set -e
 echo "driver exit $verdict"
+cat "$output/driver.log" | obs_masked
 obs_judge "$verdict" "workspace details cleared the focused dock"
