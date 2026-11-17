@@ -341,7 +341,7 @@ async fn a_blocked_output_send_still_reads_close() {
     let _pending = rig.block_output().await;
     send(&mut client, json!({"type":"close"})).await;
     until("close removes the session before output is drained", || {
-        rig.state.terminal_sessions.len() == 0
+        rig.state.terminal_sessions.is_empty()
     })
     .await;
 }
