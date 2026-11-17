@@ -68,7 +68,7 @@
       // The rule reads the remembered element's terminal, so a survey over
       // that terminal counts as an owner: its card keeps the keyboard and
       // the remembered element behind it is left alone.
-      const ownerSlot = slot ?? target?.closest("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
+      const ownerSlot = slot ?? target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
       queueMicrotask(() => {
         // The remembered element gets the keyboard back only while no other
         // owner holds it: a survey closing under a dialog, the launcher or
