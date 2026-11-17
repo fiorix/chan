@@ -206,7 +206,6 @@ vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 
 installTerminalDom();

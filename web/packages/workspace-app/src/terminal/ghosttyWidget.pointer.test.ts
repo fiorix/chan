@@ -58,11 +58,12 @@ async function openTerminal() {
 /// A pointer press, move or release at canvas CSS pixels, dispatched where
 /// pointer capture would retarget it: on the canvas itself.
 function pointer(target: Element, type: string, x: number, y: number, extra: PointerEventInit = {}): void {
-  // A move of a drag carries the pressed button and a release carries
-  // none; on macOS the engine fills buttons from the live button state,
-  // so a helper move never stands for a released one.
+  // Engines send button -1 on moves (no button changed); only the buttons
+  // bitmask says what is held. On macOS the engine fills buttons from the
+  // live button state, so a helper move never stands for a released one.
   const buttons = type === "pointerup" || type === "pointercancel" ? 0 : 1;
-  target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y, ...extra }));
+  const button = type === "pointermove" ? -1 : 0;
+  target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button, buttons, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y, ...extra }));
 }
 
 describe("the ghostty widget's pointer handling", () => {
@@ -87,7 +88,7 @@ describe("the ghostty widget's pointer handling", () => {
     expect(term.hasSelection(), "a jittered press selects nothing").toBe(false);
   });
 
-  test("a drag ended by capture loss alone keeps its selection and copies nothing", async () => {
+  test("a drag ended by capture loss alone keeps its selection and copies once", async () => {
     const { term, canvas } = await openTerminal();
     const writes: string[] = [];
     expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
@@ -97,10 +98,10 @@ describe("the ghostty widget's pointer handling", () => {
     expect(term.hasSelection()).toBe(true);
     const selected = term.getSelection();
     canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
-    // After the loss the drag is over: later moves and the release change nothing.
+    // The loss ends the drag as a release: later moves and the release change nothing more.
     pointer(canvas, "pointermove", 100, 2);
     pointer(canvas, "pointerup", 100, 2);
-    expect(writes, "the lost drag copies nothing").toEqual([]);
+    expect(writes, "the lost drag copies once").toEqual([selected]);
     expect(term.getSelection(), "the lost drag keeps its selection").toBe(selected);
   });
 

@@ -170,7 +170,6 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
-    gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
@@ -574,10 +573,6 @@
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   let primarySelectionCleanup: (() => void) | null = null;
-  // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
-  // clicks on the content beneath it while it is invisible. Non-null ONLY on
-  // the ghostty backend, and only while the gate is installed.
-  let ghosttyScrollbarClickGate: (() => void) | null = null;
   let hostResumeTimers: ReturnType<typeof setTimeout>[] = [];
   let hostResumeListenerCleanup: (() => void) | null = null;
   // Wall-clock-gap sleep/wake detector (shared `installWakeGapDetector`). See
@@ -1421,12 +1416,6 @@
       if (!ghosttyClickExtents) {
         console.warn(
           "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
-        );
-      }
-      ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
-      if (!ghosttyScrollbarClickGate) {
-        console.warn(
-          "[chan] ghostty-web pointerdown gate unavailable; its overlay scrollbar claims clicks while hidden.",
         );
       }
     }
@@ -2635,8 +2624,6 @@
     ghosttyReportedFocus = null;
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
-    ghosttyScrollbarClickGate?.();
-    ghosttyScrollbarClickGate = null;
     if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
     resizeScanTimer = null;
     secretMasker?.dispose();
