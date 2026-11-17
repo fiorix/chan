@@ -164,11 +164,16 @@ export default {
             assert.deepEqual(result.refused.prompts, []);
             assert.deepEqual(own(result.refused).map((socket) => socket.state), [3]);
             await ctx.shot(`291-${backend}-exited-note`);
+            // An exited tab never redials: read the owned sockets before the
+            // restart counts from, and count from that read.
+            await sleep(500);
+            const settled = await state(page, card);
+            assert.deepEqual(own(settled).map((socket) => socket.state), [3], "no redial before the restart");
+            const seen = own(settled).length;
             // Restart terminal through the command launcher: `cs terminal`
             // addresses live sessions only, and an exited terminal has none.
             // A new session on a new socket takes the kept text. The restart
             // opens exactly one new socket on the same tab name.
-            const seen = own(await state(page, card)).length;
             await selectLauncherCommand(page, "Restart terminal");
             await page.keyboard.press("Enter");
             result.restarted = await waitFor(page, card, "the restarted terminal reattached", (value) => {
@@ -176,10 +181,11 @@ export default {
               return value.sockets.filter((socket) => socket.tab === name).length === seen + 1
                 && next.length === 1 && next[0].ready ? { ...value, next: next[0] } : false;
             }, 30_000);
-            assert.deepEqual(result.restarted.prompts, [], "no prompt sends by itself after the restart");
             await sleep(500);
-            const pre = await state(page, card);
-            assert.deepEqual(own(pre).map((socket) => socket.state), [3], "no redial before the restart");
+            const after = await state(page, card);
+            assert.deepEqual(after.prompts, [], "no prompt sends by itself after the restart");
+            assert.equal(after.text, text, "the kept text waits for the explicit submit");
+            assert.equal(after.editable, true, "the composer stays editable after the restart");
             // Restart hands the keyboard to the new terminal, so the retry
             // returns focus to the composer first.
             await page.click(`${card} .cm-content`);
@@ -193,6 +199,8 @@ export default {
             result.sent = await waitFor(page, card, "the kept text sends on the new session", (value) => value.prompts.length === 1);
             assert.equal(result.sent.prompts[0].data, text);
             assert.equal(typeof result.sent.prompts[0].id, "string");
+            assert.equal(result.sent.prompts[0].connection, result.restarted.next.connection,
+              "the kept text sends on the restarted socket");
             const id = result.sent.prompts[0].id;
             result.delivered = await waitFor(page, card, "the delivered retry clears the composer",
               (value) => value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id))
@@ -221,14 +229,28 @@ export default {
               // `cs terminal close` only matches live sessions.
               if (opened) {
                 await closeActiveTerminal(page, name);
-                const left = await state(page, null).catch(() => null);
-                assert.ok(!left || !left.sockets.some((socket) => socket.tab === name && socket.state !== 3),
-                  "the leg leaves no live socket behind");
+                const quiet = await waitFor(page, null, "every socket of the leg is closed", (value) => {
+                  const leg = value.sockets.filter((socket) => socket.tab === name);
+                  return leg.length > 0 && leg.every((socket) => socket.state === 3);
+                }, 15_000).catch(() => null);
+                assert.ok(quiet, "every socket of the leg is closed");
               }
             });
-            // The server's roster for this window, read after cleanup: empty
-            // when the leg left nothing behind.
-            result.roster = await windowSessions(page, token).catch((error) => ({ error: String(error.message ?? error) }));
+            // The server's roster for this window, polled until none of its
+            // sessions carries the leg's name: empty when the leg left
+            // nothing behind.
+            let roster = null;
+            const deadline = Date.now() + 15_000;
+            while (Date.now() < deadline) {
+              roster = await windowSessions(page, token).catch((error) => ({ error: String(error.message ?? error) }));
+              if (Array.isArray(roster) && !roster.some((session) => session.name === name)) break;
+              await sleep(200);
+            }
+            result.roster = roster;
+            if (result.passed) {
+              assert.ok(Array.isArray(roster) && !roster.some((session) => session.name === name),
+                "the server roster drops the leg");
+            }
             if (result.passed && result.pageErrors.length) {
               result.passed = false;
               failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
