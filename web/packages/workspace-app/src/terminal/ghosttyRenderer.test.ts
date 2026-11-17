@@ -9,7 +9,6 @@ import { GhosttyVt, VtCells, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import { transparentColor } from "./backgroundOpacity";
-import { alignGhosttyRendererToXterm, type CellDimensions } from "./ghosttyCompat";
 
 const VENDORED = "../ghostty-web-ng/vendor/ghostty-vt/ghostty-vt.wasm";
 const COLS = 12;
@@ -732,9 +731,9 @@ describe("the ghostty renderer's underline styles and overline", () => {
 
   /// A terminal built from THEME as open() builds it, its core and its
   /// renderer, written `bytes` with the cursor hidden. The font measures
-  /// `fontWidth` pixels a character; with `cell`, the renderer is aligned to
-  /// that cell as TerminalTab aligns it to xterm.js's grid.
-  async function painted(bytes: string, { fontWidth = 8, cell }: { fontWidth?: number; cell?: CellDimensions } = {}) {
+  /// `fontWidth` pixels a character; the grid is the widget's own measure,
+  /// which the paint-layer suite pins under lineHeight.
+  async function painted(bytes: string, { fontWidth = 8 }: { fontWidth?: number } = {}) {
     const contexts = new WeakMap<HTMLCanvasElement, PathRecordingContext>();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
       function (this: HTMLCanvasElement) {
@@ -752,7 +751,6 @@ describe("the ghostty renderer's underline styles and overline", () => {
     const canvas = document.createElement("canvas");
     const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1, theme: THEME });
     renderer.resize(cols, rows);
-    if (cell) expect(alignGhosttyRendererToXterm(renderer, cell, cols, rows), "aligned").not.toBeNull();
     term.renderer = renderer;
     term.wasmTerm.write("\x1b[?25l" + bytes);
     const context = contexts.get(canvas)!;
@@ -961,13 +959,13 @@ describe("the ghostty renderer's underline styles and overline", () => {
     }
   });
 
-  test("a double or curly underline keeps inside a cell aligned shorter than the font's", async () => {
-    // The font's cell is 19 pixels with its baseline at 14; aligned to a
-    // 17-pixel cell the baseline moves up a pixel, and a second line two
-    // rows below a single underline's would reach past the cell's bottom.
-    const screen = await painted(ROW, { cell: { width: 8, height: 17 } });
+  test("a double or curly underline keeps inside the cell", async () => {
+    // The font's cell is 19 pixels with its baseline at 14; a second line
+    // two rows below a single underline's stays inside the cell's bottom,
+    // as do the curly's rises.
+    const screen = await painted(ROW);
     const { height, baseline } = screen.metrics;
-    expect([height, baseline]).toEqual([17, 13]);
+    expect([height, baseline]).toEqual([19, 14]);
     screen.frame();
     // A single underline stays where it is, two pixels below the baseline.
     expect.soft(underline(screen, 0, "single").runs.map((r) => r.y), "single").toEqual([baseline + 2]);

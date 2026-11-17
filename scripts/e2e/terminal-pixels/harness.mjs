@@ -20,21 +20,13 @@ import { Terminal as XtermTerminal } from "/vendor/xterm/lib/xterm.mjs";
 import { WebglAddon } from "/vendor/addon-webgl/lib/addon-webgl.mjs";
 import { Terminal as GhosttyTerminal } from "/vendor/ghostty-web-ng/ghostty-web.js";
 import { GhosttyVt } from "/vendor/ghostty-web-ng/vt.js";
-import {
-  alignGhosttyRendererToXterm,
-  installGhosttyCustomGlyphs,
-  installGhosttyOverlayScrollbar,
-  measureXtermCellDimensions,
-} from "/product/ghosttyCompat.js";
-
 /// The grid every scenario renders on. Fixed rather than fitted: a fitted
 /// grid changes with the cell size, and then two scenarios would not be
 /// painting the same pattern in the same cells.
 const COLS = 60;
 const ROWS = 20;
 
-/// TerminalTab's line height. Also what measureXtermCellDimensions is handed
-/// when the ghostty renderer is aligned to xterm's grid.
+/// TerminalTab's line height, passed to the widget as its lineHeight option.
 const LINE_HEIGHT = 1.2;
 
 /// The pattern's geometry, in cells. Every region the driver samples is
@@ -777,39 +769,27 @@ async function startGhostty(host, scenario, warnings, bytes, settle) {
     },
   );
   term = new GhosttyTerminal({
+    boxGlyphs: true,
     cols: COLS,
     cursorBlink: false,
     cursorStyle: scenario.cursorStyle ?? "block",
     fontFamily: scenario.fontFamily,
     fontSize: scenario.fontSize,
     ghostty,
+    lineHeight: LINE_HEIGHT,
     rows: ROWS,
+    scrollbar: "overlay",
     scrollback: 1000,
     smoothScrollDuration: 0,
     theme: terminalTheme(host, scenario.palette),
   });
   term.open(host);
 
-  // TerminalTab's post-open() alignment, in the order it runs there.
+  // The widget owns the grid, the box glyphs and the overlay scrollbar
+  // through its construction options, as TerminalTab passes them.
   const renderer = term.renderer;
-  const targetCell = measureXtermCellDimensions(
-    host,
-    scenario.fontFamily,
-    scenario.fontSize,
-    LINE_HEIGHT,
-  );
-  if (
-    !renderer ||
-    !targetCell ||
-    !alignGhosttyRendererToXterm(renderer, targetCell, term.cols, term.rows)
-  ) {
-    warnings.push("ghostty renderer metrics unavailable; native spacing");
-  }
-  if (renderer && !installGhosttyCustomGlyphs(renderer)) {
-    warnings.push("ghostty text hook unavailable; font-rendered box glyphs");
-  }
-  if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
-    warnings.push("ghostty scrollbar hooks unavailable");
+  if (!renderer) {
+    warnings.push("ghostty renderer unavailable");
   }
 
   await new Promise((resolve) => term.write(bytes, resolve));

@@ -36,10 +36,7 @@ export function recordingKit(runtime: GhosttyRuntime, kitFrom: typeof ghosttyKit
 export function ghosttyCompatStubs() {
   return {
     measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-    alignGhosttyRendererToXterm: () => true,
-    installGhosttyCustomGlyphs: () => true,
-    installGhosttyOverlayScrollbar: () => true,
-    gateGhosttyScrollbarClicks: () => () => {},
+      gateGhosttyScrollbarClicks: () => () => {},
   };
 }
 

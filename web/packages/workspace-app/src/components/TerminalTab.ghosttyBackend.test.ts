@@ -17,7 +17,6 @@ const ghostty = vi.hoisted(() => {
     kitLoads: 0,
     instances: 0,
     hosts: [] as VtHost[],
-    alignOk: true,
     terminals: [] as Array<Record<string, any>>,
     viewportWrites: [] as string[],
     wheels: 0,
@@ -25,7 +24,7 @@ const ghostty = vi.hoisted(() => {
     // Whether the program in the terminal has focus reporting on (DECSET
     // 1004), as ghostty-web's own mode tracking would answer.
     focusEvents: false,
-    // A renderer without the private hooks the mask painter binds to.
+    // A renderer without the shape the old mask painter used to hook.
     bareRenderer: false,
     // Whether the program asked for bracketed paste (DECSET 2004), and
     // every text the component pasted through ghostty-web.
@@ -55,11 +54,24 @@ const ghostty = vi.hoisted(() => {
     dataHandlers: Array<(data: string) => void> = [];
     resizeHandlers: Array<(size: { cols: number; rows: number }) => void> = [];
     resized: Array<[number, number]> = [];
-    // What the secret mask painter hooks: a 2D context, the render it
-    // wraps, and the buffer and viewport it reads.
+    // What the secret mask painter registers: a paint layer and a
+    // repaint, over the buffer it reads.
     renderer: Record<string, unknown> = record.bareRenderer
       ? { getMetrics: () => ({ width: 8, height: 16 }) }
       : { getMetrics: () => ({ width: 8, height: 16 }), ctx: {}, render: fakeRender };
+    layers: { order: number; paint: (frame: any) => void }[] = [];
+    addPaintLayer(layer: { order: number; paint: (frame: any) => void }) {
+      record.events.push("layer");
+      this.layers.push(layer);
+      return () => {
+        record.events.push("unlayer");
+        this.layers.splice(this.layers.indexOf(layer), 1);
+      };
+    }
+    refresh() {
+      record.events.push("refresh");
+      (this.renderer as { render?: (...args: unknown[]) => void }).render?.(this.wasmTerm, true, 0, 0);
+    }
     buffer = { active: { type: "normal", length: 24, getLine: () => undefined }, alternate: {} };
     // The wasm core the renderer draws from, as far as a render pass reads it.
     wasmTerm = {
@@ -182,14 +194,9 @@ vi.mock("../terminal/backend", async (importOriginal) => ({
     };
   }),
 }));
-vi.mock("../terminal/ghosttyCompat", () => ({
+vi.mock("../terminal/ghosttyCompat", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/ghosttyCompat")>()),
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => {
-    ghostty.record.events.push("align");
-    return ghostty.record.alignOk;
-  },
-  installGhosttyCustomGlyphs: () => (ghostty.record.events.push("glyphs"), true),
-  installGhosttyOverlayScrollbar: () => (ghostty.record.events.push("scrollbar"), true),
   gateGhosttyScrollbarClicks: () => {
     ghostty.record.events.push("gate");
     return () => ghostty.record.events.push("ungate");
@@ -270,7 +277,6 @@ beforeEach(() => {
     kitLoads: 0,
     instances: 0,
     hosts: [],
-    alignOk: true,
     terminals: [],
     viewportWrites: [],
     wheels: 0,
@@ -427,31 +433,22 @@ describe("choosing the backend", () => {
 });
 
 describe("the mount", () => {
-  test("instantiate its own wasm, open, align to xterm's cell, install the hooks, then dial", async () => {
-    await mountGhostty();
-    expect(ghostty.record.events.slice(0, 8)).toEqual([
-      "instantiate",
-      "construct",
-      "open",
-      "align",
-      "glyphs",
-      "scrollbar",
-      "gate",
-      "dial",
-    ]);
+  test("instantiate its own wasm, open with the widget's paint contract, then gate, layer and dial", async () => {
+    const { term } = await mountGhostty();
+    expect(term.options).toMatchObject({ lineHeight: 1.2, boxGlyphs: true, scrollbar: "overlay" });
+    expect(ghostty.record.events.slice(0, 3)).toEqual(["instantiate", "construct", "open"]);
+    for (const step of ["gate", "layer", "dial"] as const) {
+      expect(ghostty.record.events, `the mount ${step}s`).toContain(step);
+    }
+    expect(ghostty.record.events.indexOf("gate"), "the gate binds before the layer paints").toBeLessThan(
+      ghostty.record.events.indexOf("layer"),
+    );
   });
 
   test("the terminal is built on the wasm instance its own spawn created", async () => {
     await mountGhostty();
     expect(ghostty.record.instances).toBe(1);
     expect(ghostty.record.terminals[0].options.ghostty).toEqual({ instance: 1 });
-  });
-
-  test("a renderer without the alignment hook is kept, with a warning", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    ghostty.record.alignOk = false;
-    await mountGhostty();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("renderer metrics unavailable"))).toBe(true);
   });
 
   test("a resize fits with chan's own measurement", async () => {
@@ -631,10 +628,10 @@ describe("focus recovery after a host resume", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
 
-  // ghostty-web has no refresh() and its frame loop repaints dirty rows
-  // only, so pixels the host dropped while the window sat off-screen come
-  // back only through a forced full pass of its renderer; the resume must
-  // ask for one even though the grid is unchanged and the fit is a no-op.
+  // the widget repaints dirty rows only, so pixels the host dropped
+  // while the window sat off-screen come back only through a forced full
+  // pass; the resume must ask for one even though the grid is unchanged
+  // and the fit is a no-op.
   test("the resume forces a full render pass of the ghostty renderer", async () => {
     const { term } = await mountGhostty();
     // The mount fits and paints; the resume is judged from a settled terminal.
@@ -978,9 +975,9 @@ describe("focus reports", () => {
 });
 
 describe("secret masking", () => {
-  test("the painter hooks ghostty's renderer, and the row's check and the status line follow its toggle", async () => {
-    const { target, term } = await mountGhostty();
-    expect(term.renderer.render, "render wrapped after open").not.toBe(ghostty.fakeRender);
+  test("the painter registers a layer on ghostty's terminal, and the row's check and the status line follow its toggle", async () => {
+    const { target } = await mountGhostty();
+    expect(ghostty.record.events, "layer registered after open").toContain("layer");
     expect(await spawned(target)).toMatchObject({ masking: false });
     menuRow(MASKING_ROW).click();
     await tick();
@@ -1006,10 +1003,23 @@ describe("secret masking", () => {
         : undefined;
     const fills: number[][] = [];
     term.renderer.ctx = { save() {}, restore() {}, fillRect: (...box: number[]) => fills.push(box) };
-    /// The boxes one frame fills, in cells of the 8 by 16 stand-in metrics.
+    /// The boxes one frame fills, in cells of the 8 by 16 stand-in metrics,
+    /// driving the registered layers the way the widget's loop does.
     const frame = (): number[][] => {
       fills.splice(0);
-      term.renderer.render(term.wasmTerm, false, 0);
+      const viewportOffset = 0;
+      for (const layer of term.layers as { paint: (frame: any) => void }[]) {
+        layer.paint({
+          ctx: term.renderer.ctx,
+          metrics: { width: 8, height: 16, baseline: 13 },
+          pixelRatio: 1,
+          viewportOffset,
+          full: false,
+          changedRows: [0],
+          rows: 24,
+          cols: term.cols,
+        });
+      }
       return fills.map(([x, y, width, height]) => [x! / 8, y! / 16, width! / 8, height! / 16]);
     };
     const masked = [["API_TOKEN=".length, 0, "hunter2".length, 1]];
@@ -1046,12 +1056,12 @@ describe("secret masking", () => {
     }
   });
 
-  test("a renderer without the hooks reports the failure and leaves masking off", async () => {
+  test("a bare renderer still masks, through the layer", async () => {
     __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: true }));
     ghostty.record.bareRenderer = true;
     const { target } = await mountGhostty();
-    expect(ui.status).toBe("Secret masking stopped working in this terminal");
-    expect(await spawned(target)).toMatchObject({ masking: false });
+    expect(ui.status).not.toBe("Secret masking stopped working in this terminal");
+    expect(await spawned(target)).toMatchObject({ masking: true });
   });
 });
 

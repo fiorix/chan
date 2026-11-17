@@ -1,5 +1,4 @@
-import type { CanvasRenderer } from "@chan/ghostty-web-ng";
-import { ABI, type VtTerminal } from "@chan/ghostty-web-ng/vt";
+import type { PaintFrame } from "@chan/ghostty-web-ng";
 import {
   findSecretMaskSpans,
   SecretAssignmentMatcher,
@@ -15,26 +14,13 @@ export type GhosttyMaskBuffer = {
   getLine(y: number): MaskLine | undefined;
 };
 
-/// What the painter reads of a ghostty terminal: the active buffer, the
-/// viewport offset ghostty renders at, and the renderer it paints behind.
+/// What the painter reads of a ghostty terminal: the active buffer to
+/// scan, a paint layer for the spans, and a full repaint for the rows
+/// clearing the mask uncovers.
 export type GhosttyMaskTerminal = {
   readonly buffer: { readonly active: GhosttyMaskBuffer };
-  readonly renderer?: Pick<CanvasRenderer, "getMetrics" | "render">;
-  getViewportY(): number;
-};
-
-/// What the painter reads of a frame from the terminal the renderer paints:
-/// the grid, whether every row changed, and which rows did.
-type GhosttyMaskFrame = Pick<VtTerminal, "getDimensions" | "beginFrame" | "isRowDirty">;
-
-type GhosttyMaskRenderer = Pick<CanvasRenderer, "getMetrics"> & {
-  ctx?: CanvasRenderingContext2D;
-  render?: (
-    term: GhosttyMaskFrame,
-    forceAll?: boolean,
-    viewportY?: number,
-    scrollbarOpacity?: number,
-  ) => void;
+  addPaintLayer(layer: { order: number; paint(frame: PaintFrame): void }): () => void;
+  refresh(): void;
 };
 
 /// The state a frame's spans were read at. A frame whose key matches the
@@ -49,33 +35,28 @@ type FrameKey = {
 
 /// Masks a ghostty terminal by painting over its canvas.
 ///
-/// The widget exposes no paint event or decoration layer, so the painter
-/// wraps the renderer's render (the guarded private-hook pattern of
-/// ghosttyCompat.ts) and fills each
-/// span onto the canvas in the frame that draws the content under it: the
-/// mask is on screen in the same frame as the value, with no overlay
-/// element to lag a frame behind a scroll, and the buffer, selection and
-/// copy are untouched. The visible rows are rescanned only when the
-/// viewport, the grid, the buffer or a row the parser marked dirty
-/// changed; an idle frame repaints the cached spans, which is a few
-/// rectangles. Ghostty draws visible row r at r times the cell height
-/// whatever the fraction of the viewport offset, so a fractional offset
-/// maps rows as its floor does.
+/// The widget exposes ordered paint layers, so the painter registers one
+/// with the last order and fills each span onto the canvas in the frame
+/// that draws the content under it: the mask is on screen in the same
+/// frame as the value, with no overlay element to lag a frame behind a
+/// scroll, and the buffer, selection and copy are untouched. The visible
+/// rows are rescanned only when the viewport, the grid, the buffer or a
+/// row the frame marked changed changed; an idle frame repaints the cached
+/// spans, which is a few rectangles. Ghostty draws visible row r at r times
+/// the cell height whatever the fraction of the viewport offset, so a
+/// fractional offset maps rows as its floor does.
 ///
-/// Writes reach the painter through the parser's dirty rows, so the write
+/// Writes reach the painter through the frame's changed rows, so the write
 /// hooks the xterm masker needs are no-ops here; scanAll and scanViewport
 /// force a rescan at the next frame.
 export class GhosttySecretMasker {
   readonly #term: GhosttyMaskTerminal;
   readonly #matcher: SecretAssignmentMatcher;
   readonly #onError: (() => void) | null;
-  #renderer: GhosttyMaskRenderer | null = null;
-  #originalRender: NonNullable<GhosttyMaskRenderer["render"]> | null = null;
-  #hook: NonNullable<GhosttyMaskRenderer["render"]> | null = null;
+  #disposeLayer: (() => void) | null = null;
   #spans: SecretMaskSpan[] = [];
   #frame: FrameKey | null = null;
   #rescan = true;
-  #repaintAll = false;
   #enabled: boolean;
   #color: string;
   #disposed = false;
@@ -109,7 +90,7 @@ export class GhosttySecretMasker {
     this.#enabled = enabled;
     if (enabled) {
       this.#rescan = true;
-      if (!this.#hook) this.#install();
+      if (!this.#disposeLayer) this.#install();
     } else {
       this.clear();
     }
@@ -135,92 +116,74 @@ export class GhosttySecretMasker {
     this.scanAll();
   }
 
-  /// Drop every span; the next frame redraws the rows they covered.
+  /// Drop every span and repaint the rows they covered in a full frame.
   clear(): void {
+    if (this.#disposed) return;
     this.#spans = [];
     this.#frame = null;
-    this.#repaintAll = true;
+    this.#term.refresh();
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#spans = [];
-    const renderer = this.#renderer;
-    if (renderer && this.#hook && renderer.render === this.#hook && this.#originalRender) {
-      renderer.render = this.#originalRender;
-    }
-    this.#renderer = null;
-    this.#hook = null;
-    this.#originalRender = null;
+    this.#frame = null;
+    this.#disposeLayer?.();
+    this.#disposeLayer = null;
   }
 
   #install(): void {
-    const renderer = this.#term.renderer as GhosttyMaskRenderer | undefined;
-    const original = renderer?.render;
-    if (
-      !renderer ||
-      !renderer.ctx ||
-      typeof original !== "function" ||
-      typeof renderer.getMetrics !== "function"
-    ) {
-      this.#fail("ghostty secret masking render hook unavailable");
+    const add = this.#term.addPaintLayer;
+    if (typeof add !== "function") {
+      this.#fail("ghostty secret masking paint layer unavailable");
       return;
     }
-    const hook: NonNullable<GhosttyMaskRenderer["render"]> = (
-      term,
-      forceAll,
-      viewportY,
-      scrollbarOpacity,
-    ) => {
-      this.#renderFrame(term, forceAll === true, viewportY ?? 0, () =>
-        original.call(renderer, term, forceAll === true || this.#takeRepaint(), viewportY, scrollbarOpacity),
-      );
-    };
-    this.#renderer = renderer;
-    this.#originalRender = original;
-    this.#hook = hook;
-    renderer.render = hook;
+    try {
+      // Secret masking registers last: its boxes paint over every layer
+      // under them, including find's active-match highlight.
+      this.#disposeLayer =
+        this.#term.addPaintLayer({
+          order: Number.MAX_SAFE_INTEGER,
+          paint: (frame) => this.#renderFrame(frame),
+        }) ?? null;
+    } catch (error) {
+      this.#fail("ghostty secret masking paint layer unavailable", error);
+    }
   }
 
-  #takeRepaint(): boolean {
-    const repaint = this.#repaintAll;
-    this.#repaintAll = false;
-    return repaint;
-  }
-
-  #renderFrame(frame: GhosttyMaskFrame, forceAll: boolean, viewportY: number, draw: () => void): void {
-    let paint = false;
+  #renderFrame(frame: PaintFrame): void {
     if (this.#enabled && !this.#disposed) {
       try {
-        this.#refresh(frame, viewportY, forceAll);
-        paint = true;
+        this.#refresh(frame);
       } catch (error) {
         this.#fail("ghostty secret masking scan failed", error);
+        return;
       }
+    } else {
+      return;
     }
-    draw();
-    if (!paint || this.#spans.length === 0) return;
+    if (this.#spans.length === 0) return;
     try {
-      this.#paint();
+      this.#paint(frame);
     } catch (error) {
       this.#fail("ghostty secret masking paint failed", error);
     }
   }
 
-  #refresh(frame: GhosttyMaskFrame, viewportY: number, forceAll: boolean): void {
-    const { cols, rows } = frame.getDimensions();
+  #refresh(frame: PaintFrame): void {
+    const { cols, rows } = frame;
     const active = this.#term.buffer.active;
     const key: FrameKey = {
       type: active.type,
       length: active.length,
-      top: Math.max(0, active.length - rows - Math.max(0, Math.floor(viewportY))),
+      top: Math.max(0, active.length - rows - Math.max(0, Math.floor(frame.viewportOffset))),
       cols,
       rows,
     };
     const last = this.#frame;
     const unchanged =
-      !forceAll &&
+      !frame.full &&
       !this.#rescan &&
       last !== null &&
       last.type === key.type &&
@@ -228,19 +191,11 @@ export class GhosttySecretMasker {
       last.top === key.top &&
       last.cols === key.cols &&
       last.rows === key.rows &&
-      frame.beginFrame() !== ABI.GhosttyRenderStateDirty.FULL &&
-      !this.#visibleRowDirty(frame, rows);
+      !frame.changedRows.some((row) => row >= 0 && row < rows);
     if (unchanged) return;
     this.#rescan = false;
     this.#frame = key;
     this.#spans = this.#scan(active, key);
-  }
-
-  #visibleRowDirty(frame: GhosttyMaskFrame, rows: number): boolean {
-    for (let row = 0; row < rows; row += 1) {
-      if (frame.isRowDirty(row)) return true;
-    }
-    return false;
   }
 
   /// The spans on the visible rows, read from the wrapped groups those rows
@@ -298,11 +253,10 @@ export class GhosttySecretMasker {
     return last !== undefined && last.getWidth() > 0 && last.getChars() !== "";
   }
 
-  #paint(): void {
-    const renderer = this.#renderer;
-    const ctx = renderer?.ctx;
-    if (!renderer || !ctx) return;
-    const metrics = renderer.getMetrics();
+  #paint(frame: PaintFrame): void {
+    const ctx = frame.ctx;
+    if (!ctx) return;
+    const metrics = frame.metrics;
     ctx.save();
     ctx.globalAlpha = 1;
     ctx.fillStyle = this.#color;

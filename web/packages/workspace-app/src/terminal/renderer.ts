@@ -1,11 +1,11 @@
 import type { VtTerminal } from "@chan/ghostty-web-ng/vt";
 
 /// What a repaint of the visible rows needs from either backend. xterm.js
-/// queues the row range through refresh(). ghostty-web has no refresh(): its
-/// canvas renderer repaints only the rows the core marked dirty since the
-/// last frame, so pixels the host dropped (a canvas backing store purged
-/// while the window sat off-screen) stay gone until a full pass is forced
-/// through the renderer itself, as its own resize does.
+/// queues the row range through refresh(). ghostty-web's canvas renderer
+/// repaints only the rows the core marked dirty since the last frame, so
+/// pixels the host dropped (a canvas backing store purged while the window
+/// sat off-screen) stay gone until a full pass is forced through the
+/// renderer itself, as the widget's own refresh() does and resize does.
 export type RefreshableTerminal = {
   rows: number;
   refresh?: (start: number, end: number) => void;

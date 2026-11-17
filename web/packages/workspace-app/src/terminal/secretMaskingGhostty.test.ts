@@ -1,14 +1,14 @@
-// The ghostty secret mask painter: it hooks the renderer's render, reads the
-// visible rows and the rows they wrap with at the offset ghostty draws, and
-// fills each span onto the canvas after the frame's content. The fake
-// buffer suites drive the hook the way ghostty-web's render loop does; the
-// real-build suite runs ghostty-web's terminal and renderer over chan's
-// binding on the vendored core, over the software canvas, and reads the
-// pixels back.
+// The ghostty secret mask painter: it registers the widget's last paint
+// layer, reads the visible rows and the rows they wrap with at the offset
+// ghostty draws, and fills each span onto the canvas after the frame's
+// content. The fake buffer suites drive the layer the way the widget's
+// render loop does; the real-build suite runs ghostty-web's terminal and
+// renderer over chan's binding on the vendored core, over the software
+// canvas, and reads the pixels back.
 
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, Terminal } from "@chan/ghostty-web-ng";
-import { ABI, GhosttyVt } from "@chan/ghostty-web-ng/vt";
+import { CanvasRenderer, Terminal, type PaintFrame } from "@chan/ghostty-web-ng";
+import { GhosttyVt } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { expectPixel, SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
@@ -52,15 +52,15 @@ class FakeLine {
 
 type Fill = { x: number; y: number; width: number; height: number; color: string };
 
-/// A ghostty terminal as the painter sees it: a buffer of lines, the
-/// renderer with the context it paints on and the render it wraps, and the
-/// dirty state the parser would report for the frame.
+/// A ghostty terminal as the painter sees it: a buffer of lines and a
+/// paint registry; frames invoke the registered layers the way the
+/// widget's render loop does. `refresh` counts the full repaints asked for.
 function ghosttyTerminal(options: {
   cols: number;
   rows: number;
   lines: FakeLine[];
   type?: "normal" | "alternate";
-  withContext?: boolean;
+  withLayers?: boolean;
 }) {
   const { cols, rows, lines } = options;
   const fills: Fill[] = [];
@@ -74,12 +74,7 @@ function ghosttyTerminal(options: {
       fills.push({ x, y, width, height, color: this.fillStyle });
     },
   };
-  const original = vi.fn();
-  const renderer: Record<string, unknown> = {
-    getMetrics: () => ({ ...CELL }),
-    render: original,
-  };
-  if (options.withContext !== false) renderer.ctx = context;
+  const layers: { order: number; paint: (frame: PaintFrame) => void }[] = [];
   const active = {
     type: options.type ?? "normal",
     get length() {
@@ -93,23 +88,31 @@ function ghosttyTerminal(options: {
   let viewportY = 0;
   const dirty = new Set<number>();
   let fullRedraw = false;
+  const refreshes: number[] = [];
   const term = {
     buffer: { active },
-    renderer,
-    getViewportY: () => viewportY,
+    addPaintLayer(layer: { order: number; paint: (frame: PaintFrame) => void }) {
+      layers.push(layer);
+      return () => {
+        const at = layers.indexOf(layer);
+        if (at !== -1) layers.splice(at, 1);
+      };
+    },
+    refresh() {
+      refreshes.push(refreshes.length);
+    },
   } as unknown as GhosttyMaskTerminal;
-  const renderable = {
-    getDimensions: () => ({ cols, rows }),
-    isRowDirty: (row: number) => dirty.has(row),
-    beginFrame: () => (fullRedraw ? ABI.GhosttyRenderStateDirty.FULL : ABI.GhosttyRenderStateDirty.FALSE),
-  };
+  if (options.withLayers === false) delete (term as Record<string, unknown>).addPaintLayer;
   return {
     term,
     active,
-    renderer,
-    original,
     context,
+    layers,
     lines,
+    /// Full repaints the painter asked for so far.
+    get refreshes() {
+      return refreshes.length;
+    },
     scroll(to: number) {
       viewportY = to;
     },
@@ -119,18 +122,28 @@ function ghosttyTerminal(options: {
     markFullRedraw() {
       fullRedraw = true;
     },
-    /// One frame as ghostty-web's render loop issues it. Returns the fills
-    /// the painter made after the frame's content, and how many lines it
-    /// read from the buffer for it.
-    frame(forceAll = false): { fills: Fill[]; reads: number; forcedRedraw: boolean } {
+    /// One frame as the widget's render loop issues it: the registered
+    /// layers paint over it. Returns the fills the painter made, how many
+    /// lines it read from the buffer, and whether the frame was full.
+    frame(forceAll = false): { fills: Fill[]; reads: number; full: boolean } {
       fills.length = 0;
       reads = 0;
-      original.mockClear();
-      (renderer.render as (...args: unknown[]) => void)(renderable, forceAll, viewportY, 0);
+      const full = forceAll || fullRedraw;
+      for (const layer of [...layers]) {
+        layer.paint({
+          ctx: context as unknown as CanvasRenderingContext2D,
+          metrics: { ...CELL },
+          pixelRatio: 1,
+          viewportOffset: viewportY,
+          full,
+          changedRows: full ? Array.from({ length: rows }, (_, row) => row) : [...dirty],
+          rows,
+          cols,
+        });
+      }
       dirty.clear();
       fullRedraw = false;
-      expect(original).toHaveBeenCalledOnce();
-      return { fills: [...fills], reads, forcedRedraw: original.mock.calls[0][1] === true };
+      return { fills: [...fills], reads, full };
     },
   };
 }
@@ -145,12 +158,12 @@ describe("ghostty secret masking over a fake buffer", () => {
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
     const frame = screen.frame();
     expect(frame.fills).toEqual([cells(6, 0, 9)]);
-    expect(frame.forcedRedraw).toBe(false);
+    expect(frame.full).toBe(false);
     expect(masker.maskCount).toBe(1);
     expect(screen.lines[0].text).toBe("TOKEN=cleartext");
-    // The painter's fill comes after the content: the original render ran
-    // before the fill was made, and the mask paints with its own colour
-    // under a saved and restored context state.
+    // The painter's fill comes from its layer: the mask paints with its
+    // own colour under a saved and restored context state.
+    expect(screen.layers).toHaveLength(1);
     expect(screen.context.save).toHaveBeenCalledOnce();
     expect(screen.context.restore).toHaveBeenCalledOnce();
   });
@@ -282,11 +295,10 @@ describe("ghostty secret masking over a fake buffer", () => {
     masker.setEnabled(false);
     expect(masker.enabled).toBe(false);
     expect(masker.maskCount).toBe(0);
+    expect(screen.refreshes, "disabling repaints the covered rows").toBe(1);
     const off = screen.frame();
     expect(off.fills).toEqual([]);
-    expect(off.forcedRedraw).toBe(true);
     expect(off.reads).toBe(0);
-    expect(screen.frame().forcedRedraw).toBe(false);
     masker.setEnabled(true);
     expect(screen.frame().fills).toEqual([cells(6, 0, 3)]);
     expect(screen.lines[0].text).toBe("TOKEN=abc");
@@ -300,15 +312,16 @@ describe("ghostty secret masking over a fake buffer", () => {
     expect(screen.frame().fills).toEqual([cells(6, 0, 3, "#57606a")]);
   });
 
-  test("a renderer without its context fails loud, leaves the render alone, and the toggle retries", () => {
-    const screen = ghosttyTerminal({ cols: 20, rows: 3, withContext: false, lines: [new FakeLine("TOKEN=abc", 20), new FakeLine("", 20), new FakeLine("", 20)] });
+  test("a terminal without paint layers fails loud, paints nothing, and the toggle retries", () => {
+    const screen = ghosttyTerminal({ cols: 20, rows: 3, withLayers: false, lines: [new FakeLine("TOKEN=abc", 20), new FakeLine("", 20), new FakeLine("", 20)] });
     const onError = vi.fn();
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true, onError);
     expect(onError).toHaveBeenCalledOnce();
     expect(masker.enabled).toBe(false);
-    expect(screen.renderer.render).toBe(screen.original);
-    expect(error).toHaveBeenCalledWith("ghostty secret masking render hook unavailable", "");
+    expect(screen.layers).toEqual([]);
+    expect(error).toHaveBeenCalledWith("ghostty secret masking paint layer unavailable", "");
+    expect(screen.frame().fills).toEqual([]);
     masker.setEnabled(true);
     expect(onError).toHaveBeenCalledTimes(2);
     expect(masker.enabled).toBe(false);
@@ -329,11 +342,11 @@ describe("ghostty secret masking over a fake buffer", () => {
     expect(onError).toHaveBeenCalledOnce();
     expect(masker.enabled).toBe(false);
     expect(failed.fills).toEqual([]);
-    expect(failed.forcedRedraw).toBe(true);
+    expect(screen.refreshes, "the failure repainted the covered rows").toBe(1);
     // Later frames render without the painter until it is re-enabled.
     const after = screen.frame();
     expect(after.fills).toEqual([]);
-    expect(after.forcedRedraw).toBe(false);
+    expect(screen.refreshes).toBe(1);
     expect(onError).toHaveBeenCalledOnce();
   });
 
@@ -348,18 +361,19 @@ describe("ghostty secret masking over a fake buffer", () => {
     screen.frame();
     expect(onError).toHaveBeenCalledOnce();
     expect(masker.enabled).toBe(false);
-    expect(screen.frame().forcedRedraw).toBe(true);
+    expect(screen.refreshes, "the failure repainted the covered rows").toBe(1);
   });
 
-  test("dispose hands the renderer its render back", () => {
+  test("dispose removes the layer so later frames paint nothing", () => {
     const screen = ghosttyTerminal({ cols: 20, rows: 3, lines: [new FakeLine("TOKEN=abc", 20), new FakeLine("", 20), new FakeLine("", 20)] });
     const masker = new GhosttySecretMasker(screen.term, ["TOKEN"], MASK, true);
-    expect(screen.renderer.render).not.toBe(screen.original);
+    expect(screen.layers).toHaveLength(1);
     masker.dispose();
-    expect(screen.renderer.render).toBe(screen.original);
+    expect(screen.layers).toHaveLength(0);
     expect(masker.maskCount).toBe(0);
+    expect(screen.frame().fills).toEqual([]);
     masker.setEnabled(true);
-    expect(screen.renderer.render).toBe(screen.original);
+    expect(screen.layers).toHaveLength(0);
   });
 });
 

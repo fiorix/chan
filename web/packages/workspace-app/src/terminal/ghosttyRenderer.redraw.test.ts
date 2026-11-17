@@ -12,7 +12,7 @@ import { CanvasRenderer, SelectionManager, Terminal, type ITheme } from "@chan/g
 import { GhosttyVt, type VtTerminal } from "@chan/ghostty-web-ng/vt";
 import { afterEach, beforeAll, describe, expect, onTestFinished, test, vi } from "vitest";
 import { CellPictureContext, type CellPictures } from "../__tests__/cellPictureCanvas";
-import { installGhosttyCustomGlyphs, installGhosttyOverlayScrollbar } from "./ghosttyCompat";
+
 import { DEFAULT_SECRET_MASK_SUFFIXES } from "./secretMasking";
 import { GhosttySecretMasker } from "./secretMaskingGhostty";
 
@@ -124,16 +124,14 @@ async function run(setup: string, steps: Step[], options: Options = {}): Promise
       cursorStyle: options.cursorStyle,
       cursorBlink: options.cursorBlink,
       theme,
+      boxGlyphs: options.glyphs,
+      scrollbar: options.glyphs ? "overlay" : undefined,
     });
     renderer.resize(cols, rows);
     term.renderer = renderer;
     const context = contexts.get(canvas)!;
     const { width, height } = renderer.getMetrics();
     context.cell = { width, height };
-    if (options.glyphs) {
-      expect(installGhosttyCustomGlyphs(renderer)).toBe(true);
-      expect(installGhosttyOverlayScrollbar(renderer)).toBe(true);
-    }
     if (options.masking) new GhosttySecretMasker(term as never, DEFAULT_SECRET_MASK_SUFFIXES, "#6c6c70", true);
     return { term, renderer, context };
   };

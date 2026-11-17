@@ -107,9 +107,6 @@ vi.mock("../terminal/backend", async (importOriginal) => {
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
-  alignGhosttyRendererToXterm: () => true,
-  installGhosttyCustomGlyphs: () => true,
-  installGhosttyOverlayScrollbar: () => true,
   gateGhosttyScrollbarClicks: () => () => {},
 }));
 vi.mock("../terminal/ghosttyViewport", () => ({

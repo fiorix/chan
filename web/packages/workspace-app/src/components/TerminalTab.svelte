@@ -168,13 +168,7 @@
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
-  import {
-    alignGhosttyRendererToXterm,
-    gateGhosttyScrollbarClicks,
-    installGhosttyCustomGlyphs,
-    installGhosttyOverlayScrollbar,
-    measureXtermCellDimensions,
-  } from "../terminal/ghosttyCompat";
+  import { gateGhosttyScrollbarClicks } from "../terminal/ghosttyCompat";
   import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
@@ -1233,13 +1227,16 @@
     );
     if (backend === "ghostty" && ghosttyKit && ghosttyInstance) {
       // Ghostty backend: Ghostty's WASM VT parser + its own canvas
-      // renderer (no xterm addons exist for it). Options are limited to
-      // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
-      // uses its own metrics), no macOptionIsMeta / tabStopWidth.
+      // renderer (no xterm addons exist for it). The paint contract the
+      // widget owns comes as options: the xterm grid at lineHeight 1.2,
+      // cell-drawn box glyphs, and the translucent overlay scrollbar.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
+        boxGlyphs: true,
         cursorBlink: false,
         cursorStyle: "block",
+        lineHeight: 1.2,
+        scrollbar: "overlay",
         copy: (text) => {
           void copyToClipboard(text);
           if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
@@ -1255,10 +1252,11 @@
       });
       term = ghosttyTerm;
       // Ghostty's auto-hiding scrollbar is painted onto the content without
-      // clearing it (see installGhosttyOverlayScrollbar), so the columns under
-      // it stay readable and there is no gutter to hold back. Reserving width
-      // here could not help in any case: the overlay is anchored to the canvas,
-      // not to the host, so a narrower grid just moves the content it covers.
+      // clearing it (the widget's overlay scrollbar option), so the columns
+      // under it stay readable and there is no gutter to hold back.
+      // Reserving width here could not help in any case: the overlay is
+      // anchored to the canvas, not to the host, so a narrower grid just
+      // moves the content it covers.
       // This FitLike keeps upstream's measurement and clamp behavior over the
       // whole content box.
       const proposeGhosttyGrid = () => {
@@ -1379,37 +1377,9 @@
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
-      const renderer = ghosttyTerm.renderer;
-      const targetCell = measureXtermCellDimensions(
-        host,
-        fontFamily,
-        rendererFontSize,
-        1.2,
-      );
-      if (
-        !renderer ||
-        !targetCell ||
-        !alignGhosttyRendererToXterm(
-          renderer,
-          targetCell,
-          ghosttyTerm.cols,
-          ghosttyTerm.rows,
-        )
-      ) {
-        console.warn(
-          "[chan] ghostty-web renderer metrics unavailable; using its native font spacing.",
-        );
-      }
-      if (renderer && !installGhosttyCustomGlyphs(renderer)) {
-        console.warn(
-          "[chan] ghostty-web text hook unavailable; using font-rendered box glyphs.",
-        );
-      }
-      if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
-        console.warn(
-          "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
-        );
-      }
+      // The widget owns the grid, the box glyphs and the overlay
+      // scrollbar through its construction options above; no adapter
+      // reaches its renderer's privates for them anymore.
       // The widget's own copies (mouse release, double and triple click)
       // write through the same writer as the chord and the menu, through
       // the copy option the terminal was constructed with above.
