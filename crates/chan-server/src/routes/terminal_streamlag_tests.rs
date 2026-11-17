@@ -9,7 +9,13 @@ use crate::terminal_sessions::{
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::{future::Future, sync::Mutex};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
@@ -662,17 +668,31 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
 ///
 /// The 2 MiB ring holds the whole ~1.4 MiB flood, so no view can be evicted
 /// and every recovery below is lossless by construction: a 64 KiB ring lets
-/// even the draining view fall behind under load (observed: a live view
-/// recovering with missed_bytes=47624), which makes the live view's outcome
-/// a race instead of a contract.
+/// even the draining view fall behind under load, which makes the live
+/// view's outcome a race instead of a contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let _gate = pty_test_lock();
-    // The flood outruns every buffer (PTY, sockets, half-ring credit) so the
-    // stalled view's release is what lets the program finish.
-    let rig = Rig::new(2 * 1024 * 1024, "seq 1 200000; printf '__STREAM_DONE__'").await;
-    // Socket A reads one live frame, then stops draining entirely.
+    // The child waits for a newline before flooding, so both views attach
+    // before the first flood byte and the hold engages by construction: the
+    // flood outruns A's 1 MiB credit once A stops reading, and the stalled
+    // view's release is what lets the program finish.
+    let rig = Rig::new(
+        2 * 1024 * 1024,
+        "read -r _; seq 1 200000; printf '__STREAM_DONE__'",
+    )
+    .await;
+    // Socket A attaches before the flood and reads one live frame, then
+    // stops draining entirely.
     let (mut stalled, initial) = rig.attach().await;
+    // The hold is observed structurally: the reader parks waiting for
+    // progress while A holds the session back.
+    let held = Arc::new(AtomicBool::new(false));
+    arm_attach_seam(rig.handle.id(), AttachSeam::ReaderWaitingForProgress, {
+        let held = held.clone();
+        move || held.store(true, Ordering::SeqCst)
+    });
+    rig.handle.send_input(b"\n");
     loop {
         match next(&mut stalled).await {
             ClientMessage::Binary(_) => break,
@@ -717,6 +737,14 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
+    assert!(
+        elapsed <= std::time::Duration::from_secs(15),
+        "the hold released the session within the bound: {elapsed:?}"
+    );
+    assert!(
+        held.load(Ordering::SeqCst),
+        "the reader parked waiting for progress while A stalled"
+    );
     let mut expected = Vec::new();
     expected.extend_from_slice(CHILD_READY);
     for index in 1..=200000 {
@@ -725,8 +753,19 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     }
     expected.extend_from_slice(DONE_MARKER);
     assert_eq!(
-        received, expected,
-        "the second view receives every byte once and in order"
+        received.len(),
+        expected.len(),
+        "the second view receives every byte once: got {} want {}",
+        received.len(),
+        expected.len(),
+    );
+    assert_eq!(
+        received
+            .iter()
+            .zip(expected.iter())
+            .position(|(got, want)| got != want),
+        None,
+        "the second view receives every byte in order",
     );
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error.

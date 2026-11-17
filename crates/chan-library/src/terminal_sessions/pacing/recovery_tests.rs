@@ -5,8 +5,11 @@ fn expected_suffix(alt_screen: bool, enabled: &[u16]) -> Vec<u8> {
     // The normal-screen head saves the cursor first: xterm.js's ?1049l
     // handler restores unconditionally (InputHandler.resetModePrivate),
     // so without the DECSC the resume jumps to a stale saved position.
+    // The alt head is ?1047h: xterm.js's ?1049h writes the alternate
+    // buffer's saved-cursor slot, and mode 47 is unproven on ghostty's
+    // core while ?1047h switches screens on both shipped backends.
     let mut bytes = if alt_screen {
-        b"\x18\x1b[?47h".to_vec()
+        b"\x18\x1b[?1047h".to_vec()
     } else {
         b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
     };

@@ -215,3 +215,24 @@ describe("a mouse filter holding an unfinished control sequence", () => {
     expect(ghosttyMouseTracking(second.term)).toBe(false);
   });
 });
+
+describe("the lossy recovery suffix on the Ghostty core", () => {
+  test("the normal-screen head leaves the cursor where the replay ended", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[24;40H");
+    await output(socket, "Q");
+    await output(socket, "\x18\x1b7\x1b[?1049;1047;47l");
+    await output(socket, "Z");
+    expect(ghosttyLineText(term, 0), "the head writes nothing on row 1").toBe("");
+    expect(ghosttyLineText(term, 23), "the byte after the head lands at the replay cursor").toBe("QZ");
+  });
+
+  test("the alternate-screen head leaves the terminal on the alternate screen", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { socket, term } = await openGhostty(tab!);
+    expect(ghosttyAlternateScreen(term), "the tab starts on the normal screen").toBe(false);
+    await output(socket, "\x18\x1b[?1047h");
+    expect(ghosttyAlternateScreen(term), "the alt head switches to the alternate screen").toBe(true);
+  });
+});

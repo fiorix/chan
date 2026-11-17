@@ -7891,11 +7891,13 @@ impl Session {
         // The normal-screen head saves the cursor first: the backend that
         // restores unconditionally on ?1049l (xterm.js) would otherwise jump
         // to a stale saved position instead of resuming where the replay
-        // ended. The alt head stays ?47h rather than ?1049h: a redundant
-        // ?1049h is only a guarded no-op where the backend guards it, and an
-        // unguarded re-entry can clear the inhabited alternate screen.
+        // ended. The alt head is ?1047h rather than ?1049h: xterm.js's
+        // ?1049h writes the alternate buffer's saved-cursor slot before its
+        // guarded switch, clobbering the program's slot, and mode 47 is
+        // unproven on ghostty's core while ?1047h switches screens on both
+        // shipped backends without touching any saved slot.
         let mut out = if alt_screen {
-            b"\x18\x1b[?47h".to_vec()
+            b"\x18\x1b[?1047h".to_vec()
         } else {
             b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
         };
