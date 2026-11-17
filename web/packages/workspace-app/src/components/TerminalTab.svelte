@@ -414,8 +414,9 @@
   let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
   // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
   // loaded at connect time, primed into the xterm on the attach prelude only
-  // when the server confirms the same generation + no missed bytes; otherwise
-  // discarded for a full replay. `receivedSeq` tracks the server byte cursor
+  // when the frame keeps the cached session id and the server confirms the
+  // same generation + no missed bytes; otherwise discarded for a full replay.
+  // `receivedSeq` tracks the server byte cursor
   // (prelude `seq` + live bytes since) so a capture knows where to resume from.
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;

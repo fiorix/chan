@@ -36,6 +36,9 @@ installTerminalDom();
 
 const SESSION = "sess-xterm";
 const FRESH = "sess-fresh";
+// The mounted cases below stay a literal list so a dropped mode goes red at
+// its own case; the drift test forces it to grow with the reset list.
+const XTERM_CASES = [1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -59,7 +62,7 @@ async function reconnect(socket: TerminalSocket, id: string) {
 describe("a fresh shell after a dead full-screen program on xterm", () => {
   // The server's whole tracked set: each mode set by the dead program, kept
   // on a same-id resume and cleared for a fresh shell.
-  test.each([1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004])(
+  test.each(XTERM_CASES)(
     "clears DEC %i for a fresh shell and keeps it on resume (reads the reset bytes written to xterm)",
     async (mode) => {
       const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
@@ -92,8 +95,7 @@ describe("a fresh shell after a dead full-screen program on xterm", () => {
     const replaced = await reconnect(socket, FRESH);
     await output(replaced, "first-prompt\x1b[?2004h\x1b[?1h");
     await receive(replaced, { type: "ready", cols: 80, rows: 24 });
-    // The reset is the exact tracked-mode sequence: the dead program's set
-    // and the fresh shell's output are `h`-final.
+    // The reset is the exact tracked-mode sequence.
     const written = term.written.join("");
     const resetAt = written.indexOf(freshShellResetSequence());
     expect(resetAt, "the fresh shell's reset is written").toBeGreaterThanOrEqual(0);
@@ -117,6 +119,9 @@ describe("a fresh shell after a dead full-screen program on xterm", () => {
       const [tab] = seatTerminals([terminalTab({ terminalSessionId: SESSION })]);
       const { term } = await mountTerminal(TerminalTab, tab!);
       const socket = TerminalSocket.all.at(-1)!;
+      const dialed = new URL(socket.url, "http://chan.test").searchParams;
+      expect(dialed.get("since"), "the dial resumes from the cached snapshot").toBe("42");
+      expect(dialed.get("generation"), "the dial resumes from the cached snapshot").toBe("7");
       await attach(socket, { id: FRESH, generation: 7, seq: 0, missed_bytes: 0 });
       await receive(socket, { type: "ready", cols: 80, rows: 24 });
 
@@ -136,8 +141,10 @@ describe("a fresh shell after a dead full-screen program on xterm", () => {
 
 describe("the fresh-shell reset list", () => {
   test("matches the server's tracked set", () => {
-    // Contract: a mode the server tracks is a mode the reset clears, so the
-    // test reads the const the server's attach prelude filters on.
+    // Contract: a mode the server tracks is a mode the reset clears. The
+    // output scanner and the restore import filter on the const (`terminal_sessions.rs`,
+    // `scan_private_modes` caller and restore filter); the attach prelude writes
+    // the stored set unfiltered (`private_mode_prelude`).
     // Relative to the package directory vitest runs from, as the other
     // source-reading tests do (`App.coverWindowChords.test.ts`).
     const rust = readFileSync("../../../crates/chan-library/src/terminal_sessions.rs", "utf8");
@@ -148,24 +155,23 @@ describe("the fresh-shell reset list", () => {
     const unparsed: string[] = [];
     const server = block!.split("\n").flatMap((line) => {
       if (/^\s*(?:\/\/|$)/.test(line)) return [];
-      const n = line.match(/^\s*(\d+),/);
+      const code = line.replace(/\s*\/\/.*$/, "");
+      const n = code.match(/^\s*(\d+),$/);
       if (n) return [Number(n[1])];
-      const id = line.match(/^\s*(\w+),/);
+      const id = code.match(/^\s*(\w+),$/);
       if (id && consts.has(id[1]!)) return [consts.get(id[1]!)!];
       unparsed.push(line.trim());
       return [];
     });
     expect(unparsed, "every line of the block parsed to a mode").toEqual([]);
-    expect(server.length, "every line of the block parsed to a mode").toBe(12);
+    expect(new Set(XTERM_CASES)).toEqual(new Set(FRESH_SHELL_RESET_MODES));
+    // The sorted comparison runs before the count so a drift names its mode.
     expect([...FRESH_SHELL_RESET_MODES].sort((a, b) => a - b)).toEqual([...server].sort((a, b) => a - b));
-    // The mounted xterm cases stay literal so a dropped mode goes red at its
-    // own case; this ties that literal list to the reset list.
-    expect(new Set([1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004])).toEqual(
-      new Set(FRESH_SHELL_RESET_MODES),
-    );
-    // xterm.js holds 32 parameters and upstream ghostty 16: past the longer
-    // cap a core would silently drop the reset's tail while this tie stays
-    // green.
+    expect(server.length, "the server tracks twelve modes").toBe(12);
+    // xterm.js stores 32 parameters (`@xterm/xterm` `Params.ts`); 16 stays the
+    // bound as the conservative one for the vendored ghostty core, whose cap
+    // no source in the tree states. Past a core's cap the tail would drop
+    // silently while this tie stays green.
     expect(FRESH_SHELL_RESET_MODES.length).toBeLessThanOrEqual(16);
   });
 });

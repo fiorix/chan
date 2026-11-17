@@ -53,6 +53,9 @@ import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { registerTerminalInputSink, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 
 const SESSION = "sess-ghostty";
+// The mounted cases below stay a literal list so a dropped mode goes red at
+// its own case; the drift test forces it to grow with the reset list.
+const GHOSTTY_CASES = [1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 1049];
 const mounted = new Set<Record<string, unknown>>();
 const cleanups: Array<() => void> = [];
 
@@ -134,7 +137,7 @@ describe("a Ghostty tab reconnecting to a session", () => {
   // same-id resume and cleared for a fresh shell. Mode 1001 has its own
   // case below: the core keeps no highlight-tracking state, so that case
   // reads the reset's bytes written to ghostty instead.
-  test.each([1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 1049])(
+  test.each(GHOSTTY_CASES)(
     "preserves DEC %i on resume and clears it for a fresh shell",
     async (mode) => {
       const [tab] = seatTerminals([terminalTab()]);
@@ -201,7 +204,7 @@ describe("a Ghostty tab reconnecting to a session", () => {
     // case; this ties that literal list to the reset list. Ghostty's core
     // keeps no highlight-tracking state, so 1001 has the byte-reading case
     // above instead, and the alternate-screen exit rides alongside.
-    expect(new Set([1, 9, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 1049])).toEqual(
+    expect(new Set(GHOSTTY_CASES)).toEqual(
       new Set([...FRESH_SHELL_RESET_MODES.filter((mode) => mode !== 1001), FRESH_SHELL_ALT_EXIT]),
     );
   });
