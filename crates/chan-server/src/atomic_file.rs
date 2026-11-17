@@ -209,8 +209,7 @@ mod tests {
         let target = dir.path().join("subdir");
         std::fs::create_dir_all(&target).expect("seed directory target");
         std::fs::write(target.join("keep"), b"kept").expect("seed kept entry");
-        write(&target, b"replacement", None)
-            .expect_err("rename over a directory must fail");
+        write(&target, b"replacement", None).expect_err("rename over a directory must fail");
         assert_eq!(
             std::fs::read(target.join("keep")).expect("read kept entry"),
             b"kept",

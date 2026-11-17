@@ -9364,8 +9364,7 @@ mod tests {
 
         let (_cfg, root, workspace) = fixture();
         workspace.write_bytes("shared.bin", b"old-bytes").unwrap();
-        let mut reader =
-            std::fs::File::open(root.path().join("shared.bin")).unwrap();
+        let mut reader = std::fs::File::open(root.path().join("shared.bin")).unwrap();
         workspace.write_bytes("shared.bin", b"new-bytes").unwrap();
         let mut old = Vec::new();
         reader.read_to_end(&mut old).unwrap();
