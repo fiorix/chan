@@ -524,8 +524,10 @@ export default {
     /// (Ctrl+Shift+C -> copySelectionToClipboard, a no-op on empty
     /// selection) with the clipboard pre-seeded with a sentinel.
     /// ghostty's hidden textarea (no xterm helper class) gets focus
-    /// first so the keydown lands on the terminal.
-    async function readSelectionViaCopy() {
+    /// first so the keydown lands on the terminal. The sentinel goes
+    /// down BEFORE the drag: a release that copies would overwrite it,
+    /// and seeding after would hide that copy.
+    async function seedClipboard() {
       await page.evaluate(async (sentinel) => {
         const ta = document.querySelector(".terminal-host textarea");
         if (!ta) {
@@ -536,6 +538,9 @@ export default {
         ta.focus();
         await navigator.clipboard.writeText(sentinel);
       }, CLIPBOARD_SENTINEL);
+    }
+    async function readSelectionViaCopy(preSeeded = false) {
+      if (!preSeeded) await seedClipboard();
       await page.keyboard.down("Control");
       await page.keyboard.down("Shift");
       await page.keyboard.press("KeyC");
@@ -673,8 +678,9 @@ export default {
       // selects NOTHING (under ghostty the report path clears the
       // in-progress selection; under xterm mouse mode disables the
       // SelectionService outright -- same user-visible outcome).
+      await seedClipboard();
       await dragOverTopRows();
-      const onSelection = await readSelectionViaCopy();
+      const onSelection = await readSelectionViaCopy(true);
       if (onSelection !== "") {
         throw new Error(
           `mouse-on leg: drag selected text under an active mouse mode ` +
@@ -683,6 +689,28 @@ export default {
         );
       }
       details.mouseOnLeg.selection = "";
+      // A bare press-and-release reporting program (DECSET 1000 alone:
+      // htop, nano, `less --mouse`) owns the pointer with no drag
+      // tracking either: the release must not copy, and the drag must
+      // still report. The sentinel stays seeded across the drag.
+      await cs([
+        "write",
+        "--tab-name",
+        TAB_G,
+        `printf '\\033[?1002l\\033[?1000;1006h${MARK_PREFIX}MODE1000_%s\\n' ${MARK_ARG}\\n`,
+      ]);
+      await waitScrollback(TAB_G, `${MARK_PREFIX}MODE1000_${MARK_ARG}`);
+      await seedClipboard();
+      await dragOverTopRows();
+      const mode1000Selection = await readSelectionViaCopy(true);
+      if (mode1000Selection !== "") {
+        throw new Error(
+          `mouse-on leg: drag under DECSET 1000 selected text ` +
+            `(${JSON.stringify(mode1000Selection.slice(0, 120))}); the ` +
+            `release copied under mouse tracking`,
+        );
+      }
+      details.mouseOnLeg.mode1000Selection = "";
       await closeTerminal(TAB_G);
 
       // ---- Leg 5b: mouse_capture OFF -- the DECSET strip works under ghostty ----

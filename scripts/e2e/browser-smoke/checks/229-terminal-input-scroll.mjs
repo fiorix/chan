@@ -203,13 +203,19 @@ export default {
           // pointer: no check drags that thumb in an engine, while jsdom
           // alone pinned the fix. Only the ghostty leg runs it.
           if (backend === "ghostty") {
+            // The same wheel from the bottom recorded offset 28.57 in four
+            // runs: wait for an offset the wheel reaches, not past it.
             await page.mouse.wheel({ deltaY: -600 });
             await waitFor(page, `${backend}: thumb arm enters history`, read,
-              (state) => !state.bottom && state.offset > 50);
-            const thumb = await page.evaluate(({ hostQuery }) => {
+              (state) => !state.bottom && state.offset > 20);
+            const locateThumb = ({ hostQuery }) => {
               const host = document.querySelector(hostQuery);
               const term = window.__ghosttyTerminals229.find((t) => !t.isDisposed && t.element === host);
               if (!term) throw new Error("the opened ghostty Terminal was not captured");
+              // Fresh fade: chan's gate claims the strip only while the
+              // overlay shows (1.5 s plus a fade), and on a loaded guest a
+              // late press lands on content and reads as a product failure.
+              term.showScrollbar();
               const canvas = term.renderer.getCanvas();
               const rect = canvas.getBoundingClientRect();
               const history = term.getScrollbackLength();
@@ -217,13 +223,40 @@ export default {
               const thumbH = Math.max(20, (term.rows / (history + term.rows)) * track);
               const thumbY = 4 + (track - thumbH) * (1 - term.getViewportY() / history);
               return {
-                x: rect.left + rect.width - 8 - 4,
+                // Mid-strip: the strip spans width-12 to width-4, and a
+                // fractional rect can miss its inclusive left edge.
+                x: rect.left + rect.width - 8,
                 y: rect.top + thumbY + thumbH / 2,
               };
-            }, { hostQuery });
+            };
+            const readDragging = ({ hostQuery }) => {
+              const host = document.querySelector(hostQuery);
+              const term = window.__ghosttyTerminals229.find((t) => !t.isDisposed && t.element === host);
+              if (!term) throw new Error("the opened ghostty Terminal was not captured");
+              return term.isDraggingScrollbar === true;
+            };
+            let thumb = await page.evaluate(locateThumb, { hostQuery });
             await page.mouse.move(thumb.x, thumb.y);
             await page.mouse.down();
             await frame(page);
+            // A press that missed the strip starts no thumb drag: an
+            // instrument fault, not a product verdict. Re-aim once on a
+            // fresh fade; a second miss stays an instrument fault.
+            let dragging = await page.evaluate(readDragging, { hostQuery });
+            if (!dragging) {
+              await page.mouse.up();
+              thumb = await page.evaluate(locateThumb, { hostQuery });
+              await page.mouse.move(thumb.x, thumb.y);
+              await page.mouse.down();
+              await frame(page);
+              dragging = await page.evaluate(readDragging, { hostQuery });
+            }
+            if (!dragging) {
+              throw new Error(
+                `${backend}: instrument fault: the thumb press missed the strip twice, ` +
+                `no thumb drag to judge`,
+              );
+            }
             const atPress = (await read()).offset;
             // A nonzero drag down the track moves the view toward newer
             // rows; at the base, without a pointermove path, the view
