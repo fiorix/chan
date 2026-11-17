@@ -8,7 +8,7 @@ These eight files are unchanged observations of hf-hub 0.4.3's synchronous `ApiR
 
 The capture's standalone Rust `src/main.rs` has SHA256 `bbbef3d2467b0d820f3b2aba42447b36b918d4b9e74f3b5df8f326b5c177b231`, its Python `capture.py` has SHA256 `359b9eef4a5d20bb95cf0732607deb62968664370b2a820a1b71baeab4077260`, its resolved dependency lock has SHA256 `9bd613256354a40ebc05e99c9c24012edffafffb4e86aa42976e885d8770c1c8`, and the executed binary has SHA256 `0550d1e4457f57328da45ab0c686b01bc29d74c131b6de5e20ad9a6abe1c5d39`. The capture uses hf-hub's published `api/sync.rs` writer and `Cache` reader; it supplies no expected cache listing.
 
-The regeneration harness is in the chan-dev archive at `releases/v0131-team/evidence/Web131/modelroots-capture-r2/`. It contains `src/main.rs`, `capture.py`, `Cargo.toml`, `Cargo.lock` and its run instructions.
+The regeneration harness is in the chan-dev archive at `releases/v0131/team/evidence/Web131/modelroots-capture-r2/`. It contains `src/main.rs`, `capture.py`, `Cargo.toml`, `Cargo.lock` and its run instructions.
 
 The copied file hashes are:
 
