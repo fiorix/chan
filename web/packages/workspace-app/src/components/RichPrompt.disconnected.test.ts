@@ -221,3 +221,95 @@ describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt while disconnected"
     expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toHaveLength(1);
   });
 });
+
+describe.each(["xterm", "ghostty"] as const)("%s Rich Prompt over an ended terminal", (backend) => {
+  const EXITED = "terminal exited; Restart terminal for a new shell";
+
+  test("after an exit frame a submit names Restart terminal and keeps its text", async () => {
+    const { target, tab, term, socket, view, submit, note } = await composer(backend);
+    await receive(socket, { type: "exit", code: 0 });
+    await flush();
+    // The server closes the socket after the exit frame.
+    socket.readyState = 3;
+    // Whatever the exit frame's own output did to the view, the refusal
+    // must not move it.
+    const before = history(term);
+    submit();
+    await flush();
+    expect(note()).toBe(EXITED);
+    expect(target.querySelector(".rp-text")?.getAttribute("aria-live")).toBe("polite");
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(tab.pendingPrompt).toBeUndefined();
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
+    expect(history(term)).toBe(before);
+  });
+
+  test("after an exit frame a submit is refused even while the socket is still open", async () => {
+    const { term, socket, view, submit, note } = await composer(backend);
+    await receive(socket, { type: "exit", code: 0 });
+    await flush();
+    expect(socket.readyState).toBe(1);
+    // Whatever the exit frame's own output did to the view, the refusal
+    // must not move it.
+    const before = history(term);
+    submit();
+    await flush();
+    expect(note()).toBe(EXITED);
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(history(term)).toBe(before);
+  });
+
+  test("after a closed frame that ended the session a submit names Restart terminal", async () => {
+    const { socket, view, submit, note } = await composer(backend);
+    await receive(socket, { type: "closed", reason: "idle" });
+    await flush();
+    socket.readyState = 3;
+    submit();
+    await flush();
+    expect(note()).toBe(EXITED);
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
+  });
+
+  test("with the socket down and redialling a submit shows the not-connected note as today", async () => {
+    const { socket, view, submit, note } = await composer(backend);
+    socket.readyState = 0;
+    submit();
+    await flush();
+    expect(note()).toBe(NOTICE);
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([]);
+    expect(view.state.doc.toString()).toBe(TEXT);
+    expect(view.state.readOnly).toBe(false);
+  });
+
+  test("a restart after the exited note takes the kept text on the next submit", async () => {
+    const { socket, submit, note } = await composer(backend);
+    await receive(socket, { type: "exit", code: 0 });
+    await flush();
+    socket.readyState = 3;
+    submit();
+    await flush();
+    expect(note()).toBe(EXITED);
+    await receive(socket, {
+      type: "session",
+      id: "sess-2",
+      seq: 0,
+      generation: 2,
+      missed_bytes: 0,
+      bytes_since_focus: 0,
+      submit_agent: "claude",
+    });
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await flush();
+    socket.readyState = 1;
+    submit();
+    await flush();
+    expect(sentFrames(socket).filter((frame) => frame.type === "prompt")).toEqual([
+      { type: "prompt", data: TEXT, agent: "claude", id: expect.any(String) },
+    ]);
+    expect(note()).not.toBe(EXITED);
+  });
+});

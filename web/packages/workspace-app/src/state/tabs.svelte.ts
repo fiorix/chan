@@ -3043,6 +3043,30 @@ export function sendPromptToTerminal(
   return sink(data, agent, id);
 }
 
+/// Why a Rich Prompt submit was refused, read only after
+/// `sendPromptToTerminal` returns false: the terminal's shell or session is
+/// gone for good (`exited`; restart is the recovery) or its socket is down
+/// (`down`; it redials).
+export type TerminalPromptRefusal = "exited" | "down";
+type TerminalPromptRefusalReader = () => TerminalPromptRefusal;
+const terminalPromptRefusalReaders = new Map<string, TerminalPromptRefusalReader>();
+
+export function registerTerminalPromptRefusalReader(
+  tabId: string,
+  reader: TerminalPromptRefusalReader,
+): () => void {
+  terminalPromptRefusalReaders.set(tabId, reader);
+  return () => {
+    if (terminalPromptRefusalReaders.get(tabId) === reader) terminalPromptRefusalReaders.delete(tabId);
+  };
+}
+
+/// Why the terminal refused a prompt submit. Unknown tabs, and terminals
+/// that never registered a reader, read as `down`.
+export function terminalPromptRefusal(tabId: string): TerminalPromptRefusal {
+  return terminalPromptRefusalReaders.get(tabId)?.() ?? "down";
+}
+
 /// Cancel/recall sink: send a `cancel-prompt` frame on a SPECIFIC terminal's
 /// WS so the server removes a still-queued message by its `prompt_id`. Mirrors
 /// the prompt sink so RichPrompt can reach the terminal's socket without owning

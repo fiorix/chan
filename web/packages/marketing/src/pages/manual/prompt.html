@@ -59,6 +59,7 @@
       <li>While a message waits, typing starts the next one. Then <strong>↑ recall</strong> in the strip, or <kbd>Up</kbd> in an empty bubble, takes the waiting message back to edit, and <kbd>Esc</kbd> in an empty bubble drops it from the queue.</li>
       <li>The strip reads <em>queue full, try again</em> when the terminal's queue is full, and <em>connection lost, message may still be queued</em> when chan cannot confirm the send.</li>
       <li>If the terminal is disconnected when you submit, the strip briefly reads <em>terminal not connected; try again</em>. Your text stays editable. Submit again after the terminal reconnects; it is not sent automatically.</li>
+      <li>If the terminal's shell has exited, or its session has ended, the strip briefly reads <em>terminal exited; Restart terminal for a new shell</em>. Your text stays editable. Restart the terminal, then submit again; it is not sent automatically.</li>
       <li>Drag the bubble's top edge to resize it. It reopens at that height.</li>
       <li>For an agent started by hand at a shell prompt, chan picks the submit key from the keyboard mode the agent turns on.</li>
       <li>Group broadcast does not copy Rich Prompt messages to other terminals.</li>

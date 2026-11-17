@@ -69,6 +69,7 @@
     registerTerminalCloseSink,
     registerTerminalInputSink,
     registerTerminalMetadataSink,
+    registerTerminalPromptRefusalReader,
     registerTerminalPromptSink,
     removeExplicitlyClosedTerminalTab,
     renameTerminalTab,
@@ -101,6 +102,7 @@
     terminalTabName,
     setTerminalMetadataDraft,
     type PaneSide,
+    type TerminalPromptRefusal,
     type TerminalTab as TerminalTabState,
   } from "../state/tabs.svelte";
   import {
@@ -661,12 +663,14 @@
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
     // write queue (NOT sendInput's raw keystroke path).
     const unregisterPrompt = registerTerminalPromptSink(tab.id, sendPrompt);
+    const unregisterPromptRefusal = registerTerminalPromptRefusalReader(tab.id, promptRefusal);
     // Rich Prompt recall (ArrowUp at doc-start while queued) -> `cancel-prompt`.
     const unregisterCancel = registerTerminalCancelSink(tab.id, sendCancelPrompt);
     return () => {
       unregisterInput();
       unregisterClose();
       unregisterPrompt();
+      unregisterPromptRefusal();
       unregisterCancel();
     };
   });
@@ -2222,7 +2226,19 @@
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
+  /// Rich Prompt's refusal note: after an `exit` frame, or a `closed` frame
+  /// that ended the session, the server has closed the socket and restart is
+  /// the only recovery, so the composer names Restart terminal. While the
+  /// socket is down and redialling, or the session may still reattach
+  /// (parked), the note stays "not connected".
+  function promptRefusal(): TerminalPromptRefusal {
+    if (status === "exited" && !tab.terminalSessionId) return "exited";
+    return "down";
+  }
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
+    // The session is gone: restart is the only recovery, so refuse even
+    // while the socket is still open rather than feed a dead session.
+    if (status === "exited" && !tab.terminalSessionId) return false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
     return send({ type: "prompt", data, ...(agent ? { agent } : {}), ...(id ? { id } : {}) });

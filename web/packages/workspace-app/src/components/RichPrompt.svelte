@@ -117,6 +117,7 @@
     setRichPromptDraftPath,
     setRichPromptHeight,
     tabFocusPulse,
+    terminalPromptRefusal,
     type TerminalTab,
   } from "../state/tabs.svelte";
   import { api } from "../api/client";
@@ -643,13 +644,21 @@
 
   /// Send a submitted `text` to the terminal as `delivered` and hold the
   /// composer as pending until the terminal acknowledges it.
+  /// The composer keeps its text on any refusal; the note says why it was
+  /// refused: the terminal is gone (restart is the recovery) or its socket
+  /// is down and redialling.
+  const NOT_CONNECTED_NOTE = "terminal not connected; try again";
+  const EXITED_NOTE = "terminal exited; Restart terminal for a new shell";
+
   function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
     if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) {
-      showTransientNote("terminal not connected; try again");
+      showTransientNote(
+        terminalPromptRefusal(tab.id) === "exited" ? EXITED_NOTE : NOT_CONNECTED_NOTE,
+      );
       return;
     }
-    if (transientNote === "terminal not connected; try again") {
+    if (transientNote === NOT_CONNECTED_NOTE || transientNote === EXITED_NOTE) {
       if (noteTimer !== null) clearTimeout(noteTimer);
       noteTimer = null;
       transientNote = null;
