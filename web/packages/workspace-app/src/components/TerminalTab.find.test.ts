@@ -1496,17 +1496,19 @@ describe("terminal find on the ghostty backend", () => {
   }
 
   /// The user's drag over the terminal from one screen cell to another,
-  /// handled by ghostty-web's own mouse code; returns the clipboard writes
-  /// its release made. The canvas has the grid's size, 8 by 16 pixels a cell.
+  /// handled by ghostty-web's own pointer code; returns the clipboard
+  /// writes its release made. The canvas has the grid's size, 8 by 16
+  /// pixels a cell.
   function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }) {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
     const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
+    const press = { bubbles: true, cancelable: true, button: 0, pointerId: 1, pointerType: "mouse" } as const;
     try {
-      term.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
-      term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(to) }));
-      term.canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointerdown", { ...press, ...at(from) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointermove", { ...press, ...at(to) }));
+      term.canvas.dispatchEvent(new PointerEvent("pointerup", { ...press, ...at(to) }));
       term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard;
@@ -1533,17 +1535,21 @@ describe("terminal find on the ghostty backend", () => {
     expect(selection(term)).toEqual(match(3));
   });
 
-  test("a click elsewhere in the page still clears the selection, and find leaves it cleared", async () => {
+  // ghostty-web keeps its selection on a click outside the terminal
+  // element, and find's highlight is that selection: an outside click is
+  // not a dismissal. The bar-click test above covers the bar itself; this
+  // one covers the rest of the page.
+  test("a click elsewhere in the page keeps the selection, and find keeps it highlighted", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const elsewhere = document.createElement("button");
     document.body.append(elsewhere);
     click(elsewhere);
-    expect(selection(term), "ghostty-web's click outside its canvas").toBeNull();
+    expect(selection(term), "ghostty-web keeps its selection on an outside click").toEqual(match(5));
     await output("\r\nmore");
     frames.settle();
     await tick();
-    expect(selection(term)).toBeNull();
+    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
     expect(countElement()?.textContent).toBe("1 of 3");
     pressEnter(input);
     await tick();
