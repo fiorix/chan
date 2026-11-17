@@ -60,6 +60,7 @@
     clearLauncherDraft,
     closeCommandLauncher,
     launcherDraft,
+    modalDialogOpen,
     openSettings,
     persistLauncherDraft,
     topOverlay,
@@ -274,23 +275,6 @@
 
   /// The window as the catalog builders read it. Read inside each derived
   /// list, so the catalog and the settings index are as they stand now.
-  /// Overlay ids to the panel labels the top overlay is found by. Kept
-  /// next to the predicate so a label rename fails the deck tests, not
-  /// silently.
-  const TOP_OVERLAY_PANELS = {
-    launcher: "Command launcher",
-    search: "Search",
-    settings: "Settings",
-  } as const;
-
-  /// Whether the heir sits inside the current top overlay's own panel.
-  function topOverlayPanelContains(heir: Element): boolean {
-    const top = topOverlay();
-    if (!top) return false;
-    const panel = document.querySelector('[role="dialog"][aria-label="' + TOP_OVERLAY_PANELS[top] + '"]');
-    return !!panel?.contains(heir);
-  }
-
   function deckSource(): DeckSource {
     return {
       ctx,
@@ -301,6 +285,15 @@
       recent: recentAtOpen,
       chord: chordFor,
     };
+  }
+
+  /// Whether the heir sits inside the current top overlay's own panel.
+  /// OverlayShell stamps each panel with its overlay id, so the check
+  /// follows a rename with no label map to keep.
+  function topOverlayPanelContains(heir: Element): boolean {
+    const top = topOverlay();
+    if (!top) return false;
+    return !!heir.closest('[data-overlay="' + top + '"]');
   }
 
   /// A setting the deck cannot change in place is edited in the overlay.
@@ -872,15 +865,16 @@
   onFocusLost={bumpTabFocusPulse}
   mayTakeFocus={(heir) => {
     // The Computers launcher owns the keyboard outright: a focus change in
-    // the page while it shows would take the window's first responder back
-    // (the launcher reads the DOM attribute directly, so the check is
-    // fresh). Otherwise a run hands the keyboard back when the heir owns
+    // the page while it shows would take the window's first responder back.
+    // (This predicate reads the DOM attribute directly, so the check is
+    // fresh.) Otherwise a run hands the keyboard back when the heir owns
     // it where it is: a modal dialog, a survey card, or the top overlay's
-    // own panel. Anything else, and no heir at all, goes through the
-    // shared rule, which still refuses the terminal and its composer
-    // while an owner holds them.
+    // own panel while no modal is open. Anything else, and no heir at all,
+    // goes through the shared rule, which still refuses the terminal and
+    // its composer while an owner holds them.
     if (launcherShownOverWindow()) return false;
-    if (heir && (heir.closest("[aria-modal=\"true\"], .survey-card") || topOverlayPanelContains(heir))) return true;
+    if (heir && heir.closest('[aria-modal="true"], .survey-card')) return true;
+    if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
     return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
   }}
   {toggleChord}

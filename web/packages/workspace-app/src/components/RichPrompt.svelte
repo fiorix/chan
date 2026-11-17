@@ -674,7 +674,7 @@
   /// composer as pending until the terminal acknowledges it.
   /// A keymap or strip submit takes the keyboard whenever no owner holds
   /// it, even from an unfocused pane; only a submit held for its images'
-  /// paths still needs the composer focused, since the pane may have
+  /// paths still needs the focused pane, since the pane may have
   /// changed while the server answered.
   function sendSubmitted(view: EditorView, text: string, delivered: string, onlyWhenFocused: boolean): void {
     const id = newUuid();
@@ -880,7 +880,7 @@
   }
 
   // Keep the caret where it is: a button that took focus would blur the
-  // composer, and every action below returns focus to the editor itself.
+  // composer.
   function keepComposerFocus(e: PointerEvent): void {
     e.preventDefault();
   }
