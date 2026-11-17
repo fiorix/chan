@@ -24,6 +24,7 @@ use std::sync::{Arc, OnceLock};
 
 use tauri::Manager;
 
+#[cfg(test)]
 use crate::gateway::GatewayAttempt;
 
 /// The OAuth callback the mobile leg sends as `redirect_uri` and the
@@ -164,12 +165,13 @@ pub(crate) use ios::{ensure_mobile_lifecycle_observer, start_mobile_signin};
 /// them.
 #[cfg(target_os = "ios")]
 mod ios {
+    use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, OnceLock};
 
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-    use objc2::{class, define_class, msg_send, sel, MainThreadMarker};
+    use objc2::{class, define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
     use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSString, NSURL};
     use tokio::sync::watch;
 
@@ -209,7 +211,14 @@ mod ios {
                 let outcome = outcome_rx.await.unwrap_or(MobileAuthOutcome::Failed(
                     "the sign-in sheet closed without an answer".to_string(),
                 ));
-                release_mobile_session_for(&gateway_id, &attempt);
+                // Release on the main thread: the drop may deallocate the
+                // session. Independent of the settle below either way.
+                let release = {
+                    let gateway_id = gateway_id.clone();
+                    let attempt = Arc::clone(&attempt);
+                    move || release_mobile_session_for(&gateway_id, &attempt)
+                };
+                let _ = app.run_on_main_thread(release);
                 match outcome {
                     MobileAuthOutcome::CallbackUrl(url) => match mobile_callback_query(&url) {
                         Ok(query) => {
@@ -244,26 +253,29 @@ mod ios {
                 });
             });
         }
-        let app = app.clone();
         let gateway_id = gateway_id.to_string();
         let attempt = Arc::clone(attempt);
         let authorize_url = authorize_url.to_string();
-        app.run_on_main_thread(move || {
-            if let Err(error) =
-                start_mobile_session(&authorize_url, &gateway_id, &attempt, outcome_tx)
-            {
-                crate::auth::fail_mobile_signin(app, &gateway_id, &attempt, error);
-            }
-        })
-        .map_err(|e| format!("starting the sign-in sheet: {e}"))?;
+        app.clone()
+            .run_on_main_thread(move || {
+                if let Err(error) =
+                    start_mobile_session(&authorize_url, &gateway_id, &attempt, outcome_tx)
+                {
+                    crate::auth::fail_mobile_signin(app, &gateway_id, &attempt, error);
+                }
+            })
+            .map_err(|e| format!("starting the sign-in sheet: {e}"))?;
         Ok(())
     }
 
     /// A presented session plus its provider (the provider property is weak,
     /// so both are retained here) and the attempt they belong to, so a stale
-    /// shutdown or completion can never cancel or release a successor's.
+    /// shutdown or completion can never cancel or release a successor's. The
+    /// session rides a raw pointer because `AnyObject` is not `Send`; the
+    /// holder owns its +1 from init, every lifetime op runs on the main
+    /// thread, and cancel plus release reclaim exactly once.
     struct MobileSession {
-        session: Retained<AnyObject>,
+        session: NonNull<AnyObject>,
         _provider: Retained<MobileAuthPresentationProvider>,
         gateway_id: String,
         attempt: Arc<GatewayAttempt>,
@@ -288,8 +300,12 @@ mod ios {
             .is_some_and(|presented| mobile_session_matches(presented, gateway_id, attempt))
         {
             if let Some(presented) = holder.take() {
+                // SAFETY: the holder owns this +1 and the object is alive
+                // here; the reclaim below releases exactly once.
                 unsafe {
-                    let _: () = msg_send![&presented.session, cancel];
+                    let session = &*presented.session.as_ptr();
+                    let _: () = msg_send![session, cancel];
+                    drop(Retained::from_raw(presented.session.as_ptr()));
                 }
             }
         }
@@ -297,14 +313,18 @@ mod ios {
 
     /// Release this attempt's sheet after its completion fired, if it still
     /// owns the holder. A successor's presentation survives its
-    /// predecessor's late answer.
+    /// predecessor's late answer. Main thread only: the drop may deallocate.
     fn release_mobile_session_for(gateway_id: &str, attempt: &Arc<GatewayAttempt>) {
         let mut holder = MOBILE_SESSION.lock().unwrap();
         if holder
             .as_ref()
             .is_some_and(|presented| mobile_session_matches(presented, gateway_id, attempt))
         {
-            holder.take();
+            if let Some(presented) = holder.take() {
+                // SAFETY: same ownership as the cancel path; the drop
+                // releases the +1 init handed over.
+                drop(unsafe { Retained::from_raw(presented.session.as_ptr()) });
+            }
         }
     }
 
@@ -342,7 +362,7 @@ mod ios {
             if allocated.is_null() {
                 return Err("allocating the sign-in sheet".to_string());
             }
-            msg_send![&*allocated, initWithURL: &*url callbackURLScheme: &*scheme completionHandler: &*completion]
+            msg_send![&*allocated, initWithURL: &*url, callbackURLScheme: &*scheme, completionHandler: &*completion]
         };
         unsafe {
             let _: () = msg_send![&session, setPresentationContextProvider: &*provider];
@@ -352,7 +372,10 @@ mod ios {
             return Err("the sign-in sheet refused to start".to_string());
         }
         MOBILE_SESSION.lock().unwrap().replace(MobileSession {
-            session,
+            // The +1 from init transfers into the holder; cancel and release
+            // reclaim it exactly once. Non-null by construction from a live
+            // object.
+            session: NonNull::new(Retained::into_raw(session)).expect("a live session"),
             _provider: provider,
             gateway_id: gateway_id.to_string(),
             attempt: Arc::clone(attempt),

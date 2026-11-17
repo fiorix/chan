@@ -686,24 +686,27 @@ fn enrolling_key(
 ) -> Result<Option<Enrolling>, String> {
     #[cfg(target_os = "ios")]
     return Ok(None);
-    let Some(entry) = &discovery.wireguard else {
-        return Ok(None);
-    };
-    let cfg = app_state
-        .store
-        .lock()
-        .unwrap()
-        .get()
-        .map_err(|e| e.to_string())?;
-    let key = cfg
-        .gateways
-        .into_iter()
-        .find(|g| g.id == id)
-        .and_then(|g| g.wireguard_public_key);
-    Ok(key.map(|public_key| Enrolling {
-        public_key,
-        entry: entry.clone(),
-    }))
+    #[cfg(not(target_os = "ios"))]
+    {
+        let Some(entry) = &discovery.wireguard else {
+            return Ok(None);
+        };
+        let cfg = app_state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .map_err(|e| e.to_string())?;
+        let key = cfg
+            .gateways
+            .into_iter()
+            .find(|g| g.id == id)
+            .and_then(|g| g.wireguard_public_key);
+        Ok(key.map(|public_key| Enrolling {
+            public_key,
+            entry: entry.clone(),
+        }))
+    }
 }
 
 /// The gateway's authorize page with the sign-in's parameters. The
@@ -1309,7 +1312,9 @@ impl crate::gateway::CredentialWrites for SigninWrites {
         if let Err(error) = self.store() {
             // A token that cannot be stored takes its enrollment with it, or
             // the next sign-in would find an enrolled row for a token that
-            // was never kept.
+            // was never kept. iOS enrolls nothing, so there is nothing to
+            // take on that target.
+            #[cfg(not(target_os = "ios"))]
             self.undo_enrollment();
             return Err(error);
         }
@@ -1603,23 +1608,27 @@ fn prepare_enrollment(
 ) -> Result<Option<crate::wireguard_keys::Enrollment>, String> {
     #[cfg(target_os = "ios")]
     return Ok(None);
-    let Some(enrolling) = enrolling else {
-        return Ok(None);
-    };
-    let Some(params) = params else {
-        return Err(
-            "sign-in failed: the gateway returned no WireGuard parameters for the key".to_string(),
-        );
-    };
-    let dir = state.store.lock().unwrap().wireguard_dir();
-    crate::wireguard_keys::prepare(
-        &dir,
-        gateway_id,
-        &enrolling.public_key,
-        &enrolling.entry,
-        &params,
-    )
-    .map(Some)
+    #[cfg(not(target_os = "ios"))]
+    {
+        let Some(enrolling) = enrolling else {
+            return Ok(None);
+        };
+        let Some(params) = params else {
+            return Err(
+                "sign-in failed: the gateway returned no WireGuard parameters for the key"
+                    .to_string(),
+            );
+        };
+        let dir = state.store.lock().unwrap().wireguard_dir();
+        crate::wireguard_keys::prepare(
+            &dir,
+            gateway_id,
+            &enrolling.public_key,
+            &enrolling.entry,
+            &params,
+        )
+        .map(Some)
+    }
 }
 
 /// Swap the one-time code plus the PKCE verifier for the PAT at the
