@@ -208,6 +208,15 @@ describe("the ghostty widget's paint frame", () => {
     term.refresh();
     expect(seen.at(-1), "refresh forced a full frame").toBe(true);
   });
+
+  test("a fractional grid settles instead of resizing every frame", async () => {
+    const { term } = await openPinned(FORTY, { lineHeight: 1.2 });
+    const seen: boolean[] = [];
+    term.addPaintLayer({ order: 0, paint: (frame) => void seen.push(frame.full) });
+    term.renderer!.render(term.wasmTerm!, false, 0, 0);
+    term.renderer!.render(term.wasmTerm!, false, 0, 0);
+    expect(seen.at(-1), "the backing store settled").toBe(false);
+  });
 });
 
 describe("the ghostty widget's paint options", () => {

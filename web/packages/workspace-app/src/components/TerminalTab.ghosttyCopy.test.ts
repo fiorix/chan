@@ -121,6 +121,14 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     }
     attachCustomKeyEventHandler() {}
     attachCustomWheelEventHandler() {}
+    layers: { order: number; paint: (frame: never) => void }[] = [];
+    addPaintLayer(layer: { order: number; paint: (frame: never) => void }) {
+      this.layers.push(layer);
+      return () => {
+        this.layers.splice(this.layers.indexOf(layer), 1);
+      };
+    }
+    refresh() {}
     onData(handler: (data: string) => void) {
       this.dataHandlers.push(handler);
       return { dispose: () => void this.dataHandlers.splice(this.dataHandlers.indexOf(handler), 1) };

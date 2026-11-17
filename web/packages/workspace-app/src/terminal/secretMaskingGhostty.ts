@@ -117,11 +117,13 @@ export class GhosttySecretMasker {
   }
 
   /// Drop every span and repaint the rows they covered in a full frame.
+  /// A terminal without the refresh half of the paint contract (a test
+  /// double from before it) has nothing to repaint through.
   clear(): void {
     if (this.#disposed) return;
     this.#spans = [];
     this.#frame = null;
-    this.#term.refresh();
+    if (typeof this.#term.refresh === "function") this.#term.refresh();
   }
 
   dispose(): void {

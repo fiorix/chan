@@ -299,9 +299,13 @@ export class CanvasRenderer {
     this.canvas.style.width = `${cssWidth}px`;
     this.canvas.style.height = `${cssHeight}px`;
 
-    // Set actual canvas size (scaled for DPI)
-    this.canvas.width = cssWidth * this.devicePixelRatio;
-    this.canvas.height = cssHeight * this.devicePixelRatio;
+    // Set actual canvas size (scaled for DPI). The backing store holds
+    // whole device pixels, so a fractional CSS grid (a line height that
+    // does not land on the device grid) rounds to the same integers the
+    // resize check below compares against; otherwise every frame would
+    // see a changed canvas and repaint in full.
+    this.canvas.width = Math.round(cssWidth * this.devicePixelRatio);
+    this.canvas.height = Math.round(cssHeight * this.devicePixelRatio);
 
     // Scale context to match DPI (setting canvas.width/height resets the context)
     this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
@@ -354,10 +358,12 @@ export class CanvasRenderer {
       forceAll = true;
     }
 
-    // Resize canvas if dimensions changed
+    // Resize canvas if dimensions changed, in whole device pixels like
+    // resize() stores them, so a fractional CSS grid settles instead of
+    // resizing on every frame.
     const needsResize =
-      this.canvas.width !== dims.cols * this.metrics.width * this.devicePixelRatio ||
-      this.canvas.height !== dims.rows * this.metrics.height * this.devicePixelRatio;
+      this.canvas.width !== Math.round(dims.cols * this.metrics.width * this.devicePixelRatio) ||
+      this.canvas.height !== Math.round(dims.rows * this.metrics.height * this.devicePixelRatio);
 
     if (needsResize) {
       this.resize(dims.cols, dims.rows);
