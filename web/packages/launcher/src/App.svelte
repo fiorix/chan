@@ -273,6 +273,12 @@
     height: 100vh;
     height: 100svh;
     grid-template-rows: minmax(4rem, 1fr) minmax(0, auto) minmax(4rem, 1fr);
+    /* iOS safe areas: status bar, home indicator, landscape notch. Zero
+       everywhere else, so desktop and embeds are unaffected. */
+    padding-top: env(safe-area-inset-top);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
   }
 
   .launcher-surface.deck > :global(.topbar) {

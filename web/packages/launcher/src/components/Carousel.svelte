@@ -34,6 +34,16 @@
   import { activeCommandLauncherDraft } from "../state/commandLauncher.svelte";
   import { ChevronLeft, ChevronRight } from "@lucide/svelte";
   import { decks, showCard, type DeckName } from "../state/deck.svelte";
+  import { isIOS } from "../state/capabilities";
+
+  // Chord hints without the terminal chord on iOS, where no terminal opens.
+  const keyHint = [
+    "g screens",
+    "o on/off",
+    ...(isIOS ? [] : ["t terminal"]),
+    "w workspace window",
+    "h show/hide",
+  ].join(" · ");
   import {
     HIDE_BEYOND_DEG,
     cardWidth,
@@ -282,7 +292,7 @@
       </button>
     {/if}
   </div>
-  <p class="key-hint">g screens · o on/off · t terminal · w workspace window · h show/hide</p>
+  <p class="key-hint">{keyHint}</p>
   {#if count > 1}
     <!-- Pointer convenience mirroring the arrows: hidden from assistive tech
          and out of the tab order, since the arrows and the side buttons
