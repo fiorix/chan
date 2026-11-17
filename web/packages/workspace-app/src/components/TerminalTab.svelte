@@ -169,6 +169,7 @@
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
+  import { freshShellResetSequence } from "../terminal/freshShellReset";
   import {
     alignGhosttyRendererToXterm,
     gateGhosttyScrollbarClicks,
@@ -429,8 +430,9 @@
   let reconnectBackoffMs = WS_RECONNECT_BACKOFF_MIN_MS;
   // Scrollback snapshot resume state. `pendingSnapshot` is a cache hit
   // loaded at connect time, primed into the xterm on the attach prelude only
-  // when the server confirms the same generation + no missed bytes; otherwise
-  // discarded for a full replay. `receivedSeq` tracks the server byte cursor
+  // when the frame keeps the cached session id and the server confirms the
+  // same generation + no missed bytes; otherwise discarded for a full replay.
+  // `receivedSeq` tracks the server byte cursor
   // (prelude `seq` + live bytes since) so a capture knows where to resume from.
   // `serverGeneration` is the live session epoch (null until the first prelude).
   let pendingSnapshot: TerminalSnapshot | null = null;
@@ -1846,7 +1848,9 @@
         // no ring bytes were lost: then the replay chunks that follow are just
         // the delta past the cached cursor and append cleanly on top. On any
         // mismatch the server has already fallen back to a full replay, so drop
-        // the stale snapshot and let those chunks repaint from scratch. Written
+        // the stale snapshot and let those chunks repaint from scratch. A
+        // snapshot cached under the old session id is another session's
+        // screen: a fresh id drops it with the wrong modes it carries. Written
         // inside the replay window so xterm's device-report replies stay
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
@@ -1854,25 +1858,21 @@
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
-        // with the xterm still holding a dead TUI's negotiated input modes.
-        // Reset mouse tracking (including the 1015 urxvt format), exit the
-        // alt-screen and drop the keyboard protocol before any replay so that
-        // leftover state does not leak into the new shell. The protocol is
-        // reset in place, since the installed parser and key handlers hold
-        // that object. A same-id live resume keeps the running program's
-        // modes untouched, as the start does for a reattach.
+        // with the terminal still holding a dead TUI's negotiated input
+        // modes. Clear every mode in the server's tracked set plus the
+        // alternate-screen exit, and drop the keyboard protocol, before any
+        // replay so that leftover state does not leak into the new shell.
+        // The protocol is reset in place, since the installed parser and key
+        // handlers hold that object. A same-id live resume keeps the running
+        // program's modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
           ensureTerminalKeyboardProtocol(tab, true);
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
-          writeParsedPtyOutput(
-            new TextEncoder().encode(
-              "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
-            ),
-            "replay",
-          );
+          writeParsedPtyOutput(new TextEncoder().encode(freshShellResetSequence()), "replay");
         }
         if (
           pendingSnapshot &&
+          frame.id === priorId &&
           frame.generation === pendingSnapshot.generation &&
           (frame.missed_bytes ?? 0) === 0
         ) {

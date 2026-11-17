@@ -195,6 +195,17 @@ export async function attach(
   });
 }
 
+/// Whether the bytes written to a terminal clear this DEC private mode: some
+/// `CSI ? ... l` sequence names it exactly. A set sequence (`h`) never
+/// counts. Shared by the fresh-shell reset cases on both backends.
+export function resetClearsMode(written: string, mode: number): boolean {
+  return written.split("\x1b[?").slice(1).some((rest) => {
+    const end = rest.search(/[^0-9;]/);
+    if (end === -1 || rest[end] !== "l") return false;
+    return rest.slice(0, end).split(";").includes(String(mode));
+  });
+}
+
 /// Deliver PTY output on the socket, as an ArrayBuffer of this realm.
 export async function output(socket: TerminalSocket, text: string): Promise<void> {
   const bytes = new TextEncoder().encode(text);
