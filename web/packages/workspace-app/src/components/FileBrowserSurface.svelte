@@ -21,8 +21,8 @@
   import { openMediaViewer } from "../state/mediaOpen";
   import { windowCaps } from "../state/windowCaps";
   import {
-    browserSelection, ensureFbTreeInstance, fbActivateInstance, fbActiveInstanceId,
-    fbTreeInstance, fbSelectSet, fbSelectSingle, clearTreeDirError, handBrowserTargetToFocusedTab, loadTreeDir,
+    browserSelection, ensureFbTreeInstance, fbActivateInstance,
+    fbTreeInstance, fbSelectSet, fbSelectSingle, clearTreeDirError, loadTreeDir,
     openCommandLauncherFromMenu, openFsGraphForDirectory, openFsGraphForFile, openGraphForContact, openGraphForLanguage,
     paneWidths, persistPaneWidths, revealPathInBrowser, schedulePersistStateToHash, scheduleSessionSave,
     seedFbTreeInstanceFromReloadSnapshot, surfaceThemeOverride, toggleBrowserSidePane, tree, workspace,
@@ -167,14 +167,7 @@
         });
       }
     });
-    return () => untrack(() => {
-      // A targeted dock hands the commands and the keyboard to the focused
-      // pane's active tab as it unmounts. A tab closing, or a dock closing
-      // while another surface holds the target, changes nothing here.
-      const handsOver = !isTab && fbActiveInstanceId() === id;
-      fbWatchDispose(id);
-      if (handsOver) handBrowserTargetToFocusedTab();
-    });
+    return () => untrack(() => fbWatchDispose(id));
   });
 
   // A tab's tree takes the keyboard when its pane becomes the focused one

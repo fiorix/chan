@@ -20,7 +20,7 @@ import { xterm } from "../__tests__/xterm";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
 import {
-  browserSelection, browserSidePanes, disposeFbTreeInstance, fbActiveInstanceId, fbClipboard, fbClipboardClear,
+  browserSelection, browserSidePanes, fbActiveInstanceId, fbClipboard, fbClipboardClear,
   fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet,
 } from "../state/store.svelte";
 import {
@@ -57,10 +57,6 @@ afterEach(async () => {
   cancelPaneMode();
   fbClipboardClear();
   await unmountApp();
-  // A targeted dock hands its target to the focused pane's tab as it
-  // unmounts, so the handover can outlive the test: release the leftover.
-  const leftover = fbActiveInstanceId();
-  if (leftover) disposeFbTreeInstance(leftover);
   browserSelection.path = null;
   browserSelection.paths = [];
   vi.restoreAllMocks();
@@ -122,6 +118,10 @@ async function layOut(left: Tab[] = [browserTab(LEFT_TAB, LEFT_PATH)]): Promise<
 
 async function showDock(): Promise<void> {
   browserSidePanes.left = true;
+  await vi.waitFor(() => {
+    expect(document.querySelector(".browser.dock"), "dock mounted").toBeTruthy();
+    expect(document.querySelector('.browser.dock [aria-selected][title$="/docs"]'), "docs row listed").toBeTruthy();
+  });
   await settleLong();
   await loadTreeDir("docs");
   const directory = row(dock(), "docs");

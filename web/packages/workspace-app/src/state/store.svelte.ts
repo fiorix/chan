@@ -5760,6 +5760,13 @@ export function persistDateFormat(formatId: string): void {
 
 export function setBrowserSidePane(side: "left" | "right", open: boolean): void {
   if (browserSidePanes[side] === open) return;
+  // Closing the dock that holds the target hands the commands and the
+  // keyboard to the focused pane's active tab before the side pane
+  // unmounts. The handover lives here, not in the surface teardown, so an
+  // unmount that is not a close (a tab closing, a full teardown) changes
+  // nothing through this path. Direct writes of the flag (prefs hydration,
+  // standalone bootstrap, tests) bypass it; every live close funnels here.
+  if (!open && browserFocus.instanceId === `fb-dock-${side}`) handBrowserTargetToFocusedTab();
   browserSidePanes[side] = open;
   persistBrowserSidePanes();
 }
