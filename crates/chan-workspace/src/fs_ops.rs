@@ -957,9 +957,23 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| ChanError::from(e.error))?;
+    persist_tempfile(tmp, path)?;
     apply_metadata(path, preserved);
     sync_dir(dir)?;
+    Ok(())
+}
+
+/// Publish an already-synced `tempfile` at `target` with
+/// `std::fs::rename`, which on Windows replaces an open target while that
+/// handle keeps reading the old bytes (`tempfile`'s `persist` refuses with
+/// `ERROR_ACCESS_DENIED` instead). On failure the temporary is removed by
+/// its drop; on success cleanup is disabled after the move. Callers sync
+/// the file and set its mode before publishing, and fsync the parent
+/// directory after.
+pub fn persist_tempfile(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
+    let mut staged = tmp.into_temp_path();
+    std::fs::rename(&staged, target)?;
+    staged.disable_cleanup(true);
     Ok(())
 }
 
@@ -2324,6 +2338,108 @@ mod tests {
             got.as_deref(),
             Some(&b"hello"[..]),
             "xattr lost on overwrite"
+        );
+    }
+
+    #[test]
+    fn persist_tempfile_publishes_bytes_and_cleans_up() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let target = dir.join("out.bin");
+        let mut staged = tempfile::Builder::new()
+            .prefix(atomic_write_temp::PREFIX)
+            .rand_bytes(8)
+            .tempfile_in(dir)
+            .unwrap();
+        use std::io::Write;
+        staged.write_all(b"published").unwrap();
+        staged.as_file().sync_all().unwrap();
+        let staged_path = staged.path().to_path_buf();
+        persist_tempfile(staged, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published");
+        assert!(!staged_path.exists(), "temporary left behind after publish");
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .all(|entry| !is_atomic_write_temp_name(
+                    entry.unwrap().file_name().to_str().unwrap_or("")
+                )),
+            "temporary left behind after publish"
+        );
+    }
+
+    #[test]
+    fn persist_tempfile_failure_removes_the_temporary() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("file"), b"not a dir").unwrap();
+        let target = dir.join("file").join("out.bin");
+        let mut staged = tempfile::Builder::new()
+            .prefix(atomic_write_temp::PREFIX)
+            .rand_bytes(8)
+            .tempfile_in(dir)
+            .unwrap();
+        use std::io::Write;
+        staged.write_all(b"unpublished").unwrap();
+        staged.as_file().sync_all().unwrap();
+        let staged_path = staged.path().to_path_buf();
+        assert!(
+            persist_tempfile(staged, &target).is_err(),
+            "rename into a file-directory unexpectedly succeeded"
+        );
+        assert!(!target.exists(), "failed publish left a target");
+        assert!(
+            !staged_path.exists(),
+            "temporary left behind after failed publish"
+        );
+    }
+
+    #[test]
+    fn atomic_write_failure_leaves_no_temporaries() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("file"), b"not a dir").unwrap();
+        // A file where a directory is expected fails for every user,
+        // including root, unlike a read-only directory.
+        let target = dir.join("file").join("out.bin");
+        let result = atomic_write(&target, b"unpublished");
+        assert!(
+            result.is_err(),
+            "write through a file-directory unexpectedly published"
+        );
+        assert!(!target.exists(), "failed write left a target");
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .all(|entry| !is_atomic_write_temp_name(
+                    entry.unwrap().file_name().to_str().unwrap_or("")
+                )),
+            "temporary left behind after failed write"
+        );
+    }
+
+    /// A reader holding the old file open keeps the old bytes while a fresh
+    /// open sees the replacement. Windows-only: `File::open` shares by
+    /// default there, so `std::fs::rename` replaces the open target; on Unix
+    /// the same holds, where `tempfile::persist` already worked.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_replaces_a_file_open_by_another_handle() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("shared.bin");
+        std::fs::write(&target, b"old-bytes").unwrap();
+        let mut reader = std::fs::File::open(&target).unwrap();
+        atomic_write(&target, b"new-bytes").unwrap();
+        let mut old = Vec::new();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new-bytes",
+            "fresh open did not see the replacement"
         );
     }
 
