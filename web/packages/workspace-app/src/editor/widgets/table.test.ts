@@ -113,6 +113,57 @@ describe("tableDecorations", () => {
     parent.remove();
   });
 
+  test("a wikilink in a cell shows its label as text", () => {
+    const { parent, view } = mountTable(
+      [
+        "| Name |",
+        "|------|",
+        "| [[note]] [[folder/other.md]] |",
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td")?.textContent).toBe("note other");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a code span in a cell keeps its brackets", () => {
+    const { parent, view } = mountTable(
+      [
+        "| Name |",
+        "|------|",
+        "| `[[note]]` |",
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td code")?.textContent).toBe("[[note]]");
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("a markup cell still goes through the sanitizer", () => {
+    const { parent, view } = mountTable(
+      [
+        "| Name |",
+        "|------|",
+        '| <img src=x onerror="alert(1)"> |',
+        "",
+        "after",
+      ].join("\n"),
+    );
+
+    expect(parent.querySelector(".cm-md-table td [onerror]")).toBeNull();
+
+    view.destroy();
+    parent.remove();
+  });
+
   test.each([
     {
       name: "two columns with a body at the document start and a tight heading",

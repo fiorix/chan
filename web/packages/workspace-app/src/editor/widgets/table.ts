@@ -78,7 +78,7 @@ class TableWidget extends WidgetType {
       el.dataset.col = String(col);
       // Cell source is inline markdown; render it (bold, italic, code,
       // links) through the sanitized inline pipeline before insert.
-      el.innerHTML = renderMarkdownInline(source);
+      el.innerHTML = renderMarkdownInline(source, { wikilinks: true });
       return el;
     };
     const thead = document.createElement("thead");

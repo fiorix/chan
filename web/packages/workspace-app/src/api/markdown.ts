@@ -3,6 +3,10 @@
 //
 // Output is sanitized via DOMPurify before any {@html ...} insert
 // so every {@html ...} insertion goes through the same chokepoint.
+// Wikilink labels are opt-in per call: pass `{ wikilinks: true }`
+// where the surface shows labels (exports, Copy as HTML, the link
+// preview, survey bodies, table cells); other callers keep the
+// authored syntax.
 
 import DOMPurify, { type Config } from "dompurify";
 import { marked } from "marked";
@@ -101,8 +105,8 @@ const SANITIZE_OPTS: Config = {
 /// for `{@html ...}`. Synchronous (we use marked's sync `parse`
 /// and DOMPurify on the result) so callers can use it inline in
 /// templates without `await`.
-/// Slides and printable documents opt into editor wikilink labels; other
-/// callers keep the authored syntax.
+/// Pass `{ wikilinks: true }` where the surface shows editor wikilink
+/// labels; other callers keep the authored syntax.
 export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}): string {
   // marked.parse can return Promise<string> if any extension is
   // async; we use no async extensions, so cast through unknown.
@@ -117,8 +121,11 @@ export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}
 /// e.g. a `cs terminal survey` prompt -- without changing the global
 /// `breaks: false` (which preserves paragraph boundaries elsewhere). The
 /// per-call options merge over the instance defaults, so `gfm` stays on.
-export function renderMarkdownWithBreaks(input: string): string {
-  const raw = marked.parse(input ?? "", {
+/// Pass `{ wikilinks: true }` where the surface shows editor wikilink
+/// labels; other callers keep the authored syntax.
+export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean } = {}): string {
+  const source = input ?? "";
+  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source) : source, {
     async: false,
     breaks: true,
     gfm: true,
@@ -131,7 +138,10 @@ export function renderMarkdownWithBreaks(input: string): string {
 /// block element (no `<p>`). For inline-only contexts like table cells
 /// that need marked's inline pass but must stay in flow. Goes through
 /// the same `DOMPurify.sanitize` chokepoint as the block renderers.
-export function renderMarkdownInline(input: string): string {
-  const raw = marked.parseInline(input ?? "", { async: false }) as string;
+/// Pass `{ wikilinks: true }` where the surface shows editor wikilink
+/// labels; other callers keep the authored syntax.
+export function renderMarkdownInline(input: string, opts: { wikilinks?: boolean } = {}): string {
+  const source = input ?? "";
+  const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source) : source, { async: false }) as string;
   return DOMPurify.sanitize(raw, SANITIZE_OPTS);
 }

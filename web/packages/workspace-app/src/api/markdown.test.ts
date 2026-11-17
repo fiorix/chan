@@ -8,12 +8,35 @@ function renderMarkdownForExport(input: string): string {
 }
 
 describe("wikilink labels", () => {
-  test("requires an explicit export option and leaves sibling renderers alone", () => {
+  test("renders wikilink labels in every renderer that opts in", () => {
     const source = "[[note]] [[note|alias]]";
-    for (const html of [renderMarkdown(source), renderMarkdownWithBreaks(source), renderMarkdownInline(source)]) {
+    for (const html of [renderMarkdown(source, { wikilinks: true }), renderMarkdownWithBreaks(source, { wikilinks: true }), renderMarkdownInline(source, { wikilinks: true })]) {
       const root = document.createElement("div");
       root.innerHTML = html;
-      expect(root.textContent?.trim()).toBe(source);
+      expect(root.textContent?.trim()).toBe("note alias");
+    }
+  });
+
+  test("leaves inline code and fenced code as typed in every renderer", () => {
+    const source = "`[[note]]`\n\n```text\n[[note]]\n```\n";
+    for (const html of [renderMarkdown(source), renderMarkdownWithBreaks(source)]) {
+      const root = document.createElement("div");
+      root.innerHTML = html;
+      expect(root.querySelector("p code")?.textContent).toBe("[[note]]");
+      expect(root.querySelector("pre code")?.textContent).toBe("[[note]]\n");
+    }
+    const inline = document.createElement("div");
+    inline.innerHTML = renderMarkdownInline("`[[note]]`");
+    expect(inline.querySelector("code")?.textContent).toBe("[[note]]");
+  });
+
+  test("keeps a markup-carrying label literal and element-free in every renderer that opts in", () => {
+    const label = '<img src=x onerror="alert(1)">';
+    for (const html of [renderMarkdown(`[[note|${label}]]`, { wikilinks: true }), renderMarkdownWithBreaks(`[[note|${label}]]`, { wikilinks: true }), renderMarkdownInline(`[[note|${label}]]`, { wikilinks: true })]) {
+      const root = document.createElement("div");
+      root.innerHTML = html;
+      expect(root.querySelector("img")).toBeNull();
+      expect(root.textContent).toContain(label);
     }
   });
 

@@ -178,7 +178,7 @@ function renderBody(
   fromPath: string | null,
 ): { body: HTMLDivElement; imgs: HTMLImageElement[] } {
   const body = document.createElement("div");
-  body.innerHTML = renderMarkdown(markdown);
+  body.innerHTML = renderMarkdown(markdown, { wikilinks: true });
   const refs = findWorkspaceImageRefs(markdown);
   const imgs = Array.from(body.querySelectorAll("img")).filter((img) =>
     isWorkspaceImageSrc(img.getAttribute("src") ?? ""),

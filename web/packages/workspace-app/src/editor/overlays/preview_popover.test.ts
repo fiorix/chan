@@ -129,7 +129,7 @@ test("a previewed note loads images relative to its own path", async () => {
   });
 });
 
-test("a link preview leaves wikilinks as authored", async () => {
+test("a link preview shows wikilink labels", async () => {
   vi.mocked(api.read).mockResolvedValueOnce({
     path: "notes/a.md",
     content: "[[note]] [[note|alias]]",
@@ -141,6 +141,39 @@ test("a link preview leaves wikilinks as authored", async () => {
   open(anchor, "notes/a.md");
   await vi.waitFor(() => {
     expect(document.querySelector(".md-preview-md p")?.textContent)
-      .toBe("[[note]] [[note|alias]]");
+      .toBe("note alias");
+  });
+});
+
+test("a link preview leaves inline code and fenced code as typed", async () => {
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: "`[[note]]`\n\n```text\n[[note]]\n```\n",
+    mtime: null,
+    writable: true,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  open(anchor, "notes/a.md");
+  await vi.waitFor(() => {
+    expect(document.querySelector(".md-preview-md p code")?.textContent).toBe("[[note]]");
+    expect(document.querySelector(".md-preview-md pre code")?.textContent).toBe("[[note]]\n");
+  });
+});
+
+test("a link preview gives a markup-carrying label no element", async () => {
+  const label = '<img src=x onerror="alert(1)">';
+  vi.mocked(api.read).mockResolvedValueOnce({
+    path: "notes/a.md",
+    content: `[[note|${label}]]`,
+    mtime: null,
+    writable: true,
+  });
+  const anchor = document.createElement("span");
+  document.body.append(anchor);
+  open(anchor, "notes/a.md");
+  await vi.waitFor(() => {
+    expect(document.querySelector(".md-preview-md img")).toBeNull();
+    expect(document.querySelector(".md-preview-md p")?.textContent).toContain(label);
   });
 });

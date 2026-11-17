@@ -167,6 +167,39 @@ describe("survey overlay", () => {
     expect(target.querySelector(".survey-overlay")).toBeNull();
   });
 
+  test("a survey body shows a wikilink as its label", async () => {
+    surveyState.windowWide = { spec: spec({ bodyMarkdown: "Open [[note|alias]] now" }), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+
+    expect(target.querySelector(".survey-body")?.textContent?.trim()).toBe("Open alias now");
+  });
+
+  test("a survey body leaves inline code and fenced code as typed", async () => {
+    surveyState.windowWide = { spec: spec({ bodyMarkdown: "Type `[[note]]` here\n\n```text\n[[note]]\n```" }), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+
+    expect(target.querySelector(".survey-body p code")?.textContent).toBe("[[note]]");
+    expect(target.querySelector(".survey-body pre code")?.textContent).toBe("[[note]]\n");
+  });
+
+  test("a survey body gives a markup-carrying label no element", async () => {
+    const label = '<img src=x onerror="alert(1)">';
+    surveyState.windowWide = { spec: spec({ bodyMarkdown: `Open [[note|${label}]] now` }), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+
+    expect(target.querySelector(".survey-body img")).toBeNull();
+    expect(target.querySelector(".survey-body")?.textContent).toContain(label);
+  });
+
   test("renders the body + numbered options for a window-wide survey", async () => {
     surveyState.windowWide = { spec: spec({ title: "Search backend" }), busy: false };
     const target = document.createElement("div");
