@@ -29,7 +29,7 @@ const LINES = 60;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default {
-  name: "terminal-ghosty-halfscale-repaint",
+  name: "terminal-ghostty-halfscale-repaint",
   async run(ctx) {
     const socket = ctx.controlSocket;
     if (!socket) ctx.skip("control socket not found for the server pid");
