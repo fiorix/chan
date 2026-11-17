@@ -15,13 +15,14 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/xterm")).w
 
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { api } from "../api/client";
+import { updateGlobalConfigSerial } from "../api/preferenceWrite";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 import { xterm } from "../__tests__/xterm";
 import { commandById, commandContext, commandUnavailableReason } from "../state/commands";
 import { commandSurfaceId } from "../state/commands/browser";
 import {
   browserSelection, browserSidePanes, fbActiveInstanceId, fbClipboard, fbClipboardClear,
-  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet,
+  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet, openSettings, setBrowserSidePane,
 } from "../state/store.svelte";
 import {
   activeBrowserTab, activeFileTab, cancelPaneMode, enterPaneMode, layout, paneMode, restoreLayout,
@@ -85,6 +86,9 @@ function element(selector: string, root: ParentNode = document): HTMLElement {
 function pane(id: string): HTMLElement { return element(`.pane[data-pane-id="${id}"]`); }
 function browser(id: string): HTMLElement { return element(".browser", pane(id)); }
 function dock(): HTMLElement { return element(".browser.dock"); }
+function sideDock(side: "left" | "right"): HTMLElement {
+  return element(`.browser-side-pane.${side} .browser.dock`);
+}
 function row(root: ParentNode, path: string): HTMLElement { return element(`[aria-selected][title="demo/${path}"]`, root); }
 
 // Include pointer activation and the browser's mousedown default: jsdom
@@ -116,17 +120,20 @@ async function layOut(left: Tab[] = [browserTab(LEFT_TAB, LEFT_PATH)]): Promise<
   await vi.waitFor(() => expect(row(browser(RIGHT), RIGHT_PATH)).toBeTruthy());
 }
 
-async function showDock(): Promise<void> {
-  browserSidePanes.left = true;
+async function showDock(side: "left" | "right" = "left"): Promise<void> {
+  setBrowserSidePane(side, true);
+  // Drain the persisted write the preference mirror reads back: an
+  // unpersisted open is closed again by the next workspace refresh.
+  await updateGlobalConfigSerial(() => null);
+  const root = sideDock(side);
   await vi.waitFor(() => {
-    expect(document.querySelector(".browser.dock"), "dock mounted").toBeTruthy();
-    expect(document.querySelector('.browser.dock [aria-selected][title$="/docs"]'), "docs row listed").toBeTruthy();
+    expect(root.querySelector('[aria-selected][title$="/docs"]'), "docs row listed").toBeTruthy();
   });
   await settleLong();
   await loadTreeDir("docs");
-  const directory = row(dock(), "docs");
+  const directory = row(root, "docs");
   if (directory.getAttribute("aria-expanded") !== "true") await click(element(".twirl", directory));
-  await vi.waitFor(() => expect(row(dock(), LEFT_PATH)).toBeTruthy());
+  await vi.waitFor(() => expect(row(root, LEFT_PATH)).toBeTruthy());
 }
 
 async function run(id: string): Promise<void> {
@@ -301,6 +308,16 @@ test("a detached selection does not give commands a surface", async () => {
   expect(fileOps.createFileOrDir).toHaveBeenCalledExactlyOnceWith("");
 });
 
+async function focusSettingsControl(): Promise<HTMLElement> {
+  openSettings();
+  await settleLong();
+  const control = element('[aria-label="Settings sections"] .section-tab');
+  control.focus();
+  await settleLong();
+  expect(fbActiveInstanceId(), "focusing settings moves no target").toBe("fb-dock-left");
+  return control;
+}
+
 describe("closing the targeted dock hands the target to the focused pane", () => {
   async function targetDock(): Promise<void> {
     await layOut();
@@ -368,6 +385,8 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     expect(browserSidePanes.left, "left dock closed").toBe(false);
   }
 
+  // Characterization: passes at the base and under the reviewer's four
+  // mutants; it pins the chord path, not acceptance 1.
   test("dock chord", async () => {
     await targetDock();
     await closeDockFromChord();
@@ -386,6 +405,8 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     await expectHandedToTab();
   });
 
+  // Characterization: passes at the base and under the reviewer's four
+  // mutants; it pins the no-fallback shape, not acceptance 1.
   test("terminal active in the focused pane: the target is empty", async () => {
     await layOut([terminalTab({ id: "term-1" })]);
     await showDock();
@@ -437,10 +458,118 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     await showDock();
     await click(row(browser(RIGHT), RIGHT_PATH));
     expect(fbActiveInstanceId(), "showing the dock moves nothing").toBe(`fb-tab-${RIGHT_TAB}`);
+    const focused = document.activeElement;
     await closeDockFromLauncher();
     expect(fbActiveInstanceId(), "the target stays").toBe(`fb-tab-${RIGHT_TAB}`);
+    expect(document.activeElement, "the close moves no keyboard").toBe(focused);
     expect(commandSurfaceId()).toBe(`fb-tab-${RIGHT_TAB}`);
     expect(fbTreeInstance(`fb-tab-${RIGHT_TAB}`)?.selection.path).toBe(RIGHT_PATH);
+  });
+
+  test("closing the untargeted dock changes nothing", async () => {
+    await layOut();
+    await showDock("right");
+    await showDock("left");
+    await click(row(sideDock("right"), LEFT_PATH));
+    expect(fbActiveInstanceId(), "the right dock holds the target").toBe("fb-dock-right");
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settleLong();
+    expect(document.activeElement, "keyboard parked on the body").toBe(document.body);
+    setBrowserSidePane("left", false);
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(fbActiveInstanceId(), "the target stays").toBe("fb-dock-right");
+    expect(document.activeElement, "the close moves no keyboard").toBe(document.body);
+    expect(fbTreeInstance("fb-dock-right")?.selection.path).toBe(LEFT_PATH);
+  });
+
+  test("launcher toggle returns the keyboard to the tab's tree", async () => {
+    await targetDock();
+    await closeDockFromLauncher();
+    expect(document.activeElement === document.body, "focus left the body").toBe(false);
+    expect(element(".browser", pane(RIGHT)).contains(document.activeElement), "focus is inside the tab's tree").toBe(true);
+  });
+
+  test("launcher toggle returns the keyboard to the terminal's input", async () => {
+    xterm.textareaFocus = true;
+    try {
+      await layOut([terminalTab({ id: "term-1" })]);
+      await showDock();
+      await click(row(dock(), LEFT_PATH));
+      expect(fbActiveInstanceId(), "the dock holds the target").toBe("fb-dock-left");
+      await closeDockFromLauncher();
+      expect(commandSurfaceId()).toBeNull();
+      const textarea = xterm.terminals.at(-1)?.textarea;
+      expect(textarea, "the terminal opened a textarea").toBeTruthy();
+      await vi.waitFor(() => expect(document.activeElement).toBe(textarea));
+    } finally {
+      xterm.textareaFocus = false;
+    }
+  });
+
+  test("a close with Settings focused moves no keyboard and empties the target", async () => {
+    await targetDock();
+    const control = await focusSettingsControl();
+    await closeDockFromLauncher();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(document.activeElement, "focus stays on the Settings control").toBe(control);
+    expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
+    expect(commandSurfaceId()).toBeNull();
+  });
+
+  test("a close with a body-level launcher opener returns the keyboard to it", async () => {
+    await targetDock();
+    const field = document.createElement("input");
+    field.setAttribute("type", "text");
+    document.body.append(field);
+    try {
+      field.focus();
+      await settleLong();
+      expect(fbActiveInstanceId(), "focusing outside moves no target").toBe("fb-dock-left");
+      await closeDockFromLauncher();
+      expect(browserSidePanes.left, "left dock closed").toBe(false);
+      expect(document.activeElement, "focus returns to the body-level opener").toBe(field);
+      expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
+    } finally {
+      field.remove();
+    }
+  });
+
+  test("a chord toggle with Settings focused moves no keyboard", async () => {
+    // The user-assigned chord path dispatches the toggle command with no
+    // overlay check (App.svelte:929-934); running the command below is that
+    // path, not the launcher or menu rows above.
+    await targetDock();
+    const control = await focusSettingsControl();
+    await run("app.browser.toggleLeftDock");
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(document.activeElement, "focus stays on the Settings control").toBe(control);
+    expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
+  });
+
+  test("a no-pulse close leaves Upload and Paste refusing", async () => {
+    // The Files-tab-with-no-target state the rewrite dropped its pins for
+    // is still reachable: a close that moves no keyboard empties the target
+    // through the dock's dispose while the tab stays active.
+    await targetDock();
+    await focusSettingsControl();
+    await run("app.browser.toggleLeftDock");
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(fbActiveInstanceId(), "target emptied").toBeNull();
+    expect(activeBrowserTab()?.selected).toBe(LEFT_PATH);
+    const upload = commandById("app.browser.uploadSelection")!;
+    expect(upload.available(commandContext())).toBe(false);
+    expect(commandUnavailableReason(upload, commandContext())).toBe("Focus a file browser");
+    fbClipboardSet("copy", [RIGHT_PATH]);
+    const paste = commandById("app.browser.pasteSelection")!;
+    expect(paste.available(commandContext())).toBe(false);
+    expect(commandUnavailableReason(paste, commandContext())).toBe("Focus a file browser");
+    const transfer = vi.spyOn(api, "fsTransfer");
+    await paste.run();
+    expect(transfer, "Paste sends no transfer").not.toHaveBeenCalled();
+    await upload.run();
+    await settleLong();
+    expect(document.querySelector('input[type="file"]'), "Upload raises no picker").toBeNull();
   });
 
   test("a paste in flight from the dock lands where it was aimed", async () => {
