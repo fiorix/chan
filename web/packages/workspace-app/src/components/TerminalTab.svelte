@@ -780,14 +780,11 @@
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
-      // A survey over the terminal that moved gets the keyboard back, as
-      // the find bar, the composer and the terminal do. Any other owner
-      // yields like every other refocus: the move hands it to nothing.
-      if (surveyFor(tab.id)) {
-        tabEl?.querySelector<HTMLElement>(".survey-card")?.focus({ preventScroll: true });
-        return;
-      }
-      if (keyboardOwned(tab.id)) return;
+      // A dialog, a window-wide survey, the launcher or an overlay owns the
+      // keyboard over every terminal: the move hands it to nothing, even to
+      // the survey card over the terminal that moved. The rule reads null so
+      // a survey over this terminal alone still reaches its branch below.
+      if (keyboardOwned(null)) return;
       const owner = document.activeElement;
       if (
         owner !== null &&
@@ -795,6 +792,12 @@
         owner !== document.documentElement &&
         !tabEl?.contains(owner)
       ) {
+        return;
+      }
+      // A survey over the terminal that moved gets the keyboard back, as
+      // the find bar, the composer and the terminal do.
+      if (surveyFor(tab.id)) {
+        tabEl?.querySelector<HTMLElement>(".survey-card")?.focus({ preventScroll: true });
         return;
       }
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
@@ -2229,7 +2232,9 @@
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
-  /// a disconnected retry leaves the reader's viewport untouched.
+  /// a disconnected retry leaves the reader's viewport untouched. Returns
+  /// whether the WS was open, so the orchestrator can retry a freshly-spawned
+  /// lead.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();

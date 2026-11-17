@@ -294,9 +294,15 @@
       revealSelection();
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
-      // Preserve the viewport while restoring the caller's focus.
+      // Preserve the viewport while restoring the caller's focus. A dismissal
+      // whose heir is gone falls back to the focus-lost path under the same
+      // predicate the run's return reads, so the keyboard lands where that
+      // path puts it instead of staying where the deck left it.
       const heir = canTakeFocus(deferredFocus) ? deferredFocus : returnFocus;
-      if (!closingRun && heir?.isConnected) heir.focus({ preventScroll: true });
+      if (!closingRun) {
+        if (heir?.isConnected) heir.focus({ preventScroll: true });
+        else if (!mayTakeFocus || mayTakeFocus(null)) onFocusLost?.();
+      }
       returnFocus = null;
       // The pending opener is for a dialog that mounts in the flush that
       // unmounts this deck's input. Once that close has rendered, a dialog

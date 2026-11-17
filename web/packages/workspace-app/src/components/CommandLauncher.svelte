@@ -875,7 +875,16 @@
     // owner holds them.
     if (launcherShownOverWindow()) return false;
     if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
-    if (heir && heir.closest(".survey-card") && !modalDialogOpen()) return true;
+    // A survey card counts only in its pane while that pane is focused: a
+    // run that left focus at large after moving to another pane must not
+    // hand the keyboard to a card mounted and visible elsewhere.
+    if (
+      heir &&
+      heir.closest(".survey-card") &&
+      !modalDialogOpen() &&
+      heir.closest(".pane.focused")
+    )
+      return true;
     if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
     return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
   }}

@@ -65,11 +65,15 @@
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
+      // The rule reads the remembered element's terminal, so a survey over
+      // that terminal counts as an owner: its card keeps the keyboard and
+      // the remembered element behind it is left alone.
+      const ownerSlot = slot ?? target?.closest("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
       queueMicrotask(() => {
         // The remembered element gets the keyboard back only while no other
         // owner holds it: a survey closing under a dialog, the launcher or
         // an overlay must not move focus into the composer behind them.
-        if (!active && shown && ownsKeyboard() && !keyboardOwned(slot ?? null)) {
+        if (!active && shown && ownsKeyboard() && !keyboardOwned(ownerSlot)) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
         }
@@ -96,10 +100,17 @@
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
     }
+    // A re-run while this survey already owns the keyboard (a tab-focus pulse,
+    // a pane event) follows a window-wide owner's hold instead of grabbing
+    // the keyboard back from it. The first arrival still takes it, as before.
+    const regrab = focusedSurveyId === id;
     focusedSurveyId = id;
+    if (regrab && keyboardOwned(null)) return;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard()) card?.focus({ preventScroll: true });
+      if (shown && active?.surveyId === id && ownsKeyboard() && !(regrab && keyboardOwned(null))) {
+        card?.focus({ preventScroll: true });
+      }
     });
   });
 
