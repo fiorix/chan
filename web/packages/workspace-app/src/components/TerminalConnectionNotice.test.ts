@@ -94,7 +94,7 @@ describe("terminal connection pill", () => {
     expect(region.textContent).toBe("");
   });
 
-  test("occupies only its top-right text box with opaque theme colours", () => {
+  test("occupies only its own text box with opaque theme colours", () => {
     // jsdom computes no layout, so the overlay's positioning is a source contract.
     const source = readFileSync("src/components/TerminalConnectionNotice.svelte", "utf8");
     expect(source).toMatch(/\.terminal-connection-pill\s*\{[^}]*\bposition:\s*absolute;/);

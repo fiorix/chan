@@ -41,9 +41,10 @@ export function createTerminalConnectionHealth(
   let lastRedialAt = Number.NEGATIVE_INFINITY;
   let inputOutstanding = false;
   let noticeInputOutstanding = false;
-  // When the last user input went out. A pong answers only input sent before
-  // the ping it answers: a frame proves nothing about the client-to-server
-  // direction, but a pong arrives in send order.
+  // The last user input's stamp, held below every ping sent after it.
+  // A pong answers only input sent before the ping it answers: a frame
+  // proves nothing about the client-to-server direction, but a pong
+  // arrives in send order.
   let lastInputAt = Number.NEGATIVE_INFINITY;
   let noticePending = false;
   let noticeRemainingMs = TERMINAL_INPUT_NOTICE_MS;

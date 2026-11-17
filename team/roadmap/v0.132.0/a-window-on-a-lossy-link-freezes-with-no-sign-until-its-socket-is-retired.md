@@ -78,6 +78,7 @@ One fact that run surfaced: a remote window loads its web app from the devserver
 - The terminal's pill follows the status pill one painted frame late after a resize; the status pill's hover scale is read as its box; in a very short top pane a dropped pill hangs past the pane's bottom.
 - After a wake from sleep, keys typed while a terminal's replaced socket is still dialing are dropped; the notice reports it afterwards.
 - A key typed within about 1 to 3 s before a sleep can show the reconnect notice although its echo was on screen.
+- A pong for a ping that left before a key can still answer that key when both pings and the key share one clock millisecond, or when the clock steps back between the key and its probe; the notice and the redial hold then miss that key.
 - An unfocused window pings every 20 s, so after one late pong its warning colour can stand for up to 40 s.
 - The probe times the page as well as the network: a main-thread stall of a second or more with a ping in flight reads as a slow round trip for a few seconds.
 - A connection that is steadily slower than 400 ms reads `slow` for as long as it is.

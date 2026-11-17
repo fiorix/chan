@@ -295,6 +295,47 @@ describe("terminal connection", () => {
     connection.dispose();
   });
 
+  test("a pong for a ping sent after the key answers it across a new socket", () => {
+    const { connection } = rig();
+    connection.inputSent();
+    vi.advanceTimersByTime(1);
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
+  test("a late pong for a ping sent before the input does not answer it once the probe has left", () => {
+    const { connection, pings } = rig();
+    connection.pingSent();
+    vi.advanceTimersByTime(500);
+    connection.inputSent();
+    vi.advanceTimersByTime(1000);
+    expect(pings).toHaveLength(1);
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(true);
+    connection.dispose();
+  });
+
+  test("a pong for the first of two pings after a key still answers it", () => {
+    let t = 0;
+    const { connection } = rig(() => t);
+    connection.inputSent();
+    t = 100;
+    connection.pingSent();
+    t = 200;
+    connection.pingSent();
+    connection.pongArrived();
+    connection.retired();
+    connection.opened();
+    expect(connection.state.notice).toBe(false);
+    connection.dispose();
+  });
+
   test("a pong for a ping sent before the input does not answer it", () => {
     const { connection, runs, contact } = redialRig();
     connection.windowChanged("ok", false);
