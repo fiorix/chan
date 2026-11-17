@@ -21,6 +21,15 @@ Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make p
 
 - **`macos-wake-blank.sh`** is the one driver for macOS, and it drives nothing: it reads the unified log for how long each chan-desktop page stayed blank after it came back into view (a display or system wake, a switch back to its Space or tile) and fails over a limit. See "Blank after a wake on macOS" below.
 
+- **`fbpaste-native.sh`** drives one file-browser flow on the desktop's engine as the counterpart of browser-smoke check 232: it copies `keep.txt` through its row menu in a Files tab, pastes through the `notes` row's menu, and asserts `notes/keep.txt` on disk with the landed entry selected. `fbpaste-native.mjs` is its page-level driver through the engine's inspector; like the terminal-size driver it needs Node 22 or newer for the built-in `WebSocket`. Build the web bundles, `chan` and the native desktop at the same source revision in the guest, then run the script under a fixed 1600 by 1000 Xvfb screen:
+
+```bash
+CHAN_DESKTOP_BIN=/home/ubuntu/target/debug/chan-desktop CHAN_BIN=/home/ubuntu/target/debug/chan \
+    xvfb-run -a -s '-screen 0 1600x1000x24 -nolisten tcp' \
+    bash scripts/e2e/desktop-observations/fbpaste-native.sh \
+    /home/ubuntu/evidence/fbpaste-native-01
+```
+
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
 
 The Focus/Open fixture also needs Chrome and `puppeteer-core`; the PDF fixture needs the browser smoke's `pdf-lib`. Install the smoke's dependencies in the owning guest and set `OBS_SMOKE_DIR` to that directory when running a copied driver subtree. Set `CHROME_BIN` to the guest's Chrome for Focus/Open. The fixture outputs describe Linux WebKitGTK and a direct devserver connection only.
@@ -70,7 +79,7 @@ CHAN_DESKTOP_BIN=target/debug/chan-desktop CHAN_BIN=target/debug/chan \
     scripts/e2e/desktop-observations/hide-stroke.sh
 ```
 
-The shell drivers start their own `Xvfb` and window manager except `terminal-size-native.sh`, which needs the fixed `xvfb-run` display shown below and starts its own window manager. They need `Xvfb`, `openbox`, `xdotool`, `xprop`, ImageMagick's `import`, `python3`, `curl` and, for the hide and gateway sign-in drivers, Node 22 or newer for its built-in `WebSocket`. The native terminal-size driver also needs Node 22 or newer for its built-in `WebSocket`. Gateway sign-in also needs `pkg-config` to identify WebKitGTK and uses `gtk-query-settings` to read the display's double-click setting; without the latter it records why the setting is unavailable. A run takes one to two minutes. Its work directory, with the desktop's log, the per-arm records and screenshots, is printed at the start and is left in place after every run, whatever its exit code. Each shell driver logs its source label, the git commit with `-dirty` when its checkout has changes and `-status-unknown` when git cannot read it; the native terminal-size driver writes it to `run.json`.
+The shell drivers start their own `Xvfb` and window manager except `terminal-size-native.sh` and `fbpaste-native.sh`, which need the fixed `xvfb-run` display shown below and start their own window manager. They need `Xvfb`, `openbox`, `xdotool`, `xprop`, ImageMagick's `import`, `python3`, `curl` and, for the hide and gateway sign-in drivers, Node 22 or newer for its built-in `WebSocket`. The native terminal-size driver also needs Node 22 or newer for its built-in `WebSocket`. Gateway sign-in also needs `pkg-config` to identify WebKitGTK and uses `gtk-query-settings` to read the display's double-click setting; without the latter it records why the setting is unavailable. A run takes one to two minutes. Its work directory, with the desktop's log, the per-arm records and screenshots, is printed at the start and is left in place after every run, whatever its exit code. Each shell driver logs its source label, the git commit with `-dirty` when its checkout has changes and `-status-unknown` when git cannot read it; the native terminal-size driver writes it to `run.json`.
 
 The hide drivers are sensitive to CPU contention: under load the native window can outlast the wait, and the run then ends inconclusive, not wrong. Record the load beside a result.
 
