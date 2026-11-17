@@ -58,7 +58,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [the index pill covers Dismiss][pillcover] | not started | build |
 | [persist cannot replace an open file][persistwin] | not started | build |
-| [the Makefile's tauri fallback on Windows][taurifallback] | not started | build |
+| [the Makefile's tauri fallback on Windows][taurifallback] | merged | closed |
 | [the Windows claim's installed readings][winclaimread] | not started | build |
 | [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
