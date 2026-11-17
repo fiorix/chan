@@ -663,8 +663,13 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
 
 /// Acceptance 2's second clause on real sockets: a view that stops reading
 /// holds the session no longer than the 5 s release bound and does not slow
-/// a second view. Real 5 s wait, no test-only knob: the production path and
-/// its bound are what run.
+/// a second view. Real 5 s wait, no test-only knob. What is asserted: the
+/// program finishes without the stalled view reading (no earlier than about
+/// the bound, by the >= 4 s check) and the stalled view recovers without
+/// loss (one same-generation session frame, numeric missed count, the
+/// retained tail once). The 5 s value is pinned on a synthetic clock, with
+/// no wall time, in pacing/tests::progress_renews_deadline_and_cut_loose_stays_latched
+/// and pacing/tests::expiring_one_view_preserves_the_other_views_credit_and_deadline.
 ///
 /// The 2 MiB ring holds the whole ~1.4 MiB flood, so no view can be evicted
 /// and every recovery below is lossless by construction: a 64 KiB ring lets
@@ -692,6 +697,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         let held = held.clone();
         move || held.store(true, Ordering::SeqCst)
     });
+    // Socket B attaches before the flood, so its replay is READY alone and
+    // the start time below carries no attach latency on any schedule.
+    let (mut draining, b_session, mut received) =
+        attach_collecting(rig.address, rig.handle.id()).await;
+    let started = std::time::Instant::now();
     rig.handle.send_input(b"\n");
     loop {
         match next(&mut stalled).await {
@@ -704,29 +714,48 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         }
     }
     // Socket B drains everything the program writes, prelude replay included.
-    // No wall-clock bound here: a stalled drain is an idle transport, which
-    // the per-read budget already guards, and the hang guard below judges a
-    // completed one.
-    let (mut draining, _, mut received) = attach_collecting(rig.address, rig.handle.id()).await;
-    let started = std::time::Instant::now();
+    // A stalled drain is an idle transport: read the socket with the hang
+    // guard directly, so a run where the program is never released fails
+    // with its own name instead of a generic read timeout.
+    let drain_hang = std::time::Duration::from_secs(200);
     loop {
-        match next(&mut draining).await {
+        // The marker ends the stream, so only the tail can complete the
+        // wait; rescanning the whole buffer per frame is quadratic.
+        let frame = match tokio::time::timeout(drain_hang, draining.next()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(error))) => panic!("live view transport error: {error:?}"),
+            Ok(None) => panic!("live view ended before the flood: transport closed"),
+            Err(_) => panic!(
+                "the second view received nothing for the hang guard: the program was not released"
+            ),
+        };
+        match frame {
             ClientMessage::Binary(bytes) => {
                 received.extend_from_slice(&bytes);
-                if received
-                    .windows(DONE_MARKER.len())
-                    .any(|w| w == DONE_MARKER)
-                {
+                if received.ends_with(DONE_MARKER) {
                     break;
                 }
             }
             ClientMessage::Text(text) => {
                 let frame: Value = serde_json::from_str(&text).expect("control JSON");
                 assert_ne!(frame["type"], "error", "live view error frame: {frame}");
-                assert_ne!(
-                    frame["type"], "session",
-                    "live view takes no recovery frame: {frame}"
-                );
+                match frame["type"].as_str() {
+                    // The draining view may be released and recover without
+                    // loss on a slow schedule; only loss or a new generation
+                    // fails it here, and the byte comparison below judges.
+                    Some("session") => {
+                        assert_eq!(
+                            frame["generation"], b_session["generation"],
+                            "draining view changed incarnation: {frame}"
+                        );
+                        assert_eq!(
+                            frame["missed_bytes"].as_u64(),
+                            Some(0),
+                            "draining view lost bytes: {frame}"
+                        );
+                    }
+                    _ => {}
+                }
             }
             other => panic!("live view ended before the flood: {other:?}"),
         }
@@ -755,21 +784,31 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         expected.extend_from_slice(format!("{index}\r\n").as_bytes());
     }
     expected.extend_from_slice(DONE_MARKER);
-    assert_eq!(
-        received.len(),
-        expected.len(),
-        "the second view receives every byte once: got {} want {}",
-        received.len(),
-        expected.len(),
-    );
-    assert_eq!(
-        received
-            .iter()
-            .zip(expected.iter())
-            .position(|(got, want)| got != want),
-        None,
-        "the second view receives every byte in order",
-    );
+    let mismatch = received
+        .iter()
+        .zip(expected.iter())
+        .position(|(got, want)| got != want);
+    if received.len() != expected.len() || mismatch.is_some() {
+        let hex = |window: &[u8]| {
+            window
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let at = mismatch.unwrap_or(received.len().min(expected.len()));
+        let lo = at.saturating_sub(16);
+        panic!(
+            "the second view receives every byte once and in order: got {} want {}; first mismatch at {mismatch:?}; got window {lo}..{} {}; want window {lo}..{} {}; tail surplus {}",
+            received.len(),
+            expected.len(),
+            (at + 16).min(received.len()),
+            hex(&received[lo..(at + 16).min(received.len())]),
+            (at + 16).min(expected.len()),
+            hex(&expected[lo..(at + 16).min(expected.len())]),
+            hex(&received[expected.len().min(received.len())..]),
+        );
+    }
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
     // is the machine's like the drain's, so its bound is the same hang
@@ -813,7 +852,7 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         .expect("numeric missed_bytes");
     assert_eq!(missed, 0, "nothing evicted: the whole flood fits the ring");
     loop {
-        if tail.windows(DONE_MARKER.len()).any(|w| w == DONE_MARKER) {
+        if tail.ends_with(DONE_MARKER) {
             break;
         }
         if std::time::Instant::now() > resume_at + resume_bound {
@@ -836,6 +875,10 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
             other => panic!("stalled view ended during recovery: {other:?}"),
         }
     }
+    println!(
+        "streamlag-times elapsed={elapsed:?} resume={:?}",
+        resume_at.elapsed()
+    );
     assert_eq!(
         tail.windows(DONE_MARKER.len())
             .filter(|w| *w == DONE_MARKER)
@@ -1178,7 +1221,7 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
 
     let _gate = pty_test_lock();
     let rig = Rig::new(1024,
-        "stty -onlcr; IFS= read -r start; seq 1 1000000; printf '__STREAM_%s__' DONE; IFS= read -r finish"
+        "stty -onlcr; IFS= read -r start; seq -f %.0f 1 1000000; printf '__STREAM_%s__' DONE; IFS= read -r finish"
     ).await;
     let (mut client, initial) = rig.attach().await;
     assert_eq!(initial["missed_bytes"], 0);
@@ -1225,9 +1268,9 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
     if bytes.len() != expected.len() {
         // The child blocks on its final read, so the stream is over: a
         // short idle drain collects bytes still in flight for the report.
-        // No Mac is in the team's reach, so the mismatch must read the
-        // cause off one CI log: the first offset where the streams differ
-        // and the surplus bytes in hex.
+        // Apple's seq prints the last value twice in %g form, so the
+        // generator prints integers explicitly and both systems emit the
+        // same bytes; the windows below read the cause off one CI log.
         let idle = std::time::Duration::from_secs(2);
         while bytes.len() < expected.len() + 64 {
             match tokio::time::timeout(idle, next(&mut client)).await {
@@ -1267,7 +1310,7 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
         let hi = (at + 16).min(bytes.len());
         let want_hi = (at + 16).min(expected.len());
         panic!(
-            "the real PTY byte count is exact: got {} want {}; first mismatch at {offset:?}; got window {lo}..{hi} {}; want window {lo}..{want_hi} {}; surplus {}",
+            "the real PTY byte count is exact: got {} want {}; first mismatch at {offset:?}; got window {lo}..{hi} {}; want window {lo}..{want_hi} {}; tail surplus {} (the stream tail past the expected length; read the windows for an insertion point)",
             bytes.len(),
             expected.len(),
             hex(&bytes[lo..hi]),
