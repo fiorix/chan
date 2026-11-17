@@ -70,7 +70,8 @@ CHAN_SERVER_WINDOWS_TESTS := \
 	handoff::tests::a_claim_lock_that_is_a_symlink_is_unavailable \
 	handoff::tests::a_claim_directory_that_is_a_junction_is_unavailable \
 	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
-	devserver_handoff::tests::listener_round_trip_registered_pipe
+	devserver_handoff::tests::listener_round_trip_registered_pipe \
+	atomic_file::tests::write_replaces_a_file_open_by_another_handle
 
 # The chan-workspace tests that drive native rename races, model cache
 # publication and recovery, and model download TLS and proxy handling.
@@ -139,7 +140,8 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tls_tests::https_metadata_redirect_refuses_http_before_connecting \
 	index::embeddings::download::tls_tests::https_payload_redirect_refuses_http_before_connecting \
 	index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error \
-	index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload
+	index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload \
+	fs_ops::tests::atomic_write_replaces_a_file_open_by_another_handle
 
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a
 # macOS workstation can produce Linux bundles. DISTRO selects the rootfs +

@@ -52,7 +52,7 @@ fn write_inner_with_byte_producer(
     byte_producer(&mut tmp)?;
     tmp.as_file().sync_all()?;
     pre_persist(tmp.path())?;
-    tmp.persist(path).map_err(|error| error.error)?;
+    chan_workspace::fs_ops::persist_tempfile(tmp, path)?;
     sync_dir(dir)
 }
 
@@ -175,6 +175,71 @@ mod tests {
                 .count(),
             1,
             "only the preserved target may remain visible"
+        );
+    }
+
+    #[test]
+    fn pre_publish_failure_leaves_target_untouched_and_cleans_up() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("target.bin");
+        let prior = b"prior-target-bytes";
+        std::fs::write(&target, prior).expect("seed prior target");
+        let error = write_with_pre_persist_hook(target.as_path(), b"replacement", None, |_| {
+            Err(std::io::Error::other("injected pre-publish failure"))
+        })
+        .expect_err("pre-persist failure must surface");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            std::fs::read(&target).expect("read preserved target"),
+            prior,
+            "a refused replacement must preserve every prior byte"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read target directory")
+                .count(),
+            1,
+            "only the preserved target may remain visible"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_mode_survives_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("mode.bin");
+        write(&target, b"bytes", Some(0o600)).expect("publish with mode");
+        let mode = std::fs::metadata(&target)
+            .expect("stat published file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "published file lost its mode");
+    }
+
+    /// A reader holding the old file open keeps the old bytes while a fresh
+    /// open sees the replacement. Windows-only: `File::open` shares by
+    /// default there, so `std::fs::rename` replaces the open target; on Unix
+    /// the same holds, where the old call already worked.
+    #[cfg(windows)]
+    #[test]
+    fn write_replaces_a_file_open_by_another_handle() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let target = dir.path().join("shared.bin");
+        std::fs::write(&target, b"old-bytes").expect("seed old target");
+        let mut reader = std::fs::File::open(&target).expect("open old target");
+        write(&target, b"new-bytes", None).expect("replace open target");
+        let mut old = Vec::new();
+        reader.seek(SeekFrom::Start(0)).expect("rewind reader");
+        reader.read_to_end(&mut old).expect("read old bytes");
+        assert_eq!(old, b"old-bytes", "open reader did not keep the old bytes");
+        assert_eq!(
+            std::fs::read(&target).expect("fresh open"),
+            b"new-bytes",
+            "fresh open did not see the replacement"
         );
     }
 }
