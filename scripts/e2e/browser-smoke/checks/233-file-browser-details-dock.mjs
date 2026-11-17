@@ -2,9 +2,9 @@
 // A dock holds a selected row beside a Files tab with a selected file; the
 // launcher's Workspace details runs; the tab's inspector shows the workspace
 // body while the dock keeps its selection and the tab's own selection is gone.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileRow, navigateFiles } from "../lib/files.mjs";
+import { navigateFiles, waitFileRow } from "../lib/files.mjs";
 import { token } from "../lib/drafts.mjs";
 import { poll } from "../lib/launcher-devserver.mjs";
 
@@ -85,45 +85,50 @@ export default {
   async run(ctx) {
     const { page } = ctx;
     await page.bringToFront();
-    mkdirSync(join(ctx.workspaceDir, "notes"), { recursive: true });
-    writeFileSync(join(ctx.workspaceDir, "notes", "a.md"), "dock file\n");
-    writeFileSync(join(ctx.workspaceDir, "notes", "b.md"), "tab file\n");
+    const prefix = `details-dock-${Date.now()}`;
+    const directory = `${prefix}/notes`;
+    const fixture = join(ctx.workspaceDir, prefix);
+    mkdirSync(join(ctx.workspaceDir, directory), { recursive: true });
+    writeFileSync(join(ctx.workspaceDir, directory, "a.md"), "dock file\n");
+    writeFileSync(join(ctx.workspaceDir, directory, "b.md"), "tab file\n");
     const authToken = token(ctx);
     const { docks: originalDocks } = await readDocks(page, authToken);
     try {
       await setDock(page, "left", true, authToken);
 
-      await navigateFiles(page, "notes");
-      const tabRow = await fileRow(page, "b.md");
+      await navigateFiles(page, directory);
+      const tabRow = await waitFileRow(page, "b.md", true, { timeout: 15_000 });
       if (!tabRow) throw new Error("file row b.md not found in the Files tab");
       await tabRow.click();
       await tabRow.dispose();
-      await page.waitForFunction(() => [...document.querySelectorAll('.browser:not(.dock) [role="option"]')].some(
-        (row) => (row.getAttribute("title") ?? "").endsWith("notes/b.md") && row.getAttribute("aria-selected") === "true",
-      ), { timeout: 15_000 });
+      await page.waitForFunction((wanted) => [...document.querySelectorAll('.browser:not(.dock) [role="option"]')].some(
+        (row) => (row.getAttribute("title") ?? "").endsWith(wanted) && row.getAttribute("aria-selected") === "true",
+      ), { timeout: 15_000 }, `${directory}/b.md`);
 
-      await expand(page, ctx.workspaceDir, "notes");
-      const dockRow = treeRow(ctx.workspaceDir, join("notes", "a.md"));
+      await expand(page, ctx.workspaceDir, directory);
+      const dockRow = treeRow(ctx.workspaceDir, join(directory, "a.md"));
+      await page.waitForSelector(`${dockRow} .row-icon`, { visible: true, timeout: 15_000 });
       await page.click(`${dockRow} .row-icon`);
       await page.focus(`${DOCK} .tree`);
-      await page.waitForFunction(() => {
+      await page.waitForFunction((wanted) => {
         const tree = document.querySelector('aside[aria-label="left file browser"] .browser .tree');
         const active = document.getElementById(tree?.getAttribute("aria-activedescendant") ?? "");
-        return (active?.getAttribute("title") ?? "").endsWith("notes/a.md");
-      }, { timeout: 15_000 });
+        return (active?.getAttribute("title") ?? "").endsWith(wanted);
+      }, { timeout: 15_000 }, `${directory}/a.md`);
 
       await launcher(page, "Workspace details");
 
       await page.waitForFunction(() => [...document.querySelectorAll(".browser:not(.dock) .kind-chip.workspace")].some(
         (chip) => chip.textContent?.trim() === "workspace",
       ), { timeout: 15_000 });
-      await page.waitForFunction(() => [...document.querySelectorAll('aside[aria-label="left file browser"] [role="treeitem"]')].some(
-        (row) => (row.getAttribute("title") ?? "").endsWith("notes/a.md") && row.getAttribute("aria-selected") === "true",
-      ), { timeout: 15_000 });
-      await page.waitForFunction(() => [...document.querySelectorAll('.browser:not(.dock) [role="option"]')].some(
-        (row) => (row.getAttribute("title") ?? "").endsWith("notes/b.md") && row.getAttribute("aria-selected") !== "true",
-      ), { timeout: 15_000 });
+      await page.waitForFunction((wanted) => [...document.querySelectorAll('aside[aria-label="left file browser"] [role="treeitem"]')].some(
+        (row) => (row.getAttribute("title") ?? "").endsWith(wanted) && row.getAttribute("aria-selected") === "true",
+      ), { timeout: 15_000 }, `${directory}/a.md`);
+      await page.waitForFunction((wanted) => [...document.querySelectorAll('.browser:not(.dock) [role="option"]')].some(
+        (row) => (row.getAttribute("title") ?? "").endsWith(wanted) && row.getAttribute("aria-selected") !== "true",
+      ), { timeout: 15_000 }, `${directory}/b.md`);
     } finally {
+      rmSync(fixture, { recursive: true, force: true });
       await setDock(page, "left", originalDocks.left === true, authToken);
     }
   },
