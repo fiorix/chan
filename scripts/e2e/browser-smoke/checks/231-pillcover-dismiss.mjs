@@ -117,7 +117,7 @@ export default {
     mkdirSync(seed, { recursive: true });
     for (let i = 0; i < 3; i++) writeFileSync(join(seed, `note-${i}.md`), `# note ${i}\n\nRebuild trigger ${RUN}.\n`);
     const page = await ctx.browser.newPage();
-    const result = { browser: await ctx.browser.browser().browser().version(), seed: DIR };
+    const result = { browser: await ctx.browser.browser().version(), seed: DIR };
     let opened = false;
     try {
       await page.setViewport({ width: 1280, height: 800 });
