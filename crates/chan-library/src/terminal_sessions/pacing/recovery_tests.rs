@@ -2,10 +2,13 @@ use super::super::tests::test_session_with_ring;
 use super::super::*;
 
 fn expected_suffix(alt_screen: bool, enabled: &[u16]) -> Vec<u8> {
+    // The normal-screen head saves the cursor first: xterm.js's ?1049l
+    // handler restores unconditionally (InputHandler.resetModePrivate),
+    // so without the DECSC the resume jumps to a stale saved position.
     let mut bytes = if alt_screen {
         b"\x18\x1b[?47h".to_vec()
     } else {
-        b"\x18\x1b[?1049;1047;47l".to_vec()
+        b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
     };
     for mode in [
         1, 9, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004,

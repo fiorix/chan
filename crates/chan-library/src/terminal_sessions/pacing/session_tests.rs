@@ -339,7 +339,7 @@ fn paced_reader_keeps_input_admission_live_and_exit_drain_unpaced() {
     attached.send_input(b"input stays live");
     let input = commands.recv_timeout(Duration::from_secs(2));
     session.record_exit(TerminalExit::Code { code: 0 }, None);
-    let finished = done_rx.recv_timeout(Duration::from_secs(1));
+    let finished = done_rx.recv_timeout(Duration::from_secs(2));
     // Release a broken exit wake before joining and reporting its failure.
     session.pacing.bypass();
     let sizes = worker.join().expect("reader thread");

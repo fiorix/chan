@@ -22,7 +22,7 @@ const BLOCKED_BYTES: usize = 1024 * 1024;
 const FLOOD_CHUNKS: usize = 1100;
 const CHUNK_BYTES: usize = 32;
 const CHILD_READY: &[u8] = b"__STREAM_READY__";
-const LOST_PLAIN_SUFFIX: &[u8] = b"\x18\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
+const LOST_PLAIN_SUFFIX: &[u8] = b"\x18\x1b7\x1b[?1049;1047;47l\x1b[?1l\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l";
 
 /// Observe an actual pending binary write, without holding or changing it.
 pub(super) fn send_pending(id: &str, binary_bytes: usize) {
@@ -616,6 +616,186 @@ async fn a_tmux_pane_recovers_a_retained_cursor_without_reset_or_loss() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tmux_pane_recovers_eviction_with_an_exact_missed_count() {
     assert_resume(8 * 1024, true).await;
+}
+
+const DONE_MARKER: &[u8] = b"__STREAM_DONE__";
+
+/// Attach like Rig::attach but keep the prelude's replay bytes: a flood
+/// already streaming when the socket subscribes replays from the ring
+/// between the session frame and ready, and Rig::attach drops those.
+async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, Value, Vec<u8>) {
+    let mut client = bounded(
+        "attach terminal socket",
+        dial_terminal_with_small_buffer(address, &format!("session={id}&cols=80&rows=24")),
+    )
+    .await;
+    let mut session = None;
+    let mut sessions = 0;
+    let mut replay = Vec::new();
+    loop {
+        match next(&mut client).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") => {
+                        sessions += 1;
+                        session = Some(frame);
+                    }
+                    Some("ready") => {
+                        assert_eq!(sessions, 1, "one session frame opens the attach");
+                        return (client, session.expect("session before ready"), replay);
+                    }
+                    Some("error") => panic!("attach error: {frame}"),
+                    _ => {}
+                }
+            }
+            ClientMessage::Binary(bytes) => replay.extend_from_slice(&bytes),
+            other => panic!("attach ended before ready: {other:?}"),
+        }
+    }
+}
+
+/// Acceptance 2's second clause on real sockets: a view that stops reading
+/// holds the session no longer than the 5 s release bound and does not slow
+/// a second view. Real 5 s wait, no test-only knob: the production path and
+/// its bound are what run, at about 7 s wall.
+///
+/// The 2 MiB ring holds the whole ~1.4 MiB flood, so no view can be evicted
+/// and every recovery below is lossless by construction: a 64 KiB ring lets
+/// even the draining view fall behind under load (observed: a live view
+/// recovering with missed_bytes=47624), which makes the live view's outcome
+/// a race instead of a contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
+    let _gate = pty_test_lock();
+    // The flood outruns every buffer (PTY, sockets, half-ring credit) so the
+    // stalled view's release is what lets the program finish.
+    let rig = Rig::new(2 * 1024 * 1024, "seq 1 200000; printf '__STREAM_DONE__'").await;
+    // Socket A reads one live frame, then stops draining entirely.
+    let (mut stalled, initial) = rig.attach().await;
+    loop {
+        match next(&mut stalled).await {
+            ClientMessage::Binary(_) => break,
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "unexpected terminal error: {frame}");
+            }
+            other => panic!("stalled socket ended before its first frame: {other:?}"),
+        }
+    }
+    // Socket B drains everything the program writes, prelude replay included.
+    let (mut draining, _, mut received) = attach_collecting(rig.address, rig.handle.id()).await;
+    let started = std::time::Instant::now();
+    let bound = std::time::Duration::from_secs(20);
+    loop {
+        if std::time::Instant::now() > started + bound {
+            panic!("the second view did not drain the flood within 20 s");
+        }
+        match next(&mut draining).await {
+            ClientMessage::Binary(bytes) => {
+                received.extend_from_slice(&bytes);
+                if received
+                    .windows(DONE_MARKER.len())
+                    .any(|w| w == DONE_MARKER)
+                {
+                    break;
+                }
+            }
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "live view error frame: {frame}");
+                assert_ne!(
+                    frame["type"], "session",
+                    "live view takes no recovery frame: {frame}"
+                );
+            }
+            other => panic!("live view ended before the flood: {other:?}"),
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_secs(4),
+        "the hold engaged before the drain completed: {elapsed:?}"
+    );
+    let mut expected = Vec::new();
+    expected.extend_from_slice(CHILD_READY);
+    for index in 1..=200000 {
+        // The PTY runs with OPOST, so each newline arrives as CR LF.
+        expected.extend_from_slice(format!("{index}\r\n").as_bytes());
+    }
+    expected.extend_from_slice(DONE_MARKER);
+    assert_eq!(
+        received, expected,
+        "the second view receives every byte once and in order"
+    );
+    // Socket A resumes: exactly one same-generation session frame, a numeric
+    // missed count, the retained tail once, no error.
+    let resume_at = std::time::Instant::now();
+    let resume_bound = std::time::Duration::from_secs(20);
+    let mut sessions = 0;
+    let mut tail = Vec::new();
+    let recovery = loop {
+        if std::time::Instant::now() > resume_at + resume_bound {
+            panic!("stalled view saw no recovery within 20 s");
+        }
+        match next(&mut stalled).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                match frame["type"].as_str() {
+                    Some("session") => {
+                        sessions += 1;
+                        assert_eq!(sessions, 1, "one recovery session frame: {frame}");
+                        break frame;
+                    }
+                    Some("error") => panic!("recovery error frame: {frame}"),
+                    _ => {}
+                }
+            }
+            ClientMessage::Binary(bytes) => {
+                tail.extend_from_slice(&bytes);
+            }
+            other => panic!("stalled view ended during recovery: {other:?}"),
+        }
+    };
+    assert_eq!(
+        recovery["generation"], initial["generation"],
+        "recovery keeps the incarnation"
+    );
+    let missed = recovery["missed_bytes"]
+        .as_u64()
+        .expect("numeric missed_bytes");
+    assert_eq!(missed, 0, "nothing evicted: the whole flood fits the ring");
+    loop {
+        if tail.windows(DONE_MARKER.len()).any(|w| w == DONE_MARKER) {
+            break;
+        }
+        if std::time::Instant::now() > resume_at + resume_bound {
+            panic!("stalled view never received the retained tail");
+        }
+        match next(&mut stalled).await {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                assert_ne!(frame["type"], "error", "recovery error frame: {frame}");
+                assert_ne!(
+                    frame["type"], "session",
+                    "one recovery session frame: {frame}"
+                );
+            }
+            ClientMessage::Binary(bytes) => tail.extend_from_slice(&bytes),
+            other => panic!("stalled view ended during recovery: {other:?}"),
+        }
+    }
+    assert_eq!(
+        tail.windows(DONE_MARKER.len())
+            .filter(|w| *w == DONE_MARKER)
+            .count(),
+        1,
+        "retained tail once"
+    );
+    assert!(
+        tail.ends_with(DONE_MARKER),
+        "the tail ends at the program's end marker"
+    );
 }
 
 async fn assert_lossless_split_sequence(prefix: &[u8], continuation: &[u8]) {

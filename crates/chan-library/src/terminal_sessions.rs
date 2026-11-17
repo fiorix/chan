@@ -7888,10 +7888,16 @@ impl Session {
             .private_modes
             .lock()
             .expect("terminal private modes poisoned");
+        // The normal-screen head saves the cursor first: the backend that
+        // restores unconditionally on ?1049l (xterm.js) would otherwise jump
+        // to a stale saved position instead of resuming where the replay
+        // ended. The alt head stays ?47h rather than ?1049h: a redundant
+        // ?1049h is only a guarded no-op where the backend guards it, and an
+        // unguarded re-entry can clear the inhabited alternate screen.
         let mut out = if alt_screen {
             b"\x18\x1b[?47h".to_vec()
         } else {
-            b"\x18\x1b[?1049;1047;47l".to_vec()
+            b"\x18\x1b7\x1b[?1049;1047;47l".to_vec()
         };
         // Mouse protocols and encodings can share renderer state: a reset
         // of an absent mode must precede the enable that restores its peer.

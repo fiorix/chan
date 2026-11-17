@@ -10,6 +10,14 @@ fn admission(pacing: &Pacing, maximum: usize, now: Instant) -> Admission {
 }
 
 #[test]
+fn event_credit_leaves_broadcast_headroom() {
+    assert!(
+        2 * EVENT_CREDIT as usize <= super::super::BROADCAST_CAP,
+        "a holding view stays within the broadcast channel"
+    );
+}
+
+#[test]
 fn half_ring_caps_each_read_and_slowest_view_holds_credit() {
     let pacing = Pacing::new(100, 0);
     let slow = attach(&pacing);
