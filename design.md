@@ -55,7 +55,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `chan-tunnel-proto`, `chan-tunnel-client`, `chan-tunnel-server` | The gateway tunnel: the wire contract, the dial side the devserver embeds, and the terminating side the gateway embeds. |
 | `chan-wireguard` | The in-process WireGuard peer and TCP/IP stack the devserver's tunnel dial runs through when a wg-quick file is given, with no interface or privilege on the host. |
 | `chan-revtunnel` | Reverse port forwarding from a devserver to the connected desktop (`cs tunnel`). |
-| `chan-tls` | Shared TLS trust for every Rust TLS client `crates/chan-tls/design.md` lists: the platform verifier on macOS and Windows, the system bundle beside the bundled WebPKI roots elsewhere. |
+| `chan-tls` | Shared TLS trust for the Rust clients `crates/chan-tls/design.md` lists as its callers: the platform verifier on macOS and Windows, the system bundle beside the bundled WebPKI roots elsewhere. |
 | `chan` | The CLI binary: argument parsing, `chan serve`, the devserver verbs, workspace management, self-upgrade. |
 | `desktop` | chan-desktop, the Tauri shell: native windows, the launcher, devserver and gateway connections. The same binary is the CLI when invoked as `chan`, `cs`, `chan-files` or `chan-edit`, and a terminal window as `chan-term`. |
 | `web/packages/workspace-app` | The workspace SPA: terminal, editor, file browser, graph, dashboard, search, settings. |
