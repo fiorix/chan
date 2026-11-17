@@ -168,6 +168,7 @@
     type GhosttyKit,
     type TerminalBackend,
   } from "../terminal/backend";
+  import { freshShellResetSequence } from "../terminal/freshShellReset";
   import {
     alignGhosttyRendererToXterm,
     gateGhosttyScrollbarClicks,
@@ -1804,22 +1805,17 @@
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
-        // with the xterm still holding a dead TUI's negotiated input modes.
-        // Reset mouse tracking (including the 1015 urxvt format), exit the
-        // alt-screen and drop the keyboard protocol before any replay so that
-        // leftover state does not leak into the new shell. The protocol is
-        // reset in place, since the installed parser and key handlers hold
-        // that object. A same-id live resume keeps the running program's
-        // modes untouched, as the start does for a reattach.
+        // with the terminal still holding a dead TUI's negotiated input
+        // modes. Clear every mode in the server's tracked set plus the
+        // alternate-screen exit, and drop the keyboard protocol, before any
+        // replay so that leftover state does not leak into the new shell.
+        // The protocol is reset in place, since the installed parser and key
+        // handlers hold that object. A same-id live resume keeps the running
+        // program's modes untouched, as the start does for a reattach.
         if (frame.id !== priorId) {
           ensureTerminalKeyboardProtocol(tab, true);
           keyboardProtocolBeforeReplay = copyTerminalKeyboardProtocolState(tab.keyboardProtocol!);
-          writeParsedPtyOutput(
-            new TextEncoder().encode(
-              "\x1b[?1000;1002;1003;1004;1006;1015l\x1b[?1049l",
-            ),
-            "replay",
-          );
+          writeParsedPtyOutput(new TextEncoder().encode(freshShellResetSequence()), "replay");
         }
         if (
           pendingSnapshot &&
