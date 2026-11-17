@@ -4,16 +4,14 @@
 // Output is sanitized via DOMPurify before any {@html ...} insert
 // so every {@html ...} insertion goes through the same chokepoint.
 // Wikilink labels are opt-in per call: pass `{ wikilinks: true }`
-// where the surface shows labels (exports, Copy as HTML, the link
-// preview, survey bodies, table cells); other callers keep the
-// authored syntax.
+// where the surface shows labels; a call without the option keeps
+// the authored syntax.
 
 import DOMPurify, { type Config } from "dompurify";
 import { marked } from "marked";
 import { GFM, parser } from "@lezer/markdown";
 import { embedIframeHtml, isAllowedEmbedSrc } from "./embed";
 import { parseWikiBody } from "../editor/links";
-import { Frontmatter } from "../editor/markdown/frontmatter";
 import { RefAwareLink } from "../editor/markdown/refAwareLink";
 import { WikiLink } from "../editor/markdown/wikilink";
 
@@ -38,27 +36,60 @@ marked.use({
   },
 });
 
-const wikiParser = parser.configure([Frontmatter, ...GFM, WikiLink, RefAwareLink]);
+/// The link finder runs without the frontmatter rule: fragments (a copy
+/// selection, a survey body, a table cell) start at a `---` rule more
+/// often than documents carry metadata, and a metadata block holds no
+/// wikilinks to protect.
+const wikiParser = parser.configure([...GFM, WikiLink, RefAwareLink]);
 
-function renderWikiLabels(input: string): string {
-  let output = "";
-  let end = 0;
+interface WikiSpan {
+  from: number;
+  to: number;
+}
+
+/// The `[[...]]` spans to label. The block parse handles emphasis and
+/// the document structure; a cell that opens with a block-level HTML tag
+/// is one HTML block to it, so the inline renderer also scans the flat
+/// inline elements, where nested tags yield their links beside the tags.
+/// Inline spans that overlap a block span keep the block span: the two
+/// agree everywhere both read.
+function wikiLinkSpans(input: string, inline: boolean): WikiSpan[] {
+  if (!input.includes("[[")) return [];
+  const spans: WikiSpan[] = [];
   // Parse the original source so code, URLs and HTML cannot manufacture
   // wikilinks by hiding delimiters from a later Markdown pass.
   wikiParser.parse(input).iterate({
     enter(node) {
       if (node.name === "Image") return false; // Alt text becomes an attribute; keep span markup out of it.
       if (node.name !== "WikiLink") return;
-      const { label } = parseWikiBody(input.slice(node.from + 2, node.to - 2));
-      // Character references keep every label literal to marked, including
-      // emphasis and URL syntax. The span preserves the inline boundary
-      // even for an empty alias; it carries no export-control attributes.
-      const text = Array.from(label, (char) => `&#${char.codePointAt(0)};`).join("");
-      output += input.slice(end, node.from) + `<span>${text}</span>`;
-      end = node.to;
+      spans.push({ from: node.from, to: node.to });
       return false;
     },
   });
+  if (inline) {
+    const names = wikiParser.nodeSet.types;
+    for (const el of wikiParser.parseInline(input, 0)) {
+      if (names[el.type]?.name !== "WikiLink") continue;
+      if (spans.some((s) => s.from < el.to && el.from < s.to)) continue;
+      spans.push({ from: el.from, to: el.to });
+    }
+    spans.sort((a, b) => a.from - b.from);
+  }
+  return spans;
+}
+
+function renderWikiLabels(input: string, inline: boolean): string {
+  let output = "";
+  let end = 0;
+  for (const span of wikiLinkSpans(input, inline)) {
+    const { label } = parseWikiBody(input.slice(span.from + 2, span.to - 2));
+    // Character references keep every label literal to marked, including
+    // emphasis and URL syntax. The span preserves the inline boundary
+    // even for an empty alias; it carries no export-control attributes.
+    const text = Array.from(label, (char) => `&#${char.codePointAt(0)};`).join("");
+    output += input.slice(end, span.from) + `<span>${text}</span>`;
+    end = span.to;
+  }
   return output + input.slice(end);
 }
 
@@ -111,7 +142,7 @@ export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}
   // marked.parse can return Promise<string> if any extension is
   // async; we use no async extensions, so cast through unknown.
   const source = input ?? "";
-  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source) : source, { async: false }) as string;
+  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false) : source, { async: false }) as string;
   return DOMPurify.sanitize(raw, SANITIZE_OPTS);
 }
 
@@ -125,7 +156,7 @@ export function renderMarkdown(input: string, opts: { wikilinks?: boolean } = {}
 /// labels; other callers keep the authored syntax.
 export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: boolean } = {}): string {
   const source = input ?? "";
-  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source) : source, {
+  const raw = marked.parse(opts.wikilinks ? renderWikiLabels(source, false) : source, {
     async: false,
     breaks: true,
     gfm: true,
@@ -142,6 +173,6 @@ export function renderMarkdownWithBreaks(input: string, opts: { wikilinks?: bool
 /// labels; other callers keep the authored syntax.
 export function renderMarkdownInline(input: string, opts: { wikilinks?: boolean } = {}): string {
   const source = input ?? "";
-  const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source) : source, { async: false }) as string;
+  const raw = marked.parseInline(opts.wikilinks ? renderWikiLabels(source, true) : source, { async: false }) as string;
   return DOMPurify.sanitize(raw, SANITIZE_OPTS);
 }
