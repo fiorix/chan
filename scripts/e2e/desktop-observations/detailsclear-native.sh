@@ -36,6 +36,7 @@ workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
 xid="$(workspace_xid)"
 xdotool windowactivate --sync "$xid"
+# shellcheck disable=SC2329
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "/workspace-" "$1"; }
 # shellcheck disable=SC2329
 page_answers() { page_eval "document.readyState" | grep -q complete; }
