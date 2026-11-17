@@ -66,7 +66,6 @@ vi.mock("../terminal/ghosttyCompat", () => ({
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
   installGhosttyOverlayScrollbar: () => true,
-  gateGhosttyScrollbarClicks: () => () => {},
 }));
 vi.mock("../terminal/ghosttyViewport", () => ({
   GhosttyViewportController: class {

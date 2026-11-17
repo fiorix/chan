@@ -39,8 +39,7 @@ export function ghosttyCompatStubs() {
     alignGhosttyRendererToXterm: () => true,
     installGhosttyCustomGlyphs: () => true,
     installGhosttyOverlayScrollbar: () => true,
-    gateGhosttyScrollbarClicks: () => () => {},
-  };
+    };
 }
 
 /// The caller owns mock/global restoration. Frames advance only by frame().
