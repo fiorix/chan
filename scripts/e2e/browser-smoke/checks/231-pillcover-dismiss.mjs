@@ -63,6 +63,39 @@ async function waitIndexIdle(page, token, what) {
   }
 }
 
+/// Hold the CLI tab's first socket at CONNECTING, as the desktop driver
+/// does: the page then holds no session id for the tab, so the reload
+/// below opens a plain shell and owes the reload notice. Records each
+/// dial's command and session for the assertion that the held socket
+/// carries the requested command with no session id.
+async function holdFirstDial(page) {
+  await page.evaluate(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.__pcov231 = { dials: [] };
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const url = new URL(String(args[0]));
+        if (url.pathname !== "/api/terminal/ws") return Reflect.construct(target, args);
+        window.__pcov231.dials.push({
+          command: url.searchParams.get("command"),
+          session: url.searchParams.get("session"),
+        });
+        return {
+          readyState: NativeWebSocket.CONNECTING,
+          binaryType: "arraybuffer",
+          close() { this.readyState = NativeWebSocket.CLOSED; },
+          send() { throw new Error("held terminal socket cannot send"); },
+        };
+      },
+    });
+  });
+}
+
+async function firstDial(page) {
+  await page.waitForFunction(() => window.__pcov231.dials.length > 0, { timeout: 30_000 });
+  return page.evaluate(() => window.__pcov231.dials[0]);
+}
+
 /// The pill's box while it shows an index section, or null while the status
 /// bar shows none.
 async function indexPillBox(page) {
@@ -127,11 +160,39 @@ export default {
       await ctx.waitWindowLive(WINDOW);
       await waitIndexIdle(page, token, "the CLI tab dance");
 
+      await holdFirstDial(page);
       await cli(ctx, WINDOW, ["new", "--window", WINDOW, "--tab-name", TAB, "--command", COMMAND]);
       opened = true;
+      const dial = await firstDial(page);
+      if (dial.command !== COMMAND) throw new Error(`held first socket carries ${JSON.stringify(dial.command)}, not the requested command`);
+      if (dial.session !== null) throw new Error(`held first socket has session id ${JSON.stringify(dial.session)}, not none`);
+      const { stdout: listOut } = await cli(ctx, WINDOW, ["list", "--json"]);
+      if (Object.values(JSON.parse(listOut).groups ?? {}).flat().some((row) => row.name === TAB)) {
+        throw new Error("the held first socket created a server session; the reload would restore instead of owing its notice");
+      }
+      // The notice is owed only once the page has persisted the tab's
+      // pending command to its reload marker; reloading before that
+      // restores cleanly and the notice never appears. The marker must
+      // name the current layout hash: a pre-tab marker goes stale at
+      // the next persist.
+      await page.waitForFunction(() => {
+        try {
+          const raw = window.sessionStorage.getItem("chan-cli-reload-bits");
+          if (!raw) return false;
+          const marker = JSON.parse(raw);
+          const hash = new URLSearchParams(location.hash.slice(1)).get("s") ?? "";
+          return marker.hash === hash && Array.isArray(marker.bits) && marker.bits.some((bit) => bit !== 0);
+        } catch {
+          return false;
+        }
+      }, { timeout: 30_000 }).catch((error) => {
+        throw new Error(`the reload marker never persisted before reload: ${error.message}`, { cause: error });
+      });
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".terminal-tab", { timeout: 30_000 });
-      await page.waitForSelector(".cli-reload-notice", { visible: true, timeout: 30_000 });
+      await page.waitForSelector(".cli-reload-notice", { visible: true, timeout: 30_000 }).catch(async (error) => {
+        throw new Error(`the reload notice never appeared for a tab whose first socket never connected: ${error.message}`, { cause: error });
+      });
 
       renameSync(seed, join(ctx.workspaceDir, RENAMED));
       result.pill = await waitIndexPill(page);
