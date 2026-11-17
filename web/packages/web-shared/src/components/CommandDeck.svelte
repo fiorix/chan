@@ -79,7 +79,7 @@
     /// nothing: a focus change in the page would take the keyboard from
     /// that surface. Receives the element the focus would land on, so the
     /// host can allow a return into a surface that owns the keyboard.
-    mayTakeFocus?: (heir: HTMLElement | null) => boolean;
+    mayTakeFocus?: (heir?: HTMLElement | null) => boolean;
     /// Whether a key is the chord the host opens this deck with. The open
     /// deck takes every key ahead of the host's own listener, which
     /// therefore never sees the chord then: the deck closes on it, so the
