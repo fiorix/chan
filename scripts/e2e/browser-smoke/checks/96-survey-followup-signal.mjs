@@ -349,7 +349,8 @@ export default {
         );
       }
 
-      // Earlier checks may leave team directories; only this check's writes count.
+      // Earlier checks may leave team directories; only this check's
+      // writes count.
       const hits = followupArtifacts(ctx.workspaceDir, beforeFollowup);
       if (hits.length) {
         throw new Error(`followup artifacts written: ${hits.join(", ")}`);
