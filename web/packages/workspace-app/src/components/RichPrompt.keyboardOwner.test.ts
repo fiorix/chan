@@ -499,3 +499,21 @@ describe("a strip-button submit in an unfocused pane", () => {
   });
 });
 
+describe("the strip buttons keep the composer focused on press", () => {
+  test("a pointerdown on either strip button is cancelled", async () => {
+    const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("owner-guard") })]);
+    const { target } = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await showComposer({ tab: tab!, target, socket });
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>(".rp-strip .rp-action")];
+    expect(buttons.length, "the strip renders its actions").toBeGreaterThan(0);
+    for (const button of buttons) {
+      const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+      button.dispatchEvent(event);
+      expect(event.defaultPrevented, "the strip button cancels its pointerdown").toBe(true);
+    }
+  });
+});
+
