@@ -261,6 +261,8 @@ struct PendingAuth {
 #[derive(Debug, Clone)]
 pub(crate) struct Enrolling {
     pub(crate) public_key: String,
+    /// Read only by the desktop enrollment path; iOS enrolls nothing.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) entry: crate::devserver::WireguardDiscovery,
 }
 

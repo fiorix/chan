@@ -355,7 +355,7 @@ mod ios {
         if MainThreadMarker::new().is_none() {
             return Err("the sign-in sheet starts on the main thread only".to_string());
         }
-        let url = unsafe { NSURL::URLWithString(&NSString::from_str(authorize_url)) }
+        let url = NSURL::URLWithString(&NSString::from_str(authorize_url))
             .ok_or_else(|| "building the authorize URL".to_string())?;
         let scheme = NSString::from_str(MOBILE_CALLBACK_SCHEME);
         // The completion answers exactly once with a callback URL or an
@@ -475,14 +475,14 @@ mod ios {
         }
     );
 
-    extern_methods!(
-        // SAFETY: `new` allocates and runs NSObject's designated
-        // initializer; the provider holds no ivars.
-        unsafe impl MobileAuthPresentationProvider {
+    impl MobileAuthPresentationProvider {
+        extern_methods!(
+            // SAFETY: `new` allocates and runs NSObject's designated
+            // initializer; the provider holds no ivars.
             #[unsafe(method(new))]
             fn new() -> Retained<Self>;
-        }
-    );
+        );
+    }
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and the observer
