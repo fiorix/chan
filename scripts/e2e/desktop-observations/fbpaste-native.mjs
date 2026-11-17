@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // File-browser Paste lands in the right-clicked row's folder, on WebKitGTK.
-// The desktop guest counterpart of browser-smoke check 232: seeds keep.txt
-// at the workspace root, right-clicks the notes row of the root listing to
-// copy it, right-clicks... no: copies keep.txt, then right-clicks the notes
-// row and pastes through its menu. Asserts notes/keep.txt on disk, the root
-// keep.txt kept, and the selected row's title ending in /notes/keep.txt (the
-// tab follows its selection into notes). DOM events are dispatched in-page;
-// the engine, dispatch, handlers and rendering are WebKitGTK's own.
+// The desktop guest counterpart of browser-smoke check 232: the shell seeds
+// keep.txt at the workspace root beside notes; the driver right-clicks the
+// keep.txt row to copy it, then right-clicks the notes row and pastes through
+// its menu. Asserts notes/keep.txt on disk, the root keep.txt kept, and the
+// selected row's title ending in /notes/keep.txt (the tab follows its
+// selection into notes). DOM events are dispatched in-page; the engine,
+// dispatch, handlers and rendering are WebKitGTK's own.
 // Usage: node fbpaste-native.mjs --inspector HOST:PORT --out DIR --xid XID
-//   --window ID --workspace DIR --sha SHA --engine-version V
+//   --workspace DIR --sha SHA --engine-version V
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,8 +24,8 @@ function argsOf(argv) {
 }
 
 const a = argsOf(process.argv.slice(2));
-for (const k of ["inspector", "out", "xid", "window", "workspace", "sha", "engine-version"]) {
-  if (!a[k]) throw new Error(`usage: fbpaste-native.mjs --inspector H:P --out DIR --xid XID --window ID --workspace DIR --sha SHA --engine-version V (missing --${k})`);
+for (const k of ["inspector", "out", "xid", "workspace", "sha", "engine-version"]) {
+  if (!a[k]) throw new Error(`usage: fbpaste-native.mjs --inspector H:P --out DIR --xid XID --workspace DIR --sha SHA --engine-version V (missing --${k})`);
 }
 mkdirSync(a.out, { recursive: true });
 
@@ -40,12 +40,12 @@ async function targets() {
   return found;
 }
 
-function inspectorEval(endpoint, titleSub, expression) {
+function inspectorEval(endpoint, titleSub, expression, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const done = (fn) => (...args) => { if (settled) return; settled = true; try { ws.close(); } catch {} fn(...args); };
     const ok = done(resolve), fail = done(reject);
-    const timer = setTimeout(() => fail(new Error("inspector did not answer in 8s")), 8000);
+    const timer = setTimeout(() => fail(new Error(`inspector did not answer in ${timeoutMs}ms`)), timeoutMs);
     let ws;
     let page = null;
     targets().then((found) => {
@@ -85,21 +85,34 @@ const record = (name, ok, detail, kind) => {
 };
 const check = (name, ok, detail) => record(name, ok, detail, "property");
 const need = (name, ok, detail) => record(name, ok, detail, "precondition");
-const xdo = (args, opts = {}) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000, ...opts });
+const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
 
-const page = (expr) => inspectorEval(a.inspector, "/workspace-", expr);
-const rowTitle = (path) => page(`(() => {
-  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-  const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
-  return row ? row.getAttribute("title") : null;
-})()`);
-const openMenu = (path) => page(`(() => {
-  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-  const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
-  if (!row) return "missing";
-  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
-  return "opened";
-})()`);
+const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
+// The page relists after the seed and follows its selection after the file
+// lands, so every row read below polls to a bounded deadline instead of
+// reading once. An in-page deadline always fits inside the eval timeout.
+const waitRow = (path, timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
+    if (row) resolve(row.getAttribute("title"));
+    else if (Date.now() > deadline) resolve(null);
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
+const openMenu = async (path) => {
+  const found = await waitRow(path).catch((err) => `failed: ${err.message}`);
+  if (typeof found !== "string") return found === null ? "missing" : found;
+  return page(`(() => {
+    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
+    if (!row) return "missing";
+    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+    return "opened";
+  })()`);
+};
 const clickMenu = (title) => page(`(() => {
   const button = [...document.querySelectorAll(".ctx button")].find(
     (b) => b.querySelector(".menu-row-label")?.textContent?.trim() === ${JSON.stringify(title)});
@@ -107,13 +120,28 @@ const clickMenu = (title) => page(`(() => {
   button.click();
   return "clicked";
 })()`);
+const waitSelected = (timeoutMs = 15000) => page(`(() => new Promise((resolve) => {
+  const deadline = Date.now() + ${timeoutMs};
+  const tick = () => {
+    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/keep.txt"));
+    if (!row) {
+      if (Date.now() > deadline) resolve("absent");
+      else setTimeout(tick, 250);
+    } else if (row.getAttribute("aria-selected") === "true") resolve("true");
+    else if (Date.now() > deadline) resolve(row.getAttribute("aria-selected") ?? "unselected");
+    else setTimeout(tick, 250);
+  };
+  tick();
+})())`, timeoutMs + 5000);
 
 try {
   xdo(["windowactivate", "--sync", a.xid]);
   const ws = a.workspace;
   mkdirSync(ws, { recursive: true });
-  writeFileSync(join(ws, "keep.txt"), "keep me\n");
-  need("seed workspace", true);
+  let seeded = null;
+  try { seeded = readFileSync(join(ws, "keep.txt"), "utf8"); } catch {}
+  need("shell seeded keep.txt", seeded === "keep me\n", seeded === null ? "absent" : JSON.stringify(seeded).slice(0, 60));
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })); return "toggled"; })()`);
   const listed = await page(`(() => new Promise((resolve, reject) => {
@@ -125,18 +153,18 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`).catch((err) => `failed: ${err.message}`);
+  })())`, 20000).catch((err) => `failed: ${err.message}`);
   need("open files", listed === "files", String(listed).slice(0, 120));
 
-  const keep = await rowTitle("keep.txt").catch((err) => `failed: ${err.message}`);
-  need("keep.txt row present", typeof keep === "string" && keep.endsWith("/keep.txt"), JSON.stringify(keep));
+  const keep = await waitRow("keep.txt").catch((err) => `failed: ${err.message}`);
+  need("keep.txt row present", typeof keep === "string" && keep.endsWith("/keep.txt"), keep === null ? "absent" : String(keep).slice(0, 120));
   const copyMenu = await openMenu("keep.txt").catch((err) => `failed: ${err.message}`);
   need("copy menu opened", copyMenu === "opened", String(copyMenu));
   const copied = await clickMenu("Copy").catch((err) => `failed: ${err.message}`);
   need("copy row clicked", copied === "clicked", String(copied));
 
-  const sub = await rowTitle("notes").catch((err) => `failed: ${err.message}`);
-  need("notes row present", typeof sub === "string" && sub.endsWith("/notes"), JSON.stringify(sub));
+  const sub = await waitRow("notes").catch((err) => `failed: ${err.message}`);
+  need("notes row present", typeof sub === "string" && sub.endsWith("/notes"), sub === null ? "absent" : String(sub).slice(0, 120));
   const pasteMenu = await openMenu("notes").catch((err) => `failed: ${err.message}`);
   need("paste menu opened", pasteMenu === "opened", String(pasteMenu));
   const pasted = await clickMenu("Paste").catch((err) => `failed: ${err.message}`);
@@ -147,16 +175,13 @@ try {
     try { landed = readFileSync(join(ws, "notes", "keep.txt"), "utf8"); break; }
     catch { await sleep(500); }
   }
-  check("landed on disk", landed === "keep me\n", JSON.stringify(landed)?.slice(0, 60) ?? "absent");
+  check("landed on disk", landed === "keep me\n", landed === null ? "absent" : JSON.stringify(landed).slice(0, 60));
   let kept = null;
   try { kept = readFileSync(join(ws, "keep.txt"), "utf8"); } catch {}
-  check("source kept", kept === "keep me\n", JSON.stringify(kept)?.slice(0, 60) ?? "absent");
-  const selected = await page(`(() => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/keep.txt"));
-    return row ? row.getAttribute("aria-selected") : "absent";
-  })()`).catch((err) => `failed: ${err.message}`);
-  check("landed entry selected", selected === "true", JSON.stringify(selected));
+  check("source kept", kept === "keep me\n", kept === null ? "absent" : JSON.stringify(kept).slice(0, 60));
+  const selected = await waitSelected().catch((err) => `failed: ${err.message}`);
+  if (typeof selected === "string" && selected.startsWith("failed:")) need("selection readable", false, selected.slice(0, 120));
+  else check("landed entry selected", selected === "true", JSON.stringify(selected));
 
   run.finished = new Date().toISOString();
   const preFailed = failures.some((f) => f.kind === "precondition");
