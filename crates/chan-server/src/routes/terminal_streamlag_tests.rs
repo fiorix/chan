@@ -775,7 +775,10 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let mut tail = Vec::new();
     let recovery = loop {
         if std::time::Instant::now() > resume_at + resume_bound {
-            panic!("stalled view saw no recovery within 20 s");
+            panic!(
+                "stalled view saw no recovery within 20 s: sessions {sessions}, tail {} bytes",
+                tail.len(),
+            );
         }
         match next(&mut stalled).await {
             ClientMessage::Text(text) => {
@@ -809,7 +812,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
             break;
         }
         if std::time::Instant::now() > resume_at + resume_bound {
-            panic!("stalled view never received the retained tail");
+            panic!(
+                "stalled view never received the retained tail: tail {} of {} bytes",
+                tail.len(),
+                expected.len(),
+            );
         }
         match next(&mut stalled).await {
             ClientMessage::Text(text) => {
@@ -1210,6 +1217,59 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
         reads > 1024,
         "the real PTY stream crosses the broadcast event capacity: {reads}"
     );
+    if bytes.len() != expected.len() {
+        // The child blocks on its final read, so the stream is over: a
+        // short idle drain collects bytes still in flight for the report.
+        // No Mac is in the team's reach, so the mismatch must read the
+        // cause off one CI log: the first offset where the streams differ
+        // and the surplus bytes in hex.
+        let idle = std::time::Duration::from_secs(2);
+        while bytes.len() < expected.len() + 64 {
+            match tokio::time::timeout(idle, next(&mut client)).await {
+                Ok(ClientMessage::Binary(data)) => bytes.extend_from_slice(&data),
+                Ok(ClientMessage::Text(text)) => {
+                    let frame: Value = serde_json::from_str(&text).expect("control JSON");
+                    assert_ne!(
+                        frame["type"], "error",
+                        "a progressing view must never lose output"
+                    );
+                    assert_ne!(
+                        frame["type"], "session",
+                        "a progressing view needs no recovery prelude"
+                    );
+                    assert_ne!(
+                        frame["type"], "exit",
+                        "the child waits until the view consumes its stream"
+                    );
+                }
+                Ok(frame) => panic!("the progressing socket ended early: {frame:?}"),
+                Err(_) => break,
+            }
+        }
+        let hex = |window: &[u8]| {
+            window
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let offset = bytes
+            .iter()
+            .zip(expected.as_bytes())
+            .position(|(actual, want)| actual != want);
+        let at = offset.unwrap_or(bytes.len().min(expected.len()));
+        let lo = at.saturating_sub(16);
+        let hi = (at + 16).min(bytes.len());
+        let want_hi = (at + 16).min(expected.len());
+        panic!(
+            "the real PTY byte count is exact: got {} want {}; first mismatch at {offset:?}; got window {lo}..{hi} {}; want window {lo}..{want_hi} {}; surplus {}",
+            bytes.len(),
+            expected.len(),
+            hex(&bytes[lo..hi]),
+            hex(&expected.as_bytes()[lo..want_hi]),
+            hex(&bytes[expected.len().min(bytes.len())..]),
+        );
+    }
     assert_eq!(
         bytes.len(),
         expected.len(),
