@@ -1,24 +1,25 @@
 // A ghostty terminal at a device scale factor of 2 whose canvas drawing
-// state the host resets while hidden must repaint at full scale on the
-// visible flip: the owner's half-scale terminals after a sleep. Same shape
-// as check 204, but the reset leaves an identity transform behind, so at
-// ratio 1 the defect cannot show and at ratio 2 the top-left quarter keeps
-// every painted pixel.
+// state the host discards while hidden must repaint at full scale on the
+// visible flip. Same shape as check 204, but the discard leaves an
+// identity transform behind, so at ratio 1 the scale assertions below fail
+// as a precondition instead of passing with nothing proven.
 //
-//   PAINT  -- open a ghostty terminal at deviceScaleFactor 2, print pages
-//             of text, wait for the server-side scrollback and for the
-//             painted pixels in every quarter of the backing store.
+//   PAINT  -- open a ghostty terminal at deviceScaleFactor 2, print text
+//             including a full-width line, arm a WINCH trap, and wait for
+//             the server-side scrollback and for stable painted pixels in
+//             every quarter of the backing store at scale 2.
 //   HIDE   -- bring another page of the same context to the front so the
 //             terminal's page turns hidden, then drop the canvas drawing
-//             state by a same-size reset: the transform reads identity
-//             while the size is unchanged.
+//             state by a same-size reset: the bitmap goes transparent while
+//             the size is unchanged.
 //   RESUME -- bring the page back (visibilitychange visible, the signal the
 //             terminal's host-resume listener runs on) and wait for every
-//             quarter to hold painted pixels again, with the grid unchanged
-//             and no resize sent to the PTY.
+//             quarter to hold its baseline paint again within a band, at
+//             scale 2, with the backing size unchanged and no WINCH observed
+//             on the PTY.
 //
-// Red at the base: after the flip the painted pixels sit in the top-left
-// quarter only. Green: all four quarters hold paint as before the reset.
+// Each bounded wait below is a hang guard: it bounds a stuck engine, and
+// its timeout reports which stage hung.
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
@@ -102,7 +103,7 @@ export default {
     try {
       // PAINT
       await cs(["write", "--tab-name", TAB,
-        `for i in $(seq -w 1 ${LINES}); do printf '${MARK}LINE_%s the quick brown fox jumps over the lazy dog, packing my box with five dozen liquor jugs\\n' "$i"; done; printf '${MARK}%s\\n' DONE\n`]);
+        `for i in $(seq -w 1 ${LINES}); do printf '${MARK}LINE_%s the quick brown fox jumps over the lazy dog, packing my box with five dozen liquor jugs\\n' "$i"; done; printf '${MARK}%s\\n' DONE\n; printf '%0180d\\n' 0`]);
       await waitScrollback(`${MARK}DONE`);
       let baseline = null;
       let previous = null;
@@ -121,6 +122,17 @@ export default {
         await sleep(300);
       }
       readings.baseline = baseline;
+      // The scale the defect cannot show without: at ratio 1 this check
+      // would pass with nothing proven, so a paint off scale 2 fails the
+      // check instead of running it.
+      if (baseline.scaleX !== 2 || baseline.scaleY !== 2) {
+        throw new Error(`precondition: the stable paint was not at scale 2: ${JSON.stringify(baseline)}`);
+      }
+      // Arm the PTY observation: any grid publication resizes the pty and
+      // the shell reports it. The marker proves the trap ran before any
+      // resize the resume could publish.
+      await cs(["write", "--tab-name", TAB, `trap 'echo ${MARK}WINCH' WINCH; echo ${MARK}TRAP_SET\n`]);
+      await waitScrollback(`${MARK}TRAP_SET`, 30_000);
 
       // HIDE
       front = await ctx.browser.newPage();
@@ -132,23 +144,30 @@ export default {
         c.width = c.width;
       }, canvas);
       readings.hidden = await measure();
-      if (readings.hidden.quarters.slice(1).some((q) => q !== 0)) {
-        throw new Error(`the discard left paint outside the top-left quarter: ${JSON.stringify(readings.hidden)}`);
+      if (readings.hidden.quarters.some((q) => q !== 0)) {
+        throw new Error(`the discard left paint behind: ${JSON.stringify(readings.hidden)}`);
       }
       if (readings.hidden.scaleX !== 1 || readings.hidden.scaleY !== 1) {
         throw new Error(`the discard did not reset the transform: ${JSON.stringify(readings.hidden)}`);
       }
+      // Quiesce: let any in-flight hidden paint land before the flip, so the
+      // resume loop measures the flip's own repaint and nothing earlier.
       await sleep(1_500);
 
       // RESUME
       await page.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "visible", { polling: 100, timeout: 10_000 });
-      const floor = baseline.quarters.map((q) => Math.floor(q / 2));
+      // A repaint that drops the glyphs still paints the background, and a
+      // wrong-scale one moves the counts: each quarter must land back
+      // inside a band around its own baseline, on both sides.
+      const band = (b) => Math.max(200, Math.round(b * 0.02));
       const resumeDeadline = Date.now() + 10_000;
       let after = null;
       for (;;) {
         after = await measure();
-        if (after && after.width === baseline.width && after.height === baseline.height && after.quarters.every((q, i) => q >= floor[i])) break;
+        if (after && after.width === baseline.width && after.height === baseline.height
+            && after.scaleX === 2 && after.scaleY === 2
+            && after.quarters.every((q, i) => Math.abs(q - baseline.quarters[i]) <= band(baseline.quarters[i]))) break;
         if (Date.now() > resumeDeadline) {
           readings.after = after;
           await ctx.shot("ghostty-halfscale-not-repainted");
@@ -161,6 +180,13 @@ export default {
       }
       readings.after = after;
       await ctx.shot("ghostty-halfscale-repainted");
+      const endScrollback = (await cs(["scrollback", "--tab-name", TAB])).stdout;
+      if (!endScrollback.includes(`${MARK}TRAP_SET`)) {
+        throw new Error("the WINCH trap never armed: no size published to the PTY can be ruled out");
+      }
+      if (endScrollback.includes(`${MARK}WINCH`)) {
+        throw new Error(`a resize reached the PTY across the resume: ${JSON.stringify(endScrollback.slice(-500))}`);
+      }
       return readings;
     } finally {
       await front?.close().catch(() => {});
