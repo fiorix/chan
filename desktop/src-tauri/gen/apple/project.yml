@@ -13,7 +13,7 @@ settingGroups:
       PRODUCT_NAME: Chan
       PRODUCT_BUNDLE_IDENTIFIER: app.chan.ios
       CODE_SIGN_STYLE: Automatic
-      DEVELOPMENT_TEAM: 8YT442RX6R
+      DEVELOPMENT_TEAM: W73XV5CK3N
 targetTemplates:
   app:
     type: application
