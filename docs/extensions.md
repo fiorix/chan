@@ -64,7 +64,7 @@ sequenceDiagram
 
 ## The environment
 
-An extension is spawned without a shell, so nothing reads a shell profile for it: it inherits the serving chan process's environment as is, and a bare `command`, like every helper the extension runs by name, resolves through that process's `PATH`. A chan started from a terminal passes on the terminal's `PATH`.
+An extension is spawned without a shell, so nothing reads a shell profile for it: it inherits the serving chan process's environment as is, and a bare `command`, like every helper the extension runs by name, resolves through that process's `PATH`. A chan started from a terminal passes on the terminal's `PATH`. Under a Linux AppImage the bundle's mount entries, `PYTHONHOME`, the GTK hook's keys and the runtime's markers are removed and the user's search paths restored, as a terminal's shell gets them.
 
 A devserver running as a service (the systemd user service on Linux, the launchd agent on macOS) runs with the `PATH` its service definition records, and that `PATH` is also the one every terminal the service opens starts from. `chan devserver restart` rewrites the definition, and `start` and `join` write it when they bring the service up; a run from a terminal records that shell's `PATH` (absolute entries only), while a run with no terminal on standard input, such as a desktop connect script, keeps the `PATH` already recorded. So after adding a directory an extension needs, run `chan devserver restart` from a plain shell that has it: a restart from inside an activated virtualenv or a `nix develop` shell records that environment's `PATH` for every terminal the service opens.
 

@@ -246,6 +246,197 @@ fn should_open_browser(open_browser: bool) -> bool {
     !matches!(std::env::var("BROWSER"), Ok(v) if v.is_empty())
 }
 
+/// Candidate commands that open `url` in the host's browser when `parent`
+/// is an AppImage process's environment, each scrubbed to the terminal's
+/// host environment; `None` otherwise, in which case callers keep their
+/// platform opener. Candidates follow the `open` crate's order (`xdg-open`,
+/// then `gio open` and the other fallbacks); callers spawn the first that
+/// starts. Linux only: off an AppImage the platform opener runs as today.
+#[cfg(target_os = "linux")]
+pub fn appimage_browser_commands(
+    url: &str,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Option<Vec<std::process::Command>> {
+    use std::process::Stdio;
+
+    let parent: Vec<_> = parent.into_iter().collect();
+    let is_appimage = ["APPDIR", "APPIMAGE"].iter().all(|name| {
+        parent
+            .iter()
+            .any(|(key, value)| key == name && !value.is_empty())
+    });
+    if !is_appimage {
+        return None;
+    }
+    let mut commands = open::commands(url);
+    for command in &mut commands {
+        command.env_clear().envs(parent.iter().cloned());
+        clear_appimage_command_env(command, parent.iter().cloned());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    Some(commands)
+}
+
+/// Open the serve URL in the host's browser: the scrubbed `open`-crate
+/// candidates under a Linux AppImage, the platform opener otherwise.
+/// Best-effort; the caller logs the error and keeps serving.
+#[cfg(target_os = "linux")]
+fn open_browser(url: &str) -> Result<(), String> {
+    if let Some(commands) = appimage_browser_commands(url, std::env::vars_os()) {
+        let mut last_error = String::from("no browser launcher started");
+        for mut command in commands {
+            match command.spawn() {
+                Ok(mut child) => {
+                    std::thread::spawn(move || drop(child.wait()));
+                    return Ok(());
+                }
+                Err(error) => {
+                    last_error = format!("could not start browser launcher: {error}");
+                }
+            }
+        }
+        return Err(last_error);
+    }
+    open::that_detached(url).map_err(|error| format!("could not open browser: {error}"))
+}
+
+/// Open the serve URL in the host's browser: the platform opener.
+#[cfg(not(target_os = "linux"))]
+fn open_browser(url: &str) -> Result<(), String> {
+    open::that_detached(url).map_err(|error| format!("could not open browser: {error}"))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod serve_browser_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    fn browser_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path().join("mount");
+        let bundled_bin = mount.join("usr/bin");
+        let host_bin = temp.path().join("host bin");
+        std::fs::create_dir_all(&bundled_bin).unwrap();
+        std::fs::create_dir_all(&host_bin).unwrap();
+        (temp, bundled_bin, host_bin)
+    }
+
+    fn write_launcher(directory: &std::path::Path, name: &str, script: &str) {
+        let path = directory.join(name);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn appimage_parent(
+        mount: &std::path::Path,
+        bundled_bin: &std::path::Path,
+        host_bin: &std::path::Path,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        use std::ffi::OsString;
+        let mut parent: Vec<(OsString, OsString)> = Vec::new();
+        parent.push(("APPDIR".into(), mount.as_os_str().to_os_string()));
+        parent.push((
+            "APPIMAGE".into(),
+            mount.with_file_name("Chan.AppImage").into_os_string(),
+        ));
+        parent.push((
+            "PATH".into(),
+            std::env::join_paths([bundled_bin, host_bin]).unwrap(),
+        ));
+        parent.push(("PYTHONHOME".into(), mount.join("usr").into_os_string()));
+        parent.push((
+            "LD_LIBRARY_PATH".into(),
+            format!("{}/usr/lib:", mount.display()).into(),
+        ));
+        parent
+    }
+
+    /// Spawn the first candidate that starts, as the serve site does.
+    fn spawn_first_available(commands: Vec<std::process::Command>) -> Option<std::process::Output> {
+        for mut command in commands {
+            if let Ok(output) = command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                return Some(output);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn serve_browser_command_uses_the_terminal_scrub() {
+        let (_temp, bundled_bin, host_bin) = browser_fixture();
+        let mount = bundled_bin
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        write_launcher(&bundled_bin, "xdg-open", "#!/bin/sh\nexit 91\n");
+        write_launcher(
+            &host_bin,
+            "xdg-open",
+            "#!/bin/sh\n[ \"$#\" = 1 ] || exit 92\n[ -z \"${APPDIR+x}${APPIMAGE+x}${PYTHONHOME+x}${LD_LIBRARY_PATH+x}\" ] || exit 93\nprintf '%s' \"$1\"\n",
+        );
+        let url = "https://example.com/path?q=a%20b&other=x#part";
+        let parent = appimage_parent(&mount, &bundled_bin, &host_bin);
+        let commands =
+            appimage_browser_commands(url, parent).expect("AppImage parent yields commands");
+        assert_eq!(
+            commands
+                .first()
+                .expect("at least one candidate")
+                .get_program(),
+            std::ffi::OsStr::new("xdg-open")
+        );
+        let output = spawn_first_available(commands).expect("a launcher starts");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, url.as_bytes());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn serve_browser_falls_back_past_a_missing_launcher() {
+        let (_temp, bundled_bin, host_bin) = browser_fixture();
+        let mount = bundled_bin
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        write_launcher(&bundled_bin, "xdg-open", "#!/bin/sh\nexit 91\n");
+        write_launcher(
+            &host_bin,
+            "gio",
+            "#!/bin/sh\nprintf 'gio-open %s %s' \"$1\" \"$2\"\n",
+        );
+        let url = "https://example.com/";
+        let parent = appimage_parent(&mount, &bundled_bin, &host_bin);
+        let commands =
+            appimage_browser_commands(url, parent).expect("AppImage parent yields commands");
+        assert!(commands
+            .iter()
+            .any(|command| { command.get_program() == std::ffi::OsStr::new("gio") }));
+        let output = spawn_first_available(commands).expect("a fallback starts");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, format!("gio-open open {url}").into_bytes());
+    }
+
+    #[test]
+    fn serve_browser_is_absent_off_an_appimage() {
+        let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+            vec![("PATH".into(), "/usr/bin:/bin".into())];
+        let url = "https://example.com/";
+        assert!(appimage_browser_commands(url, parent).is_none());
+    }
+}
+
 /// Bundle returned by [`build_tenant_app`]: the prefixed axum app plus the
 /// pieces `serve()` needs out-of-band (token for the launch URL,
 /// last_activity for the idle watcher). The watch handle and
@@ -1824,9 +2015,9 @@ pub async fn serve(
         "boot: ready, URL printed"
     );
     if should_open_browser(config.open_browser) {
-        // Best-effort: on a headless host (no `xdg-open`/no display)
+        // Best-effort: on a headless host (no launcher/no display)
         // this returns an error; log a NOTE and keep serving.
-        if let Err(e) = open::that_detached(&url) {
+        if let Err(e) = open_browser(&url) {
             eprintln!("NOTE: could not open browser ({e}); visit the URL above.");
         }
     }

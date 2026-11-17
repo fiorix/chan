@@ -4290,7 +4290,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_capability_grants_app_commands_and_opener() {
+    fn workspace_and_about_capabilities_grant_the_host_opener() {
         let perms = capability_permissions(WORKSPACE_CAPABILITY_JSON);
         assert!(
             perms.iter().any(|p| p == "workspace-window"),

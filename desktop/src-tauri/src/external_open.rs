@@ -10,32 +10,6 @@ fn validated_url(target: &str) -> Result<url::Url, String> {
     Ok(url)
 }
 
-#[cfg(target_os = "linux")]
-fn appimage_command(
-    url: &url::Url,
-    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-) -> Option<std::process::Command> {
-    use std::process::{Command, Stdio};
-
-    let parent: Vec<_> = parent.into_iter().collect();
-    if !["APPDIR", "APPIMAGE"].iter().all(|name| {
-        parent
-            .iter()
-            .any(|(key, value)| key == name && !value.is_empty())
-    }) {
-        return None;
-    }
-    let mut command = Command::new("xdg-open");
-    command.env_clear().envs(parent.iter().cloned());
-    chan_server::clear_appimage_command_env(&mut command, parent);
-    command
-        .arg(url.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    Some(command)
-}
-
 /// Open a supported external URL through the host's registered application.
 pub(crate) fn open<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -43,19 +17,29 @@ pub(crate) fn open<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let url = validated_url(target)?;
     #[cfg(target_os = "linux")]
-    if let Some(mut command) = appimage_command(&url, std::env::vars_os()) {
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("starting the host link opener: {error}"))?;
-        // Reap xdg-open without holding a sign-in attempt or the UI thread.
-        tauri::async_runtime::spawn_blocking(move || match child.wait() {
-            Ok(status) if !status.success() => {
-                tracing::warn!(%status, "the host link opener failed");
+    if let Some(commands) =
+        chan_server::appimage_browser_commands(url.as_str(), std::env::vars_os())
+    {
+        let mut last_error = String::from("no browser launcher started");
+        for mut command in commands {
+            match command.spawn() {
+                Ok(mut child) => {
+                    // Reap the launcher without holding a sign-in attempt or the UI thread.
+                    tauri::async_runtime::spawn_blocking(move || match child.wait() {
+                        Ok(status) if !status.success() => {
+                            tracing::warn!(%status, "the host link opener failed");
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "waiting for the host link opener failed")
+                        }
+                        Ok(_) => {}
+                    });
+                    return Ok(());
+                }
+                Err(error) => last_error = format!("starting the host link opener: {error}"),
             }
-            Err(error) => tracing::warn!(%error, "waiting for the host link opener failed"),
-            Ok(_) => {}
-        });
-        return Ok(());
+        }
+        return Err(last_error);
     }
     app.opener()
         .open_url(url.as_str(), None::<&str>)
@@ -119,10 +103,11 @@ mod tests {
             vec![("APPDIR", ""), ("APPIMAGE", "/tmp/Chan.AppImage")],
             vec![("APPDIR", "/tmp/mount"), ("APPIMAGE", "")],
         ] {
-            assert!(
-                appimage_command(&url, parent.into_iter().map(|(k, v)| (k.into(), v.into())))
-                    .is_none()
-            );
+            assert!(chan_server::appimage_browser_commands(
+                url.as_str(),
+                parent.into_iter().map(|(k, v)| (k.into(), v.into()))
+            )
+            .is_none());
         }
     }
 
@@ -164,7 +149,9 @@ mod tests {
                 format!("{}/usr/lib:", mount.display()).into(),
             ),
         ];
-        let mut command = appimage_command(&url, parent).expect("AppImage command");
+        let mut commands = chan_server::appimage_browser_commands(url.as_str(), parent)
+            .expect("AppImage commands");
+        let command = commands.first_mut().expect("at least one candidate");
         assert_eq!(command.get_program(), "xdg-open");
         assert_eq!(command.get_args().collect::<Vec<_>>(), [url.as_str()]);
         let output = command
