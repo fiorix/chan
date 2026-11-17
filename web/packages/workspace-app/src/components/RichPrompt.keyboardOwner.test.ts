@@ -33,16 +33,21 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import CommandLauncher from "./CommandLauncher.svelte";
+import ConfirmModal from "./ConfirmModal.svelte";
+import Wysiwyg from "../editor/Wysiwyg.svelte";
 import Pane from "./Pane.svelte";
 import SearchPanel from "./SearchPanel.svelte";
 import TerminalTab from "./TerminalTab.svelte";
 import Terminals from "./Terminals.svelte";
 import { api, type SurveySpec } from "../api/client";
 import { closeConfirmState } from "../state/closeConfirm.svelte";
+import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { registerCommands } from "../state/commands";
 import { richPrompt, showRichPromptForTab, toggleRichPromptSource } from "../state/richPrompt.svelte";
 import { launcherPanel, overlayStack, searchPanel } from "../state/store.svelte";
+import { dialogIn } from "../__tests__/dialog";
+import BubbleOverlay from "./BubbleOverlay.svelte";
 import { workspace } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import {
@@ -79,6 +84,7 @@ const IMAGE_TEXT = "see ![](shot.png)";
 const ON_SERVER = "/home/me/.chan/workspaces/k/Drafts/owner/shot.png";
 const workspaceInfo = workspace.info;
 const mountedPanes: Array<Record<string, unknown>> = [];
+const mountedDialogs: Array<{ component: Record<string, unknown>; target: HTMLElement }> = [];
 
 beforeEach(() => {
   // The editors focus and measure on animation frames; a frame that runs at
@@ -89,6 +95,11 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const component of mountedPanes.splice(0)) unmount(component);
+  for (const dialog of mountedDialogs.splice(0)) {
+    unmount(dialog.component);
+    dialog.target.remove();
+  }
+  resolveConfirm(false);
   resetTerminals();
   draft.content = TEXT;
   workspace.info = workspaceInfo;
@@ -97,6 +108,7 @@ afterEach(() => {
   closeTeamDialog();
   closeConfirmState.open = false;
   document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+  overlayStack.ids = [];
   vi.restoreAllMocks();
 });
 
@@ -176,6 +188,70 @@ const OWNERS: Owner[] = [
       return field;
     },
     release: () => document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR),
+  },
+  {
+    name: "a ModalShell dialog",
+    take: async () => {
+      const target = document.createElement("div");
+      document.body.append(target);
+      const component = mount(ConfirmModal, { target, props: {} }) as Record<string, unknown>;
+      mountedDialogs.push({ component, target });
+      void uiConfirm({
+        title: "Delete notes.md?",
+        message: "It moves to the trash.",
+        confirmLabel: "Delete",
+        cancelLabel: "Keep",
+      });
+      await settle();
+      const dialog = dialogIn(target);
+      expect(dialog, "the confirm dialog shows").not.toBeNull();
+      await vi.waitFor(() => expect(dialog!.contains(document.activeElement), "the dialog holds the keyboard").toBe(true));
+      return document.activeElement as HTMLElement;
+    },
+    release: () => {
+      resolveConfirm(false);
+      const last = mountedDialogs.pop();
+      if (last) {
+        unmount(last.component);
+        last.target.remove();
+      }
+    },
+  },
+  {
+    name: "the command launcher overlay",
+    take: async () => {
+      const field = focusedField();
+      overlayStack.ids = ["launcher"];
+      await settle();
+      return field;
+    },
+    release: () => {
+      overlayStack.ids = [];
+    },
+  },
+  {
+    name: "the Search overlay",
+    take: async () => {
+      const field = focusedField();
+      overlayStack.ids = ["search"];
+      await settle();
+      return field;
+    },
+    release: () => {
+      overlayStack.ids = [];
+    },
+  },
+  {
+    name: "the Settings overlay",
+    take: async () => {
+      const field = focusedField();
+      overlayStack.ids = ["settings"];
+      await settle();
+      return field;
+    },
+    release: () => {
+      overlayStack.ids = [];
+    },
   },
 ];
 
@@ -552,6 +628,159 @@ describe("the command launcher's return under another overlay", () => {
     searchPanel.open = false;
     launcherPanel.open = false;
     overlayStack.ids = [];
+describe("a tab-focus pulse while an owner holds the keyboard", () => {
+  // The pulse must leave focus where the owner holds it. Owners with real
+  // DOM here are the survey cards and the ModalShell dialog; the other
+  // owners hold the keyboard through state the composer reads, as the
+  // matrix proves.
+  test("a survey card over the terminal keeps it", async () => {
+    const composer = await openComposer();
+    const survey = OWNERS.find((owner) => owner.name === "a survey over the terminal")!;
+    const card = await survey.take(composer.target, composer.tab.id);
+    bumpTabFocusPulse();
+    await settle();
+    expect(document.activeElement, "the card keeps the keyboard").toBe(card);
+    survey.release();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settle();
+    bumpTabFocusPulse();
+    await settle();
+    expect(composer.view.hasFocus, "the pulse after the release gives the composer the keyboard").toBe(true);
+  });
+
+  test("a window-wide survey card keeps it", async () => {
+    const composer = await openComposer();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const overlay = mount(BubbleOverlay, { target });
+    showSurvey(SURVEY, null);
+    await settle();
+    const card = target.querySelector<HTMLElement>(".survey-card");
+    expect(card, "the window-wide survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the card has the keyboard").toBe(card));
+    bumpTabFocusPulse();
+    await settle();
+    expect(document.activeElement, "the card keeps the keyboard").toBe(card);
+    resetSurveysForTest();
+    unmount(overlay);
+    target.remove();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settle();
+    bumpTabFocusPulse();
+    await settle();
+    expect(composer.view.hasFocus, "the pulse after the release gives the composer the keyboard").toBe(true);
+  });
+
+  test("a ModalShell dialog keeps it", async () => {
+    const composer = await openComposer();
+    const modal = OWNERS.find((owner) => owner.name === "a ModalShell dialog")!;
+    const holder = await modal.take(composer.target, composer.tab.id);
+    bumpTabFocusPulse();
+    await settle();
+    expect(document.activeElement, "the dialog keeps the keyboard").toBe(holder);
+    modal.release();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settle();
+    bumpTabFocusPulse();
+    await settle();
+    expect(composer.view.hasFocus, "the pulse after the release gives the composer the keyboard").toBe(true);
+  });
+});
+
+describe("an editor that mounts while an owner takes the keyboard", () => {
+  test("a swap that mounts under the launcher comes up without the keyboard", async () => {
+    const composer = await openComposer();
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    await settle();
+    toggleRichPromptSource(composer.tab.id);
+    await settle();
+    const content = composer.target.querySelector<HTMLElement>(".rich-prompt .cm-content")!;
+    const view = EditorView.findFromDOM(content)!;
+    expect(view.hasFocus, "the mounting editor does not take the keyboard").toBe(false);
+    document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settle();
+    bumpTabFocusPulse();
+    await settle();
+    const after = composer.target.querySelector<HTMLElement>(".rich-prompt .cm-content")!;
+    expect(EditorView.findFromDOM(after)!.hasFocus, "the pulse after the release gives the editor the keyboard").toBe(true);
+  });
+
+  test("a frame scheduled before the owner shows reads the rule when it runs", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const refusable = { current: true };
+    const editor = mount(Wysiwyg, {
+      target,
+      props: { value: "take the keyboard", autoFocus: true, mayTakeFocus: () => refusable.current },
+    });
+    await settle();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await settle();
+    refusable.current = false;
+    editor.resetCaret(0, 0);
+    await settle();
+    const view = EditorView.findFromDOM(target.querySelector<HTMLElement>(".cm-content")!)!;
+    expect(view.hasFocus, "the delayed frame yields to the owner").toBe(false);
+    target.remove();
+  });
+});
+
+describe("a survey that closes under another owner", () => {
+  test("under the Computers launcher the keyboard stays with the launcher", async () => {
+    const composer = await openComposer();
+    const survey = OWNERS.find((owner) => owner.name === "a survey over the terminal")!;
+    await survey.take(composer.target, composer.tab.id);
+    const launcher = OWNERS.find((owner) => owner.name === "the Computers launcher")!;
+    const holder = await launcher.take(composer.target, composer.tab.id);
+    survey.release();
+    await settle();
+    expect(document.activeElement, "the launcher keeps the keyboard").toBe(holder);
+    expect(composer.view.hasFocus, "the composer does not take the keyboard").toBe(false);
+    launcher.release();
+  });
+
+  test("under the Team dialog the composer does not take the keyboard", async () => {
+    const composer = await openComposer();
+    const survey = OWNERS.find((owner) => owner.name === "a survey over the terminal")!;
+    await survey.take(composer.target, composer.tab.id);
+    const team = OWNERS.find((owner) => owner.name === "the Team dialog")!;
+    await team.take(composer.target, composer.tab.id);
+    survey.release();
+    await settle();
+    expect(composer.view.hasFocus, "the composer does not take the keyboard").toBe(false);
+    team.release();
+  });
+});
+
+describe("a rejected or failed prompt under another owner", () => {
+  test("rejected leaves the keyboard with the launcher", async () => {
+    const composer = await openComposer();
+    composer.socket.sent.splice(0);
+    press(composer.content, "Enter", { ctrlKey: true });
+    await settle();
+    const id = sentFrames(composer.socket).find((frame) => frame.type === "prompt")?.id as string;
+    expect(id, "the submit sent a prompt").toBeTruthy();
+    const launcher = OWNERS.find((owner) => owner.name === "the Computers launcher")!;
+    const holder = await launcher.take(composer.target, composer.tab.id);
+    await receive(composer.socket, { type: "prompt-ack", id, queued: false, depth: 0 });
+    await settle();
+    expect(document.activeElement, "the launcher keeps the keyboard").toBe(holder);
+    expect(composer.view.hasFocus, "the composer does not take the keyboard").toBe(false);
+    launcher.release();
+  });
+
+  test("failed leaves the keyboard with the launcher", async () => {
+    const composer = await openComposer();
+    const id = await queue(composer, "delivered");
+    expect(id, "the submit sent a prompt").toBeTruthy();
+    const launcher = OWNERS.find((owner) => owner.name === "the Computers launcher")!;
+    const holder = await launcher.take(composer.target, composer.tab.id);
+    composer.socket.close();
+    await settle();
+    expect(document.activeElement, "the launcher keeps the keyboard").toBe(holder);
+    expect(composer.view.hasFocus, "the composer does not take the keyboard").toBe(false);
+    launcher.release();
   });
 });
 

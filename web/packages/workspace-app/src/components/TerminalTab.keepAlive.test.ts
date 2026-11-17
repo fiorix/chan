@@ -27,6 +27,7 @@ import { demoSocketFactory } from "../demo/socket";
 import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { onWatchEvent } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
+import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import { terminalRelocations } from "../state/terminalDock.svelte";
 import {
   cancelPaneMode,
@@ -460,5 +461,64 @@ describe("the keyboard after a relocation", () => {
 
     expect(asked.filter((el) => composer.contains(el)), "the composer is asked for no focus").toEqual([]);
     expect(composer.contains(document.activeElement), "the composer does not hold the keyboard").toBe(false);
+  });
+
+  // A survey over the terminal that moves gets the keyboard back after the
+  // move, as the find bar, the composer and the terminal do.
+  test("hands the keyboard back to the survey card after the move", async () => {
+    const { root, beside } = await focusedHostBesideEmptyPane();
+    showRichPromptForTab(HOST);
+    await settle();
+    const composer = await vi.waitFor(() => {
+      const el = root.querySelector<HTMLElement>(".rich-prompt");
+      expect(el?.contains(document.activeElement)).toBe(true);
+      return el!;
+    });
+    showSurvey({ surveyId: "survey-move-back", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] }, HOST);
+    await settle();
+    await vi.waitFor(() => {
+      const card = root.querySelector<HTMLElement>(".survey-card");
+      expect(card).not.toBeNull();
+      expect(document.activeElement).toBe(card);
+    });
+    const moves = terminalRelocations(HOST);
+    await closePane(beside);
+    await settle();
+    await vi.waitFor(() => expect(terminalRelocations(HOST), "the terminal moved").toBe(moves + 1));
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+    expect(composer.contains(document.activeElement), "the composer does not take the keyboard").toBe(false);
+    await vi.waitFor(() => {
+      const el = document.activeElement;
+      expect(el instanceof HTMLElement && !!el.closest(".survey-card"), "the card has the keyboard back").toBe(true);
+    });
+  });
+
+  // A move under another owner yields like every other refocus: the move
+  // hands the keyboard to nothing while the Team dialog holds it.
+  test("hands the keyboard to nothing when it moves under the Team dialog", async () => {
+    const { root, beside } = await focusedHostBesideEmptyPane();
+    showRichPromptForTab(HOST);
+    await settle();
+    const composer = await vi.waitFor(() => {
+      const el = root.querySelector<HTMLElement>(".rich-prompt");
+      expect(el?.contains(document.activeElement)).toBe(true);
+      return el!;
+    });
+    openTeamDialog({ leadTabId: HOST, leadPaneId: SEED_PANE });
+    await settle();
+    const asked: HTMLElement[] = [];
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      asked.push(this);
+      focus.call(this, options);
+    });
+    const moves = terminalRelocations(HOST);
+    await closePane(beside);
+    await settle();
+    await vi.waitFor(() => expect(terminalRelocations(HOST), "the terminal moved").toBe(moves + 1));
+    await new Promise((r) => setTimeout(r, RECOVERY_SETTLED));
+    expect(asked.filter((el) => composer.contains(el)), "the composer is asked for no focus").toEqual([]);
+    expect(composer.contains(document.activeElement), "the composer does not hold the keyboard").toBe(false);
+    closeTeamDialog();
   });
 });
