@@ -58,7 +58,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [the model download trusts bundled roots][modelroots] | partly built | measure |
 | [the TLS rows' Windows readings][tlswin] | not started | measure |
 | [terminal browser checks' red proofs][termredproofs] | not started | measure |
-| [a lossy link freezes a window][linkhealth] | built | design |
+| [a lossy link freezes a window][linkhealth] | built | review |
 | [the composer takes a survey's keys][keyowner] | not started | build |
 | [a fresh shell keeps dead modes][freshmodes] | not started | build |
 | [try again over an exited terminal][exitedtry] | not started | build |
