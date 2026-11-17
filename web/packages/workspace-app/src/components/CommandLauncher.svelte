@@ -866,14 +866,16 @@
   mayTakeFocus={(heir) => {
     // The Computers launcher owns the keyboard outright: a focus change in
     // the page while it shows would take the window's first responder back.
-    // (This predicate reads the DOM attribute directly, so the check is
-    // fresh.) Otherwise a run hands the keyboard back when the heir owns
-    // it where it is: a modal dialog, a survey card, or the top overlay's
-    // own panel while no modal is open. Anything else, and no heir at all,
-    // goes through the shared rule, which still refuses the terminal and
-    // its composer while an owner holds them.
+    // (This predicate reads LAUNCHER_SHOWN_ATTR directly, so the check is
+    // fresh.) Otherwise a run hands the keyboard back to the heir where it
+    // owns the keyboard: a window-wide modal dialog, a survey card where no
+    // modal owns the keyboard, or the top overlay's panel while no modal is
+    // open. Anything else, and no heir at all, goes through the shared
+    // rule, which still refuses the terminal and its composer while an
+    // owner holds them.
     if (launcherShownOverWindow()) return false;
-    if (heir && heir.closest('[aria-modal="true"], .survey-card')) return true;
+    if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
+    if (heir && heir.closest(".survey-card") && !modalDialogOpen()) return true;
     if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
     return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
   }}

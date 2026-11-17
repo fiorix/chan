@@ -717,6 +717,63 @@ describe("the launcher's return under another overlay", () => {
     }
   });
 
+  test("a run that settles with a window-wide survey up leaves the terminal card alone", async () => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    const surveyTarget = document.createElement("div");
+    document.body.append(surveyTarget);
+    const wideTarget = document.createElement("div");
+    document.body.append(wideTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-card", title: null, bodyMarkdown: "Choose", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      expect(document.activeElement, "the launcher takes focus").toBe(target.querySelector(".deck-input"));
+      // Keys stay with the survey while it shows, so the run goes through
+      // a row click, the way a user reaches it under a survey.
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Wait on window",
+      );
+      expect(row, "the deck lists the held command").toBeDefined();
+      row!.click();
+      await flush();
+      expect(held, "the run started").not.toBeNull();
+      // A window-wide survey shows while the run is still out; the pane
+      // gives up the keyboard to the window.
+      mounted.push(mount(BubbleOverlay, { target: wideTarget }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-window", title: null, bodyMarkdown: "Choose", options: ["OK"] }, null);
+      await flush();
+      const wide = wideTarget.querySelector<HTMLElement>(".survey-card");
+      expect(wide, "the window-wide survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(wide));
+      wide!.blur();
+      expect(document.activeElement).toBe(document.body);
+      const focus = vi.spyOn(card!, "focus");
+      try {
+        held!.resolve();
+        await flush();
+        expect(launcherPanel.open, "the run closes the deck").toBe(false);
+        expect(focus, "the completed run does not return into the terminal card").not.toHaveBeenCalled();
+        expect(document.activeElement).toBe(document.body);
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      surveyTarget.remove();
+      wideTarget.remove();
+    }
+  });
+
   test("a run that settles with Search on top leaves a pane-level dialog button alone", async () => {
     const searchTarget = document.createElement("div");
     document.body.append(searchTarget);
