@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { closeActiveTerminal, dispatchCommand, selectLauncherCommand } from "../lib/pane-strip.mjs";
+import { closeActiveTerminal, selectLauncherCommand, windowSessions } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -226,6 +226,9 @@ export default {
                   "the leg leaves no live socket behind");
               }
             });
+            // The server's roster for this window, read after cleanup: empty
+            // when the leg left nothing behind.
+            result.roster = await windowSessions(page, token).catch((error) => ({ error: String(error.message ?? error) }));
             if (result.passed && result.pageErrors.length) {
               result.passed = false;
               failures.push(`${backend}: browser exceptions: ${result.pageErrors.join("; ")}`);
