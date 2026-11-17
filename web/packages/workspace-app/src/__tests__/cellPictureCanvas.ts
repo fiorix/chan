@@ -60,6 +60,12 @@ export class CellPictureContext {
     this.#resync();
   }
 
+  /// The pictures are kept in the renderer's CSS pixels, so an absolute
+  /// transform is a no-op like the relative one: the double never scales.
+  setTransform(): void {
+    this.#resync();
+  }
+
   save(): void {
     const { fillStyle, strokeStyle, font, globalAlpha, lineWidth } = this;
     this.#saved.push({ fillStyle, strokeStyle, font, globalAlpha, lineWidth });

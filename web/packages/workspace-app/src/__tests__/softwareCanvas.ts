@@ -79,6 +79,23 @@ export class SoftwareCanvasContext {
     this.#scaleY *= y;
   }
 
+  /// Set the transform absolutely, as a host that reset the drawing state
+  /// leaves it: identity scale at the same canvas size. The double models
+  /// scaling only, so the shear and translation parts are accepted and
+  /// ignored, like the render paths that never set them.
+  setTransform(a: number, b: number, c: number, d: number, _e: number, _f: number): void {
+    this.#resync();
+    void b;
+    void c;
+    this.#scaleX = a;
+    this.#scaleY = d;
+  }
+
+  getTransform(): { a: number; b: number; c: number; d: number; e: number; f: number } {
+    this.#resync();
+    return { a: this.#scaleX, b: 0, c: 0, d: this.#scaleY, e: 0, f: 0 };
+  }
+
   save(): void {
     this.#resync();
     this.#saved.push({
