@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dispatchCommand, selectLauncherCommand } from "../lib/pane-strip.mjs";
+import { closeActiveTerminal, dispatchCommand, selectLauncherCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -31,11 +31,12 @@ function traceExitedTerminal() {
       if (url.pathname !== "/api/terminal/ws") {
         return Reflect.construct(target, args);
       }
+      const connection = trace.sockets.length;
       const socket = Reflect.construct(target, args);
       // Fresh dials carry no `session` value (only reattaches do); the tab
       // name scopes the leg and survives a restart of the same tab.
       const tab = new URL(args[0], location.href).searchParams.get("tab_name");
-      const record = { socket, tab, ready: false, delivered: [] };
+      const record = { socket, tab, connection, ready: false, delivered: [] };
       trace.sockets.push(record);
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;
@@ -49,7 +50,7 @@ function traceExitedTerminal() {
         if (typeof data === "string") {
           let frame;
           try { frame = JSON.parse(data); } catch { /* Raw input is not JSON. */ }
-          if (frame?.type === "prompt") trace.prompts.push({ ...frame, connection: trace.sockets.length });
+          if (frame?.type === "prompt") trace.prompts.push({ ...frame, connection });
         }
         return send(data);
       };
@@ -71,9 +72,10 @@ async function state(page, card) {
       pending: composer?.classList.contains("pending") ?? null,
       note: note?.textContent ?? null,
       live: note?.getAttribute("aria-live") ?? null,
-      sockets: trace?.sockets.map(({ socket, tab, ready, delivered }) => ({
+      sockets: trace?.sockets.map(({ socket, tab, connection, ready, delivered }) => ({
         state: socket.readyState,
         tab,
+        connection,
         ready,
         delivered,
       })) ?? [],
@@ -166,7 +168,7 @@ export default {
             // addresses live sessions only, and an exited terminal has none.
             // A new session on a new socket takes the kept text. The restart
             // opens exactly one new socket on the same tab name.
-            const seen = (await state(page, card)).sockets.length;
+            const seen = own(await state(page, card)).length;
             await selectLauncherCommand(page, "Restart terminal");
             await page.keyboard.press("Enter");
             result.restarted = await waitFor(page, card, "the restarted terminal reattached", (value) => {
@@ -174,6 +176,13 @@ export default {
               return value.sockets.filter((socket) => socket.tab === name).length === seen + 1
                 && next.length === 1 && next[0].ready ? { ...value, next: next[0] } : false;
             }, 30_000);
+            assert.deepEqual(result.restarted.prompts, [], "no prompt sends by itself after the restart");
+            await sleep(500);
+            const pre = await state(page, card);
+            assert.deepEqual(own(pre).map((socket) => socket.state), [3], "no redial before the restart");
+            // Restart hands the keyboard to the new terminal, so the retry
+            // returns focus to the composer first.
+            await page.click(`${card} .cm-content`);
             if (backend === "xterm") {
               await page.keyboard.down("Control");
               await page.keyboard.press("Enter");
@@ -207,9 +216,15 @@ export default {
               }
             };
             await cleanup("owned terminal cleanup", async () => {
-              // The tab bus closes whatever tab is active, live session or
-              // not; `cs terminal close` only matches live sessions.
-              if (opened) await dispatchCommand(page, "app.tab.close");
+              // A restarted leg is live and asks "Close tab?" before it
+              // closes; the helper answers and waits for the count to drop.
+              // `cs terminal close` only matches live sessions.
+              if (opened) {
+                await closeActiveTerminal(page, name);
+                const left = await state(page, null).catch(() => null);
+                assert.ok(!left || !left.sockets.some((socket) => socket.tab === name && socket.state !== 3),
+                  "the leg leaves no live socket behind");
+              }
             });
             if (result.passed && result.pageErrors.length) {
               result.passed = false;
