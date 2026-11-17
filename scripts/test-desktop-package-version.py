@@ -113,9 +113,10 @@ config = json.loads(Path("tauri.conf.json").read_text())
 if "--config" in args:
     index = args.index("--config")
     try:
-        override = json.loads(args[index + 1])
-    except (IndexError, ValueError):
-        sys.exit("invalid --config JSON")
+        raw = args[index + 1]
+        override = json.loads(raw if raw.startswith("{") else Path(raw).read_text())
+    except (IndexError, ValueError, OSError):
+        sys.exit("invalid --config JSON or file")
     config.update(override)
 version = config["version"]
 if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
@@ -130,6 +131,13 @@ if "--bundles" in args:
         sys.exit("invalid --bundles value")
 elif args[0] == "build" and "-" in version and os.environ.get("TEST_UNAME") == "Linux":
     sys.exit(f'invalid version "{version}": contains invalid character')
+if "appimage" in bundles:
+    bundle_dir = Path("../../target/release/bundle/appimage")
+    bundle_dir.mkdir(parents=True)
+    image = bundle_dir / f"chan-desktop_{version}_amd64.AppImage"
+    image.write_bytes(b"appimage fixture")
+    if os.environ.get("TEST_SIGNED", "1") == "1":
+        image.with_suffix(image.suffix + ".sig").write_bytes(b"signature fixture")
 with Path(os.environ["TAURI_RECORD"]).open("a") as record:
     record.write(json.dumps({"via": "pinned", "args": args}) + "\n")
 """
@@ -196,6 +204,9 @@ def fixture_pinned(root: Path, makefile: str, version: str, cargo_script: str) -
     (desktop / "Makefile").write_text(makefile)
     (root / "Makefile").write_text("web:\n\t@:\n")
     config.write_text(json.dumps({"version": version}))
+    for source in (APPIMAGE_CONFIG,):
+        if source.exists():
+            (config.parent / source.name).write_bytes(source.read_bytes())
     executable(bin_dir / "cargo", cargo_script)
     executable(bin_dir / "uname", UNAME)
     pinned_src = root / "pinned-src"
@@ -204,7 +215,7 @@ def fixture_pinned(root: Path, makefile: str, version: str, cargo_script: str) -
     return desktop, bin_dir
 
 
-TOOLS = ("make", "sh", "bash", "env", "node", "python3", "cp", "mkdir", "chmod")
+TOOLS = ("make", "sh", "bash", "env", "node", "python3", "cp", "mkdir", "chmod", "mv")
 
 
 def closed_tools(root: Path) -> Path:
