@@ -41,6 +41,22 @@ describe("buildDocDom", () => {
     expect(content.querySelector("p")?.textContent).toBe("note alias");
   });
 
+  test("leaves frontmatter as typed and labels the body", async () => {
+    const { content, completion } = buildDocDom({
+      markdown: '---\ntitle: Plan\nup: "[[Projects/Parent]]"\nrelated:\n  - "[[Other note|see other]]"\ngrid: [[1, 2], [3, 4]]\n---\n\nSee [[a]].\n',
+      path: "notes/doc.md",
+      theme: "light",
+      contentWidthPx: 669,
+    });
+    await completion;
+    const text = content.textContent ?? "";
+    expect(text).toContain('up: "[[Projects/Parent]]"');
+    expect(text).toContain('[[Other note|see other]]');
+    expect(text).toContain("grid: [[1, 2], [3, 4]]");
+    expect(text).toContain("See a.");
+    expect(text).not.toContain("[[a]]");
+  });
+
   test("renders markdown into a scoped, width-fixed container", () => {
     const { root, content } = buildDocDom({
       markdown: "# Title\n\nbody text\n",
