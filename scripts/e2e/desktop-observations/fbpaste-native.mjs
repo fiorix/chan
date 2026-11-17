@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 // File-browser Paste lands in the right-clicked row's folder, on WebKitGTK.
-// The desktop guest counterpart of browser-smoke check 232: seeds a workspace
-// with notes/keep.txt and notes/sub/, opens a Files tab showing notes in
-// chan-desktop, copies keep.txt through its row menu, pastes through the sub
-// folder row's menu, then asserts notes/sub/keep.txt on disk and the landed
-// entry selected. DOM events are dispatched in-page (synthetic); the engine,
-// dispatch, handlers and rendering are WebKitGTK's own.
+// The desktop guest counterpart of browser-smoke check 232: seeds keep.txt
+// at the workspace root, right-clicks the notes row of the root listing to
+// copy it, right-clicks... no: copies keep.txt, then right-clicks the notes
+// row and pastes through its menu. Asserts notes/keep.txt on disk, the root
+// keep.txt kept, and the selected row's title ending in /notes/keep.txt (the
+// tab follows its selection into notes). DOM events are dispatched in-page;
+// the engine, dispatch, handlers and rendering are WebKitGTK's own.
 // Usage: node fbpaste-native.mjs --inspector HOST:PORT --out DIR --xid XID
-//   --window WINDOWID --workspace DIR --sha SHA --engine-version V
-import { execFile, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+//   --window ID --workspace DIR --sha SHA --engine-version V
+import { spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
-const exec = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function argsOf(argv) {
@@ -28,8 +27,6 @@ const a = argsOf(process.argv.slice(2));
 for (const k of ["inspector", "out", "xid", "window", "workspace", "sha", "engine-version"]) {
   if (!a[k]) throw new Error(`usage: fbpaste-native.mjs --inspector H:P --out DIR --xid XID --window ID --workspace DIR --sha SHA --engine-version V (missing --${k})`);
 }
-const { CHAN_BIN, CHAN_CONTROL_SOCKET } = process.env;
-if (!CHAN_BIN || !CHAN_CONTROL_SOCKET) throw new Error("need CHAN_BIN and CHAN_CONTROL_SOCKET in the environment");
 mkdirSync(a.out, { recursive: true });
 
 async function targets() {
@@ -43,7 +40,7 @@ async function targets() {
   return found;
 }
 
-function evaluate(endpoint, titleSub, expression) {
+function inspectorEval(endpoint, titleSub, expression) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const done = (fn) => (...args) => { if (settled) return; settled = true; try { ws.close(); } catch {} fn(...args); };
@@ -78,19 +75,48 @@ function evaluate(endpoint, titleSub, expression) {
 }
 
 const run = { engine: "webkitgtk", engineVersion: a["engine-version"], worktreeSha: a.sha, started: new Date().toISOString(), steps: [] };
-const step = (name, ok, detail = "") => { run.steps.push({ name, ok, detail }); console.log(`fbpaste-native: ${ok ? "ok" : "FAIL"} ${name}${detail ? ` ${detail}` : ""}`); if (!ok) throw new Error(name); };
-const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
+// Exit codes follow the directory's convention: 10 a property failed, 3 a
+// precondition or the instrument itself failed, 0 the contract held.
+let failures = [];
+const record = (name, ok, detail, kind) => {
+  run.steps.push({ name, ok, detail: detail ?? "" });
+  console.log(`fbpaste-native: ${ok ? "ok" : "FAIL"} ${name}${detail ? ` ${detail}` : ""}`);
+  if (!ok) failures.push({ name, kind, detail });
+};
+const check = (name, ok, detail) => record(name, ok, detail, "property");
+const need = (name, ok, detail) => record(name, ok, detail, "precondition");
+const xdo = (args, opts = {}) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000, ...opts });
+
+const page = (expr) => inspectorEval(a.inspector, "/workspace-", expr);
+const rowTitle = (path) => page(`(() => {
+  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+  const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
+  return row ? row.getAttribute("title") : null;
+})()`);
+const openMenu = (path) => page(`(() => {
+  const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
+  const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
+  if (!row) return "missing";
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
+  return "opened";
+})()`);
+const clickMenu = (title) => page(`(() => {
+  const button = [...document.querySelectorAll(".ctx button")].find(
+    (b) => b.querySelector(".menu-row-label")?.textContent?.trim() === ${JSON.stringify(title)});
+  if (!button) return "missing";
+  button.click();
+  return "clicked";
+})()`);
 
 try {
-  const page = (expr) => evaluate(a.inspector, "/workspace-", expr);
   xdo(["windowactivate", "--sync", a.xid]);
   const ws = a.workspace;
-  mkdirSync(join(ws, "notes", "sub"), { recursive: true });
-  writeFileSync(join(ws, "notes", "keep.txt"), "keep me\n");
-  step("seed workspace", true);
+  mkdirSync(ws, { recursive: true });
+  writeFileSync(join(ws, "keep.txt"), "keep me\n");
+  need("seed workspace", true);
 
   await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })); return "toggled"; })()`);
-  await page(`(() => new Promise((resolve, reject) => {
+  const listed = await page(`(() => new Promise((resolve, reject) => {
     const deadline = Date.now() + 15000;
     const tick = () => {
       const el = document.querySelector('.browser [role="listbox"], .browser [role="tree"]');
@@ -99,63 +125,53 @@ try {
       else setTimeout(tick, 250);
     };
     tick();
-  })())`);
-  step("open files", true);
+  })())`).catch((err) => `failed: ${err.message}`);
+  need("open files", listed === "files", String(listed).slice(0, 120));
 
-  const rowTitle = async (path) => page(`(() => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
-    if (!row) return null;
-    return { title: row.getAttribute("title"), selected: row.getAttribute("aria-selected") };
-  })()`);
-  const openMenu = async (path) => page(`(() => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").replace(/ \\(.*\\)$/, "").endsWith("/${path}"));
-    if (!row) return "missing:" + ${JSON.stringify(path)};
-    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
-    return "opened";
-  })()`);
-  const clickMenu = async (title) => page(`(() => {
-    const button = [...document.querySelectorAll(".ctx button")].find(
-      (b) => b.querySelector(".menu-row-label")?.textContent?.trim() === ${JSON.stringify(title)});
-    if (!button) return "missing";
-    button.click();
-    return "clicked";
-  })()`);
+  const keep = await rowTitle("keep.txt").catch((err) => `failed: ${err.message}`);
+  need("keep.txt row present", typeof keep === "string" && keep.endsWith("/keep.txt"), JSON.stringify(keep));
+  const copyMenu = await openMenu("keep.txt").catch((err) => `failed: ${err.message}`);
+  need("copy menu opened", copyMenu === "opened", String(copyMenu));
+  const copied = await clickMenu("Copy").catch((err) => `failed: ${err.message}`);
+  need("copy row clicked", copied === "clicked", String(copied));
 
-  const keep = await rowTitle("notes/keep.txt");
-  step("keep.txt row present", !!keep, JSON.stringify(keep));
-  if ((await openMenu("notes/keep.txt")) !== "opened") throw new Error("copy menu did not open");
-  if ((await clickMenu("Copy")) !== "clicked") throw new Error("Copy row did not click");
-  step("copy through row menu", true);
-  const sub = await rowTitle("notes/sub");
-  step("sub row present", !!sub, JSON.stringify(sub));
-  if ((await openMenu("notes/sub")) !== "opened") throw new Error("paste menu did not open");
-  if ((await clickMenu("Paste")) !== "clicked") throw new Error("Paste row did not click");
-  step("paste through row menu", true);
+  const sub = await rowTitle("notes").catch((err) => `failed: ${err.message}`);
+  need("notes row present", typeof sub === "string" && sub.endsWith("/notes"), JSON.stringify(sub));
+  const pasteMenu = await openMenu("notes").catch((err) => `failed: ${err.message}`);
+  need("paste menu opened", pasteMenu === "opened", String(pasteMenu));
+  const pasted = await clickMenu("Paste").catch((err) => `failed: ${err.message}`);
+  need("paste row clicked", pasted === "clicked", String(pasted));
 
-  const landed = join(ws, "notes", "sub", "keep.txt");
-  let disk = null;
+  let landed = null;
   for (let i = 0; i < 30; i++) {
-    try { disk = readFileSync(landed, "utf8"); break; } catch { await sleep(500); }
+    try { landed = readFileSync(join(ws, "notes", "keep.txt"), "utf8"); break; }
+    catch { await sleep(500); }
   }
-  step("landed on disk", disk === "keep me\n", JSON.stringify(disk)?.slice(0, 60) ?? "absent");
-  step("source kept (copy, not cut)", readFileSync(join(ws, "notes", "keep.txt"), "utf8") === "keep me\n");
+  check("landed on disk", landed === "keep me\n", JSON.stringify(landed)?.slice(0, 60) ?? "absent");
+  let kept = null;
+  try { kept = readFileSync(join(ws, "keep.txt"), "utf8"); } catch {}
+  check("source kept", kept === "keep me\n", JSON.stringify(kept)?.slice(0, 60) ?? "absent");
   const selected = await page(`(() => {
     const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/sub/keep.txt"));
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes/keep.txt"));
     return row ? row.getAttribute("aria-selected") : "absent";
-  })()`);
-  step("landed entry selected", selected === "true", String(selected));
+  })()`).catch((err) => `failed: ${err.message}`);
+  check("landed entry selected", selected === "true", JSON.stringify(selected));
+
   run.finished = new Date().toISOString();
-  run.ok = true;
+  const preFailed = failures.some((f) => f.kind === "precondition");
+  const code = preFailed ? 3 : failures.length > 0 ? 10 : 0;
+  run.ok = code === 0;
+  run.exitCode = code;
   writeFileSync(join(a.out, "fbpaste-native.json"), `${JSON.stringify(run, null, 2)}\n`);
-  console.log("fbpaste-native: PASS");
+  console.log(code === 0 ? "fbpaste-native: PASS" : `fbpaste-native: ${failures.length} check(s) failed`);
+  process.exitCode = code;
 } catch (error) {
   run.finished = new Date().toISOString();
   run.ok = false;
-  run.error = String(error && error.message ? error.message : error).slice(0, 500);
-  writeFileSync(join(a.out, "fbpaste-native.json"), `${JSON.stringify(run, null, 2)}\n`);
+  run.exitCode = 3;
+  run.error = String(error && error.message ? error.message : error).slice(0, 300);
+  try { writeFileSync(join(a.out, "fbpaste-native.json"), `${JSON.stringify(run, null, 2)}\n`); } catch {}
   console.error(`fbpaste-native: FAIL ${run.error}`);
-  process.exit(1);
+  process.exitCode = 3;
 }

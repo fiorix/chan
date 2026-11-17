@@ -21,6 +21,8 @@ Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make p
 
 - **`macos-wake-blank.sh`** is the one driver for macOS, and it drives nothing: it reads the unified log for how long each chan-desktop page stayed blank after it came back into view (a display or system wake, a switch back to its Space or tile) and fails over a limit. See "Blank after a wake on macOS" below.
 
+- **`fbpaste-native.sh`** drives one file-browser flow on the desktop's engine as the counterpart of browser-smoke check 232: it copies `keep.txt` through its row menu in a Files tab, pastes through the `notes` row's menu, and asserts `notes/keep.txt` on disk with the landed entry selected. `fbpaste-native.mjs` is its page-level driver through the engine's inspector; like the terminal-size driver it needs Node 22 or newer for the built-in `WebSocket`.
+
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
 
 The Focus/Open fixture also needs Chrome and `puppeteer-core`; the PDF fixture needs the browser smoke's `pdf-lib`. Install the smoke's dependencies in the owning guest and set `OBS_SMOKE_DIR` to that directory when running a copied driver subtree. Set `CHROME_BIN` to the guest's Chrome for Focus/Open. The fixture outputs describe Linux WebKitGTK and a direct devserver connection only.

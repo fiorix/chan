@@ -10,13 +10,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/desktop-observations/lib.sh
-. /work/chan/scripts/e2e/desktop-observations/lib.sh
+. "$HERE/lib.sh"
 
 output=$1
 [ -n "${output:-}" ] || obs_inconclusive "fbpaste-native.sh needs an output directory"
 : "${DISPLAY:?run under xvfb-run}"
 obs_setup fbpaste-native
-obs_need node xvfb-run sha256sum xdotool xprop import
+obs_need node sha256sum
 mkdir -m 700 "$output"
 sha256sum "$HERE/fbpaste-native.sh" "$HERE/fbpaste-native.mjs" "$HERE/lib.sh" > "$output/instrument-sha256.txt"
 INSPECTOR="127.0.0.1:${OBS_INSPECTOR_PORT:-$((20000 + RANDOM % 20000))}"
@@ -33,7 +33,11 @@ workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
 xid="$(workspace_xid)"
 xdotool windowactivate --sync "$xid"
-CHAN_WINDOW_ID="$(node "$HERE/inspect.mjs" "$INSPECTOR" eval "/workspace-" "new URLSearchParams(location.search).get('w')" | tr -d '"')"
+page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "/workspace-" "$1"; }
+# shellcheck disable=SC2329
+page_answers() { page_eval "document.readyState" | grep -q complete; }
+obs_wait 60 "the workspace page to answer the inspector" page_answers
+CHAN_WINDOW_ID="$(page_eval "new URLSearchParams(location.search).get('w')" | tr -d '"')"
 export CHAN_WINDOW_ID
 [ -n "$CHAN_WINDOW_ID" ] || obs_inconclusive "the workspace page names no window id"
 for socket in $(obs_control_sockets); do
