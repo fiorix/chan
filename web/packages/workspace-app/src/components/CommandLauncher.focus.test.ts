@@ -10,6 +10,13 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
 const library = vi.hoisted(() => ({ snapshot: null as unknown }));
 vi.mock("../state/commands/install", () => ({}));
 vi.mock("../api/libraryCommand", () => ({
@@ -28,11 +35,24 @@ import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import SearchPanel from "./SearchPanel.svelte";
+import TerminalTab from "./TerminalTab.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+import { xterm } from "../__tests__/xterm";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { allCommands, registerCommands } from "../state/commands";
 import "../state/commands/global";
+
+installTerminalDom();
 import {
   clearLauncherDraft,
   closeCommandLauncher,
@@ -253,6 +273,8 @@ afterEach(() => {
   if (promptState.open) resolvePrompt(null);
   document.body.innerHTML = "";
   launcherPanel.open = false;
+  resetTerminals();
+  xterm.textareaFocus = false;
   vi.clearAllMocks();
 });
 
@@ -509,6 +531,118 @@ describe("focus when the launcher closes", () => {
     await runOpenAndCancel();
     expect(document.activeElement, "focus returns to the chord's control, not the launcher's last opener").toBe(field);
   });
+
+  test("a run that settles with the prompt open returns the keyboard to the prompt's field", async () => {
+    // The deck opens from the prompt's field, as a chord would while the
+    // prompt holds the keyboard; the run's return target is the modal heir.
+    const dialogs = document.createElement("div");
+    document.body.append(dialogs);
+    mounted.push(mount(PromptModal, { target: dialogs }) as Record<string, unknown>);
+    mounted.push(mount(PathPromptModal, { target: dialogs }) as Record<string, unknown>);
+    void uiPrompt("Name");
+    await flush();
+    const field = document.querySelector<HTMLInputElement>('[role="dialog"][aria-modal="true"] input');
+    expect(field, "the prompt shows its field").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the prompt takes the keyboard").toBe(field));
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+    openCommandLauncher();
+    await flush();
+    // Keys stay with the prompt while it shows, so the run goes through a
+    // row click, the way a user reaches it under a dialog.
+    const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+      (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Toggle nothing",
+    );
+    expect(row, "the deck lists the no-op command").toBeDefined();
+    const focus = vi.spyOn(field!, "focus");
+    try {
+      row!.click();
+      await flush();
+      expect(runNothing, "the run executed").toHaveBeenCalled();
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      await vi.waitFor(() => expect(document.activeElement, "focus returns to the prompt's field").toBe(field));
+      expect(focus, "the return hands the keyboard to the modal heir").toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+    }
+  });
+
+  test("a run that settles with a survey card in another pane leaves the card alone", async () => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    // Same card as the focused-pane return, but the pane is not focused, so
+    // the return refuses and the keyboard stays where the run left it.
+    const surveyTarget = document.createElement("div");
+    surveyTarget.className = "pane";
+    document.body.append(surveyTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-elsewhere", title: null, bodyMarkdown: "Choose", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      expect(document.activeElement, "the launcher takes focus").toBe(target.querySelector(".deck-input"));
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Toggle nothing",
+      );
+      expect(row, "the deck lists the no-op command").toBeDefined();
+      row!.click();
+      await flush();
+      expect(runNothing, "the run executed").toHaveBeenCalled();
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      const focus = vi.spyOn(card!, "focus");
+      try {
+        await flush();
+        expect(focus, "the return does not reach into the unfocused pane").not.toHaveBeenCalled();
+        expect(document.activeElement, "the keyboard stays where the run left it").not.toBe(card);
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      surveyTarget.remove();
+    }
+  });
+
+  test("a dismissal whose opener is gone hands the keyboard to the focused terminal", async () => {
+    xterm.textareaFocus = true;
+    const [tab] = seatTerminals([terminalTab({ title: "meeting" })]);
+    const { target: termTarget } = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    const target = await openFromOrigin();
+    // The opener leaves the document, as a closed dock does, before the
+    // deck is dismissed.
+    origin.remove();
+    await press(target, "Escape");
+    expect(launcherPanel.open, "Escape dismisses the deck").toBe(false);
+    const textarea = termTarget.querySelector<HTMLElement>("textarea");
+    expect(textarea, "the terminal opened its input").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the terminal takes the keyboard").toBe(textarea));
+  });
+
+  test("a dismissal with no heir under a modal takes nothing", async () => {
+    await openFromOrigin();
+    const pulses = tabFocusPulse.value;
+    origin.remove();
+    void uiPrompt("Name");
+    await flush();
+    // Escape belongs to the modal while it shows, so the dismissal goes
+    // through the direct close, which runs the same close effect.
+    closeCommandLauncher();
+    await flush();
+    expect(launcherPanel.open, "the close dismisses the deck").toBe(false);
+    expect(tabFocusPulse.value, "the modal keeps the keyboard; no fallback pulse").toBe(pulses);
+  });
 });
 
 describe("the keyboard while the launcher is open", () => {
@@ -684,7 +818,10 @@ describe("the launcher's return under another overlay", () => {
   test("a run that opens nothing returns the keyboard to the survey card", async () => {
     const tab = terminalTab();
     resetLayout([tab]);
+    // The product mounts the per-terminal overlay inside its terminal's
+    // pane, which the focus-return's focused-pane check reads.
     const surveyTarget = document.createElement("div");
+    surveyTarget.className = "pane focused";
     document.body.append(surveyTarget);
     try {
       mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);

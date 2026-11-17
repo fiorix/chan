@@ -3,10 +3,11 @@
 // The Rich Prompt over a focused terminal takes the keyboard on its own: as
 // its editor mounts, when a delivered or drained message empties it, when a
 // recall gives its text back, on each tab-focus pulse, and when a submit held
-// for its images' paths is sent. A modal dialog, a survey over the terminal
-// and the Computers launcher own the keyboard (`refocusRefused`), and while
-// one does none of those moves focus into the composer; once it lets go, the
-// next pulse lands in the composer again. A TerminalTab is mounted over the
+// for its images' paths is sent. A modal dialog, a survey over the terminal,
+// the Computers launcher and an overlay over the panes own the keyboard
+// (`refocusRefused`), and while one does none of those moves focus into the
+// composer; once it lets go, the next pulse lands in the composer again. A
+// TerminalTab is mounted over the
 // stand-in xterm and socket, so the phases arrive as the server's frames.
 
 import { EditorView } from "@codemirror/view";
@@ -32,7 +33,9 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
+import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import ConfirmModal from "./ConfirmModal.svelte";
+import TeamDialog from "./TeamDialog.svelte";
 import Wysiwyg from "../editor/Wysiwyg.svelte";
 import Pane from "./Pane.svelte";
 import TerminalTab from "./TerminalTab.svelte";
@@ -42,13 +45,14 @@ import { closeConfirmState } from "../state/closeConfirm.svelte";
 import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { richPrompt, showRichPromptForTab, toggleRichPromptSource } from "../state/richPrompt.svelte";
-import { overlayStack, workspace } from "../state/store.svelte";
+import { overlayStack, ui, workspace } from "../state/store.svelte";
 import { dialogIn } from "../__tests__/dialog";
 import BubbleOverlay from "./BubbleOverlay.svelte";
-import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
+import { closeSurveyFromRemote, resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import {
   bumpTabFocusPulse,
   layout,
+  selectNextTabInActivePane,
   selectTabInPane,
   type LeafNode,
   type TerminalTab as TerminalTabState,
@@ -631,6 +635,143 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
     bumpTabFocusPulse();
     await settle();
     expect(composer.view.hasFocus, "the pulse after the release gives the composer the keyboard").toBe(true);
+  });
+
+  // A re-run of the per-terminal overlay's effect (a pulse, a pane event)
+  // while a window-wide owner holds the keyboard follows the owner's hold
+  // instead of grabbing it back: once this survey owns the keyboard, the
+  // card re-takes it only when nothing above it does.
+  test("a pulse leaves a dialog field alone while a survey card is up", async () => {
+    const composer = await openComposer();
+    const survey = OWNERS.find((owner) => owner.name === "a survey over the terminal")!;
+    const card = await survey.take(composer.target, composer.tab.id);
+    // A real dialog field, inside the dialog's DOM: the pulse guard reads
+    // the field's dialog ancestors, so only the survey card's re-grab is
+    // under test, not the pulse's own blur of a detached stand-in.
+    const request = { leadTabId: composer.tab.id, leadPaneId: TERMINAL_PANE };
+    openTeamDialog(request);
+    const holder = document.createElement("div");
+    document.body.append(holder);
+    mountedDialogs.push({ component: mount(TeamDialog, { target: holder, props: { request } }), target: holder });
+    const field = await vi.waitFor(() => {
+      const el = holder.querySelector<HTMLElement>('.team-dialog input[placeholder="Neo"]');
+      expect(el, "the Team dialog shows its name field").not.toBeNull();
+      expect(document.activeElement, "the dialog takes the keyboard").toBe(el);
+      return el!;
+    });
+    const focus = vi.spyOn(card, "focus");
+    try {
+      bumpTabFocusPulse();
+      await settle();
+      expect(focus, "the card does not re-grab the keyboard").not.toHaveBeenCalled();
+      expect(document.activeElement, "the dialog keeps the keyboard").toBe(field);
+    } finally {
+      focus.mockRestore();
+      survey.release();
+    }
+  });
+
+  // The window-wide survey's close returns the remembered element only while
+  // no other owner holds the keyboard: with a survey over the remembered
+  // element's terminal, the close leaves the keyboard with that survey's card.
+  test("a closing window-wide survey leaves the keyboard with the terminal's survey", async () => {
+    const composer = await openComposer();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const overlay = mount(BubbleOverlay, { target });
+    showSurvey(SURVEY, null);
+    await settle();
+    const wide = target.querySelector<HTMLElement>(".survey-card");
+    expect(wide, "the window-wide survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the window-wide card takes the keyboard").toBe(wide));
+    showSurvey({ ...SURVEY, surveyId: "survey-terminal-close" }, composer.tab.id);
+    await settle();
+    const card = composer.target.querySelector<HTMLElement>(".survey-card");
+    expect(card, "the terminal survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the terminal card takes the keyboard").toBe(card));
+    const asked: HTMLElement[] = [];
+    const focus = HTMLElement.prototype.focus;
+    const spy = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+      asked.push(this);
+      focus.call(this, options);
+    });
+    try {
+      // The window-wide survey is answered elsewhere: its slot retires
+      // through the remote-close path, as a timeout or another window does.
+      closeSurveyFromRemote(SURVEY.surveyId);
+      await settle();
+      const richPrompt = composer.target.querySelector<HTMLElement>(".rich-prompt")!;
+      expect(asked.filter((el) => richPrompt.contains(el)), "the composer is asked for no focus").toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(document.activeElement, "the terminal card keeps the keyboard").toBe(card);
+    resetSurveysForTest();
+    unmount(overlay);
+    target.remove();
+  });
+
+  // The dialog arms of the pulse guard are pinned by the real dialogs, not a
+  // stand-in: a chord tab switch with focus in the Team dialog's name field
+  // leaves the keyboard there. Without the role="dialog" arm the pulse blurs
+  // the field and the composer's effect takes it.
+  test("a Team dialog field keeps the keyboard across a chord tab switch", async () => {
+    const [first] = seatTerminals([
+      terminalTab({ richPromptDraftPath: draftPath("owner-team") }),
+      terminalTab({ richPromptDraftPath: draftPath("owner-team-2") }),
+    ]);
+    const { target } = await mountTerminal(TerminalTab, first!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await showComposer({ tab: first!, target, socket });
+    const request = { leadTabId: first!.id, leadPaneId: TERMINAL_PANE };
+    openTeamDialog(request);
+    const holder = document.createElement("div");
+    document.body.append(holder);
+    mountedDialogs.push({ component: mount(TeamDialog, { target: holder, props: { request } }), target: holder });
+    const field = await vi.waitFor(() => {
+      const el = holder.querySelector<HTMLElement>('.team-dialog input[placeholder="Neo"]');
+      expect(el, "the Team dialog shows its name field").not.toBeNull();
+      expect(document.activeElement, "the dialog takes the keyboard").toBe(el);
+      return el!;
+    });
+    selectNextTabInActivePane();
+    await settle();
+    expect(document.activeElement, "the chord leaves the keyboard in the dialog").toBe(field);
+  });
+
+  // Same pin for the close prompt's alertdialog arm: the chord switch leaves
+  // the keyboard on the prompt's Cancel button.
+  test("a close prompt button keeps the keyboard across a chord tab switch", async () => {
+    const [first] = seatTerminals([
+      terminalTab({ richPromptDraftPath: draftPath("owner-close") }),
+      terminalTab({ richPromptDraftPath: draftPath("owner-close-2") }),
+    ]);
+    const { target } = await mountTerminal(TerminalTab, first!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    await showComposer({ tab: first!, target, socket });
+    // The overlay cancels itself while the socket is down, so the prompt
+    // opens on a live connection, as the desktop's close request does.
+    ui.ws = "open";
+    closeConfirmState.open = true;
+    const holder = document.createElement("div");
+    document.body.append(holder);
+    mountedDialogs.push({ component: mount(CloseConfirmOverlay, { target: holder }), target: holder });
+    const button = await vi.waitFor(() => {
+      const el = holder.querySelector<HTMLElement>(".overlay .card");
+      expect(el, "the close prompt shows").not.toBeNull();
+      const focused = document.activeElement as HTMLElement | null;
+      expect(focused, "the prompt takes the keyboard").not.toBeNull();
+      expect(el!.contains(focused), "the keyboard is on the prompt").toBe(true);
+      return focused!;
+    });
+    selectNextTabInActivePane();
+    await settle();
+    expect(document.activeElement, "the chord leaves the keyboard on the prompt").toBe(button);
+    ui.ws = "connecting";
   });
 });
 
