@@ -22,7 +22,8 @@ use sha2::{Digest, Sha256};
 
 /// Per-user config dir. Holds the global `config.toml` (workspace
 /// registry + default-workspace). Uses `.chan` under the OS-provided home
-/// on every platform.
+/// on every platform, and under the app sandbox's Application Support on
+/// iOS (Apple's backed-up home for app data).
 ///
 /// `CHAN_HOME` overrides this with the directory to use IN PLACE OF `~/.chan`
 /// (CARGO_HOME / GNUPGHOME semantics -- the dir itself, not a parent): set
@@ -37,7 +38,21 @@ use sha2::{Digest, Sha256};
 /// `.chan` under the working directory; see `resolve_fallback_home`. The
 /// choice is made once per process and logged.
 pub fn config_dir() -> PathBuf {
-    config_dir_with_sources(chan_home_override(), dirs::home_dir())
+    config_dir_with_sources(chan_home_override(), os_home_dir())
+}
+
+/// The OS home the chan home hangs under: the sandbox's Application
+/// Support on iOS, the login home everywhere else.
+#[cfg(target_os = "ios")]
+fn os_home_dir() -> Option<PathBuf> {
+    dirs::data_dir()
+}
+
+/// The OS home the chan home hangs under: the sandbox's Application
+/// Support on iOS, the login home everywhere else.
+#[cfg(not(target_os = "ios"))]
+fn os_home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
 }
 
 fn config_dir_with_sources(override_dir: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {

@@ -607,23 +607,29 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
 fn sync_launcher_menu(app: &AppHandle, host: &WebviewWindow) {
     #[cfg(windows)]
     sync_menu_chords(host);
-    let wears = panel_is_visible(host.label()) && !crate::titlebar_tabs::in_mode(host);
-    if wears == host.menu().is_some() {
-        return;
-    }
-    if wears {
-        match crate::build_launcher_menu(app) {
-            Ok(menu) => {
-                if let Err(e) = host.set_menu(menu) {
-                    tracing::warn!(error = %e, "attaching the launcher menu failed");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "building the launcher menu failed"),
+    // iOS has no menubar to sync: the single webview wears none.
+    #[cfg(target_os = "ios")]
+    let _ = (app, host);
+    #[cfg(not(target_os = "ios"))]
+    {
+        let wears = panel_is_visible(host.label()) && !crate::titlebar_tabs::in_mode(host);
+        if wears == host.menu().is_some() {
+            return;
         }
-    } else {
-        let _ = host.remove_menu();
+        if wears {
+            match crate::build_launcher_menu(app) {
+                Ok(menu) => {
+                    if let Err(e) = host.set_menu(menu) {
+                        tracing::warn!(error = %e, "attaching the launcher menu failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "building the launcher menu failed"),
+            }
+        } else {
+            let _ = host.remove_menu();
+        }
+        crate::rebuild_window_menu(app);
     }
-    crate::rebuild_window_menu(app);
 }
 
 /// Whether the launcher's key bridge carries the menubar's chords
@@ -690,12 +696,12 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
         return;
     };
     restore_host(host_window);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
         let _ = host_window.remove_menu();
         crate::rebuild_window_menu(app);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     let _ = app;
 }
 
@@ -709,7 +715,12 @@ fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
             }
         }
     });
+    // iOS has no focus to return: the single webview always holds it.
+    #[cfg(target_os = "ios")]
+    let _ = host;
+    #[cfg(not(target_os = "ios"))]
     let webview: &tauri::Webview<R> = host.as_ref();
+    #[cfg(not(target_os = "ios"))]
     let _ = webview.set_focus();
 }
 

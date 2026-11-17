@@ -10,6 +10,8 @@ mod dropped_paths;
 mod embedded;
 mod gateway;
 mod handoff_registrations;
+#[cfg(target_os = "ios")]
+mod ios;
 mod last_window;
 mod launch_paths;
 mod launcher_panel;
@@ -29,9 +31,10 @@ mod terminal_mode;
 mod terminal_opacity;
 mod titlebar_tabs;
 mod tls;
-// Reads the updater plugin's offered update, and FreeBSD builds without
-// the plugin (see Cargo.toml), so the module goes with it.
-#[cfg(not(target_os = "freebsd"))]
+// Reads the updater plugin's offered update. FreeBSD builds without the
+// plugin (see Cargo.toml), and iOS has no updater story, so the module
+// goes with it on both.
+#[cfg(not(any(target_os = "freebsd", target_os = "ios")))]
 mod update_floor;
 mod upload;
 // Only macOS observes a wake; the tests run its schedule everywhere.
@@ -56,6 +59,7 @@ use serde::Serialize;
 // off-macOS those imports are unused and `-D warnings` fails the Linux
 // build (caught by CI, not the local macOS gate, which never compiles
 // the other cfg branch).
+#[cfg(not(target_os = "ios"))]
 use tauri::menu::{Menu, MenuItemBuilder, Submenu};
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
@@ -1337,6 +1341,7 @@ fn devserver_url_token(raw: &str) -> Option<String> {
 /// `cs window list` prints there) rather than a plausible but different
 /// machine; so does a devserver's control row, whose title no naming field
 /// composes.
+#[cfg(not(target_os = "ios"))]
 fn record_menu_title(record: &chan_server::WindowRecord, devserver_name: Option<&str>) -> String {
     if record.library_id == "local" {
         return serve::watched_window_title(record, None);
@@ -1350,6 +1355,7 @@ fn record_menu_title(record: &chan_server::WindowRecord, devserver_name: Option<
 /// The display name of the connected devserver that owns `library_id`, for a
 /// Window-menu row ([`record_menu_title`]); `None` for the local library and
 /// for a devserver with no live connection.
+#[cfg(not(target_os = "ios"))]
 fn menu_devserver_name(state: &AppState, library_id: &str) -> Option<String> {
     let devserver_id = state.devserver_feed.devserver_id_for_library(library_id)?;
     state.devservers.get(&devserver_id).map(|conn| conn.name)
@@ -4133,6 +4139,7 @@ fn platform_os() -> String {
 /// affordance with no JS opt-out). An empty / non-text clipboard maps
 /// to "" so the SPA just treats it as nothing-to-paste; other failures
 /// surface as an Err the SPA logs before falling back to the web API.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_read_text() -> Result<String, String> {
     match on_clipboard(|c| optional_content(c.get_text())) {
         Ok(text) => Ok(text.unwrap_or_default()),
@@ -4145,6 +4152,7 @@ fn clipboard_read_text() -> Result<String, String> {
 /// `navigator.clipboard.writeText()` can reject, so the SPA routes the write
 /// here through `arboard`. Any failure surfaces as an Err the SPA logs before
 /// falling back to the web API.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_write_text(text: String) -> Result<(), String> {
     on_clipboard(|c| c.set_text(text)).map_err(|e| e.to_string())
 }
@@ -4233,6 +4241,7 @@ async fn write_primary_selection(text: String) -> Result<(), String> {
 /// (`ImageData`), so encode it to PNG (what the terminal deals in). An
 /// image-less clipboard maps to `Ok(None)` so the SPA just tries the next
 /// representation.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_read_image() -> Result<Option<Vec<u8>>, String> {
     let image = match on_clipboard(|c| optional_content(c.get_image())) {
         Ok(Some(image)) => image,
@@ -4254,6 +4263,7 @@ fn clipboard_read_image() -> Result<Option<Vec<u8>>, String> {
 /// PNG can declare enormous dimensions (a decompression bomb), so bound the
 /// decode instead of letting `w*h*4` OOM the desktop process. The alloc cap is
 /// the real guard; the dimension caps reject absurd sizes early.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_image_limits() -> image::Limits {
     let mut limits = image::Limits::no_limits();
     limits.max_image_width = Some(16_384);
@@ -4267,6 +4277,7 @@ fn clipboard_image_limits() -> image::Limits {
 /// RGBA, so decode the PNG to RGBA `ImageData` under a bounded decoder (a
 /// hostile PNG can declare huge dimensions). Any failure surfaces as an Err the
 /// CLI reports.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_write_image(bytes: Vec<u8>) -> Result<(), String> {
     let mut reader = image::ImageReader::with_format(
         std::io::Cursor::new(bytes.as_slice()),
@@ -4288,6 +4299,7 @@ fn clipboard_write_image(bytes: Vec<u8>) -> Result<(), String> {
 
 /// Read HTML off the OS clipboard for `cs paste --html`. An HTML-less clipboard
 /// maps to `Ok(None)`. Native arboard read, mirroring [`clipboard_read_text`].
+#[cfg(not(target_os = "ios"))]
 fn clipboard_read_html() -> Result<Option<String>, String> {
     match on_clipboard(|c| optional_content(c.get().html())) {
         Ok(html) => Ok(html),
@@ -4299,6 +4311,7 @@ fn clipboard_read_html() -> Result<Option<String>, String> {
 /// `cs copy --html`, so a real browser reading the OS clipboard (a paste into
 /// Gmail) keeps the formatting. arboard's HTML setter carries the alt text for
 /// plain-only targets.
+#[cfg(not(target_os = "ios"))]
 fn clipboard_write_html(html: String, alt_text: String) -> Result<(), String> {
     on_clipboard(|c| c.set().html(html, Some(alt_text))).map_err(|e| e.to_string())
 }
@@ -4307,6 +4320,7 @@ fn clipboard_write_html(html: String, alt_text: String) -> Result<(), String> {
 /// clipboard holds no such kind, which every read treats as `None`. Classifying
 /// it inside the operation keeps `with_cached_clipboard` from mistaking it for a
 /// broken connection and discarding the handle that OWNS the selection on Linux.
+#[cfg(not(target_os = "ios"))]
 fn optional_content<T>(result: Result<T, arboard::Error>) -> Result<Option<T>, arboard::Error> {
     match result {
         Ok(value) => Ok(Some(value)),
@@ -4322,7 +4336,7 @@ fn optional_content<T>(result: Result<T, arboard::Error>) -> Result<Option<T>, a
 /// the OLE clipboard, which must be closed promptly or every other app is
 /// locked out of it. Errors stay `arboard::Error` so each command maps
 /// acquisition and operation failures together.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "ios")))]
 fn on_clipboard<T>(
     op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
 ) -> Result<T, arboard::Error> {
@@ -4389,7 +4403,7 @@ fn with_cached_clipboard<C, T, E>(
 /// Windows' OLE clipboard both misbehave when two of them run at once, and
 /// async commands run concurrently, so the mutual exclusion must be explicit
 /// rather than inherited from a single invoke thread.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn clipboard_serial_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -4401,7 +4415,7 @@ fn clipboard_serial_lock() -> &'static Mutex<()> {
 /// command holds the Tauri invoke thread for seconds and the window cannot even
 /// render the `cs paste` request card. The guard is taken INSIDE the blocking
 /// closure so a queued operation parks a pool thread, never the async runtime.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 async fn run_clipboard_op<T, F>(op: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
@@ -4420,7 +4434,7 @@ where
 /// Flatten a clipboard blocking task's join result: the operation's own error
 /// rides through untouched, and a task that panicked or was cancelled becomes
 /// an ordinary command error rather than an unwrap on the invoke path.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn clipboard_join_result<T>(joined: tauri::Result<Result<T, String>>) -> Result<T, String> {
     joined.map_err(|e| format!("clipboard task failed: {e}"))?
 }
@@ -4438,7 +4452,7 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 /// See [`clipboard_read_text`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn read_clipboard_text() -> Result<String, String> {
     run_clipboard_op(clipboard_read_text).await
@@ -4452,7 +4466,7 @@ fn write_clipboard_text(text: String) -> Result<(), String> {
 }
 
 /// See [`clipboard_write_text`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn write_clipboard_text(text: String) -> Result<(), String> {
     run_clipboard_op(move || clipboard_write_text(text)).await
@@ -4466,7 +4480,7 @@ fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
 }
 
 /// See [`clipboard_read_image`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
     run_clipboard_op(clipboard_read_image).await
@@ -4480,7 +4494,7 @@ fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
 }
 
 /// See [`clipboard_write_image`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
     run_clipboard_op(move || clipboard_write_image(bytes)).await
@@ -4494,7 +4508,7 @@ fn read_clipboard_html() -> Result<Option<String>, String> {
 }
 
 /// See [`clipboard_read_html`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn read_clipboard_html() -> Result<Option<String>, String> {
     run_clipboard_op(clipboard_read_html).await
@@ -4508,10 +4522,60 @@ fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
 }
 
 /// See [`clipboard_write_html`].
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[tauri::command]
 async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
     run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
+}
+
+// iOS has no native clipboard (the webview's own clipboard applies), so each
+// clipboard command refuses and the SPA falls back to the web API, the same
+// fallback it takes when a desktop clipboard operation fails.
+
+/// Clipboard text is unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn read_clipboard_text() -> Result<String, String> {
+    Err("native clipboard is not supported on iOS".into())
+}
+
+/// Clipboard text is unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn write_clipboard_text(text: String) -> Result<(), String> {
+    let _ = text;
+    Err("native clipboard is not supported on iOS".into())
+}
+
+/// Clipboard images are unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn read_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+    Err("native clipboard is not supported on iOS".into())
+}
+
+/// Clipboard images are unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn write_clipboard_image(bytes: Vec<u8>) -> Result<(), String> {
+    let _ = bytes;
+    Err("native clipboard is not supported on iOS".into())
+}
+
+/// Clipboard HTML is unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn read_clipboard_html() -> Result<Option<String>, String> {
+    Err("native clipboard is not supported on iOS".into())
+}
+
+/// Clipboard HTML is unsupported on iOS; the SPA falls back to the web API.
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn write_clipboard_html(html: String, alt_text: String) -> Result<(), String> {
+    let _ = html;
+    let _ = alt_text;
+    Err("native clipboard is not supported on iOS".into())
 }
 
 /// Raise the window of a Window menu Open row. The section lists minimized
@@ -5595,6 +5659,20 @@ fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// iOS entry, called from Swift as `start_app` through Tauri's mobile
+/// entry point. The iOS library target shares this file as its root, so
+/// the entry lives here beside `main`; it runs the single-webview app
+/// and returns only when the process exits.
+#[cfg(target_os = "ios")]
+#[allow(dead_code)]
+#[tauri::mobile_entry_point]
+pub fn ios_entry() {
+    ios::run();
+}
+
+// The iOS library target shares this file, and its entry is `ios_entry`,
+// so `main` is unused there; the desktop binary still enters here.
+#[allow(dead_code)]
 fn main() {
     // Windows: a release chan-desktop.exe is GUI-subsystem (no console). When
     // invoked as the `chan` / `cs` CLI through a shim, reattach to the parent
@@ -6377,6 +6455,12 @@ fn main() {
 /// launcher shows (launcher_panel.rs). Windows are otherwise menu-less;
 /// their chords ride KEY_BRIDGE_JS (serve.rs).
 fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    // iOS installs no app menu: the single webview wears none.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = app;
+        return Ok(());
+    }
     // macOS: inject the window-nav items into the system menubar's Window
     // submenu. The App menu already owns About <app> and Quit, so File ▸
     // About / Exit are macOS-implicit.
@@ -6542,7 +6626,9 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     app.set_menu(menu)?;
 
+    #[cfg(not(target_os = "ios"))]
     app.on_menu_event(handle_menu_event);
+    #[cfg(not(target_os = "ios"))]
     Ok(())
 }
 
@@ -6553,6 +6639,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
 /// opens; muda queues the pick's event before the popup returns, and the
 /// popup then queues a clear behind it, so the next menu event takes the
 /// window and a dismissed menu leaves none behind. Main thread.
+#[cfg(not(target_os = "ios"))]
 static MENU_POPUP_HOST: Mutex<Option<String>> = Mutex::new(None);
 
 /// Name the window a title bar menu is popped up for, or clear it. Only
@@ -6563,6 +6650,7 @@ pub(crate) fn set_menu_popup_host(host: Option<String>) {
 }
 
 /// The window the menu event being handled was popped up for, if any.
+#[cfg(not(target_os = "ios"))]
 fn take_menu_popup_host() -> Option<String> {
     MENU_POPUP_HOST
         .lock()
@@ -6573,6 +6661,7 @@ fn take_menu_popup_host() -> Option<String> {
 /// Route every menubar item click / accelerator. tauri hands every menu
 /// event to this one app-wide listener, a click in a popped-up menu as
 /// much as one in a menubar, so an item does the same wherever it shows.
+#[cfg(not(target_os = "ios"))]
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     let host = take_menu_popup_host();
     run_menu_item(app, event.id().as_ref(), host.as_deref());
@@ -6665,12 +6754,14 @@ pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str, invoked_for: Optio
 /// `rebuild_window_menu` uses to find (and replace) its own entries.
 const BURIED_MENU_ID_PREFIX: &str = "buried:";
 /// Disabled section header above the buried entries.
+#[cfg(not(target_os = "ios"))]
 const BURIED_MENU_HEADER_ID: &str = "buried-header";
 /// Window-menu id namespace for currently-OPEN (visible) windows: the id is
 /// this prefix + the Tauri window label, so a click recovers the label and
 /// raises the live window. Same prefix+label scheme as `buried:`.
 const OPEN_MENU_ID_PREFIX: &str = "open:";
 /// Disabled section header above all open-window entries.
+#[cfg(not(target_os = "ios"))]
 const OPEN_MENU_HEADER_ID: &str = "open-header";
 /// The Window submenu item the dynamic tail follows.
 const OPEN_IN_BROWSER_MENU_ID: &str = "app-open-in-browser";
@@ -6679,6 +6770,7 @@ const OPEN_IN_BROWSER_MENU_ID: &str = "app-open-in-browser";
 /// the only off-mac bar -- uses this id for its Window submenu, so the
 /// dynamic-tail rebuild can find it by one key.
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(target_os = "ios"))]
 const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();
 
 /// A top-level menu of the launcher menubar (off macOS), by the stable id
@@ -6688,6 +6780,7 @@ const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();
 /// the bar show one definition ([`launcher_submenu`]).
 #[cfg(any(not(target_os = "macos"), test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "ios"))]
 pub(crate) enum LauncherMenu {
     File,
     Edit,
@@ -6696,6 +6789,7 @@ pub(crate) enum LauncherMenu {
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
+#[cfg(not(target_os = "ios"))]
 impl LauncherMenu {
     /// The menubar's menus, in their order.
     pub(crate) const ALL: [Self; 4] = [Self::File, Self::Edit, Self::View, Self::Window];
@@ -6746,7 +6840,7 @@ impl LauncherMenu {
 /// while windows exist). Undo/Redo are likewise GTK-unsupported (dropped, and they
 /// would orphan a leading separator), so Edit sticks to the four clipboard
 /// items muda does implement on GTK.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let mut menu = tauri::menu::MenuBuilder::new(app);
     for which in LauncherMenu::ALL {
@@ -6758,7 +6852,7 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
 /// One menu of the launcher menubar, with its items: what the menubar
 /// shows and what a window tab bar pops up in its place. Each item's id is
 /// what `handle_menu_event` routes on, wherever the item is clicked.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) fn launcher_submenu(
     app: &tauri::AppHandle,
     which: LauncherMenu,
@@ -6830,6 +6924,7 @@ pub(crate) fn launcher_submenu(
 /// has exactly one (the global menubar); off-mac a window wears the launcher
 /// bar only while its launcher shows, so this is those windows' Window
 /// submenus. Empty when no launcher shows or if a bar lost the submenu.
+#[cfg(not(target_os = "ios"))]
 fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<R>> {
     #[cfg(target_os = "macos")]
     {
@@ -6857,6 +6952,11 @@ fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<
 /// Runs on the main thread -- muda requires menu mutation there on macOS --
 /// and is best-effort throughout: a menu glitch must never take down a
 /// close/destroy handler.
+/// iOS has no Window menu to re-sync: the single webview wears none.
+#[cfg(target_os = "ios")]
+pub fn rebuild_window_menu(_app: &tauri::AppHandle<impl tauri::Runtime>) {}
+
+#[cfg(not(target_os = "ios"))]
 pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
@@ -6949,6 +7049,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
 /// window list below. Nothing rebuilds the menu on a minimize, a restore
 /// or an app hide, so a rebuild in that state must keep them. A window
 /// whose title cannot be read is titled by `record_title`.
+#[cfg(not(target_os = "ios"))]
 fn open_window_rows(
     records: &[chan_server::WindowRecord],
     hidden: &[(String, String)],
@@ -6971,6 +7072,7 @@ fn open_window_rows(
 
 /// One item of the Window submenu's dynamic tail.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "ios"))]
 struct WindowMenuEntry {
     /// A section header's id, or a row's id prefix plus its window label.
     id: String,
@@ -6983,6 +7085,7 @@ struct WindowMenuEntry {
 /// section a disabled header over its (window label, title) rows and left
 /// out when it has none. While privacy mode is on every row reads as the
 /// privacy title, whatever title its window carries.
+#[cfg(not(target_os = "ios"))]
 fn window_menu_tail(
     open: Vec<(String, String)>,
     hidden: Vec<(String, String)>,
@@ -7032,6 +7135,7 @@ fn window_menu_tail(
 /// Whether a Window submenu item id belongs to the dynamic tail. The open
 /// and hidden headers use exact ids; their rows use the corresponding
 /// prefixes.
+#[cfg(not(target_os = "ios"))]
 fn is_window_menu_tail_id(id: &str) -> bool {
     [
         BURIED_MENU_HEADER_ID,
@@ -7045,6 +7149,7 @@ fn is_window_menu_tail_id(id: &str) -> bool {
 
 /// The calls [`restamp_window_menu`] makes on a Window submenu, so the
 /// tail's placement can be checked against a model of the native menu.
+#[cfg(not(target_os = "ios"))]
 trait WindowMenuSurface {
     /// The submenu's item ids, in muda's order.
     fn item_ids(&self) -> Vec<String>;
@@ -7070,6 +7175,7 @@ trait WindowMenuSurface {
 /// the submenu to AppKit as the windows menu (`setWindowsMenu:`), which
 /// AppKit fills after Zoom and at the bottom. Off macOS the submenu ends
 /// at Open in Browser and the tail closes it.
+#[cfg(not(target_os = "ios"))]
 fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
     // Back to front, so each removal leaves the positions still to come
     // in place.
@@ -7093,11 +7199,13 @@ fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) 
 }
 
 /// A live Window submenu, with the app that builds its items.
+#[cfg(not(target_os = "ios"))]
 struct NativeWindowMenu<'a, R: tauri::Runtime> {
     app: &'a tauri::AppHandle<R>,
     submenu: &'a Submenu<R>,
 }
 
+#[cfg(not(target_os = "ios"))]
 impl<R: tauri::Runtime> WindowMenuSurface for NativeWindowMenu<'_, R> {
     fn item_ids(&self) -> Vec<String> {
         self.submenu
@@ -8807,7 +8915,7 @@ mod tests {
     /// inline call would starve the timer below for the operation's whole life.
     /// A blocked X11 selection read is exactly this shape, and holding the
     /// invoke thread through it is what froze the window.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[tokio::test(flavor = "current_thread")]
     async fn clipboard_op_leaves_the_awaiting_thread_free() {
         use std::sync::mpsc;
@@ -8841,7 +8949,7 @@ mod tests {
 
     /// Two clipboard operations must never be inside the guard at once because
     /// X11 selections and Windows OLE both require serialized clipboard access.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[tokio::test]
     async fn clipboard_ops_never_overlap() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8877,6 +8985,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[test]
     fn optional_content_classifies_absent_content_without_hiding_failures() {
         assert_eq!(
@@ -9131,7 +9240,7 @@ mod tests {
 
     /// An operation's own error is the command's error, verbatim: the runner
     /// adds no wrapping the SPA's fallback logic would have to parse.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[tokio::test]
     async fn clipboard_op_error_rides_through() {
         assert_eq!(
@@ -9144,7 +9253,7 @@ mod tests {
     /// becomes an ordinary command error instead of an unwrap on the invoke
     /// path. The panicking task here deliberately never touches the clipboard
     /// guard, so it cannot poison it for the other tests in this binary.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[tokio::test]
     async fn clipboard_join_failure_becomes_a_command_error() {
         let joined = tauri::async_runtime::spawn_blocking(|| -> Result<(), String> {
