@@ -61,6 +61,7 @@ import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
 import { applyWindowLabel } from "./windowTitle.svelte";
+import { connectionIsRemote, setConnectionWatchStatus, watchConnectionProbe } from "./connectionHealth.svelte";
 import {
   activeLayout,
   activeTabInPane,
@@ -322,8 +323,8 @@ export const ui = $state<{
   /// the server prints at launch.
   authMissing: boolean;
   /// True while the DisconnectOverlay is actively blocking the UI (the
-  /// watcher dropped after having been open, past the startup grace). The
-  /// overlay greys out the app, but global keyboard shortcuts are
+  /// watcher closed under the page past its grace, or stayed silent past its
+  /// read deadline). The overlay greys out the app, but global keyboard shortcuts are
   /// document-level and fire regardless of focus, so App.svelte's key
   /// handlers consult this to suppress pane/tab shortcuts (e.g. Ctrl+D
   /// closing a tab) behind the overlay. Owned by DisconnectOverlay, which
@@ -2720,9 +2721,10 @@ function surfaceTeamSpawn(
   }
 }
 
-function onWatchStatus(status: WsStatus, attempt: number): void {
+function onWatchStatus(status: WsStatus, attempt: number, drop?: import("../api/transport").WatchDrop): void {
   ui.ws = status;
   ui.wsAttempt = attempt;
+  setConnectionWatchStatus(status, drop);
 }
 
 /// A fresh socket has none of the old socket's scopes or transfer count, so
@@ -2849,13 +2851,18 @@ async function seedTerminalRoster(): Promise<void> {
   }
 }
 
+/// Keep the window's probe and remote scope on every watcher opening path.
+function openWindowWatcher(): WatchSubscription {
+  return openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady, watchConnectionProbe, { remote: connectionIsRemote() });
+}
+
 /// Nudge the live event socket after wake or visibility return. A healthy
 /// socket keeps its subscription; a missing socket opens immediately.
 export function resumeWatcher(): void {
   if (unwatch) {
     unwatch.probe();
   } else {
-    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+    unwatch = openWindowWatcher();
   }
 }
 
@@ -3042,7 +3049,7 @@ async function bootstrapStandalone(): Promise<void> {
   // Watcher socket drives the broadcast / pane event bus terminals rely on,
   // and the scoped filesystem watch a File Browser subscribes to.
   if (!unwatch) {
-    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+    unwatch = openWindowWatcher();
   }
   // No index-status poller (no `/api/index/status` route in this tenant).
 
@@ -3190,7 +3197,7 @@ export async function bootstrap(): Promise<void> {
       if (pendingLead) openTeamDialog(pendingLead);
     }
     if (!unwatch) {
-      unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
+      unwatch = openWindowWatcher();
     }
     startIndexStatusPoller();
   } catch (e) {

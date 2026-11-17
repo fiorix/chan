@@ -37,7 +37,7 @@ One fact that run surfaced: a remote window loads its web app from the devserver
    - `ok` otherwise.
 6. Once the page has had a pong, a new socket's first ping is timed like any other, and if the socket is retired unanswered its pings are misses. During an outage the window itself reads `down` until the redialed socket's first pong. The page's first socket reads `unknown` until its first pong.
 7. The state keeps the last 60 finished pings (round-trip time, or a miss), the time of the last frame, the wait of the oldest unanswered ping, when the state began, and the outage with its start and the time its cover is due. A 250 ms ticker runs only while a ping waits. A wait past the read deadline is a clock jump: the timings are forgotten.
-8. Each terminal socket has a probe of its own, which does not remember across sockets. It pings once at open and keeps its 20 s heartbeat and 45 s read deadline. When the user types, pastes or submits a prompt and no frame arrives within 1 s, it sends one ping, at most one per 2 s. Mouse reports, focus reports, generated replies and the ghostty wheel do not arm that. The control terminal takes no part.
+8. Each terminal socket has a probe of its own, which does not remember across sockets. It pings once at open and keeps its 20 s heartbeat and 45 s read deadline. When the user types, pastes or submits a prompt, it sends one ping 1 s later, at most once per 2 s, whether or not a frame arrived. Mouse reports, focus reports, generated replies and the ghostty wheel do not arm that. The control terminal takes no part.
 
 ### Indicator
 
@@ -77,6 +77,8 @@ One fact that run surfaced: a remote window loads its web app from the devserver
 - The terminal's pill and the window's indicator count from different pings, so while both show, their seconds can differ by up to about 2 s.
 - The terminal's pill follows the status pill one painted frame late after a resize; the status pill's hover scale is read as its box; in a very short top pane a dropped pill hangs past the pane's bottom.
 - After a wake from sleep, keys typed while a terminal's replaced socket is still dialing are dropped; the notice reports it afterwards.
+- A key typed within about 1 to 3 s before a sleep can show the reconnect notice although its echo was on screen.
+- A pong for a ping that left before a key can still answer that key when both pings and the key share one clock millisecond, or when the clock steps back between the key and its probe; the notice and the redial hold then miss that key.
 - An unfocused window pings every 20 s, so after one late pong its warning colour can stand for up to 40 s.
 - The probe times the page as well as the network: a main-thread stall of a second or more with a ping in flight reads as a slow round trip for a few seconds.
 - A connection that is steadily slower than 400 ms reads `slow` for as long as it is.

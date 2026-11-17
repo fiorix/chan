@@ -5,6 +5,7 @@
 // stays open however long a test runs.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createConnectionProbe } from "../api/connectionProbe";
 import { openWatch, setSocketFactory, WS_READ_DEADLINE_MS } from "../api/transport";
 import { demoSocketFactory } from "./socket";
 
@@ -48,6 +49,20 @@ describe("the demo socket's heartbeat", () => {
 
     expect(dials).toBe(1);
     expect(statuses).not.toContain("reconnecting");
+    watch.close();
+  });
+
+  test("a watch over it has its first reading as the socket opens", () => {
+    setSocketFactory(demoSocketFactory);
+    const connection = createConnectionProbe();
+    const watch = openWatch(() => {}, undefined, undefined, undefined, undefined, connection);
+    expect(connection.answered).toBe(false);
+    // The socket opens on the next tick, and the pong to the watch's first
+    // ping arrives inside the send.
+    vi.advanceTimersByTime(0);
+    expect(connection.answered).toBe(true);
+    expect(connection.rttMs).toBe(0);
+    expect(connection.oldestPingAt).toBeNull();
     watch.close();
   });
 });

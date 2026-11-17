@@ -4,7 +4,7 @@
 // core. The socket records the PTY wire; the software canvas serves jsdom.
 
 import type { Terminal } from "@chan/ghostty-web-ng";
-import { unmount } from "svelte";
+import { tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 const ghostty = vi.hoisted(() => ({
@@ -33,7 +33,10 @@ import {
   attachGhostty, compileGhosttyCore, ghosttyAlternateScreen, ghosttyCellMetrics,
   ghosttyLineText, ghosttyMode, ghosttyMouseTracking, installSoftwareCanvas, mountGhostty,
 } from "../__tests__/ghosttyTab";
-import { WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import { WS_PING_MS, WS_RECONNECT_BACKOFF_MIN_MS } from "../api/transport";
+import { CONNECTION_STALLED_MS } from "../api/connectionProbe";
+import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
+import { TERMINAL_STALL_REDIAL_MS } from "./terminalConnectionHealth.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import {
   attach,
@@ -61,11 +64,13 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  resetConnectionHealthForTests();
   installSoftwareCanvas();
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
 });
 
 afterEach(async () => {
+  resetConnectionHealthForTests();
   for (const component of mounted) await unmount(component);
   mounted.clear();
   for (const cleanup of cleanups.splice(0)) cleanup();
@@ -107,6 +112,30 @@ function inputFrames(socket: TerminalSocket) {
 }
 
 describe("a Ghostty tab reconnecting to a session", () => {
+  test("an alternate-screen wheel arrow blocks stalled redial without a probe or warning", async () => {
+    const [tab] = seatTerminals([terminalTab()]);
+    const { host, socket, term } = await openGhostty(tab!);
+    await output(socket, "\x1b[?1049h");
+    expect(ghosttyAlternateScreen(term)).toBe(true);
+    await receive(socket, { type: "pong" });
+    await vi.advanceTimersByTimeAsync(WS_PING_MS + CONNECTION_STALLED_MS);
+    const beforePings = sentFrames(socket).filter((frame) => frame.type === "ping").length;
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    expect(ghosttyCellMetrics(term).height).toBeGreaterThan(0);
+    canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -1, deltaMode: 1 }));
+    expect(inputFrames(socket)).toContainEqual({ type: "input", data: "\x1b[A" });
+    connectionHealth.lastContactAt = Date.now();
+    connectionHealth.state = "ok";
+    await tick();
+    await vi.advanceTimersByTimeAsync(TERMINAL_STALL_REDIAL_MS + 1_000);
+    expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(beforePings);
+    expect(TerminalSocket.all).toHaveLength(1);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(WS_RECONNECT_BACKOFF_MIN_MS);
+    await attach(TerminalSocket.all.at(-1)!, { id: SESSION });
+    await tick();
+    expect(document.querySelector('[data-terminal-connection-pill]')).toBeNull();
+  });
   test.each([
     ["replacement", "sess-fresh", "\n"],
     ["resume", SESSION, "\x1b[27;2;13~"],

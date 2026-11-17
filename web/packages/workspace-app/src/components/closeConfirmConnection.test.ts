@@ -1,60 +1,113 @@
 // @vitest-environment jsdom
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
-import {
-  closeConfirmState,
-  resolveCloseConfirm,
-  uiCloseConfirm,
-} from "../state/closeConfirm.svelte";
+import DisconnectOverlay from "./DisconnectOverlay.svelte";
+import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
+import { connectionHealth, resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { ui } from "../state/store.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
+let target: HTMLElement;
 
-afterEach(() => {
-  for (const component of mounted.splice(0)) unmount(component);
-  resolveCloseConfirm("cancel");
-  ui.ws = "connecting";
-  document.body.innerHTML = "";
+beforeEach(async () => {
+  resetConnectionHealthForTests();
+  ui.disconnectBlocking = false;
+  ui.ws = "open";
+  setConnectionWatchStatus("open");
+  target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(CloseConfirmOverlay, { target }) as Record<string, unknown>);
+  await tick();
 });
 
-function render(): HTMLElement {
-  const target = document.createElement("div");
-  document.body.append(target);
-  mounted.push(mount(CloseConfirmOverlay, { target }) as Record<string, unknown>);
-  return target;
+afterEach(async () => {
+  resolveCloseConfirm("cancel");
+  for (const component of mounted.splice(0)) await unmount(component);
+  resetConnectionHealthForTests();
+  ui.ws = "connecting";
+  ui.disconnectBlocking = false;
+  vi.useRealTimers();
+  document.body.replaceChildren();
+});
+
+async function drop(): Promise<void> {
+  watchConnectionProbe.reset();
+  setConnectionWatchStatus("reconnecting", { reason: "closed", lastFrameAt: Date.now() });
+  ui.ws = "reconnecting";
+  await tick();
 }
 
 describe("CloseConfirmOverlay connection lifecycle", () => {
-  test("a disconnect transition resolves the pending prompt as cancel", async () => {
-    ui.ws = "open";
-    const target = render();
+  test("a healthy window opens a close prompt", async () => {
+    const answer = uiCloseConfirm();
     await tick();
-
-    const pending = uiCloseConfirm();
-    await tick();
-    expect(closeConfirmState.open).toBe(true);
-    expect(target.querySelector(".overlay")).not.toBeNull();
-
-    ui.ws = "reconnecting";
-    await tick();
-    expect(closeConfirmState.open).toBe(false);
-    expect(target.querySelector(".overlay")).toBeNull();
-    await expect(pending).resolves.toBe("cancel");
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    resolveCloseConfirm("cancel");
+    await expect(answer).resolves.toBe("cancel");
   });
 
-  test("a reconnect transition clears a stale pending prompt", async () => {
-    ui.ws = "reconnecting";
-    const target = render();
+  test("the loss of an open watcher cancels a pending prompt", async () => {
+    const answer = uiCloseConfirm();
     await tick();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    await drop();
+    expect(target.querySelector('[role="alertdialog"]')).toBeNull();
+    await expect(answer).resolves.toBe("cancel");
+  });
 
-    const pending = uiCloseConfirm();
+  test("a prompt opened after the watcher drops survives redial status changes", async () => {
+    await drop();
+    const answer = uiCloseConfirm();
+    await tick();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    setConnectionWatchStatus("connecting");
+    ui.ws = "connecting";
+    await tick();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    setConnectionWatchStatus("open");
     ui.ws = "open";
     await tick();
+    expect(connectionHealth.outage).not.toBeNull();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    resolveCloseConfirm("cancel");
+    await expect(answer).resolves.toBe("cancel");
+  });
 
-    expect(closeConfirmState.open).toBe(false);
-    expect(target.querySelector(".overlay")).toBeNull();
-    await expect(pending).resolves.toBe("cancel");
+  test("the redialed socket's first pong cancels a prompt opened during its outage", async () => {
+    await drop();
+    const answer = uiCloseConfirm();
+    await tick();
+    setConnectionWatchStatus("open");
+    ui.ws = "open";
+    await tick();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    watchConnectionProbe.pingSent();
+    watchConnectionProbe.frameReceived();
+    watchConnectionProbe.pongReceived();
+    await tick();
+    expect(connectionHealth.outage).toBeNull();
+    expect(target.querySelector('[role="alertdialog"]')).toBeNull();
+    await expect(answer).resolves.toBe("cancel");
+  });
+
+  test("the real reconnecting cover cancels a prompt opened during an outage", async () => {
+    vi.useFakeTimers();
+    const coverTarget = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(DisconnectOverlay, { target: coverTarget }) as Record<string, unknown>);
+    await tick();
+    await drop();
+    const answer = uiCloseConfirm();
+    await tick();
+    vi.advanceTimersByTime(599);
+    await tick();
+    expect(target.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(coverTarget.querySelector(".overlay")).toBeNull();
+    vi.advanceTimersByTime(1);
+    await tick();
+    await tick();
+    expect(coverTarget.querySelector(".overlay")).not.toBeNull();
+    expect(target.querySelector('[role="alertdialog"]')).toBeNull();
+    await expect(answer).resolves.toBe("cancel");
   });
 });

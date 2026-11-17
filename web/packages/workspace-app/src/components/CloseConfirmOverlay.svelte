@@ -2,7 +2,7 @@
   // The desktop red-dot close prompt. When the OS close button is pressed on a
   // live workspace/terminal window, the host prevents the close and evals an
   // `app.window.confirmClose` into the webview; App.svelte opens this overlay
-  // (unless the window is empty or reconnecting, which close straight away).
+  // (unless the window is empty or covered with no open watcher, which closes straight away).
   //
   // Modelled on DisconnectOverlay's card, but this is a DECISION, not a live
   // wait: no spinner, three actions, and it stacks above both the reconnect
@@ -25,6 +25,7 @@
   import { tmuxPaneTabs } from "../state/tabs.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
+  import { connectionHealth } from "../state/connectionHealth.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -38,18 +39,19 @@
   // stays. Read when the prompt opens; the tabs do not change under it.
   const tmuxWindow = $derived(open && tmuxPaneTabs().length > 0);
 
-  // A connection transition invalidates the native close request that opened
-  // this prompt. Cancel immediately on both drop and recovery, before another
-  // native window can leave this decision occluded. A prompt opened after the
-  // socket is already down is cancelled by the second condition as well.
-  let previousWs = ui.ws;
+  // A pending decision belongs to the connection it opened under. Redial
+  // status changes within one outage do not invalidate a later prompt.
+  let observedCover = ui.disconnectBlocking;
   $effect(() => {
-    const ws = ui.ws;
-    const connectionChanged = ws !== previousWs;
-    previousWs = ws;
-    if (connectionChanged || (open && ws !== "open")) {
+    const covered = ui.disconnectBlocking;
+    if (
+      open &&
+      (connectionHealth.outageEpoch !== closeConfirmState.outageEpochAtOpen ||
+        (covered && !observedCover && !closeConfirmState.coveredAtOpen))
+    ) {
       cancelCloseConfirmForConnectionChange();
     }
+    observedCover = covered;
   });
 
   const refusal = $derived(closeConfirmState.refusal);

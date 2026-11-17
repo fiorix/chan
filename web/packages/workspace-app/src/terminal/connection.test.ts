@@ -6,9 +6,17 @@ import {
   routeXtermData,
   shouldForwardGeneratedTerminalInput,
   terminalMessageBytes,
+  terminalMouseReport,
 } from "./connection";
 
 describe("terminal connection invariants", () => {
+  test("classifies complete mouse reports without mistaking typed escape data for one", () => {
+    expect(terminalMouseReport("\x1b[M !!")).toBe("x10");
+    expect(terminalMouseReport("\x1b[<0;10;5M")).toBe("sgr");
+    expect(terminalMouseReport("\x1b[<0;10;5m")).toBe("sgr");
+    expect(terminalMouseReport("\x1b[Mx")).toBeNull();
+    expect(terminalMouseReport("\x1b[<0;10;5Mtyped")).toBeNull();
+  });
   test("tracks pending PTY writes until xterm drains them", () => {
     const tracker = new PtyWriteTracker();
     let drain: (() => void) | undefined;

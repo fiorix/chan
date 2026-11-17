@@ -618,6 +618,20 @@ describe("output and scrolling", () => {
     term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
     expect(arrows(socket)).toEqual(["\x1bOA"]);
   });
+
+  test("a wheel arrow sent to the PTY does not arm a connection probe", async () => {
+    const { term, socket } = await mountGhostty();
+    vi.useFakeTimers();
+    try {
+      term.buffer.active = term.buffer.alternate;
+      term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
+      expect(arrows(socket)).toEqual(["\x1b[A"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sentFrames(socket).filter((frame) => frame.type === "ping")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // WKWebView can keep document.activeElement on the host ghostty-web focuses

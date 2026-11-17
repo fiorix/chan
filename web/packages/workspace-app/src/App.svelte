@@ -9,6 +9,7 @@
   import DisconnectOverlay from "./components/DisconnectOverlay.svelte";
   import SessionEndedOverlay from "./components/SessionEndedOverlay.svelte";
   import CloseConfirmOverlay from "./components/CloseConfirmOverlay.svelte";
+  import { connectionHealth } from "./state/connectionHealth.svelte";
   import { installWakeGapDetector } from "./wakeGap";
   import {
     flushAndCloseWindow,
@@ -1720,7 +1721,7 @@
         return;
       // The desktop OS red-dot on a LIVE window. The host prevented the close
       // and asked us. Two fast paths close straight away (no prompt): while the
-      // reconnect overlay is up (ui.disconnectBlocking) there is nothing to keep
+      // reconnect overlay is up with no open watcher there is nothing to keep
       // interacting with, and an empty window (no tabs) must never be recorded --
       // the discard cascade removes its row and DELETEs its session blob. Any
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
@@ -1731,7 +1732,7 @@
         if (!requestTmuxWindow()) setTransientStatus("not a tmux window");
         return;
       case "app.window.confirmClose":
-        if (ui.disconnectBlocking || !hasAnyTab()) {
+        if (!hasAnyTab() || (ui.disconnectBlocking && !connectionHealth.watcherOpen)) {
           discardWindowSession({ reap: true });
           flushAndCloseWindow();
           return;
