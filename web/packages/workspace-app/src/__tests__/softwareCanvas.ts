@@ -67,10 +67,58 @@ export class SoftwareCanvasContext {
   readonly #cellWidth: number;
 
   /// `cellWidth` is what measureText reports per character, so a renderer
-  /// measuring its font lands on the cell the test expects.
+  /// measuring its font lands on the cell the test expects. The double
+  /// owns the element's size accessors while it owns the context: a real
+  /// canvas resets its drawing state on every size assignment, even one
+  /// that changes nothing, and a lazy size poll cannot see those.
   constructor(canvas: HTMLCanvasElement, cellWidth = 8) {
     this.#canvas = canvas;
     this.#cellWidth = cellWidth;
+    let width = canvas.width;
+    let height = canvas.height;
+    const reset = (): void => this.reset();
+    Object.defineProperties(canvas, {
+      width: {
+        configurable: true,
+        get: () => width,
+        set: (value: number) => {
+          if (value < 0) return;
+          width = value;
+          reset();
+        },
+      },
+      height: {
+        configurable: true,
+        get: () => height,
+        set: (value: number) => {
+          if (value < 0) return;
+          height = value;
+          reset();
+        },
+      },
+    });
+  }
+
+  /// Reset the drawing state the way assigning the canvas size does: a
+  /// transparent bitmap, the identity transform, an empty save stack and
+  /// the double's default styles.
+  reset(): void {
+    this.#width = this.#canvas.width;
+    this.#height = this.#canvas.height;
+    this.#pixels = new Float64Array(this.#width * this.#height * 4);
+    this.#scaleX = 1;
+    this.#scaleY = 1;
+    this.#saved = [];
+    this.fillStyle = "#000000";
+    this.strokeStyle = "#000000";
+    this.font = "";
+    this.globalAlpha = 1;
+    this.lineCap = "butt";
+    this.lineDashOffset = 0;
+    this.lineJoin = "miter";
+    this.lineWidth = 1;
+    this.textAlign = "left";
+    this.textBaseline = "alphabetic";
   }
 
   scale(x: number, y: number): void {
@@ -79,14 +127,14 @@ export class SoftwareCanvasContext {
     this.#scaleY *= y;
   }
 
-  /// Set the transform absolutely, as a host that reset the drawing state
-  /// leaves it: identity scale at the same canvas size. The double models
-  /// scaling only, so the shear and translation parts are accepted and
-  /// ignored, like the render paths that never set them.
-  setTransform(a: number, b: number, c: number, d: number, _e: number, _f: number): void {
+  /// Set the transform absolutely. The double models scaling only: a shear
+  /// or translation is outside what the terminal paths use, so it fails
+  /// like an unsupported color instead of modelling the wrong picture.
+  setTransform(a: number, b: number, c: number, d: number, e: number, f: number): void {
     this.#resync();
-    void b;
-    void c;
+    if (b !== 0 || c !== 0 || e !== 0 || f !== 0) {
+      throw new Error(`unsupported canvas transform: setTransform(${a}, ${b}, ${c}, ${d}, ${e}, ${f})`);
+    }
     this.#scaleX = a;
     this.#scaleY = d;
   }
@@ -150,6 +198,19 @@ export class SoftwareCanvasContext {
     };
   }
 
+  /// Read a device pixel back without touching the transform: the space
+  /// the backing store is measured in.
+  pixelAtDevice(x: number, y: number): Rgba {
+    this.#resync();
+    const at = (Math.floor(y) * this.#width + Math.floor(x)) * 4;
+    return {
+      r: this.#pixels[at],
+      g: this.#pixels[at + 1],
+      b: this.#pixels[at + 2],
+      a: this.#pixels[at + 3],
+    };
+  }
+
   beginPath(): void {}
   clip(): void {}
   fillText(): void {}
@@ -161,9 +222,8 @@ export class SoftwareCanvasContext {
   stroke(): void {}
   strokeText(): void {}
 
-  // Assigning canvas.width or canvas.height reallocates the backing store and
-  // resets the context state, which is why the renderer can call ctx.scale
-  // after every resize without compounding its transform.
+  // Size assignments reset through the element accessors above; this only
+  // syncs a store changed behind them.
   #resync(): void {
     if (
       this.#canvas.width === this.#width &&
@@ -171,12 +231,7 @@ export class SoftwareCanvasContext {
     ) {
       return;
     }
-    this.#width = this.#canvas.width;
-    this.#height = this.#canvas.height;
-    this.#pixels = new Float64Array(this.#width * this.#height * 4);
-    this.#scaleX = 1;
-    this.#scaleY = 1;
-    this.#saved = [];
+    this.reset();
   }
 
   #composite(
