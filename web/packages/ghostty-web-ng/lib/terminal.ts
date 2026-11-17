@@ -1557,6 +1557,11 @@ export class Terminal {
     const scrollbackLength = this.wasmTerm.getScrollbackLength();
     if (scrollbackLength === 0) return; // No scrollbar if no scrollback
 
+    // The strip takes presses only while the overlay shows: a hidden bar
+    // has no visible target to aim at, and those pixels are content under
+    // chan's full-width grid, where a press means a selection.
+    if (this.scrollbarOpacity <= 0) return;
+
     const rect = this.canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;

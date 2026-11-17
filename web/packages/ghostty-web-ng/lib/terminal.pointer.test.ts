@@ -97,6 +97,7 @@ async function openPinned(input = ""): Promise<{
 afterEach(() => {
   for (const term of opened.splice(0)) term.dispose();
   document.body.innerHTML = "";
+  delete (navigator as { clipboard?: unknown }).clipboard;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete (HTMLCanvasElement.prototype as unknown as Record<string, unknown>).setPointerCapture;
@@ -107,6 +108,20 @@ function installClipboard() {
   const writeText = vi.fn((_text: string) => Promise.resolve());
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   return writeText;
+}
+
+/// Stand the overlay's finished visible state up directly: in a browser it
+/// fades in over animation frames, but these tests pin the press gate, not
+/// the fade. The hidden-strip tests use a fresh terminal, whose overlay
+/// never showed.
+function showStrip(term: Terminal): void {
+  const inner = term as unknown as { scrollbarVisible: boolean; scrollbarOpacity: number };
+  inner.scrollbarVisible = true;
+  inner.scrollbarOpacity = 1;
+}
+
+function isDraggingScrollbar(term: Terminal): boolean {
+  return (term as unknown as { isDraggingScrollbar: boolean }).isDraggingScrollbar;
 }
 
 describe("the ghostty widget's pointer handling", () => {
@@ -139,6 +154,8 @@ describe("the ghostty widget's pointer handling", () => {
     expect(captureHost, "a canvas press captures nothing on the host").not.toHaveBeenCalled();
     const scrolled = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
     scrolled.term.viewport.scrollTo(10);
+    showStrip(scrolled.term);
+    showStrip(term);
     vi.spyOn(scrolled.canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -162,7 +179,6 @@ describe("the ghostty widget's pointer handling", () => {
     scrolled.canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 9, pointerType: "mouse" }));
     expect(scrolled.term.hasSelection(), "a thumb press selects nothing").toBe(false);
     expect(writeText, "a thumb press copies nothing").not.toHaveBeenCalled();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a thumb drag moves the view through the real parent listeners", async () => {
@@ -170,6 +186,7 @@ describe("the ghostty widget's pointer handling", () => {
     const history = term.getScrollbackLength();
     expect(history).toBeGreaterThan(10);
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -194,6 +211,7 @@ describe("the ghostty widget's pointer handling", () => {
     const history = term.getScrollbackLength();
     expect(history).toBeGreaterThan(20);
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -219,6 +237,7 @@ describe("the ghostty widget's pointer handling", () => {
     const history = term.getScrollbackLength();
     expect(history).toBeGreaterThan(20);
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -241,6 +260,7 @@ describe("the ghostty widget's pointer handling", () => {
   test("a buttonless move during a thumb drag ends the drag, and a held button does not", async () => {
     const { term, host, canvas } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -264,6 +284,7 @@ describe("the ghostty widget's pointer handling", () => {
   test("a lost capture ends the thumb drag", async () => {
     const { term, host, canvas } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -296,7 +317,6 @@ describe("the ghostty widget's selection", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(writeText.mock.calls[0]![0]).toContain("hello world");
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a click outside the terminal element keeps the selection", async () => {
@@ -327,7 +347,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     expect(writeText.mock.calls[0]![0]).toBe("hello");
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a press and release without a drag selects and copies nothing", async () => {
@@ -339,7 +358,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(term.hasSelection()).toBe(false);
     expect(writeText).not.toHaveBeenCalled();
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a move just over half a cell starts the drag, a smaller move does not", async () => {
@@ -365,7 +383,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(term.getSelection()).toBe("world");
     expect(writeText).toHaveBeenCalledTimes(1);
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a triple click selects the whole row", async () => {
@@ -376,7 +393,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(term.getSelection()).toBe("second row");
     expect(writeText).toHaveBeenCalledTimes(1);
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a buttonless move keeps selecting while the canvas holds the pointer, and ends the drag once it is gone", async () => {
@@ -411,7 +427,6 @@ describe("the ghostty widget's selection mechanics", () => {
       held.mockRestore();
     }
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a drag past the top edge selects from column zero, past the bottom from the last column", async () => {
@@ -459,7 +474,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(term.hasSelection(), "a touch drag selects nothing").toBe(false);
     expect(writeText, "a touch drag copies nothing").not.toHaveBeenCalled();
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a primary pen press selects", async () => {
@@ -497,6 +511,7 @@ describe("the ghostty widget's selection mechanics", () => {
   test("a non-left press on the thumb starts no drag", async () => {
     const { term, host, canvas, captureHost } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
     term.viewport.scrollTo(10);
+    showStrip(term);
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
     });
@@ -526,7 +541,6 @@ describe("the ghostty widget's selection mechanics", () => {
     expect(writeText, "the interruption copies nothing").not.toHaveBeenCalled();
     expect(term.hasSelection(), "the interrupted drag kept its selection").toBe(true);
     term.dispose();
-    delete (navigator as { clipboard?: unknown }).clipboard;
   });
 
   test("a context menu reset hides the textarea when it loses the keyboard", async () => {
@@ -567,5 +581,163 @@ describe("the ghostty widget's drag auto-scroll", () => {
     expect(scrollBy, "the auto-scroll moved through the viewport API").toHaveBeenCalledWith(-3);
     expect(scrollLines, "no write bypassed the viewport API").not.toHaveBeenCalled();
     expect(term.viewport.offset).toBe(0);
+  });
+
+  test("the auto-scroll stops once the canvas leaves the document", async () => {
+    const { term, host, canvas, px } = await openPinned(Array.from({ length: 30 }, (_, n) => `line ${n}`).join("\r\n"));
+    term.viewport.scrollTo(8);
+    const scrollBy = vi.spyOn(term.viewport, "scrollBy");
+    vi.useFakeTimers();
+    try {
+      const [x0, y0] = px(0, 0);
+      pointer(canvas, "pointerdown", x0, y0);
+      const rect = canvas.getBoundingClientRect();
+      pointer(canvas, "pointermove", 1, rect.height + 404);
+      vi.advanceTimersByTime(160);
+      expect(scrollBy, "the edge drag scrolls while attached").toHaveBeenCalled();
+      scrollBy.mockClear();
+      host.remove();
+      vi.advanceTimersByTime(320);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(scrollBy, "no scroll drives a detached canvas").not.toHaveBeenCalled();
+  });
+});
+
+describe("the ghostty widget's release under mouse tracking", () => {
+  test("a drag under DECSET 1000 copies nothing on release but still reports it", async () => {
+    const writeText = installClipboard();
+    const reports: string[] = [];
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    term.onData((data) => void reports.push(data));
+    term.write("\x1b[?1000h\x1b[?1006h");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    pointer(canvas, "pointerup", x1, y1);
+    // The compat mouseup the engine fires next carries the program's
+    // release report, which clears the highlight the way the base left it.
+    canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: x1, clientY: y1 }));
+    expect(writeText, "a tracked drag copies nothing").not.toHaveBeenCalled();
+    expect(reports.join(""), "the release still reports to the program").toContain("\x1b[<0;");
+    expect(term.hasSelection(), "the report clears the highlight as at the base").toBe(false);
+  });
+
+  test("a capture lost under DECSET 1000 ends the drag without copying", async () => {
+    const writeText = installClipboard();
+    const reports: string[] = [];
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    term.onData((data) => void reports.push(data));
+    term.write("\x1b[?1000h\x1b[?1006h");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
+    canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: x1, clientY: y1 }));
+    expect(writeText, "a tracked loss copies nothing").not.toHaveBeenCalled();
+    expect(reports.join(""), "the loss still reports the release").toContain("\x1b[<0;");
+  });
+});
+
+describe("a capture lost mid-drag ends it as a release", () => {
+  test("a capture lost before the release copies once", async () => {
+    const writeText = installClipboard();
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    // Chrome drops the capture on a move with no buttons and fires the loss
+    // before the release: the drag is still open, so the loss releases it.
+    canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, buttons: 0, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x1, clientY: y1 }),
+    );
+    pointer(canvas, "pointerup", x1, y1);
+    expect(writeText, "the lost capture copies once").toHaveBeenCalledTimes(1);
+    expect(writeText.mock.calls[0]![0]).toBe("hello");
+    expect(term.hasSelection(), "the released drag keeps its selection").toBe(true);
+  });
+
+  test("a capture lost after the release ends nothing", async () => {
+    const writeText = installClipboard();
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    pointer(canvas, "pointerup", x1, y1);
+    expect(writeText, "the release copies once").toHaveBeenCalledTimes(1);
+    canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
+    expect(writeText, "the late loss copies nothing more").toHaveBeenCalledTimes(1);
+  });
+
+  test("a capture lost after a cancel copies nothing", async () => {
+    const writeText = installClipboard();
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const [x0, y0] = px(0, 0);
+    const [x1, y1] = px(4, 0);
+    pointer(canvas, "pointerdown", x0, y0);
+    pointer(canvas, "pointermove", x1, y1);
+    canvas.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1, pointerType: "mouse" }));
+    canvas.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId: 1, pointerType: "mouse" }));
+    expect(writeText, "neither the cancel nor the loss copies").not.toHaveBeenCalled();
+    expect(term.hasSelection(), "the interrupted drag keeps its selection").toBe(true);
+  });
+});
+
+describe("the ghostty widget's overlay strip gate", () => {
+  test("a press on the hidden strip starts a selection, not a thumb drag", async () => {
+    const { term, canvas, px } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
+    // A fresh terminal never showed the overlay: the strip is content.
+    const down = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 21, pointerType: "mouse", isPrimary: true, clientX: 312, clientY: 9 });
+    canvas.dispatchEvent(down);
+    expect(down.defaultPrevented, "the hidden strip claims nothing").toBe(false);
+    expect(isDraggingScrollbar(term), "no thumb drag starts").toBe(false);
+    const [, my] = px(0, 1);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, cancelable: true, buttons: 1, pointerId: 21, pointerType: "mouse", isPrimary: true, clientX: 300, clientY: my }),
+    );
+    expect(term.hasSelection(), "the hidden strip selects like content").toBe(true);
+  });
+
+  test("a press on the visible strip claims the press and starts a thumb drag", async () => {
+    const { term, host, canvas } = await openPinned(Array.from({ length: 40 }, (_, n) => `line ${n}`).join("\r\n"));
+    const history = term.getScrollbackLength();
+    term.viewport.scrollTo(10);
+    showStrip(term);
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 96, width: 320, height: 96, toJSON: () => {},
+    });
+    const trackHeight = 96 - 4 * 2;
+    const thumbHeight = Math.max(20, (6 / (history + 6)) * trackHeight);
+    const thumbY = 4 + (trackHeight - thumbHeight) * (1 - 10 / history) + thumbHeight / 2;
+    const down = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 22, pointerType: "mouse", isPrimary: true, clientX: 312, clientY: thumbY });
+    canvas.dispatchEvent(down);
+    expect(down.defaultPrevented, "the visible strip claims the press").toBe(true);
+    expect(isDraggingScrollbar(term), "the thumb drag starts").toBe(true);
+    expect(term.hasSelection(), "the strip press selects nothing").toBe(false);
+    host.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 22, pointerType: "mouse" }));
+    expect(isDraggingScrollbar(term), "the release ends the thumb drag").toBe(false);
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 22, pointerType: "mouse", isPrimary: true, clientX: 312, clientY: thumbY }),
+    );
+    expect(isDraggingScrollbar(term), "a second press claims the strip again").toBe(true);
+  });
+
+  test("with no history the strip area selects like content", async () => {
+    const { term, canvas, px } = await openPinned("hello world\r\nsecond row");
+    const down = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerId: 23, pointerType: "mouse", isPrimary: true, clientX: 312, clientY: 9 });
+    canvas.dispatchEvent(down);
+    expect(down.defaultPrevented, "no bar means no claim").toBe(false);
+    const [, my] = px(0, 1);
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", { bubbles: true, cancelable: true, buttons: 1, pointerId: 23, pointerType: "mouse", isPrimary: true, clientX: 300, clientY: my }),
+    );
+    expect(term.hasSelection(), "the strip area selects like content").toBe(true);
+    expect(isDraggingScrollbar(term), "no thumb drag starts").toBe(false);
   });
 });

@@ -419,10 +419,15 @@ export class SelectionManager {
     canvas.addEventListener('pointermove', (e: PointerEvent) => {
       if (this.isSelecting) {
         // A move with no button pressed ends a drag only once the canvas
-        // no longer holds the pointer: on macOS the last queued moves of
-        // a quick drag carry 0 after the physical release, and a chorded
+        // no longer holds the pointer: the capture test keeps the moves
+        // of a live drag (on macOS the last queued moves of a quick flick
+        // carry 0 while the release is still on its way), and a chorded
         // release (right held, left up) reports buttons 2. Clearing here
-        // would erase a live selection and swallow its copy.
+        // would erase a live selection and swallow its copy. Where the
+        // engine drops the capture first (Chrome on a buttons-0 move), the
+        // loss handler releases the drag with its copy before the move
+        // lands, so this branch only meets post-loss moves with nothing
+        // left to end.
         if ((e.buttons & 1) === 0 && canvas.hasPointerCapture?.(e.pointerId) !== true) {
           endDrag(false);
           return;
@@ -488,11 +493,23 @@ export class SelectionManager {
         }
       }
     };
-    canvas.addEventListener('pointerup', () => endDrag(true));
+    // The release copies unless the program owns the pointer: under mouse
+    // tracking the compat mouseup sends the release report right after,
+    // which clears the highlight, so copying here would write the drag
+    // the report then erases. The mode is read per event; a program that
+    // enables tracking mid-drag still gets its reports.
+    canvas.addEventListener('pointerup', () => endDrag(!this.wasmTerm.hasMouseTracking()));
     // An interrupted drag keeps its selection but copies nothing. The
     // implicit release after a pointerup lands here with nothing to end.
     canvas.addEventListener('pointercancel', () => endDrag(false));
-    canvas.addEventListener('lostpointercapture', () => endDrag(false));
+    // A capture lost with no cancel before it ends the drag as a release.
+    // On Chrome a move with no buttons pressed drops the capture first and
+    // the release lands after, so ending silently here would leave the
+    // selection painted over a stale clipboard. Under mouse tracking the
+    // release still reports and clears, so this copies nothing there. A
+    // loss on a canvas that kept its capture (WebKit), or one that lands
+    // after a release or a cancel, finds nothing to end.
+    canvas.addEventListener('lostpointercapture', () => endDrag(!this.wasmTerm.hasMouseTracking()));
 
     // Handle click events for double-click (word) and triple-click (line) selection
     // Use event.detail which browsers set to click count (1, 2, 3, etc.)
