@@ -1518,7 +1518,7 @@ describe("terminal find on the ghostty backend", () => {
 
   // ghostty-web keeps its selection on a click outside the terminal
   // element, and find's highlight is that selection. The bar is the
-  // terminal's own: a click in it keeps the highlight with no guard.
+  // terminal's own: a click in it keeps the highlight.
   test.each(["input", "count", "box"] as const)("a click on the find bar's %s keeps find's highlight", async (part) => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);

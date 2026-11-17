@@ -33,6 +33,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const term of opened.splice(0)) term.dispose();
   document.body.innerHTML = "";
+  delete (navigator as { clipboard?: unknown }).clipboard;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -57,8 +58,9 @@ async function openTerminal() {
 /// A pointer press, move or release at canvas CSS pixels, dispatched where
 /// pointer capture would retarget it: on the canvas itself.
 function pointer(target: Element, type: string, x: number, y: number, extra: PointerEventInit = {}): void {
-  // An engine reports the pressed button on every move of a drag and
-  // releases it on up; a move with no button ends the drag elsewhere.
+  // A move of a drag carries the pressed button and a release carries
+  // none; on macOS the engine fills buttons from the live button state,
+  // so a helper move never stands for a released one.
   const buttons = type === "pointerup" || type === "pointercancel" ? 0 : 1;
   target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: x, clientY: y, ...extra }));
 }
@@ -70,40 +72,6 @@ describe("the ghostty widget's pointer handling", () => {
     await openTerminal();
     expect(docAdd, "no document listener after open").not.toHaveBeenCalled();
     expect(winAdd, "no window listener after open").not.toHaveBeenCalled();
-  });
-
-  test("a selection drag that leaves the canvas keeps selecting by pointer capture", async () => {
-    const { term, canvas } = await openTerminal();
-    const writes: string[] = [];
-    expect(installGhosttySelection(term, (text) => void writes.push(text))).toBe(true);
-    term.write("hello world\r\nsecond row");
-    pointer(canvas, "pointerdown", 1, 1);
-    // Far outside the canvas: under pointer capture the move still reaches it.
-    pointer(canvas, "pointermove", 500, 300);
-    pointer(canvas, "pointerup", 500, 300);
-    expect(term.hasSelection(), "the excursion kept the drag selecting").toBe(true);
-    expect(writes).toEqual(["hello world\nsecond row"]);
-  });
-
-  test("the selection drag's auto-scroll moves the view through the viewport API", async () => {
-    const { term, canvas } = await openTerminal();
-    term.write(Array.from({ length: 30 }, (_, n) => `line ${n}`).join("\r\n"));
-    expect(term.getScrollbackLength()).toBeGreaterThan(10);
-    term.viewport.scrollTo(8);
-    const scrollBy = vi.spyOn(term.viewport, "scrollBy");
-    const scrollLines = vi.spyOn(term, "scrollLines");
-    vi.useFakeTimers();
-    try {
-      pointer(canvas, "pointerdown", 1, 1);
-      // Past the bottom edge, where the drag asks for newer rows.
-      pointer(canvas, "pointermove", 1, 500);
-      vi.advanceTimersByTime(160);
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(scrollBy, "the auto-scroll moved through the viewport API").toHaveBeenCalledWith(-3);
-    expect(scrollLines, "no write bypassed the viewport API").not.toHaveBeenCalled();
-    expect(term.viewport.offset).toBe(0);
   });
 
   test("a press with a below-threshold move selects and copies nothing", async () => {

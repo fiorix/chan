@@ -199,6 +199,51 @@ export default {
             failures.push(`${backend}: the typed letter and cursor are not at the bottom: ${JSON.stringify(result.afterEcho)}`);
           }
 
+          // The ghostty overlay thumb drag moves the view with the
+          // pointer: no check drags that thumb in an engine, while jsdom
+          // alone pinned the fix. Only the ghostty leg runs it.
+          if (backend === "ghostty") {
+            await page.mouse.wheel({ deltaY: -600 });
+            await waitFor(page, `${backend}: thumb arm enters history`, read,
+              (state) => !state.bottom && state.offset > 50);
+            const thumb = await page.evaluate(({ hostQuery }) => {
+              const host = document.querySelector(hostQuery);
+              const term = window.__ghosttyTerminals229.find((t) => !t.isDisposed && t.element === host);
+              if (!term) throw new Error("the opened ghostty Terminal was not captured");
+              const canvas = term.renderer.getCanvas();
+              const rect = canvas.getBoundingClientRect();
+              const history = term.getScrollbackLength();
+              const track = rect.height - 8;
+              const thumbH = Math.max(20, (term.rows / (history + term.rows)) * track);
+              const thumbY = 4 + (track - thumbH) * (1 - term.getViewportY() / history);
+              return {
+                x: rect.left + rect.width - 8 - 4,
+                y: rect.top + thumbY + thumbH / 2,
+              };
+            }, { hostQuery });
+            await page.mouse.move(thumb.x, thumb.y);
+            await page.mouse.down();
+            await frame(page);
+            const atPress = (await read()).offset;
+            // A nonzero drag down the track moves the view toward newer
+            // rows; at the base, without a pointermove path, the view
+            // holds and this assertion fails.
+            await page.mouse.move(thumb.x, thumb.y + 60);
+            await frame(page);
+            const dragged = await read();
+            await page.mouse.up();
+            await page.mouse.move(thumb.x, thumb.y + 120);
+            await frame(page);
+            const after = await read();
+            if (!(dragged.offset < atPress && dragged.offset >= 0)) {
+              failures.push(`${backend}: the thumb drag did not move the view toward newer rows: ${atPress} -> ${dragged.offset}`);
+            }
+            if (Math.abs(after.offset - dragged.offset) >= 1) {
+              failures.push(`${backend}: a move after the thumb release changed the view: ${dragged.offset} -> ${after.offset}`);
+            }
+            await ctx.shot(`229-${backend}-thumb-drag`);
+          }
+
           result.reports = [];
           for (const encoding of ["sgr", "x10"]) {
             for (const kind of ["mouse", "wheel"]) {

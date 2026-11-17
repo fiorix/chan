@@ -3518,10 +3518,8 @@
   {#if findOpen}
     <!-- The widget keeps its selection on a click outside the terminal
          element, and find's highlight is that selection, so a click in
-         the bar (to place the caret) keeps the highlight with no guard.
-         The menus close on pointerdown and the panes activate on
-         mousedown, which still bubble. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+         the bar (to place the caret) keeps the highlight. The menus close
+         on pointerdown and the panes activate on mousedown. -->
     <div class="terminal-find" role="search" aria-label="find in terminal">
       <input
         bind:this={searchInput}
