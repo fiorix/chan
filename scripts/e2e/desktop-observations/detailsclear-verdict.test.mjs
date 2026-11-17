@@ -26,6 +26,11 @@ function inspectorEval(endpoint, titleSub, expression, timeoutMs) {
     const has = (s) => e.includes(s);
     const scenario = process.env.P6PROOF_SCENARIO;
     if (scenario === "dead") throw new Error("inspector socket failed");
+    // The WebKitGTK inspector has no awaitPromise: an async page expression
+    // answers at once instead of its value. Read every async source the
+    // way the guest does.
+    if (/\\basync\\b/.test(e)) return {};
+    if (has("__dockEnable")) return "docked";
     if (has("chan:command")) return "toggled";
     if (has("listbox")) return true;
     if (has("browser_side_panes")) return "docked";

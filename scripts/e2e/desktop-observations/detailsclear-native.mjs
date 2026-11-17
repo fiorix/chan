@@ -180,20 +180,27 @@ try {
   })();
   need("open files", listed === "files", String(listed).slice(0, 120));
 
-  const docked = await page(`(() => (async () => {
-    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
-    const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
-    if (!token) return "no-token";
-    const headers = { authorization: "Bearer " + token, "content-type": "application/json" };
-    const got = await fetch(prefix + "/api/config", { headers });
-    if (!got.ok) return "get-" + got.status;
-    const config = await got.json();
-    const response = await fetch(prefix + "/api/config", { method: "PATCH", headers,
-      body: JSON.stringify({ expected_revision: config.revision,
-        preferences: { browser_side_panes: { ...config.preferences.browser_side_panes, left: true } } }) });
-    if (!response.ok) return "patch-" + response.status;
-    return "docked";
-  })())()`).catch((err) => `failed: ${err.message}`);
+  // The inspector has no awaitPromise, so an async page expression would
+  // answer at once instead of its value: kick the PATCH, then poll the
+  // recorded outcome from node the way every other bound in this driver
+  // works. The kick itself is synchronous and returns at once.
+  await page(`(() => { window.__dockEnable = "pending"; (async () => {
+    try {
+      const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
+      const token = new URLSearchParams(location.search).get("t") ?? sessionStorage.getItem("chan.token");
+      if (!token) { window.__dockEnable = "no-token"; return; }
+      const headers = { authorization: "Bearer " + token, "content-type": "application/json" };
+      const got = await fetch(prefix + "/api/config", { headers });
+      if (!got.ok) { window.__dockEnable = "get-" + got.status; return; }
+      const config = await got.json();
+      const response = await fetch(prefix + "/api/config", { method: "PATCH", headers,
+        body: JSON.stringify({ expected_revision: config.revision,
+          preferences: { browser_side_panes: { ...config.preferences.browser_side_panes, left: true } } }) });
+      window.__dockEnable = response.ok ? "docked" : "patch-" + response.status;
+    } catch (err) { window.__dockEnable = "failed: " + String((err && err.message) || err).slice(0, 120); }
+  })(); return "kicked"; })()`).catch(() => {});
+  const docked = await waitForValue(`(() => window.__dockEnable)()`,
+    (v) => typeof v === "string" && v !== "pending" && !v.startsWith("failed:"), "dock enablement", 15000);
   need("left dock enabled", docked === "docked", String(docked).slice(0, 120));
   const dockVisible = await waitForValue(
     `(() => { const el = document.querySelector('${DOCK} .browser .tree'); return el && el.checkVisibility() ? "dock" : null; })()`,
