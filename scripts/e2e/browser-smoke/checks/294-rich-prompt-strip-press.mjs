@@ -49,18 +49,6 @@ async function focusState(page, card) {
   }, card);
 }
 
-// The centre of a rendered element, scrolled into view.
-async function pointIn(page, selector) {
-  return page.evaluate((selector) => {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`no ${selector}`);
-    el.scrollIntoView({ block: "center" });
-    const box = el.getBoundingClientRect();
-    if (!(box.width > 0 && box.height > 0)) throw new Error(`${selector} has no box`);
-    return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
-  }, selector);
-}
-
 // The page's patched WebSocket records prompt frames with the tab that sent
 // them, and can drop the recall's cancel frame for the failed-recall leg.
 function tracePrompts() {
@@ -128,17 +116,77 @@ async function openComposer(ctx, page, cs, windowId, backend, name, text) {
   return { card, terminal };
 }
 
+/// Install the press record: what sits under the press point and every
+/// event the button and the window see, in capture and at bubble.
+async function installPressRecord(page, selector) {
+  return page.evaluate((selector) => {
+    const button = document.querySelector(selector);
+    if (!button) throw new Error(`no ${selector}`);
+    button.scrollIntoView({ block: "center" });
+    const box = button.getBoundingClientRect();
+    if (!(box.width > 0 && box.height > 0)) throw new Error(`${selector} has no box`);
+    const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    const describe = (el) =>
+      el ? `${el.tagName}.${typeof el.className === "string" ? el.className : el.className?.baseVal ?? ""}` : null;
+    const under = document.elementFromPoint(point.x, point.y);
+    const record = {
+      selector,
+      point,
+      buttonBox: { x: box.x, y: box.y, width: box.width, height: box.height },
+      under: describe(under),
+      underIsButton: under === button || !!under?.closest?.(selector),
+      events: [],
+    };
+    const note = (node) => (event) =>
+      record.events.push({
+        type: event.type,
+        node,
+        target: describe(event.target),
+        prevented: event.defaultPrevented,
+        at: Math.round(performance.now()),
+      });
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      button.addEventListener(type, note("button-capture"), true);
+      window.addEventListener(type, note("window-capture"), true);
+      window.addEventListener(type, (event) =>
+        record.events.push({ type: event.type, node: "window-bubble", prevented: event.defaultPrevented, at: Math.round(performance.now()) }),
+      );
+    }
+    window.__prompt293.pressRecord = record;
+    return point;
+  }, selector);
+}
+
+async function readPressRecord(page) {
+  return page.evaluate(() => {
+    const record = window.__prompt293.pressRecord;
+    const active = document.activeElement;
+    record.activeAfter = active === null || active === document.body ? "body" : describeActive(active);
+    function describeActive(el) {
+      return `${el.tagName ?? "?"}.${
+        typeof el.className === "string" ? el.className : el.className?.baseVal ?? ""
+      }`;
+    }
+    return record;
+  });
+}
+
 /// A real press on the strip's primary button: hold, read, release.
 async function pressSubmit(page, card, label, shot) {
-  const point = await pointIn(page, `${card} .rp-primary`);
+  const point = await installPressRecord(page, `${card} .rp-primary`);
   await page.mouse.move(point.x, point.y);
   await page.mouse.down();
   await sleep(250);
   const held = await focusState(page, card);
-  assert.equal(held.where, "composer", `${label}: the press holds the composer`);
+  const record = await readPressRecord(page);
+  try {
+    assert.equal(held.where, "composer", `${label}: the press holds the composer`);
+  } catch (error) {
+    throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(record)}`);
+  }
   await shot(label);
   await page.mouse.up();
-  return held;
+  return { held, record };
 }
 
 /// Submit with the keyboard and catch a pending prompt, retrying.
@@ -221,7 +269,7 @@ export default {
             // Step 1: a real press on Submit holds the composer, and the
             // next key reaches it with no click. The release submits the
             // draft; once it delivers, the typed key starts the next one.
-            await pressSubmit(page, card, "294-press-held", shot);
+            result.steps.pressRecord = (await pressSubmit(page, card, "294-press-held", shot)).record;
             await waitFor(page, card, "the submit delivers",
               (value) => (value.text === "" && !value.pending ? value : false));
             await page.keyboard.type("x");
@@ -251,7 +299,7 @@ export default {
             if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
               throw new Error("never caught a pending prompt in 4 submits");
             }
-            await pressSubmit(page, card, "294-recall-press", shot);
+            result.steps.recallPress = (await pressSubmit(page, card, "294-recall-press", shot)).record;
             result.steps.recall = await waitFor(page, card, "the run recalls",
               (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
             assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
@@ -267,7 +315,7 @@ export default {
             if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
               throw new Error("never caught a pending prompt for the failed recall");
             }
-            await pressSubmit(page, card, "294-failed-press", shot);
+            result.steps.failedPress = (await pressSubmit(page, card, "294-failed-press", shot)).record;
             await sleep(6500);
             const failed = await focusState(page, card);
             const dropped = await page.evaluate(() => window.__prompt294.droppedCancels);
@@ -284,14 +332,19 @@ export default {
             // recall. Absent here unless a submit left one queued.
             const secondary = await page.$(`${card} .rp-action:not(.rp-primary)`);
             if (secondary) {
-              const point = await pointIn(page, `${card} .rp-action:not(.rp-primary)`);
+              const point = await installPressRecord(page, `${card} .rp-action:not(.rp-primary)`);
               await page.mouse.move(point.x, point.y);
               await page.mouse.down();
               await sleep(250);
               const held = await focusState(page, card);
+              const secondaryRecord = await readPressRecord(page);
               await page.mouse.up();
-              assert.equal(held.where, "composer", "the secondary press holds the composer");
-              result.steps.secondary = { where: held.where };
+              try {
+                assert.equal(held.where, "composer", "the secondary press holds the composer");
+              } catch (error) {
+                throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(secondaryRecord)}`);
+              }
+              result.steps.secondary = { where: held.where, record: secondaryRecord };
             } else {
               result.steps.secondary = "absent: no queued prompt to recall";
             }
@@ -336,13 +389,18 @@ export default {
               (value) => value.text === textB && value.editable && !value.pending);
             await page.click(`${terminal} .terminal-host`);
             const paneA = await activePaneId(page);
-            const pointB = await pointIn(page, `${cardB} .rp-primary`);
+            const pointB = await installPressRecord(page, `${cardB} .rp-primary`);
             await page.mouse.move(pointB.x, pointB.y);
             await page.mouse.down();
             await sleep(250);
             const heldB = await focusState(page, cardB);
+            const recordB = await readPressRecord(page);
             await page.mouse.up();
-            assert.equal(heldB.where, "composer", "the press holds B's composer");
+            try {
+              assert.equal(heldB.where, "composer", "the press holds B's composer");
+            } catch (error) {
+              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(recordB)}`);
+            }
             const sentB = await waitFor(page, cardB, "B's submit sends and clears",
               (value) => (value.text === "" && !value.pending ? value : false));
             const promptsB = await page.evaluate(
@@ -353,7 +411,7 @@ export default {
             assert.equal(promptsB[0].data, textB);
             assert.equal(sentB.where, "composer", "B's composer keeps the keyboard");
             assert.equal(await activePaneId(page), paneA, "A is still the active pane");
-            result.steps.twoPane = { pane: paneA, prompts: promptsB.length };
+            result.steps.twoPane = { pane: paneA, prompts: promptsB.length, record: recordB };
             await shot(`294-${backend}-twopane`);
 
             // The image leg only records: whether the composer takes focus
@@ -364,11 +422,12 @@ export default {
             await page.keyboard.type(imageText);
             await waitFor(page, cardB, "the image draft is editable",
               (value) => value.text.includes("box294.png") && value.editable && !value.pending);
-            const pointI = await pointIn(page, `${cardB} .rp-primary`);
+            const pointI = await installPressRecord(page, `${cardB} .rp-primary`);
             await page.mouse.move(pointI.x, pointI.y);
             await page.mouse.down();
             await sleep(250);
             const heldI = await focusState(page, cardB);
+            const recordI = await readPressRecord(page);
             await page.mouse.up();
             const samples = [{ at: 0, focus: heldI.where, pane: await activePaneId(page).catch(() => null) }];
             for (let elapsed = 250; elapsed <= 6000; elapsed += 250) {
@@ -379,6 +438,7 @@ export default {
             }
             result.steps.image = {
               heldFocus: heldI.where,
+              record: recordI,
               samples,
               composerFocusedAtEnd: samples[samples.length - 1].focus === "composer",
               paneBecameActive: samples.some((sample) => sample.pane && sample.pane !== paneA),

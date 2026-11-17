@@ -14,6 +14,65 @@ import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The press is the evidence: record what sits under its point and every
+// event the button and the window see, so a missing submit reads as a
+// missing press, a missing click, or a missing send — not as a guess.
+async function installPressRecord(page, selector) {
+  return page.evaluate((selector) => {
+    const button = document.querySelector(selector);
+    if (!button) throw new Error(`no ${selector}`);
+    button.scrollIntoView({ block: "center" });
+    const box = button.getBoundingClientRect();
+    if (!(box.width > 0 && box.height > 0)) throw new Error(`${selector} has no box`);
+    const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    const describe = (el) =>
+      el ? `${el.tagName}.${typeof el.className === "string" ? el.className : el.className?.baseVal ?? ""}` : null;
+    const under = document.elementFromPoint(point.x, point.y);
+    const record = {
+      selector,
+      point,
+      buttonBox: { x: box.x, y: box.y, width: box.width, height: box.height },
+      under: describe(under),
+      underIsButton: under === button || !!under?.closest?.(selector),
+      events: [],
+    };
+    const note = (node) => (event) =>
+      record.events.push({
+        type: event.type,
+        node,
+        target: describe(event.target),
+        prevented: event.defaultPrevented,
+        at: Math.round(performance.now()),
+      });
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      button.addEventListener(type, note("button-capture"), true);
+      window.addEventListener(type, note("window-capture"), true);
+      window.addEventListener(type, (event) =>
+        record.events.push({ type: event.type, node: "window-bubble", prevented: event.defaultPrevented, at: Math.round(performance.now()) }),
+      );
+    }
+    window.__prompt292.pressRecord = record;
+    return point;
+  }, selector);
+}
+
+async function readPressRecord(page, card) {
+  return page.evaluate((card) => {
+    const record = window.__prompt292.pressRecord;
+    const active = document.activeElement;
+    const composer = card ? document.querySelector(card) : null;
+    record.activeAfter =
+      active === null || active === document.body
+        ? "body"
+        : composer && composer.contains(active)
+          ? "composer"
+          : `${active.tagName ?? "?"}.${
+            typeof active.className === "string" ? active.className : active.className?.baseVal ?? ""
+          }`;
+    return record;
+  }, card);
+}
+
 // The page's patched WebSocket records prompt frames and delivery acks with
 // the tab and session they rode on. Installed before the first leg opens;
 // each leg resets the prompt list. Fresh dials carry no `session` value
@@ -156,10 +215,22 @@ export default {
             );
             await waitFor(page, card, "the survey shows over the terminal", (value) => value.card, 10_000);
             result.surveyShown = await waitFor(page, card, "the survey holds the keyboard", (value) => value.focus === "survey");
-            // The Send button needs no keyboard: the click submits under the
-            // survey and must send exactly one prompt.
-            await page.click(`${card} .rp-primary`);
-            result.sent = await waitFor(page, card, "the submit sends one prompt", (value) => value.prompts.length === 1, 5000);
+            // The Send button needs no keyboard: the press submits under the
+            // survey and must send exactly one prompt. The press record says
+            // what happened when no prompt arrives: a press that never
+            // reached the button, a swallowed click, or a swallowed send.
+            const press = await installPressRecord(page, `${card} .rp-primary`);
+            await page.mouse.move(press.x, press.y);
+            await page.mouse.down();
+            await sleep(250);
+            await page.mouse.up();
+            result.press = await readPressRecord(page, card);
+            await ctx.shot(`292-${backend}-press`);
+            try {
+              result.sent = await waitFor(page, card, "the submit sends one prompt", (value) => value.prompts.length === 1, 5000);
+            } catch (error) {
+              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(result.press)}`);
+            }
             assert.equal(result.sent.prompts[0].data, text);
             assert.equal(typeof result.sent.prompts[0].id, "string");
             const id = result.sent.prompts[0].id;
