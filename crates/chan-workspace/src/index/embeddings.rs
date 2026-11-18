@@ -521,36 +521,14 @@ pub fn repo_dir_name(model_id: &str) -> String {
     format!("models--{}", model_id.replace('/', "--"))
 }
 
-/// True when `repo_dir` holds a usable copy of `model_id`'s files:
-/// `refs/main` present, plus at least one `snapshots/<hash>/`
-/// directory containing `config.json`, `tokenizer.json`, and
-/// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, a `.part` left by an interrupted download)
-/// fails the check.
-fn model_files_present(repo_dir: &Path) -> bool {
-    if !repo_dir.join("refs").join("main").is_file() {
-        return false;
-    }
-    let snapshots = repo_dir.join("snapshots");
-    let Ok(it) = std::fs::read_dir(&snapshots) else {
-        return false;
-    };
-    for entry in it.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_dir() {
-            continue;
-        }
-        let dir = entry.path();
-        if dir.join("config.json").is_file()
-            && dir.join("tokenizer.json").is_file()
-            && dir.join("model.safetensors").is_file()
-        {
-            return true;
-        }
-    }
-    false
+/// Whether `repo_dir` holds a copy of `model_id` the embedder opens with
+/// no download: every file it reads, in the one snapshot the downloader
+/// would read them from (the pinned one, or the complete one `refs/main`
+/// names). Anything weaker (a stray lockfile, a half-downloaded snapshot, a
+/// `.part` left by an interrupted download) is not. The seeder asks the
+/// same question through this function.
+pub fn model_files_present(model_id: &str, repo_dir: &Path) -> bool {
+    config::embedding_model(model_id).is_some_and(|model| download::downloaded(repo_dir, model))
 }
 
 /// Runtime resolver for the embedding model. Indexes by
@@ -558,9 +536,9 @@ fn model_files_present(repo_dir: &Path) -> bool {
 /// can swap the active model without changing this function.
 ///
 /// Returns the repo directory under `global_models_dir()` when the
-/// model is laid out and ready (matches the same predicate
-/// `embed_seed.rs::default_model_present` uses on the seed path --
-/// either source can populate the cache). Returns
+/// model is laid out and ready (`model_files_present`, the predicate
+/// the seeder's `default_model_present` shares -- either source can
+/// populate the cache). Returns
 /// `EmbedError::ModelNotDownloaded` otherwise; callers propagate it
 /// to the API / CLI surface so the user sees "model not downloaded;
 /// run `chan workspace index download-model` or rebuild with `--features
@@ -582,7 +560,7 @@ pub fn model_downloaded(model_id: &str) -> Result<bool, EmbedError> {
 pub(crate) fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathBuf, EmbedError> {
     let _ = lookup_model(model_id)?;
     let repo_dir = cache_dir.join(repo_dir_name(model_id));
-    if model_files_present(&repo_dir) {
+    if model_files_present(model_id, &repo_dir) {
         Ok(repo_dir)
     } else {
         Err(EmbedError::ModelNotDownloaded {
@@ -595,7 +573,7 @@ pub(crate) fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathB
 fn model_downloaded_in(model_id: &str, cache_dir: &Path) -> Result<bool, EmbedError> {
     let _ = lookup_model(model_id)?;
     let repo_dir = cache_dir.join(repo_dir_name(model_id));
-    Ok(model_files_present(&repo_dir))
+    Ok(model_files_present(model_id, &repo_dir))
 }
 
 #[cfg(test)]

@@ -108,38 +108,15 @@ fn repo_dir_name(model: &str) -> String {
 }
 
 /// True if `repo_dir` already holds a usable copy of the default
-/// model: `refs/main` present, plus at least one `snapshots/<hash>/`
-/// directory containing `config.json`, `tokenizer.json`, and
-/// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, a `.part` from an interrupted download)
-/// fails the check and the seeder re-extracts. `is_file` follows
-/// symlinks, so a cache an earlier version wrote in hf-hub's layout
-/// (snapshots/ -> blobs/) validates beside the plain files chan
-/// writes now.
+/// model, by the embedder's own rule
+/// (`chan_workspace::index::embeddings::model_files_present`): every
+/// file it reads in the snapshot it would read them from. Anything
+/// weaker fails the check and the seeder re-extracts. `is_file`
+/// follows symlinks, so a cache an earlier version wrote in hf-hub's
+/// layout (snapshots/ -> blobs/) validates beside the plain files
+/// chan writes now.
 fn default_model_present(repo_dir: &Path) -> bool {
-    if !repo_dir.join("refs").join("main").is_file() {
-        return false;
-    }
-    let snapshots = repo_dir.join("snapshots");
-    let Ok(it) = std::fs::read_dir(&snapshots) else {
-        return false;
-    };
-    for entry in it.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_dir() {
-            continue;
-        }
-        let dir = entry.path();
-        if dir.join("config.json").is_file()
-            && dir.join("tokenizer.json").is_file()
-            && dir.join("model.safetensors").is_file()
-        {
-            return true;
-        }
-    }
-    false
+    chan_workspace::index::embeddings::model_files_present(chan_workspace::DEFAULT_MODEL, repo_dir)
 }
 
 #[cfg(test)]
@@ -169,6 +146,23 @@ mod tests {
     fn present_when_full_layout_exists() {
         let tmp = tempfile::tempdir().unwrap();
         seeded(tmp.path());
+        assert!(default_model_present(tmp.path()));
+    }
+
+    #[test]
+    fn present_when_the_pinned_snapshot_is_complete_without_its_ref() {
+        // A failed or lost write of refs/main leaves a model the embedder
+        // still opens without a download.
+        let tmp = tempfile::tempdir().unwrap();
+        let revision =
+            chan_workspace::index::config::embedding_model(chan_workspace::DEFAULT_MODEL)
+                .unwrap()
+                .revision;
+        let snap = tmp.path().join("snapshots").join(revision);
+        fs::create_dir_all(&snap).unwrap();
+        for name in ["config.json", "tokenizer.json", "model.safetensors"] {
+            fs::write(snap.join(name), b"x").unwrap();
+        }
         assert!(default_model_present(tmp.path()));
     }
 

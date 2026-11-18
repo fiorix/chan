@@ -187,6 +187,9 @@ impl Client {
         let (info, file) = self.pin(model, filename)?;
         let repo = self.cache.join(repo_dir_name(model));
         if let Some(path) = cached(&repo, info, filename) {
+            if path.starts_with(repo.join("snapshots").join(info.revision)) {
+                name_pinned_commit(&repo, info.revision);
+            }
             return Ok(path);
         }
         let snapshot = repo.join("snapshots").join(info.revision);
@@ -466,6 +469,29 @@ fn complete_snapshot(repo: &Path, model: &EmbeddingModelInfo) -> Option<PathBuf>
     }
     let named = snapshots.join(commit);
     complete(&named).then_some(named)
+}
+
+/// Whether `repo` holds every file the embedder reads of `model`, in the one
+/// snapshot `cached` reads them from. A model whose table entry pins no copy
+/// of one of those files never is.
+pub(super) fn downloaded(repo: &Path, model: &EmbeddingModelInfo) -> bool {
+    config::MODEL_FILES
+        .into_iter()
+        .all(|name| model.files.iter().any(|file| file.name == name))
+        && complete_snapshot(repo, model).is_some()
+}
+
+/// Point `refs/main` at the pinned commit when it names another, or nothing:
+/// a cache whose pinned files were all published keeps its ref even when a
+/// write of it failed or the ref was removed. Best effort, since a cache
+/// that cannot be written must still be read.
+fn name_pinned_commit(repo: &Path, revision: &str) {
+    if std::fs::read_to_string(repo.join("refs/main")).is_ok_and(|named| named == revision) {
+        return;
+    }
+    if let Err(error) = publish_ref(repo, revision) {
+        tracing::debug!(repo = %repo.display(), %error, "cannot name the pinned commit in refs/main");
+    }
 }
 
 /// The cached copy of `filename`. All of a model's files come from one

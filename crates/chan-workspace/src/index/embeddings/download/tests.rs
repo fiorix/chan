@@ -776,6 +776,50 @@ fn a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinn
 }
 
 #[test]
+fn a_pinned_snapshot_without_its_ref_is_downloaded_and_gets_its_ref() {
+    let cache = tempfile::tempdir().unwrap();
+    let model = config::embedding_model(crate::DEFAULT_MODEL).unwrap();
+    let repo = cache.path().join(repo_dir_name(crate::DEFAULT_MODEL));
+    let pinned = repo.join("snapshots").join(model.revision);
+    std::fs::create_dir_all(&pinned).unwrap();
+    for name in MODEL_FILES {
+        std::fs::write(pinned.join(name), b"x").unwrap();
+    }
+    assert!(
+        super::super::model_downloaded_in(crate::DEFAULT_MODEL, cache.path()).unwrap(),
+        "every pinned file in the pinned snapshot is a downloaded model, ref or not"
+    );
+    let server = Server::start(|_| response("503 Service Unavailable", "", b"no request expected"));
+    let path = Client::with_config(
+        cache.path(),
+        &server.endpoint,
+        chan_tls::client_config().unwrap(),
+    )
+    .get(crate::DEFAULT_MODEL, "config.json")
+    .unwrap();
+    assert_eq!(path, pinned.join("config.json"));
+    assert_eq!(
+        std::fs::read_to_string(repo.join("refs/main")).unwrap(),
+        model.revision,
+        "a hit in the pinned snapshot names its commit"
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_model_that_pins_no_weights_is_never_downloaded() {
+    let cache = tempfile::tempdir().unwrap();
+    let model = config::embedding_model("BAAI/bge-m3").unwrap();
+    let repo = cache.path().join(repo_dir_name(model.id));
+    let pinned = repo.join("snapshots").join(model.revision);
+    std::fs::create_dir_all(&pinned).unwrap();
+    for name in MODEL_FILES {
+        std::fs::write(pinned.join(name), b"x").unwrap();
+    }
+    assert!(!super::super::model_downloaded_in(model.id, cache.path()).unwrap());
+}
+
+#[test]
 fn cache_reference_cannot_escape_the_snapshot_directory() {
     let cache = tempfile::tempdir().unwrap();
     let repo = cache.path().join(repo_dir_name("fixture/model"));
