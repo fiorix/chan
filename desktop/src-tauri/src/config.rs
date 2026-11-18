@@ -666,6 +666,7 @@ fn entry_from_roster_row(
         .unwrap_or_else(|| (gateway.url.clone(), 443));
     let (os, pretty_name) = feed.os_of(&id).unwrap_or_default();
     let connection_health = connection_health(&id, conns, feed);
+    let rows_hidden = rows_hidden(&id, conns, feed);
     DevserverEntry {
         // Three-way mapping for rostered rows: a live conn reports
         // Connected (the window-feed watchdog still owns quiet-conn
@@ -707,8 +708,17 @@ fn entry_from_roster_row(
         shared: row.shared,
         native_trust_required: row.shared
             && !gateway.trusts_native(row.owner_user_id, &row.devserver_id),
+        rows_hidden,
         connection_health,
     }
+}
+
+/// Whether the feed hides the rows of a connection the desktop holds,
+/// because its workspace poll finds the devserver not answering. A down
+/// mark on a row whose connection is gone (the connect script exited, or
+/// the connection is being torn down) is not an outage the poll can end.
+fn rows_hidden(id: &str, conns: &DevserverConns, feed: &crate::DevserverFeed) -> bool {
+    conns.is_connected(id) && feed.is_down(id)
 }
 
 /// The connection health of a row whose connection the desktop holds, read
@@ -877,6 +887,7 @@ fn entry_from_devserver(
         gateway_url: String::new(),
         shared: false,
         native_trust_required: false,
+        rows_hidden: rows_hidden(&d.id, conns, feed),
         connection_health: connection_health(&d.id, conns, feed),
     }
 }
@@ -3301,6 +3312,45 @@ mod tests {
         );
         reg.conns.remove(&plain);
         assert_eq!(reg.list()[0].connection_health, None);
+    }
+
+    /// Both row builders say when the feed hides the rows of a connection
+    /// the desktop holds, and neither does for a down mark on a connection
+    /// it does not hold.
+    #[test]
+    fn both_row_builders_say_when_a_held_connections_rows_are_hidden() {
+        let (_dir, reg) = registry_with_gateway_roster();
+        let rows = reg.list();
+        let (plain, rostered, answering) =
+            (rows[0].id.clone(), rows[1].id.clone(), rows[2].id.clone());
+        assert!(rows.iter().all(|row| !row.rows_hidden));
+        for id in [&plain, &rostered] {
+            assert!(reg.feed.set_down(id, true));
+        }
+        assert!(
+            reg.list().iter().all(|row| !row.rows_hidden),
+            "rows read hidden for a connection the desktop does not hold"
+        );
+        for id in [&plain, &rostered, &answering] {
+            reg.conns.set(
+                id.clone(),
+                crate::devserver::DevserverConn {
+                    host: "127.0.0.1".into(),
+                    port: 8787,
+                    token: "tok".into(),
+                    name: "box".into(),
+                    gateway: None,
+                },
+            );
+        }
+        let rows = reg.list();
+        assert!(rows[0].rows_hidden, "the configured row");
+        assert!(rows[1].rows_hidden, "the rostered row");
+        assert!(!rows[2].rows_hidden, "a held connection that is not down");
+        assert!(reg.feed.set_down(&plain, false));
+        assert!(!reg.list()[0].rows_hidden);
+        reg.conns.remove(&rostered);
+        assert!(!reg.list()[1].rows_hidden);
     }
 
     #[test]

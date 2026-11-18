@@ -189,6 +189,7 @@ const alpha: DevserverEntry = {
   gateway_url: "",
   shared: false,
   native_trust_required: false,
+  rows_hidden: false,
   connection_health: null,
 };
 

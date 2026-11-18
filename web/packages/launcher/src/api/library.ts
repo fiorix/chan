@@ -406,6 +406,14 @@ export interface DevserverEntry {
   /** A shared roster row that needs explicit native-IPC consent before connect. */
   native_trust_required: boolean;
   /**
+   * The desktop holds a connection to this devserver but lists none of its
+   * window, tmux or workspace rows, because its workspace poll finds the
+   * devserver not answering; the rows return when the poll is answered
+   * again. False for a row whose connection the desktop does not hold and
+   * on every surface with no desktop.
+   */
+  rows_hidden: boolean;
+  /**
    * This devserver's connection health while the desktop holds a connection
    * to it; null with no reading: a disconnected or connecting devserver, one
    * whose feed answers no ping, and every row off the desktop.

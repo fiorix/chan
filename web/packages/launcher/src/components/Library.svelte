@@ -196,6 +196,10 @@
   }
 
   const connected = (ds: DevserverEntry): boolean => ds.status === "connected";
+  // The desktop lists none of this devserver's windows or workspaces while
+  // its workspace poll finds it not answering, so a card with no rows then
+  // is not an empty devserver.
+  const rowsHidden = (ds: DevserverEntry): boolean => ds.rows_hidden === true;
   // The connection health the desktop reads for a devserver it holds a
   // connection to; null without one, and for a row from a producer that
   // sends no key.
@@ -549,6 +553,8 @@
           <code>chan open /path/to/project</code> in a terminal.
         </p>
       {/if}
+    {:else if node.devserver !== null && rowsHidden(node.devserver)}
+      <p class="empty-hint">Windows and workspaces show again when the connection recovers.</p>
     {:else if machineIsEmpty(node) && node.devserver !== null && connected(node.devserver) && !readOnly}
       <p class="empty-hint">
         No workspaces on this devserver yet. Add one with the buttons above, or run

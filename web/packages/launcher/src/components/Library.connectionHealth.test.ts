@@ -31,7 +31,7 @@ function computer(id: string, label: string, connection_health: ConnectionHealth
   return {
     id, url: `http://${label}.example:8787`, host: `${label}.example`, port: 8787, label, script: "", has_token: false,
     library_id: null, status, pending_signin: false, auto_hide_control: false, os: "linux", pretty_name: null,
-    gateway_id: null, gateway_url: "", shared: false, native_trust_required: false, connection_health,
+    gateway_id: null, gateway_url: "", shared: false, native_trust_required: false, rows_hidden: false, connection_health,
   };
 }
 

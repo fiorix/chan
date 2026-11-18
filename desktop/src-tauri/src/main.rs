@@ -799,6 +799,12 @@ impl DevserverFeed {
         }
     }
 
+    /// Whether this devserver is marked down, so `windows()`,
+    /// `workspaces()` and `tmux_connections()` serve none of its rows.
+    fn is_down(&self, id: &str) -> bool {
+        self.down.lock().unwrap().contains(id)
+    }
+
     /// Flip a devserver's UNREACHABLE state (its window/color feed sockets are
     /// down while the connection record still exists). Returns whether it
     /// changed, so the caller fires the attention/library signals only on a real

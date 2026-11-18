@@ -101,6 +101,7 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
         connection_health: null,
       },
       {
@@ -122,6 +123,7 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
         connection_health: null,
       },
       {
@@ -145,6 +147,7 @@ function seed(): Seed {
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
         connection_health: null,
       },
     ],
@@ -442,6 +445,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
         gateway_url: "",
         shared: false,
         native_trust_required: false,
+        rows_hidden: false,
         connection_health: null,
       };
       devservers.push(ds);

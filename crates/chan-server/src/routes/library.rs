@@ -3183,6 +3183,7 @@ mod devserver_route_tests {
                     gateway_url: String::new(),
                     shared: false,
                     native_trust_required: false,
+                    rows_hidden: false,
                     connection_health: None,
                 }]),
             }
@@ -3218,6 +3219,7 @@ mod devserver_route_tests {
                 gateway_url: String::new(),
                 shared: false,
                 native_trust_required: false,
+                rows_hidden: false,
                 connection_health: None,
             };
             self.rows.lock().unwrap().push(entry.clone());

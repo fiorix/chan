@@ -88,6 +88,7 @@ const devservers: MockDevserver[] = [
     gateway_url: "",
     shared: false,
     native_trust_required: false,
+    rows_hidden: false,
     connection_health: null,
   },
 ];
@@ -345,6 +346,7 @@ function publicDevserver(ds: MockDevserver): DevserverEntry {
     gateway_url: ds.gateway_url,
     shared: ds.shared,
     native_trust_required: ds.native_trust_required,
+    rows_hidden: ds.rows_hidden,
     connection_health: ds.connection_health,
   };
 }
@@ -448,6 +450,7 @@ export const mockApi: LibraryApi = {
       gateway_url: "",
       shared: false,
       native_trust_required: false,
+      rows_hidden: false,
       connection_health: null,
     };
     devservers.push(ds);

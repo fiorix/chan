@@ -192,6 +192,16 @@ pub struct DevserverEntry {
     /// the key always serializes for the launcher's required wire mirror.
     #[serde(default)]
     pub native_trust_required: bool,
+    /// Whether the desktop holds a connection to this devserver but lists
+    /// none of its window, tmux or workspace rows, because its workspace
+    /// poll finds the devserver not answering. The rows return when the
+    /// poll is answered again; the launcher reads this so that it does not
+    /// take the devserver for an empty one meanwhile. `false` for a row
+    /// whose connection the desktop does not hold, and on every surface
+    /// with no desktop. The key always serializes. `#[serde(default)]`: a
+    /// row without the field reads `false`.
+    #[serde(default)]
+    pub rows_hidden: bool,
     /// This devserver's connection health while the desktop holds a
     /// connection to it, or `None` with no reading: a disconnected or
     /// connecting devserver, one whose feed answers no ping, and every row
@@ -330,6 +340,7 @@ mod tests {
             gateway_url: String::new(),
             shared: false,
             native_trust_required: false,
+            rows_hidden: false,
             connection_health,
         }
     }
@@ -340,7 +351,8 @@ mod tests {
                             \"auto_hide_control\":false,\"library_id\":null,\
                             \"status\":\"connected\",\"pending_signin\":false,\"os\":\"\",\
                             \"pretty_name\":null,\"gateway_id\":null,\"gateway_url\":\"\",\
-                            \"shared\":false,\"native_trust_required\":false";
+                            \"shared\":false,\"native_trust_required\":false,\
+                            \"rows_hidden\":false";
 
     #[test]
     fn a_row_with_a_reading_carries_it_on_the_wire() {
@@ -395,6 +407,29 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
             entry
+        );
+    }
+
+    #[test]
+    fn a_row_with_hidden_rows_says_so_and_an_older_producer_reads_none() {
+        let entry = DevserverEntry {
+            rows_hidden: true,
+            ..row(None)
+        };
+        let wire = serde_json::to_string(&entry).unwrap();
+        let head = ROW_HEAD.replace("\"rows_hidden\":false", "\"rows_hidden\":true");
+        assert_eq!(wire, format!("{head},\"connection_health\":null}}"));
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
+            entry
+        );
+        let older = format!(
+            "{},\"connection_health\":null}}",
+            ROW_HEAD.replace(",\"rows_hidden\":false", "")
+        );
+        assert_eq!(
+            serde_json::from_str::<DevserverEntry>(&older).unwrap(),
+            row(None)
         );
     }
 
