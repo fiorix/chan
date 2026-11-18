@@ -14,8 +14,8 @@
 //!      the network. With the default target dir, `cargo clean`
 //!      wipes it and the next build re-downloads.
 //!   2. tar+zstd encode the staging dir into the embed bundle.
-//!      Drops `*.lock`, `*.no_exists` and `**/blobs/**` along the
-//!      way. chan writes plain files under snapshots/; a staging dir
+//!      Drops `*.lock`, `*.no_exists`, `*.part`, `refs/.tmp*` and
+//!      `**/blobs/**` along the way. chan writes plain files under snapshots/; a staging dir
 //!      an earlier version wrote holds links there into blobs/, which
 //!      tar follows, so keeping blobs/ too would store them twice.
 //!
@@ -144,10 +144,11 @@ fn bundle_up_to_date(bundle: &Path, staging: &Path) -> Result<bool> {
 }
 
 /// Walk `src` and emit a zstd-compressed tar archive at `dst`.
-/// Skips cache bookkeeping (`*.lock`, `*.no_exists`) and
-/// the `blobs/` subdir (snapshots/ symlinks already point to the
-/// same bytes; tar follows symlinks by default, so blobs/ would
-/// double the archive).
+/// Skips cache bookkeeping (`*.lock`, `*.no_exists`, a `refs/.tmp*`
+/// a crash left), partial downloads (`*.part`) and any `blobs/`
+/// subdir: a staging tree an earlier version wrote holds links under
+/// snapshots/ into blobs/, which tar follows, so keeping blobs/ would
+/// double the archive.
 fn encode_tar_zst(src: &Path, dst: &Path) -> Result<()> {
     encode_tar_zst_via(src, dst, |path| File::create(path))
 }
@@ -249,10 +250,18 @@ fn should_skip(rel: &Path) -> bool {
     if s.contains("/blobs/") || s.starts_with("blobs/") {
         return true;
     }
-    if s.ends_with(".lock") || s.ends_with(".no_exists") {
+    if s.ends_with(".lock") || s.ends_with(".no_exists") || s.ends_with(".part") {
         return true;
     }
-    false
+    // A `refs/main` replacement a crash left behind.
+    let in_refs = rel
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "refs");
+    in_refs
+        && rel
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".tmp"))
 }
 
 fn humanize(bytes: u64) -> String {
@@ -298,6 +307,21 @@ fn redact_proxy_credentials(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bundle_skips_partial_downloads_and_stranded_ref_temporaries() {
+        for (path, skipped) in [
+            ("models--a--b/refs/.tmpAbC123", true),
+            ("models--a--b/snapshots/c/model.safetensors.part", true),
+            ("models--a--b/snapshots/c/model.safetensors.lock", true),
+            ("models--a--b/blobs/0123", true),
+            ("models--a--b/refs/main", false),
+            ("models--a--b/snapshots/c/model.safetensors", false),
+            ("models--a--b/snapshots/c/.tmpdir/config.json", false),
+        ] {
+            assert_eq!(should_skip(Path::new(path)), skipped, "{path}");
+        }
+    }
 
     #[test]
     fn proxy_credentials_never_reach_the_log() {
