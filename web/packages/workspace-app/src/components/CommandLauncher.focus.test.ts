@@ -568,6 +568,49 @@ describe("focus when the launcher closes", () => {
     }
   });
 
+  test("a run that settles with a window-wide survey up returns the keyboard to its card", async () => {
+    // The modal-first arm's pin: the heir is the window-wide survey's card,
+    // which has no focus repair of its own, so only the arm can hand it the
+    // keyboard back.
+    const surveyTarget = document.createElement("div");
+    document.body.append(surveyTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-window", title: null, bodyMarkdown: "Choose", options: ["OK"] }, null);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the window-wide survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement, "the survey takes the keyboard").toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      // Keys stay with the survey while it shows, so the run goes through a
+      // row click, the way a user reaches it under a survey.
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Toggle nothing",
+      );
+      expect(row, "the deck lists the no-op command").toBeDefined();
+      const focus = vi.spyOn(card!, "focus");
+      try {
+        row!.click();
+        await flush();
+        expect(runNothing, "the run executed").toHaveBeenCalled();
+        expect(launcherPanel.open, "the run closes the deck").toBe(false);
+        await vi.waitFor(() => expect(document.activeElement, "focus returns to the window-wide card").toBe(card));
+        expect(focus, "the return hands the keyboard to the modal heir").toHaveBeenCalled();
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      resetSurveysForTest();
+      surveyTarget.remove();
+    }
+  });
+
   test("a run that settles with a survey card over an inactive tab leaves it alone", async () => {
     const first = terminalTab({ id: "term-first" });
     const second = terminalTab({ id: "term-second" });
