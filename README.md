@@ -34,6 +34,7 @@ One repository builds everything.
 - **Rust.** The root Cargo workspace holds the `chan` binary and the libraries under it, layered in one direction. `chan-workspace` is the core: a sandboxed filesystem over a directory, the workspace registry, search and the graph, with no knowledge of HTTP. `chan-library` hosts workspaces and terminal sessions. `chan-server` wraps them in HTTP and WebSocket routes. `chan` and the desktop drive the stack.
 - **Web.** An npm workspace holds the Svelte apps: the workspace app (terminal, editor, file browser, graph, dashboard) and the launcher. Both are embedded into the binary at build time, so nothing but the binary is needed at runtime: no Node.js, no Python, no daemons. The terminal core is Ghostty's libghostty-vt compiled to WebAssembly.
 - **Desktop.** chan-desktop is a Tauri shell that embeds the same server and opens its windows as native webviews. The desktop binary is also the CLI when invoked as `chan` or `cs`.
+- **Mobile.** chan-ios is a Tauri iOS shell in `mobile/ios` that runs the embedded loopback launcher in a single webview to sign into gateways and open rostered devservers.
 - **Gateway.** The gateway is a Cargo workspace of its own, backed by Postgres. It is not a member of the root workspace, so the single binary never links Postgres or OAuth.
 
 Chan is developed by small teams of AI coding assistants coordinated by the project owner, using chan's own Team Work tooling. [team/README.md](team/README.md) describes the process.
@@ -42,6 +43,7 @@ Chan is developed by small teams of AI coding assistants coordinated by the proj
 
 - [crates/](crates) - the Rust crates of the root Cargo workspace: the `chan` binary and its libraries.
 - [desktop/](desktop) - chan-desktop, the Tauri shell, also a member of the root workspace.
+- [mobile/](mobile) - chan-ios, the Tauri iOS shell in `mobile/ios`, also a member of the root workspace.
 - [web/](web) - the npm workspace: the workspace app, the launcher, the terminal widget (`ghostty-web-ng`), the gateway's account app (`profile`), shared code (`web-shared`), and the chan.app site with the user manual (`marketing`).
 - [gateway/](gateway) - the gateway's Cargo workspace: its services, the operator CLI, the database migrations and the decision records.
 - [packaging/](packaging) - what the Makefile's package targets drive: distro packages, container images, Kubernetes manifests, Nix and FreeBSD builds.
