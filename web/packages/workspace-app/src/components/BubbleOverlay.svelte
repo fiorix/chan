@@ -24,9 +24,9 @@
     type SurveySlot,
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
-  import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
   import { canTakeFocus } from "@chan/web-shared/modal-focus";
-  import { handKeyboardToOwner, legacyKeyboardOwned, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { handKeyboardToOwner, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -76,24 +76,14 @@
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
-      // A remembered survey card is the owner itself, but only while its
-      // terminal is the focused pane's active tab: then the card reads the
-      // window-wide slot and the close hands the keyboard back. Otherwise
-      // the card's own survey counts as an owner and the close leaves the
-      // keyboard where it is. Anything else reads its terminal, so a
-      // survey over that terminal keeps the keyboard and the element
-      // behind it is left alone.
-      const rememberedTerminal = target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
-      const ownerSlot =
-        slot ??
-        (target?.closest(".survey-card") && rememberedTerminal === activeTerminalTab()?.id
-          ? null
-          : rememberedTerminal);
       queueMicrotask(() => {
-        // The remembered element gets the keyboard back only while no other
-        // owner holds it: a survey closing under a dialog, the launcher or
-        // an overlay must not move focus into the composer behind them.
-        if (!active && shown && ownsKeyboard() && !legacyKeyboardOwned(ownerSlot)) {
+        // The remembered element gets the keyboard back only where the
+        // keyboard's owner lets it: a survey closing under a dialog, the
+        // launcher or an overlay must not move focus into the composer
+        // behind them, and a remembered survey card takes it only while its
+        // survey owns the keyboard.
+        const mayRestore = mayFocus(target?.isConnected ? target : null);
+        if (!active && shown && ownsKeyboard() && mayRestore) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
         } else if (!active && slot === null && !canTakeFocus(document.activeElement)) {
@@ -144,16 +134,13 @@
     // keyboard's owner lets it: it paints over the dialogs of its tier and
     // takes it from them, and leaves it to the Computers launcher and the
     // covers over the window. Asking reads the owners' state, so this effect
-    // runs again when one lets go. A re-run while it already owns the
-    // keyboard (a pane event) follows a window-wide owner's hold instead of
-    // grabbing the keyboard back from it.
-    const regrab = focusedSurveyId === id;
-    if (!regrab && !mayFocus(card)) return;
+    // runs again when one lets go. Once it took the keyboard, a re-run (a
+    // pane event) leaves the keyboard where its owner holds it.
+    if (focusedSurveyId === id || !mayFocus(card)) return;
     focusedSurveyId = id;
-    if (regrab && legacyKeyboardOwned(null)) return;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card) && !(regrab && legacyKeyboardOwned(null))) {
+      if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card)) {
         card?.focus({ preventScroll: true });
       }
     });
