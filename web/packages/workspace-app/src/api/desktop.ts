@@ -554,6 +554,25 @@ export async function reconnectDevserverForWindow(): Promise<void> {
   }
 }
 
+/// Show the desktop's Computers screen over THIS devserver window with its
+/// devserver's card in front and the keyboard on it: the disconnect overlay's
+/// Show in Computers. The desktop resolves the devserver from the window's
+/// label and opens the screen at its first card when the devserver has left
+/// the registry. Throws off-desktop and on IPC/ACL failure, so the overlay can
+/// show why the screen did not come.
+export async function showComputersForWindow(): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  try {
+    await tauriInvoke("show_computers_for_window");
+  } catch (err) {
+    console.warn(
+      "showComputersForWindow: show_computers_for_window IPC failed",
+      err,
+    );
+    throw err;
+  }
+}
+
 /// Payload of the `tunnel_open` window_command (`cs tunnel`), forwarded to
 /// the native host verbatim. Field names stay snake_case: this is the
 /// devserver's wire shape and Rust deserializes it as such.
