@@ -524,9 +524,33 @@ describe("the keyboard after a relocation", () => {
     closeTeamDialog();
   });
 
-  // A move under a window-wide owner hands the keyboard to nothing, not even
-  // the survey card over the terminal that moved: the survey branch runs only
-  // when no dialog, window-wide survey, launcher or overlay owns the keyboard.
+  // With the keyboard at large under the Team dialog, the move hands it to
+  // the dialog, the keyboard's owner, as the dialog's surface takes it.
+  test("hands the keyboard to the Team dialog's field when it moves with the keyboard at large", async () => {
+    const { beside } = await focusedHostBesideEmptyPane();
+    openTeamDialog({ leadTabId: HOST, leadPaneId: SEED_PANE });
+    try {
+      const field = await vi.waitFor(() => {
+        const el = document.querySelector<HTMLElement>('.team-dialog input[placeholder="Neo"]');
+        expect(el).not.toBeNull();
+        expect(document.activeElement).toBe(el);
+        return el!;
+      });
+      field.blur();
+      expect(document.activeElement, "the keyboard at large").toBe(document.body);
+      const moves = terminalRelocations(HOST);
+      await closePane(beside);
+      await settle();
+      await vi.waitFor(() => expect(terminalRelocations(HOST), "the terminal moved").toBe(moves + 1));
+      await vi.waitFor(() => expect(document.activeElement, "the dialog's field").toBe(field));
+    } finally {
+      closeTeamDialog();
+    }
+  });
+
+  // A move while the Team dialog holds the keyboard leaves it there: the
+  // survey card over the terminal that moved is not the owner then, and the
+  // dialog's field keeps the keyboard.
   test("hands the keyboard to nothing when it moves under the Team dialog with a survey up", async () => {
     const { root, beside } = await focusedHostBesideEmptyPane();
     showRichPromptForTab(HOST);
