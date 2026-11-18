@@ -9,6 +9,24 @@ import { expect } from "vitest";
 
 export type Rgba = { r: number; g: number; b: number; a: number };
 
+/// The element's own size accessor, which converts the assigned value the
+/// way the product's size check reads it back.
+function sizeAccessor(name: "width" | "height"): {
+  get: (canvas: HTMLCanvasElement) => number;
+  set: (canvas: HTMLCanvasElement, value: number) => void;
+} {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, name);
+  if (typeof descriptor?.get !== "function" || typeof descriptor?.set !== "function") {
+    throw new Error(`software canvas needs the element's ${name} accessor`);
+  }
+  const get = descriptor.get as (this: HTMLCanvasElement) => number;
+  const set = descriptor.set as (this: HTMLCanvasElement, value: number) => void;
+  return {
+    get: (canvas: HTMLCanvasElement) => get.call(canvas),
+    set: (canvas: HTMLCanvasElement, value: number) => set.call(canvas, value),
+  };
+}
+
 /// The canvas source-over rule over straight alpha. The expected pixels come
 /// from the rule rather than from the adapter, so a change to the adapter
 /// cannot move the target it is measured against.
@@ -68,32 +86,34 @@ export class SoftwareCanvasContext {
 
   /// `cellWidth` is what measureText reports per character, so a renderer
   /// measuring its font lands on the cell the test expects. The double
-  /// owns the element's size accessors while it owns the context: a real
-  /// canvas resets its drawing state on every size assignment, even one
-  /// that changes nothing, and a lazy size poll cannot see those.
+  /// observes every size assignment, even one that changes nothing: a
+  /// canvas element converts the assigned value as WebIDL unsigned long
+  /// and resets its drawing state, so the double delegates to the
+  /// element's own accessors and resets after each set. Reading back
+  /// through the element keeps fractional products visible the way the
+  /// product's size check sees them.
   constructor(canvas: HTMLCanvasElement, cellWidth = 8) {
     this.#canvas = canvas;
     this.#cellWidth = cellWidth;
-    let width = canvas.width;
-    let height = canvas.height;
-    const reset = (): void => this.reset();
+    const widthAccess = sizeAccessor("width");
+    const heightAccess = sizeAccessor("height");
     Object.defineProperties(canvas, {
       width: {
         configurable: true,
-        get: () => width,
+        get: () => widthAccess.get(canvas),
         set: (value: number) => {
           if (value < 0) return;
-          width = value;
-          reset();
+          widthAccess.set(canvas, value);
+          this.reset();
         },
       },
       height: {
         configurable: true,
-        get: () => height,
+        get: () => heightAccess.get(canvas),
         set: (value: number) => {
           if (value < 0) return;
-          height = value;
-          reset();
+          heightAccess.set(canvas, value);
+          this.reset();
         },
       },
     });
