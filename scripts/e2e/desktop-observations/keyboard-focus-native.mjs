@@ -161,8 +161,16 @@ class WebKitPage {
     return page;
   }
 
-  evaluate(expression) {
+  evaluate(expression, ...args) {
     if (!this.target) throw new Error("WebKit inspector has no page target");
+    // Callers pass either a source string or a function with its arguments.
+    // A function object does not survive JSON, so serialize the call; a bare
+    // undefined would drop the parameter and WebKit rejects the message.
+    const body =
+      typeof expression === "function"
+        ? `(${expression.toString()})(${args.map((arg) => JSON.stringify(arg)).join(",")})`
+        : expression;
+    if (typeof body !== "string") throw new Error("WebKit evaluation needs a source string");
     const id = this.nextId;
     this.nextId += 1;
     return new Promise((resolve, reject) => {
@@ -170,13 +178,13 @@ class WebKitPage {
         if (this.pending.delete(id)) reject(new Error("inspector evaluation timed out"));
       }, 8000);
       this.pending.set(id, { resolve, reject, timer });
-      const inner = JSON.stringify({ id, method: "Runtime.evaluate", params: { expression, returnByValue: true } });
+      const inner = JSON.stringify({ id, method: "Runtime.evaluate", params: { expression: body, returnByValue: true } });
       this.socket.send(JSON.stringify({ id, method: "Target.sendMessageToTarget", params: { targetId: this.target, message: inner } }));
     });
   }
 
   async call(fn, ...args) {
-    return this.evaluate(`(${fn.toString()})(${args.map((arg) => JSON.stringify(arg)).join(",")})`);
+    return this.evaluate(fn, ...args);
   }
 
   close() {
