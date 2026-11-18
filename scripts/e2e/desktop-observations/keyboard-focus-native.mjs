@@ -74,8 +74,9 @@ const pass = (name, detail) => {
   say("PASS", name, detail);
 };
 const fail = (name, detail) => {
-  verdict.steps[name] = { ok: false, ...detail };
-  verdict.faults.push(name);
+  const earlier = verdict.steps[name]?.ok === false ? verdict.steps[name] : {};
+  verdict.steps[name] = { ...earlier, ok: false, ...detail };
+  if (!verdict.faults.includes(name)) verdict.faults.push(name);
   save();
   say("FAIL", name, detail);
   if (!keepGoing) process.exit(10);
@@ -485,7 +486,7 @@ async function main() {
   ).catch(() => null);
   await shot("press-a-next-key");
   if (!after) fail("click submits and the next key types", { after: await focusState(cardA) });
-  pass("click submits and the next key types", { where: after.where });
+  else pass("click submits and the next key types", { where: after.where });
   const tabA = await readTerminalId(".terminal-tab.active");
 
   // Two panes: B's composer is open while A is active. A real click on
@@ -544,8 +545,8 @@ async function main() {
   const paneNow = await activePaneId();
   await shot("twopane-sent");
   if (paneNow !== paneA) fail("two-pane submit keeps focus and pane", { paneA, paneNow });
-  if (sentB.where !== "composer") fail("two-pane submit keeps focus and pane", { focus: sentB.where });
-  pass("two-pane submit keeps focus and pane", { held: heldB.where, focus: sentB.where, paneA, paneNow });
+  if (sentB && sentB.where !== "composer") fail("two-pane submit keeps focus and pane", { focus: sentB.where });
+  pass("two-pane submit keeps focus and pane", { held: heldB.where, focus: sentB?.where ?? null, paneA, paneNow });
 
   // The deck opened by its chord returns into Search. The page's command
   // bus records what a deck run dispatches, so a run is told apart from a
