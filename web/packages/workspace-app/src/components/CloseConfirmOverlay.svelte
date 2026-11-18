@@ -26,7 +26,7 @@
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { connectionHealth } from "../state/connectionHealth.svelte";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -113,10 +113,26 @@
   // Steal focus onto Cancel when the overlay appears: the backdrop stops clicks
   // but keystrokes still flow to whatever was focused (a terminal / editor), so
   // park focus on the safe default and trap Tab over the three buttons below.
+  // It takes the keyboard once per showing, where the keyboard's owner lets
+  // it (not under the Computers launcher, a cover or an owner painted above
+  // it); asking reads the owners' state, so this runs again when one lets go,
+  // and a hand-back to it lands on Cancel too.
+  let tookKeyboard = false;
   $effect(() => {
-    if (!open) return;
+    if (!open) {
+      tookKeyboard = false;
+      return;
+    }
+    if (tookKeyboard || !mayFocus(overlayEl)) return;
+    tookKeyboard = true;
     (document.activeElement as HTMLElement | null)?.blur();
-    queueMicrotask(() => (cancelBtn ?? overlayEl)?.focus());
+    queueMicrotask(() => {
+      if (mayFocus(overlayEl)) (cancelBtn ?? overlayEl)?.focus();
+    });
+  });
+  $effect(() => {
+    if (!overlayEl) return;
+    return registerKeyboardTaker(overlayEl, () => (cancelBtn ?? overlayEl)?.focus());
   });
 
   // Escape cancels; Tab/Shift+Tab cycle the three buttons and never leak focus

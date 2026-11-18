@@ -33,7 +33,7 @@
     validateTeamConfig,
   } from "../state/teamDialog.svelte";
   import { runTeamBootstrap, wireToDialog } from "../state/teamOrchestrator.svelte";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   /// Team Work dialog. Opens over the already-created Team Work Lead
   /// terminal (the dialog request
@@ -80,10 +80,27 @@
   let dirSuggestions = $state<string[]>([]);
   let dirSuggestReq = 0;
   let nameInputEl = $state<HTMLInputElement | undefined>();
+  let dialogEl = $state<HTMLDivElement | undefined>();
 
   onMount(() => {
-    queueMicrotask(() => nameInputEl?.focus());
     void refreshDirSuggestions(config.teamDir);
+  });
+
+  // The name field takes the keyboard once, where the keyboard's owner lets
+  // it (not under the Computers launcher, a cover or a window-wide survey
+  // painted above it); asking reads the owners' state, so this runs again
+  // when one lets go, and a hand-back to the dialog lands on the field too.
+  let tookKeyboard = false;
+  $effect(() => {
+    if (tookKeyboard || !dialogEl || !mayFocus(dialogEl)) return;
+    tookKeyboard = true;
+    queueMicrotask(() => {
+      if (mayFocus(dialogEl ?? null)) nameInputEl?.focus();
+    });
+  });
+  $effect(() => {
+    if (!dialogEl) return;
+    return registerKeyboardTaker(dialogEl, () => nameInputEl?.focus());
   });
 
   // Mirror the live config draft onto the lead terminal and schedule a session
@@ -349,6 +366,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="team-dialog-backdrop" onclick={onBackdropClick} role="presentation">
   <div
+    bind:this={dialogEl}
     class="team-dialog"
     role="dialog"
     aria-modal="true"

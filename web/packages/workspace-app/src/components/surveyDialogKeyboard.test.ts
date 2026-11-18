@@ -11,6 +11,10 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
+import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
+import TeamDialog from "./TeamDialog.svelte";
+import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
+import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
@@ -147,5 +151,44 @@ describe("a terminal's survey under a cover over the window", () => {
     await tick();
     await settle();
     expect(document.activeElement).toBe(card(target));
+  });
+});
+
+describe("the close prompt and the Team dialog", () => {
+  test("the close prompt arriving under the Computers launcher takes nothing, and takes Cancel when it hides", async () => {
+    const origin = focusOrigin();
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(CloseConfirmOverlay, { target }));
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    const answer = uiCloseConfirm();
+    await settle();
+    expect(document.activeElement, "under the launcher").toBe(origin);
+    document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    await settle();
+    expect(document.activeElement).toBe(target.querySelector("button.cancel"));
+    resolveCloseConfirm("cancel");
+    await answer;
+  });
+
+  test("the Team dialog arriving under a window-wide survey leaves the card the keyboard, and takes it as the survey closes", async () => {
+    resetLayout([terminalTab({ id: "lead-tab", terminalSessionId: "lead-session" })]);
+    focusOrigin();
+    const wide = overlay();
+    showSurvey(SURVEY, null);
+    await settle();
+    expect(document.activeElement).toBe(card(wide));
+    const request = { leadTabId: "lead-tab", leadPaneId: "pane-test" };
+    openTeamDialog(request);
+    const target = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(TeamDialog, { target, props: { request } }));
+    try {
+      await settle();
+      expect(document.activeElement, "the card over the dialog").toBe(card(wide));
+      surveyState.windowWide = null;
+      await settle();
+      expect(document.activeElement, "the dialog's name field").toBe(target.querySelector(".team-field input"));
+    } finally {
+      closeTeamDialog();
+    }
   });
 });
