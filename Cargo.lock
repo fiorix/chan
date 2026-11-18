@@ -1094,6 +1094,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-ios"
+version = "0.131.0"
+
+[[package]]
 name = "chan-library"
 version = "0.131.0"
 dependencies = [

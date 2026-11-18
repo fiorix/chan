@@ -23,6 +23,7 @@ members = [
     "crates/chan-winpipe",
     "crates/fetch-models",
     "desktop/src-tauri",
+    "mobile/ios",
 ]
 
 [workspace.package]
