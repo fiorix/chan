@@ -178,20 +178,32 @@ async function readPressRecord(page) {
 }
 
 /// A real press on the strip's primary button: hold, read, release.
-async function pressSubmit(page, card, label, shot) {
-  const point = await installPressRecord(page, `${card} .rp-primary`);
+/// Press at `point`, run `read` with the button held, and release the
+/// button whatever `read` finds or throws, so a failed hold leaves no
+/// pressed button behind for the cleanup to trip over.
+async function holdPress(page, point, read) {
   await page.mouse.move(point.x, point.y);
   await page.mouse.down();
-  await sleep(250);
-  const held = await focusState(page, card);
-  const record = await readPressRecord(page);
+  try {
+    await sleep(250);
+    return await read();
+  } finally {
+    await page.mouse.up();
+  }
+}
+
+async function pressSubmit(page, card, label, shot) {
+  const point = await installPressRecord(page, `${card} .rp-primary`);
+  const { held, record } = await holdPress(page, point, async () => {
+    const reading = { held: await focusState(page, card), record: await readPressRecord(page) };
+    await shot(label);
+    return reading;
+  });
   try {
     assert.equal(held.where, "composer", `${label}: the press holds the composer`);
   } catch (error) {
     throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(record)}`);
   }
-  await shot(label);
-  await page.mouse.up();
   return { held, record };
 }
 
@@ -354,12 +366,10 @@ export default {
             const secondary = await page.$(`${card} .rp-action:not(.rp-primary)`);
             if (secondary) {
               const point = await installPressRecord(page, `${card} .rp-action:not(.rp-primary)`);
-              await page.mouse.move(point.x, point.y);
-              await page.mouse.down();
-              await sleep(250);
-              const held = await focusState(page, card);
-              const secondaryRecord = await readPressRecord(page);
-              await page.mouse.up();
+              const { held, secondaryRecord } = await holdPress(page, point, async () => ({
+                held: await focusState(page, card),
+                secondaryRecord: await readPressRecord(page),
+              }));
               try {
                 assert.equal(held.where, "composer", "the secondary press holds the composer");
               } catch (error) {
@@ -416,13 +426,11 @@ export default {
             // composer.
             const pointB = await installPressRecord(page, `${cardB} .rp-primary`);
             await page.evaluate(() => { window.__heldBefore294 = document.activeElement; });
-            await page.mouse.move(pointB.x, pointB.y);
-            await page.mouse.down();
-            await sleep(250);
-            const heldB = await focusState(page, cardB);
-            const unmovedB = await page.evaluate(() => document.activeElement === window.__heldBefore294);
-            const recordB = await readPressRecord(page);
-            await page.mouse.up();
+            const { heldB, unmovedB, recordB } = await holdPress(page, pointB, async () => ({
+              heldB: await focusState(page, cardB),
+              unmovedB: await page.evaluate(() => document.activeElement === window.__heldBefore294),
+              recordB: await readPressRecord(page),
+            }));
             try {
               assert.ok(unmovedB, `the press on B's button moves no focus (held at ${heldB.where})`);
             } catch (error) {
@@ -450,12 +458,10 @@ export default {
             await waitFor(page, cardB, "the image draft is editable",
               (value) => value.text.includes("box294.png") && value.editable && !value.pending);
             const pointI = await installPressRecord(page, `${cardB} .rp-primary`);
-            await page.mouse.move(pointI.x, pointI.y);
-            await page.mouse.down();
-            await sleep(250);
-            const heldI = await focusState(page, cardB);
-            const recordI = await readPressRecord(page);
-            await page.mouse.up();
+            const { heldI, recordI } = await holdPress(page, pointI, async () => ({
+              heldI: await focusState(page, cardB),
+              recordI: await readPressRecord(page),
+            }));
             const samples = [{ at: 0, focus: heldI.where, pane: await activePaneId(page).catch(() => null) }];
             for (let elapsed = 250; elapsed <= 6000; elapsed += 250) {
               await sleep(250);
