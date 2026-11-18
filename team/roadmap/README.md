@@ -75,7 +75,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [Workspace details clears the wrong selection][detailsclear] | not started | build |
 | [four places show wikilinks as typed][wikiplaces] | not started | build |
 | [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
-| [terminals at half scale after a sleep][wakescale] | not started | build |
+| [terminals at half scale after a sleep][wakescale] | merged | build |
 
 ## Completed
 
