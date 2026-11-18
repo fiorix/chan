@@ -444,27 +444,38 @@ fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// The cached copy of `filename`: the pinned snapshot's, or the one in the
-/// snapshot `refs/main` names while that snapshot holds every file the model
-/// pins. An earlier chan wrote its cache at whatever commit `main` was then,
-/// with each file a link into `blobs/` or, without links, renamed into
-/// place; both read here.
-fn cached(repo: &Path, model: &EmbeddingModelInfo, filename: &str) -> Option<PathBuf> {
+/// The snapshot that holds every file the model pins: the pinned one, or
+/// else the one `refs/main` names. An earlier chan wrote its cache at
+/// whatever commit `main` was then, with each file a link into `blobs/` or,
+/// without links, renamed into place; both read here.
+fn complete_snapshot(repo: &Path, model: &EmbeddingModelInfo) -> Option<PathBuf> {
+    let complete = |snapshot: &Path| {
+        model
+            .files
+            .iter()
+            .all(|file| snapshot.join(file.name).is_file())
+    };
     let snapshots = repo.join("snapshots");
-    let pinned = snapshots.join(model.revision).join(filename);
-    if pinned.is_file() {
+    let pinned = snapshots.join(model.revision);
+    if complete(&pinned) {
         return Some(pinned);
     }
     let commit = std::fs::read_to_string(repo.join("refs/main")).ok()?;
     if !identifier(&commit) {
         return None;
     }
-    let snapshot = snapshots.join(commit);
-    model
-        .files
-        .iter()
-        .all(|file| snapshot.join(file.name).is_file())
-        .then(|| snapshot.join(filename))
+    let named = snapshots.join(commit);
+    complete(&named).then_some(named)
+}
+
+/// The cached copy of `filename`. All of a model's files come from one
+/// snapshot: the complete one, or else the pinned one a download is filling.
+fn cached(repo: &Path, model: &EmbeddingModelInfo, filename: &str) -> Option<PathBuf> {
+    if let Some(snapshot) = complete_snapshot(repo, model) {
+        return Some(snapshot.join(filename));
+    }
+    let filling = repo.join("snapshots").join(model.revision).join(filename);
+    filling.is_file().then_some(filling)
 }
 
 struct FileLock(File);

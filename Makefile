@@ -104,6 +104,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::a_download_uses_the_supplied_tls_configuration \
 	index::embeddings::download::tests::a_pinned_file_is_read_without_a_request \
 	index::embeddings::download::tests::an_incomplete_snapshot_at_another_commit_is_not_mixed_with_the_pinned_one \
+	index::embeddings::download::tests::a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinned_one \
 	index::embeddings::download::tests::cache_reference_cannot_escape_the_snapshot_directory \
 	index::embeddings::download::tests::an_unpinned_model_or_file_is_refused_before_any_request_or_write \
 	index::embeddings::download::tests::a_model_that_publishes_no_weights_is_refused_before_any_request \

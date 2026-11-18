@@ -739,6 +739,43 @@ fn an_incomplete_snapshot_at_another_commit_is_not_mixed_with_the_pinned_one() {
 }
 
 #[test]
+fn a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinned_one() {
+    const OLD: &str = "1111111111111111111111111111111111111111";
+    let cache = tempfile::tempdir().unwrap();
+    let repo = cache.path().join(repo_dir_name("fixture/model"));
+    let old = repo.join("snapshots").join(OLD);
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(repo.join("refs")).unwrap();
+    std::fs::write(repo.join("refs/main"), OLD).unwrap();
+    std::fs::write(old.join("config.json"), BODY).unwrap();
+    std::fs::write(old.join("tokenizer.json"), BODY).unwrap();
+    // A download at the pin got as far as one file, then an earlier chan
+    // put its own snapshot back in front.
+    let pinned = snapshot(cache.path());
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::write(pinned.join("config.json"), BODY).unwrap();
+    let server = Server::start(|_| response("503 Service Unavailable", "", b"no request expected"));
+    let client = Client::with_config(
+        cache.path(),
+        &server.endpoint,
+        chan_tls::client_config().unwrap(),
+    )
+    .pinned(pins(
+        "fixture/model",
+        COMMIT,
+        &[("config.json", BODY), ("tokenizer.json", BODY)],
+    ));
+    for name in ["config.json", "tokenizer.json"] {
+        assert_eq!(
+            client.get("fixture/model", name).unwrap(),
+            old.join(name),
+            "every file of the model comes from the one complete snapshot"
+        );
+    }
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn cache_reference_cannot_escape_the_snapshot_directory() {
     let cache = tempfile::tempdir().unwrap();
     let repo = cache.path().join(repo_dir_name("fixture/model"));
