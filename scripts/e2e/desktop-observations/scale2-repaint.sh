@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Wakescale acceptance 5: the same canvas reset as check 296, on the real
-# WebKitGTK desktop at GDK_SCALE=2, base against tip. A same-size canvas
-# reset is the specification's reset on every engine, so unlike the sleep
-# it needs no wake to reproduce: blank bitmap, identity transform. The
-# driver below opens one ghostty terminal, paints pages, reads quarters and
-# transform, resets, and refocuses the window (the app's forced passes run
-# on focus); at the tip the repaint lands at full scale, at the base it
-# stays in the top-left quarter. Run once per tree at /work/chan: base
-# first, then tip. Exit 0 held, 10 observed fault, 2 refused, 3
-# inconclusive; the lifecycle shell maps 10 through obs_judge.
+# The check-296 reset on the real WebKitGTK desktop at GDK_SCALE=2. One
+# ghostty terminal paints pages, the canvas drawing state drops by a
+# same-size reset, and the window refocus runs the app's forced passes;
+# the driver reads painted pixels per quarter plus the transform before
+# and after. Run once per tree at /work/chan, base first, then tip: the
+# base keeps the half-scale paint (an observed fault), the tip repaints
+# at full scale. Exit 0 held; the wrapper exits 1 on an observed fault
+# (the driver exits 10 through its judge), 3 when inconclusive, 2 when
+# refused. Run only in an isolated guest.
+# shellcheck disable=SC2329
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,10 +19,11 @@ usage() { printf 'Usage: %s <out-dir>\n' "$0" >&2; exit 2; }
 [ "$#" -eq 1 ] || usage
 output=$1
 
-obs_setup wakescale-gdk2
+export CHAN_BIN="$(command -v cs)"
+obs_setup scale2-repaint
 obs_need node xdotool
 mkdir -m 700 "$output"
-sha256sum "$HERE/wakescale-gdk2.sh" "$HERE/wakescale-gdk2.mjs" "$HERE/lib.sh" > "$output/instrument-sha256.txt"
+sha256sum "$HERE/scale2-repaint.sh" "$HERE/scale2-repaint.mjs" "$HERE/lib.sh" > "$output/instrument-sha256.txt"
 
 Xvfb -displayfd 3 -screen 0 1600x1000x24 -nolisten tcp \
   3> "$OBS_WORK/display" > "$OBS_WORK/xvfb.log" 2>&1 &
@@ -65,11 +66,11 @@ for socket in $(obs_control_sockets); do
   CHAN_CONTROL_SOCKET=""
 done
 [ -n "${CHAN_CONTROL_SOCKET:-}" ] || obs_inconclusive "no private control socket addresses the workspace window"
-
-dpkg-query -W libwebkit2gtk-4.1-0 > "$output/engine-package.txt" 2>/dev/null || true
+import -window "$xid" "$output/window-before.png"
 set +e
-node "$HERE/wakescale-gdk2.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output"
+node "$HERE/scale2-repaint.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output"
 verdict=$?
 set -e
+import -window "$xid" "$output/window-after.png"
 obs_verdict
 obs_judge "$verdict" "scale-2 repaint differs base to tip in the wrong direction"
