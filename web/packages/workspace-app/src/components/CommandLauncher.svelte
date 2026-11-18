@@ -60,8 +60,10 @@
     clearLauncherDraft,
     closeCommandLauncher,
     launcherDraft,
+    modalDialogOpen,
     openSettings,
     persistLauncherDraft,
+    topOverlay,
   } from "../state/store.svelte";
   import {
     SURFACE_LABELS,
@@ -87,7 +89,7 @@
     activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { refocusRefused } from "../state/focusGuard";
+  import { keyboardOwned, launcherShownOverWindow } from "../state/focusGuard.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -283,6 +285,15 @@
       recent: recentAtOpen,
       chord: chordFor,
     };
+  }
+
+  /// Whether the heir sits inside the current top overlay's own panel.
+  /// OverlayShell stamps each panel with its overlay id, so the check
+  /// follows a rename with no label map to keep.
+  function topOverlayPanelContains(heir: Element): boolean {
+    const top = topOverlay();
+    if (!top) return false;
+    return !!heir.closest('[data-overlay="' + top + '"]');
   }
 
   /// A setting the deck cannot change in place is edited in the overlay.
@@ -852,6 +863,21 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
-  mayTakeFocus={() => !refocusRefused(activeTerminalTab()?.id ?? null)}
+  mayTakeFocus={(heir) => {
+    // The Computers launcher owns the keyboard outright: a focus change in
+    // the page while it shows would take the window's first responder back.
+    // (This predicate reads LAUNCHER_SHOWN_ATTR directly, so the check is
+    // fresh.) Otherwise a run hands the keyboard back to the heir where it
+    // owns the keyboard: a window-wide modal dialog, a survey card where no
+    // modal owns the keyboard, or the top overlay's panel while no modal is
+    // open. Anything else, and no heir at all, goes through the shared
+    // rule, which still refuses the terminal and its composer while an
+    // owner holds them.
+    if (launcherShownOverWindow()) return false;
+    if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
+    if (heir && heir.closest(".survey-card") && !modalDialogOpen()) return true;
+    if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
+    return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
+  }}
   {toggleChord}
 />

@@ -69,7 +69,7 @@
     tree,
     workspaceDisplayName,
   } from "../state/store.svelte";
-  import { refocusRefused } from "../state/focusGuard";
+  import { refocusRefused } from "../state/focusGuard.svelte";
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";

@@ -11,7 +11,7 @@ vi.mock("../state/connectionHealth.svelte", async (importOriginal) => ({
 vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
 
 import WindowTabBar from "./WindowTabBar.svelte";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
+import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { connectionHealth, resetConnectionHealthForTests } from "../state/connectionHealth.svelte";
 import { NO_TITLEBAR_CHROME, windowTabBar } from "../state/windowTabBar.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";

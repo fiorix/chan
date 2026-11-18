@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
+  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
   import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
   import { surveyFor } from "../state/survey.svelte";
   import { teamDialogState } from "../state/teamDialog.svelte";

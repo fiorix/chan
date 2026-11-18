@@ -139,6 +139,7 @@
       onclick={(e) => e.stopPropagation()}
       role="dialog"
       aria-label={label}
+      data-overlay={id}
       tabindex="-1"
     >
       {@render children()}

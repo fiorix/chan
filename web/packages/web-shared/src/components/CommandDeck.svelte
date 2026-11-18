@@ -77,8 +77,9 @@
     /// keyboard is held outside the page, such as a native launcher window
     /// shown over it, answers false, and the deck then hands focus to
     /// nothing: a focus change in the page would take the keyboard from
-    /// that surface.
-    mayTakeFocus?: () => boolean;
+    /// that surface. Receives the element the focus would land on, so the
+    /// host can allow a return into a surface that owns the keyboard.
+    mayTakeFocus?: (heir?: HTMLElement | null) => boolean;
     /// Whether a key is the chord the host opens this deck with. The open
     /// deck takes every key ahead of the host's own listener, which
     /// therefore never sees the chord then: the deck closes on it, so the
@@ -508,9 +509,9 @@
     await tick();
     if (pendingReturnFocus === published) pendingReturnFocus = null;
     if (open || holdsFocus(document.activeElement)) return;
-    if (mayTakeFocus && !mayTakeFocus()) return;
-    if (canTakeFocus(deferredFocus)) deferredFocus.focus({ preventScroll: true });
-    else if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
+    const heir = canTakeFocus(deferredFocus) ? deferredFocus : canTakeFocus(opener) ? opener : null;
+    if (mayTakeFocus && !mayTakeFocus(heir)) return;
+    if (heir) heir.focus({ preventScroll: true });
     else onFocusLost?.();
   }
 

@@ -27,6 +27,8 @@ import StandInSurface, { type SurfaceGrab } from "./CommandLauncher.testSurface.
 import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import BubbleOverlay from "./BubbleOverlay.svelte";
+import SearchPanel from "./SearchPanel.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import { allCommands, registerCommands } from "../state/commands";
@@ -36,10 +38,12 @@ import {
   closeCommandLauncher,
   launcherPanel,
   openCommandLauncher,
+  overlayStack,
   pathPromptState,
   promptState,
   resolvePathPrompt,
   resolvePrompt,
+  searchPanel,
   uiPrompt,
 } from "../state/store.svelte";
 import { tabFocusPulse } from "../state/tabs.svelte";
@@ -584,5 +588,259 @@ describe("the keyboard while the launcher is open", () => {
     document.documentElement.setAttribute("data-launcher-shown", "");
     await runFromLauncher(target, "Stand-in prompt");
     expect(document.activeElement).toBe(field());
+  });
+});
+
+describe("the launcher's return under another overlay", () => {
+  // jsdom has no ResizeObserver; the search panel's hits effect needs the
+  // stub the terminal tests install with their DOM helper.
+  const realResizeObserver = globalThis.ResizeObserver;
+  beforeEach(() => {
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  });
+  afterEach(() => {
+    globalThis.ResizeObserver = realResizeObserver;
+  });
+  test("a run that opens nothing returns the keyboard to the Search input", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      await runFromLauncher(target, "Toggle nothing");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(document.activeElement, "focus returns to the Search input").toBe(input);
+    } finally {
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
+  });
+
+  test("a run that settles with Search on top under a modal leaves the Search input alone", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      const dialogs = document.createElement("div");
+      document.body.append(dialogs);
+      mounted.push(mount(PromptModal, { target: dialogs }) as Record<string, unknown>);
+      mounted.push(mount(PathPromptModal, { target: dialogs }) as Record<string, unknown>);
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      await runFromLauncher(target, "Wait on window");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      void uiPrompt("Name");
+      await flush();
+      const field = document.querySelector<HTMLInputElement>('[role="dialog"][aria-modal="true"] input')!;
+      await vi.waitFor(() => expect(document.activeElement).toBe(field));
+      field.blur();
+      expect(document.activeElement).toBe(document.body);
+      const focus = vi.spyOn(input!, "focus");
+      try {
+        held!.resolve();
+        await flush();
+        expect(promptState.open, "the modal still owns the keyboard").toBe(true);
+        expect(focus, "the completed run does not return into Search under the modal").not.toHaveBeenCalled();
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
+  });
+
+  test("a run that opens nothing returns the keyboard to the survey card", async () => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    const surveyTarget = document.createElement("div");
+    document.body.append(surveyTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-card", title: null, bodyMarkdown: "Choose", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      expect(document.activeElement, "the launcher takes focus").toBe(target.querySelector(".deck-input"));
+      // Keys stay with the survey while it shows, so the run goes through
+      // a row click, the way a user reaches it under a survey.
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Toggle nothing",
+      );
+      expect(row, "the deck lists the no-op command").toBeDefined();
+      row!.click();
+      await flush();
+      expect(runNothing, "the run executed").toHaveBeenCalled();
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(document.activeElement, "focus returns to the survey card").toBe(card);
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      surveyTarget.remove();
+    }
+  });
+
+  test("a run that settles with a window-wide survey up leaves the terminal card alone", async () => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    const surveyTarget = document.createElement("div");
+    document.body.append(surveyTarget);
+    const wideTarget = document.createElement("div");
+    document.body.append(wideTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-card", title: null, bodyMarkdown: "Choose", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      expect(document.activeElement, "the launcher takes focus").toBe(target.querySelector(".deck-input"));
+      // Keys stay with the survey while it shows, so the run goes through
+      // a row click, the way a user reaches it under a survey.
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Wait on window",
+      );
+      expect(row, "the deck lists the held command").toBeDefined();
+      row!.click();
+      await flush();
+      expect(held, "the run started").not.toBeNull();
+      // A window-wide survey shows while the run is still out; the pane
+      // gives up the keyboard to the window.
+      mounted.push(mount(BubbleOverlay, { target: wideTarget }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-window", title: null, bodyMarkdown: "Choose", options: ["OK"] }, null);
+      await flush();
+      const wide = wideTarget.querySelector<HTMLElement>(".survey-card");
+      expect(wide, "the window-wide survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(wide));
+      wide!.blur();
+      expect(document.activeElement).toBe(document.body);
+      const focus = vi.spyOn(card!, "focus");
+      try {
+        held!.resolve();
+        await flush();
+        expect(launcherPanel.open, "the run closes the deck").toBe(false);
+        expect(focus, "the completed run does not return into the terminal card").not.toHaveBeenCalled();
+        expect(document.activeElement).toBe(document.body);
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      surveyTarget.remove();
+      wideTarget.remove();
+    }
+  });
+
+  test("a run that settles with Search on top leaves a pane-level dialog button alone", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    const card = document.createElement("div");
+    card.setAttribute("role", "dialog");
+    const button = document.createElement("button");
+    button.textContent = "stand-in";
+    card.append(button);
+    document.body.append(card);
+    const focus = vi.spyOn(button, "focus");
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      button.focus();
+      await flush();
+      focus.mockClear();
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      await runFromLauncher(target, "Toggle nothing");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(focus, "the completed run does not return into a pane-level dialog").not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      focus.mockRestore();
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+      card.remove();
+    }
+  });
+
+  test("a run that settles while the Computers launcher is shown moves no focus", async () => {
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      launcherPanel.open = true;
+      overlayStack.ids = ["search", "launcher"];
+      await flush();
+      document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+      await flush();
+      await runFromLauncher(target, "Toggle nothing");
+      expect(launcherPanel.open, "the run closes the deck").toBe(false);
+      expect(document.activeElement, "focus stays on the body while the launcher covers the window").toBe(document.body);
+    } finally {
+      document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
   });
 });

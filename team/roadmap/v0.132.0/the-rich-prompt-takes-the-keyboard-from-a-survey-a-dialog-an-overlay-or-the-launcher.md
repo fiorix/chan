@@ -31,7 +31,7 @@ Read at `f453b0b2e`, by reading; not run. Paths are under `web/packages/workspac
 
 ## Boundaries
 
-- `state/focusGuard.ts` and the owners' state it reads, the Rich Prompt's focus paths, the two editors' delayed and text-change focus, the survey overlay's focus effect, `bumpTabFocusPulse` and the terminal's return after a move, with their tests.
+- `state/focusGuard.svelte.ts` and the owners' state it reads, the Rich Prompt's focus paths, the two editors' delayed and text-change focus, the survey overlay's focus effect, `bumpTabFocusPulse` and the terminal's return after a move, with their tests.
 - Starts from `v0131/promptguard` at `a086a88d6` and its review (`dev/v0131-team/reviews/review-promptguard-1a.md`). The branch's tests are the base. The review's blocking finding, the launcher mark, is contract 2; its three should-fix findings are contract 3's delayed frame, contract 4's return at close and contract 1's overlays.
 - `ModalShell`'s stack and its focus repair stay as they are.
 - A strip-button submit in a pane that is not focused focuses the composer today (`components/RichPrompt.svelte:661`); the branch stops that (the review's note 5). This row keeps today's behaviour unless the owner rules otherwise, recorded here.
