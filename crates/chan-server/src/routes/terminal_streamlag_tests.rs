@@ -688,9 +688,12 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     .await;
     // Socket A attaches before the flood and reads one live frame, then
     // stops draining entirely. The flood is sized so the hold engages by
-    // construction on any transport: at ~6.9 MB it outruns the kernel's
-    // send buffering (capped at wmem_max) plus the 1 MiB pacing credit, so
-    // the slowest view is a full credit behind before the flood ends.
+    // construction: the rig's sockets use fixed 64 KiB buffers, so A stops
+    // acknowledging past about 256 KiB and is a full credit behind about
+    // 1.3 MB in, and every 64 KiB reader chunk past that needs an admission
+    // check. A 1.4 MB flood leaves only a ~100 KiB window for that check,
+    // which one fast chunk can jump; at ~6.9 MB the window is ~5.6 MB, so
+    // a check must land inside it.
     let (mut stalled, initial) = rig.attach().await;
     // The hold is observed structurally: the reader parks waiting for
     // progress while A holds the session back.
