@@ -576,10 +576,28 @@ async function main() {
   if (back === false) fail("deck by key returns into Search", { active: (await focusState(null)).where });
   const dispatched = await page.evaluate(() => window.__kbdCommands.slice());
   if (!dispatched.includes("app.terminal.copyScrollback")) fail("deck by key returns into Search", { ran: false, dispatched });
+  // XTEST keys reach the page asynchronously, so the query is waited for;
+  // a key that never lands is recorded with where the keyboard and the X
+  // focus were.
+  const beforeKey = { active: (await focusState(null)).where, xActive: await xdotool("getactivewindow", "getwindowname").catch((e) => e.message) };
   await x([], "type", "Q");
-  const query = await page.evaluate((input) => document.querySelector(input)?.value ?? null, searchInput);
+  const query = await until("the Q lands in Search",
+    () => page.evaluate((input) => document.querySelector(input)?.value ?? null, searchInput),
+    (value) => value === `${queryBefore}Q`, 3000)
+    .catch(async () => page.evaluate((input) => document.querySelector(input)?.value ?? null, searchInput));
   await shot("search-after-run");
-  if (query !== `${queryBefore}Q`) fail("deck by key returns into Search", { queryBefore, query });
+  if (query !== `${queryBefore}Q`) {
+    fail("deck by key returns into Search", {
+      queryBefore,
+      query,
+      beforeKey,
+      afterKey: {
+        active: (await focusState(null)).where,
+        xActive: await xdotool("getactivewindow", "getwindowname").catch((e) => e.message),
+        deckOpen: await page.evaluate((input) => Boolean(document.querySelector(input)), deckInput),
+      },
+    });
+  }
   pass("deck by key returns into Search", { openedBy: "chord", nativeSearchFocus, queryBefore, query, dispatched });
   await dispatch("app.search.toggle");
 
