@@ -238,8 +238,7 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
-  import { surveyFor } from "../state/survey.svelte";
+  import { handKeyboardToOwner, launcherShownOverWindow, legacyKeyboardOwned, owner } from "../state/keyboardOwner.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
@@ -810,22 +809,22 @@
       if (!active || !focused) return;
       // A dialog, a window-wide survey, the launcher or an overlay owns the
       // keyboard over every terminal: the move hands it to nothing, even to
-      // the survey card over the terminal that moved. The rule reads null so
-      // a survey over this terminal alone still reaches its branch below.
-      if (legacyKeyboardOwned(null)) return;
-      const owner = document.activeElement;
+      // the survey card over the terminal that moved.
+      const current = owner();
+      if (current !== null && current.kind !== "terminal-survey") return;
+      const holder = document.activeElement;
       if (
-        owner !== null &&
-        owner !== document.body &&
-        owner !== document.documentElement &&
-        !tabEl?.contains(owner)
+        holder !== null &&
+        holder !== document.body &&
+        holder !== document.documentElement &&
+        !tabEl?.contains(holder)
       ) {
         return;
       }
-      // A survey over the terminal that moved gets the keyboard back, as
-      // the find bar, the composer and the terminal do.
-      if (surveyFor(tab.id)) {
-        tabEl?.querySelector<HTMLElement>(".survey-card")?.focus({ preventScroll: true });
+      // A survey over the terminal that moved, the owner here, gets the
+      // keyboard back, as the find bar, the composer and the terminal do.
+      if (current !== null) {
+        handKeyboardToOwner();
         return;
       }
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
