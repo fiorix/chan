@@ -326,6 +326,44 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A pin the Hub could never serve fails here, not on every user's first
+    /// download.
+    #[test]
+    fn every_pin_is_well_formed_and_every_model_but_bge_m3_pins_what_the_embedder_reads() {
+        let hex = |value: &str, len: usize| {
+            value.len() == len
+                && value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        };
+        for model in embedding_models() {
+            assert!(
+                hex(model.revision, 40),
+                "{}: the revision is not a lowercase commit: {:?}",
+                model.id,
+                model.revision
+            );
+            for file in model.files {
+                assert!(
+                    hex(file.sha256, 64),
+                    "{} {}: the sha256 is not lowercase hex of 64: {:?}",
+                    model.id,
+                    file.name,
+                    file.sha256
+                );
+                assert!(file.size > 0, "{} {}: no size", model.id, file.name);
+            }
+            let names: Vec<_> = model.files.iter().map(|file| file.name).collect();
+            // bge-m3's repository publishes no model.safetensors.
+            let expected: &[&str] = if model.id == "BAAI/bge-m3" {
+                &["config.json", "tokenizer.json"]
+            } else {
+                &MODEL_FILES
+            };
+            assert_eq!(names, expected, "{}: the pinned files", model.id);
+        }
+    }
+
     #[test]
     fn load_returns_default_when_absent() {
         let tmp = TempDir::new().unwrap();
