@@ -162,4 +162,16 @@ describe("the connection face on the Computers deck", () => {
     expect(face("ds-a")!.textContent).toContain("1.3 s");
     expect(detail("ds-a")!.textContent).toContain("Slow for 27 s");
   });
+
+  it("keeps the privacy reveal out of the face's image, whose children a screen reader skips", async () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", rtt_ms: 1_300 }))];
+    await setPrivacy({ enabled: true });
+    mountDeck("ds-a");
+    const reveal = face("ds-a")!.querySelector<HTMLButtonElement>('[aria-label="Reveal connection details"]')!;
+    expect(reveal.closest('[role="img"]'), "the reveal sits inside the image").toBeNull();
+    const image = face("ds-a")!.querySelector<HTMLElement>('[role="img"]')!;
+    expect(image.getAttribute("aria-label")).toBe("Connection details");
+    expect(image.querySelector("button, a, input")).toBeNull();
+  });
 });
+
