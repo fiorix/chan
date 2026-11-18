@@ -12,7 +12,7 @@ import {
 } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
-import { answerOpenSurveys, keyboardAt, raiseSurvey, terminalCard } from "../lib/keyboard-owners.mjs";
+import { answerOpenSurveys, keyboardAt, raiseSurvey, terminalCard, waitForCard } from "../lib/keyboard-owners.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DECK = '[role="dialog"][aria-label="Command launcher"]';
@@ -89,7 +89,7 @@ export default {
             "--option", "Alpha", "--option", "Beta",
             "A survey over the terminal of the pane that is not focused."]);
           calls.push(survey);
-          await page.waitForSelector(terminalCard(row.tab), { visible: true, timeout: 15_000 });
+          await waitForCard(page, terminalCard(row.tab), survey, "the survey shows over the unfocused pane", { visible: true });
           await settle(page);
           result.afterSurvey = { keyboard: await keyboardAt(page), panes: await panes(page) };
           assert.ok(result.afterSurvey.panes.find((pane) => pane.id === empty.id)?.focused,

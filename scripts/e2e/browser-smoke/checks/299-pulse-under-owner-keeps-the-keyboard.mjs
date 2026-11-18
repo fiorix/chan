@@ -13,7 +13,9 @@ import { join } from "node:path";
 import { closeActiveTab, closeEveryTerminal } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
-import { WINDOW_CARD, answerOpenSurveys, keyboardAt, raiseSurvey, surveyOutcome } from "../lib/keyboard-owners.mjs";
+import {
+  WINDOW_CARD, answerOpenSurveys, keyboardAt, raiseSurvey, surveyOutcome, waitForCard,
+} from "../lib/keyboard-owners.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // No digit in the text: a typed `1` would show in the editor and on disk.
@@ -96,7 +98,7 @@ export default {
                 "--option", "Alpha", "--option", "Beta",
                 `A window-wide survey is up when cs open brings a ${kind} tab forward.`]);
               calls.push(survey);
-              await page.waitForSelector(WINDOW_CARD, { visible: true, timeout: 15_000 });
+              await waitForCard(page, WINDOW_CARD, survey, "the window-wide survey shows", { visible: true });
               leg.before = await until("precondition: the window-wide survey holds the keyboard",
                 () => keyboardAt(page), (at) => at === "window-survey");
               await csOpen(target);

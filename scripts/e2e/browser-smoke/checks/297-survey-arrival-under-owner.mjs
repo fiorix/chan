@@ -15,7 +15,7 @@ import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 import {
-  WINDOW_CARD, answerOpenSurveys, keyboardAt, raiseSurvey, surveyOutcome, terminalCard,
+  WINDOW_CARD, answerOpenSurveys, chord, keyboardAt, raiseSurvey, surveyOutcome, terminalCard, waitForCard,
 } from "../lib/keyboard-owners.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,9 +75,7 @@ export default {
             await dispatchCommand(page, "app.search.toggle");
             await page.waitForSelector(SEARCH_INPUT, { visible: true, timeout: 15_000 });
             await page.click(SEARCH_INPUT);
-            await page.keyboard.down("Control");
-            await page.keyboard.press("KeyA");
-            await page.keyboard.up("Control");
+            await chord(page, ["Control"], "KeyA");
             await page.keyboard.press("Backspace");
             search.before = await until("precondition: Search holds the keyboard", () => keyboardAt(page),
               (at) => at === "search");
@@ -86,7 +84,7 @@ export default {
               "--option", "Alpha", "--option", "Beta",
               "A survey arrives over the active terminal while Search is open."]);
             calls.push(survey);
-            await page.waitForSelector(terminalCard(row.tab), { visible: true, timeout: 15_000 });
+            await waitForCard(page, terminalCard(row.tab), survey, "the survey shows over the terminal", { visible: true });
             await settle(page);
             search.afterArrival = await keyboardAt(page);
             await ctx.shot(`297-${backend}-search-survey-arrived`);
@@ -122,7 +120,7 @@ export default {
               "--option", "WideOne", "--option", "WideTwo",
               "A window-wide survey is up when a survey over the terminal arrives."]);
             calls.push(windowSurvey);
-            await page.waitForSelector(WINDOW_CARD, { visible: true, timeout: 15_000 });
+            await waitForCard(page, WINDOW_CARD, windowSurvey, "the window-wide survey shows", { visible: true });
             wide.before = await until("precondition: the window-wide survey holds the keyboard",
               () => keyboardAt(page), (at) => at === "window-survey");
             const terminalSurvey = raiseSurvey(cs, ["--tab-name", name, "--timeout", "60",
@@ -130,7 +128,7 @@ export default {
               "--option", "TermOne", "--option", "TermTwo",
               "This survey arrives under a window-wide one."]);
             calls.push(terminalSurvey);
-            await page.waitForSelector(terminalCard(row.tab), { timeout: 15_000 });
+            await waitForCard(page, terminalCard(row.tab), terminalSurvey, "the terminal's survey arrives");
             await settle(page);
             wide.afterArrival = await keyboardAt(page);
             await ctx.shot(`297-${backend}-window-wide-terminal-arrived`);

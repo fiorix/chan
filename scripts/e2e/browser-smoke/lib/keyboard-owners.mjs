@@ -32,6 +32,32 @@ export async function surveyOutcome(call, timeout) {
   return call.result;
 }
 
+/// Wait for a survey's card to show; a timeout names the `cs` call's outcome,
+/// so a survey the server refused reads as the instrument's fault, not a
+/// missing card.
+export async function waitForCard(page, selector, call, label, options = {}) {
+  try {
+    return await page.waitForSelector(selector, { timeout: 15_000, ...options });
+  } catch (error) {
+    throw new Error(`${label}: no card at ${selector} (${error.message}); the survey call reads ${JSON.stringify(call.result)}`);
+  }
+}
+
+/// Press `key` with `modifiers` held, releasing every modifier whatever
+/// happens between, so a throw cannot leave Control or Alt down.
+export async function chord(page, modifiers, key) {
+  const held = [];
+  try {
+    for (const modifier of modifiers) {
+      await page.keyboard.down(modifier);
+      held.push(modifier);
+    }
+    await page.keyboard.press(key);
+  } finally {
+    for (const modifier of held.reverse()) await page.keyboard.up(modifier);
+  }
+}
+
 /// Where the keyboard is, named by the surface around the active element.
 export async function keyboardAt(page) {
   return page.evaluate(() => {

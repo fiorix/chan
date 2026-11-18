@@ -13,7 +13,9 @@ import { closeEveryTerminal, selectLauncherCommand } from "../lib/pane-strip.mjs
 import { recordedSince } from "../lib/pty-recorder.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
-import { answerOpenSurveys, keyboardAt, raiseSurvey, surveyOutcome, terminalCard } from "../lib/keyboard-owners.mjs";
+import {
+  answerOpenSurveys, chord, keyboardAt, raiseSurvey, surveyOutcome, terminalCard, waitForCard,
+} from "../lib/keyboard-owners.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -79,11 +81,7 @@ export default {
           const offset = (await recordedSince("precondition: the recorder records the PTY", recorder, 0, "5a")).length;
 
           await page.click(`${terminal} .terminal-host`);
-          await page.keyboard.down("Control");
-          await page.keyboard.down("Alt");
-          await page.keyboard.press("KeyP");
-          await page.keyboard.up("Alt");
-          await page.keyboard.up("Control");
+          await chord(page, ["Control", "Alt"], "KeyP");
           await page.waitForSelector(`${card} .cm-content`, { visible: true, timeout: 15_000 });
           await page.click(`${card} .cm-content`);
           result.composer = await until("precondition: the composer holds the keyboard", () => keyboardAt(page),
@@ -100,7 +98,7 @@ export default {
             "--option", "Alpha", "--option", "Beta",
             "A survey arrives over the terminal while the path prompt is open."]);
           calls.push(survey);
-          await page.waitForSelector(terminalCard(row.tab), { timeout: 15_000 });
+          await waitForCard(page, terminalCard(row.tab), survey, "the survey arrives under the dialog");
           await settle(page);
           result.underDialog = await keyboardAt(page);
           await ctx.shot(`298-${backend}-survey-under-dialog`);
