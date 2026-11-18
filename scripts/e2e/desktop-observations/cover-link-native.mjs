@@ -124,6 +124,17 @@ async function inspectOne(step, expression) {
   return value;
 }
 
+/// The value of `expression` in every page, each page's answer recorded as
+/// it came: its value, whether it threw, or the inspector's error.
+async function inspectPages(step, expression) {
+  const pages = await inspectAll(expression);
+  readings.push({
+    at: Date.now(), step,
+    pages: pages.map((page) => ({ page: page.page, value: page.value ?? null, thrown: page.thrown ?? false, error: page.error ?? null })),
+  });
+  return pages;
+}
+
 async function xdo(...args) {
   const { stdout } = await run("xdotool", args.map(String), { timeout: 15_000 });
   return stdout.trim();
@@ -340,6 +351,8 @@ function watcherOf(flow, windowId, prefix) {
 
 let status = 3;
 const windows = [];
+// The desktop's own library, once a Computers screen has shown.
+let desktopApi = null;
 // The local window, which holds the focus before the devserver connects.
 let localHost = null;
 
@@ -486,6 +499,7 @@ async function devserverArm() {
   await toggleScreen(host, "show", async () => (await inspectOne("show", LAUNCHER(windowId)))?.slots?.includes("local")
     && (await inspectOne("show page", COVER(windowId)))?.covered === true);
   const desktop = await desktopLibrary();
+  desktopApi = desktop;
   const row = (await desktop("GET", "/api/library/devservers")).find((d) => d.label === LABEL);
   if (!row) throw new Inconclusive("the desktop's library lists no devserver row for the devserver");
   const devserverCard = row.id;
@@ -597,11 +611,16 @@ async function devserverArm() {
 /// loopback port the driver bound and freed, until the outage ends. The
 /// fetch standard blocks some low ports, and a blocked port throws where the
 /// watcher's dial has no catch, which would end its redials. Installed in the
-/// local window's page; the cut and the restore go to one window, by its `w`.
-const LOCAL_HOOK = (deadPort) => `(() => {
+/// page of one of `windowIds`, the desktop's own shown local windows, by its
+/// `w`; every page answers with what it read of itself, so a page that skips
+/// says why. The cut and the restore go to one window, by its `w`.
+const LOCAL_HOOK = (deadPort, windowIds) => `(() => {
   const url = new URL(location.href);
-  if ((url.searchParams.get('lib') ?? 'local') !== 'local' || !url.searchParams.get('w') || url.searchParams.get('kind') === 'control'
-    || !document.querySelector('#app > *')) return { skip: true };
+  const page = {
+    w: url.searchParams.get('w'), lib: url.searchParams.get('lib'), kind: url.searchParams.get('kind'),
+    app: Boolean(document.querySelector('#app > *')), location: location.pathname,
+  };
+  if (!${JSON.stringify(windowIds)}.includes(page.w) || !page.app) return { skip: true, page };
   if (!window.__coverLinkCut) {
     const sockets = new Set();
     const send = WebSocket.prototype.send;
@@ -626,22 +645,50 @@ const LOCAL_HOOK = (deadPort) => `(() => {
       restore() { cut = false; return true; },
     };
   }
-  return { window: url.searchParams.get('w'), seen: window.__coverLinkCut.seen() };
+  return { page, window: page.w, seen: window.__coverLinkCut.seen() };
 })()`;
 const localCall = (windowId, call) => `(() => {
   if (!(${pageOf(windowId)}) || !window.__coverLinkCut) return { skip: true };
   return { [${JSON.stringify(call)}]: window.__coverLinkCut[${JSON.stringify(call)}]() };
 })()`;
 
+/// The X window titled as a local window (`↓ local Terminal Window 1`), when
+/// exactly one is; else the window that held the focus at the start.
+async function localXWindow() {
+  const named = [];
+  for (const id of await visibleWindows()) {
+    const name = await xdo("getwindowname", id).catch(() => "");
+    if (name.includes(" local ") && name.includes("Window")) named.push({ id, name });
+  }
+  readings.push({ at: Date.now(), step: "local X windows", value: named });
+  return named.length === 1 ? named[0].id : localHost;
+}
+
 async function localArm() {
-  if (!localHost) throw new Inconclusive("no local window was found at the start");
-  await xdo("windowactivate", "--sync", localHost);
-  const hook = LOCAL_HOOK(await freePort());
+  if (!desktopApi) throw new Inconclusive("the desktop's own library was never reached, so no local window is known");
+  // The local window by the desktop's own record of it, not by what its
+  // page's address is read to say.
+  const list = await desktopApi("GET", "/api/library/windows");
+  const records = Array.isArray(list) ? list : list?.windows ?? [];
+  const local = records.filter((r) => r.library_id === "local" && !r.control && !r.hidden && r.origin !== "browser");
+  readings.push({
+    at: Date.now(), step: "local records",
+    value: records.map(({ window_id, library_id, kind, control, hidden, origin, connected, prefix }) =>
+      ({ window_id, library_id, kind, control, hidden, origin, connected, prefix })),
+  });
+  if (local.length === 0) throw new Inconclusive("the desktop lists no shown local window; see the local records reading");
+  const host = await localXWindow();
+  if (!host) throw new Inconclusive("no local window's X window is known");
+  await xdo("windowactivate", "--sync", host);
+  const hook = LOCAL_HOOK(await freePort(), local.map((r) => r.window_id));
   const hooked = await until(async () => {
-    const seen = await inspectOne("local sockets", hook);
+    const pages = await inspectPages("local sockets", hook);
+    const seen = pages.map((page) => page.value).find((value) => value && !value.skip) ?? null;
     return { ok: Boolean(seen?.seen?.some((socket) => socket.watcher)), seen };
   }, 30_000);
-  if (!hooked?.ok) throw new Inconclusive(`the local window's watcher socket was not reached: ${JSON.stringify(hooked?.seen)}`);
+  if (!hooked?.ok) {
+    throw new Inconclusive(`the local window's watcher socket was not reached: ${JSON.stringify(hooked?.seen)}; each page's answer is in the local sockets readings`);
+  }
   const windowId = hooked.seen.window;
   const planted = await inspectOne("local witness", WITNESS(windowId));
   if (!planted?.planted || planted.cover) throw new Inconclusive("the local window's page took no witness, or shows a cover already");
@@ -654,7 +701,7 @@ async function localArm() {
   if (!shown?.ok) throw new Inconclusive("the local window's cover did not show with its sockets closed");
   await sleep(Math.max(0, cutAt + RECOVERY_ACTIONS_MS + 1_000 - Date.now()));
   const later = await inspectOne("local later", COVER(windowId));
-  await shot(localHost, "local-cover");
+  await shot(host, "local-cover");
   const detail = { coverMs: shown.seen.witness.cover.at - cutAt, actionsAtShow: shown.seen.witness.cover.actions, actionsLater: later?.actions ?? null };
   if (!detail.actionsAtShow.includes(ACTION) && later?.cover && !later.actions.includes(ACTION)) {
     pass("a local window's cover offers no Show in Computers", detail);
