@@ -93,7 +93,7 @@ export default {
             search.query = await page.$eval(SEARCH_INPUT, (input) => input.value);
             search.surveyOutcome = survey.result;
             await ctx.shot(`297-${backend}-search-typed`);
-            assert.ok(search.query.includes("kq"),
+            assert.equal(search.query, "kq",
               `typed text lands in Search, not the arriving card: Search reads ${JSON.stringify(search.query)}; ` +
               `after the arrival the keyboard was at ${search.afterArrival}`);
             search.passed = true;
@@ -102,7 +102,16 @@ export default {
             failures.push(`${backend} under Search: ${search.failure}`);
           } finally {
             try {
-              if (await page.$(SEARCH_INPUT)) await dispatchCommand(page, "app.search.toggle");
+              // Search closes with its query cleared before the next leg
+              // clicks the terminal it covers.
+              if (await page.$(SEARCH_INPUT)) {
+                await page.$eval(SEARCH_INPUT, (input) => {
+                  input.value = "";
+                  input.dispatchEvent(new Event("input", { bubbles: true }));
+                });
+                await dispatchCommand(page, "app.search.toggle");
+                await page.waitForSelector(SEARCH_INPUT, { hidden: true, timeout: 15_000 });
+              }
               await answerOpenSurveys(page, calls);
             } catch (error) {
               result.cleanupErrors.push(`search leg: ${error.message}`);
