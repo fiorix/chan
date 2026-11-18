@@ -10,16 +10,89 @@ homepage = "https://chan.app"
 readme = "../../README.md"
 publish = false
 
-[[bin]]
-name = "chan-ios"
-path = "src/main.rs"
-
 [lib]
 name = "app"
 path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[build-dependencies]
+# config-json5 lets tauri.conf.json5 carry the one comment the
+# frontendDist value needs; the strict JSON parser rejects comments.
+tauri-build = { workspace = true, features = ["config-json5"] }
+
 [dependencies]
-# Lanes add dependencies as the port lands. The shell lane owns this
-# file; the auth lane claims the ios-gated dependency sections through
-# the lead, and the lead reconciles Cargo.lock at merge time.
+# Shared library stack (no embeddings: the embedded loopback server runs
+# no inference on device).
+chan-server = { workspace = true, default-features = false }
+# The loopback server core (src/embedded.rs) serves the launcher over
+# axum; matches the chan-server version set.
+axum = { workspace = true }
+# `tauri::generate_context!` plus the app builder and IPC surface.
+tauri = { workspace = true, features = ["devtools"] }
+tauri-plugin-dialog = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The workspace library: config paths, the library registry the embedded
+# host opens, and atomic file writes for the config store.
+chan-workspace = { workspace = true, default-features = false }
+# The wg-quick reader src/config.rs validates gateway tunnel files
+# with, shared with the desktop. No fabric runs on iOS; the file is
+# validated and stored, never adopted.
+chan-wireguard = { workspace = true }
+# WireGuard enrollment helpers in src/config.rs: base64 key encoding,
+# SHA-256 file digests, and OS randomness for key generation.
+base64 = { workspace = true }
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+dirs = { workspace = true }
+# The gateway and devserver legs' HTTP client; every client starts from
+# the chan-tls trust decision below.
+reqwest = { workspace = true, features = ["json", "stream"] }
+# The trust decision of every TLS client in the gateway legs.
+chan-tls = { workspace = true }
+# Gateway PAT storage in the OS keyring.
+keyring = { workspace = true }
+# Constant-time compare for the OAuth state check.
+subtle = { workspace = true }
+# The client session name's host part.
+gethostname = { workspace = true }
+# Cancellation tokens for the gateway roster polls and sign-in attempts.
+tokio-util = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# Native APIs: the iOS boot uses runtime-resolved classes (no UIKit
+# bindings crate) plus `define_class!` for the lifecycle and sheet
+# targets. `NSURL` reaches auth's authorize URL, `NSNotificationCenter`
+# its lifecycle observer.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
+# Blocks for the authentication session's completion handler. The
+# version wry already links, so Cargo builds no second copy.
+block2 = "0.6"
+
+[dev-dependencies]
+# The ported tests drive real fs work in temp dirs.
+tempfile = { workspace = true }
+# The ACL tests parse permissions/app.toml; no non-test code parses TOML.
+toml = { workspace = true }
+# The mock runtime (`tauri::test`) drives real IPC `on_message` dispatch
+# against the generated ACL context without a display server.
+tauri = { workspace = true, features = ["test"] }
+# test-util gives `start_paused` for the paused-clock tests.
+tokio = { workspace = true, features = ["test-util"] }
+# Threaded control terminal's HTTP leg test runtime, same as desktop.
+chan-server = { workspace = true, default-features = true }
+# The paused-clock tests stall one root's filesystem calls with
+# `chan_workspace::paths::root_stall`, a seam behind this feature.
+# Features enter no lockfile, so the test build gains the seam only.
+chan-workspace = { workspace = true, default-features = false, features = ["test-hooks"] }
+# The gateway legs' TLS test stand-ins (session-recording store,
+# loopback listener), dev-only like the desktop's.
+chan-tls = { workspace = true, features = ["test-support"] }

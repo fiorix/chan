@@ -1096,7 +1096,39 @@ dependencies = [
 
 [[package]]
 name = "chan-ios"
-version = "0.131.0"
+version = "0.133.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "block2",
+ "chan-server",
+ "chan-tls",
+ "chan-wireguard",
+ "chan-workspace",
+ "dirs 5.0.1",
+ "gethostname",
+ "getrandom 0.2.17",
+ "keyring",
+ "objc2",
+ "objc2-foundation",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "chan-library"
@@ -4209,6 +4241,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "json5"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "serde",
 ]
 
 [[package]]
@@ -7883,6 +7926,7 @@ dependencies = [
  "http",
  "infer",
  "json-patch",
+ "json5",
  "log",
  "memchr",
  "phf 0.13.1",
