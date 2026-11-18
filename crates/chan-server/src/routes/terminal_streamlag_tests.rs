@@ -665,37 +665,39 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
 /// is that the program finishes without the stalled view reading (no
 /// earlier than about the 5 s release bound, by the >= 4 s check) and the
 /// stalled view recovers without loss (one same-generation session frame,
-/// numeric missed count, the retained tail once). The 5 s value is pinned
+/// zero missed bytes, the retained tail once, the replay suffix and the
+/// cursor arithmetic asserted exact). The 5 s value is pinned
 /// on a synthetic clock, with no wall time, in
 /// pacing/tests::progress_renews_deadline_and_cut_loose_stays_latched
 /// and pacing/tests::expiring_one_view_preserves_the_other_views_credit_and_deadline.
 ///
-/// The 2 MiB ring cannot hold the ~6.9 MB flood behind a view that never
-/// reads, so the stalled view is evicted by construction (its missed count
-/// is asserted above zero) while the draining view keeps up and recovers
-/// without loss (its missed count is asserted zero): a 64 KiB ring would
-/// let even the draining view fall behind under load, which makes the live
-/// view's outcome a race instead of a contract.
+/// The 8 MiB ring holds the whole ~6.9 MB stream, so no view is evicted
+/// and every recovery below is lossless by construction: both missed
+/// counts are asserted zero, and the stalled view's replay suffix and
+/// cursor arithmetic are asserted exact. A 64 KiB ring would let even
+/// the draining view fall behind under load, which makes the live view's
+/// outcome a race instead of a contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let _gate = pty_test_lock();
     // The child waits for a newline before flooding, so both views attach
-    // before the first flood byte and the hold engages by construction: the
-    // flood outruns A's 1 MiB credit once A stops reading, and the stalled
-    // view's release is what lets the program finish.
+    // before the first flood byte and the hold engages by construction:
+    // the stream exceeds A's 4 MiB credit by about 2.7 MB once A stops
+    // reading, and the stalled view's release is what lets the program
+    // finish.
     let rig = Rig::new(
-        2 * 1024 * 1024,
-        "stty -onlcr; read -r _; seq 1 1000000; printf '__STREAM_DONE__'",
+        8 * 1024 * 1024,
+        "stty -onlcr; read -r _; seq -f %.0f 1 1000000; printf '__STREAM_DONE__'",
     )
     .await;
     // Socket A attaches before the flood and reads one live frame, then
-    // stops draining entirely. The flood is sized so the hold engages by
-    // construction: the rig's sockets use fixed 64 KiB buffers, so A stops
-    // acknowledging past about 256 KiB and is a full credit behind about
-    // 1.3 MB in, and every 64 KiB reader chunk past that needs an admission
-    // check. A 1.4 MB flood leaves only a ~100 KiB window for that check,
-    // which one fast chunk can jump; at ~6.9 MB the window is ~5.6 MB, so
-    // a check must land inside it.
+    // stops draining entirely. The hold engages by construction: every
+    // read is capped at the remaining credit and preceded by an admission
+    // check, so no chunk jumps the limit, and the ~6.9 MB stream exceeds
+    // A's 4 MiB credit (half the 8 MiB ring, or 512 events) by about
+    // 2.7 MB (6,888,927 minus 4,194,304), far past what A's fixed 64 KiB
+    // socket buffers absorb (doubled on Linux), so a check must park the
+    // reader before the flood ends.
     let (mut stalled, initial) = rig.attach().await;
     // The hold is observed structurally: the reader parks waiting for
     // progress while A holds the session back.
@@ -710,16 +712,16 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         attach_collecting(rig.address, rig.handle.id()).await;
     let started = std::time::Instant::now();
     rig.handle.send_input(b"\n");
-    loop {
+    let pre_frame = loop {
         match next(&mut stalled).await {
-            ClientMessage::Binary(_) => break,
+            ClientMessage::Binary(bytes) => break bytes.len(),
             ClientMessage::Text(text) => {
                 let frame: Value = serde_json::from_str(&text).expect("control JSON");
                 assert_ne!(frame["type"], "error", "unexpected terminal error: {frame}");
             }
             other => panic!("stalled socket ended before its first frame: {other:?}"),
         }
-    }
+    };
     // Socket B drains everything the program writes, prelude replay included.
     // A stalled drain is an idle transport: read the socket with a hang
     // guard directly, so a run where the program is never released fails
@@ -774,12 +776,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
-    // Hang guard, not a contract bound: 60 s is eleven times the 5.57 s
-    // worst of 40 single-test runs on a Linux development host, and still
-    // clears a ten-times-slower machine. A green run never prints the
-    // timing line, so the guard names it.
+    // Hang guard, not a contract bound: 180 s is fourteen times the 12.6 s
+    // macOS run and thirty-two times the 5.57 s host worst. A green run
+    // never prints the timing line, so the guard names it.
     assert!(
-        elapsed <= std::time::Duration::from_secs(60),
+        elapsed <= std::time::Duration::from_secs(180),
         "the drain did not complete within the hang guard after {elapsed:?}"
     );
     assert!(
@@ -824,11 +825,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
     // is the machine's like the drain's, so a hang guard, not a contract
-    // bound, applies: 1 s is twenty times the 47 ms worst of 40
-    // single-test runs on a Linux development host, and still clears a
-    // ten-times-slower machine with room for another tail move.
+    // bound, applies: 60 s, sized like the drain guard, since a green run
+    // never prints the timing line and the guard names the elapsed time.
+    // The resume replays about 6.6 MB through one socket.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_secs(1);
+    let resume_bound = std::time::Duration::from_secs(60);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
@@ -862,15 +863,33 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         recovery["generation"], initial["generation"],
         "recovery keeps the incarnation"
     );
+    // Bytes arriving before the recovery frame are the socket's own
+    // stalled backlog: the server kept sending into kernel buffers the
+    // test never drained, and those sends complete once the test reads
+    // again, ahead of the re-attach. TCP keeps them complete and in
+    // order, so the frame's replay count plus cursor arithmetic below
+    // check the whole stream exactly.
+    let stale_len = tail.len();
     let missed = recovery["missed_bytes"]
         .as_u64()
         .expect("numeric missed_bytes");
-    // The ring cannot hold the whole flood behind a stalled view, so the
-    // release must report eviction; what matters is that the count exists
-    // and the retained tail below is complete and in order.
-    assert!(
-        missed > 0,
-        "a stalled view behind a 6.9 MB flood is evicted: {missed}"
+    // The 8 MiB ring holds the whole ~6.9 MB stream, so the stalled view
+    // is never evicted: the release reports a zero missed count, and the
+    // attach cursor plus the consumed first frame plus the drained
+    // backlog plus the replayed bytes must reach the recovery cursor.
+    assert_eq!(
+        missed, 0,
+        "a stalled view behind a fitting stream keeps every byte: {missed}"
+    );
+    let replay = recovery["replay_bytes"]
+        .as_u64()
+        .expect("numeric replay_bytes") as usize;
+    let initial_seq = initial["seq"].as_u64().expect("numeric attach seq");
+    let recovery_seq = recovery["seq"].as_u64().expect("numeric recovery seq");
+    assert_eq!(
+        initial_seq + pre_frame as u64 + stale_len as u64 + missed + replay as u64,
+        recovery_seq,
+        "attach cursor plus consumed plus backlog plus replayed reaches the recovery cursor"
     );
     loop {
         if tail.ends_with(DONE_MARKER) {
@@ -911,6 +930,16 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     assert!(
         tail.ends_with(DONE_MARKER),
         "the tail ends at the program's end marker"
+    );
+    let post = &tail[stale_len..];
+    let suffix_at = expected
+        .len()
+        .checked_sub(replay)
+        .expect("replay fits the expected stream");
+    assert_eq!(
+        post,
+        &expected[suffix_at..],
+        "bytes after the recovery frame equal the last replay bytes of the stream"
     );
 }
 
