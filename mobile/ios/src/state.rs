@@ -63,8 +63,6 @@ pub struct AppState {
     /// is closed, so the user has to see why it ended (or hit
     /// Reconnect, whose teardown reaps it).
     pub control_terminal_dead: Mutex<HashSet<String>>,
-    /// Monotonic generation source for scripted control runs.
-    pub control_terminal_generation: std::sync::atomic::AtomicU64,
     /// Per synthesized row serialization for connect, trust mutation,
     /// roster revocation, and gateway cascades. Holding the async
     /// lock makes DELETE wait for an older connect to settle and then
@@ -99,10 +97,6 @@ pub struct AppState {
     /// cache, poll handles. Shared with the config registry (its
     /// live-state projection) and every gateway operation.
     pub gateway_manager: Arc<GatewayManager>,
-    /// Plain devserver rows whose raw-dial failure already ran the
-    /// is-this-really-a-gateway backstop probe this run, so the probe
-    /// never becomes a per-connect cost again.
-    pub gateway_backstop_probed: Mutex<HashSet<String>>,
     /// Windows hidden ("buried") by a hide gesture, in bury order
     /// (most recent last). On iOS the single webview is never buried;
     /// the list exists so the window-ops label resolution and the
@@ -135,14 +129,12 @@ impl AppState {
             devserver_connecting: Arc::new(Mutex::new(HashSet::new())),
             control_terminal_runs: Mutex::new(HashMap::new()),
             control_terminal_dead: Mutex::new(HashSet::new()),
-            control_terminal_generation: std::sync::atomic::AtomicU64::new(0),
             native_policy_locks: Mutex::new(HashMap::new()),
             native_policy_generations: Mutex::new(HashMap::new()),
             devserver_remove_hook: Arc::new(OnceLock::new()),
             devserver_reconnect_hook: Arc::new(OnceLock::new()),
             gateway_remove_hook: Arc::new(OnceLock::new()),
             gateway_manager: Arc::new(GatewayManager::default()),
-            gateway_backstop_probed: Mutex::new(HashSet::new()),
             buried_windows: Mutex::new(Vec::new()),
             silent_hides: Mutex::new(HashSet::new()),
             terminal_background_opacity: Mutex::new(None),
@@ -164,6 +156,15 @@ impl AppState {
         )
     }
 
+    pub(crate) fn native_policy_generation(&self, id: &str) -> u64 {
+        self.native_policy_generations
+            .lock()
+            .unwrap()
+            .get(id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn bump_native_policy_generation(&self, id: &str) -> u64 {
         let mut generations = self.native_policy_generations.lock().unwrap();
         let generation = generations.entry(id.to_string()).or_insert(0);
@@ -174,13 +175,13 @@ impl AppState {
     /// Record `label` as buried (most recent). Re-burying a label
     /// drops its older entry first so the list holds one entry per
     /// window and recency stays truthful.
+    #[cfg(test)]
     pub fn bury_window(&self, label: &str, title: &str) {
         let mut buried = self.buried_windows.lock().unwrap();
         buried.retain(|b| b.label != label);
         buried.push(BuriedWindow {
             label: label.to_string(),
             title: title.to_string(),
-            buried_at: crate::config::now_millis(),
         });
     }
 
@@ -245,24 +246,15 @@ pub fn native_label(record: &chan_server::WindowRecord) -> String {
 }
 
 pub struct ControlTerminalRun {
-    pub generation: u64,
     pub prefix: String,
-    pub script_based: bool,
 }
 /// One buried (hidden, not closed) window: see `AppState::buried_windows`.
 #[derive(Debug, Clone)]
 pub struct BuriedWindow {
-    /// Tauri window label. Also the Window-menu item id suffix.
+    /// Tauri window label.
     pub label: String,
-    /// The window's title at bury time (`serve::watched_window_title`'s
-    /// "local / chan Window 2" behind its machine glyph, or a control
-    /// terminal's "Control Terminal - box"), never privacy mode's mask
-    /// (`AppState::bury_window`) -- the Window menu's last resort for the
-    /// row's text.
+    /// The window's title at bury time.
     pub title: String,
-    /// Wall-clock millis at bury time; diagnostics only (the Vec's
-    /// push order is the recency authority).
-    pub buried_at: u64,
 }
 /// The launcher's connected-devserver feed source: aggregates every
 /// connected devserver's live window snapshot and cached workspace rows so the
@@ -271,9 +263,9 @@ pub struct BuriedWindow {
 /// `WorkspaceHost::install_devserver_feed`; the desktop registers a devserver on
 /// connect (`connect_devserver_impl`) and drops it on disconnect
 /// (`teardown_devserver_connection`). The trait reads are sync: the window
-/// snapshots are the SAME `Arc<Mutex<…>>` each devserver window-watcher feed task
+/// snapshots are the SAME `Arc<Mutex<...>>` each devserver poll task
 /// writes, and the async-fetched workspaces are served from a cache a per-devserver
-/// poll task refreshes (`spawn_devserver_workspace_poll`).
+/// poll task refreshes.
 #[derive(Default)]
 pub struct DevserverFeed {
     /// Devserver id -> its live window snapshot (shared with the watcher feed task).
@@ -320,10 +312,55 @@ pub struct DevserverFeed {
 }
 
 impl DevserverFeed {
+    /// Track a freshly-connected devserver's window snapshot so `windows()` sees
+    /// it; the `Arc` is shared with the per-devserver poll task.
+    pub(crate) fn register_windows(
+        &self,
+        id: String,
+        snapshot: Arc<Mutex<DevserverWindowSnapshot>>,
+    ) {
+        self.windows.lock().unwrap().insert(id, snapshot);
+    }
+
+    /// Seed a devserver's remote `library_id` into the cache so `library_id_of`
+    /// resolves even when the live window snapshot is empty.
+    pub(crate) fn seed_library_id(&self, id: String, library_id: String) {
+        self.library_ids.lock().unwrap().insert(id, library_id);
+    }
+
+    /// Seed a devserver's self-reported OS from the connect probe so the launcher
+    /// machine icon resolves on first render.
+    pub(crate) fn seed_os(&self, id: String, os: String, pretty_name: Option<String>) {
+        self.os.lock().unwrap().insert(id, (os, pretty_name));
+    }
+
     /// The cached OS (`os` family, optional `pretty_name`) of a devserver, or
     /// `None` before its first connect. Survives disconnect (kept by `forget`).
     pub(crate) fn os_of(&self, id: &str) -> Option<(String, Option<String>)> {
         self.os.lock().unwrap().get(id).cloned()
+    }
+
+    /// Replace a devserver's cached workspace rows.
+    pub(crate) fn set_workspaces(&self, id: String, rows: Vec<chan_server::LauncherWorkspace>) {
+        self.workspaces.lock().unwrap().insert(id, rows);
+    }
+
+    /// Replace a devserver's cached colour. `None` clears it (default accent).
+    /// Returns whether the stored value changed.
+    pub(crate) fn set_color(&self, id: String, color: Option<String>) -> bool {
+        let mut colors = self.colors.lock().unwrap();
+        if colors.get(&id).cloned() == color {
+            return false;
+        }
+        match color {
+            Some(c) => {
+                colors.insert(id, c);
+            }
+            None => {
+                colors.remove(&id);
+            }
+        }
+        true
     }
 
     /// Drop a disconnected devserver from the per-connection feeds (windows +
@@ -552,5 +589,118 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
         // here for `lib-<hex>` ids; `None` -> the editor's default accent.
         let id = self.devserver_id_for_library(library_id)?;
         self.colors.lock().unwrap().get(&id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chan_server::DevserverFeedSource;
+
+    fn sample_window(library_id: &str, window_id: &str, prefix: &str) -> chan_server::WindowRecord {
+        chan_server::WindowRecord {
+            window_id: window_id.to_string(),
+            library_id: library_id.to_string(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "notes Window 1".to_string(),
+            ordinal: 1,
+            label: "notes".to_string(),
+            workspace_path: Some("/srv/notes".to_string()),
+            prefix: prefix.to_string(),
+            token: "tok".to_string(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        }
+    }
+
+    fn sample_workspace(
+        devserver_id: &str,
+        library_id: Option<&str>,
+    ) -> chan_server::LauncherWorkspace {
+        chan_server::LauncherWorkspace {
+            workspace_id: "notes-1a2b".to_string(),
+            path: "/srv/notes".to_string(),
+            status: chan_server::WorkspaceStatus::Running,
+            error: None,
+            label: "notes".to_string(),
+            on: true,
+            library_id: library_id.map(str::to_string),
+            devserver_id: Some(devserver_id.to_string()),
+            prefix: "notes-1a2b".to_string(),
+        }
+    }
+
+    #[test]
+    fn native_policy_generation_defaults_to_zero_and_bumps_monotonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        assert_eq!(state.native_policy_generation("gw:1"), 0);
+        assert_eq!(state.bump_native_policy_generation("gw:1"), 1);
+        assert_eq!(state.native_policy_generation("gw:1"), 1);
+        assert_eq!(state.bump_native_policy_generation("gw:1"), 2);
+        assert_eq!(state.native_policy_generation("gw:1"), 2);
+        assert_eq!(state.native_policy_generation("gw:2"), 0);
+    }
+
+    #[test]
+    fn devserver_feed_writers_populate_lookup_and_survive_forget_as_expected() {
+        let feed = DevserverFeed::default();
+        feed.seed_library_id("gw:1".into(), "lib-aa11".into());
+        assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-aa11"));
+        assert_eq!(
+            feed.devserver_id_for_library("lib-aa11").as_deref(),
+            Some("gw:1")
+        );
+
+        feed.seed_os("gw:1".into(), "linux".into(), None);
+        assert_eq!(feed.os_of("gw:1"), Some(("linux".into(), None)));
+        assert!(feed.set_color("gw:1".into(), Some("#112233".into())));
+        assert!(!feed.set_color("gw:1".into(), Some("#112233".into())));
+        assert_eq!(feed.pane_color("lib-aa11").as_deref(), Some("#112233"));
+
+        let win = sample_window("lib-aa11", "w-99", "/notes-1a2b");
+        let snap = Arc::new(Mutex::new(DevserverWindowSnapshot::from(vec![win.clone()])));
+        feed.register_windows("gw:1".into(), snap);
+        feed.set_workspaces(
+            "gw:1".into(),
+            vec![sample_workspace("gw:1", Some("lib-aa11"))],
+        );
+
+        assert_eq!(feed.windows(), vec![win.clone()]);
+        assert_eq!(feed.workspaces().len(), 1);
+        assert_eq!(
+            feed.record_for_window_id("w-99"),
+            Some(("gw:1".to_string(), win.clone()))
+        );
+        assert_eq!(
+            feed.record_for_native_label("lib-aa11::w-99"),
+            Some(("gw:1".to_string(), win))
+        );
+
+        // Down hides windows and workspaces without dropping cached rows.
+        assert!(feed.set_down("gw:1", true));
+        assert!(feed.windows().is_empty());
+        assert!(feed.workspaces().is_empty());
+        assert!(feed.set_down("gw:1", false));
+        assert_eq!(feed.windows().len(), 1);
+        assert_eq!(feed.workspaces().len(), 1);
+
+        // Forget clears windows, workspaces, and color while retaining library_id and OS.
+        feed.forget("gw:1");
+        assert!(feed.windows().is_empty());
+        assert!(feed.workspaces().is_empty());
+        assert_eq!(feed.pane_color("lib-aa11"), None);
+        assert_eq!(feed.library_id_of("gw:1").as_deref(), Some("lib-aa11"));
+        assert_eq!(feed.os_of("gw:1"), Some(("linux".into(), None)));
     }
 }

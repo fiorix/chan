@@ -6,15 +6,17 @@
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::Path;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
-use chan_server::{
-    DesktopBridge, DesktopWindowOp, SharedWindowTitles, WindowRecord, WindowTitles,
-    WorkspaceLifecycleOutcome,
-};
-use tokio::sync::{mpsc, watch, Notify};
+#[cfg(test)]
+use chan_server::WorkspaceLifecycleOutcome;
+use chan_server::{DesktopBridge, DesktopWindowOp, WindowRecord, WindowTitles};
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::sync::{mpsc, watch};
 
 use crate::config::{
     ConfigStore, DevserverConfigRegistry, DevserverRemoveHook, GatewayConfigRegistry,
@@ -29,8 +31,9 @@ const WINDOW_OPS_CHANNEL_CAPACITY: usize = 32;
 
 pub struct EmbeddedServer {
     host: Arc<chan_server::WorkspaceHost>,
-    /// `None` for a default-terminal launch, which starts no extension
-    /// processes beside a running chan-desktop's.
+    /// Retained for the life of the embedded server so extension processes
+    /// outlive setup; tests drain it explicitly through `shutdown_all`.
+    #[cfg_attr(not(test), allow(dead_code))]
     extension_runtime: Option<chan_server::ExtensionRuntime>,
     addr: SocketAddr,
     shutdown_tx: watch::Sender<bool>,
@@ -264,65 +267,6 @@ impl EmbeddedServer {
         }
     }
 
-    /// A terminal-only host for a default-terminal launch: the library, a
-    /// desktop bridge that carries the title map but no window ops (so `cs
-    /// window new/open/hide` answer "no desktop"), the self-handle for the
-    /// tenant's `cs` socket, `server_config_hook` on the tenant builder (the
-    /// window follows the terminal background opacity like every other), and
-    /// a loopback listener on an ephemeral port that is never saved. No
-    /// window registry (a mint fails instead of writing `windows.json`), no
-    /// workspace overlay (a shutdown snapshot has nothing to write), no
-    /// launcher root, no devserver or gateway registries and no extension
-    /// processes: the launch must leave a running chan-desktop's state alone.
-    pub async fn start_terminal_only(
-        server_config_hook: chan_server::ServerConfigHook,
-    ) -> Result<Self, String> {
-        let library = chan_workspace::Library::open()
-            .map_err(|e| format!("opening chan workspace registry for the terminal host: {e}"))?;
-        let bridge = DesktopBridge {
-            window_ops: None,
-            window_titles: Arc::new(WindowTitles::new()),
-        };
-        let host = Arc::new(
-            chan_server::WorkspaceHost::with_desktop_bridge(
-                library,
-                bridge,
-                chan_server::route_builder_with_config_hook(None, server_config_hook),
-            )
-            .without_tunnels(),
-        );
-        host.install_self();
-        let (listener, _fell_back) =
-            bind_embedded_port(None).map_err(|e| format!("binding the terminal host: {e}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("setting the terminal host listener nonblocking: {e}"))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|e| format!("reading the terminal host listener addr: {e}"))?;
-        let listener = tokio::net::TcpListener::from_std(listener)
-            .map_err(|e| format!("adopting the terminal host listener: {e}"))?;
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let app = chan_server::metrics::with_metrics(host.clone().router());
-        tauri::async_runtime::spawn(async move {
-            let result = serve_router(listener, app, async move {
-                let _ = shutdown_rx.changed().await;
-            })
-            .await;
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "the terminal host stopped");
-            }
-        });
-        Ok(Self::assemble(
-            host,
-            None,
-            addr,
-            shutdown_tx,
-            None,
-            String::new(),
-        ))
-    }
-
     /// A host-only server for tests: a real `WorkspaceHost` over `library`,
     /// with no loopback listener, no registries and no root fallback. Enough to
     /// mount and unmount real tenants, which is what the serve-lifecycle tests
@@ -387,15 +331,9 @@ impl EmbeddedServer {
             .unwrap_or_default()
     }
 
-    /// The shared window-title map the desktop writes (on window build /
-    /// rename / destroy) and the server reads back for `GET /api/windows`.
-    pub fn window_titles(&self) -> SharedWindowTitles {
-        self.host.desktop_bridge().window_titles.clone()
-    }
-
-    /// The per-launch launcher bearer. The desktop bakes it into the URL each
-    /// window's launcher webview loads as `?t=`, so the loopback
-    /// `/api/library/*` surface accepts the launcher's calls.
+    /// The per-launch launcher bearer. The app bakes it into the URL the
+    /// launcher webview loads as `?t=`, so the loopback `/api/library/*`
+    /// surface accepts the launcher's calls.
     pub fn launcher_token(&self) -> &str {
         &self.launcher_token
     }
@@ -410,32 +348,8 @@ impl EmbeddedServer {
             .and_then(|mut slot| slot.take())
     }
 
-    /// True when the window whose `?w=` session id is `window_id` has ≥1
-    /// in-flight file transfer (upload/download). The transfer-close guard
-    /// (serve.rs `CloseRequested`) queries it to prompt before closing a window
-    /// mid-transfer.
-    ///
-    /// Keyed on the `?w=` window id (NOT the native window label: they diverge
-    /// for watcher-opened windows, where the label is `{library_id}::{window_id}`
-    /// -- see `window_watcher::native_label`). Resolve the serving tenant's
-    /// prefix from the live window records here. Local library only: a remote/devserver window's
-    /// transfers live on that server, so it's absent from these records and reads
-    /// `false` -- correct, it's not ours to guard.
-    pub fn window_has_active_transfer(&self, window_id: &str) -> bool {
-        let records = self.local_window_records();
-        match tenant_prefix_for_window(&records, window_id) {
-            Some(prefix) => self.host.tenant_has_active_transfer(&prefix, window_id),
-            None => false,
-        }
-    }
-
     /// Mount the registered workspace at `key` and answer its launch URL.
-    ///
-    /// Every attempt and the waits between them share the devserver mount's
-    /// bound, counted from the call: a root that stops answering is refused at
-    /// the bound in [`chan_server::mount_timed_out`]'s words, and an open
-    /// waiting on it gives the root's lock back to a close or a removal when
-    /// it is dropped there.
+    #[cfg(test)]
     pub async fn open_workspace(&self, key: &str) -> Result<String, String> {
         tokio::time::timeout(
             chan_server::WORKSPACE_MOUNT_TIMEOUT,
@@ -446,14 +360,9 @@ impl EmbeddedServer {
     }
 
     /// [`open_workspace`](Self::open_workspace)'s attempts, unbounded.
+    #[cfg(test)]
     async fn open_workspace_attempts(&self, key: &str) -> Result<String, String> {
         use chan_workspace::ChanError;
-        // The host waits for in-process owners while publishing Starting.
-        // Retry WorkspaceLocked here, which can also be the tail of a local
-        // release. Repeating the host's AlreadyOpen budget would multiply
-        // the wait and publish an error between attempts.
-        // The idempotent host wrapper returns an existing mount for redundant
-        // turn-on requests and serializes concurrent registrations.
         const MAX_ATTEMPTS: usize = 8;
         const BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
         let prefix = prefix_for_key(key);
@@ -477,9 +386,7 @@ impl EmbeddedServer {
     }
 
     /// Shared workspace registry handle owned by the embedded host.
-    /// Every desktop registry mutation and feature toggle routes
-    /// through this single `Library` so the in-memory registry the
-    /// host opens workspaces against never goes stale relative to disk.
+    #[cfg(test)]
     pub fn library(&self) -> &chan_workspace::Library {
         self.host.library()
     }
@@ -493,29 +400,12 @@ impl EmbeddedServer {
 
     /// True iff a workspace tenant goes by `key`, its canonical root or the
     /// registry row's root it was opened at, under any prefix. Answered from
-    /// the keys the host stores, touching no filesystem, so the
-    /// workspace-overlay snapshot can ask it of every registered row without
-    /// waiting on a root that has stopped answering.
+    /// the keys the host stores, touching no filesystem.
     pub fn is_workspace_mounted_by_key(&self, key: &std::path::Path) -> bool {
         self.host.is_workspace_mounted_by_key(key)
     }
 
-    /// The root the workspace runtime `key` names was opened at, by its
-    /// canonical root or by that root, which is the root its registry row
-    /// stores; `None` when no workspace runtime goes by `key`. Answered from
-    /// the keys the host stores, touching no filesystem.
-    pub fn mounted_root(&self, key: &Path) -> Option<std::path::PathBuf> {
-        self.host.mounted_root(key)
-    }
-
-    /// The canonical root the workspace runtime `key` names was mounted at,
-    /// found as [`mounted_root`](Self::mounted_root) finds it; `None` when no
-    /// workspace runtime goes by `key`. Answered from the keys the host
-    /// stores, touching no filesystem.
-    pub fn mounted_canonical_root(&self, key: &Path) -> Option<std::path::PathBuf> {
-        self.host.mounted_canonical_root(key)
-    }
-
+    #[cfg(test)]
     pub async fn close_workspace_root(
         &self,
         root: &Path,
@@ -527,6 +417,7 @@ impl EmbeddedServer {
             .map_err(|e| close_root_error(root, e))
     }
 
+    #[cfg(test)]
     pub async fn remove_workspace_root(
         &self,
         root: &Path,
@@ -549,6 +440,7 @@ impl EmbeddedServer {
 
     /// Drain every hosted workspace, shared-terminal, and control-terminal
     /// tenant concurrently while preserving the persisted workspace overlay.
+    #[cfg(test)]
     pub async fn shutdown_all(&self) -> Result<(), String> {
         let hosted = self
             .host
@@ -609,13 +501,9 @@ impl EmbeddedServer {
         Ok(url)
     }
 
-    /// Mount a fresh terminal tenant whose PTY runs `command` (a single
-    /// shell command line, through the login shell so an interactive
-    /// script gets a real PTY) and return its tokened launch URL. Each
-    /// call mounts its own tenant under a unique prefix, so a control
-    /// terminal running one devserver's connect script stays separate
-    /// from the shared standalone-terminal tenant and from other control
-    /// terminals.
+    /// Mount a fresh terminal tenant whose PTY runs `command` and return its
+    /// tokened launch URL and prefix.
+    #[cfg(test)]
     pub async fn open_terminal_with_command(
         &self,
         command: String,
@@ -634,133 +522,28 @@ impl EmbeddedServer {
         Ok((hosted.handle.launch_url(), prefix))
     }
 
-    /// Mount the `/exec` tenant of a default-terminal launch: its PTY execs
-    /// `program` (the user's shell when `None`) in `cwd`. Returns the tokened
-    /// launch URL and the prefix the exit watcher polls through
-    /// [`control_terminal_exit`](Self::control_terminal_exit).
-    pub async fn open_terminal_with_program(
-        &self,
-        program: Option<Vec<std::ffi::OsString>>,
-        cwd: std::path::PathBuf,
-    ) -> Result<(String, String), String> {
-        let prefix = "/exec".to_string();
-        let hosted = self
-            .host
-            .open_terminal_session_with_program(
-                serve_config(self.addr, &prefix),
-                program.map(chan_server::TenantProgram::Exec),
-                Some(cwd),
-            )
-            .await
-            .map_err(|e| format!("opening the terminal tenant: {e}"))?;
-        Ok((hosted.handle.launch_url(), prefix))
-    }
-
-    /// Close an unregistered control tenant when its native window cannot open.
-    pub async fn close_terminal_tenant(&self, prefix: &str) -> Result<bool, String> {
-        self.host
-            .close_terminal_tenant(prefix)
-            .await
-            .map_err(|e| format!("closing a command terminal tenant: {e}"))
-    }
-
-    /// Raw output (replay-ring scrollback) of the control-terminal tenant
-    /// mounted at `prefix`, decoded lossily. Lets the connect flow scrape a
-    /// token the connect script printed; empty when no such tenant exists.
-    pub fn read_control_terminal_output(&self, prefix: &str) -> String {
-        String::from_utf8_lossy(&self.host.terminal_tenant_scrollback(prefix)).into_owned()
-    }
-
-    /// Exit state of the control-terminal tenant's PTY (the connect script),
-    /// or `None` while it is still running. The connect flow polls this beside
-    /// the scrollback scrape: `Some(exit)` means the script exited (a failed
-    /// connect) so the scrape can fail fast instead of waiting out its full
-    /// budget. The status is the tenant's, independent of the control window,
-    /// so it still reports after the window is closed.
-    pub fn control_terminal_exit(&self, prefix: &str) -> Option<chan_server::TerminalExit> {
-        self.host.terminal_tenant_last_exit(prefix)
-    }
-
-    /// Mint the connect-script control terminal as a real (`persisted:false`)
-    /// chan-library registry row under the DEVSERVER's `library_id`.
-    /// The row rides `/api/library/windows` with a real library_id so the launcher
-    /// shows the devserver group on a zero-window connect, and is reaped by
-    /// [`reap_control_window`](Self::reap_control_window) on the connect-script PTY
-    /// exit. The native window is still opened imperatively by
-    /// `serve::spawn_control_terminal_window`; this furnishes only the feed row.
-    /// The row's `(prefix, token, connected)` are resolved at read time
-    /// from the control tenant, so no token crosses here.
-    pub fn mint_control_window(
-        &self,
-        window_id: String,
-        devserver_library_id: String,
-        control_tenant_prefix: String,
-    ) -> Result<WindowRecord, String> {
-        self.host
-            .mint_control_window(window_id, devserver_library_id, control_tenant_prefix)
-            .map_err(|e| format!("minting control window: {e}"))
-    }
-
-    /// Reap a control terminal's registry row AND its `/control-N` tenant (kills
-    /// the connect-script PTY), firing the feed change so the launcher drops the
-    /// row. Returns whether a row existed. Called on the control PTY exit (the
-    /// desktop-triggered reap) and on disconnect/forget; idempotent. The host's
-    /// `reap_control_window` removes the registry row and unmounts the tenant
-    /// directly (it does NOT route through the host's prefix-close prune-task
-    /// drop race).
+    /// Reap a control terminal's registry row and its `/control-N` tenant,
+    /// firing the feed change so the launcher drops the row.
     pub async fn reap_control_window(&self, window_id: &str) -> bool {
         self.host.reap_control_window(window_id).await
     }
 
-    /// Set the server-persisted visibility of a window in the LOCAL embedded
-    /// registry: a LOCAL window (`local::<window_id>`) or the control
-    /// terminal row (whose `window_id` is its `control_terminal_label`). Persists
-    /// to `~/.chan/windows.json` (control rows in-memory) and fires the feed change
-    /// so `should_show` + the launcher mirror it. Returns whether a row matched.
-    /// DEVSERVER windows persist on their OWN devserver (see
-    /// `devserver::set_window_visibility`), not here.
-    pub fn set_window_hidden(&self, window_id: &str, hidden: bool) -> Result<bool, String> {
-        self.host
-            .set_window_hidden(window_id, hidden)
-            .map_err(|e| format!("setting window visibility: {e}"))
-    }
-
-    /// The loopback address the embedded server listens on. The window
-    /// watcher assembles a window's tenant URL (`http://{addr}{prefix}…`)
-    /// from this plus the record's prefix/token.
+    /// The loopback address the embedded server listens on. A window's
+    /// tenant URL (`http://{addr}{prefix}...`) is assembled from this plus
+    /// the record's prefix/token.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// The library's authoritative window set, each persisted
-    /// registry row joined with its serving tenant's live `prefix`/`token`/
-    /// `connected`. This MERGES connected devservers' windows for
-    /// the launcher, so it is the right source only for surfaces that want the
-    /// full set (the launcher feed and the Window menu). Empty until a window is
-    /// minted.
+    /// The library's authoritative window set, merging connected devservers'
+    /// windows for the launcher.
+    #[cfg(test)]
     pub fn assemble_window_records(&self) -> Vec<WindowRecord> {
         self.host.assemble_window_records()
     }
 
-    /// The LOCAL library's window records only -- the merged set
-    /// ([`assemble_window_records`](Self::assemble_window_records)) minus
-    /// connected devservers' rows. THE source for consumers that reason about
-    /// local windows (the local native watcher, the active-transfer close guard,
-    /// the first-window mint check): a remote row with a colliding `window_id` or
-    /// `workspace_path` would otherwise false-match and drive a wrong
-    /// open/close/mint. Filters to this host's library id.
-    pub fn local_window_records(&self) -> Vec<WindowRecord> {
-        let local = self.host.library_id();
-        self.host
-            .assemble_window_records()
-            .into_iter()
-            .filter(|r| r.library_id == local)
-            .collect()
-    }
-
-    /// The aggregate window-set change signal (registry mint/discard +
-    /// tenant on/off + presence) the watcher's feed awaits. NOT the raw
-    /// registry change signal -- that misses tenant transitions.
+    /// The aggregate window-set change signal.
+    #[cfg(test)]
     pub fn library_change_notify(&self) -> Arc<Notify> {
         self.host.library_change_notify()
     }
@@ -773,53 +556,13 @@ impl EmbeddedServer {
     }
 
     /// Fire the library-change signal so the launcher's window + workspace watch
-    /// feeds re-push -- the desktop calls this when its devserver feed (window
-    /// snapshot or workspace cache) changes.
+    /// feeds re-push.
     pub fn signal_library_change(&self) {
         self.host.signal_library_change();
     }
 
-    /// Reload the local workspace registry snapshot from `~/.chan/config.toml`.
-    ///
-    /// The embedded server holds a long-lived [`chan_workspace::Library`]. When
-    /// another process updates the shared registry, the desktop watcher calls this
-    /// before waking launcher clients so `/api/library/workspaces` serves the fresh
-    /// rows.
-    pub fn reload_library_registry(&self) -> chan_workspace::Result<()> {
-        self.host.library().reload_registry()
-    }
-
-    /// The pane-highlight colour for a window of `library_id`: the host
-    /// resolves the two sources behind one call -- local (the installed
-    /// [`LocalColorStore`](chan_server::LocalColorStore)) vs a devserver
-    /// (`DevserverEntry.color` matched by `library_id` in the devserver registry).
-    /// `None` -> the editor falls back to the default accent. Injected as `?pane=`
-    /// at mint time.
-    pub fn pane_color(&self, library_id: &str) -> Option<String> {
-        self.host.pane_color(library_id)
-    }
-
-    /// Whether this window was minted by a routed `cs open` and is still
-    /// waiting for the frame parked for it. The watcher appends `seed=0` for
-    /// such a window so the SPA does not seed a default terminal beside the
-    /// tab it is about to be handed.
-    pub fn is_routed_mint(&self, window_id: &str) -> bool {
-        self.host.is_routed_mint(window_id)
-    }
-
-    /// The launcher's light/dark choice from the local theme store, or `None`
-    /// to follow the OS. Reads the same store the launcher's `local-theme`
-    /// route writes; used to theme the desktop's own notice windows.
-    pub fn local_theme(&self) -> Option<String> {
-        self.host.local_theme_store().and_then(|store| store.get())
-    }
-
     /// Mint a window into the local library registry and return its assembled
-    /// record. The minted record fires the aggregate change signal, so the
-    /// window watcher's feed surfaces it and opens its native window -- the
-    /// registry is the sole window-creation authority (a minted window can
-    /// never be double-opened). A workspace record gets its live prefix and
-    /// token when a matching tenant is mounted; minting does not require one.
+    /// record.
     pub fn mint_window(
         &self,
         kind: chan_server::WindowKind,
@@ -830,41 +573,11 @@ impl EmbeddedServer {
             .map_err(|e| format!("minting a window: {e}"))
     }
 
-    /// Mint a throwaway standalone terminal window whose first terminal starts
-    /// in `cwd`; see the host's `open_throwaway_terminal_window`. The shared
-    /// terminal tenant must be mounted first ([`Self::open_terminal`]).
-    pub fn open_throwaway_terminal_window(&self, cwd: &Path) -> Result<WindowRecord, String> {
-        self.host
-            .open_throwaway_terminal_window(cwd)
-            .map_err(|e| format!("opening a terminal window: {e}"))
-    }
-
-    /// Open `path` in a standalone window as `cs open PATH` does there,
-    /// answering as the handoff's `OpenPath` does. The shared terminal tenant
-    /// must be mounted ([`open_terminal`](Self::open_terminal)): its
-    /// filesystem surface resolves the path.
-    pub async fn open_path_in_standalone_window(
-        &self,
-        path: &str,
-    ) -> chan_server::handoff::Response {
-        chan_server::handoff::answer_open_path(&self.host, path).await
-    }
-
-    /// Mint a native window of the workspace whose runtime `key` names, by
-    /// its canonical root or by the root it was opened at. The record stores
-    /// the root the runtime was opened at, the registry row's, which is the
-    /// path the launcher lists the workspace by and nests its windows under,
-    /// whichever of the two keys the caller holds. The host answers from the
-    /// keys it stores, so no root's filesystem is asked.
+    /// Mint a native window of the workspace whose runtime `key` names.
     pub fn mint_workspace_window(&self, key: &Path) -> Result<WindowRecord, String> {
         self.mint_workspace_window_with_origin(key, chan_server::WindowOrigin::Native)
     }
 
-    /// [`mint_workspace_window`](Self::mint_workspace_window) with the client
-    /// `origin` to stamp. A browser origin marks a record that exists purely
-    /// for a browser tab holding its own `window_id`: the watcher never opens
-    /// a native twin for it (it skips non-native origins). Backs the Window
-    /// menu's New Window and "Open in Browser".
     pub fn mint_workspace_window_with_origin(
         &self,
         key: &Path,
@@ -875,23 +588,8 @@ impl EmbeddedServer {
             .map_err(|e| format!("minting a window: {e}"))
     }
 
-    /// The library's first-open rule: mint exactly one boot terminal the first
-    /// time this library is opened with an empty window registry, then persist a
-    /// marker so it never re-mints. Returns the minted record, or `None` when
-    /// nothing was minted (the registry already has windows, or the marker is set
-    /// -- the user closed the only terminal, so reopening comes up with none). The
-    /// minted record fires the aggregate change signal, so the watcher opens its
-    /// native window. The boot path calls this instead of an unconditional mint.
-    pub fn ensure_first_open_terminal(&self) -> Result<Option<WindowRecord>, String> {
-        self.host
-            .ensure_first_open_terminal()
-            .map_err(|e| format!("ensuring the first-open terminal: {e}"))
-    }
-
-    /// The local library's persisted workspace on/off overlay (installed at
-    /// start). The boot path reads its `on_paths()` to re-serve; the toggle
-    /// commands write it on each on/off so a restart comes back as the user left
-    /// it.
+    /// The local library's persisted workspace on/off overlay.
+    #[cfg(test)]
     pub fn workspace_overlay(&self) -> Option<&Arc<chan_server::WorkspaceOverlay>> {
         self.host.workspace_overlay()
     }
@@ -994,8 +692,7 @@ impl Drop for EmbeddedServer {
     }
 }
 
-/// Preserve the host's release refusal so a desktop handoff can return the
-/// retryable answer instead of a generic embedded-close error.
+#[cfg(test)]
 fn close_root_error(root: &Path, error: chan_server::Error) -> String {
     match error {
         chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => format!(
@@ -1007,15 +704,7 @@ fn close_root_error(root: &Path, error: chan_server::Error) -> String {
     }
 }
 
-/// Map an embedded open error to a user-facing string. A workspace
-/// already held by another chan process (typically a standalone
-/// `chan serve <workspace>` started before the desktop tried to mount
-/// it) surfaces as `WorkspaceLocked` and reads as an instruction to quit
-/// that process. An in-process handle that hasn't dropped yet surfaces as
-/// `WorkspaceAlreadyOpen` and reads as the words the root's row reads.
-/// Both reach the user verbatim in the notice of the `chan serve` handoff
-/// or of the restore at boot, so they must read as clear, non-fatal
-/// sentences rather than a raw error chain.
+#[cfg(test)]
 fn map_open_error(key: &str, e: chan_server::Error) -> String {
     use chan_workspace::ChanError;
     match e {
@@ -1029,18 +718,8 @@ fn map_open_error(key: &str, e: chan_server::Error) -> String {
     }
 }
 
-/// On-disk dir for the standalone `/terminal` tenant's per-window layout blobs
-/// (`terminal-sessions` under `chan_home`, created on first use). The desktop
-/// passes `chan_workspace::paths::config_dir` (the single config-dir authority)
-/// so a `CHAN_HOME` override isolates a smoke instance and an unset override
-/// resolves to `~/.chan/terminal-sessions`. `None` only if the dir can't be
-/// created -- the tenant then keeps layout in-memory (it just won't persist
-/// across relaunch).
 async fn local_terminal_session_dir(chan_home: &Path) -> Option<std::path::PathBuf> {
     let dir = chan_home.join("terminal-sessions");
-    // `tokio::fs` keeps the dir-create off the runtime thread:
-    // `open_terminal` is async, so a blocking `std::fs::create_dir_all` would
-    // stall the event loop.
     tokio::fs::create_dir_all(&dir).await.ok()?;
     Some(dir)
 }
@@ -1054,20 +733,16 @@ fn serve_config(addr: SocketAddr, prefix: &str) -> chan_server::ServeConfig {
         open_browser: false,
         search_aggression: None,
         settings_disabled: false,
-        // The embedded desktop server has no controlling terminal for the
-        // serve-progress stream, so it stays quiet like open_browser.
         verbose: false,
     }
 }
 
+#[cfg(test)]
 fn prefix_for_key(key: &str) -> String {
     format!("/{}", crate::serve::workspace_window_prefix(key))
 }
 
-/// The serving tenant prefix for the window whose `?w=` id is `window_id`, found
-/// in a window-record snapshot. The active-transfer guard resolves a closing
-/// window's tenant this way because the close handler doesn't carry it. `None`
-/// when no record matches (a remote/other-library window, or already gone).
+#[cfg(test)]
 fn tenant_prefix_for_window(records: &[WindowRecord], window_id: &str) -> Option<String> {
     records
         .iter()

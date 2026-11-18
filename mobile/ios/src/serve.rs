@@ -1,8 +1,7 @@
 //! Serve helpers the window-ops consumer and the gateway leg share:
 //! the serves-changed event, tenant prefix slugs, and the local
-//! window mint/resolve/open helpers. The desktop's watcher-driven
-//! serve machinery (window builds, retargets, geometry) has no iOS
-//! counterpart and is not ported.
+//! window mint/resolve/open helpers. The single-webview iOS app has no
+//! multi-window watcher, retargeting, or geometry persistence.
 
 use std::sync::Arc;
 
@@ -15,6 +14,7 @@ pub const SERVES_CHANGED: &str = "serves-changed";
 
 /// The tenant prefix slug for a workspace key: a stable hash of the
 /// key, so the same workspace always mounts at the same prefix.
+#[cfg(test)]
 pub fn workspace_window_prefix(key: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

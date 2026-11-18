@@ -8,7 +8,7 @@
 //! stamped into a URL, and the resulting opaque session is installed
 //! into the WebView cookie store before navigation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,7 @@ impl std::fmt::Debug for GatewayConn {
 }
 
 impl GatewayConn {
+    #[cfg(test)]
     pub fn new(
         identity_origin: String,
         desktop_entry_url: String,
@@ -142,9 +143,20 @@ impl GatewayConn {
     }
 
     /// Attach an explicit devserver target to every entry mint.
+    #[cfg(test)]
     pub fn with_entry_target(mut self, target: Option<GatewayEntryTarget>) -> Self {
         self.entry_target = target;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_fresh_session_for_test(&self, csrf: &str) {
+        *self.session.lock().unwrap() = Some(GatewaySession {
+            gate: "test-gate".into(),
+            cookie_header: format!("__Host-devserver_gate=test-gate; __Host-devserver_csrf={csrf}"),
+            csrf: csrf.into(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        });
     }
 }
 
@@ -174,6 +186,7 @@ impl GatewaySession {
     /// Time left before this session should be re-minted. `expires_at` already
     /// carries [`GATE_SESSION_EXPIRY_SAFETY_SECS`], so reaching it still leaves
     /// a live window in which the replacement mint can complete.
+    #[cfg(test)]
     fn refresh_due_in(&self) -> Duration {
         self.expires_at.saturating_duration_since(Instant::now())
     }
@@ -195,10 +208,7 @@ impl std::fmt::Debug for GatewaySession {
 ///
 /// Every entry carries the `Instant` it was registered, stamped inside `set`
 /// (the single chokepoint every registration site goes through) and read via
-/// [`registered_elapsed`](Self::registered_elapsed): the control-script exit
-/// watcher uses the age to tell a connect-time daemonize-handshake exit from a
-/// later death of the script that IS the connection. A re-`set` (token
-/// rotation) re-stamps it: the rotation is a fresh registration.
+/// `registered_elapsed` in tests. A re-`set` (token rotation) re-stamps it.
 #[derive(Default)]
 pub struct DevserverConns {
     inner: Mutex<HashMap<String, (DevserverConn, Instant)>>,
@@ -211,6 +221,31 @@ impl DevserverConns {
             .unwrap()
             .get(id)
             .map(|(conn, _)| conn.clone())
+    }
+
+    /// Find the live gateway-backed connection pinned to `exact_origin`.
+    pub fn gateway_conn_for_origin(&self, exact_origin: &str) -> Option<DevserverConn> {
+        self.inner.lock().unwrap().values().find_map(|(conn, _)| {
+            conn.gateway
+                .as_ref()
+                .is_some_and(|gw| gw.proxy_origin == exact_origin)
+                .then(|| conn.clone())
+        })
+    }
+
+    /// Whether `id` is currently registered with the exact gateway connection
+    /// instance `conn` (distinguishing an active connection from a disconnect or
+    /// replacement connect).
+    pub(crate) fn is_same_gateway_conn(&self, id: &str, conn: &DevserverConn) -> bool {
+        let Some(expected) = conn.gateway.as_ref() else {
+            return false;
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|(current, _)| current.gateway.as_ref())
+            .is_some_and(|current| Arc::ptr_eq(&current.session, &expected.session))
     }
 
     pub fn set(&self, id: String, conn: DevserverConn) {
@@ -230,6 +265,7 @@ impl DevserverConns {
 
     /// How long ago this devserver's connection was registered (its latest
     /// `set` stamp), or `None` when it is not connected.
+    #[cfg(test)]
     pub fn registered_elapsed(&self, id: &str) -> Option<Duration> {
         self.inner
             .lock()
@@ -237,6 +273,64 @@ impl DevserverConns {
             .get(id)
             .map(|(_, registered)| registered.elapsed())
     }
+}
+
+/// Wire entry from `GET /api/devserver/workspaces`, which [`fetch_workspaces`]
+/// turns into a launcher row plus an assembled tenant URL.
+#[derive(Clone, Deserialize)]
+struct WorkspaceEntry {
+    prefix: String,
+    path: String,
+    label: String,
+    on: bool,
+    #[serde(default)]
+    status: chan_server::WorkspaceStatus,
+    #[serde(default)]
+    error: Option<String>,
+    token: String,
+}
+
+impl std::fmt::Debug for WorkspaceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceEntry")
+            .field("prefix", &self.prefix)
+            .field("path", &self.path)
+            .field("label", &self.label)
+            .field("on", &self.on)
+            .field("status", &self.status)
+            .field("error", &self.error)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// `POST /api/devserver/workspaces/{prefix}/on` body, mirroring the server's
+/// `SetWorkspaceOnRequest`. `on:false` keeps the workspace registered
+/// (unmount-but-remember), distinct from `DELETE` = Forget. `force` overrides
+/// the server's off-with-live-terminals guard.
+#[derive(Debug, Serialize)]
+struct SetWorkspaceOnRequest {
+    on: bool,
+    force: bool,
+}
+
+/// The discriminator a live-terminals refusal carries in its `error` field.
+const LIVE_TERMINALS: &str = "live_terminals";
+
+/// Why a devserver workspace on/off/forget failed, structured so a caller can
+/// tell a confirm-before-off (live terminals, offer to force) from a refusal
+/// the devserver explained, and both from everything else.
+#[derive(Debug)]
+pub enum SetWorkspaceOnError {
+    /// An unforced off or forget was rejected: `active_terminals` live
+    /// terminals would be killed. The caller confirms, then retries with
+    /// `force: true`.
+    ActiveTerminals { active_terminals: usize },
+    /// A 409: the devserver declined the request and said why.
+    Refused { message: String },
+    /// Any other failure (network, decode, any non-409 status), as a plain
+    /// message.
+    Other { message: String },
 }
 
 /// Longest peer refusal message kept, in characters.
@@ -294,6 +388,15 @@ fn has_visible_content(text: &str) -> bool {
     text.chars().any(|c| !c.is_whitespace() && !is_invisible(c))
 }
 
+/// Whether `message` says only the live-terminals discriminator, whatever
+/// invisible characters surround it.
+fn is_bare_discriminator(message: &str) -> bool {
+    message
+        .chars()
+        .filter(|c| !is_invisible(*c) && !c.is_whitespace())
+        .eq(LIVE_TERMINALS.chars())
+}
+
 /// Make a peer's own words fit to show. Anything [`is_unshowable`] names
 /// becomes a space, runs of whitespace collapse to one, and the result is cut
 /// to [`MAX_REFUSAL_MESSAGE_CHARS`] on a character boundary.
@@ -342,6 +445,61 @@ pub(crate) fn refusal_message(status: reqwest::StatusCode, body: &str, fallback:
         .filter(|message| has_visible_content(message))
         .map(|message| format!("HTTP {status}: {message}"))
         .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Read a `409 Conflict` by its body rather than by its status: a numeric
+/// `active_terminals` surfaces the confirm-before-off outcome, a non-empty
+/// string `error` surfaces the peer's normalized refusal, and anything else
+/// falls back to the body or HTTP status.
+async fn refusal_from_conflict(resp: reqwest::Response) -> SetWorkspaceOnError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str);
+    let count = parsed
+        .as_ref()
+        .and_then(|value| value.get("active_terminals"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok());
+    if let Some(active_terminals) = count {
+        return SetWorkspaceOnError::ActiveTerminals { active_terminals };
+    }
+    let reason = error
+        .map(peer_message)
+        .filter(|message| has_visible_content(message) && !is_bare_discriminator(message))
+        .unwrap_or_else(|| {
+            let body = peer_message(&body);
+            if !has_visible_content(&body) || error.is_some() {
+                format!("devserver refused with HTTP {status}")
+            } else {
+                body
+            }
+        });
+    SetWorkspaceOnError::Refused { message: reason }
+}
+
+impl SetWorkspaceOnError {
+    pub fn other(msg: impl std::fmt::Display) -> Self {
+        Self::Other {
+            message: msg.to_string(),
+        }
+    }
+}
+
+/// A devserver workspace as the launcher renders it: the tenant fields plus
+/// the assembled tenant URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DevserverWorkspaceRow {
+    pub prefix: String,
+    pub path: String,
+    pub label: String,
+    pub on: bool,
+    pub status: chan_server::WorkspaceStatus,
+    pub error: Option<String>,
+    pub url: String,
 }
 
 /// Reuse one process-wide HTTP client so devserver polls and requests share keep-alive connection pools. Cloning the client shares its pool rather than opening an independent one. Memoize the build result, including TLS initialization failures, so every caller sees the same initialization outcome without repeated build attempts.
@@ -1170,7 +1328,15 @@ async fn refresh_gateway_session_after(
 fn gateway_connection_for_window(
     state: &crate::AppState,
     window_label: &str,
+    window_url: &url::Url,
 ) -> Result<DevserverConn, String> {
+    let exact_origin = window_url.origin().ascii_serialization();
+    if window_label == "main" {
+        return state
+            .devservers
+            .gateway_conn_for_origin(&exact_origin)
+            .ok_or_else(|| "gateway CSRF token connection is not available".to_string());
+    }
     if !window_label.starts_with("lib-") {
         return Err("gateway CSRF token is unavailable to this window".to_string());
     }
@@ -1182,8 +1348,12 @@ fn gateway_connection_for_window(
         .devservers
         .get(&devserver_id)
         .ok_or_else(|| "gateway CSRF token connection is not available".to_string())?;
-    if conn.gateway.is_none() {
-        return Err("gateway CSRF token is unavailable on a direct connection".to_string());
+    let gw = conn
+        .gateway
+        .as_ref()
+        .ok_or_else(|| "gateway CSRF token is unavailable on a direct connection".to_string())?;
+    if gw.proxy_origin != exact_origin {
+        return Err("gateway CSRF token origin does not match this window".to_string());
     }
     Ok(conn)
 }
@@ -1193,7 +1363,7 @@ async fn gateway_csrf_token_for_connection(
     window_label: &str,
     window_url: &url::Url,
 ) -> Result<String, String> {
-    if !window_label.starts_with("lib-") {
+    if window_label != "main" && !window_label.starts_with("lib-") {
         return Err("gateway CSRF token is unavailable to this window".to_string());
     }
     let gw = conn
@@ -1217,21 +1387,21 @@ pub(crate) async fn gateway_csrf_token(
     window: tauri::WebviewWindow,
 ) -> Result<String, String> {
     let label = window.label().to_string();
-    let conn = gateway_connection_for_window(state.inner(), &label)?;
-    install_gateway_webview_session(&app, &conn, Some(&label))?;
     let url = window
         .url()
         .map_err(|e| format!("reading gateway window URL: {e}"))?;
+    let conn = gateway_connection_for_window(state.inner(), &label, &url)?;
+    install_gateway_webview_session(&app, &conn, Some(&label))?;
     gateway_csrf_token_for_connection(&conn, &label, &url).await?;
 
     // A reconnect can replace the connection while an expired session is being
     // minted. Resolve both the connection and URL again so the returned token
     // belongs to what the caller is showing now.
-    let conn = gateway_connection_for_window(state.inner(), &label)?;
-    install_gateway_webview_session(&app, &conn, Some(&label))?;
     let url = window
         .url()
         .map_err(|e| format!("reading gateway window URL after refresh: {e}"))?;
+    let conn = gateway_connection_for_window(state.inner(), &label, &url)?;
+    install_gateway_webview_session(&app, &conn, Some(&label))?;
     gateway_csrf_token_for_connection(&conn, &label, &url).await
 }
 
@@ -1240,8 +1410,8 @@ pub(crate) async fn gateway_csrf_token(
 /// the entry credential out of navigation URLs while preserving HttpOnly on
 /// the authorization cookie. The installer remains attached to the connection
 /// so every later session re-mint updates the store without a navigation.
-pub(crate) fn install_gateway_webview_session(
-    app: &tauri::AppHandle,
+pub(crate) fn install_gateway_webview_session<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     conn: &DevserverConn,
     preferred_window_label: Option<&str>,
 ) -> Result<(), String> {
@@ -1290,8 +1460,8 @@ fn install_current_gateway_session(
     Ok(())
 }
 
-fn install_gateway_webview_session_values(
-    app: &tauri::AppHandle,
+fn install_gateway_webview_session_values<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     proxy_origin: &str,
     session: &GatewaySession,
     preferred_window_label: Option<&str>,
@@ -1339,6 +1509,14 @@ fn install_gateway_webview_session_values(
 
 fn gateway_url(gw: &GatewayConn, path: &str) -> String {
     format!("{}{}", gw.proxy_origin.trim_end_matches('/'), path)
+}
+
+async fn gateway_get(conn: &DevserverConn, path: &str) -> Result<reqwest::Response, String> {
+    let gw = conn
+        .gateway
+        .as_ref()
+        .ok_or_else(|| "not a gateway connection".to_string())?;
+    gateway_request(gw, reqwest::Method::GET, path, None::<&()>, None).await
 }
 
 fn gateway_auth_shaped(status: reqwest::StatusCode) -> bool {
@@ -1557,11 +1735,287 @@ pub fn assemble_tenant_url_from_base(
     Ok(url.to_string())
 }
 
-/// Mint a window on a connected devserver's library
-/// (`POST /api/library/windows`): the library assigns the id, persists the
-/// record, and fires the watch, so the desktop's watcher reconciles the new
-/// window open -- no client-side open. Used for the first-connect boot terminal
-/// (`kind: Terminal`) and launcher-open reroutes. `kind` selects the window kind; `workspace_path` identifies the root for a workspace window.
+/// The meta descriptor chan-server injects into every launcher shell
+/// (`inject_launcher_meta`) carrying the serving host's OS family.
+const HOST_OS_META_NAME: &str = "chan-launcher-host-os";
+
+/// Fetch a gateway-proxied devserver's OS family (`macos | windows | linux |
+/// other`) for the launcher's machine icon from the launcher shell's host-os
+/// meta tag.
+pub async fn fetch_gateway_host_os(conn: &DevserverConn) -> Result<String, String> {
+    let resp = gateway_get(conn, "/").await?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "gateway launcher shell returned HTTP {}",
+            resp.status()
+        ));
+    }
+    let html = resp
+        .text()
+        .await
+        .map_err(|e| format!("reading gateway launcher shell: {e}"))?;
+    parse_host_os_meta(&html)
+        .ok_or_else(|| "the launcher shell carries no host-os descriptor".to_string())
+}
+
+/// Pull the host-os meta's content out of a launcher shell, scanning whole
+/// `<meta ...>` tags so attribute order and spacing can vary across server
+/// versions.
+fn parse_host_os_meta(html: &str) -> Option<String> {
+    let name_attr = format!("name=\"{HOST_OS_META_NAME}\"");
+    let mut rest = html;
+    while let Some(start) = rest.find("<meta") {
+        let tag_and_rest = &rest[start..];
+        let end = tag_and_rest.find('>')?;
+        let tag = &tag_and_rest[..end];
+        if tag.contains(&name_attr) {
+            let value = tag
+                .split_once("content=\"")
+                .and_then(|(_, after)| after.split_once('"'))
+                .map(|(value, _)| value)?;
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+        rest = &tag_and_rest[end..];
+    }
+    None
+}
+
+/// Fetch a connected devserver's workspace list (`GET /api/library/workspaces`
+/// on gateway connections, `GET /api/devserver/workspaces` on raw connections).
+pub async fn fetch_workspaces(conn: &DevserverConn) -> Result<Vec<DevserverWorkspaceRow>, String> {
+    if conn.gateway.is_some() {
+        let resp = gateway_get(conn, "/api/library/workspaces").await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
+            return Err(format!(
+                "gateway workspaces returned {}",
+                refusal_message(status, &body, &fallback)
+            ));
+        }
+        let entries = resp
+            .json::<Vec<chan_server::LauncherWorkspace>>()
+            .await
+            .map_err(|e| format!("decoding gateway workspaces: {e}"))?;
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            rows.push(row_from_launcher(conn, entry).await?);
+        }
+        return Ok(rows);
+    }
+    let url = format!(
+        "{}/api/devserver/workspaces",
+        base_origin(&conn.host, conn.port)
+    );
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::GET,
+        &url,
+        None::<&()>,
+        None,
+        "listing devserver workspaces",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
+        return Err(format!(
+            "devserver workspaces returned {}",
+            refusal_message(status, &body, &fallback)
+        ));
+    }
+    let entries = resp
+        .json::<Vec<WorkspaceEntry>>()
+        .await
+        .map_err(|e| format!("decoding devserver workspaces: {e}"))?;
+    entries
+        .into_iter()
+        .map(|e| row_from_entry(conn, e))
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct LocalColorResponse {
+    color: Option<String>,
+}
+
+/// `GET /api/library/local-color`: the devserver library's pane-highlight colour
+/// (`#rrggbb`), or `None` for the default accent.
+pub async fn fetch_local_color(conn: &DevserverConn) -> Result<Option<String>, String> {
+    let label = PerArmLabel {
+        gateway: "gateway colour",
+        raw: "devserver colour",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::GET,
+        "/api/library/local-color",
+        None::<&()>,
+        "fetching devserver colour",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(conn, resp, label).await);
+    }
+    resp.json::<LocalColorResponse>()
+        .await
+        .map(|r| r.color)
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))
+}
+
+fn row_from_entry(
+    conn: &DevserverConn,
+    e: WorkspaceEntry,
+) -> Result<DevserverWorkspaceRow, String> {
+    let url = if e.token.is_empty() {
+        String::new()
+    } else {
+        assemble_tenant_url(&conn.host, conn.port, &e.prefix, &e.token)?
+    };
+    Ok(DevserverWorkspaceRow {
+        prefix: e.prefix,
+        path: e.path,
+        label: e.label,
+        on: e.on,
+        status: e.status,
+        error: e.error,
+        url,
+    })
+}
+
+async fn row_from_launcher(
+    conn: &DevserverConn,
+    e: chan_server::LauncherWorkspace,
+) -> Result<DevserverWorkspaceRow, String> {
+    let prefix = if e.prefix.is_empty() {
+        e.workspace_id.clone()
+    } else {
+        e.prefix.clone()
+    };
+    let url = if e.on {
+        format!(
+            "{}/{prefix}/index.html",
+            conn_base_origin(conn).trim_end_matches('/')
+        )
+    } else {
+        String::new()
+    };
+    Ok(DevserverWorkspaceRow {
+        prefix: format!("/{prefix}"),
+        path: e.path,
+        label: e.label,
+        on: e.on,
+        status: e.status,
+        error: e.error,
+        url,
+    })
+}
+
+/// Per-connection tracking of decoded window rows so an unreadable row logs
+/// once and preserves its last readable record rather than failing the whole
+/// list decode.
+#[derive(Default)]
+pub(crate) struct ConnectionRows {
+    logged: HashSet<String>,
+    last_readable: HashMap<String, chan_server::WindowRecord>,
+}
+
+/// Decode a devserver's window rows one at a time, skipping unreadable rows so
+/// an unknown tag on one row does not drop the remaining windows.
+pub(crate) fn decode_window_rows(
+    devserver_id: &str,
+    source: &str,
+    rows: Vec<serde_json::Value>,
+    seen: &mut ConnectionRows,
+) -> Vec<chan_server::WindowRecord> {
+    let mut windows = Vec::with_capacity(rows.len());
+    for (index, value) in rows.iter().enumerate() {
+        let error = match chan_server::WindowRecord::deserialize(value) {
+            Ok(record) => {
+                seen.last_readable
+                    .insert(record.window_id.clone(), record.clone());
+                windows.push(record);
+                continue;
+            }
+            Err(error) => error,
+        };
+        let Some(id) = value.get("window_id").and_then(serde_json::Value::as_str) else {
+            tracing::warn!(
+                devserver = %devserver_id,
+                source = %source,
+                row = %format!("index {index}"),
+                %error,
+                "unreadable devserver window row is hidden"
+            );
+            continue;
+        };
+        let first = seen.logged.insert(id.to_owned());
+        let row = format!("window_id {id}");
+        match seen.last_readable.get(id) {
+            Some(last) => {
+                windows.push(last.clone());
+                if first {
+                    tracing::warn!(
+                        devserver = %devserver_id,
+                        source = %source,
+                        %row,
+                        %error,
+                        "devserver window row turned unreadable; keeping the stale record last read"
+                    );
+                }
+            }
+            None if first => tracing::warn!(
+                devserver = %devserver_id,
+                source = %source,
+                %row,
+                %error,
+                "unreadable devserver window row is hidden"
+            ),
+            None => {}
+        }
+    }
+    let carried: HashSet<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
+    seen.last_readable
+        .retain(|id, _| carried.contains(id.as_str()));
+    windows
+}
+
+/// The window set a connected devserver serves at `GET /api/library/windows`.
+pub async fn fetch_library_windows(
+    devserver_id: &str,
+    conn: &DevserverConn,
+) -> Result<Vec<chan_server::WindowRecord>, String> {
+    let label = PerArmLabel {
+        gateway: "gateway library windows",
+        raw: "library windows",
+    };
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::GET,
+        "/api/library/windows",
+        None::<&()>,
+        "listing library windows",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(conn, resp, label).await);
+    }
+    let rows = resp
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .map_err(|e| format!("decoding {}: {e}", label.for_conn(conn)))?;
+    Ok(decode_window_rows(
+        devserver_id,
+        "list",
+        rows,
+        &mut ConnectionRows::default(),
+    ))
+}
+
+/// Mint a window on a connected devserver's library (`POST /api/library/windows`).
+#[cfg(test)]
 pub async fn mint_library_window(
     conn: &DevserverConn,
     kind: chan_server::WindowKind,
@@ -1579,11 +2033,11 @@ pub async fn mint_library_window_with_start(
     let body = chan_server::CreateWindow {
         kind,
         workspace_path,
-        // The desktop mints native windows on a connected devserver.
+        // The client mints native windows on a connected devserver.
         origin: chan_server::WindowOrigin::Native,
         start_terminal,
-        // The desktop launcher is a legacy caller (the gate allows a missing
-        // acting id); leadership is honest-client only.
+        // The launcher is a legacy caller (the gate allows a missing acting
+        // id); leadership is honest-client only.
         acting_window_id: None,
     };
     let status_label = PerArmLabel {
@@ -1608,6 +2062,189 @@ pub async fn mint_library_window_with_start(
     resp.json::<chan_server::WindowRecord>()
         .await
         .map_err(|e| format!("decoding {}: {e}", decode_label.for_conn(conn)))
+}
+
+/// Allow lifecycle requests to mount or drain a tenant (above the server's 60 s
+/// mount timeout).
+const REMOTE_SERVE_HTTP_BUDGET: Duration = Duration::from_secs(70);
+
+fn workspace_delete_url(host: &str, port: u16, prefix: &str, force: bool) -> String {
+    let mut url = format!(
+        "{}/api/devserver/workspaces{}",
+        base_origin(host, port),
+        prefix
+    );
+    if force {
+        url.push_str("?force=true");
+    }
+    url
+}
+
+/// Unmount and forget a workspace tenant on a connected devserver.
+pub async fn forget_workspace(
+    conn: &DevserverConn,
+    prefix: &str,
+    force: bool,
+) -> Result<(), SetWorkspaceOnError> {
+    if let Some(gw) = &conn.gateway {
+        let clean = prefix.trim_start_matches('/');
+        let mut path = format!("/api/library/workspaces/{clean}");
+        if force {
+            path.push_str("?force=true");
+        }
+        let resp = gateway_request(
+            gw,
+            reqwest::Method::DELETE,
+            &path,
+            None::<&()>,
+            Some(REMOTE_SERVE_HTTP_BUDGET),
+        )
+        .await
+        .map_err(SetWorkspaceOnError::other)?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            return Err(refusal_from_conflict(resp).await);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
+            return Err(SetWorkspaceOnError::other(format!(
+                "gateway workspace delete returned {}",
+                refusal_message(status, &body, &fallback)
+            )));
+        }
+        return Ok(());
+    }
+    let url = workspace_delete_url(&conn.host, conn.port, prefix, force);
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::DELETE,
+        &url,
+        None::<&()>,
+        Some(REMOTE_SERVE_HTTP_BUDGET),
+        "forgetting devserver workspace",
+    )
+    .await
+    .map_err(SetWorkspaceOnError::other)?;
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        return Err(refusal_from_conflict(resp).await);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
+        return Err(SetWorkspaceOnError::other(format!(
+            "devserver workspace delete returned {}",
+            refusal_message(status, &body, &fallback)
+        )));
+    }
+    Ok(())
+}
+
+fn workspace_on_url(host: &str, port: u16, prefix: &str) -> String {
+    format!(
+        "{}/api/devserver/workspaces{}/on",
+        base_origin(host, port),
+        prefix
+    )
+}
+
+/// Build the launcher-route toggle request for the gateway arm: `/on` takes no
+/// body and `/off` sends `{force}`.
+fn launcher_workspace_toggle_request(
+    prefix: &str,
+    on: bool,
+    force: bool,
+) -> (String, Option<serde_json::Value>) {
+    let clean = prefix.trim_start_matches('/');
+    if on {
+        (format!("/api/library/workspaces/{clean}/on"), None)
+    } else {
+        (
+            format!("/api/library/workspaces/{clean}/off"),
+            Some(serde_json::json!({ "force": force })),
+        )
+    }
+}
+
+/// Mount (`on: true`) or unmount (`on: false`) a registered workspace without
+/// forgetting it.
+pub async fn set_workspace_on(
+    conn: &DevserverConn,
+    prefix: &str,
+    on: bool,
+    force: bool,
+) -> Result<Option<DevserverWorkspaceRow>, SetWorkspaceOnError> {
+    if let Some(gw) = &conn.gateway {
+        let (path, body) = launcher_workspace_toggle_request(prefix, on, force);
+        let resp = gateway_request(
+            gw,
+            reqwest::Method::POST,
+            &path,
+            body.as_ref(),
+            Some(REMOTE_SERVE_HTTP_BUDGET),
+        )
+        .await
+        .map_err(SetWorkspaceOnError::other)?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            return Err(refusal_from_conflict(resp).await);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let fallback = format!("HTTP {status}");
+            return Err(SetWorkspaceOnError::other(format!(
+                "gateway workspace on/off returned {}",
+                refusal_message(status, &body, &fallback)
+            )));
+        }
+        if !on {
+            return Ok(None);
+        }
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let Ok(entry) = resp.json::<chan_server::LauncherWorkspace>().await else {
+            return Ok(None);
+        };
+        let row = row_from_launcher(conn, entry)
+            .await
+            .map_err(SetWorkspaceOnError::other)?;
+        return Ok(Some(row));
+    }
+    let url = workspace_on_url(&conn.host, conn.port, prefix);
+    let body = SetWorkspaceOnRequest { on, force };
+    let resp = raw_devserver_request(
+        conn,
+        reqwest::Method::POST,
+        &url,
+        Some(&body),
+        Some(REMOTE_SERVE_HTTP_BUDGET),
+        "setting devserver workspace on/off",
+    )
+    .await
+    .map_err(SetWorkspaceOnError::other)?;
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        return Err(refusal_from_conflict(resp).await);
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let fallback = format!("HTTP {status}");
+        return Err(SetWorkspaceOnError::other(format!(
+            "devserver workspace on/off returned {}",
+            refusal_message(status, &body, &fallback)
+        )));
+    }
+    if !on {
+        return Ok(None);
+    }
+    let entry = resp
+        .json::<WorkspaceEntry>()
+        .await
+        .map_err(|e| SetWorkspaceOnError::other(format!("decoding devserver workspace on: {e}")))?;
+    let row = row_from_entry(conn, entry).map_err(SetWorkspaceOnError::other)?;
+    Ok(Some(row))
 }
 
 /// Every `tracing` line a test emits on its own thread, rendered by the same
@@ -3273,5 +3910,80 @@ mod tests {
         assert!(age < Duration::from_secs(60), "fresh registration: {age:?}");
         assert!(conns.remove("ds1").is_some());
         assert_eq!(conns.registered_elapsed("ds1"), None);
+    }
+
+    #[tokio::test]
+    async fn main_window_resolves_csrf_only_for_matching_connected_gateway_origin() {
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let proxy_origin = "https://alice--0a1b2c3d4e5f.p1.proxy.chan.app";
+        let mut conn = gateway_test_conn("http://127.0.0.1:9/desktop/v1/devserver/entry".into());
+        {
+            let gw = conn.gateway.as_mut().unwrap();
+            gw.proxy_origin = proxy_origin.to_string();
+            *gw.session.lock().unwrap() = Some(GatewaySession {
+                gate: "gate-1".into(),
+                cookie_header: "__Host-devserver_gate=gate-1; __Host-devserver_csrf=csrf-main"
+                    .into(),
+                csrf: "csrf-main".into(),
+                expires_at: Instant::now() + Duration::from_secs(120),
+            });
+        }
+
+        let matching_url = url::Url::parse(&format!("{proxy_origin}/notes/index.html")).unwrap();
+        let mismatched_url =
+            url::Url::parse("https://bob--1a2b3c4d5e6f.p1.proxy.chan.app/notes/index.html")
+                .unwrap();
+        let loopback_url = url::Url::parse("http://127.0.0.1:8471/?t=tok").unwrap();
+
+        // Disconnected: main refuses even on the gateway origin.
+        assert!(gateway_connection_for_window(&state, "main", &matching_url).is_err());
+
+        // Connected: main resolves CSRF for the matching origin and refuses
+        // mismatched origins or non-main/non-lib labels.
+        state.devservers.set("gw:1".into(), conn.clone());
+        let resolved = gateway_connection_for_window(&state, "main", &matching_url)
+            .expect("connected gateway origin resolves for main");
+        assert_eq!(
+            gateway_csrf_token_for_connection(&resolved, "main", &matching_url)
+                .await
+                .as_deref(),
+            Ok("csrf-main")
+        );
+        assert!(gateway_connection_for_window(&state, "main", &mismatched_url).is_err());
+        assert!(gateway_connection_for_window(&state, "main", &loopback_url).is_err());
+        assert!(
+            gateway_csrf_token_for_connection(&resolved, "main", &mismatched_url)
+                .await
+                .is_err()
+        );
+        assert!(gateway_connection_for_window(&state, "about", &matching_url).is_err());
+        assert!(
+            gateway_csrf_token_for_connection(&resolved, "about", &matching_url)
+                .await
+                .is_err()
+        );
+
+        // Disconnecting invalidates lookup immediately.
+        state.devservers.remove("gw:1");
+        assert!(gateway_connection_for_window(&state, "main", &matching_url).is_err());
+    }
+
+    #[test]
+    fn host_os_meta_and_workspace_toggle_helpers_match_gateway_contract() {
+        let html = r#"<!doctype html><html><head><meta charset="utf-8"><meta content="macos" name="chan-launcher-host-os"></head></html>"#;
+        assert_eq!(parse_host_os_meta(html).as_deref(), Some("macos"));
+        assert_eq!(parse_host_os_meta("<html><head></head></html>"), None);
+
+        assert_eq!(
+            launcher_workspace_toggle_request("/notes-1a2b3c", true, false),
+            ("/api/library/workspaces/notes-1a2b3c/on".to_string(), None)
+        );
+        assert_eq!(
+            launcher_workspace_toggle_request("notes-1a2b3c", false, true),
+            (
+                "/api/library/workspaces/notes-1a2b3c/off".to_string(),
+                Some(serde_json::json!({ "force": true }))
+            )
+        );
     }
 }

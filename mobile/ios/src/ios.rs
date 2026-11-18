@@ -69,7 +69,9 @@ pub fn run() {
                 tauri::async_runtime::block_on(embedded::EmbeddedServer::start(registry_deps))
                     .map_err(std::io::Error::other)?;
             tracing::info!(addr = %server.addr(), "iOS webview loading loopback launcher");
-            let url = format!("http://{}/?t={}", server.addr(), server.launcher_token());
+            let url =
+                crate::mobile_auth::launcher_url_for_addr(server.addr(), server.launcher_token())
+                    .expect("the loopback launcher URL is always valid");
             if state_for_setup.embedded.set(server).is_err() {
                 tracing::warn!("embedded local server initialized more than once");
             }
@@ -105,17 +107,12 @@ pub fn run() {
                     let id = id.to_string();
                     tauri::async_runtime::spawn(async move {
                         let state = Arc::clone(&app.state::<Arc<AppState>>());
-                        // The row is a synthesized gateway row: reconnect
-                        // its gateway, which re-enters the connect flow
-                        // with a fresh authenticated entry.
-                        let Some((gateway_id, _, _)) =
-                            crate::gateway::parse_synthesized_id(&id)
-                        else {
+                        if crate::gateway::parse_synthesized_id(&id).is_none() {
                             tracing::warn!(devserver = %id, "reconnect hook fired for a non-gateway row");
                             return;
-                        };
+                        }
                         if let Err(e) =
-                            crate::gateway::connect_gateway(app, state, gateway_id, true).await
+                            crate::connect_rostered_devserver(app, state, id.clone()).await
                         {
                             tracing::warn!(devserver = %id, error = %e, "reconnect after a proxy node move failed");
                         }
@@ -175,16 +172,9 @@ pub fn run() {
                     rx,
                 ));
             }
-            WebviewWindowBuilder::new(
-                app.handle(),
-                "main",
-                WebviewUrl::External(
-                    url.parse()
-                        .expect("the loopback launcher URL is always valid"),
-                ),
-            )
-            .title("Chan")
-            .build()?;
+            WebviewWindowBuilder::new(app.handle(), "main", WebviewUrl::External(url))
+                .title("Chan")
+                .build()?;
             ensure_back_gesture();
             Ok(())
         })
@@ -286,34 +276,59 @@ impl BackGestureTarget {
     );
 }
 
-/// Attach a left-edge swipe recognizer to every app window, navigating
+/// Attach a left-edge swipe recognizer to every scene window, navigating
 /// home through the back-to-Computers command when it ends. Reports
 /// whether any window took it. Main thread only (UIKit); every object is
-/// alive for the call (the application for the process, windows retained
-/// by it, each recognizer retained by its window once added, the gesture
-/// target intentionally leaked below).
+/// alive for the call (the application for the process, scenes and windows
+/// retained by it, each recognizer retained by its window once added, the
+/// gesture target intentionally leaked below).
 fn install_back_gesture() -> bool {
     let target = BackGestureTarget::new();
-    // SAFETY: sharedApplication, windows, and the view calls below are
-    // main-thread-only and both callers (setup, page load) run there;
-    // every pointer is null-checked before use.
+    // SAFETY: sharedApplication, connectedScenes, scene windows, and gesture
+    // recognizer attachment are main-thread-only and both callers (setup,
+    // page load) run there; every pointer is null-checked before use.
     unsafe {
         let app: *mut AnyObject = msg_send![class!(UIApplication), sharedApplication];
         if app.is_null() {
             return false;
         }
-        let windows: *mut AnyObject = msg_send![&*app, windows];
-        if windows.is_null() {
+        let scenes: *mut AnyObject = msg_send![&*app, connectedScenes];
+        if scenes.is_null() {
             return false;
         }
-        let count: usize = msg_send![&*windows, count];
+        let scenes: *mut AnyObject = msg_send![&*scenes, allObjects];
+        if scenes.is_null() {
+            return false;
+        }
+        let scenes = &*scenes;
+        let scene_count: usize = msg_send![scenes, count];
         let mut installed = false;
-        let mut index = 0;
-        while index < count {
-            let window: *mut AnyObject = msg_send![&*windows, objectAtIndex: index];
-            if !window.is_null() {
+        for scene_index in 0..scene_count {
+            let scene: *mut AnyObject = msg_send![scenes, objectAtIndex: scene_index];
+            if scene.is_null() {
+                continue;
+            }
+            let scene = &*scene;
+            let has_windows: bool = msg_send![scene, respondsToSelector: sel!(windows)];
+            if !has_windows {
+                continue;
+            }
+            let windows: *mut AnyObject = msg_send![scene, windows];
+            if windows.is_null() {
+                continue;
+            }
+            let windows = &*windows;
+            let window_count: usize = msg_send![windows, count];
+            for window_index in 0..window_count {
+                let window: *mut AnyObject = msg_send![windows, objectAtIndex: window_index];
+                if window.is_null() {
+                    continue;
+                }
                 let allocated: Allocated<AnyObject> =
                     msg_send![class!(UIScreenEdgePanGestureRecognizer), alloc];
+                if Allocated::as_ptr(&allocated).is_null() {
+                    continue;
+                }
                 // UIRectEdgeLeft == 1 << 0, stable API contract.
                 let swipe: Retained<AnyObject> = msg_send![
                     allocated,
@@ -324,7 +339,6 @@ fn install_back_gesture() -> bool {
                 let _: () = msg_send![&*window, addGestureRecognizer: &*swipe];
                 installed = true;
             }
-            index += 1;
         }
         if installed {
             // Recognizers hold their target weakly: forget the retain so
