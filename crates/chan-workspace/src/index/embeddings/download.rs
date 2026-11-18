@@ -202,6 +202,7 @@ impl Client {
                 .endpoint
                 .join(&format!("{model}/resolve/{}/{}", info.revision, file.name))?;
             self.download(&url, file, &path)?;
+            remove_old_part(&repo, file);
         }
         publish_ref(&repo, info.revision)?;
         #[cfg(test)]
@@ -479,6 +480,20 @@ pub(super) fn downloaded(repo: &Path, model: &EmbeddingModelInfo) -> bool {
         .into_iter()
         .all(|name| model.files.iter().any(|file| file.name == name))
         && complete_snapshot(repo, model).is_some()
+}
+
+/// Remove the part an earlier chan left for `file` in `blobs/`, named by its
+/// sha256 as the Hub's LFS etag is, once the pinned copy is published: an
+/// interrupted download of the weights leaves up to their size there.
+/// Best effort, as `name_pinned_commit` is.
+fn remove_old_part(repo: &Path, file: &ModelFile) {
+    let old = repo.join("blobs").join(format!("{}.part", file.sha256));
+    match std::fs::remove_file(&old) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            tracing::debug!(part = %old.display(), %error, "cannot remove an earlier download's part");
+        }
+        _ => {}
+    }
 }
 
 /// Point `refs/main` at the pinned commit when it names another, or nothing:

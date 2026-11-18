@@ -89,6 +89,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::tests::empty_weights_are_classified_before_mapping \
 	index::embeddings::download::tests::partial_file_supports_resume_and_restart_writes \
 	index::embeddings::download::tests::a_download_fetches_its_pinned_commit_and_publishes_it \
+	index::embeddings::download::tests::publishing_a_file_removes_the_part_an_earlier_layout_left_for_it \
 	index::embeddings::download::tests::partial_download_resumes_and_publishes_exact_bytes \
 	index::embeddings::download::tests::bytes_that_miss_their_pin_are_not_published \
 	index::embeddings::download::tests::a_completed_part_that_hashes_wrong_is_fetched_again_in_the_same_call \

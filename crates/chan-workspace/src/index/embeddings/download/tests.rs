@@ -308,6 +308,30 @@ fn a_download_fetches_its_pinned_commit_and_publishes_it() {
 }
 
 #[test]
+fn publishing_a_file_removes_the_part_an_earlier_layout_left_for_it() {
+    let cache = tempfile::tempdir().unwrap();
+    let blobs = cache
+        .path()
+        .join(repo_dir_name("fixture/model"))
+        .join("blobs");
+    std::fs::create_dir_all(&blobs).unwrap();
+    let sha256 = format!("{:x}", Sha256::digest(BODY));
+    let old = blobs.join(format!("{sha256}.part"));
+    let other = blobs.join("another-file.part");
+    std::fs::write(&old, &BODY[..3]).unwrap();
+    std::fs::write(&other, b"not this file's").unwrap();
+    let server = Server::start(|_| range_response(BODY, 0));
+    client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .unwrap();
+    assert!(
+        !old.exists(),
+        "the earlier download of the published file is removed"
+    );
+    assert!(other.exists(), "another file's part is left alone");
+}
+
+#[test]
 fn partial_download_resumes_and_publishes_exact_bytes() {
     let cache = tempfile::tempdir().unwrap();
     let partial = part_file(cache.path(), &BODY[..3]);
