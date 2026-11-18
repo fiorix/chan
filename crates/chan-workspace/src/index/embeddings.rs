@@ -58,6 +58,10 @@ pub enum EmbedError {
     /// or the cache it writes.
     #[error("model download: {0}")]
     Download(String),
+    /// The model's Hub repository publishes no copy of a file the embedder
+    /// reads, so the model table pins none and no download is tried.
+    #[error("{model} cannot be downloaded: its Hub repository publishes no {file}")]
+    Unpublished { model: String, file: &'static str },
     /// The model server's certificate failed the shared trust decision.
     #[error("model download: {0} (certificate verification failed)")]
     Certificate(String),
@@ -257,6 +261,7 @@ impl Embedder {
         client: &download::Client,
     ) -> Result<Self, EmbedError> {
         let _ = lookup_model(model_id)?;
+        client.require_published(model_id)?;
         std::fs::create_dir_all(cache_dir)?;
 
         // Cache lookup precedes client initialization, so an already downloaded

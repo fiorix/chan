@@ -34,6 +34,9 @@ pub struct EmbeddingModelInfo {
     pub files: &'static [ModelFile],
 }
 
+/// The files the embedder reads from a model's snapshot.
+pub const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+
 /// One file of a pinned model revision, by its name in the Hub repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelFile {

@@ -208,6 +208,25 @@ impl Client {
         Ok(path)
     }
 
+    /// Refuse a model whose table entry pins no copy of a file the embedder
+    /// reads, before any of its files is asked for. A model the table does
+    /// not hold is refused by `get`.
+    pub(super) fn require_published(&self, model: &str) -> Result<(), EmbedError> {
+        let Some(info) = self.models.iter().find(|info| info.id == model) else {
+            return Ok(());
+        };
+        match config::MODEL_FILES
+            .into_iter()
+            .find(|name| !info.files.iter().any(|file| file.name == *name))
+        {
+            Some(file) => Err(EmbedError::Unpublished {
+                model: model.to_owned(),
+                file,
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Whether every file of `model` the cache holds, where `get` would read
     /// it, has its pinned sha256 and size. A missing file does not.
     pub(super) fn files_match_their_pins(&self, model: &str) -> Result<bool, EmbedError> {

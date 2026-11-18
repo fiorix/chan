@@ -745,6 +745,37 @@ fn an_unpinned_model_or_file_is_refused_before_any_request_or_write() {
 }
 
 #[test]
+fn a_model_that_publishes_no_weights_is_refused_before_any_request() {
+    let cache = tempfile::tempdir().unwrap();
+    let server = Server::start(|_| {
+        response(
+            "503 Service Unavailable",
+            "",
+            b"an unpublished model must not reach transport",
+        )
+    });
+    let client = Client::with_config(
+        cache.path(),
+        &server.endpoint,
+        chan_tls::client_config().unwrap(),
+    );
+    let error = super::super::Embedder::open_with_client("BAAI/bge-m3", cache.path(), &client)
+        .expect_err("a model whose repository publishes no weights cannot open");
+    assert_eq!(
+        error.to_string(),
+        "BAAI/bge-m3 cannot be downloaded: its Hub repository publishes no model.safetensors"
+    );
+    assert!(
+        server.requests.lock().unwrap().is_empty(),
+        "none of the model's files is fetched"
+    );
+    assert!(
+        std::fs::read_dir(cache.path()).unwrap().next().is_none(),
+        "the cache is not touched"
+    );
+}
+
+#[test]
 fn completed_part_publishes_without_an_invalid_end_range_request() {
     let cache = tempfile::tempdir().unwrap();
     part_file(cache.path(), BODY);
@@ -1001,7 +1032,7 @@ fn each_resume_guard_refuses_on_its_own() {
     }
 }
 
-const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+use crate::index::config::MODEL_FILES;
 
 /// The seeded model's files in `cache`, by name.
 fn seeded_files(cache: &Path) -> HashMap<&'static str, Vec<u8>> {

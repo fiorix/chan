@@ -104,6 +104,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::an_incomplete_snapshot_at_another_commit_is_not_mixed_with_the_pinned_one \
 	index::embeddings::download::tests::cache_reference_cannot_escape_the_snapshot_directory \
 	index::embeddings::download::tests::an_unpinned_model_or_file_is_refused_before_any_request_or_write \
+	index::embeddings::download::tests::a_model_that_publishes_no_weights_is_refused_before_any_request \
 	index::embeddings::download::tests::completed_part_publishes_without_an_invalid_end_range_request \
 	index::embeddings::download::tests::oversized_part_restarts_and_publishes_exact_bytes \
 	index::embeddings::download::tests::a_short_transfer_stays_partial_and_resumes_on_the_next_attempt \
