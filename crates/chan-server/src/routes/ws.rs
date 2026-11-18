@@ -463,9 +463,11 @@ enum ClientFrameReply {
 const MAX_SCOPES_PER_SOCKET: usize = 65_536;
 
 /// The `pong` answer to a client `ping` heartbeat, echoed verbatim on the same
-/// socket. Pinned by [`tests::pong_frame_is_the_pinned_wire_shape`] so the
-/// server -> client half cannot drift from the SPA/desktop parse.
-const PONG_FRAME: &str = r#"{"type":"pong"}"#;
+/// socket: this event socket's, and the library window feed's
+/// (`library::watch_library_windows`). Pinned by
+/// [`tests::pong_frame_is_the_pinned_wire_shape`] so the server -> client half
+/// cannot drift from the SPA/desktop parse.
+pub(super) const PONG_FRAME: &str = r#"{"type":"pong"}"#;
 
 /// Forward server -> client frames to one WebSocket client and apply this
 /// socket's inbound `sub`/`unsub` frames, until either side hangs up.
