@@ -24,7 +24,6 @@ use std::sync::{Arc, OnceLock};
 
 use tauri::Manager;
 
-#[cfg(test)]
 use crate::gateway::GatewayAttempt;
 
 /// The OAuth callback the mobile leg sends as `redirect_uri` and the
@@ -56,6 +55,61 @@ pub(crate) fn mobile_callback_query(callback_url: &str) -> Result<String, String
         return Err("the sign-in answer carries authority this callback never has".to_string());
     }
     Ok(url.query().unwrap_or_default().to_string())
+}
+
+/// What the authentication session answered with: exactly one arm fires
+/// per presentation. Shared so host tests drive the mapping the forwarder
+/// runs on device.
+pub(crate) enum MobileAuthOutcome {
+    CallbackUrl(String),
+    Cancelled,
+    Failed(String),
+}
+
+/// Where a captured callback URL settles: the validated query, or a fail
+/// carrying the reason. A URL that is not the callback fails the live slot
+/// loudly instead of ignoring it: the sheet just vanished, and silence
+/// would strand the user on a Connecting row.
+pub(crate) enum MobileCallbackAction {
+    Settle(String),
+    Fail(String),
+}
+
+pub(crate) fn mobile_callback_action(callback_url: &str) -> MobileCallbackAction {
+    match mobile_callback_query(callback_url) {
+        Ok(query) => MobileCallbackAction::Settle(query),
+        Err(error) => MobileCallbackAction::Fail(format!("sign-in failed in the browser: {error}")),
+    }
+}
+
+/// Settle a session outcome through the exact desktop paths: a captured
+/// callback settles or fails by shape, a dismissal fails as a browser
+/// cancel, and any other failure fails with the system's words.
+pub(crate) fn settle_mobile_outcome<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
+    outcome: MobileAuthOutcome,
+) {
+    match outcome {
+        MobileAuthOutcome::CallbackUrl(url) => match mobile_callback_action(&url) {
+            MobileCallbackAction::Settle(query) => {
+                crate::auth::settle_mobile_query(app, gateway_id, attempt, &query);
+            }
+            MobileCallbackAction::Fail(message) => {
+                crate::auth::fail_mobile_signin(app, gateway_id, attempt, message);
+            }
+        },
+        MobileAuthOutcome::Cancelled => crate::auth::fail_mobile_signin(
+            app,
+            gateway_id,
+            attempt,
+            "sign-in was cancelled in the browser".to_string(),
+        ),
+        MobileAuthOutcome::Failed(message) => {
+            crate::auth::fail_mobile_signin(app, gateway_id, attempt, message);
+        }
+    }
 }
 
 /// The app handle the rostered-connect path stashes for the bridge-open path,
@@ -180,18 +234,10 @@ mod ios {
 
     use crate::gateway::GatewayAttempt;
 
-    use super::{mobile_callback_query, MOBILE_CALLBACK_SCHEME};
+    use super::{MobileAuthOutcome, MOBILE_CALLBACK_SCHEME};
 
     #[link(name = "AuthenticationServices", kind = "framework")]
     extern "C" {}
-
-    /// What the authentication session answered with: exactly one arm fires
-    /// per presentation.
-    enum MobileAuthOutcome {
-        CallbackUrl(String),
-        Cancelled,
-        Failed(String),
-    }
 
     /// Start the sign-in sheet for the pending slot's authorize URL, on the
     /// main thread. The session completion forwards into the exact desktop
@@ -222,26 +268,7 @@ mod ios {
                     move || release_mobile_session_for(&gateway_id, &attempt)
                 };
                 let _ = app.run_on_main_thread(release);
-                match outcome {
-                    MobileAuthOutcome::CallbackUrl(url) => match mobile_callback_query(&url) {
-                        Ok(query) => {
-                            crate::auth::settle_mobile_query(app, &gateway_id, &attempt, &query);
-                        }
-                        Err(error) => tracing::warn!(
-                            %error,
-                            "ignoring a sign-in answer that is not the mobile callback",
-                        ),
-                    },
-                    MobileAuthOutcome::Cancelled => crate::auth::fail_mobile_signin(
-                        app,
-                        &gateway_id,
-                        &attempt,
-                        "sign-in was cancelled in the browser".to_string(),
-                    ),
-                    MobileAuthOutcome::Failed(message) => {
-                        crate::auth::fail_mobile_signin(app, &gateway_id, &attempt, message);
-                    }
-                }
+                super::settle_mobile_outcome(app, &gateway_id, &attempt, outcome);
             });
         }
         {
@@ -444,32 +471,79 @@ mod ios {
         unsafe impl NSObjectProtocol for MobileAuthPresentationProvider {}
 
         impl MobileAuthPresentationProvider {
-            /// The window the sheet presents from: the app's key window, else
-            /// its first window. Null when neither answers, and the session
-            /// then fails through the completion instead of presenting nowhere.
+            /// The window the sheet presents from: the key window of the
+            /// foreground-active window scene, else its first window. Null
+            /// when no scene answers, and the session then fails through
+            /// the completion instead of presenting nowhere.
             #[unsafe(method(presentationAnchorForWebAuthenticationSession:))]
             fn presentation_anchor(&self, _session: *mut AnyObject) -> *mut AnyObject {
-                // The shared application outlives the call, so no ownership
-                // is taken; a null answer fails the session through the
-                // completion instead of presenting nowhere.
+                // Scene lookup: the app is scene-based, where the legacy
+                // shared-application windows answer nil. All public API.
                 let app: *mut AnyObject =
                     unsafe { msg_send![class!(UIApplication), sharedApplication] };
                 if app.is_null() {
                     return std::ptr::null_mut();
                 }
-                // SAFETY: non-null per the check above, and alive for the
-                // process; used immediately.
-                let app = unsafe { &*app };
+                // SAFETY: the application is non-null per the check above and
+                // alive for the process; every object below is autoreleased
+                // and used immediately on this main-thread call.
                 unsafe {
-                    let key: *mut AnyObject = msg_send![app, keyWindow];
-                    if !key.is_null() {
-                        return key;
-                    }
-                    let windows: *mut AnyObject = msg_send![app, windows];
-                    if windows.is_null() {
+                    let app = &*app;
+                    let scenes: *mut AnyObject = msg_send![app, connectedScenes];
+                    if scenes.is_null() {
                         return std::ptr::null_mut();
                     }
-                    msg_send![&*windows, firstObject]
+                    let scenes: *mut AnyObject = msg_send![&*scenes, allObjects];
+                    if scenes.is_null() {
+                        return std::ptr::null_mut();
+                    }
+                    let scenes = &*scenes;
+                    let count: usize = msg_send![scenes, count];
+                    for index in 0..count {
+                        let scene: *mut AnyObject = msg_send![scenes, objectAtIndex: index];
+                        if scene.is_null() {
+                            continue;
+                        }
+                        let scene = &*scene;
+                        // Foreground-active scenes only (0); the rest cannot
+                        // present.
+                        let state: isize = msg_send![scene, activationState];
+                        if state != 0 {
+                            continue;
+                        }
+                        // A scene of any other kind has no windows; ask
+                        // instead of assuming the class.
+                        let has_windows: bool =
+                            msg_send![scene, respondsToSelector: sel!(windows)];
+                        if !has_windows {
+                            continue;
+                        }
+                        let windows: *mut AnyObject = msg_send![scene, windows];
+                        if windows.is_null() {
+                            continue;
+                        }
+                        let windows = &*windows;
+                        let windows_count: usize = msg_send![windows, count];
+                        let mut first: *mut AnyObject = std::ptr::null_mut();
+                        for window_index in 0..windows_count {
+                            let window: *mut AnyObject =
+                                msg_send![windows, objectAtIndex: window_index];
+                            if window.is_null() {
+                                continue;
+                            }
+                            if first.is_null() {
+                                first = window;
+                            }
+                            let is_key: bool = msg_send![&*window, isKeyWindow];
+                            if is_key {
+                                return window;
+                            }
+                        }
+                        if !first.is_null() {
+                            return first;
+                        }
+                    }
+                    std::ptr::null_mut()
                 }
             }
         }
@@ -756,6 +830,69 @@ mod tests {
             !crate::auth::tests::take_pending_for_test(),
             "a matching fail consumes the slot",
         );
+    }
+
+    #[test]
+    fn malformed_callback_maps_to_a_fail_carrying_the_reason() {
+        match mobile_callback_action("chan://auth/callback?code=c1&state=s1") {
+            MobileCallbackAction::Settle(query) => {
+                assert_eq!(query, "code=c1&state=s1");
+            }
+            MobileCallbackAction::Fail(message) => {
+                panic!("a well-formed callback settles, failing with: {message}")
+            }
+        }
+        match mobile_callback_action("chan://auth/other?code=c1") {
+            MobileCallbackAction::Fail(message) => {
+                assert!(
+                    message.contains("another path"),
+                    "the fail carries the system's words: {message}"
+                );
+            }
+            MobileCallbackAction::Settle(query) => {
+                panic!("a malformed callback fails, settling with: {query}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_callback_fails_loudly_instead_of_ignoring() {
+        let _serial = crate::auth::tests::SLOT_TEST_LOCK.lock().await;
+        let attempt = Arc::new(GatewayAttempt::default());
+        crate::auth::tests::install_pending_for_test("gw-mobile", &attempt);
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        settle_mobile_outcome(
+            app.handle().clone(),
+            "gw-mobile",
+            &attempt,
+            MobileAuthOutcome::CallbackUrl("https://evil.example/phish?code=c1".into()),
+        );
+        assert!(
+            !crate::auth::tests::take_pending_for_test(),
+            "a malformed callback fails the slot instead of ignoring it",
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_and_failure_outcomes_consume_the_slot() {
+        let _serial = crate::auth::tests::SLOT_TEST_LOCK.lock().await;
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        for outcome in [
+            MobileAuthOutcome::Cancelled,
+            MobileAuthOutcome::Failed("sheet exploded".into()),
+        ] {
+            let attempt = Arc::new(GatewayAttempt::default());
+            crate::auth::tests::install_pending_for_test("gw-mobile", &attempt);
+            settle_mobile_outcome(app.handle().clone(), "gw-mobile", &attempt, outcome);
+            assert!(
+                !crate::auth::tests::take_pending_for_test(),
+                "a terminal outcome fails the slot instead of ignoring it",
+            );
+        }
     }
 
     #[tokio::test]
