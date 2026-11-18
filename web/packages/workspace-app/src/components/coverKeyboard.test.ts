@@ -38,7 +38,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
-import { promptState, resolvePrompt, uiPrompt, workspace } from "../state/store.svelte";
+import { COVER_ROOT_ATTR, promptState, resolvePrompt, setCoverBlocking, uiPrompt, workspace } from "../state/store.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 
 installTerminalDom();
@@ -177,4 +177,67 @@ test("a tab-focus pulse fired under the screen lock leaves its PIN field the key
   bumpTabFocusPulse();
   await settle();
   expect(document.activeElement, "the pulse leaves the PIN field alone").toBe(pin);
+});
+
+/// The app's prompt dialog open with its field focused, then the screen lock
+/// up over it with its card woken and its PIN field holding the keyboard.
+async function dialogUnderWokenLock(): Promise<{ field: HTMLInputElement; backdrop: HTMLElement; pin: HTMLInputElement }> {
+  focusOrigin();
+  const dialogs = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(Harness, { target: dialogs, props: { callers: true } }));
+  flushSync();
+  void uiPrompt("Name");
+  await settle();
+  const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
+  field.focus();
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  await settle();
+  const pin = backdrop.querySelector<HTMLInputElement>('input[type="password"]')!;
+  expect(document.activeElement, "the woken card's PIN field").toBe(pin);
+  return { field, backdrop, pin };
+}
+
+test("Tab on the screen lock's PIN field stays on the lock, off the dialog under it", async () => {
+  const { backdrop, pin } = await dialogUnderWokenLock();
+  pin.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+  await settle();
+  expect(backdrop.contains(document.activeElement), "Tab cycles the lock's own controls").toBe(true);
+});
+
+test("Escape on the screen lock leaves the dialog under it open", async () => {
+  const { pin } = await dialogUnderWokenLock();
+  pin.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await settle();
+  expect(promptState.open, "the dialog under the lock stays open").toBe(true);
+  expect(document.activeElement, "the PIN field keeps the keyboard").toBe(pin);
+});
+
+test("a dialog field left focused under the reconnect cover answers no Escape", async () => {
+  focusOrigin();
+  const dialogs = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(Harness, { target: dialogs, props: { callers: true } }));
+  flushSync();
+  void uiPrompt("Name");
+  await settle();
+  const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
+  field.focus();
+  // The reconnect cover's root at its layer, over the dialogs' 26000; the
+  // cover leaves a dialog's focus where it was.
+  const cover = document.body.appendChild(document.createElement("div"));
+  cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
+  cover.style.position = "fixed";
+  cover.style.zIndex = "30000";
+  setCoverBlocking("reconnect", true);
+  try {
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await settle();
+    expect(promptState.open, "the dialog stays open during the outage").toBe(true);
+  } finally {
+    setCoverBlocking("reconnect", false);
+    cover.remove();
+  }
 });

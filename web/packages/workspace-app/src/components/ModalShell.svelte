@@ -8,7 +8,8 @@
   import { deckPendingReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
   import { registerModalShell } from "./modalStack";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
+  import { appInputBlocked } from "../state/store.svelte";
 
   let {
     labelledby,
@@ -59,6 +60,10 @@
 
   function panelKeydown(event: KeyboardEvent): void {
     if (!registration?.isTop()) return;
+    // Under a cover painted over the dialog (the reconnect cover leaves a
+    // dialog's focus where it was), the dialog answers none of its keys:
+    // they go on to the window's guard, which cancels them.
+    if (appInputBlocked() && !mayFocus(panel ?? null)) return;
     focus.onKeydown(event);
     if (event.key === "Tab") event.stopPropagation();
   }

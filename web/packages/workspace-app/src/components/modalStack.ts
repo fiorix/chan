@@ -1,5 +1,6 @@
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { handKeyboardToOwner, mayFocus, owner, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+import { appInputBlocked } from "../state/store.svelte";
 
 type ShellOptions = {
   layer: HTMLElement;
@@ -70,6 +71,9 @@ function onFocusOut(): void {
 function onKeydown(event: KeyboardEvent): void {
   let shell = top();
   if (!shell) return;
+  // A cover painted over the dialog (the screen lock, the reconnect cover)
+  // holds the keyboard: its Escape and Tab are not the dialog's to answer.
+  if (appInputBlocked() && !mayFocus(shell.panel)) return;
   if (event.key === "Escape") {
     event.stopPropagation();
     shell.onKeydown(event);
