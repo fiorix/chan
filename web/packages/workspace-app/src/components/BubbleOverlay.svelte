@@ -246,10 +246,11 @@
 {/if}
 
 <style>
-  /* Window-wide: over the panes, the menus (29000) and the dialogs
-     (ModalShell's 26000 and up), whose keyboard it holds by painting over
-     them, and under the covers over the window (the reconnect cover's 30000
-     and up), which paint over it and hold the keyboard while they show. */
+  /* Window-wide: over the panes, the menus (29000), the command deck
+     (29800 at most) and the dialogs (ModalShell's 26000 and up), whose
+     keyboard it holds by painting over them, and under the covers over the
+     window (the reconnect cover's 30000 and up), which paint over it and
+     hold the keyboard while they show. */
   .survey-overlay {
     position: fixed;
     inset: 0;

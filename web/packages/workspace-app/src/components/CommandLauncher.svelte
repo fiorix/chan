@@ -59,6 +59,7 @@
   import {
     clearLauncherDraft,
     closeCommandLauncher,
+    commandDeckLayer,
     launcherDraft,
     openSettings,
     persistLauncherDraft,
@@ -834,6 +835,7 @@
 </script>
 
 <CommandDeck
+  --deck-layer={commandDeckLayer()}
   ownerTag={ownerTag("overlay", "launcher")}
   ownerAbove={ownerAboveOverlays}
   open={launcherDraft.visible}

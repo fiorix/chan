@@ -24,7 +24,7 @@
   // narrower panels.
 
   import type { Snippet } from "svelte";
-  import { overlayDepth, type OverlayId } from "../state/store.svelte";
+  import { overlayLayer, type OverlayId } from "../state/store.svelte";
   import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
   import { windowControlsBand } from "../state/windowTabBar.svelte";
@@ -107,12 +107,9 @@
     };
   });
 
-  // 10-step gap per depth so any same-overlay sub-layers (popovers,
-  // dropdowns) still have room above their parent without spilling
-  // into the next overlay's slot. Closed (depth -1) collapses to the
-  // base z-index, but the `{#if open}` below means we never paint
-  // anything in that state anyway.
-  const zIndex = $derived(25000 + Math.max(0, overlayDepth(id)) * 10);
+  // Closed (depth -1) collapses to the base layer, but the `{#if open}`
+  // below means we never paint anything in that state anyway.
+  const zIndex = $derived(overlayLayer(id));
 
   // Resolved panel width. An explicit `width` prop from the caller
   // wins (no overlay sets one today, but the override stays useful

@@ -5400,6 +5400,25 @@ export function overlayDepth(id: OverlayId): number {
   return overlayStack.ids.indexOf(id);
 }
 
+/// The layer an open overlay paints at: a step over the overlays' base per
+/// place in the stack, so a newer overlay paints over the one it was opened
+/// from. The 10-step gap leaves an overlay's own sub-layers (popovers,
+/// dropdowns) room above it without reaching the next overlay's.
+export function overlayLayer(id: OverlayId): number {
+  return 25000 + Math.max(0, overlayDepth(id)) * 10;
+}
+
+/// The layer the command deck paints at in this window. While it is the
+/// top overlay and no dialog or window-wide survey is up, it holds the
+/// keyboard and paints over the status bar (28000), the pane tree (28500)
+/// and the menus (29000), under the window-wide survey (29900) and the
+/// covers over the window (30000 and up). Under a dialog, the survey or an
+/// overlay opened over it, it paints at its place in the overlays' stack,
+/// so what holds the keyboard over it paints over it too.
+export function commandDeckLayer(): number {
+  return topOverlay() === "launcher" && !modalDialogOpen() ? 29800 : overlayLayer("launcher");
+}
+
 /// Id of the topmost open overlay, or `null` when nothing is up. Used
 /// by the window-level Escape handler to close one overlay at a time.
 export function topOverlay(): OverlayId | null {

@@ -1256,7 +1256,9 @@
     --deck-danger: var(--danger, var(--danger-text, #d1242f));
     position: fixed;
     inset: 0;
-    z-index: 32000;
+    /* A host that ranks the deck among layers of its own names its layer;
+       without one the deck paints over the whole page. */
+    z-index: var(--deck-layer, 32000);
     display: flex;
     align-items: flex-start;
     justify-content: center;
