@@ -37,6 +37,7 @@ import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { demoWorkspaceInfo } from "../demo/data";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
+import { bumpTabFocusPulse } from "../state/tabs.svelte";
 import { promptState, resolvePrompt, uiPrompt, workspace } from "../state/store.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 
@@ -161,4 +162,19 @@ test("a terminal that held the keyboard takes it back when the screen lock lifts
   await vi.waitFor(() => expect(document.activeElement, "the terminal holds the keyboard").toBe(textarea));
   await lockAndUnlock();
   await vi.waitFor(() => expect(document.activeElement, "the terminal once the lock lifts").toBe(textarea));
+});
+
+test("a tab-focus pulse fired under the screen lock leaves its PIN field the keyboard", async () => {
+  focusOrigin();
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  await settle();
+  const pin = backdrop.querySelector<HTMLInputElement>('input[type="password"]')!;
+  expect(document.activeElement, "the woken card's PIN field").toBe(pin);
+  bumpTabFocusPulse();
+  await settle();
+  expect(document.activeElement, "the pulse leaves the PIN field alone").toBe(pin);
 });
