@@ -236,10 +236,8 @@ describe("the lossy recovery suffix on the Ghostty core", () => {
     expect(ghosttyAlternateScreen(term), "the alt head switches to the alternate screen").toBe(true);
   });
 
-  // The old alt head, kept to settle whether "unproven" described the core
-  // or the tests: the core honors ?47h (this case is green), so it was
-  // about the tests. The product keeps ?1047h, the switch the guest suite
-  // exercises on both backends.
+  // The core honors ?47h (this case stays green on it); the product keeps
+  // ?1047h, the switch the guest suite exercises on both backends.
   test("the old ?47h head leaves the terminal on the alternate screen", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const { socket, term } = await openGhostty(tab!);

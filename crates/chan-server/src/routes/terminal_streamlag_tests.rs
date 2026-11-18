@@ -661,14 +661,13 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
     }
 }
 
-/// Acceptance 2's second clause on real sockets: a view that stops reading
-/// holds the session no longer than the 5 s release bound and does not slow
-/// a second view. Real 5 s wait, no test-only knob. What is asserted: the
-/// program finishes without the stalled view reading (no earlier than about
-/// the bound, by the >= 4 s check) and the stalled view recovers without
-/// loss (one same-generation session frame, numeric missed count, the
-/// retained tail once). The 5 s value is pinned on a synthetic clock, with
-/// no wall time, in pacing/tests::progress_renews_deadline_and_cut_loose_stays_latched
+/// Acceptance 2's second clause on real sockets, in part: what is asserted
+/// is that the program finishes without the stalled view reading (no
+/// earlier than about the 5 s release bound, by the >= 4 s check) and the
+/// stalled view recovers without loss (one same-generation session frame,
+/// numeric missed count, the retained tail once). The 5 s value is pinned
+/// on a synthetic clock, with no wall time, in
+/// pacing/tests::progress_renews_deadline_and_cut_loose_stays_latched
 /// and pacing/tests::expiring_one_view_preserves_the_other_views_credit_and_deadline.
 ///
 /// The 2 MiB ring holds the whole ~1.4 MiB flood, so no view can be evicted
@@ -684,7 +683,7 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // view's release is what lets the program finish.
     let rig = Rig::new(
         2 * 1024 * 1024,
-        "read -r _; seq 1 200000; printf '__STREAM_DONE__'",
+        "stty -onlcr; read -r _; seq 1 200000; printf '__STREAM_DONE__'",
     )
     .await;
     // Socket A attaches before the flood and reads one live frame, then
@@ -742,7 +741,10 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
                 assert_ne!(frame["type"], "error", "live view error frame: {frame}");
                 // The draining view may be released and recover without
                 // loss on a slow schedule; only loss or a new generation
-                // fails it here, and the byte comparison below judges.
+                // fails it here, and the byte comparison below judges. The
+                // "only the stalled view is released" property itself is
+                // pinned without a clock in
+                // pacing/tests::expiring_one_view_preserves_the_other_views_credit_and_deadline.
                 if let Some("session") = frame["type"].as_str() {
                     assert_eq!(
                         frame["generation"], b_session["generation"],
@@ -763,13 +765,13 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
-    // Hang guard, not a contract bound: ten times the worst measured
-    // elapsed, 5.41 s over the 40-run series in
-    // streamlag-5/series-40-final.log (host load 8 to 16 throughout),
-    // rounded up, so only a hang reaches it.
+    // Hang guard, not a contract bound: sized from a 40-run series on a
+    // Linux development host (worst measured elapsed 5.42 s; the macOS
+    // runner was never measured). A green run never prints the timing
+    // line, so the guard names it.
     assert!(
         elapsed <= std::time::Duration::from_secs(60),
-        "the drain did not complete within the hang guard: {elapsed:?}"
+        "the drain did not complete within the hang guard after {elapsed:?}"
     );
     assert!(
         held.load(Ordering::SeqCst),
@@ -778,8 +780,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let mut expected = Vec::new();
     expected.extend_from_slice(CHILD_READY);
     for index in 1..=200000 {
-        // The PTY runs with OPOST, so each newline arrives as CR LF.
-        expected.extend_from_slice(format!("{index}\r\n").as_bytes());
+        // The child disables ONLCR, so each newline arrives as LF on both
+        // systems; a macOS writer outrunning its reader through ONLCR can
+        // emit CR CR LF, which renders the same and only a byte-exact reader
+        // sees (inferred from the BSD tty output path).
+        expected.extend_from_slice(format!("{index}\n").as_bytes());
     }
     expected.extend_from_slice(DONE_MARKER);
     let mismatch = received
@@ -809,18 +814,20 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     }
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
-    // is the machine's like the drain's: a hang guard at ten times the
-    // worst measured resume, 46.3 ms over the 40-run series in
-    // streamlag-5/series-40-final.log (host load 8 to 16 throughout),
-    // rounded up, not a contract bound.
+    // is the machine's like the drain's, so the same 60 s hang guard
+    // applies (worst measured resume 46.3 ms over 40 single-test runs on
+    // a Linux development host; the macOS runner was never measured). A
+    // green run never prints the timing line, so the guard names the
+    // elapsed resume time.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_millis(500);
+    let resume_bound = std::time::Duration::from_secs(60);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
         if std::time::Instant::now() > resume_at + resume_bound {
             panic!(
-                "stalled view saw no recovery within the hang guard: sessions {sessions}, tail {} bytes",
+                "stalled view saw no recovery within the hang guard after {:?}: sessions {sessions}, tail {} bytes",
+                resume_at.elapsed(),
                 tail.len(),
             );
         }
@@ -857,7 +864,8 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         }
         if std::time::Instant::now() > resume_at + resume_bound {
             panic!(
-                "stalled view never received the retained tail within the hang guard: tail {} of {} bytes",
+                "stalled view never received the retained tail within the hang guard after {:?}: tail {} of {} bytes",
+                resume_at.elapsed(),
                 tail.len(),
                 expected.len(),
             );
@@ -1236,7 +1244,26 @@ async fn a_progressing_small_socket_receives_more_than_a_broadcast_of_real_pty_r
     let mut bytes = Vec::with_capacity(expected.len());
     let mut reads = 0;
     while bytes.len() < expected.len() {
-        match next(&mut client).await {
+        // A short stream reports its length instead of the generic stall.
+        let frame = match tokio::time::timeout(PROBE_BUDGET, client.next()).await {
+            Ok(Some(Ok(frame))) => frame,
+            Ok(Some(Err(error))) => panic!(
+                "progressing stream errored at {} of {} bytes: {error:?}",
+                bytes.len(),
+                expected.len(),
+            ),
+            Ok(None) => panic!(
+                "progressing stream ended early at {} of {} bytes",
+                bytes.len(),
+                expected.len(),
+            ),
+            Err(_) => panic!(
+                "progressing stream stalled: received {} of {} bytes",
+                bytes.len(),
+                expected.len(),
+            ),
+        };
+        match frame {
             ClientMessage::Binary(data) => {
                 reads += 1;
                 bytes.extend_from_slice(&data);
