@@ -152,6 +152,31 @@ export async function closeActiveTerminal(page, label) {
   throw new Error(`${label}: the terminal count stayed at ${last.terminals}; the pane holds ${JSON.stringify(last)}`);
 }
 
+/// Close the visible side's active tab of any kind, taking a close
+/// confirmation whose button starts with "Close", and wait until the strip
+/// lists one tab fewer.
+export async function closeActiveTab(page, label) {
+  const before = await readPaneStrip(page);
+  await dispatchCommand(page, "app.tab.close");
+  const deadline = Date.now() + 15_000;
+  let last = before;
+  while (Date.now() < deadline) {
+    last = await readPaneStrip(page);
+    if (last.tabs.length < before.tabs.length) return last;
+    const dialog = await page.$('[role="dialog"][aria-labelledby="confirm-title"]');
+    if (dialog) {
+      for (const button of await dialog.$$("button")) {
+        if (await button.evaluate((node) => node.textContent?.trim().startsWith("Close"))) {
+          await button.click();
+          break;
+        }
+      }
+    }
+    await sleep(200);
+  }
+  throw new Error(`${label}: the strip still lists ${last.tabs.length} tabs; the pane holds ${JSON.stringify(last)}`);
+}
+
 /// The live terminal sessions the server attributes to the page's window, read
 /// from the tenant's terminal roster.
 export async function windowSessions(page, token) {
