@@ -37,9 +37,9 @@ import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { demoWorkspaceInfo } from "../demo/data";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { bumpTabFocusPulse } from "../state/tabs.svelte";
+import { bumpTabFocusPulse, layout, type LeafNode } from "../state/tabs.svelte";
 import { COVER_ROOT_ATTR, promptState, resolvePrompt, setCoverBlocking, uiPrompt, workspace } from "../state/store.svelte";
-import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
+import { closeTeamDialog, openTeamDialog, teamDialogState } from "../state/teamDialog.svelte";
 
 installTerminalDom();
 
@@ -240,4 +240,24 @@ test("a dialog field left focused under the reconnect cover answers no Escape", 
     setCoverBlocking("reconnect", false);
     cover.remove();
   }
+});
+
+test("Escape on the screen lock leaves the Team dialog under it open and its lead terminal alive", async () => {
+  resetLayout([terminalTab({ id: "lead-tab", terminalSessionId: "lead-session" })]);
+  focusOrigin();
+  const request = { leadTabId: "lead-tab", leadPaneId: "pane-test" };
+  openTeamDialog(request);
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(TeamDialog, { target, props: { request } }));
+  await settle();
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  expect(document.activeElement, "the lock takes the keyboard").toBe(backdrop);
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await settle();
+  expect(teamDialogState.request, "the Team dialog stays open").not.toBeNull();
+  const tabs = Object.values(layout.nodes).flatMap((node) => (node.kind === "leaf" ? (node as LeafNode).tabs : []));
+  expect(tabs.map((tab) => tab.id), "the lead terminal stays").toContain("lead-tab");
 });
