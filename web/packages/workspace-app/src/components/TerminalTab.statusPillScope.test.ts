@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 
-// The status pill watcher must never observe the document. Under an output
-// flood (check 211 prints thousands of lines, then types into the find bar)
-// a document-wide MutationObserver re-measures on every terminal frame and
-// every find highlight restyle, and each measure forces sync layout plus a
-// style write that refires the observer: the main thread never drains and
-// CDP input dispatches time out. Scoping the observer to the always-mounted
-// status bar subtree breaks the loop: terminal and find-bar writes land
-// outside the watched subtree.
+// The status pill watcher must never observe the document. When the watcher
+// is attached (find bar or reload notice showing) under an output flood, a
+// document-wide MutationObserver re-measures on every terminal frame, and
+// each measure forces sync layout: the main thread never drains. Scoping the
+// observer to the always-mounted status bar subtree removes the hazard:
+// terminal and find-bar writes land outside the watched subtree.
+//
+// This pin does not rule on check 211's J106d timeouts: that run's opening
+// chord hung before the bar opened and the notice never renders on a fresh
+// window, so neither action was attached there. The 211 cause stays open;
+// this test only proves the watcher stays off the document when it attaches.
 //
 // The connection notice keeps its own pre-existing document-wide observer
 // (TerminalConnectionNotice.svelte): it only schedules a frame, and 211 is
