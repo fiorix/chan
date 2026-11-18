@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# The Rich Prompt keeps the keyboard on a real pointer press, the Computers
-# launcher keeps it while a deck run settles under it, and the deck opened
-# by key returns into Search: all on the desktop's WebKitGTK page.
+# Keyboard ownership on the desktop's WebKitGTK page, in this order: a real
+# press on the Rich Prompt's Submit keeps the composer's keyboard and the
+# next key types; a press in another pane moves no focus and leaves the
+# active pane; the deck opened by its chord runs a row and returns into
+# Search; with the Computers launcher shown, a deck run leaves the page's
+# focus where it was; and, last, a deck opened from a focused composer and
+# dismissed under the launcher leaves it there too. That last step fails
+# today: the deck's dismissal focuses its return target without asking the
+# keyboard rule.
 #
 # This runs under xvfb-run with a fixed screen, like terminal-size-native.sh.
-# Drivers: argv are passed to keyboard-focus-native.mjs unchanged.
-# Exit codes follow lib.sh: 0 the contract held, 1 a fault was observed,
-# 2 the environment cannot run this driver, 3 inconclusive.
+# Drivers: argv are passed to keyboard-focus-native.mjs unchanged;
+# --keep-going records every fault and runs on, for a red tree.
+# Exit codes follow lib.sh: 0 every step held, 1 a fault was observed (the
+# run's keyboard-focus.json names each in "faults"; today that is the
+# dismissal alone), 2 the environment cannot run this driver, 3 inconclusive.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
