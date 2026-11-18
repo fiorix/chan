@@ -6,9 +6,9 @@
 // for its images' paths is sent. A modal dialog, a survey over the terminal,
 // the Computers launcher and an overlay over the panes own the keyboard
 // (`refocusRefused`), and while one does none of those moves focus into the
-// composer; once it lets go, the next pulse lands in the composer again. A
-// TerminalTab is mounted over the
-// stand-in xterm and socket, so the phases arrive as the server's frames.
+// composer; once it lets go, the next pulse lands in the composer again.
+// A TerminalTab is mounted over the stand-in xterm and socket, so the
+// phases arrive as the server's frames.
 
 import { EditorView } from "@codemirror/view";
 import { mount, tick, unmount } from "svelte";

@@ -2233,9 +2233,10 @@
   /// `id` tags the message for prompt-ack / prompt-delivered tracking; omitted
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
-  /// a disconnected retry leaves the reader's viewport untouched. Returns
-  /// whether the WS was open, so the orchestrator can retry a freshly-spawned
-  /// lead.
+  /// a disconnected retry leaves the reader's viewport untouched.
+  /// Returns whether the send went out: false when the socket is not open,
+  /// so the orchestrator can retry a freshly-spawned lead, and when the
+  /// session is gone, where no retry can succeed.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     term?.scrollToBottom();
