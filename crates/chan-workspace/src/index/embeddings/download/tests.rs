@@ -286,6 +286,16 @@ fn a_download_fetches_its_pinned_commit_and_publishes_it() {
         [format!("/fixture/model/resolve/{COMMIT}/config.json")],
         "one request, for the file at its pinned commit"
     );
+    let user_agent = requests[0].lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("user-agent")
+            .then(|| value.trim())
+    });
+    assert_eq!(
+        user_agent,
+        Some(concat!("chan/", env!("CARGO_PKG_VERSION"))),
+        "the download names chan, as the updater does"
+    );
     assert_eq!(
         hf_hub::Cache::new(cache.path().to_owned())
             .model("fixture/model".into())
@@ -552,7 +562,7 @@ fn an_unusable_proxy_is_not_blamed_for_a_failure_without_a_request() {
         .get("fixture/model", "config.json")
         .expect_err("the cache cannot hold a snapshot");
     assert!(
-        matches!(&error, EmbedError::HfHub(message) if message.starts_with("I/O error")),
+        matches!(&error, EmbedError::Download(message) if message.starts_with("I/O error")),
         "the filesystem error is reported, not the proxy variable: {error:?}"
     );
     assert!(server.requests.lock().unwrap().is_empty());
@@ -696,7 +706,7 @@ fn an_unpinned_model_or_file_is_refused_before_any_request_or_write() {
             .expect_err("an unpinned file must not resolve to a cached or downloaded file");
         assert_eq!(
             error.to_string(),
-            format!("hf-hub: {model} has no pinned {filename}"),
+            format!("model download: {model} has no pinned {filename}"),
         );
         assert!(
             server.requests.lock().unwrap().is_empty(),
@@ -846,7 +856,7 @@ fn embedder_transport_failure_preserves_another_downloaders_cache() {
     let error =
         super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client)
             .expect_err("the transport fails");
-    assert!(matches!(error, EmbedError::HfHub(_)));
+    assert!(matches!(error, EmbedError::Download(_)));
     assert_eq!(
         std::fs::read(part).unwrap(),
         b"other downloader's partial bytes",

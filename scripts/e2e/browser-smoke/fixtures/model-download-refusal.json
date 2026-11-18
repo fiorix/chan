@@ -1,1 +1,1 @@
-{"error":"search error: hf-hub: request error: https://127.0.0.1:33947/fixture/model/resolve/main/config.json: Connection Failed: tls connection init failed: invalid peer certificate: UnknownIssuer (certificate verification failed)"}
+{"error":"search error: model download: request error: https://127.0.0.1:33947/fixture/model/resolve/main/config.json: Connection Failed: tls connection init failed: invalid peer certificate: UnknownIssuer (certificate verification failed)"}

@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "error": format!("search error: hf-hub: {cause} (certificate verification failed)")
+                "error": format!("search error: model download: {cause} (certificate verification failed)")
             }),
             "the model download refusal retains the complete search error envelope"
         );

@@ -26,6 +26,8 @@ const ENDPOINT: &str = "https://huggingface.co";
 /// server ends a download and a slow one does not.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// The updater's user agent.
+const USER_AGENT: &str = concat!("chan/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(test)]
 type PublicationObserver = dyn Fn(&Path) + Send + Sync;
@@ -49,9 +51,9 @@ pub(super) struct Client {
 enum DownloadError {
     #[error("request error: {0}")]
     Request(#[from] Box<ureq::Error>),
-    #[error("I/O error {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("Invalid part file - corrupted file")]
+    #[error("the server's reply does not continue the partial download")]
     InvalidResume,
     #[error("{model} has no pinned {file}")]
     Unpinned { model: String, file: String },
@@ -81,7 +83,7 @@ impl DownloadError {
         if certificate {
             EmbedError::Certificate(message)
         } else {
-            EmbedError::HfHub(message)
+            EmbedError::Download(message)
         }
     }
 }
@@ -170,7 +172,7 @@ impl Client {
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(self.read_timeout)
             .try_proxy_from_env(self.proxy_from_env)
-            .user_agent("unknown/None; hf-hub/0.4.3; rust/unknown")
+            .user_agent(USER_AGENT)
             .redirect_auth_headers(RedirectAuthHeaders::SameHost)
             .build();
         Ok(self.agent.get_or_init(|| agent))

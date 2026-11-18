@@ -54,10 +54,12 @@ pub enum EmbedError {
     Candle(String),
     #[error("tokenizer: {0}")]
     Tokenizer(String),
-    #[error("hf-hub: {0}")]
-    HfHub(String),
+    /// The model download failed: its request, a file that misses its pin,
+    /// or the cache it writes.
+    #[error("model download: {0}")]
+    Download(String),
     /// The model server's certificate failed the shared trust decision.
-    #[error("hf-hub: {0} (certificate verification failed)")]
+    #[error("model download: {0} (certificate verification failed)")]
     Certificate(String),
     /// A proxy env var (`HTTP(S)_PROXY`/`ALL_PROXY`) is set to a value the model
     /// downloader's HTTP client (ureq) cannot use, so a download would run
@@ -758,7 +760,7 @@ mod tests {
         // Pin the happy path. When refs/main + a
         // complete snapshot trio are present, the resolver returns
         // the repo dir; callers proceed to `Embedder::open` against
-        // the cached files without an hf-hub network round-trip.
+        // the cached files without a network round-trip.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join(repo_dir_name("BAAI/bge-small-en-v1.5"));
         seeded_repo(&repo);
@@ -772,7 +774,7 @@ mod tests {
         // prior download → resolver surfaces
         // ModelNotDownloaded with the expected path. The CLI / API
         // layer turns this into the "run `chan workspace index download-model`"
-        // hint instead of triggering an hf-hub network fetch.
+        // hint instead of triggering a model download.
         let tmp = tempfile::tempdir().unwrap();
         let err = resolve_model_in("BAAI/bge-small-en-v1.5", tmp.path()).unwrap_err();
         match err {
@@ -794,7 +796,7 @@ mod tests {
     fn resolve_model_errors_when_snapshot_incomplete() {
         // Half-downloaded state: refs/main present, but the
         // snapshot is missing one of the trio. Rejecting this is
-        // load-bearing -- a hf-hub download interrupted mid-flight
+        // load-bearing -- a model download interrupted mid-flight
         // can leave the dir in this shape, and we don't want the
         // embedder to open a partial model and crash mid-forward-
         // pass. ModelNotDownloaded is the right signal: the caller

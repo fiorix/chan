@@ -203,7 +203,7 @@ fn assert_certificate_error(error: &EmbedError, request_url: &str) {
     );
     let display = error.to_string();
     assert!(
-        display.starts_with(&format!("hf-hub: request error: {request_url}: ")),
+        display.starts_with(&format!("model download: request error: {request_url}: ")),
         "certificate error must retain the Hub transport context: {display}"
     );
     assert!(
