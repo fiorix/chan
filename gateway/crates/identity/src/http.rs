@@ -24,7 +24,8 @@ use uuid::Uuid;
 
 use crate::api_tokens::{
     ApiToken, ApiTokenService, AuditEntry, CreatedToken, GivenBack, NewToken, PresentedToken,
-    RequestMeta, TokenOrigin, ValidatedToken, DEFAULT_TOKEN_SCOPES,
+    RequestMeta, TokenOrigin, ValidatedToken, ACTION_REVOKED_DESKTOP, ACTION_REVOKED_MOBILE,
+    DEFAULT_TOKEN_SCOPES,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -77,6 +78,10 @@ pub struct AppState {
     /// One-time desktop-authorize redemption codes; written by the
     /// confirm handler, consumed by `/desktop/authorize/redeem`.
     pub desktop_redemptions: crate::desktop_authorize::RedemptionStore,
+    /// One-time mobile-authorize redemption codes; written by
+    /// `/mobile/authorize/confirm`, consumed only by
+    /// `/mobile/authorize/redeem`.
+    pub mobile_redemptions: crate::desktop_authorize::RedemptionStore,
     /// Which hosts the peer-list route refused and when it last said so,
     /// so an agent polling into the refusal is logged at a bounded rate.
     pub wireguard_refusals: crate::wireguard::RefusedPolls,
@@ -100,6 +105,7 @@ const RESERVED_USERNAMES: &[&str] = &[
     "blog",
     "chan",
     "dashboard",
+    "desktop",
     "developer",
     "developers",
     "docs",
@@ -110,6 +116,7 @@ const RESERVED_USERNAMES: &[&str] = &[
     "login",
     "logout",
     "me",
+    "mobile",
     "oauth",
     "owner",
     "profile",
@@ -181,6 +188,7 @@ pub fn routers(
         api_tokens,
         token_throttle,
         desktop_redemptions: Default::default(),
+        mobile_redemptions: Default::default(),
         wireguard_refusals: Default::default(),
         pool,
         session_store: store,
@@ -321,6 +329,28 @@ pub fn routers(
             "/desktop/v1/token",
             axum::routing::delete(desktop_token_revoke),
         )
+        .route("/mobile/authorize", get(crate::mobile_authorize::authorize))
+        .route(
+            "/mobile/authorize/consent",
+            get(crate::mobile_authorize::consent),
+        )
+        .route(
+            "/mobile/authorize/confirm",
+            post(crate::mobile_authorize::confirm),
+        )
+        .route(
+            "/mobile/authorize/redeem",
+            post(crate::mobile_authorize::redeem),
+        )
+        .route("/mobile/v1/devserver/entry", post(mobile_devserver_entry))
+        .route(
+            "/mobile/v1/devservers",
+            get(crate::desktop_roster::mobile_roster),
+        )
+        .route(
+            "/mobile/v1/token",
+            axum::routing::delete(mobile_token_revoke),
+        )
         .fallback(static_files::handler)
         .with_state(state)
         .layer(session_layer)
@@ -348,6 +378,9 @@ struct GatewayDiscovery {
     /// Presence tells a desktop this gateway supports account-level
     /// authorize; a gateway without the key reads as connect-mode only.
     roster_url: String,
+    mobile_authorize_url: String,
+    mobile_entry_url: String,
+    mobile_roster_url: String,
     devserver_proxy_origin: String,
     devserver_proxy_host_depth: u8,
     tunnel_url: String,
@@ -388,6 +421,24 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
             .base_url
             .join("/desktop/v1/devservers")
             .map_err(|e| Error::Anyhow(anyhow::anyhow!("discovery roster url: {e}")))?
+            .to_string(),
+        mobile_authorize_url: state
+            .cfg
+            .base_url
+            .join("/mobile/authorize")
+            .map_err(|e| Error::Anyhow(anyhow::anyhow!("discovery mobile authorize url: {e}")))?
+            .to_string(),
+        mobile_entry_url: state
+            .cfg
+            .base_url
+            .join("/mobile/v1/devserver/entry")
+            .map_err(|e| Error::Anyhow(anyhow::anyhow!("discovery mobile entry url: {e}")))?
+            .to_string(),
+        mobile_roster_url: state
+            .cfg
+            .base_url
+            .join("/mobile/v1/devservers")
+            .map_err(|e| Error::Anyhow(anyhow::anyhow!("discovery mobile roster url: {e}")))?
             .to_string(),
         devserver_proxy_origin,
         devserver_proxy_host_depth: 2,
@@ -555,11 +606,17 @@ async fn auth_callback_inner(
         {
             tracing::warn!(error = ?e, user = %user.username, "write_auth_audit (blocked) failed");
         }
-        // If the user was bounced here by /desktop/authorize, finish
-        // the flow with a loopback error redirect so the desktop client
-        // can render its own "blocked" panel.
+        // If the user was bounced here by /desktop/authorize or
+        // /mobile/authorize, finish the flow with a callback error
+        // redirect so the client can surface the blocked reason.
         if let Some(params) = crate::desktop_authorize::take_pending(&session).await? {
             return Ok(Redirect::to(&crate::desktop_authorize::error_url(
+                &params,
+                "account_blocked",
+            )));
+        }
+        if let Some(params) = crate::mobile_authorize::take_pending(&session).await? {
+            return Ok(Redirect::to(&crate::mobile_authorize::error_url(
                 &params,
                 "account_blocked",
             )));
@@ -597,10 +654,16 @@ async fn auth_callback_inner(
         {
             tracing::warn!(error = ?e, user = %user.username, "write_auth_audit (oauth_login deny) failed");
         }
-        // Desktop bounce: route the deny back to chan-desktop via the
-        // loopback callback query so the desktop client can surface it.
+        // Desktop / mobile bounce: route the deny back to the client via
+        // its validated callback query so the client can surface it.
         if let Some(params) = crate::desktop_authorize::take_pending(&session).await? {
             return Ok(Redirect::to(&crate::desktop_authorize::error_url(
+                &params,
+                "oauth_denied",
+            )));
+        }
+        if let Some(params) = crate::mobile_authorize::take_pending(&session).await? {
+            return Ok(Redirect::to(&crate::mobile_authorize::error_url(
                 &params,
                 "oauth_denied",
             )));
@@ -719,6 +782,12 @@ async fn auth_callback_inner(
         .is_some()
     {
         return Ok(Redirect::to(crate::desktop_authorize::CONSENT_PATH));
+    }
+    if crate::mobile_authorize::peek_pending(&session)
+        .await?
+        .is_some()
+    {
+        return Ok(Redirect::to(crate::mobile_authorize::CONSENT_PATH));
     }
 
     // Resume share landing (or any other stashed return path) if the
@@ -1234,9 +1303,9 @@ async fn tokens_create(
 ) -> Result<(StatusCode, Json<CreatedTokenView>)> {
     let uid = current_active_user(&state, &session).await?.id;
     if body.scopes.as_ref().is_some_and(|scopes| {
-        scopes
-            .iter()
-            .any(|scope| scope.starts_with(DESKTOP_SCOPE_PREFIX))
+        scopes.iter().any(|scope| {
+            scope.starts_with(DESKTOP_SCOPE_PREFIX) || scope.starts_with(MOBILE_SCOPE_PREFIX)
+        })
     }) {
         return Err(Error::BadRequest("invalid scopes".into()));
     }
@@ -1349,16 +1418,50 @@ async fn desktop_token_revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode> {
+    client_token_revoke(
+        state,
+        headers,
+        &[DESKTOP_CONNECT_SCOPE, DESKTOP_ACCOUNT_SCOPE],
+        ACTION_REVOKED_DESKTOP,
+        "desktop",
+    )
+    .await
+}
+
+/// `DELETE /mobile/v1/token` -- a mobile `mobile.account` PAT revokes
+/// itself under [`ACTION_REVOKED_MOBILE`], running [`cut_given_back_token`]
+/// when the token had been used.
+async fn mobile_token_revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode> {
+    client_token_revoke(
+        state,
+        headers,
+        &[MOBILE_ACCOUNT_SCOPE],
+        ACTION_REVOKED_MOBILE,
+        "mobile",
+    )
+    .await
+}
+
+async fn client_token_revoke(
+    state: AppState,
+    headers: HeaderMap,
+    allowed_scopes: &[&str],
+    audit_action: &'static str,
+    client_label: &'static str,
+) -> Result<StatusCode> {
     let token = bearer_token(&headers).ok_or(Error::Unauthorized)?;
     let presented = state.api_tokens.presented(token).await?;
     if !presented
         .scopes
         .iter()
-        .any(|scope| scope == DESKTOP_CONNECT_SCOPE || scope == DESKTOP_ACCOUNT_SCOPE)
+        .any(|scope| allowed_scopes.contains(&scope.as_str()))
     {
         tracing::warn!(
             user = %presented.username,
-            "desktop token revoke denied: no desktop scope on the token",
+            "{client_label} token revoke denied: no {client_label} scope on the token",
         );
         return Err(Error::Unauthorized);
     }
@@ -1371,7 +1474,7 @@ async fn desktop_token_revoke(
     let give_back = async move {
         let given_back = state
             .api_tokens
-            .give_back(presented.user_id, presented.token_id, &meta)
+            .give_back_with_action(presented.user_id, presented.token_id, audit_action, &meta)
             .await?;
         match given_back {
             Some(GivenBack::Unused) => {}
@@ -1896,6 +1999,14 @@ pub(crate) const DESKTOP_CONNECT_SCOPE: &str = "desktop.connect";
 /// (`desktop_authorize::validate`).
 pub(crate) const DESKTOP_ACCOUNT_SCOPE: &str = "desktop.account";
 
+/// Prefix shared by mobile scopes. `tokens_create` refuses it; the mobile
+/// authorize flow and `admin_tokens_create` are their mint paths.
+pub(crate) const MOBILE_SCOPE_PREFIX: &str = "mobile.";
+
+/// Account-level mobile scope: sole scope issued by `/mobile/authorize`
+/// and accepted exclusively on `/mobile/v1/*`.
+pub(crate) const MOBILE_ACCOUNT_SCOPE: &str = "mobile.account";
+
 /// The dial scope: a PAT carrying it can register on chan-tunnel, so
 /// it IS a devserver (`devserver_id` = sha256 of the PAT is the
 /// tunnel-registry key). This is what gates devserver-row
@@ -1979,22 +2090,54 @@ async fn desktop_devserver_entry(
     headers: HeaderMap,
     Json(body): Json<DesktopEntryBody>,
 ) -> Result<Response> {
+    client_devserver_entry(
+        state,
+        headers,
+        body,
+        &[DESKTOP_CONNECT_SCOPE, DESKTOP_ACCOUNT_SCOPE],
+        gateway_common::devserver_gate::ClientType::Desktop,
+        "desktop",
+    )
+    .await
+}
+
+async fn mobile_devserver_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<DesktopEntryBody>,
+) -> Result<Response> {
+    client_devserver_entry(
+        state,
+        headers,
+        body,
+        &[MOBILE_ACCOUNT_SCOPE],
+        gateway_common::devserver_gate::ClientType::Mobile,
+        "mobile",
+    )
+    .await
+}
+
+async fn client_devserver_entry(
+    state: AppState,
+    headers: HeaderMap,
+    body: DesktopEntryBody,
+    allowed_scopes: &[&str],
+    client_type: gateway_common::devserver_gate::ClientType,
+    client_label: &'static str,
+) -> Result<Response> {
     let token = bearer_token(&headers).ok_or(Error::Unauthorized)?;
     let validated = state
         .api_tokens
         .validate(token, &request_meta(&headers))
         .await?;
-    // Either desktop.connect or desktop.account opens the entry mint.
-    // The profile access check authorizes the selected devserver for
-    // the caller regardless of the PAT's scope.
     if !validated
         .scopes
         .iter()
-        .any(|scope| scope == DESKTOP_CONNECT_SCOPE || scope == DESKTOP_ACCOUNT_SCOPE)
+        .any(|scope| allowed_scopes.contains(&scope.as_str()))
     {
         tracing::warn!(
             user = %validated.username,
-            "desktop entry denied: no desktop scope on the token",
+            "{client_label} entry denied: no {client_label} scope on the token",
         );
         return Err(Error::Unauthorized);
     }
@@ -2151,20 +2294,17 @@ async fn desktop_devserver_entry(
         tenant_url.scheme(),
         &tenant.authority,
     );
-    // This route is how chan-desktop opens its gateway sessions: a
-    // desktop-scoped PAT presented by native code, which exchanges the
-    // credential itself. It is the only mint for the desktop client.
     let entry_token = gateway_common::devserver_gate::encode_entry(
         &state.cfg.entry_signer,
         validated.user_id,
         owner_id,
-        gateway_common::devserver_gate::ClientType::Desktop,
+        client_type,
         &devserver_id,
         &aud,
         &proxy_id,
         &path,
     )
-    .map_err(|e| Error::Anyhow(anyhow::anyhow!("mint desktop entry token: {e}")))?;
+    .map_err(|e| Error::Anyhow(anyhow::anyhow!("mint {client_label} entry token: {e}")))?;
     let proxy_origin = tenant.origin;
     let entry_exchange_url = format!(
         "{}{}",
@@ -2176,7 +2316,7 @@ async fn desktop_devserver_entry(
         owner = %owner_username,
         devserver_id = %devserver_id,
         path = %path,
-        "desktop entry: minted entry credential",
+        "{client_label} entry: minted entry credential",
     );
     let mut response = Json(DesktopEntryResponse {
         owner_user_id: owner_id,
@@ -3266,6 +3406,8 @@ mod tests {
                 pair[1]
             );
         }
+        assert!(RESERVED_USERNAMES.binary_search(&"desktop").is_ok());
+        assert!(RESERVED_USERNAMES.binary_search(&"mobile").is_ok());
     }
 
     #[test]
@@ -3467,5 +3609,106 @@ mod tests {
             append_denied_marker(&base, "/account/?tab=access").unwrap(),
             "/account/?tab=access&denied=oauth_login"
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_and_mobile_redeem_routes_refuse_cross_redemption() {
+        use tower::ServiceExt;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .unwrap();
+        pool.close().await;
+        let state = AppState {
+            cfg: Arc::new(crate::config::test_config("https://proxy.chan.app")),
+            api_tokens: ApiTokenService::new(pool.clone()),
+            token_throttle: TokenThrottle::new(),
+            desktop_redemptions: Default::default(),
+            mobile_redemptions: Default::default(),
+            wireguard_refusals: Default::default(),
+            pool: pool.clone(),
+            session_store: PostgresStore::new(pool),
+        };
+
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = crate::desktop_authorize::challenge_for(verifier);
+        let desktop_code = state.desktop_redemptions.insert(
+            crate::desktop_authorize::RedeemPayload {
+                id: Uuid::nil(),
+                secret: "chan_pat_desktop".into(),
+                label: "desktop".into(),
+                expires_at: None,
+                wireguard: None,
+            },
+            challenge.clone(),
+        );
+        let mobile_code = state.mobile_redemptions.insert(
+            crate::desktop_authorize::RedeemPayload {
+                id: Uuid::nil(),
+                secret: "chan_pat_mobile".into(),
+                label: "mobile".into(),
+                expires_at: None,
+                wireguard: None,
+            },
+            challenge,
+        );
+
+        let app = Router::new()
+            .route(
+                "/desktop/authorize/redeem",
+                post(crate::desktop_authorize::redeem),
+            )
+            .route(
+                "/mobile/authorize/redeem",
+                post(crate::mobile_authorize::redeem),
+            )
+            .with_state(state);
+
+        let post_redeem = |uri: &str, code: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({
+                "code": code,
+                "code_verifier": verifier,
+            })
+            .to_string();
+            let req = axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            async move {
+                let res = app.oneshot(req).await.unwrap();
+                let status = res.status();
+                let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                (status, bytes)
+            }
+        };
+
+        assert_eq!(
+            post_redeem("/mobile/authorize/redeem", &desktop_code)
+                .await
+                .0,
+            StatusCode::GONE
+        );
+        assert_eq!(
+            post_redeem("/desktop/authorize/redeem", &mobile_code)
+                .await
+                .0,
+            StatusCode::GONE
+        );
+
+        let (d_status, d_bytes) = post_redeem("/desktop/authorize/redeem", &desktop_code).await;
+        assert_eq!(d_status, StatusCode::OK);
+        let d_json: serde_json::Value = serde_json::from_slice(&d_bytes).unwrap();
+        assert_eq!(d_json["secret"], "chan_pat_desktop");
+
+        let (m_status, m_bytes) = post_redeem("/mobile/authorize/redeem", &mobile_code).await;
+        assert_eq!(m_status, StatusCode::OK);
+        let m_json: serde_json::Value = serde_json::from_slice(&m_bytes).unwrap();
+        assert_eq!(m_json["secret"], "chan_pat_mobile");
+        assert!(m_json.get("wireguard").is_none(), "{m_json}");
     }
 }
