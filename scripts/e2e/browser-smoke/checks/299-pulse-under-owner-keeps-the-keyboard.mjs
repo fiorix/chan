@@ -40,9 +40,10 @@ async function until(label, read, accept, timeout = 15_000) {
 }
 
 /// The text of the visible surface of `kind` ("editor" or "files") that
-/// holds `marker`, or null while none does.
+/// holds `marker`, or null while none does. An inactive editor tab keeps
+/// its box under `visibility: hidden`, so the editor must be the active one.
 const surfaceText = (page, kind, marker) => page.evaluate((kind, marker) => {
-  const selector = kind === "editor" ? ".editor-tab" : ".browser";
+  const selector = kind === "editor" ? ".editor-tab.active" : ".browser";
   for (const node of document.querySelectorAll(selector)) {
     const box = node.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) continue;
@@ -105,6 +106,13 @@ export default {
               opened = true;
               leg.surface = await until(`precondition: the ${kind} tab shows ${target}`,
                 () => surfaceText(page, kind, marker), (text) => text !== null);
+              // The opened tab is the strip's selected one: a tab that never
+              // came forward runs no focus mover, and 1 would answer anyway.
+              const tabName = target.replace(/\/$/, "");
+              leg.selected = await until(`precondition: the strip selects the ${kind} tab for ${tabName}`,
+                () => page.evaluate(() => [...document.querySelectorAll('.tab-label[role="tab"][aria-selected="true"]')]
+                  .map((label) => ({ text: label.textContent?.trim() ?? "", title: label.closest(".tab")?.getAttribute("title") ?? "" }))),
+                (selected) => selected.some((tab) => tab.text.includes(tabName) || tab.title.includes(tabName)));
               await settle(page);
               await sleep(500);
               leg.afterOpen = await keyboardAt(page);
