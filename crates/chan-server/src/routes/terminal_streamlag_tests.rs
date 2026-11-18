@@ -769,11 +769,12 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
-    // Hang guard, not a contract bound: provisional 120 s for the
-    // measurement series below; finalized at ten times its worst there.
-    // A green run never prints the timing line, so the guard names it.
+    // Hang guard, not a contract bound: 60 s is eleven times the 5.57 s
+    // worst of 40 single-test runs on a Linux development host, and still
+    // clears a ten-times-slower machine. A green run never prints the
+    // timing line, so the guard names it.
     assert!(
-        elapsed <= std::time::Duration::from_secs(120),
+        elapsed <= std::time::Duration::from_secs(60),
         "the drain did not complete within the hang guard after {elapsed:?}"
     );
     assert!(
@@ -817,10 +818,12 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     }
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
-    // is the machine's like the drain's, so the same hang guard applies;
-    // provisional like the drain's, finalized from the series below.
+    // is the machine's like the drain's, so a hang guard, not a contract
+    // bound, applies: 1 s is twenty times the 47 ms worst of 40
+    // single-test runs on a Linux development host, and still clears a
+    // ten-times-slower machine with room for another tail move.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_secs(120);
+    let resume_bound = std::time::Duration::from_secs(1);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
