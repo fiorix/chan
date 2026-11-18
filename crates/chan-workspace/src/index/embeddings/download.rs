@@ -401,7 +401,9 @@ impl Client {
                     break;
                 }
                 if read as u64 > remaining {
-                    part.set_len(start)?;
+                    // A reply longer than its range would meet the next
+                    // attempt the same way: that attempt starts clean.
+                    part.set_len(0)?;
                     return Err(DownloadError::InvalidResume);
                 }
                 part.write_all(&buffer[..read])?;

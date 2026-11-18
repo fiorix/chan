@@ -1091,25 +1091,26 @@ fn a_short_transfer_stays_partial_and_resumes_on_the_next_attempt() {
 }
 
 #[test]
-fn excess_after_written_chunks_rolls_back_to_the_original_partial() {
+fn excess_after_written_chunks_empties_the_part_for_the_next_attempt() {
     let cache = tempfile::tempdir().unwrap();
     let body = vec![b'x'; 128 * 1024 + 3];
-    let prefix = body[..3].to_vec();
-    let part = part_file(cache.path(), &prefix);
+    let part = part_file(cache.path(), &body[..3]);
     let pinned = fixture(&body);
-    let server = Server::start(move |request| {
-        if requested_range(request) != "bytes=3-" {
-            return response("400 Bad Request", "", b"unexpected large-body resume range");
+    let server = Server::start(move |request| match requested_range(request) {
+        // The asked range and then more, with no length to refuse it by.
+        "bytes=3-" => {
+            let mut bytes = format!(
+                "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nContent-Range: bytes 3-{}/{}\r\n\r\n",
+                body.len() - 1,
+                body.len()
+            )
+            .into_bytes();
+            bytes.extend_from_slice(&body[3..]);
+            bytes.extend_from_slice(b"excess");
+            bytes
         }
-        let mut bytes = format!(
-            "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nContent-Range: bytes 3-{}/{}\r\n\r\n",
-            body.len() - 1,
-            body.len()
-        )
-        .into_bytes();
-        bytes.extend_from_slice(&body[3..]);
-        bytes.extend_from_slice(b"excess");
-        bytes
+        "bytes=0-" => range_response(&body, 0),
+        _ => response("400 Bad Request", "", b"unexpected large-body range"),
     });
     let client = Client::with_config(
         cache.path(),
@@ -1122,12 +1123,24 @@ fn excess_after_written_chunks_rolls_back_to_the_original_partial() {
         "an excess body must refuse publication after earlier chunks were written"
     );
     assert_eq!(
-        std::fs::read(part).unwrap(),
-        prefix,
-        "excess body must roll back chunks appended before the overflow"
+        std::fs::read(&part).unwrap(),
+        b"",
+        "the refused part is emptied, so the same request is not refused again"
     );
     assert!(!snapshot(cache.path()).join("config.json").exists());
-    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    client
+        .get("fixture/model", "config.json")
+        .expect("the next attempt starts clean");
+    assert_eq!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| requested_range(request))
+            .collect::<Vec<_>>(),
+        ["bytes=3-", "bytes=0-"]
+    );
 }
 
 /// The default model's pinned snapshot in `cache`.
