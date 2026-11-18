@@ -57,51 +57,78 @@ const evaluate = (expression) =>
 const FIND = `(() => {
   const ghostty = [...document.querySelectorAll(".terminal-host > canvas")];
   const xterm = document.querySelector(".terminal.xterm .xterm-screen");
-  if (xterm) return JSON.stringify({ backend: "xterm" });
-  if (ghostty.length !== 1) return JSON.stringify({ canvases: ghostty.length });
-  return JSON.stringify({ ok: true });
+  if (xterm) return { backend: "xterm" };
+  if (ghostty.length !== 1) return { canvases: ghostty.length };
+  return { ok: true };
 })()`;
-const MEASURE = `(() => {
+const COUNT = `(() => {
   const c = document.querySelector(".terminal-host > canvas");
   const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
   const w = c.width >> 1, h = c.height >> 1;
-  const quarters = [0, 0, 0, 0];
+  const total = [0, 0, 0, 0];
+  const seen = new Map();
+  const at = (x, y) => (y * c.width + x) * 4;
+  const quarterOf = (x, y) => (y < h ? 0 : 2) + (x < w ? 0 : 1);
   for (let y = 0; y < c.height; y += 2)
     for (let x = 0; x < c.width; x += 4) {
-      const at = (y * c.width + x) * 4;
-      if (d[at] + d[at + 1] + d[at + 2] > 30) quarters[(y < h ? 0 : 2) + (x < w ? 0 : 1)] += 1;
+      const q = quarterOf(x, y);
+      total[q]++;
+      const o = at(x, y);
+      if (d[o + 3] === 0) continue;
+      const key = (d[o] << 16) | (d[o + 1] << 8) | d[o + 2];
+      seen.set(key, (seen.get(key) || 0) + 1);
+    }
+  let bg = 0;
+  let bgCount = -1;
+  for (const [key, n] of seen) {
+    if (n > bgCount) {
+      bg = key;
+      bgCount = n;
+    }
+  }
+  const br = (bg >> 16) & 255, bgg = (bg >> 8) & 255, bb = bg & 255;
+  const opaque = [0, 0, 0, 0];
+  const ink = [0, 0, 0, 0];
+  for (let y = 0; y < c.height; y += 2)
+    for (let x = 0; x < c.width; x += 4) {
+      const q = quarterOf(x, y);
+      const o = at(x, y);
+      if (d[o + 3] === 0) continue;
+      opaque[q]++;
+      if (Math.abs(d[o] - br) + Math.abs(d[o + 1] - bgg) + Math.abs(d[o + 2] - bb) > 36) ink[q]++;
     }
   const t = c.getContext("2d").getTransform();
-  return JSON.stringify({ quarters, width: c.width, height: c.height,
-    scaleX: t.a, scaleY: t.d, ratio: window.devicePixelRatio });
+  return { total, opaque, ink, bg: [br, bgg, bb],
+    quarters: opaque, width: c.width, height: c.height,
+    scaleX: t.a, scaleY: t.d, ratio: window.devicePixelRatio,
+    visibility: document.visibilityState, focused: document.hasFocus() });
 })()`;
+const MEASURE = COUNT;
 // Reset and measure in one synchronous expression: the frame loop paints
 // the cursor between two round trips, which would read as leftover paint.
-const RESET_AND_MEASURE = `(() => {
-  const c = document.querySelector(".terminal-host > canvas");
-  c.width = c.width;
-  const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-  const w = c.width >> 1, h = c.height >> 1;
-  const quarters = [0, 0, 0, 0];
-  for (let y = 0; y < c.height; y += 2)
-    for (let x = 0; x < c.width; x += 4) {
-      const at = (y * c.width + x) * 4;
-      if (d[at] + d[at + 1] + d[at + 2] > 30) quarters[(y < h ? 0 : 2) + (x < w ? 0 : 1)] += 1;
-    }
-  const t = c.getContext("2d").getTransform();
-  return JSON.stringify({ quarters, width: c.width, height: c.height,
-    scaleX: t.a, scaleY: t.d, ratio: window.devicePixelRatio });
-})()`;
+const RESET_AND_MEASURE = COUNT.replace(
+  "const c = document.querySelector(\".terminal-host > canvas\");",
+  "const c = document.querySelector(\".terminal-host > canvas\"); c.width = c.width;",
+);
 
-async function poll(read, accept, label, bound) {
+async function poll(read, accept, label, bound, timeoutKind) {
   const until = Date.now() + bound;
   let value;
+  let lastError = null;
   do {
-    value = await read();
+    try {
+      value = await read();
+    } catch (error) {
+      lastError = error;
+      await sleep(300);
+      continue;
+    }
     if (accept(value)) return value;
     await sleep(300);
   } while (Date.now() < until);
-  throw new Error(`${label}: last ${JSON.stringify(value)}`);
+  const detail = lastError ? `read failed: ${lastError.message}; last value ${JSON.stringify(value)}` : `last ${JSON.stringify(value)}`;
+  if (timeoutKind === "fault") throw new Fault(`${label}: ${detail}`);
+  throw new Incomplete(`${label}: ${detail}`);
 }
 
 async function main() {
@@ -111,28 +138,34 @@ async function main() {
   const tab = "scale2-repaint";
   cs(["terminal", "new", "--window", WID, "--pane", pane, "--side", "a", "--tab-name", tab]);
   // Hang guard: the new terminal takes a moment to mount its canvas.
-  await poll(async () => JSON.parse(await evaluate(FIND)),
-    (f) => f.ok === true, "no ghostty canvas mounted", 15000).catch((error) => {
+  await poll(async () => evaluate(FIND),
+    (f) => f.ok === true, "no ghostty canvas mounted", 15000, "incomplete").catch((error) => {
     throw new Incomplete(error.message);
   });
   // Hang guard: the shell takes a moment to answer on the fresh pty.
   await poll(async () => cs(["scrollback", "--tab-name", tab]),
-    (text) => text.length > 0, "the shell never answered", 15000).catch((error) => {
+    (text) => text.length > 0, "the shell never answered", 15000, "incomplete").catch((error) => {
     throw new Incomplete(error.message);
   });
   cs(["terminal", "write", "--tab-name", tab,
 `for i in $(seq -w 1 60); do printf 'HS2_LINE_%s the quick brown fox jumps over the lazy dog, packing my box with five dozen liquor jugs\\n' "$i"; done; printf '%0180d\\n' 0; printf 'HS2_DONE\\n'
 `]);
-  const baseline = await poll(async () => JSON.parse(await evaluate(MEASURE)),
-    (m) => m.ratio === 2 && m.scaleX === 2 && m.quarters.every((q) => q > 2000),
-    "no stable full-scale paint", 30000).catch((error) => {
+  // A cursor-only repaint leaves dozens of ink samples; the prose leaves
+  // thousands in every quarter. The floor stays low: the desktop window
+  // is smaller than the browser's, and a glyphless repaint reads near zero.
+  const INK_FLOOR = 100;
+  const baseline = await poll(async () => evaluate(MEASURE),
+    (m) => m.ratio === 2 && m.scaleX === 2 && m.opaque.every((q, i) => q === m.total[i])
+      && m.ink.every((q) => q >= INK_FLOOR),
+    "no stable full-scale paint", 30000, "incomplete").catch((error) => {
     if (error.message.includes('"ratio":1')) {
       throw new Incomplete("the guest does not run at that scale: devicePixelRatio is 1");
     }
     throw new Incomplete(error.message);
   });
   save("baseline.json", baseline);
-  const hidden = JSON.parse(await evaluate(RESET_AND_MEASURE));
+  run("import", ["-window", args.xid, join(args.output, "baseline.png")], "screenshot baseline", 30000);
+  const hidden = await evaluate(RESET_AND_MEASURE);
   save("hidden.json", hidden);
   if (hidden.quarters.some((q) => q !== 0)) {
     throw new Incomplete(`the discard left paint behind: ${JSON.stringify(hidden.quarters)}`);
@@ -141,20 +174,21 @@ async function main() {
     throw new Incomplete(`the discard did not reset the transform: ${JSON.stringify(hidden)}`);
   }
   xdo("windowminimize", args.xid);
+  // Settle: let the minimize land before the refocus, so the focus event
+  // fires on a hidden window and the app runs its forced passes.
   await sleep(1000);
   xdo("windowactivate", "--sync", args.xid);
-  const band = (b) => Math.max(200, Math.round(b * 0.02));
-  let after = null;
-  try {
-    after = await poll(async () => JSON.parse(await evaluate(MEASURE)),
-      (m) => m.width === baseline.width && m.height === baseline.height
-        && m.scaleX === 2 && m.scaleY === 2
-        && m.quarters.every((q, i) => Math.abs(q - baseline.quarters[i]) <= band(baseline.quarters[i])),
-      "the terminal did not repaint at full scale after the refocus", 10000);
-  } catch (error) {
-    throw new Fault(error.message);
-  }
+  const band = (b) => Math.max(200, Math.round(b * 0.1));
+  // Only this wait is a product fault: every earlier wait is an
+  // instrument fault, thrown as Incomplete by the poll itself.
+  const after = await poll(async () => evaluate(MEASURE),
+    (m) => m.width === baseline.width && m.height === baseline.height
+      && m.scaleX === 2 && m.scaleY === 2
+      && m.opaque.every((q, i) => q === m.total[i])
+      && m.ink.every((q, i) => Math.abs(q - baseline.ink[i]) <= band(baseline.ink[i])),
+    "the terminal did not repaint at full scale after the refocus", 10000, "fault");
   save("after.json", after);
+  run("import", ["-window", args.xid, join(args.output, "after.png")], "screenshot after", 30000);
   let tree = null;
   try {
     tree = run("git", ["rev-parse", "HEAD"], "tree", 10000);

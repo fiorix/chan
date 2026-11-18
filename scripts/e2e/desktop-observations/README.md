@@ -21,6 +21,8 @@ Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make p
 
 - **`macos-wake-blank.sh`** is the one driver for macOS, and it drives nothing: it reads the unified log for how long each chan-desktop page stayed blank after it came back into view (a display or system wake, a switch back to its Space or tile) and fails over a limit. See "Blank after a wake on macOS" below.
 
+- **`scale2-repaint.sh`** opens one ghostty terminal on the desktop at `GDK_SCALE=2`, paints pages, drops the canvas drawing state by a same-size reset, and refocuses the window so the app runs its forced passes. It reads painted pixels per quarter plus the transform before and after: at full scale the repaint lands and the run holds; at half scale the paint stays in the top-left quarter and the run faults. Only the after-refocus miss is a product fault; every earlier miss is inconclusive, and a guest that does not run at scale 2 is refused with that line.
+
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
 
 The Focus/Open fixture also needs Chrome and `puppeteer-core`; the PDF fixture needs the browser smoke's `pdf-lib`. Install the smoke's dependencies in the owning guest and set `OBS_SMOKE_DIR` to that directory when running a copied driver subtree. Set `CHROME_BIN` to the guest's Chrome for Focus/Open. The fixture outputs describe Linux WebKitGTK and a direct devserver connection only.

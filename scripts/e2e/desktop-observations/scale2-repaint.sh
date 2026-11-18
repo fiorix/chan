@@ -47,9 +47,14 @@ INSPECTOR="127.0.0.1:${OBS_INSPECTOR_PORT:-$((20000 + RANDOM % 20000))}"
 export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"
 obs_start_desktop
 
+WEBKIT_VERSION="$(pkg-config --modversion webkit2gtk-4.1)" || obs_refuse "pkg-config names no webkit2gtk-4.1"
+obs_log "engine: WebKitGTK $WEBKIT_VERSION; display $DISPLAY; GDK_SCALE=$GDK_SCALE"
+echo "$WEBKIT_VERSION" > "$output/engine-package.txt"
+
 WS="$OBS_WORK/ws"
 mkdir -p "$WS"
-chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off"
+timeout --signal=TERM --kill-after=5s 60s chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 \
+    || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
 workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
 xid="$(workspace_xid)"
