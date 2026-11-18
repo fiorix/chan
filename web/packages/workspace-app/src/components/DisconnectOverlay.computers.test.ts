@@ -243,6 +243,7 @@ describe("Show in Computers on the reconnecting cover", () => {
     await settle();
     expect(invoke).toHaveBeenCalledWith("show_computers_for_window", undefined);
     expect(action.disabled, "the action holds while the desktop answers").toBe(true);
+    expect(action.textContent?.trim(), "and says so, as Restart connection and Abandon do").toBe("Showing...");
 
     // The screen takes the keyboard before the desktop answers, and a
     // browser drops focus from a button as it becomes disabled; jsdom keeps
@@ -253,6 +254,7 @@ describe("Show in Computers on the reconnecting cover", () => {
     shown();
     await settle();
     expect(action.disabled).toBe(false);
+    expect(action.textContent?.trim()).toBe("Show in Computers");
     expect(document.activeElement, "the shown screen keeps the keyboard").toBe(stray);
     expect(target.querySelector(".error")).toBeNull();
 

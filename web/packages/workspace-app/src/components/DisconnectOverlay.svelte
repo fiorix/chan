@@ -397,7 +397,7 @@
             disabled={pendingAction !== null}
             onclick={showComputers}
           >
-            Show in Computers
+            {pendingAction === "computers" ? "Showing..." : "Show in Computers"}
           </button>
         </div>
       {/if}
