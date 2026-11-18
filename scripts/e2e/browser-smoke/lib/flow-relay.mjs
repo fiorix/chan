@@ -5,10 +5,10 @@
 
 import { createServer, connect } from "node:net";
 
-/// Start a relay on a free loopback port to `targetPort`. Each flow records
-/// its request path and head (the request line and headers, latin1) once
-/// they have arrived.
-export async function startRelay(targetPort) {
+/// Start a relay on a free loopback port to `targetPort` on `host`. Each
+/// flow records its request path and head (the request line and headers,
+/// latin1) once they have arrived.
+export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
   const flows = [];
   const taps = [];
   let silent = false;
@@ -93,7 +93,7 @@ export async function startRelay(targetPort) {
     flow.resume.push(direction(client, () => flow.upstream, 0));
     flow.openUpstream = () => {
       if (flow.upstream || client.destroyed || flow.clientEnded || client.readableEnded) return;
-      const upstream = connect({ host: "127.0.0.1", port: targetPort, allowHalfOpen: true });
+      const upstream = connect({ host, port: targetPort, allowHalfOpen: true });
       flow.upstream = upstream;
       flow.resume.push(direction(upstream, () => client, 1));
       upstream.on("drain", () => flow.resume[0](true));

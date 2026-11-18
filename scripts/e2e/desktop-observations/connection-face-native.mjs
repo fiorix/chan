@@ -1,10 +1,16 @@
 #!/usr/bin/env node
-// Reads a direct devserver's connection face on the real WebKitGTK Computers
-// screen while a relay between the desktop and the devserver delays,
-// silences, drops and restores every flow. The shell driver owns the
-// desktop and the display; this owns the devserver and the relay, and counts
+// Reads a devserver's connection face on the real WebKitGTK Computers screen
+// through a relay that delays, silences, drops and restores its flows. The
+// shell driver owns the desktop and the display; this owns the devserver and
+// the relay.
+//
+// Direct: the relay sits between the desktop and the devserver, and counts
 // the `{"type":"ping"}` frames the desktop sends on the devserver's window
 // feed, told from a page's own by the request: a page's carries its origin.
+// Gateway (a fixture from `gateway-zone.sh connface`): the devserver's tunnel
+// to the gateway's proxy passes through the relay, so a delay there slows
+// only replies that cross the tunnel, and a face that reads slow shows the
+// reply came from the devserver, not from the gateway.
 //
 // Exit 0 when every reading held, 10 when one did not, 3 when a step the
 // readings rest on did not happen.
@@ -17,15 +23,16 @@ import { fileURLToPath } from "node:url";
 import { clientFrameReader, startRelay } from "../browser-smoke/lib/flow-relay.mjs";
 
 const run = promisify(execFile);
-const [inspector, work, chan] = process.argv.slice(2);
+const [inspector, work, chan, fixturePath] = process.argv.slice(2);
+const fixture = fixturePath ? JSON.parse(fs.readFileSync(fixturePath)) : null;
 const here = path.dirname(fileURLToPath(import.meta.url));
-const LABEL = "face-test";
+const LABEL = fixture ? "face-gateway" : "face-test";
 const FEED_PATH = "/api/library/windows/watch";
 const DELAY_EACH_WAY_MS = 650;
 const FOCUSED_CADENCE_MS = 3_000;
 const CADENCE_SPAN_MS = 15_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const secrets = [];
+const secrets = fixture ? [fixture.pat.secret, fixture.tunnelPat] : [];
 const mask = (text) => secrets.reduce((s, secret) => s.replaceAll(secret, "<token>"), String(text))
   .replace(/([?&]t=)[^&\s"']+/g, "$1<token>");
 const checks = [];
@@ -76,10 +83,13 @@ async function api(base, token, method, route, body) {
 }
 
 // The card as the launcher shows it, read in whichever page holds the deck.
-const READ = `(() => {
+let cardKey = null;
+const findSlot = () => cardKey
+  ? `[...document.querySelectorAll('.slot')].find((s) => s.getAttribute('data-key') === ${JSON.stringify(cardKey)})`
+  : `[...document.querySelectorAll('.slot')].find((s) => [...s.querySelectorAll('.ds-name-row .row-name')].some((n) => n.textContent.trim() === ${JSON.stringify(LABEL)}))`;
+const READ = () => `(() => {
   if (!document.querySelector('.slot')) return { skip: true };
-  const slots = [...document.querySelectorAll('.slot')];
-  const slot = slots.find((s) => [...s.querySelectorAll('.ds-name-row .row-name')].some((n) => n.textContent.trim() === ${JSON.stringify(LABEL)}));
+  const slot = ${findSlot()};
   const local = document.querySelector('.slot[data-key="local"]');
   const face = slot?.querySelector('.ds-name-row .connection-face');
   const detail = slot?.querySelector('.ds-health .connection-detail');
@@ -105,7 +115,7 @@ async function inspectAll(expression) {
 }
 
 async function readCard(step) {
-  const pages = await inspectAll(READ);
+  const pages = await inspectAll(READ());
   const card = pages.map((page) => page.value).find((value) => value && !value.skip) ?? null;
   readings.push({ at: Date.now(), step, card });
   return card;
@@ -129,21 +139,102 @@ async function shot(windowId, name) {
 
 const devHome = path.join(work, "devserver-home");
 fs.mkdirSync(devHome);
-const devPort = await freePort();
-const devBase = `http://127.0.0.1:${devPort}`;
-const server = spawn(chan, ["devserver", "run", "--service=none", "--bind=127.0.0.1", `--port=${devPort}`], {
-  env: { ...process.env, CHAN_HOME: devHome }, stdio: ["ignore", "pipe", "pipe"],
-});
-server.stdout.on("data", (data) => logs.push(data.toString()));
-server.stderr.on("data", (data) => logs.push(data.toString()));
-const relay = await startRelay(devPort);
-const relayBase = `http://127.0.0.1:${relay.port}`;
+let server = null;
+let relay = null;
+
+function startDevserver(args, env = {}) {
+  server = spawn(chan, ["devserver", "run", "--service=none", ...args], {
+    env: { ...process.env, CHAN_HOME: devHome, ...env }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  server.stdout.on("data", (data) => logs.push(data.toString()));
+  server.stderr.on("data", (data) => logs.push(data.toString()));
+}
+
+async function devserverReady(base) {
+  const ready = await until(async () => {
+    if (server.exitCode !== null) throw new Inconclusive("the devserver exited during startup");
+    try { return { ok: (await fetch(`${base}/api/devserver/info`, { signal: AbortSignal.timeout(1000) })).ok }; }
+    catch { return null; }
+  }, 60_000);
+  if (!ready?.ok) throw new Inconclusive("the devserver did not start");
+}
+
+async function desktopPageUp() {
+  const pageUp = await until(async () => {
+    try { return { ok: (await inspectAll("document.readyState === 'complete'")).some((page) => page.value === true) }; }
+    catch { return null; }
+  }, 60_000);
+  if (!pageUp?.ok) throw new Inconclusive("no desktop page answered the inspector");
+}
+
+/// Show the Computers screen over `host` until `shown` holds, pressing the
+/// chord up to three times; on failure keep what the screen showed.
+async function showScreen(host, shown) {
+  let screen = null;
+  for (let attempt = 0; attempt < 3 && !screen?.ok; attempt++) {
+    await run("xdotool", ["windowactivate", "--sync", host]);
+    await run("xdotool", ["key", "--clearmodifiers", "ctrl+shift+p"]);
+    screen = await until(async () => ({ ok: await shown() }), 15_000);
+  }
+  if (screen?.ok) return;
+  try {
+    const { stdout: pages } = await run(process.execPath, [path.join(here, "inspect.mjs"), inspector, "list"], { timeout: 15_000 });
+    logs.push(`inspector pages:\n${pages}`);
+    const { stdout: active } = await run("xdotool", ["getactivewindow", "getwindowname"]);
+    logs.push(`active window: ${active}`);
+    await run("import", ["-window", "root", path.join(work, "shots", "no-deck.png")], { timeout: 15_000 });
+  } catch (error) {
+    logs.push(`no-deck diagnostics: ${error}`);
+  }
+  throw new Inconclusive("the Computers screen did not show the devserver's card");
+}
+
+/// The desktop's own library: the launcher page's origin and bearer.
+async function desktopLibrary() {
+  const launcherHref = (await inspectAll("document.querySelector('.slot') ? location.href : null"))
+    .map((page) => page.value).find((value) => typeof value === "string");
+  if (!launcherHref) throw new Inconclusive("the launcher page gave no address");
+  const launcherUrl = new URL(launcherHref);
+  const launcherToken = launcherUrl.searchParams.get("t");
+  if (!launcherToken) throw new Inconclusive("the launcher page has no bearer");
+  secrets.push(launcherToken);
+  return (method, route, body) => api(launcherUrl.origin, launcherToken, method, route, body);
+}
+
+/// Bring the devserver's card to the front of the deck.
+async function cardToFront() {
+  await inspectAll(`(() => { const s = ${findSlot()}; s?.click(); return Boolean(s); })()`);
+  const front = await readUntil("front", (card) => card.front, 15_000);
+  if (!front?.ok) throw new Inconclusive("the devserver's card did not come to the front");
+  await sleep(600); // the deck's turn
+}
+
+async function healthyLeg(host) {
+  const healthy = await readUntil("healthy", (card) => card.face?.state === "healthy" && card.detail, 30_000);
+  if (healthy?.ok) {
+    pass("the card in front shows a healthy face beside the name and the detail under the address", healthy.card);
+  } else {
+    fault("no healthy face beside the name with the detail under the address", healthy?.card ?? null);
+  }
+  await shot(host, "healthy");
+  const local = await readCard("local");
+  if (local && local.localMarks === 0) pass("the local machine's card shows no face", { localMarks: local.localMarks });
+  else fault("the local machine's card shows a face or detail", local);
+}
+
+/// The face's reply time at a delay of 650 ms each way: at least the
+/// 1.3 s round trip, and no more than a slow link's few seconds.
+const SLOW_TITLE = /^Connection slow, (\d+\.\d) s$/;
+const slowReply = (card, max) => {
+  const seconds = Number(SLOW_TITLE.exec(card.face?.title ?? "")?.[1] ?? NaN);
+  return card.face?.state === "slow" && seconds >= 1.2 && seconds <= max;
+};
 
 // Every client frame of every flow, read past its request head; a flow
 // from the desktop's own client carries no Origin header.
 const flowStates = new Map();
 const pings = [];
-relay.tap((flow, index, chunk) => {
+const tapFeed = (flow, index, chunk) => {
   if (index !== 0) return;
   let state = flowStates.get(flow);
   if (!state) {
@@ -164,29 +255,26 @@ relay.tap((flow, index, chunk) => {
   for (const frame of state.reader.push(rest)) {
     if (frame.text === '{"type":"ping"}') pings.push({ at: Date.now(), flow: state.id, desktop: state.desktop });
   }
-});
+};
 const feedPings = (from, to) => pings.filter((p) => p.desktop && p.at >= from && p.at < to);
 
 let status = 3;
 const windows = [];
-let token;
 let desktop = null;
-try {
-  const ready = await until(async () => {
-    if (server.exitCode !== null) throw new Inconclusive("the devserver exited during startup");
-    try { return { ok: (await fetch(`${devBase}/api/devserver/info`, { signal: AbortSignal.timeout(1000) })).ok }; }
-    catch { return null; }
-  }, 60_000);
-  if (!ready?.ok) throw new Inconclusive("the devserver did not start");
-  token = JSON.parse(fs.readFileSync(path.join(devHome, "devserver/config.json"))).devserver_token;
+
+async function direct() {
+  const devPort = await freePort();
+  const devBase = `http://127.0.0.1:${devPort}`;
+  startDevserver(["--bind=127.0.0.1", `--port=${devPort}`]);
+  relay = await startRelay(devPort);
+  relay.tap(tapFeed);
+  const relayBase = `http://127.0.0.1:${relay.port}`;
+  await devserverReady(devBase);
+  const token = JSON.parse(fs.readFileSync(path.join(devHome, "devserver/config.json"))).devserver_token;
   secrets.push(token);
   const remote = (method, route, body) => api(devBase, token, method, route, body);
   const cli = (args) => run(chan, args, { timeout: 90_000 });
-  const pageUp = await until(async () => {
-    try { return { ok: (await inspectAll("document.readyState === 'complete'")).some((page) => page.value === true) }; }
-    catch { return null; }
-  }, 60_000);
-  if (!pageUp?.ok) throw new Inconclusive("no desktop page answered the inspector");
+  await desktopPageUp();
 
   // The window that holds the focus before the devserver connects, the
   // local one: the devserver's own windows open over it later.
@@ -204,51 +292,14 @@ try {
   }), 30_000);
   if (!feedFlow?.ok) throw new Inconclusive("no window feed of the desktop's passed through the relay");
 
-  // The Computers screen shows over the window the chord reaches.
-  let deck = null;
-  for (let attempt = 0; attempt < 3 && !deck?.ok; attempt++) {
-    await run("xdotool", ["windowactivate", "--sync", host]);
-    await run("xdotool", ["key", "--clearmodifiers", "ctrl+shift+p"]);
-    deck = await readUntil("open", (card) => card.key !== null, 15_000);
-  }
-  if (!deck?.ok) {
-    try {
-      const { stdout: pages } = await run(process.execPath, [path.join(here, "inspect.mjs"), inspector, "list"], { timeout: 15_000 });
-      logs.push(`inspector pages:\n${pages}`);
-      const { stdout: active } = await run("xdotool", ["getactivewindow", "getwindowname"]);
-      logs.push(`active window: ${active}`);
-      await run("import", ["-window", "root", path.join(work, "shots", "no-deck.png")], { timeout: 15_000 });
-    } catch (error) {
-      logs.push(`no-deck diagnostics: ${error}`);
-    }
-    throw new Inconclusive("the Computers screen did not show the devserver's card");
-  }
-  await inspectAll(`(() => { const s = [...document.querySelectorAll('.slot')].find((s) => [...s.querySelectorAll('.ds-name-row .row-name')].some((n) => n.textContent.trim() === ${JSON.stringify(LABEL)})); s?.click(); return Boolean(s); })()`);
-  // The desktop's own library, which closes a devserver's windows: the
-  // launcher page's origin and bearer.
-  const launcherHref = (await inspectAll("document.querySelector('.slot') ? location.href : null"))
-    .map((page) => page.value).find((value) => typeof value === "string");
-  if (!launcherHref) throw new Inconclusive("the launcher page gave no address");
-  const launcherUrl = new URL(launcherHref);
-  const launcherToken = launcherUrl.searchParams.get("t");
-  if (!launcherToken) throw new Inconclusive("the launcher page has no bearer");
-  secrets.push(launcherToken);
-  desktop = (method, route, body) => api(launcherUrl.origin, launcherToken, method, route, body);
-  const front = await readUntil("front", (card) => card.front, 15_000);
-  if (!front?.ok) throw new Inconclusive("the devserver's card did not come to the front");
-  await sleep(600); // the deck's turn
+  // The Computers screen shows over the window the chord reaches, and the
+  // desktop's own library closes the devserver's windows.
+  await showScreen(host, async () => (await readCard("open"))?.key != null);
+  desktop = await desktopLibrary();
+  await cardToFront();
 
   // Healthy, with the face beside the name and the detail under the address.
-  const healthy = await readUntil("healthy", (card) => card.face?.state === "healthy" && card.detail, 30_000);
-  if (healthy?.ok) {
-    pass("the card in front shows a healthy face beside the name and the detail under the address", healthy.card);
-  } else {
-    fault("no healthy face beside the name with the detail under the address", healthy?.card ?? null);
-  }
-  await shot(host, "healthy");
-  const local = await readCard("local");
-  if (local && local.localMarks === 0) pass("the local machine's card shows no face", { localMarks: local.localMarks });
-  else fault("the local machine's card shows a face or detail", local);
+  await healthyLeg(host);
 
   // The Computers screen showing asks the feed for a ping between two of
   // the 3 s cadence's.
@@ -280,7 +331,7 @@ try {
 
   // At 650 ms each way the face reads the reply time.
   relay.setDelay(DELAY_EACH_WAY_MS);
-  const slow = await readUntil("slow", (card) => card.face?.state === "slow" && /^Connection slow, 1\.[2-6] s$/.test(card.face.title ?? ""), 30_000);
+  const slow = await readUntil("slow", (card) => slowReply(card, 1.6), 30_000);
   if (slow?.ok) pass("at 650 ms each way the face reads slow with the reply time", slow.card);
   else fault("at 650 ms each way the face did not read slow with the reply time", slow?.card ?? null);
   await shot(host, "slow");
@@ -366,6 +417,60 @@ try {
   } else {
     fault("the feed's pings or the faces follow the windows", { withWindows, withNone });
   }
+}
+
+async function gateway() {
+  // The devserver's tunnel to the gateway's proxy, through the relay; the
+  // edge certificate names 127.0.0.1, so the relay's port verifies.
+  const [upstreamHost, upstreamPort] = fixture.tunnelUpstream.split(":");
+  relay = await startRelay(Number(upstreamPort), { host: upstreamHost });
+  const devPort = await freePort();
+  startDevserver([
+    "--bind", "127.0.0.1", "--port", String(devPort),
+    `--tunnel-url=https://127.0.0.1:${relay.port}/v1/tunnel`, `--tunnel-devserver-name=${LABEL}`,
+  ], { CHAN_TUNNEL_TOKEN: fixture.tunnelPat, SSL_CERT_FILE: fixture.ca, CHAN_DEVSERVER_LISTEN: "1" });
+  await devserverReady(`http://127.0.0.1:${devPort}`);
+  await desktopPageUp();
+  const { stdout: firstWindow } = await run("xdotool", ["getactivewindow"]);
+  const host = firstWindow.trim();
+
+  // The gateway joins through the desktop's own library, with the account
+  // token the shell driver put in the keyring, and its devserver connects.
+  await showScreen(host, async () => (await inspectAll("Boolean(document.querySelector('.slot'))")).some((page) => page.value === true));
+  desktop = await desktopLibrary();
+  const added = await desktop("POST", "/api/library/gateways", { url: fixture.origin, label: "face-gateway" });
+  await desktop("POST", `/api/library/gateways/${added.id}/connect`, {});
+  const row = await until(async () => {
+    const rows = await desktop("GET", "/api/library/devservers");
+    const found = rows.find((d) => d.gateway_id === added.id);
+    return { ok: Boolean(found), found };
+  }, 90_000);
+  if (!row?.ok) throw new Inconclusive("the devserver did not appear in the gateway's roster");
+  await desktop("POST", `/api/library/devservers/${encodeURIComponent(row.found.id)}/connect`, {});
+  const connected = await until(async () => {
+    const rows = await desktop("GET", "/api/library/devservers");
+    return { ok: rows.some((d) => d.id === row.found.id && d.status === "connected") };
+  }, 90_000);
+  if (!connected?.ok) throw new Inconclusive("the desktop did not connect to the gateway's devserver");
+  cardKey = row.found.id;
+  await cardToFront();
+
+  await healthyLeg(host);
+  // The tunnel leg at 650 ms each way: the devserver's reply crosses it.
+  relay.setDelay(DELAY_EACH_WAY_MS);
+  const slow = await readUntil("slow", (card) => slowReply(card, 5), 45_000);
+  if (slow?.ok) pass("at 650 ms each way on the tunnel leg the face reads slow with the reply time", slow.card);
+  else fault("at 650 ms each way on the tunnel leg the face did not read slow with the reply time", slow?.card ?? null);
+  await shot(host, "slow");
+  relay.setDelay(0);
+  const recovered = await readUntil("recovered", (card) => card.face?.state === "healthy", 45_000);
+  if (recovered?.ok) pass("with the delay gone the face reads healthy again", recovered.card);
+  else fault("the face did not read healthy again with the delay gone", recovered?.card ?? null);
+}
+
+try {
+  if (fixture) await gateway();
+  else await direct();
   status = faulted ? 10 : 0;
 } catch (error) {
   if (!(error instanceof Inconclusive)) logs.push(String(error?.stack ?? error));
@@ -379,10 +484,10 @@ try {
     id: state.id, path: flow.path, desktop: state.desktop, pings: pings.filter((p) => p.flow === state.id).length,
   }));
   fs.writeFileSync(path.join(work, "results.json"), mask(JSON.stringify({
-    status, checks, readings, flows, pings, relay: relay.summary(),
+    mode: fixture ? "gateway" : "direct", status, checks, readings, flows, pings, relay: relay?.summary() ?? null,
   }, null, 2)) + "\n");
   fs.writeFileSync(path.join(work, "devserver.log"), mask(logs.join("")));
-  await relay.close();
-  server.kill("SIGTERM");
+  await relay?.close();
+  server?.kill("SIGTERM");
 }
 process.exit(status);

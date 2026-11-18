@@ -47,6 +47,7 @@
 #   scripts/e2e/gateway-zone.sh core       # the core suite only
 #   scripts/e2e/gateway-zone.sh <scenario> # stack bring-up + that scenario only
 #   scripts/e2e/gateway-zone.sh tmuxfeed   # opt-in native desktop + real tmux
+#   scripts/e2e/gateway-zone.sh connface   # opt-in native desktop: the connection face
 #   E2E_KEEP=1 scripts/e2e/gateway-zone.sh # leave the stack running
 #   E2E_LAUNCHER_BUNDLE=1|0                # pin the launcher-bundle expectation
 #   E2E_CA_CERT=FILE E2E_CA_KEY=FILE       # reuse a CA trusted by a native test guest
@@ -4015,9 +4016,52 @@ EOF
     esac
 }
 
+# This opt-in scenario needs a native desktop too. The driver owns the
+# devserver and a relay on its tunnel leg alone, so a delay there slows only
+# replies that cross the tunnel: the face reads the devserver's own reply,
+# not one the gateway could answer itself. This harness owns the identity,
+# proxy and account fixtures, and the ingress the desktop's ordinary DNS
+# reaches p1 through.
+scenario_connface() {
+    need keyctl
+    local email="e2e-face@example.com" owner username tunnel_pat ds account fixture
+    read -r owner username <<< "$(seed_user "$email")"
+    [ -n "$owner" ] && [ -n "$username" ] || assert_fail "connface: user seed failed"
+    mint_into "$email" e2e-face tunnel_pat ds || assert_fail "connface: tunnel PAT mint failed"
+    account="$WORK/face-account.json"
+    (umask 077; "$GW_BIN/chan-gateway-admin" \
+        --identity-url "http://127.0.0.1:$ID_INTERNAL_PORT" \
+        --identity-token "$TOK_IDENTITY_ADMIN" --json \
+        token create "$email" --scope desktop.account --label connection-face > "$account") ||
+        assert_fail "connface: desktop account PAT mint failed"
+    # localtest.me resolves to loopback. This account has exactly one
+    # devserver, on p1, so the native client's ordinary DNS can use a
+    # transparent TCP ingress without editing the machine's resolver.
+    spawn face-ingress node "$WORK/tcp-shim.mjs" \
+        "127.0.0.1:$PROXY_PORT" "$(node_ip p1):$PROXY_PORT"
+    fixture="$WORK/face-fixture.json"
+    node - "$account" "$fixture" "https://$ID_HOST" "$tunnel_pat" \
+        "$(node_ip p1):$TUNNEL_PORT" "$TLS_DIR/ca.crt" <<'NODE'
+const fs = require("node:fs");
+const [account, output, origin, tunnelPat, tunnelUpstream, ca] = process.argv.slice(2);
+const minted = JSON.parse(fs.readFileSync(account));
+const pat = {id: minted.id, secret: minted.secret, label: minted.label ?? "connection-face", expires_at: minted.expires_at ?? ""};
+fs.writeFileSync(output, JSON.stringify({origin, pat, tunnelPat, tunnelUpstream, ca}), {mode: 0o600});
+NODE
+    local status=0
+    SSL_CERT_FILE="$TLS_DIR/ca.crt" CHAN_BIN="$CHAN_BIN" \
+        bash "$REPO/scripts/e2e/desktop-observations/connection-face-native.sh" --gateway-fixture "$fixture" || status=$?
+    case "$status" in
+        0) assert_pass "connface: the face reads the devserver's reply across the gateway tunnel" ;;
+        1) assert_fail "connface: native connection face contract failed" ;;
+        *) log "connface: native driver incomplete (status $status); not a pass"; exit "$status" ;;
+    esac
+}
+
 run_scenarios() { # run_scenarios <all|name>
     local which="$1" ran=0 s
     if [ "$which" = tmuxfeed ]; then scenario_tmuxfeed; return; fi
+    if [ "$which" = connface ]; then scenario_connface; return; fi
     for s in $SCENARIOS; do
         if [ "$which" = all ] || [ "$which" = "$s" ]; then
             log ""
