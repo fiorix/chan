@@ -537,6 +537,28 @@ fn the_tests_client_ignores_the_environments_proxy() {
 }
 
 #[test]
+fn an_unusable_proxy_is_not_blamed_for_a_failure_without_a_request() {
+    const TEST: &str = "index::embeddings::download::tests::an_unusable_proxy_is_not_blamed_for_a_failure_without_a_request";
+    if !is_child(TEST) {
+        in_child(TEST, &[("HTTPS_PROXY", "https://proxy.invalid:443")]);
+        return;
+    }
+    // A cache root that is a file fails before any request is made.
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("cache");
+    std::fs::write(&cache, b"not a directory").unwrap();
+    let server = Server::start(|_| response("503 Service Unavailable", "", b"no request expected"));
+    let error = client(&cache, &server)
+        .get("fixture/model", "config.json")
+        .expect_err("the cache cannot hold a snapshot");
+    assert!(
+        matches!(&error, EmbedError::HfHub(message) if message.starts_with("I/O error")),
+        "the filesystem error is reported, not the proxy variable: {error:?}"
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_cached_model_opens_and_embeds_with_its_existing_files() {
     let cache = tempfile::tempdir().unwrap();
     crate::index::test_support::seed_embedding_model(cache.path());

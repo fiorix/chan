@@ -69,8 +69,12 @@ enum DownloadError {
 
 impl DownloadError {
     fn into_embed(self) -> EmbedError {
-        if let Some((var, value)) = proxy_env_issue() {
-            return EmbedError::ProxyConfig { var, value };
+        // An unusable proxy variable explains a failed request, and nothing
+        // that failed before or without one.
+        if let DownloadError::Request(_) = self {
+            if let Some((var, value)) = proxy_env_issue() {
+                return EmbedError::ProxyConfig { var, value };
+            }
         }
         let certificate = certificate_failure(&self);
         let message = self.to_string();
