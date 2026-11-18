@@ -35,6 +35,10 @@ import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import SearchPanel from "./SearchPanel.svelte";
+import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
+import { demoWorkspaceInfo } from "../demo/data";
+import { screensaver } from "../state/screensaver.svelte";
+import { recordingContext2d } from "../__tests__/canvas";
 import TerminalTab from "./TerminalTab.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
@@ -65,6 +69,7 @@ import {
   resolvePrompt,
   searchPanel,
   uiPrompt,
+  workspace,
 } from "../state/store.svelte";
 import {
   activePane,
@@ -1162,5 +1167,56 @@ describe("the launcher's return under another overlay", () => {
       overlayStack.ids = [];
       searchTarget.remove();
     }
+  });
+});
+
+describe("the deck under the screen lock", () => {
+  beforeEach(() => {
+    // The lock's rain draws on a canvas and asks about reduced motion and fonts.
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      recordingContext2d().ctx as unknown as RenderingContext,
+    );
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: true,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    Object.defineProperty(document, "fonts", { configurable: true, value: { load: vi.fn(async () => []) } });
+    workspace.info = demoWorkspaceInfo({
+      metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+      files: [],
+    });
+    Object.assign(screensaver, { enabled: true, timeout_secs: 300, theme: "plain", pin_set: true, locked: false, loaded: true });
+  });
+
+  afterEach(() => {
+    screensaver.locked = false;
+    workspace.info = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  test("the lock coming up over the open deck keeps its PIN field's keyboard, and Enter runs no row", async () => {
+    const target = await openFromOrigin();
+    const input = target.querySelector(".deck-input") as HTMLInputElement;
+    input.value = "Toggle nothing";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "Toggle nothing" }));
+    await tick();
+    const lockTarget = document.createElement("div");
+    document.body.append(lockTarget);
+    mounted.push(mount(ScreensaverOverlay, { target: lockTarget }) as Record<string, unknown>);
+    screensaver.locked = true;
+    await flush();
+    const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+    expect(document.activeElement, "the lock takes the keyboard from the deck").toBe(backdrop);
+    backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+    await flush();
+    const pin = backdrop.querySelector<HTMLInputElement>('input[type="password"]')!;
+    expect(document.activeElement, "the woken card's PIN field").toBe(pin);
+    pin.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await flush();
+    expect(runNothing, "a key typed under the lock ran the deck's row").not.toHaveBeenCalled();
+    expect(document.activeElement, "the PIN field keeps the keyboard").toBe(pin);
   });
 });

@@ -22,15 +22,18 @@ import {
   mayFocus,
   mayTryFocus,
   owner,
+  ownerAboveOverlays,
   ownerRoot,
   ownerTag,
 } from "./keyboardOwner.svelte";
 import {
+  FULL_WINDOW_COVERS,
   importContactsPanel,
   overlayStack,
   type OverlayId,
   pathPromptState,
   promptState,
+  setCoverBlocking,
   workspaceWarningsDialog,
 } from "./store.svelte";
 import { resetSurveysForTest, showSurvey } from "./survey.svelte";
@@ -57,6 +60,7 @@ afterEach(async () => {
   closeConfirmState.open = false;
   resetSurveysForTest();
   document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+  for (const cover of FULL_WINDOW_COVERS) setCoverBlocking(cover, false);
   overlayStack.ids = [];
   document.body.innerHTML = "";
   resetLayout([]);
@@ -300,6 +304,27 @@ describe("mayTryFocus", () => {
     resetSurveysForTest();
     document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
     expect(mayTryFocus(editor), "the Computers launcher").toBe(false);
+  });
+});
+
+describe("under a cover over the window", () => {
+  test.each(FULL_WINDOW_COVERS)("%s: mayFocus refuses every element, one inside the owner's root included", (cover) => {
+    const { field } = taggedRoot(ownerTag("modal"));
+    promptState.open = true;
+    const loose = document.createElement("input");
+    document.body.append(loose);
+    setCoverBlocking(cover, true);
+    expect(mayFocus(field), "inside the owner's root").toBe(false);
+    expect(mayFocus(loose), "with nothing else owning it").toBe(false);
+    setCoverBlocking(cover, false);
+    expect(mayFocus(field)).toBe(true);
+  });
+
+  test.each(FULL_WINDOW_COVERS)("%s: the command deck leaves the keyboard to it", (cover) => {
+    overlayStack.ids = ["launcher"];
+    expect(ownerAboveOverlays(), "the deck alone").toBe(false);
+    setCoverBlocking(cover, true);
+    expect(ownerAboveOverlays()).toBe(true);
   });
 });
 

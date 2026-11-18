@@ -9,7 +9,7 @@
 // its root is looked up in the page when `ownerRoot` or `mayFocus` asks,
 // never kept, so no reader holds a root from before its surface mounted.
 
-import { modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
+import { appInputBlocked, modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor, type SurveySlot } from "./survey.svelte";
 import { activeTerminalTab } from "./tabs.svelte";
 
@@ -122,21 +122,25 @@ export function ownerRoot(current: KeyboardOwner | null = owner()): HTMLElement 
 
 /// Whether `element` may take the keyboard: when nothing owns it, or when
 /// `element` sits inside the owner's root, looked up as this asks. The
-/// Computers launcher has no root in the page, so nothing may take it then.
+/// Computers launcher has no root in the page, so nothing may take it then,
+/// and nothing may while a cover over the window (the screen lock, the
+/// reconnect or session-ended cover) holds it.
 export function mayFocus(element: Element | null): boolean {
+  if (appInputBlocked()) return false;
   const current = owner();
   if (current === null) return true;
   const root = ownerRoot(current);
   return element !== null && root !== null && root.contains(element);
 }
 
-/// Whether an owner above the overlays holds the keyboard: a modal dialog or
-/// a window-wide survey. The command deck leaves its keys and focus to one.
-/// A survey over a terminal ranks below the deck and does not count; nor
-/// does the Computers launcher, whose keys never reach the page, so a deck
-/// under it still runs what the page itself sends it.
+/// Whether an owner above the overlays holds the keyboard: a modal dialog, a
+/// window-wide survey, or a cover over the window (the screen lock, the
+/// reconnect or session-ended cover). The command deck leaves its keys and
+/// focus to one. A survey over a terminal ranks below the deck and does not
+/// count; nor does the Computers launcher, whose keys never reach the page,
+/// so a deck under it still runs what the page itself sends it.
 export function ownerAboveOverlays(): boolean {
-  return modalDialogOpen();
+  return modalDialogOpen() || appInputBlocked();
 }
 
 /// Whether a surface may try to take the keyboard by itself, on a focus
