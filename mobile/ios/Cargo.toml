@@ -1,0 +1,25 @@
+[package]
+name = "chan-ios"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Supercharged terminal emulator, iOS app."
+license.workspace = true
+repository.workspace = true
+homepage = "https://chan.app"
+readme = "../../README.md"
+publish = false
+
+[[bin]]
+name = "chan-ios"
+path = "src/main.rs"
+
+[lib]
+name = "app"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# Lanes add dependencies as the port lands. The shell lane owns this
+# file; the auth lane claims the ios-gated dependency sections through
+# the lead, and the lead reconciles Cargo.lock at merge time.
