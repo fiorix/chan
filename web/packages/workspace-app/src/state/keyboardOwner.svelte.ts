@@ -13,7 +13,7 @@ import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setConfirmRestoreGate } from "./confirm.svelte";
 import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, raisedCoverKeys, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor } from "./survey.svelte";
-import { activeTerminalTab } from "./tabs.svelte";
+import { activeTerminalTab, bumpTabFocusPulse } from "./tabs.svelte";
 
 /// The attribute each owner surface puts on its root, valued by `ownerTag`.
 export const KEYBOARD_OWNER_ATTR = "data-keyboard-owner";
@@ -213,19 +213,25 @@ export function handKeyboardToOwner(): boolean {
 
 // When the last cover over the window lifts with the keyboard at large (the
 // cover's own field went with it), the keyboard goes to its owner as the
-// owner's surface takes it: a dialog under the screen lock takes its field
-// back on unlock.
+// owner's surface takes it, as a dialog under the screen lock takes its
+// field back on unlock. With nothing owning it, the tab-focus pulse hands it
+// to the focused pane's active tab, unless the reconnect cover is among the
+// covers lifting: that cover pulses the tab itself, for a terminal or an
+// editor it saw holding the keyboard, and only then.
 if (typeof document !== "undefined") {
   $effect.root(() => {
-    let covered = appInputBlocked();
+    let raised = raisedCoverKeys();
     $effect(() => {
-      const now = appInputBlocked();
-      if (covered && !now) {
+      const now = raisedCoverKeys();
+      if (raised.length > 0 && now.length === 0) {
+        const reconnect = raised.includes("reconnect");
         queueMicrotask(() => {
-          if (!appInputBlocked() && !canTakeFocus(document.activeElement)) handKeyboardToOwner();
+          if (appInputBlocked() || canTakeFocus(document.activeElement)) return;
+          if (owner() !== null) handKeyboardToOwner();
+          else if (!reconnect) bumpTabFocusPulse();
         });
       }
-      covered = now;
+      raised = now;
     });
   });
 }

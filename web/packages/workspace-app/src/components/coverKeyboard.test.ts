@@ -2,15 +2,34 @@
 //
 // A dialog open when a cover comes up over the window: the cover holds the
 // keyboard while it shows, and the dialog takes it back when the cover
-// lifts. The real screen lock, the app's prompt dialog, the close prompt
-// and the Team dialog, in jsdom.
+// lifts; with nothing owning the keyboard, the focused terminal takes it
+// back. The real screen lock, the app's prompt dialog, the close prompt,
+// the Team dialog and a terminal over the stand-in xterm, in jsdom.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
+vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
+vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalTab")).searchAddonModule());
+vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
+vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
 import TeamDialog from "./TeamDialog.svelte";
+import TerminalTab from "./TerminalTab.svelte";
+import {
+  attach,
+  installTerminalDom,
+  mountTerminal,
+  receive,
+  resetTerminals,
+  seatTerminals,
+  TerminalSocket,
+} from "../__tests__/terminalTab";
+import { xterm } from "../__tests__/xterm";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
 import { recordingContext2d } from "../__tests__/canvas";
@@ -20,6 +39,8 @@ import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelt
 import { screensaver } from "../state/screensaver.svelte";
 import { promptState, resolvePrompt, uiPrompt, workspace } from "../state/store.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
+
+installTerminalDom();
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 
@@ -47,6 +68,8 @@ afterEach(async () => {
   if (promptState.open) resolvePrompt(null);
   resolveCloseConfirm("cancel");
   closeTeamDialog();
+  resetTerminals();
+  xterm.textareaFocus = false;
   for (const component of mounted.splice(0)) await unmount(component);
   await settle();
   workspace.info = null;
@@ -125,4 +148,17 @@ test("the Team dialog takes the keyboard back onto its name field when the scree
   expect(document.activeElement, "the name field as the dialog shows").toBe(name);
   await lockAndUnlock();
   expect(document.activeElement, "the name field once the lock lifts").toBe(name);
+});
+
+test("a terminal that held the keyboard takes it back when the screen lock lifts with nothing owning it", async () => {
+  xterm.textareaFocus = true;
+  const [tab] = seatTerminals([terminalTab({ title: "shell" })]);
+  const { target } = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket);
+  await receive(socket, { type: "ready", cols: 80, rows: 24 });
+  const textarea = target.querySelector<HTMLElement>("textarea")!;
+  await vi.waitFor(() => expect(document.activeElement, "the terminal holds the keyboard").toBe(textarea));
+  await lockAndUnlock();
+  await vi.waitFor(() => expect(document.activeElement, "the terminal once the lock lifts").toBe(textarea));
 });
