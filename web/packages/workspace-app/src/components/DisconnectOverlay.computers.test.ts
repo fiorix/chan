@@ -105,8 +105,20 @@ async function toRecoveryActions(): Promise<void> {
   await settle();
 }
 
+/// Whether `element` sits in an inert subtree. Svelte sets `inert` as a
+/// property, which jsdom does not reflect to the attribute.
+function inert(element: HTMLElement): boolean {
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if ((node as HTMLElement & { inert?: boolean }).inert) return true;
+  }
+  return false;
+}
+
+/// The actions the cover offers: a held place's buttons are inert.
 const labels = (target: HTMLElement): string[] =>
-  [...target.querySelectorAll<HTMLButtonElement>(".actions button")].map((b) => b.textContent?.trim() ?? "");
+  [...target.querySelectorAll<HTMLButtonElement>(".actions button")]
+    .filter((b) => !inert(b))
+    .map((b) => b.textContent?.trim() ?? "");
 
 function button(target: HTMLElement, label: string): HTMLButtonElement {
   const found = [...target.querySelectorAll<HTMLButtonElement>(".actions button")].find(
@@ -144,6 +156,34 @@ describe("Show in Computers on the reconnecting cover", () => {
     await toRecoveryActions();
     expect(labels(target)).toEqual(["Restart connection", "Abandon", "Show in Computers"]);
     expect(document.activeElement).toBe(cover);
+  });
+
+  // The card is centred on the window, so a row that enters it moves every
+  // row below. jsdom lays nothing out; what it can show is that no row of
+  // the card enters or leaves when Restart connection and Abandon appear:
+  // their place is held, hidden, from the moment the cover shows.
+  test("keeps its place when Restart connection and Abandon appear", async () => {
+    desktopWindow("dev-1");
+    const cover = await dropConnection(await mountCover());
+    const card = cover.querySelector<HTMLElement>(".card")!;
+    const target = cover.parentElement!;
+    const rowsAtShow = [...card.children];
+    const heldAtShow = [...card.querySelectorAll<HTMLButtonElement>("button")].map((b) => ({
+      button: b, text: b.textContent?.trim(), inert: inert(b), disabled: b.disabled,
+    }));
+
+    await toRecoveryActions();
+    expect([...card.children], "no row entered or left the card").toEqual(rowsAtShow);
+    expect(heldAtShow.map(({ text, inert, disabled }) => ({ text, inert, disabled })), "held, not offered, until 8 s").toEqual([
+      { text: "Restart connection", inert: true, disabled: true },
+      { text: "Abandon", inert: true, disabled: true },
+      { text: "Show in Computers", inert: false, disabled: false },
+    ]);
+    const restart = button(target, "Restart connection");
+    expect(restart).toBe(heldAtShow[0].button);
+    expect(inert(restart)).toBe(false);
+    expect(restart.disabled).toBe(false);
+    expect(labels(target)).toEqual(["Restart connection", "Abandon", "Show in Computers"]);
   });
 
   test("is in the cover's Tab cycle with the other actions", async () => {

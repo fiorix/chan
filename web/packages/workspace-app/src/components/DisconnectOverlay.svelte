@@ -364,13 +364,16 @@
       {#if recoveryError}
         <div class="error" role="alert"><PrivateField field="reconnect:error" label="reconnection error">{recoveryError}</PrivateField></div>
       {/if}
-      {#if canRecover && actionsReady}
-        <div class="actions">
+      <!-- The card is centred, so a row that appears moves the rows below it.
+           With Show in Computers there, Restart connection and Abandon hold
+           their place, hidden and inert, from the moment the cover shows. -->
+      {#if canRecover && (actionsReady || offerComputers)}
+        <div class="actions" class:reserved={!actionsReady} inert={!actionsReady}>
           <button
             class="reconnect"
             bind:this={reconnectBtn}
             aria-describedby={restartNoteId}
-            disabled={pendingAction !== null}
+            disabled={pendingAction !== null || !actionsReady}
             onclick={reconnect}
           >
             {pendingAction === "reconnect" ? "Restarting..." : "Restart connection"}
@@ -378,13 +381,13 @@
           <button
             class="abandon"
             bind:this={abandonBtn}
-            disabled={pendingAction !== null}
+            disabled={pendingAction !== null || !actionsReady}
             onclick={abandon}
           >
             {pendingAction === "abandon" ? "Abandoning..." : "Abandon"}
           </button>
         </div>
-        <div class="action-note" id={restartNoteId}>Restart closes and reopens the windows served by this connection.</div>
+        <div class="action-note" class:reserved={!actionsReady} inert={!actionsReady} id={restartNoteId}>Restart closes and reopens the windows served by this connection.</div>
       {/if}
       {#if offerComputers}
         <div class="actions">
@@ -475,6 +478,10 @@
     display: flex;
     gap: 10px;
     justify-content: center;
+  }
+  /* A held place: laid out as when shown, so nothing below it moves. */
+  .reserved {
+    visibility: hidden;
   }
   .action-note {
     color: var(--text-secondary);
