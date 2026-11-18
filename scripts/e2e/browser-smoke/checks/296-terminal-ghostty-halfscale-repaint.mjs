@@ -21,10 +21,11 @@
 //             scale 2, with the backing size unchanged and no resize frame
 //             sent on the terminal's socket in between.
 //
-// Ink is samples differing from the quarter's background colour, which is
-// the baseline's own most frequent sample; opaque coverage must equal the
-// sample total. Each bounded wait below is a hang guard: it bounds a stuck
-// engine, and its timeout reports which stage hung.
+// Ink is samples differing from the baseline's own most frequent colour;
+// opaque coverage must equal the sample total. Every reading after the
+// baseline is measured against the baseline's colour. Each bounded wait
+// below is a hang guard: it bounds a stuck engine, and its timeout reports
+// which stage hung.
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
@@ -79,12 +80,17 @@ export default {
     // socket itself: a same-size publication never reaches a WINCH trap.
     const cdp = await page.createCDPSession();
     await cdp.send("Network.enable");
+    const sockets = [];
     const sentResizes = [];
-    cdp.on("Network.webSocketFrameSent", ({ response }) => {
+    cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
+      sockets.push({ requestId, url, at: Date.now() });
+    });
+    cdp.on("Network.webSocketFrameSent", ({ requestId, response }) => {
       let frame = null;
       try { frame = JSON.parse(response.payloadData); } catch { return; }
-      if (frame?.type === "resize") sentResizes.push({ cols: frame.cols, rows: frame.rows, at: Date.now() });
+      if (frame?.type === "resize") sentResizes.push({ requestId, cols: frame.cols, rows: frame.rows, at: Date.now() });
     });
+    const terminalSocket = () => sockets.find((s) => s.url.includes(TAB));
 
     const row = await openAttachedTerminal(ctx, page, cs, windowId, TAB, "ghostty");
     const canvas =
@@ -92,11 +98,12 @@ export default {
       `.terminal-tab.active[data-terminal-tab-id="${row.tab}"] ${TERMINAL_SURFACES.ghostty}`;
 
     /// Painted pixels per quarter of the backing store, plus the canvas
-    /// transform and grid. Ink is samples differing from the baseline's
-    /// own most frequent colour; a repaint that fills backgrounds and
-    /// drops every glyph reads full coverage with no ink.
-    const measure = () =>
-      page.evaluate((query) => {
+    /// transform and grid. Without a reference colour the most frequent
+    /// sample of the reading is used; pass the baseline's colour so every
+    /// later reading counts against it. A repaint that fills backgrounds
+    /// and drops every glyph reads full coverage and no ink.
+    const measure = (bgRef = null) =>
+      page.evaluate(([query, ref]) => {
         const c = document.querySelector(query);
         if (!c) return null;
         const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
@@ -116,12 +123,14 @@ export default {
             seen.set(key, (seen.get(key) || 0) + 1);
           }
         }
-        let bg = 0;
-        let bgCount = -1;
-        for (const [key, n] of seen) {
-          if (n > bgCount) {
-            bg = key;
-            bgCount = n;
+        let bg = ref;
+        if (bg === null) {
+          let bgCount = -1;
+          for (const [key, n] of seen) {
+            if (n > bgCount) {
+              bg = key;
+              bgCount = n;
+            }
           }
         }
         const br = (bg >> 16) & 255;
@@ -145,7 +154,7 @@ export default {
           scaleX: t.a, scaleY: t.d,
           visibility: document.visibilityState,
         };
-      }, canvas);
+      }, [canvas, bgRef]);
 
     let front = null;
     const readings = {};
@@ -158,6 +167,13 @@ export default {
       if ((await cs(["scrollback", "--tab-name", TAB])).stdout.includes("syntax error")) {
         throw new Error("the paint write did not submit cleanly");
       }
+      // The zeros line reaches the last column: a short zeros line would
+      // still pass the ink floor on the left while proving nothing about
+      // the right edge.
+      const zeros = (await cs(["scrollback", "--tab-name", TAB])).stdout.split("\n").filter((l) => /^0+$/.test(l));
+      if (!zeros.some((l) => l.length >= 150)) {
+        throw new Error("the full-width line never printed");
+      }
       // A cursor-only repaint leaves dozens of ink samples; the prose
       // plus the full-width line leaves thousands in every quarter.
       const INK_FLOOR = 300;
@@ -168,7 +184,7 @@ export default {
       let previous = null;
       const deadline = Date.now() + 30_000;
       for (;;) {
-        const now = await measure();
+        const now = await measure(previous?.bg ?? null);
         if (now && now.opaque.every((q, i) => q === now.total[i]) && now.ink.every((q) => q >= INK_FLOOR) && quiet(previous, now)) {
           baseline = now;
           break;
@@ -187,12 +203,19 @@ export default {
       if (baseline.scaleX !== 2 || baseline.scaleY !== 2) {
         throw new Error(`precondition: the stable paint was not at scale 2: ${JSON.stringify(baseline)}`);
       }
-      // Positive control: the open published its grid, so the counter
-      // below observes publications; a blind counter would prove nothing.
-      if (sentResizes.length === 0) {
+      // Positive control: the open published its grid on this terminal's
+      // socket, so the counter below observes publications; a blind counter
+      // would prove nothing.
+      const termSocket = terminalSocket();
+      if (!termSocket) {
+        throw new Error("instrument fault: the terminal published no socket");
+      }
+      if (!sentResizes.some((f) => f.requestId === termSocket.requestId)) {
         throw new Error("instrument fault: the frame counter never saw the open's resize");
       }
       const hideMark = sentResizes.length;
+      const hideSockets = sockets.length;
+      readings.socket = { requestId: termSocket.requestId, url: termSocket.url };
 
       // HIDE
       front = await ctx.browser.newPage();
@@ -203,17 +226,18 @@ export default {
         const c = document.querySelector(query);
         c.width = c.width;
       }, canvas);
-      readings.hidden = await measure();
+      readings.hidden = await measure(baseline.bg);
       if (readings.hidden.quarters.some((q) => q !== 0)) {
         throw new Error(`the discard left paint behind: ${JSON.stringify(readings.hidden)}`);
       }
       if (readings.hidden.scaleX !== 1 || readings.hidden.scaleY !== 1) {
         throw new Error(`the discard did not reset the transform: ${JSON.stringify(readings.hidden)}`);
       }
+      // Settle: let any in-flight hidden paint land before the flip.
       await sleep(1_500);
       // The store still blank right before the flip: a paint landing
       // during the quiesce would count as the flip's.
-      readings.hidden2 = await measure();
+      readings.hidden2 = await measure(baseline.bg);
       if (readings.hidden2.quarters.some((q) => q !== 0)) {
         throw new Error(`instrument fault: paint landed while hidden: ${JSON.stringify(readings.hidden2)}`);
       }
@@ -229,7 +253,7 @@ export default {
       const resumeDeadline = Date.now() + 10_000;
       let after = null;
       for (;;) {
-        after = await measure();
+        after = await measure(baseline.bg);
         if (after && after.width === baseline.width && after.height === baseline.height
             && after.scaleX === 2 && after.scaleY === 2
             && after.opaque.every((q, i) => q === after.total[i])
@@ -252,10 +276,24 @@ export default {
       if ((await cs(["scrollback", "--tab-name", TAB])).stdout.includes("syntax error")) {
         throw new Error("the terminal text holds a syntax error");
       }
-      if (sentResizes.length !== hideMark) {
-        throw new Error(`a resize reached the socket across the flip: ${JSON.stringify(sentResizes.slice(hideMark))}`);
+      const freshSockets = sockets.slice(hideSockets).filter((s) => s.url.includes("/api/terminal"));
+      if (freshSockets.length > 0) {
+        const error = new Error(`a new terminal socket appeared across the flip: ${JSON.stringify(freshSockets)}`);
+        error.smokeDetails = readings;
+        throw error;
       }
+      const newFrames = sentResizes.slice(hideMark).filter((f) => f.requestId === termSocket.requestId);
+      if (newFrames.length > 0) {
+        const error = new Error(`a resize reached the socket across the flip: ${JSON.stringify(newFrames)}`);
+        error.smokeDetails = readings;
+        throw error;
+      }
+      readings.resizeFrames = sentResizes;
+      readings.hideMark = hideMark;
       return readings;
+    } catch (error) {
+      error.smokeDetails = readings;
+      throw error;
     } finally {
       await front?.close().catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
