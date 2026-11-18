@@ -20,7 +20,6 @@ import {
   KEYBOARD_OWNER_ATTR,
   LAUNCHER_SHOWN_ATTR,
   mayFocus,
-  mayTryFocus,
   owner,
   ownerAboveOverlays,
   ownerRoot,
@@ -278,32 +277,6 @@ describe("mayFocus", () => {
     document.body.append(field);
     overlayStack.ids = ["settings"];
     expect(mayFocus(field)).toBe(false);
-  });
-});
-
-describe("mayTryFocus", () => {
-  test("lets a surface under the command deck try, since the deck hands it on as it closes", () => {
-    taggedRoot(ownerTag("overlay", "launcher"));
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    overlayStack.ids = ["launcher"];
-    expect(mayFocus(editor)).toBe(false);
-    expect(mayTryFocus(editor)).toBe(true);
-  });
-
-  test("refuses as mayFocus does under every other owner", () => {
-    const editor = document.createElement("div");
-    document.body.append(editor);
-    overlayStack.ids = ["search"];
-    expect(mayTryFocus(editor), "Search").toBe(false);
-    overlayStack.ids = ["launcher", "settings"];
-    expect(mayTryFocus(editor), "Settings over the deck").toBe(false);
-    overlayStack.ids = [];
-    showSurvey(SURVEY, null);
-    expect(mayTryFocus(editor), "a window-wide survey").toBe(false);
-    resetSurveysForTest();
-    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
-    expect(mayTryFocus(editor), "the Computers launcher").toBe(false);
   });
 });
 

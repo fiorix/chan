@@ -31,7 +31,7 @@
   import type { BrowserTab } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { fbWatchRegister, fbWatchReconcile, fbWatchDispose } from "../state/fbWatch.svelte";
-  import { mayTryFocus } from "../state/keyboardOwner.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
 
   let { variant, side, tab, focused = false, onClose, onFlip }: {
     variant: "dock" | "tab";
@@ -179,15 +179,14 @@
   // a background pane, mounted by a session restore or Hybrid Nav's commit,
   // from taking it. The microtask runs after the pulse has parked the
   // keyboard on the body. The tree takes it only where the keyboard's
-  // owner lets it try: a dialog, a window-wide survey, Search, Settings or
-  // the Computers launcher keeps it, and the command deck hands it on as it
-  // closes.
+  // owner lets it: a dialog, a window-wide survey, the command deck, Search,
+  // Settings or the Computers launcher keeps it.
   $effect(() => {
     if (!isTab || !focused) return;
     tab;
     tabFocusPulse.value;
     queueMicrotask(() => {
-      if (focused && mayTryFocus(browserEl ?? null)) treeRef?.focusTree();
+      if (focused && mayFocus(browserEl ?? null)) treeRef?.focusTree();
     });
   });
 

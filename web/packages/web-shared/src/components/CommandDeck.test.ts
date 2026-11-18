@@ -540,6 +540,20 @@ describe("CommandDeck focus on close", () => {
     expect(onFocusLost).toHaveBeenCalledOnce();
   });
 
+  it("a dismissal of a deck opened from the body hands the keyboard to its host", async () => {
+    // The body takes no focus, so the dismissal has no heir, as a run's
+    // return has none, and the host's focus-lost path places the keyboard.
+    origin = document.createElement("button");
+    document.body.appendChild(origin);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const onFocusLost = vi.fn();
+    app = mount(CommandDeckHarness, { target, props: { items: [run()], onFocusLost } }) as Record<string, unknown>;
+    await flush();
+    escape();
+    await flush();
+    expect(onFocusLost).toHaveBeenCalledOnce();
+  });
+
   it("hands focus to nothing while the host says the page may not take it", async () => {
     const onFocusLost = vi.fn();
     const mayTakeFocus = vi.fn(() => false);

@@ -171,7 +171,7 @@
     closeTabMenu,
     openTabMenu,
   } from "../state/tabMenu.svelte";
-  import { mayTryFocus } from "../state/keyboardOwner.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
   // The Editor right-click menu carries no Open Inspector entry (the
   // pane chrome context menu has it) and no window-reload entry
   // (Cmd+R). Its reload row is different: it force-adopts the on-disk
@@ -254,11 +254,11 @@
   });
 
   // The editor takes the keyboard by itself (a pulse, its mount, its
-  // caret and reset frames) only where the keyboard's owner lets it try: a
-  // dialog, a window-wide survey, Search, Settings or the Computers
-  // launcher keeps it, and the command deck hands it on as it closes.
+  // caret and reset frames) only where the keyboard's owner lets it: a
+  // dialog, a window-wide survey, the command deck, Search, Settings or the
+  // Computers launcher keeps it.
   function editorMayFocus(): boolean {
-    return mayTryFocus(editorTabEl ?? null);
+    return mayFocus(editorTabEl ?? null);
   }
 
   function focusActiveEditor(): void {
