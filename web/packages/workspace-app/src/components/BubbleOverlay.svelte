@@ -25,7 +25,7 @@
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
   import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
-  import { legacyKeyboardOwned, ownerTag } from "../state/keyboardOwner.svelte";
+  import { legacyKeyboardOwned, mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -109,9 +109,25 @@
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
     }
-    // A re-run while this survey already owns the keyboard (a tab-focus pulse,
-    // a pane event) follows a window-wide owner's hold instead of grabbing
-    // the keyboard back from it. The first arrival still takes it, as before.
+    // A card over a terminal asks the keyboard's owner: it takes the keyboard
+    // only while nothing above it holds it (a dialog, a window-wide survey,
+    // an overlay, the Computers launcher). Asking reads the owners' state, so
+    // this effect runs again when the owner above lets go, and the card takes
+    // the keyboard then.
+    if (slot !== null) {
+      if (!mayFocus(card)) return;
+      focusedSurveyId = id;
+      (document.activeElement as HTMLElement | null)?.blur();
+      queueMicrotask(() => {
+        if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card)) {
+          card?.focus({ preventScroll: true });
+        }
+      });
+      return;
+    }
+    // The window-wide card takes the keyboard on its own arrival. A re-run
+    // while it already owns the keyboard (a pane event) follows a window-wide
+    // owner's hold instead of grabbing the keyboard back from it.
     const regrab = focusedSurveyId === id;
     focusedSurveyId = id;
     if (regrab && legacyKeyboardOwned(null)) return;

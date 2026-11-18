@@ -749,10 +749,11 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
     }
   });
 
-  // The window-wide survey's close returns the remembered element only while
-  // no other owner holds the keyboard: with a survey over the remembered
-  // element's terminal, the close leaves the keyboard with that survey's card.
-  test("a closing window-wide survey leaves the keyboard with the terminal's survey", async () => {
+  // A survey over the terminal arriving while a window-wide survey shows
+  // leaves the window-wide card the keyboard: that card is the owner above
+  // it. When the window-wide survey closes, the terminal's card takes the
+  // keyboard, and the composer behind it is asked for no focus.
+  test("a terminal's survey under a window-wide one takes the keyboard when that one closes", async () => {
     const composer = await openComposer();
     const target = document.createElement("div");
     document.body.append(target);
@@ -766,7 +767,7 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
     await settle();
     const card = composer.target.querySelector<HTMLElement>(".survey-card");
     expect(card, "the terminal survey shows").not.toBeNull();
-    await vi.waitFor(() => expect(document.activeElement, "the terminal card takes the keyboard").toBe(card));
+    expect(document.activeElement, "the window-wide card keeps the keyboard").toBe(wide);
     const asked: HTMLElement[] = [];
     const focus = HTMLElement.prototype.focus;
     const spy = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
@@ -778,12 +779,12 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
       // through the remote-close path, as a timeout or another window does.
       closeSurveyFromRemote(SURVEY.surveyId);
       await settle();
+      await vi.waitFor(() => expect(document.activeElement, "the terminal card takes the keyboard").toBe(card));
       const richPrompt = composer.target.querySelector<HTMLElement>(".rich-prompt")!;
       expect(asked.filter((el) => richPrompt.contains(el)), "the composer is asked for no focus").toEqual([]);
     } finally {
       spy.mockRestore();
     }
-    expect(document.activeElement, "the terminal card keeps the keyboard").toBe(card);
     resetSurveysForTest();
     unmount(overlay);
     target.remove();
