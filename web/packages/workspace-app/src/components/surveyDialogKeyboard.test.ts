@@ -8,7 +8,7 @@
 // both. The real survey overlay and dialog stack, in jsdom.
 
 import { flushSync, mount, tick, unmount } from "svelte";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
@@ -16,6 +16,7 @@ import OverlayShell from "./OverlayShell.svelte";
 import { createRawSnippet } from "svelte";
 import TeamDialog from "./TeamDialog.svelte";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
+import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
@@ -118,6 +119,24 @@ describe("a window-wide survey and a dialog", () => {
     expect(document.activeElement).toBe(card(target));
     await openDialog();
     await settle();
+    expect(document.activeElement).toBe(card(target));
+  });
+
+  test("a dialog closing over another under a window-wide survey hands its opener nothing", async () => {
+    focusOrigin();
+    const target = overlay();
+    dialogs();
+    const field = await openDialog();
+    field.focus();
+    void uiConfirm({ title: "Sure?" });
+    await settle();
+    showSurvey(SURVEY, null);
+    await settle();
+    expect(document.activeElement, "the card over both dialogs").toBe(card(target));
+    const restore = vi.spyOn(field, "focus");
+    resolveConfirm(false);
+    await settle();
+    expect(restore, "the opener in the dialog left").not.toHaveBeenCalled();
     expect(document.activeElement).toBe(card(target));
   });
 

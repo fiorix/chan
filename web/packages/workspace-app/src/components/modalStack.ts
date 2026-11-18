@@ -150,7 +150,10 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
         const remaining = top();
         if (remaining) {
           if (inside(remaining, document.activeElement)) return;
-          const opener = shell.openers.find((node) => inside(remaining, node));
+          // The opener in the dialog left takes the keyboard back only where
+          // the keyboard's owner lets it: under a window-wide survey painted
+          // over both, the survey keeps it.
+          const opener = shell.openers.find((node) => inside(remaining, node) && mayFocus(node));
           if (opener) opener.focus({ preventScroll: true });
           repair();
         } else if (shouldRestore && !canTakeFocus(document.activeElement)) {
