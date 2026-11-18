@@ -48,8 +48,8 @@ pub struct SemanticState {
     /// `semantic_enabled` flag AND whether the model is on disk --
     /// the field is "hybrid" only when BOTH are true.
     pub mode: &'static str,
-    /// True when the model files are laid out at the resolver's
-    /// expected path (refs/main + complete snapshot trio). False
+    /// True when every file the embedder reads is in one snapshot at
+    /// the resolver's expected path, by the downloader's own rule. False
     /// when the model hasn't been downloaded.
     pub model_present: bool,
     /// Workspace-configured model id (`IndexConfig::model`).

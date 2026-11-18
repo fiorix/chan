@@ -853,7 +853,7 @@ fn a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinn
 }
 
 #[test]
-fn a_pinned_snapshot_without_its_ref_is_downloaded_and_gets_its_ref() {
+fn a_pinned_snapshot_without_its_ref_counts_as_downloaded_and_gets_its_ref() {
     let cache = tempfile::tempdir().unwrap();
     let model = config::embedding_model(crate::DEFAULT_MODEL).unwrap();
     let repo = cache.path().join(repo_dir_name(crate::DEFAULT_MODEL));
