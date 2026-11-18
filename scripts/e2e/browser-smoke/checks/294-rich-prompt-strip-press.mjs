@@ -441,15 +441,20 @@ export default {
               (value) => value.text === textB && value.editable && !value.pending);
             await page.click(`${terminal} .terminal-host`);
             const paneA = await activePaneId(page);
+            // The press moves no focus: A's element keeps the keyboard while
+            // B's button is held. Only the submit itself may then focus B's
+            // composer.
             const pointB = await installPressRecord(page, `${cardB} .rp-primary`);
+            await page.evaluate(() => { window.__heldBefore294 = document.activeElement; });
             await page.mouse.move(pointB.x, pointB.y);
             await page.mouse.down();
             await sleep(250);
             const heldB = await focusState(page, cardB);
+            const unmovedB = await page.evaluate(() => document.activeElement === window.__heldBefore294);
             const recordB = await readPressRecord(page);
             await page.mouse.up();
             try {
-              assert.equal(heldB.where, "composer", "the press holds B's composer");
+              assert.ok(unmovedB, `the press on B's button moves no focus (held at ${heldB.where})`);
             } catch (error) {
               throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(recordB)}`);
             }
