@@ -221,6 +221,11 @@ function startWorkspacePolling(): void {
     if (library.gateways.some((gateway) => gateway.wireguard || gateway.wireguard_status || gateway.wireguard_enrolled || gateway.wireguard_ingresses?.length)) {
       void refreshGatewaysLive();
     }
+    // A devserver's connection health changes with no feed push either, so
+    // its face shows a change within the poll while one has a reading.
+    if (library.devservers.some((ds) => (ds.connection_health ?? null) !== null)) {
+      void refreshDevserversLive();
+    }
   }, WORKSPACE_POLL_MS);
   (workspacePoll as { unref?: () => void }).unref?.();
 }
