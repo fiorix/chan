@@ -211,24 +211,27 @@ export function handKeyboardToOwner(): boolean {
   return take !== undefined;
 }
 
-// When the last cover over the window lifts with the keyboard at large (the
+// When a cover over the window lifts with the keyboard at large (the
 // cover's own field went with it), the keyboard goes to its owner as the
-// owner's surface takes it, as a dialog under the screen lock takes its
-// field back on unlock. With nothing owning it, the tab-focus pulse hands it
-// to the focused pane's active tab, unless the reconnect cover is among the
-// covers lifting: that cover pulses the tab itself, for a terminal or an
-// editor it saw holding the keyboard, and only then.
+// owner's surface takes it, where the owner paints over every cover still
+// up: a dialog under the screen lock takes its field back on unlock, and
+// the close prompt over the reconnect cover takes Cancel back when the lock
+// over both lifts. With nothing owning it and no cover left, the tab-focus
+// pulse hands it to the focused pane's active tab, unless the reconnect
+// cover is among the covers lifting: that cover pulses the tab itself, for a
+// terminal or an editor it saw holding the keyboard, and only then.
 if (typeof document !== "undefined") {
   $effect.root(() => {
     let raised = raisedCoverKeys();
     $effect(() => {
       const now = raisedCoverKeys();
-      if (raised.length > 0 && now.length === 0) {
-        const reconnect = raised.includes("reconnect");
+      const lifted = raised.filter((cover) => !now.includes(cover));
+      if (lifted.length > 0) {
+        const reconnect = lifted.includes("reconnect");
         queueMicrotask(() => {
-          if (appInputBlocked() || canTakeFocus(document.activeElement)) return;
+          if (canTakeFocus(document.activeElement)) return;
           if (owner() !== null) handKeyboardToOwner();
-          else if (!reconnect) bumpTabFocusPulse();
+          else if (!appInputBlocked() && !reconnect) bumpTabFocusPulse();
         });
       }
       raised = now;
