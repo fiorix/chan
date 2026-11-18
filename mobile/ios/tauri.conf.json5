@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Chan",
+  "version": "0.133.0",
+  "identifier": "app.chan.ios",
+  "build": {
+    // The webview loads the embedded loopback launcher, never bundled
+    // assets; dist/ only satisfies the build's asset embedding.
+    "frontendDist": "dist",
+    "devUrl": null,
+    "beforeDevCommand": null,
+    "beforeBuildCommand": null
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self' https://www.youtube-nocookie.com https://www.google.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Supercharged terminal emulator",
+    "longDescription": "Chan is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory.",
+    "iOS": {
+      "minimumSystemVersion": "15.0",
+      "developmentTeam": "W73XV5CK3N"
+    }
+  }
+}
