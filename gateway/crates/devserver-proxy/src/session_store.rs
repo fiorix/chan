@@ -2220,6 +2220,7 @@ mod tests {
             .expect("browser session");
         for client in [
             ClientType::Desktop,
+            ClientType::Mobile,
             ClientType::Browser,
             ClientType::Unknown,
         ] {
@@ -2253,6 +2254,8 @@ mod tests {
             for (named_client, other_client) in [
                 (ClientType::Desktop, ClientType::Browser),
                 (ClientType::Browser, ClientType::Desktop),
+                (ClientType::Mobile, ClientType::Browser),
+                (ClientType::Desktop, ClientType::Mobile),
             ] {
                 for binding_client in [named_client, other_client] {
                     let store = SessionStore::new(8, Duration::from_secs(60));
@@ -2287,6 +2290,7 @@ mod tests {
         let store = SessionStore::new(8, Duration::from_secs(60));
         for client in [
             ClientType::Desktop,
+            ClientType::Mobile,
             ClientType::Browser,
             ClientType::Unknown,
         ] {
