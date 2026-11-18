@@ -16,7 +16,9 @@ const RUN = Date.now().toString(36);
 const DIR = `pc231-${RUN}`;
 const RENAMED = `pc231-${RUN}-renamed`;
 const WINDOW = `smoke-check-231`;
-const TAB = "pillcover-231-notice";
+// Unique per run: the trees are reused across reruns, and a stale session
+// under a fixed name reads as a session the held socket created.
+const TAB = `pillcover-231-notice-${Date.now().toString(36)}`;
 const COMMAND = "exec sleep 600";
 
 function windowUrl(ctx, windowId) {
