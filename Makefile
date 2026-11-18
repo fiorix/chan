@@ -118,6 +118,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::embedder_retries_non_utf8_cached_config \
 	index::embeddings::download::tests::embedder_retries_a_cached_model_that_only_fails_its_probe \
 	index::embeddings::download::tests::embedder_refuses_a_retry_model_that_only_fails_its_probe \
+	index::embeddings::download::tests::a_failed_probe_with_every_file_as_pinned_keeps_the_cache \
 	index::embeddings::download::publication_tests::reference_replacement_preserves_open_readers \
 	index::embeddings::download::publication_tests::reference_publication_failure_preserves_destination_and_cleans_temporary \
 	index::embeddings::download::publication_tests::published_reference_has_regular_file_attributes \

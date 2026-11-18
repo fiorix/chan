@@ -188,6 +188,22 @@ impl Client {
         Ok(path)
     }
 
+    /// Whether every file of `model` the cache holds, where `get` would read
+    /// it, has its pinned sha256 and size. A missing file does not.
+    pub(super) fn files_match_their_pins(&self, model: &str) -> Result<bool, EmbedError> {
+        let Some(info) = self.models.iter().find(|info| info.id == model) else {
+            return Ok(false);
+        };
+        let repo = self.cache.join(repo_dir_name(model));
+        for file in info.files {
+            match cached(&repo, info, file.name) {
+                Some(path) if matches_pin(&path, file)? => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     fn pin(
         &self,
         model: &str,
@@ -310,22 +326,38 @@ fn open_part(path: &Path) -> io::Result<File> {
 /// Feed the part's first `len` bytes to `hasher`, leaving its cursor at `len`.
 fn hash_prefix(part: &mut File, len: u64, hasher: &mut Sha256) -> io::Result<()> {
     part.rewind()?;
-    let mut prefix = (&mut *part).take(len);
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        let read = prefix.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if part.stream_position()? != len {
+    if hash_into(&mut (&mut *part).take(len), hasher)? != len {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "the partial download shrank while it was hashed",
         ));
     }
     Ok(())
+}
+
+/// Feed everything `reader` yields to `hasher`; the byte count.
+fn hash_into(reader: &mut impl Read, hasher: &mut Sha256) -> io::Result<u64> {
+    let mut buffer = [0; 64 * 1024];
+    let mut total = 0;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(total);
+        }
+        hasher.update(&buffer[..read]);
+        total += read as u64;
+    }
+}
+
+/// Whether the file at `path` has `file`'s pinned size and sha256.
+fn matches_pin(path: &Path, file: &ModelFile) -> io::Result<bool> {
+    let mut reader = File::open(path)?;
+    if reader.metadata()?.len() != file.size {
+        return Ok(false);
+    }
+    let mut hasher = Sha256::new();
+    hash_into(&mut reader, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()) == file.sha256)
 }
 
 fn identifier(value: &str) -> bool {

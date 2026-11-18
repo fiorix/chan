@@ -201,11 +201,15 @@ impl Embedder {
     /// HuggingFace into `cache_dir` on first use; subsequent opens
     /// are local and fast.
     ///
-    /// Decoding, loading or probing a corrupt cached model removes its
-    /// per-model cache and retries once. Download and filesystem failures
-    /// preserve the cache so resumable bytes and concurrent download locks
-    /// remain intact. The probe also detects weights that load but fail
-    /// during inference. A second failure surfaces to the caller.
+    /// A model that fails to decode, load or probe is fetched once more
+    /// when one of its cached files misses its pinned sha256 or size: the
+    /// per-model cache is removed and the files are downloaded again. A
+    /// failure with every file as pinned is not corruption a download
+    /// repairs (an accelerator error, say), so it surfaces with the cache
+    /// kept. Download and filesystem failures preserve the cache so
+    /// resumable bytes and concurrent download locks remain intact. The
+    /// probe also detects weights that load but fail during inference. A
+    /// second failure surfaces to the caller.
     pub fn open(model_id: &str, cache_dir: &Path) -> Result<Self, EmbedError> {
         let client = download::Client::new(cache_dir)?;
         Self::open_with_client(model_id, cache_dir, &client)
@@ -223,10 +227,14 @@ impl Embedder {
                 | EmbedError::Tokenizer(_)
                 | EmbedError::Candle(_)),
             ) => {
+                if client.files_match_their_pins(model_id)? {
+                    return Err(first_err);
+                }
                 tracing::warn!(
                     model = model_id,
                     error = %first_err,
-                    "embedder open/probe failed; wiping model cache and retrying",
+                    "embedder open/probe failed on a file that misses its pin; \
+                     wiping model cache and retrying",
                 );
                 wipe_model_cache(model_id, cache_dir)?;
                 let e = Self::open_once(model_id, cache_dir, client)?;

@@ -1059,6 +1059,51 @@ fn embedder_refuses_a_retry_model_that_only_fails_its_probe() {
     );
 }
 
+#[test]
+fn a_failed_probe_with_every_file_as_pinned_keeps_the_cache() {
+    let cache = tempfile::tempdir().unwrap();
+    crate::index::test_support::seed_embedding_model(cache.path());
+    let seeded = cache
+        .path()
+        .join(repo_dir_name(crate::DEFAULT_MODEL))
+        .join("snapshots/test-model");
+    let mut files = seeded_files(cache.path());
+    let tokenizer = tokenizer_with_invalid_cls(&files["tokenizer.json"]);
+    std::fs::write(seeded.join("tokenizer.json"), &tokenizer).unwrap();
+    files.insert("tokenizer.json", tokenizer);
+    // The pins name the bytes the cache holds, so the failure is not
+    // corruption: a download would bring the same bytes back.
+    let pinned = default_pins("test-model", &files);
+    let server = Server::start(|_| {
+        response(
+            "503 Service Unavailable",
+            "",
+            b"a model as pinned is not fetched again",
+        )
+    });
+    let client = Client::with_config(
+        cache.path(),
+        &server.endpoint,
+        chan_tls::client_config().unwrap(),
+    )
+    .pinned(pinned);
+    let error =
+        super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client)
+            .expect_err("the pinned model fails its probe");
+    assert!(
+        matches!(error, EmbedError::Candle(_)),
+        "the probe's own failure surfaces: {error}"
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+    for (name, bytes) in files {
+        assert_eq!(
+            std::fs::read(seeded.join(name)).unwrap(),
+            bytes,
+            "the cache is kept"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn embedder_missing_downloaded_weights_preserves_cache() {
