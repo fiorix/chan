@@ -8,13 +8,3 @@
    const top = topOverlay();
    return top !== null && top !== except;
  }
---- a/web/packages/workspace-app/src/components/CommandLauncher.svelte
-+++ b/web/packages/workspace-app/src/components/CommandLauncher.svelte
-@@ -876,7 +876,6 @@
-     // Anything else, and no heir at all, goes through the shared rule,
-     // which still refuses the terminal and its composer while an owner
-     // holds them.
--    if (launcherShownOverWindow()) return false;
-     if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
-     if (heir?.closest(".survey-card"))
-       return (
