@@ -369,13 +369,21 @@ impl ConnectionReading {
     }
 
     /// Read the face at `now` into `shown`, answering whether it changed. A
-    /// face a wait crossed a threshold into starts when it crossed it.
+    /// face a wait crossed a threshold into starts when it crossed it, unless
+    /// that was before the face it follows began: slow after a stall starts
+    /// when it is read, not at the wait's first second.
     fn settle(&mut self, now: Stamp) -> bool {
         let next = self.face(now);
         let changed = self.shown.map(|(face, _)| face) != next.map(|(face, _)| face);
         if changed {
-            self.shown =
-                next.map(|(face, due)| (face, due.map_or(now.wall_ms, |due| due.min(now.wall_ms))));
+            let began = self.shown.map(|(_, since)| since);
+            self.shown = next.map(|(face, due)| {
+                let since = match due {
+                    Some(due) if began.is_none_or(|began| due >= began) => due.min(now.wall_ms),
+                    _ => now.wall_ms,
+                };
+                (face, since)
+            });
         }
         changed
     }
@@ -818,6 +826,27 @@ mod tests {
         assert_eq!(
             face(&mut reading, hand.wait(4_000)),
             Some(ConnectionFace::Stalled)
+        );
+    }
+
+    /// A set during a stall ends it, and the slow face that follows starts
+    /// when the set came: the wait's first second is before the stall began.
+    #[test]
+    fn a_slow_face_after_a_stall_starts_when_it_is_read() {
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 40);
+        let sent = hand.wait(3_000);
+        reading.ping_sent(sent);
+        let stalled = reading.health(hand.wait(5_000)).unwrap();
+        assert_eq!(stalled.face, ConnectionFace::Stalled);
+        assert_eq!(stalled.since, sent.wall_ms + 4_000);
+        let set = hand.wait(1_000);
+        reading.set_arrived(set);
+        let health = reading.health(hand.wait(500)).unwrap();
+        assert_eq!(health.face, ConnectionFace::Slow);
+        assert_eq!(
+            health.since, set.wall_ms,
+            "slow after the stall started before the stall did"
         );
     }
 
