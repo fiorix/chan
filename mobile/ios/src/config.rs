@@ -1,0 +1,2799 @@
+//! The iOS app's local config.
+//!
+//! The chan registry (`~/.chan/config.toml`) is the source of truth
+//! for which workspaces exist. This file holds only app-local
+//! state that has no place in chan proper; [`Config`]'s field docs list
+//! it.
+//!
+//! Per-workspace serve URLs are intentionally NOT persisted: chan rotates
+//! the bearer token on every `chan serve`, so a saved URL would
+//! decay to garbage between launches. The URL lives in `AppState`
+//! in memory while a serve is running, and the webview
+//! reloads it fresh on every On toggle.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use chan_server::{
+    DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus, GatewayEntry, GatewayInput,
+    GatewayRegistry, WireguardKeyOutcome,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::devserver::DevserverConns;
+
+/// A devserver the desktop dials out to: a headless `chan devserver`
+/// running on some box (often reached over an `ssh -L` local forward).
+/// A devserver is a multi-workspace aggregator: the desktop groups its
+/// workspaces under one `[DEVSERVER {host}]` launcher section and drives
+/// them through the devserver's management API.
+///
+/// This struct is the *local* connection recipe only: the full devserver URL
+/// (scheme included) the desktop dials plus the user's connect `script` (the
+/// control terminal runs it, e.g. an `ssh -L` invocation). The devserver owns
+/// the per-workspace URLs/tokens and their lifecycle; the desktop persists
+/// just enough to re-offer the connection and re-open its windows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Devserver {
+    /// Stable desktop-local identifier used for row actions, window
+    /// restore, and the in-memory connection-state map. Not sent to the
+    /// devserver.
+    pub id: String,
+    /// The full devserver URL the desktop dials, scheme included
+    /// (`https://box.example.com:8787`, or `http://127.0.0.1:8787` for an
+    /// `ssh -L` loopback forward). The scheme is load-bearing: the dial path
+    /// branches raw-tunnel vs proxied-HTTPS on it. The parsed host is also the
+    /// default
+    /// `[DEVSERVER {host}]` section label until the devserver reports its own
+    /// `host_label`. A missing port defaults from the scheme at dial time.
+    pub url: String,
+    /// The connect script the CONTROL TERMINAL runs in its PTY (typically
+    /// an `ssh user@box -L {port}:localhost:{port} chan devserver ...`).
+    /// It blocks for the life of the session; its return means the
+    /// session ended (the CONTROL TERMINAL then offers re-run / disconnect).
+    #[serde(default)]
+    pub script: String,
+    /// Optional user label for the launcher section header and window
+    /// titles. Empty falls back to the URL host.
+    #[serde(default)]
+    pub label: String,
+    /// Bearer token for the devserver. Write-only over the launcher wire: the
+    /// registry reports its presence via `has_token` and never echoes the
+    /// value back. Stored so a connect script can be just the transport setup
+    /// (for example `ssh -N`) while the credential comes from the Address URL;
+    /// empty means scrape/read a fresh token at dial.
+    #[serde(default)]
+    pub token: String,
+    /// Wall-clock millis when the devserver was added.
+    #[serde(default)]
+    pub added_at: u64,
+    /// Whether the control terminal auto-hides on a successful connect (the
+    /// devserver form's "auto-hide control terminal on success" checkbox). The
+    /// connect flow reads it to hide the control terminal programmatically (no
+    /// bury notice) once connected.
+    #[serde(default)]
+    pub auto_hide_control: bool,
+    /// Read-only markers found in config files written by the pick-one
+    /// gateway flow: the picked devserver's OWNER username plus its full id.
+    /// The startup migration converts such a row into a [`Gateway`] entry
+    /// (and clears them on a row it keeps). Never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_devserver_id: Option<String>,
+}
+
+/// Persisted consent for one shared devserver's exact gateway identity.
+/// Labels, proxy origins, and short discriminators are intentionally absent:
+/// authority is keyed by immutable owner UUID plus the full devserver id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeDevserverTrust {
+    /// None only on legacy records. Legacy username-keyed trust is retained
+    /// for readable config migration but never authorizes native IPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<uuid::Uuid>,
+    pub owner: String,
+    pub devserver_id: String,
+}
+
+/// A gateway the desktop holds an account-level connection to: the public
+/// identity origin the user added on the launcher's Gateways screen. The
+/// desktop signs in once per gateway account, polls the gateway's devserver
+/// roster, and synthesizes the rostered devservers into the launcher list.
+/// Only this connection recipe persists; roster rows are volatile and the
+/// account PAT lives in the OS keyring (keyed by the identity origin), so a
+/// removed-then-re-added gateway reconnects without a fresh sign-in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Gateway {
+    /// Stable desktop-minted id (`gw-` + 8 lowercase hex). The hex segment
+    /// (sans prefix) rides inside synthesized devserver row ids, whose
+    /// charset is pinned to `[A-Za-z0-9_-]`.
+    pub id: String,
+    /// The gateway's public identity origin, scheme included, no path
+    /// (`https://gw.chan.app`). Normalized to an origin at add time.
+    pub url: String,
+    /// Optional user label for the gateway badge; empty falls back to the
+    /// URL host.
+    #[serde(default)]
+    pub label: String,
+    /// Connect intent: enabled gateways auto-connect at startup. Connect
+    /// persists `true`, disconnect persists `false`. Defaults `true` so a
+    /// hand-added row behaves like a freshly added one.
+    #[serde(default = "gateway_enabled_default")]
+    pub enabled: bool,
+    /// Wall-clock millis when the gateway was added (or when its legacy
+    /// devserver row was converted).
+    #[serde(default)]
+    pub added_at: u64,
+    /// Shared devservers the user has allowed to receive native IPC. Trust is
+    /// scoped by this enclosing gateway row and survives disconnect/restart;
+    /// removing the gateway removes the records with it.
+    #[serde(default)]
+    pub native_trust: Vec<NativeDevserverTrust>,
+    /// A hand-written or unmigrated enrollment wg-quick file. It keeps
+    /// its single-tunnel meaning; enrolled parameters use their key file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<PathBuf>,
+    /// The public half of the WireGuard key generated for this gateway,
+    /// base64 as `wg` prints it; the private half is in the row's key file
+    /// under the desktop's `wireguard` directory and nowhere else. Absent
+    /// until a key is generated, and left off the file then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_public_key: Option<String>,
+    /// The key the gateway enrolled at the last sign-in that sent one. A
+    /// generated key that differs, a replaced one among them, is not
+    /// enrolled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_enrolled_key: Option<String>,
+    /// Host map accompanying an unmigrated enrollment file. Once migrated,
+    /// each ingress carries its own map in `wireguard_enrollment`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wireguard_hosts: Vec<WireguardHost>,
+    /// Enrolled tunnel parameters. The private key stays in its owner-only
+    /// file; `wireguard` is reserved for a hand-written or unmigrated file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_enrollment: Option<WireguardEnrollment>,
+    /// An obsolete owned client file whose removal follows a kept enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_cleanup: Option<WireguardCleanup>,
+}
+
+/// Byte ownership survives later changes to the enrolled key or parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardCleanup {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+/// Shared client settings and each node's peer, without private material.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardEnrollment {
+    pub key_file: PathBuf,
+    pub addresses: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_keepalive: Option<u16>,
+    pub ingresses: Vec<WireguardIngress>,
+}
+
+/// One name of a gateway's host map as the row stores it: an exact
+/// lowercase DNS name, or `*.` and one, matching every label depth below it,
+/// with the tunnel addresses it is reached at. The serde mirror of
+/// chan-wireguard's `HostRoute`, which carries no serde of its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardHost {
+    pub name: String,
+    pub addresses: Vec<std::net::IpAddr>,
+}
+
+/// One gateway node's WireGuard interface and the names it routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardIngress {
+    pub id: String,
+    pub endpoint: String,
+    pub public_key: String,
+    pub hosts: Vec<WireguardHost>,
+}
+
+impl Gateway {
+    /// The source identifying the current tunnel for adoption and status.
+    pub fn wireguard_source(&self) -> Option<&Path> {
+        self.wireguard_enrollment
+            .as_ref()
+            .map(|enrollment| enrollment.key_file.as_path())
+            .or(self.wireguard.as_deref())
+    }
+
+    pub fn trusts_native(&self, owner_user_id: uuid::Uuid, devserver_id: &str) -> bool {
+        self.native_trust.iter().any(|trust| {
+            trust.owner_user_id == Some(owner_user_id) && trust.devserver_id == devserver_id
+        })
+    }
+
+    /// The row's host map as the proxy routes it, passed at every adopt of
+    /// the row's file.
+    pub fn host_routes(&self) -> Vec<chan_wireguard::HostRoute> {
+        self.wireguard_enrollment
+            .as_ref()
+            .and_then(|enrollment| enrollment.ingresses.first())
+            .map(|ingress| &ingress.hosts)
+            .unwrap_or(&self.wireguard_hosts)
+            .iter()
+            .map(|host| chan_wireguard::HostRoute {
+                name: host.name.clone(),
+                addresses: host.addresses.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Read one persisted shared-devserver trust decision. The gateway row is the
+/// outer trust boundary, so an absent gateway is an error rather than an
+/// untrusted answer that might hide a mid-flight removal.
+pub fn native_trust(
+    store: &Arc<Mutex<ConfigStore>>,
+    gateway_id: &str,
+    owner_user_id: uuid::Uuid,
+    devserver_id: &str,
+) -> Result<bool, String> {
+    let cfg = store.lock().unwrap().get().map_err(|e| e.to_string())?;
+    let gateway = cfg.gateway(gateway_id)?;
+    Ok(gateway.trusts_native(owner_user_id, devserver_id))
+}
+
+/// Persist or remove one exact shared-devserver trust tuple. Returns whether
+/// the file changed; repeated PUT/DELETE operations are idempotent.
+pub fn set_native_trust(
+    store: &Arc<Mutex<ConfigStore>>,
+    gateway_id: &str,
+    owner_user_id: uuid::Uuid,
+    owner: &str,
+    devserver_id: &str,
+    trusted: bool,
+) -> Result<bool, String> {
+    let mut store = store.lock().unwrap();
+    let mut cfg = store.get().map_err(|e| e.to_string())?;
+    let gateway = cfg.gateway_mut(gateway_id)?;
+    let present = gateway.trusts_native(owner_user_id, devserver_id);
+    if present == trusted {
+        return Ok(false);
+    }
+    if trusted {
+        gateway.native_trust.push(NativeDevserverTrust {
+            owner_user_id: Some(owner_user_id),
+            owner: owner.to_string(),
+            devserver_id: devserver_id.to_string(),
+        });
+    } else {
+        gateway.native_trust.retain(|trust| {
+            trust.owner_user_id != Some(owner_user_id) || trust.devserver_id != devserver_id
+        });
+    }
+    store.save(&cfg).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Cleanup-only removal for a roster row that disappeared before its UUID can
+/// be read from the new snapshot. This never grants authority.
+pub fn prune_native_trust_by_label(
+    store: &Arc<Mutex<ConfigStore>>,
+    gateway_id: &str,
+    owner: &str,
+    devserver_id: &str,
+) -> Result<bool, String> {
+    let mut store = store.lock().unwrap();
+    let mut cfg = store.get().map_err(|e| e.to_string())?;
+    let gateway = cfg.gateway_mut(gateway_id)?;
+    let before = gateway.native_trust.len();
+    gateway
+        .native_trust
+        .retain(|trust| trust.owner != owner || trust.devserver_id != devserver_id);
+    if gateway.native_trust.len() == before {
+        return Ok(false);
+    }
+    store.save(&cfg).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn gateway_enabled_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// Client session name presented by native windows; empty keeps automatic naming.
+    #[serde(default)]
+    pub client_session_name: String,
+    /// Preferred loopback port for the embedded local server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_port: Option<u16>,
+    /// Configured devservers (multi-workspace aggregators the desktop
+    /// dials out to). Each renders its own `[DEVSERVER {host}]` launcher
+    /// section. The per-workspace URLs/tokens are NOT persisted (the
+    /// devserver rotates them); only the connection recipe is.
+    #[serde(default)]
+    pub devservers: Vec<Devserver>,
+    /// Configured gateways: account-level connections whose devserver
+    /// rosters the desktop synthesizes into the launcher list. Only the
+    /// connection recipe persists (see [`Gateway`]); the rostered rows are
+    /// volatile. `#[serde(default)]`: configs predating gateways read empty,
+    /// and a downgrade ignores the unknown field.
+    #[serde(default)]
+    pub gateways: Vec<Gateway>,
+    /// The LOCAL library's pane-highlight colour (hex `#rrggbb`), or `None` for
+    /// the default accent. Backs the [`LocalColorStore`](chan_server::LocalColorStore)
+    /// the host reads when minting local windows (terminals + workspaces). The
+    /// launcher's local-colour route writes it; the per-devserver colour lives on
+    /// each [`Devserver`].
+    #[serde(default)]
+    pub local_color: Option<String>,
+    /// The launcher's light/dark choice (`"dark"` / `"light"`), or `None` to
+    /// follow the OS (the default, so shipping this changes nothing until the
+    /// user first toggles). Backs the [`LocalThemeStore`](chan_server::LocalThemeStore)
+    /// that local standalone terminal windows read + watch; the launcher's
+    /// local-theme route writes it. Remote and devserver terminals are unaffected
+    /// (their host installs no store).
+    #[serde(default)]
+    pub launcher_theme: Option<String>,
+}
+
+/// An app without a `config.json` runs with the empty object's config, so a
+/// missing file and a file that predates a field agree on every default by
+/// construction.
+impl Default for Config {
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("an empty object deserializes as a Config")
+    }
+}
+
+impl Config {
+    /// The gateway row `id`, or the "no gateway" refusal every lookup gives.
+    fn gateway(&self, id: &str) -> Result<&Gateway, String> {
+        self.gateways
+            .iter()
+            .find(|gateway| gateway.id == id)
+            .ok_or_else(|| format!("no gateway {id}"))
+    }
+
+    /// Mutable [`Self::gateway`].
+    fn gateway_mut(&mut self, id: &str) -> Result<&mut Gateway, String> {
+        self.gateways
+            .iter_mut()
+            .find(|gateway| gateway.id == id)
+            .ok_or_else(|| format!("no gateway {id}"))
+    }
+}
+
+pub struct ConfigStore {
+    path: PathBuf,
+}
+
+impl ConfigStore {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            path: config_path()?,
+        })
+    }
+
+    /// Test-only store at an explicit path; production stores resolve
+    /// their path through [`ConfigStore::new`].
+    #[cfg(test)]
+    pub(crate) fn at_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// The directory of the gateways' WireGuard key and client files:
+    /// `wireguard` beside this file, `<chan home>/desktop/wireguard`.
+    pub fn wireguard_dir(&self) -> PathBuf {
+        self.path.with_file_name("wireguard")
+    }
+
+    pub fn get(&self) -> io::Result<Config> {
+        match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Store a chosen embedded port without replacing an existing preference.
+    pub(crate) fn save_embedded_port_if_absent(&mut self, port: u16) -> io::Result<()> {
+        let mut cfg = self.get()?;
+        if cfg.embedded_port.is_none() || cfg.embedded_port == Some(0) {
+            cfg.embedded_port = Some(port);
+            self.save(&cfg)?;
+        }
+        Ok(())
+    }
+
+    /// This file holds devserver bearer tokens and token-bearing URLs, so it
+    /// is written like the token stores it sits beside: through
+    /// chan-workspace's atomic_write (tempfile + fsync of the file AND the
+    /// parent dir + rename), then narrowed to 0600 on unix. A plain write and
+    /// rename would leave the token at the process umask with no fsync behind
+    /// the publication.
+    ///
+    /// atomic_write carries an existing file's mode across the rename, so the
+    /// chmod runs on every save rather than only where the file is created:
+    /// a config that reaches this process group- or world-readable does not
+    /// stay that way.
+    pub fn save(&mut self, cfg: &Config) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(cfg)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        chan_workspace::fs_ops::atomic_write(&self.path, &bytes)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+/// Side effect run after a devserver row is removed via the registry's
+/// [`remove`](DevserverRegistry::remove) (the HTTP `DELETE` path), so that path
+/// reaps a live connection/windows (the desktop's `teardown_devserver_connection`).
+/// Set once, after the Tauri `AppHandle` exists (the registry installs before it),
+/// via the shared [`OnceLock`] cell -- the chan-server-side registry can't see
+/// the `AppHandle` directly, so the desktop injects the teardown as a closure.
+/// The returned handle lets async gateway policy paths await teardown before a
+/// reconnect; the synchronous registry-remove path explicitly detaches it.
+/// A no-op when nothing is live (removing a not-connected devserver).
+pub type DevserverRemoveHook =
+    Arc<dyn Fn(&str) -> tauri::async_runtime::JoinHandle<()> + Send + Sync>;
+
+/// chan-desktop's [`DevserverRegistry`] implementation -- the bridge the
+/// launcher's `/api/library/devservers` routes reach through
+/// [`WorkspaceHost::devserver_registry`](chan_server::WorkspaceHost::devserver_registry).
+/// It wraps the SHARED [`ConfigStore`] handle (the same `Arc<Mutex<ConfigStore>>`
+/// the desktop's own commands and window geometry use), so every config
+/// write -- devserver CRUD and window state -- serializes
+/// through one lock and can't lose an update to a concurrent full-file rewrite.
+///
+/// The token is write-only: `add`/`update` accept it, `list` and the returned
+/// entry only report [`has_token`](DevserverEntry::has_token). A blank/absent
+/// token on update keeps the stored one unless the caller sets `clear_token`.
+pub struct DevserverConfigRegistry {
+    store: Arc<Mutex<ConfigStore>>,
+    /// Filled (once the `AppHandle` exists) with the live-connection teardown;
+    /// `remove` fires it after dropping a row so the HTTP `DELETE` reaps the
+    /// same connection/windows the Tauri command does. Empty until then (and on
+    /// headless surfaces) -- `remove` then only drops the config row.
+    on_remove: Arc<OnceLock<DevserverRemoveHook>>,
+    /// The live connection map (shared with `AppState.devservers`), so `list`
+    /// reports each row's [`DevserverEntry::status`] -- the launcher shows
+    /// Connect vs Disconnect + gates Edit read-only off it.
+    conns: Arc<DevserverConns>,
+    /// Devservers with a connect request currently in flight. Shared with
+    /// `AppState.devserver_connecting`, so list reports `connecting` during the
+    /// coalesced dial attempt.
+    connecting: Arc<Mutex<HashSet<String>>>,
+    /// The connected-devserver feed (shared with `AppState.devserver_feed`), so
+    /// `list` resolves each row's `library_id` from the live window snapshot.
+    /// `WorkspaceHost::pane_color` matches a devserver window's `library_id`
+    /// against these entries to find its colour, so the projection MUST carry it.
+    feed: Arc<crate::DevserverFeed>,
+    /// The gateway runtime map (shared with `AppState.gateway_manager`):
+    /// `list` appends one synthesized row per rostered gateway devserver,
+    /// so connected gateways' devservers appear beside the persisted rows.
+    gateway_manager: Arc<crate::gateway::GatewayManager>,
+}
+
+impl DevserverConfigRegistry {
+    pub fn new(
+        store: Arc<Mutex<ConfigStore>>,
+        on_remove: Arc<OnceLock<DevserverRemoveHook>>,
+        conns: Arc<DevserverConns>,
+        connecting: Arc<Mutex<HashSet<String>>>,
+        feed: Arc<crate::DevserverFeed>,
+        gateway_manager: Arc<crate::gateway::GatewayManager>,
+    ) -> Self {
+        Self {
+            store,
+            on_remove,
+            conns,
+            connecting,
+            feed,
+            gateway_manager,
+        }
+    }
+}
+
+/// Project a rostered gateway devserver into a launcher row. The id is the
+/// synthesized `gw:` triple; connection state reads the same conns /
+/// connecting / feed maps as persisted rows (keyed by that id); the roster
+/// supplies label, liveness, and provenance. Synthesized rows carry no
+/// local config: no token, no script, no editing.
+fn entry_from_roster_row(
+    gateway: &Gateway,
+    row: &crate::gateway::RosterDevserver,
+    conns: &DevserverConns,
+    connecting: &Arc<Mutex<HashSet<String>>>,
+    feed: &crate::DevserverFeed,
+) -> DevserverEntry {
+    let id = crate::gateway::synthesized_row_id(&gateway.id, &row.owner, &row.devserver_id);
+    let (host, port) = url::Url::parse(&gateway.url)
+        .ok()
+        .and_then(|u| {
+            let host = u.host_str()?.to_string();
+            Some((host, u.port_or_known_default().unwrap_or(443)))
+        })
+        .unwrap_or_else(|| (gateway.url.clone(), 443));
+    let (os, pretty_name) = feed.os_of(&id).unwrap_or_default();
+    DevserverEntry {
+        // Three-way mapping for rostered rows: a live conn reports
+        // Connected (the window-feed watchdog still owns quiet-conn
+        // Unreachable), an unconnected row follows the roster's online
+        // bit - offline rows get the lost dot BEFORE any connect attempt.
+        // Gateway-level trouble (the roster fetch failing) stays on the
+        // GatewayEntry badge, never painted across rows.
+        status: if conns.is_connected(&id) {
+            if feed.is_unreachable(&id) {
+                DevserverStatus::Unreachable
+            } else {
+                DevserverStatus::Connected
+            }
+        } else if connecting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+        {
+            DevserverStatus::Connecting
+        } else if row.online {
+            DevserverStatus::Disconnected
+        } else {
+            DevserverStatus::Unreachable
+        },
+        library_id: feed.library_id_of(&id),
+        id,
+        url: gateway.url.clone(),
+        host,
+        port,
+        label: row.label.clone(),
+        script: String::new(),
+        has_token: false,
+        auto_hide_control: false,
+        pending_signin: false,
+        os,
+        pretty_name,
+        gateway_id: Some(gateway.id.clone()),
+        gateway_url: gateway.url.clone(),
+        shared: row.shared,
+        native_trust_required: row.shared
+            && !gateway.trusts_native(row.owner_user_id, &row.devserver_id),
+    }
+}
+
+/// chan-desktop's [`LocalColorStore`](chan_server::LocalColorStore): the local
+/// library's pane-highlight colour persisted in the desktop config
+/// (`~/.chan/desktop`, the same shared store the devserver registry and geometry
+/// LRU use, so every write serializes through one lock). The host reads it when
+/// minting local windows; the launcher's local-colour route writes it.
+pub struct LocalColorConfig {
+    store: Arc<Mutex<ConfigStore>>,
+}
+
+impl LocalColorConfig {
+    pub fn new(store: Arc<Mutex<ConfigStore>>) -> Self {
+        Self { store }
+    }
+}
+
+impl chan_server::LocalColorStore for LocalColorConfig {
+    fn get(&self) -> Option<String> {
+        self.store
+            .lock()
+            .unwrap()
+            .get()
+            .ok()
+            .and_then(|c| c.local_color)
+    }
+
+    fn set(&self, color: Option<String>) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        cfg.local_color = color;
+        store.save(&cfg).map_err(|e| e.to_string())
+    }
+}
+
+/// chan-desktop's [`LocalThemeStore`](chan_server::LocalThemeStore): the
+/// launcher's light/dark choice persisted in the desktop config (the same
+/// shared store the local colour + devserver registry use, so every write
+/// serializes through one lock). The host reads it when minting local terminal
+/// windows; the launcher's local-theme route writes it.
+pub struct LocalThemeConfig {
+    store: Arc<Mutex<ConfigStore>>,
+}
+
+impl LocalThemeConfig {
+    pub fn new(store: Arc<Mutex<ConfigStore>>) -> Self {
+        Self { store }
+    }
+}
+
+impl chan_server::LocalThemeStore for LocalThemeConfig {
+    fn get(&self) -> Option<String> {
+        self.store
+            .lock()
+            .unwrap()
+            .get()
+            .ok()
+            .and_then(|c| c.launcher_theme)
+    }
+
+    fn set(&self, theme: Option<String>) -> Result<(), String> {
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        cfg.launcher_theme = theme;
+        store.save(&cfg).map_err(|e| e.to_string())
+    }
+}
+
+/// Split a stored devserver URL into (host, port): the port defaults
+/// from the scheme when the URL omits it (`https` 443, `http` 80), so
+/// `https://p1.proxy.chan.app` resolves without an explicit port. Bare
+/// `host:port` (no scheme) is rejected -- the launcher requires a
+/// `scheme://host` URL. The registry projects stored rows through this;
+/// the dial path's own parser lives in the devserver module.
+fn parse_devserver_url(url: &str) -> Result<(String, u16), String> {
+    let parsed =
+        url::Url::parse(url.trim()).map_err(|e| format!("invalid devserver URL {url:?}: {e}"))?;
+    let host = parsed
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| format!("devserver URL {url:?} has no host"))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("devserver URL {url:?} has no port and an unknown scheme"))?;
+    Ok((host, port))
+}
+
+/// Normalize and validate the desktop dial URL from an explicit URL or the
+/// launcher's host and port. The persisted URL identifies the connection.
+fn devserver_url(input: &DevserverInput) -> Result<String, String> {
+    if let Some(url) = input
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        return crate::devserver::normalize_devserver_url(url);
+    }
+    let host = input.host.trim();
+    if host.is_empty() {
+        return Err("devserver host is required".to_string());
+    }
+    let url = format!("http://{host}:{}", input.port);
+    crate::devserver::normalize_devserver_url(&url)
+}
+
+/// Project a stored devserver to the launcher entry, exposing host and port, token presence, live connection status, and cached feed metadata without exposing the token.
+fn entry_from_devserver(
+    d: &Devserver,
+    conns: &DevserverConns,
+    connecting: &Arc<Mutex<HashSet<String>>>,
+    feed: &crate::DevserverFeed,
+) -> DevserverEntry {
+    // The desktop stores the dial URL (formed from the user's host+port); the wire
+    // entry exposes host+port. A stored URL is always valid (add/update validate
+    // it), so the parse should not fail; fall back defensively to (raw, 0).
+    let (host, port) = parse_devserver_url(&d.url).unwrap_or_else(|_| (d.url.clone(), 0));
+    // The self-reported OS, cached in the feed at connect (empty before the first
+    // connect or from a devserver too old to report it).
+    let (os, pretty_name) = feed.os_of(&d.id).unwrap_or_default();
+    DevserverEntry {
+        id: d.id.clone(),
+        // A row stored with its bearer in the URL (typed that way, or saved by
+        // an older build) must not carry it onto the launcher wire, where the
+        // token is write-only and reported only as `has_token`.
+        url: display_devserver_url(&d.url),
+        host,
+        port,
+        label: d.label.clone(),
+        script: d.script.clone(),
+        has_token: !d.token.is_empty(),
+        status: if conns.is_connected(&d.id) {
+            // The connection record exists, but if this devserver's window/color
+            // feed sockets have gone down (the post-sleep half-open zombie, N
+            // consecutive feed reconnect failures) report Unreachable instead of
+            // a green Connected that the fresh-TCP workspace poll would otherwise
+            // keep lit over a dead feed.
+            if feed.is_unreachable(&d.id) {
+                DevserverStatus::Unreachable
+            } else {
+                DevserverStatus::Connected
+            }
+        } else if connecting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&d.id)
+        {
+            DevserverStatus::Connecting
+        } else {
+            DevserverStatus::Disconnected
+        },
+        // Sign-in waits are gateway-level; a persisted row never waits, and
+        // the key stays on the wire so the launcher parses it unconditionally.
+        pending_signin: false,
+        // The connected library id, learned from the live window feed (`None`
+        // until this devserver is connected with ≥1 window). `pane_color` matches
+        // a devserver window's `library_id` against this (in the feed) to resolve
+        // its colour; the entry carries no colour (each library's colour is on
+        // its own host).
+        library_id: feed.library_id_of(&d.id),
+        // Whether the control terminal auto-hides on connect success.
+        auto_hide_control: d.auto_hide_control,
+        // The launcher's machine icon + tooltip, from the devserver's self-report.
+        os,
+        pretty_name,
+        // Plain configured rows carry no gateway provenance; gateway-roster
+        // rows are synthesized with these set, not read from persisted config.
+        gateway_id: None,
+        gateway_url: String::new(),
+        shared: false,
+        native_trust_required: false,
+    }
+}
+
+/// A devserver URL without its `?t=` bearer, for storage and for every
+/// CLI-facing listing: the bearer rides the registry's write-only `token`
+/// field, and a URL the CLI registered as `http://host:port/?t=...` must
+/// not echo that token back through `chan devserver ls` or a refusal that
+/// lists candidates. Other query parameters and the path are kept.
+pub(crate) fn display_devserver_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Some((base, query)) = trimmed.split_once('?') else {
+        return trimmed.to_string();
+    };
+    let (query, fragment) = match query.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (query, None),
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("t=") && *pair != "t")
+        .collect();
+    let mut out = base.to_string();
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
+/// The identity devserver `add` dedupes on: scheme + dial host + port.
+/// Query and path are excluded on purpose: a stored URL may carry a `?t=`
+/// bearer that a later register of the same endpoint omits, and the two
+/// spellings still name one server.
+pub(crate) fn endpoint_key(url: &str) -> Option<(String, String, u16)> {
+    let (host, port) = parse_devserver_url(url).ok()?;
+    let scheme = url.trim().split("://").next()?.to_ascii_lowercase();
+    Some((scheme, host, port))
+}
+
+impl DevserverRegistry for DevserverConfigRegistry {
+    fn list(&self) -> Vec<DevserverEntry> {
+        // Infallible by contract (mirrors the window feed): a read error
+        // surfaces as an empty list, not a 500. Persisted rows first, then
+        // one synthesized row per rostered gateway devserver - derived
+        // deterministically from the config rows + the roster cache, so
+        // repeated lists agree while nothing changed.
+        let store = self.store.lock().unwrap();
+        store
+            .get()
+            .map(|cfg| {
+                let mut rows: Vec<DevserverEntry> = cfg
+                    .devservers
+                    .iter()
+                    .map(|d| entry_from_devserver(d, &self.conns, &self.connecting, &self.feed))
+                    .collect();
+                for g in &cfg.gateways {
+                    rows.extend(self.gateway_manager.roster(&g.id).iter().map(|r| {
+                        entry_from_roster_row(g, r, &self.conns, &self.connecting, &self.feed)
+                    }));
+                }
+                rows
+            })
+            .unwrap_or_default()
+    }
+
+    fn add(&self, input: DevserverInput) -> Result<DevserverEntry, String> {
+        let url = devserver_url(&input)?;
+        let token = input.token.unwrap_or_default().trim().to_string();
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        // Adding an endpoint that is already registered updates the row in
+        // place instead of growing a twin: label, script, and token land on
+        // the existing id, so `chan devserver register` is idempotent and a
+        // URL/label target stays resolvable. `auto_hide_control` is left
+        // alone on a merge -- it is a dialog choice about the stored row,
+        // and the register handoff never carries a meaningful value for it.
+        let key = endpoint_key(&url);
+        if key.is_some() {
+            if let Some(existing) = cfg
+                .devservers
+                .iter_mut()
+                .find(|d| endpoint_key(&d.url) == key)
+            {
+                if let Some(label) = input.label {
+                    existing.label = label;
+                }
+                if let Some(script) = input.script {
+                    existing.script = script;
+                }
+                if !token.is_empty() {
+                    existing.token = token;
+                }
+                let entry = existing.clone();
+                store.save(&cfg).map_err(|e| e.to_string())?;
+                return Ok(entry_from_devserver(
+                    &entry,
+                    &self.conns,
+                    &self.connecting,
+                    &self.feed,
+                ));
+            }
+        }
+        let entry = Devserver {
+            id: uuid::Uuid::new_v4().to_string(),
+            url,
+            script: input.script.unwrap_or_default(),
+            label: input.label.unwrap_or_default(),
+            token,
+            added_at: now_millis(),
+            auto_hide_control: input.auto_hide_control,
+            gateway_owner: None,
+            gateway_devserver_id: None,
+        };
+        cfg.devservers.push(entry.clone());
+        store.save(&cfg).map_err(|e| e.to_string())?;
+        Ok(entry_from_devserver(
+            &entry,
+            &self.conns,
+            &self.connecting,
+            &self.feed,
+        ))
+    }
+
+    fn update(&self, id: &str, input: DevserverInput) -> Result<Option<DevserverEntry>, String> {
+        // Synthesized gateway rows carry no local config to edit; they are
+        // not in the persisted vec, so the lookup below misses and the
+        // route layer answers 404. Same for remove.
+        let url = devserver_url(&input)?;
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        let Some(ds) = cfg.devservers.iter_mut().find(|d| d.id == id) else {
+            return Ok(None);
+        };
+        ds.url = url;
+        // label/script are full-replace (None/empty clears, which the display
+        // path reads as "derive the label from the URL host" / "no script").
+        ds.label = input.label.unwrap_or_default();
+        ds.script = input.script.unwrap_or_default();
+        // The auto-hide flag is full-replace like label/script (the edit form resubmits it).
+        ds.auto_hide_control = input.auto_hide_control;
+        // Token is write-only: the edit form can't echo the stored secret, so
+        // blank/absent still means keep. `clear_token` is the explicit removal
+        // path; a pasted replacement token wins over the checkbox.
+        let replacement_token = input
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        if let Some(tok) = replacement_token {
+            ds.token = tok.to_string();
+        } else if input.clear_token {
+            ds.token.clear();
+        }
+        let entry = entry_from_devserver(ds, &self.conns, &self.connecting, &self.feed);
+        store.save(&cfg).map_err(|e| e.to_string())?;
+        Ok(Some(entry))
+    }
+
+    fn remove(&self, id: &str) -> Result<bool, String> {
+        {
+            let mut store = self.store.lock().unwrap();
+            let mut cfg = store.get().map_err(|e| e.to_string())?;
+            let before = cfg.devservers.len();
+            cfg.devservers.retain(|d| d.id != id);
+            if cfg.devservers.len() == before {
+                return Ok(false);
+            }
+            store.save(&cfg).map_err(|e| e.to_string())?;
+        }
+        // Row dropped: reap any live connection/windows so the HTTP DELETE
+        // matches the Tauri command's teardown. The store lock is released
+        // above first -- the teardown locks the other AppState maps, never the
+        // store. A no-op when the devserver wasn't connected.
+        if let Some(hook) = self.on_remove.get() {
+            std::mem::drop(hook(id));
+        }
+        Ok(true)
+    }
+}
+
+/// Normalize a gateway URL to its origin: scheme + host [+ non-default
+/// port], path/query/fragment dropped. Rejects non-http(s) schemes and
+/// hostless URLs; everything after the origin is user noise (a pasted
+/// consent-page URL still yields the right gateway).
+pub fn normalize_gateway_url(raw: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("invalid gateway URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("gateway URL must be http(s)".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("gateway URL needs a host".to_string());
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+/// Mint a gateway id: `gw-` + 8 lowercase hex chars from the OS CSPRNG.
+/// Callers dedup against the config's existing ids (four random bytes make
+/// startup-collisions astronomically unlikely, but a config file is
+/// forever).
+fn mint_gateway_id() -> Result<String, String> {
+    let mut b = [0u8; 4];
+    getrandom::getrandom(&mut b).map_err(|e| format!("CSPRNG unavailable: {e}"))?;
+    Ok(format!(
+        "gw-{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3]
+    ))
+}
+
+fn mint_unused_gateway_id(existing: &[Gateway]) -> Result<String, String> {
+    loop {
+        let id = mint_gateway_id()?;
+        if !existing.iter().any(|g| g.id == id) {
+            return Ok(id);
+        }
+    }
+}
+
+/// Side effect run after a gateway row is removed via the registry's
+/// [`remove`](chan_server::GatewayRegistry::remove) (the HTTP `DELETE`
+/// path), so that path runs the same cascade the Tauri command does (stop
+/// the roster poll, tear down rostered connections, drop the roster rows).
+/// Set once, after the Tauri `AppHandle` exists, via the shared
+/// [`OnceLock`] cell -- mirror of [`DevserverRemoveHook`]. A no-op when the
+/// gateway wasn't connected.
+pub type GatewayRemoveHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// chan-desktop's [`GatewayRegistry`]
+/// implementation -- the bridge the launcher's `/api/library/gateways`
+/// routes reach through `WorkspaceHost::gateway_registry`. Wraps the SHARED
+/// [`ConfigStore`] handle like [`DevserverConfigRegistry`], so gateway CRUD
+/// serializes through the same lock as every other config write.
+///
+/// The volatile [`GatewayEntry`] fields
+/// (`status`, `pending_signin`, `devserver_count`, `last_error`) project
+/// from the gateway manager's runtime map.
+pub struct GatewayConfigRegistry {
+    store: Arc<Mutex<ConfigStore>>,
+    /// Filled (once the `AppHandle` exists) with the cascade teardown;
+    /// `remove` fires it after dropping a row. Empty until then (and on
+    /// surfaces without live connections) -- `remove` then only drops the
+    /// config row.
+    on_remove: Arc<OnceLock<GatewayRemoveHook>>,
+    /// The live runtime map (shared with `AppState.gateway_manager`), so
+    /// `list` reports each row's connection state; a gateway without a
+    /// runtime renders the disconnected defaults.
+    manager: Arc<crate::gateway::GatewayManager>,
+}
+
+impl GatewayConfigRegistry {
+    pub fn new(
+        store: Arc<Mutex<ConfigStore>>,
+        on_remove: Arc<OnceLock<GatewayRemoveHook>>,
+        manager: Arc<crate::gateway::GatewayManager>,
+    ) -> Self {
+        Self {
+            store,
+            on_remove,
+            manager,
+        }
+    }
+
+    // The iOS app runs no WireGuard fabric (the boot starts none), so a
+    // row's tunnel file is stored and validated but never adopted here;
+    // the projection below reports the file without a fabric status.
+}
+
+fn entry_from_gateway(
+    g: &Gateway,
+    view: Option<crate::gateway::GatewayRuntimeView>,
+) -> GatewayEntry {
+    let view = view.unwrap_or_default();
+    let file = g.wireguard.as_deref();
+    // No fabric runs on iOS: no tunnel status, no ingresses, and no
+    // fabric connect refusal to carry into `last_error`.
+    let wireguard_status: Option<String> = None;
+    let wireguard_ingresses: Vec<chan_server::WireguardIngressStatus> = Vec::new();
+    let wireguard_refusal: Option<String> = None;
+    GatewayEntry {
+        id: g.id.clone(),
+        url: g.url.clone(),
+        label: g.label.clone(),
+        enabled: g.enabled,
+        status: view.status,
+        pending_signin: view.pending_signin,
+        devserver_count: view.devserver_count,
+        // A row whose file was refused has no runtime to carry the reason,
+        // so the projection carries it until a connect sets its own; so
+        // does every row with a file while the proxy could not bind.
+        last_error: view.last_error.or(wireguard_refusal),
+        wireguard: file.map(|path| path.display().to_string()),
+        wireguard_status,
+        wireguard_ingresses,
+        wireguard_public_key: g.wireguard_public_key.clone(),
+        wireguard_enrolled: g.wireguard_public_key.is_some()
+            && g.wireguard_enrolled_key == g.wireguard_public_key,
+    }
+}
+
+/// The WireGuard file of an add or update payload: absent or blank is none;
+/// otherwise an absolute path, or one under `~/` as a form is typed, that
+/// the shared reader accepts now. Reading it here refuses a bad file where
+/// the launcher can show the reader's message, rather than at the next
+/// start; the message names the path, the line and the key, never a value.
+pub(crate) fn validate_wireguard_file(raw: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .ok_or_else(|| "WireGuard: no home directory to resolve ~ against".to_string())?
+            .join(rest),
+        None => PathBuf::from(raw),
+    };
+    if !path.is_absolute() {
+        return Err(format!("WireGuard: the file path must be absolute: {raw}"));
+    }
+    chan_wireguard::config::read_file(&path).map_err(|e| format!("WireGuard: {e}"))?;
+    Ok(Some(path))
+}
+
+impl GatewayRegistry for GatewayConfigRegistry {
+    fn list(&self) -> Vec<GatewayEntry> {
+        // Infallible by contract (mirrors the devserver list): a read error
+        // surfaces as an empty list, not a 500.
+        let store = self.store.lock().unwrap();
+        store
+            .get()
+            .map(|cfg| {
+                cfg.gateways
+                    .iter()
+                    .map(|g| entry_from_gateway(g, self.manager.view(&g.id)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn add(&self, input: GatewayInput) -> Result<GatewayEntry, String> {
+        let url = normalize_gateway_url(&input.url)?;
+        let wireguard = validate_wireguard_file(input.wireguard.as_deref())?;
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        if cfg.gateways.iter().any(|g| g.url == url) {
+            return Err(format!("gateway already configured: {url}"));
+        }
+        let gw = Gateway {
+            id: mint_unused_gateway_id(&cfg.gateways)?,
+            url,
+            label: input.label.unwrap_or_default().trim().to_string(),
+            enabled: true,
+            added_at: now_millis(),
+            native_trust: Vec::new(),
+            wireguard,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
+            wireguard_cleanup: None,
+            wireguard_hosts: Vec::new(),
+        };
+        cfg.gateways.push(gw.clone());
+        store.save(&cfg).map_err(|e| e.to_string())?;
+        Ok(entry_from_gateway(&gw, None))
+    }
+
+    fn update(&self, id: &str, input: GatewayInput) -> Result<Option<GatewayEntry>, String> {
+        let wireguard = validate_wireguard_file(input.wireguard.as_deref())?;
+        let mut store = self.store.lock().unwrap();
+        let mut cfg = store.get().map_err(|e| e.to_string())?;
+        let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
+            return Ok(None);
+        };
+        // The URL is the gateway's identity (the keyring PAT and the
+        // synthesized row ids key off it), so update refuses a different
+        // origin; an empty url means keep. Changing the origin is a
+        // remove + re-add.
+        if !input.url.trim().is_empty() && normalize_gateway_url(&input.url)? != gw.url {
+            return Err("gateway URL is immutable; remove and re-add to change it".to_string());
+        }
+        // Label is full-replace: empty clears, and the badge derives from
+        // the URL host again.
+        gw.label = input.label.unwrap_or_default().trim().to_string();
+        // The file is full-replace like the label, and the fabric follows
+        // it once the row is saved.
+        let previous = std::mem::replace(&mut gw.wireguard, wireguard);
+        // A changed manual file replaces the enrolled parameters and map.
+        // An unchanged empty field preserves an enrollment without a file.
+        // Clearing a file also clears its enrolled key marker.
+        if gw.wireguard != previous {
+            gw.wireguard_hosts.clear();
+            gw.wireguard_enrollment = None;
+            if gw.wireguard.is_none() {
+                gw.wireguard_enrolled_key = None;
+            }
+        }
+        let gw = gw.clone();
+        store.save(&cfg).map_err(|e| e.to_string())?;
+        if previous.as_deref() != gw.wireguard.as_deref() {
+            self.manager.clear_discovery_error(id);
+        }
+        Ok(Some(entry_from_gateway(&gw, self.manager.view(id))))
+    }
+
+    fn remove(&self, id: &str) -> Result<bool, String> {
+        let keys = {
+            let mut store = self.store.lock().unwrap();
+            let mut cfg = store.get().map_err(|e| e.to_string())?;
+            let before = cfg.gateways.len();
+            cfg.gateways.retain(|g| g.id != id);
+            if cfg.gateways.len() == before {
+                return Ok(false);
+            }
+            store.save(&cfg).map_err(|e| e.to_string())?;
+            store.wireguard_dir()
+        };
+        // Row dropped: run the cascade so the HTTP DELETE matches the Tauri
+        // command's teardown. Release the store first: every cascade takes it
+        // before locking gateway state.
+        if let Some(hook) = self.on_remove.get() {
+            hook(id);
+        }
+        // The row's key and client file go with it. The row is gone either
+        // way, so a file that cannot be deleted is logged, not refused.
+        if let Err(e) = crate::wireguard_keys::remove(&keys, id) {
+            tracing::warn!(gateway = %id, dir = %keys.display(), error = %e, "removing the gateway's WireGuard files");
+        }
+        Ok(true)
+    }
+}
+
+/// Generate a WireGuard key pair for gateway `id` (the Gateways form's
+/// Generate WireGuard key action, over the desktop bridge): discover the
+/// gateway, refuse when its discovery offers no enrollment, then write the
+/// private half to the row's key file and store the public half on the row
+/// in one save, replacing any earlier key. A replaced key reads as not
+/// enrolled. The key file is written and the row saved under the store's
+/// lock, so concurrent generations serialize and the last one's key is both
+/// the file's and the row's; nothing is written before the discovery
+/// answers.
+pub(crate) async fn generate_wireguard_key(
+    store: &Arc<Mutex<ConfigStore>>,
+    manager: &crate::gateway::GatewayManager,
+    id: &str,
+) -> Result<WireguardKeyOutcome, String> {
+    let url = {
+        let cfg = store.lock().unwrap().get().map_err(|e| e.to_string())?;
+        match cfg.gateways.iter().find(|g| g.id == id) {
+            Some(gw) => gw.url.clone(),
+            None => return Ok(WireguardKeyOutcome::NotFound),
+        }
+    };
+    let discovery = crate::devserver::discover_gateway(&url)
+        .await
+        .map_err(|e| format!("gateway discovery failed: {e}"))?;
+    if discovery.wireguard.is_none() {
+        return Ok(WireguardKeyOutcome::NotOffered);
+    }
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    // The URL is immutable, so the row found again is the one discovered,
+    // unless it was removed meanwhile.
+    let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
+        return Ok(WireguardKeyOutcome::NotFound);
+    };
+    let public = crate::wireguard_keys::generate(&guard.wireguard_dir(), id)?;
+    gw.wireguard_public_key = Some(public);
+    let gw = gw.clone();
+    guard.save(&cfg).map_err(|e| e.to_string())?;
+    drop(guard);
+    tracing::info!(gateway = %id, "gateway WireGuard key generated");
+    Ok(WireguardKeyOutcome::Generated(Box::new(
+        entry_from_gateway(&gw, manager.view(id)),
+    )))
+}
+
+pub(crate) fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// chan-desktop keeps its config under `~/.chan/desktop/` -- the same
+/// `~/.chan` home as the CLI registry (`config.toml`), not a separate
+/// OS app-data directory. On Windows that resolves to
+/// `%USERPROFILE%\.chan\desktop\config.json`.
+fn config_path() -> io::Result<PathBuf> {
+    Ok(chan_workspace::paths::config_dir()
+        .join("desktop")
+        .join("config.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn client_session_name_defaults_to_empty() {
+        let missing: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.client_session_name, "");
+        assert_eq!(super::Config::default().client_session_name, "");
+        assert_eq!(
+            serde_json::to_value(missing).unwrap()["client_session_name"],
+            ""
+        );
+    }
+
+    #[test]
+    fn client_session_name_round_trips_through_unrelated_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = super::ConfigStore::at_path(dir.path().join("config.json"));
+        let cfg: super::Config = serde_json::from_value(serde_json::json!({
+            "client_session_name": "  Work & home  "
+        }))
+        .unwrap();
+        store.save(&cfg).unwrap();
+        store.save_embedded_port_if_absent(8787).unwrap();
+        let read = serde_json::to_value(store.get().unwrap()).unwrap();
+        assert_eq!(read["client_session_name"], "  Work & home  ");
+        assert_eq!(read["embedded_port"], 8787);
+    }
+
+    #[test]
+    fn display_devserver_url_drops_only_the_bearer() {
+        use super::display_devserver_url;
+        assert_eq!(
+            display_devserver_url("http://127.0.0.1:8787/?t=tok_abc"),
+            "http://127.0.0.1:8787/"
+        );
+        assert_eq!(
+            display_devserver_url("https://box.example.com:8787/?t=tok&x=1#f"),
+            "https://box.example.com:8787/?x=1#f"
+        );
+        assert_eq!(
+            display_devserver_url("http://127.0.0.1:8787"),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            display_devserver_url(" http://127.0.0.1:8787/?token=keep "),
+            "http://127.0.0.1:8787/?token=keep"
+        );
+    }
+
+    use super::*;
+    use chan_server::GatewayStatus;
+
+    fn empty_connecting() -> Arc<Mutex<HashSet<String>>> {
+        Arc::new(Mutex::new(HashSet::new()))
+    }
+
+    #[test]
+    fn config_loads_and_drops_unknown_outbound_and_window_config_rows() {
+        let raw = r##"{
+            "outbound": [{
+                "id": "remote-1",
+                "url": "http://127.0.0.1:4000/?t=abc",
+                "label": "old remote",
+                "added_at": 42
+            }],
+            "window_configs": [{
+                "key": "workspace-old-1",
+                "zoom_level": 1.25,
+                "url_hash": "#history"
+            }],
+            "local_color": "#123456"
+        }"##;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, raw).unwrap();
+        let mut store = ConfigStore::at_path(path.clone());
+        let cfg = store.get().expect("load config with unknown rows");
+        assert_eq!(cfg.local_color.as_deref(), Some("#123456"));
+        store.save(&cfg).unwrap();
+        let saved = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(value.get("outbound").is_none());
+        assert!(value.get("window_configs").is_none());
+    }
+
+    #[test]
+    fn config_defaults_devservers_empty() {
+        let cfg = Config::default();
+        assert!(cfg.devservers.is_empty());
+    }
+
+    #[test]
+    fn config_loads_without_devservers_field() {
+        // A config.json that predates devservers must still load: serde
+        // reads the missing key as the empty set so the load never fails
+        // and drops the rest of the config.
+        let raw = r#"{}"#;
+        let cfg: Config = serde_json::from_str(raw).expect("load without devservers");
+        assert!(cfg.devservers.is_empty());
+    }
+
+    #[test]
+    fn config_devservers_round_trip() {
+        let cfg = Config {
+            devservers: vec![Devserver {
+                id: "ds-1".into(),
+                url: "http://127.0.0.1:8787".into(),
+                script: "ssh box -L 8787:localhost:8787 chan devserver".into(),
+                label: "lab box".into(),
+                token: "tok_secret".into(),
+                added_at: 42,
+                auto_hide_control: true,
+                gateway_owner: Some("alice".into()),
+                gateway_devserver_id: Some("a".repeat(64)),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: Config = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.devservers, cfg.devservers);
+    }
+
+    #[test]
+    fn embedded_port_defaults_and_survives_shared_config_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(path)));
+        assert_eq!(store.lock().unwrap().get().unwrap().embedded_port, None);
+        store
+            .lock()
+            .unwrap()
+            .save_embedded_port_if_absent(43210)
+            .unwrap();
+        let theme = LocalThemeConfig::new(Arc::clone(&store));
+        chan_server::LocalThemeStore::set(&theme, Some("dark".into())).unwrap();
+        let config = store.lock().unwrap().get().unwrap();
+        assert_eq!(config.embedded_port, Some(43210));
+        assert_eq!(config.launcher_theme.as_deref(), Some("dark"));
+        drop(config);
+        store
+            .lock()
+            .unwrap()
+            .save_embedded_port_if_absent(43211)
+            .unwrap();
+        assert_eq!(
+            store.lock().unwrap().get().unwrap().embedded_port,
+            Some(43210)
+        );
+    }
+
+    /// `Config` does not deny unknown fields, so a file holding a key it lacks,
+    /// such as the `collapsed_machines` list configs on disk may still carry,
+    /// loads, and the next save writes only the fields `Config` has.
+    #[test]
+    fn a_config_holding_collapsed_machines_loads_and_saves_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"launcher_theme":"light","collapsed_machines":["local"]}"#,
+        )
+        .unwrap();
+        let mut store = ConfigStore::at_path(path.clone());
+        let cfg = store.get().expect("a config with collapsed_machines loads");
+        assert_eq!(cfg.launcher_theme.as_deref(), Some("light"));
+        store.save(&cfg).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["launcher_theme"], "light");
+        assert!(saved.get("collapsed_machines").is_none(), "{saved}");
+    }
+
+    #[test]
+    fn devserver_optional_fields_default() {
+        // Only the connection essentials are required; script/label/
+        // added_at/gateway selection default so a hand-written (or
+        // pre-picker) config stays loadable.
+        let raw = r#"{
+            "id": "ds-1",
+            "url": "http://127.0.0.1:8787"
+        }"#;
+        let ds: Devserver = serde_json::from_str(raw).expect("minimal load");
+        assert_eq!(ds.id, "ds-1");
+        assert_eq!(ds.url, "http://127.0.0.1:8787");
+        assert_eq!(ds.script, "");
+        assert_eq!(ds.label, "");
+        assert_eq!(ds.token, "");
+        assert_eq!(ds.added_at, 0);
+        assert_eq!(ds.gateway_owner, None);
+        assert_eq!(ds.gateway_devserver_id, None);
+    }
+
+    /// The config carries devserver bearer tokens and token-bearing URLs, so a
+    /// save has to leave it owner-only, including over a file an older build
+    /// created at the process umask.
+    #[cfg(unix)]
+    #[test]
+    fn config_save_is_owner_only_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop").join("config.json");
+        let mut store = ConfigStore { path: path.clone() };
+        let cfg = Config {
+            launcher_theme: Some("dark".to_string()),
+            ..Default::default()
+        };
+
+        store.save(&cfg).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(store.get().unwrap().launcher_theme.as_deref(), Some("dark"));
+
+        // atomic_write carries an existing file's mode across the rename, so a
+        // config left world-readable by an older build is only narrowed if the
+        // save chmods every time rather than on create.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&cfg).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "config.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "stray files beside the config: {leftovers:?}"
+        );
+    }
+
+    /// The registry projects a stored `Devserver` to a wire `DevserverEntry`
+    /// with the token elided and `has_token` reporting its presence; it never
+    /// echoes the token value.
+    #[test]
+    fn registry_list_elides_token_reports_has_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let added = reg
+            .add(DevserverInput {
+                url: None,
+                host: "box.example.com".into(),
+                port: 8787,
+                label: Some("lab".into()),
+                script: Some("ssh -L …".into()),
+                token: Some("tok_secret".into()),
+                clear_token: false,
+                auto_hide_control: false,
+            })
+            .expect("add");
+        assert!(added.has_token);
+        assert_eq!(added.host, "box.example.com");
+        assert_eq!(added.port, 8787);
+        assert_eq!(added.library_id, None);
+        let listed = reg.list();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].has_token);
+        // The token value never appears on the wire entry (no field for it);
+        // the on-disk config still holds it for the connect path.
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.devservers[0].token, "tok_secret");
+    }
+
+    /// A devserver URL that carries a `?t=` bearer is shown without it: the
+    /// wire url never echoes the token, whatever the row was stored with.
+    #[test]
+    fn registry_entry_url_never_carries_the_bearer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let added = reg
+            .add(DevserverInput {
+                url: Some("http://box.example.com:8787/?t=tok_in_url".into()),
+                host: String::new(),
+                port: 0,
+                label: None,
+                script: None,
+                token: None,
+                clear_token: false,
+                auto_hide_control: false,
+            })
+            .expect("add");
+        assert!(!added.url.contains("tok_in_url"), "{}", added.url);
+        let listed = reg.list();
+        assert!(!listed[0].url.contains("tok_in_url"), "{}", listed[0].url);
+    }
+
+    /// The wire `connected` flag the launcher reads
+    /// (`GET /api/library/devservers` -> `list` -> `entry_from_devserver`)
+    /// derives from the shared `DevserverConns` membership, so dropping the conn
+    /// flips it false while the config row stays. This is the mechanism that
+    /// guarantees the launcher never shows a dead devserver as connected.
+    #[test]
+    fn registry_list_connected_tracks_conns_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let conns = Arc::new(crate::devserver::DevserverConns::default());
+        let connecting = empty_connecting();
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::clone(&conns),
+            Arc::clone(&connecting),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let id = reg
+            .add(DevserverInput {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                ..Default::default()
+            })
+            .expect("add")
+            .id;
+        // No live conn yet: disconnected.
+        assert_eq!(reg.list()[0].status, DevserverStatus::Disconnected);
+        connecting.lock().unwrap().insert(id.clone());
+        assert_eq!(reg.list()[0].status, DevserverStatus::Connecting);
+        // A live conn (what connect_devserver_impl sets on a successful dial).
+        conns.set(
+            id.clone(),
+            crate::devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                token: "tok".into(),
+                name: "box".into(),
+                gateway: None,
+            },
+        );
+        assert_eq!(reg.list()[0].status, DevserverStatus::Connected);
+        connecting.lock().unwrap().remove(&id);
+        // The control terminal dies -> the flip drops the conn -> the wire entry
+        // flips to status:disconnected, but the persisted config row is untouched
+        // (so a re-run/edit can reconnect it).
+        conns.remove(&id);
+        assert_eq!(reg.list()[0].status, DevserverStatus::Disconnected);
+        assert_eq!(store.lock().unwrap().get().unwrap().devservers.len(), 1);
+        // Sign-in waits are gateway-level: a persisted row never reports
+        // pending_signin (the wire key stays, pinned false).
+        assert!(!reg.list()[0].pending_signin);
+    }
+
+    /// A live connection whose window/color feed sockets have gone down (the
+    /// post-sleep half-open zombie) reports Unreachable, not a green Connected
+    /// the fresh-TCP poll would otherwise keep lit. Gated on a live conn: with no
+    /// conn, a lingering flag still reads Disconnected.
+    #[test]
+    fn registry_status_unreachable_when_feed_down_but_conn_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let conns = Arc::new(crate::devserver::DevserverConns::default());
+        let feed = Arc::new(crate::DevserverFeed::default());
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::clone(&conns),
+            empty_connecting(),
+            Arc::clone(&feed),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let id = reg
+            .add(DevserverInput {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                ..Default::default()
+            })
+            .expect("add")
+            .id;
+        conns.set(
+            id.clone(),
+            crate::devserver::DevserverConn {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                token: "tok".into(),
+                name: "box".into(),
+                gateway: None,
+            },
+        );
+        // A live conn with a healthy feed reads Connected.
+        assert_eq!(reg.list()[0].status, DevserverStatus::Connected);
+        // The feed watchdog marks the sockets unreachable while the conn record
+        // survives -> Unreachable.
+        assert!(feed.set_unreachable(&id, true));
+        assert_eq!(reg.list()[0].status, DevserverStatus::Unreachable);
+        // Recovery clears it -> back to Connected.
+        assert!(feed.set_unreachable(&id, false));
+        assert_eq!(reg.list()[0].status, DevserverStatus::Connected);
+        // Unreachable is a sub-state of a live conn: drop the conn and even a
+        // lingering flag reads Disconnected, not Unreachable.
+        feed.set_unreachable(&id, true);
+        conns.remove(&id);
+        assert_eq!(reg.list()[0].status, DevserverStatus::Disconnected);
+    }
+
+    /// `update` with a blank/absent token keeps the stored one; a non-blank
+    /// token replaces it; `clear_token` removes it. URL/label/script are
+    /// full-replace.
+    #[test]
+    fn registry_update_keeps_replaces_and_clears_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let id = reg
+            .add(DevserverInput {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                token: Some("tok_one".into()),
+                ..Default::default()
+            })
+            .expect("add")
+            .id;
+        // Blank token + new url/label: token survives, the rest replace.
+        let updated = reg
+            .update(
+                &id,
+                DevserverInput {
+                    host: "127.0.0.1".into(),
+                    port: 9000,
+                    label: Some("renamed".into()),
+                    token: None,
+                    ..Default::default()
+                },
+            )
+            .expect("update")
+            .expect("found");
+        assert_eq!(updated.host, "127.0.0.1");
+        assert_eq!(updated.port, 9000);
+        assert_eq!(updated.label, "renamed");
+        assert!(updated.has_token);
+        assert_eq!(
+            store.lock().unwrap().get().unwrap().devservers[0].token,
+            "tok_one"
+        );
+        // A non-blank token replaces it.
+        reg.update(
+            &id,
+            DevserverInput {
+                host: "127.0.0.1".into(),
+                port: 9000,
+                token: Some("tok_two".into()),
+                ..Default::default()
+            },
+        )
+        .expect("update")
+        .expect("found");
+        assert_eq!(
+            store.lock().unwrap().get().unwrap().devservers[0].token,
+            "tok_two"
+        );
+        // An explicit clear removes it.
+        let cleared = reg
+            .update(
+                &id,
+                DevserverInput {
+                    host: "127.0.0.1".into(),
+                    port: 9000,
+                    clear_token: true,
+                    ..Default::default()
+                },
+            )
+            .expect("update")
+            .expect("found");
+        assert!(!cleared.has_token);
+        assert_eq!(store.lock().unwrap().get().unwrap().devservers[0].token, "");
+    }
+
+    #[test]
+    fn registry_update_and_remove_missing_id_signal_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            store,
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let missing = reg
+            .update(
+                "nope",
+                DevserverInput {
+                    host: "127.0.0.1".into(),
+                    port: 8787,
+                    ..Default::default()
+                },
+            )
+            .expect("update ok");
+        assert!(missing.is_none());
+        assert!(!reg.remove("nope").expect("remove ok"));
+    }
+
+    /// `remove` fires the teardown hook ONLY when a row was actually dropped,
+    /// with that id -- so the HTTP DELETE reaps the live connection, and a
+    /// missing-id remove (or a not-found) doesn't fire a spurious teardown.
+    #[test]
+    fn registry_remove_fires_hook_only_when_a_row_was_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hook_cell: Arc<OnceLock<DevserverRemoveHook>> = Arc::new(OnceLock::new());
+        let fired_for_hook = Arc::clone(&fired);
+        hook_cell
+            .set(Arc::new(move |id: &str| {
+                fired_for_hook.lock().unwrap().push(id.to_string());
+                tauri::async_runtime::spawn(async {})
+            }))
+            .ok();
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::clone(&hook_cell),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let id = reg
+            .add(DevserverInput {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                ..Default::default()
+            })
+            .expect("add")
+            .id;
+        // Missing id: nothing dropped → hook must NOT fire.
+        assert!(!reg.remove("nope").expect("remove ok"));
+        assert!(fired.lock().unwrap().is_empty());
+        // Real id: row dropped → hook fires once with that id.
+        assert!(reg.remove(&id).expect("remove ok"));
+        assert_eq!(fired.lock().unwrap().as_slice(), &[id]);
+    }
+
+    #[test]
+    fn registry_add_rejects_an_empty_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = DevserverConfigRegistry::new(
+            store,
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        assert!(reg
+            .add(DevserverInput {
+                host: "".into(),
+                port: 8787,
+                ..Default::default()
+            })
+            .is_err());
+    }
+
+    // --- window geometry ---
+
+    fn wg_input(url: &str, wireguard: Option<&str>) -> GatewayInput {
+        GatewayInput {
+            url: url.to_string(),
+            label: None,
+            wireguard: wireguard.map(str::to_string),
+        }
+    }
+
+    fn plain_row(id: &str, url: &str) -> Devserver {
+        Devserver {
+            id: id.to_string(),
+            url: url.to_string(),
+            script: String::new(),
+            label: String::new(),
+            token: String::new(),
+            added_at: 7,
+            auto_hide_control: false,
+            gateway_owner: None,
+            gateway_devserver_id: None,
+        }
+    }
+
+    #[test]
+    fn config_loads_without_gateways_field() {
+        // A config.json predating gateways must still load: serde reads the
+        // missing key as the empty vec.
+        let raw = r#"{ "devservers": [] }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("load without gateways");
+        assert!(cfg.gateways.is_empty());
+    }
+
+    #[test]
+    fn a_missing_config_is_the_empty_objects_config() {
+        // The default stands in for a missing config.json and must agree with
+        // a file that predates a field: both read every serde default.
+        let fresh = Config::default();
+        let empty: Config = serde_json::from_str("{}").expect("an empty object is a config");
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap(),
+            serde_json::to_value(&empty).unwrap()
+        );
+    }
+
+    #[test]
+    fn gateway_enabled_defaults_true() {
+        // A hand-edited row without the field behaves like a fresh add.
+        let raw = r#"{ "id": "gw-00000000", "url": "https://gw.chan.app" }"#;
+        let gw: Gateway = serde_json::from_str(raw).expect("gateway row");
+        assert!(gw.enabled);
+        assert!(gw.label.is_empty());
+    }
+
+    fn test_discovery() -> crate::devserver::GatewayDiscovery {
+        crate::devserver::GatewayDiscovery {
+            kind: "chan-gateway".into(),
+            api_version: 1,
+            identity_origin: "https://gw.chan.app".into(),
+            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
+            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            devserver_proxy_origin: "https://proxy.chan.app".into(),
+            devserver_proxy_host_depth: 2,
+            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
+            wireguard: None,
+        }
+    }
+
+    fn roster_row(
+        owner: &str,
+        id: &str,
+        label: &str,
+        shared: bool,
+    ) -> crate::gateway::RosterDevserver {
+        crate::gateway::RosterDevserver {
+            owner_user_id: if owner == "alice" {
+                uuid::Uuid::from_u128(1)
+            } else {
+                uuid::Uuid::from_u128(2)
+            },
+            owner: owner.to_string(),
+            devserver_id: id.to_string(),
+            label: label.to_string(),
+            online: true,
+            shared,
+            proxy_origin: Some("https://p1.proxy.chan.app".to_string()),
+        }
+    }
+
+    fn registry_with_gateway_roster() -> (tempfile::TempDir, DevserverConfigRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        {
+            let mut guard = store.lock().unwrap();
+            let cfg = Config {
+                devservers: vec![plain_row("ds1", "http://box.example.com:8787")],
+                gateways: vec![Gateway {
+                    id: "gw-1a2b3c4d".to_string(),
+                    url: "https://gw.chan.app".to_string(),
+                    label: "work".to_string(),
+                    enabled: true,
+                    added_at: 1,
+                    native_trust: Vec::new(),
+                    wireguard: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled_key: None,
+                    wireguard_enrollment: None,
+                    wireguard_cleanup: None,
+                    wireguard_hosts: Vec::new(),
+                }],
+                ..Default::default()
+            };
+            guard.save(&cfg).unwrap();
+        }
+        let manager = Arc::new(crate::gateway::GatewayManager::default());
+        manager.seed_test_runtime(
+            "gw-1a2b3c4d",
+            test_discovery(),
+            vec![
+                roster_row("alice", &"a".repeat(64), "laptop", false),
+                roster_row("bob", &"b".repeat(64), "shared-box", true),
+            ],
+        );
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::devserver::DevserverConns::default()),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            manager,
+        );
+        (dir, reg)
+    }
+
+    #[test]
+    fn list_appends_synthesized_gateway_rows() {
+        let (_dir, reg) = registry_with_gateway_roster();
+        let rows = reg.list();
+        assert_eq!(rows.len(), 3, "one plain + two synthesized");
+        assert_eq!(rows[0].id, "ds1");
+        assert_eq!(rows[0].gateway_id, None);
+
+        let own = &rows[1];
+        assert_eq!(own.id, format!("gw:1a2b3c4d:alice:{}", "a".repeat(64)));
+        assert_eq!(own.gateway_id.as_deref(), Some("gw-1a2b3c4d"));
+        assert_eq!(own.gateway_url, "https://gw.chan.app");
+        assert!(!own.shared);
+        assert!(!own.native_trust_required);
+        assert_eq!(own.label, "laptop");
+        assert_eq!(own.status, DevserverStatus::Disconnected);
+        assert!(!own.has_token);
+        assert!(own.script.is_empty());
+        assert_eq!(own.host, "gw.chan.app");
+
+        let shared = &rows[2];
+        assert_eq!(shared.id, format!("gw:1a2b3c4d:bob:{}", "b".repeat(64)));
+        assert!(shared.shared);
+        assert!(shared.native_trust_required);
+
+        // Trust is the exact full tuple under this gateway. Once persisted it
+        // survives a fresh config read and only that shared row flips.
+        assert!(set_native_trust(
+            &reg.store,
+            "gw-1a2b3c4d",
+            uuid::Uuid::from_u128(2),
+            "bob",
+            &"b".repeat(64),
+            true,
+        )
+        .unwrap());
+        assert!(
+            !set_native_trust(
+                &reg.store,
+                "gw-1a2b3c4d",
+                uuid::Uuid::from_u128(2),
+                "bob",
+                &"b".repeat(64),
+                true,
+            )
+            .unwrap(),
+            "re-grant is idempotent"
+        );
+        let trusted = reg.list();
+        assert!(!trusted[1].native_trust_required);
+        assert!(!trusted[2].native_trust_required);
+        assert_eq!(
+            reg.store.lock().unwrap().get().unwrap().gateways[0]
+                .native_trust
+                .len(),
+            1,
+            "idempotent grant persists one exact record"
+        );
+
+        // Deterministic across calls while nothing changes.
+        assert_eq!(reg.list(), trusted);
+        assert!(set_native_trust(
+            &reg.store,
+            "gw-1a2b3c4d",
+            uuid::Uuid::from_u128(2),
+            "bob",
+            &"b".repeat(64),
+            false,
+        )
+        .unwrap());
+        assert!(reg.list()[2].native_trust_required);
+    }
+
+    #[test]
+    fn synthesized_status_maps_conn_and_roster_online_three_ways() {
+        // conn live -> Connected; no conn + online -> Disconnected; no conn
+        // + offline -> Unreachable (the lost dot as a pre-connect signal).
+        // Gateway-level trouble never reaches row status.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        {
+            let cfg = Config {
+                gateways: vec![Gateway {
+                    id: "gw-1a2b3c4d".to_string(),
+                    url: "https://gw.chan.app".to_string(),
+                    label: String::new(),
+                    enabled: true,
+                    added_at: 1,
+                    native_trust: Vec::new(),
+                    wireguard: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled_key: None,
+                    wireguard_enrollment: None,
+                    wireguard_cleanup: None,
+                    wireguard_hosts: Vec::new(),
+                }],
+                ..Default::default()
+            };
+            store.lock().unwrap().save(&cfg).unwrap();
+        }
+        let manager = Arc::new(crate::gateway::GatewayManager::default());
+        let mut offline = roster_row("alice", &"b".repeat(64), "dark-box", false);
+        offline.online = false;
+        manager.seed_test_runtime(
+            "gw-1a2b3c4d",
+            test_discovery(),
+            vec![
+                roster_row("alice", &"a".repeat(64), "laptop", false),
+                offline,
+            ],
+        );
+        let conns = Arc::new(crate::devserver::DevserverConns::default());
+        let reg = DevserverConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::clone(&conns),
+            empty_connecting(),
+            Arc::new(crate::DevserverFeed::default()),
+            manager,
+        );
+        let rows = reg.list();
+        assert_eq!(
+            rows[0].status,
+            DevserverStatus::Disconnected,
+            "online, no conn"
+        );
+        assert_eq!(
+            rows[1].status,
+            DevserverStatus::Unreachable,
+            "offline, no conn"
+        );
+        // A live conn wins over the roster bit.
+        conns.set(
+            rows[0].id.clone(),
+            crate::devserver::DevserverConn {
+                host: "alice--aaaaaaaaaaaa.p1.proxy.chan.app".to_string(),
+                port: 443,
+                token: String::new(),
+                name: "laptop".to_string(),
+                gateway: None,
+            },
+        );
+        assert_eq!(
+            reg.list()[0].status,
+            DevserverStatus::Connected,
+            "conn live"
+        );
+    }
+
+    #[test]
+    fn update_and_remove_answer_missing_for_synthesized_ids() {
+        // Synthesized rows carry no local config: the route layer must 404
+        // mutations, which the registry signals out-of-band.
+        let (_dir, reg) = registry_with_gateway_roster();
+        let synth = format!("gw:1a2b3c4d:alice:{}", "a".repeat(64));
+        let update = reg.update(
+            &synth,
+            DevserverInput {
+                url: None,
+                host: "box.example.com".into(),
+                port: 8787,
+                label: None,
+                script: None,
+                token: None,
+                clear_token: false,
+                auto_hide_control: false,
+            },
+        );
+        assert_eq!(update, Ok(None));
+        assert_eq!(reg.remove(&synth), Ok(false));
+        // And the synthesized rows are untouched by the attempts.
+        assert_eq!(reg.list().len(), 3);
+    }
+
+    #[test]
+    fn gateway_registry_add_normalizes_dedups_and_mints_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let added = reg
+            .add(GatewayInput {
+                url: "https://GW.chan.app/consent?pick=1".to_string(),
+                label: Some("  work  ".to_string()),
+                wireguard: None,
+            })
+            .expect("add");
+        assert_eq!(added.url, "https://gw.chan.app");
+        assert_eq!(added.label, "work");
+        assert!(added.enabled);
+        assert_eq!(added.status, GatewayStatus::Disconnected);
+        // The minted id is gw- + 8 lowercase hex (the synthesized-row id
+        // charset depends on it).
+        let hex = added.id.strip_prefix("gw-").expect("gw- prefix");
+        assert_eq!(hex.len(), 8);
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        // Same origin (different noise) is a dup.
+        let err = reg
+            .add(GatewayInput {
+                url: "https://gw.chan.app/other".to_string(),
+                label: None,
+                wireguard: None,
+            })
+            .expect_err("dup origin");
+        assert!(err.contains("already configured"), "{err}");
+        // Non-http(s) is rejected.
+        assert!(reg
+            .add(GatewayInput {
+                url: "ftp://gw.chan.app".to_string(),
+                label: None,
+                wireguard: None,
+            })
+            .is_err());
+        assert_eq!(reg.list().len(), 1);
+    }
+
+    #[test]
+    fn gateway_registry_update_renames_and_keeps_the_url_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        let added = reg
+            .add(GatewayInput {
+                url: "https://gw.chan.app".to_string(),
+                label: Some("work".to_string()),
+                wireguard: None,
+            })
+            .expect("add");
+        // Rename: label is full-replace (trimmed), echoing the stored URL back
+        // is fine, and the new label persists in the config store.
+        let updated = reg
+            .update(
+                &added.id,
+                GatewayInput {
+                    url: "https://gw.chan.app".to_string(),
+                    label: Some("  prod  ".to_string()),
+                    wireguard: None,
+                },
+            )
+            .expect("update")
+            .expect("row exists");
+        assert_eq!(updated.id, added.id);
+        assert_eq!(updated.url, "https://gw.chan.app");
+        assert_eq!(updated.label, "prod");
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].label, "prod");
+        // An empty url means keep; an absent label clears (the badge derives
+        // from the URL host again).
+        let cleared = reg
+            .update(
+                &added.id,
+                GatewayInput {
+                    url: String::new(),
+                    label: None,
+                    wireguard: None,
+                },
+            )
+            .expect("update")
+            .expect("row exists");
+        assert_eq!(cleared.url, "https://gw.chan.app");
+        assert_eq!(cleared.label, "");
+        // A different origin is refused: the URL is identity (remove + re-add
+        // is the origin-change path) and the stored row stays untouched.
+        let err = reg
+            .update(
+                &added.id,
+                GatewayInput {
+                    url: "https://other.example".to_string(),
+                    label: Some("x".to_string()),
+                    wireguard: None,
+                },
+            )
+            .expect_err("url change refused");
+        assert!(err.contains("immutable"), "{err}");
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].url, "https://gw.chan.app");
+        assert_eq!(cfg.gateways[0].label, "");
+        // Same origin with URL noise still counts as a match (normalized).
+        assert!(reg
+            .update(
+                &added.id,
+                GatewayInput {
+                    url: "https://GW.chan.app/consent?pick=1".to_string(),
+                    label: Some("noisy".to_string()),
+                    wireguard: None,
+                },
+            )
+            .expect("update")
+            .is_some());
+        // Unknown id: None, nothing changes.
+        assert_eq!(
+            reg.update(
+                "gw-deadbeef",
+                GatewayInput {
+                    url: String::new(),
+                    label: None,
+                    wireguard: None,
+                },
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn gateway_registry_remove_fires_hook_and_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.path().join("config.json"),
+        }));
+        let hook_cell: Arc<OnceLock<GatewayRemoveHook>> = Arc::new(OnceLock::new());
+        let removed_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&removed_ids);
+        hook_cell
+            .set(Arc::new(move |id: &str| {
+                sink.lock().unwrap().push(id.to_string());
+            }))
+            .ok()
+            .expect("hook installs once");
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::clone(&hook_cell),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        assert_eq!(reg.remove("gw-deadbeef"), Ok(false));
+        assert!(removed_ids.lock().unwrap().is_empty());
+        let added = reg
+            .add(GatewayInput {
+                url: "https://gw.chan.app".to_string(),
+                label: None,
+                wireguard: None,
+            })
+            .expect("add");
+        assert_eq!(reg.remove(&added.id), Ok(true));
+        assert_eq!(*removed_ids.lock().unwrap(), vec![added.id]);
+        assert!(reg.list().is_empty());
+    }
+
+    #[test]
+    fn gateway_wireguard_path_round_trips_and_an_old_row_reads() {
+        // A row written before the field reads with none, and writes none
+        // back, so a downgrade reads the same file.
+        let old: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d",
+            "url": "https://gw.chan.app"
+        }))
+        .unwrap();
+        assert_eq!(old.wireguard, None);
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("wireguard"), "{text}");
+        let with: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d",
+            "url": "https://gw.chan.app",
+            "wireguard": "/home/u/wg/chan.conf"
+        }))
+        .unwrap();
+        assert_eq!(
+            with.wireguard.as_deref(),
+            Some(std::path::Path::new("/home/u/wg/chan.conf"))
+        );
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(
+            text.contains("\"wireguard\":\"/home/u/wg/chan.conf\""),
+            "{text}"
+        );
+        let back: Gateway = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, with);
+    }
+
+    /// A 32-byte key as `wg genkey` prints one; it stands in for the
+    /// private key every refusal below must not echo.
+    const WG_PRIVATE_KEY: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    const WG_PEER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+
+    fn wg_text() -> String {
+        format!(
+            "[Interface]\nPrivateKey = {WG_PRIVATE_KEY}\nAddress = 10.7.0.2/32\n\
+             [Peer]\nPublicKey = {WG_PEER_KEY}\nEndpoint = 192.0.2.1:51820\n\
+             AllowedIPs = 10.7.0.1/32\n"
+        )
+    }
+
+    /// An owner-only wg-quick file named `name` under `dir`.
+    fn wg_file(dir: &std::path::Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    /// A registry over a config holding `gateways`. The desktop also
+    /// starts a WireGuard fabric over them; iOS runs no fabric, so the
+    /// registry alone is the whole fixture.
+    async fn gateway_registry_over(
+        dir: &std::path::Path,
+        gateways: Vec<Gateway>,
+    ) -> (Arc<Mutex<ConfigStore>>, GatewayConfigRegistry) {
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.join("config.json"),
+        }));
+        if !gateways.is_empty() {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways = gateways.clone();
+            guard.save(&cfg).unwrap();
+        }
+        let manager = Arc::new(crate::gateway::GatewayManager::default());
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::clone(&manager),
+        );
+        (store, reg)
+    }
+
+    #[tokio::test]
+    async fn gateway_registry_add_and_update_read_the_wireguard_file_and_refuse_a_bad_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, reg) = gateway_registry_over(dir.path(), Vec::new()).await;
+        let good = wg_file(dir.path(), "good.conf", &wg_text());
+        let bad_line = wg_file(
+            dir.path(),
+            "bad.conf",
+            &wg_text().replace("10.7.0.2/32", "nowhere"),
+        );
+        let url = "https://gw.chan.app";
+
+        // A bad file is refused with the reader's message, the path, the
+        // line and the key and never the private key, and nothing is stored.
+        let err = reg
+            .add(wg_input(url, Some(bad_line.to_str().unwrap())))
+            .expect_err("a bad line is refused");
+        assert!(err.contains(&bad_line.display().to_string()), "{err}");
+        assert!(err.contains("line 3"), "{err}");
+        assert!(err.contains("Address"), "{err}");
+        assert!(!err.contains(WG_PRIVATE_KEY), "{err}");
+        assert!(reg.list().is_empty());
+        // So are a relative path and a missing file.
+        let err = reg
+            .add(wg_input(url, Some("wg/chan.conf")))
+            .expect_err("a relative path is refused");
+        assert!(err.contains("absolute"), "{err}");
+        let missing = dir.path().join("absent.conf");
+        let err = reg
+            .add(wg_input(url, Some(missing.to_str().unwrap())))
+            .expect_err("a missing file is refused");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        assert!(reg.list().is_empty());
+
+        // A good file is stored as given and trimmed.
+        let added = reg
+            .add(wg_input(url, Some(&format!("  {}  ", good.display()))))
+            .expect("add");
+        assert_eq!(added.wireguard.as_deref(), good.to_str());
+        // No fabric runs on iOS: the file is stored, with no tunnel status.
+        assert_eq!(added.wireguard_status, None);
+        assert_eq!(added.last_error, None);
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard.as_deref(), Some(good.as_path()));
+
+        // Update refuses a bad file and keeps the stored one.
+        let err = reg
+            .update(&added.id, wg_input(url, Some(bad_line.to_str().unwrap())))
+            .expect_err("a bad line is refused on update");
+        assert!(err.contains("line 3"), "{err}");
+        assert!(!err.contains(WG_PRIVATE_KEY), "{err}");
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard.as_deref(), Some(good.as_path()));
+        // A blank, like an absent one, clears it, and the file loses the key.
+        let cleared = reg
+            .update(&added.id, wg_input("", Some("  ")))
+            .expect("update")
+            .expect("row exists");
+        assert_eq!(cleared.wireguard, None);
+        assert_eq!(cleared.wireguard_status, None);
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard, None);
+        let text = fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(!text.contains("wireguard"), "{text}");
+    }
+
+    /// A gateway's discovery document on a loopback listener, carrying
+    /// `wireguard` when given: its origin and its server.
+    async fn discovery_stub(
+        wireguard: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let o = origin.clone();
+        let app = axum::Router::new().route(
+            "/.well-known/chan-gateway",
+            axum::routing::get(move || {
+                let o = o.clone();
+                let wireguard = wireguard.clone();
+                async move {
+                    let mut doc = serde_json::json!({
+                        "kind": "chan-gateway",
+                        "api_version": 1,
+                        "identity_origin": o,
+                        "desktop_authorize_url": format!("{o}/desktop/authorize"),
+                        "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                        "devserver_proxy_origin": "https://proxy.chan.app",
+                        "devserver_proxy_host_depth": 2,
+                    });
+                    if let Some(entry) = wireguard {
+                        doc["wireguard"] = entry;
+                    }
+                    axum::Json(doc)
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (origin, server)
+    }
+
+    /// A config store under `home` as the desktop lays it out
+    /// (`desktop/config.json`) holding one gateway row `id` at `url`.
+    fn store_with_gateway(home: &Path, id: &str, url: &str) -> Arc<Mutex<ConfigStore>> {
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            home.join("desktop").join("config.json"),
+        )));
+        let mut guard = store.lock().unwrap();
+        let mut cfg = guard.get().unwrap();
+        cfg.gateways.push(Gateway {
+            id: id.to_string(),
+            url: url.to_string(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
+            wireguard_cleanup: None,
+            wireguard_hosts: Vec::new(),
+        });
+        guard.save(&cfg).unwrap();
+        drop(guard);
+        store
+    }
+
+    fn stored_gateway(store: &Arc<Mutex<ConfigStore>>, id: &str) -> Gateway {
+        store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateway(id)
+            .unwrap()
+            .clone()
+    }
+
+    /// The public key the private key in `path` derives, base64.
+    fn public_of_key_file(path: &Path) -> String {
+        use base64::Engine;
+        let text = fs::read_to_string(path).unwrap();
+        let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(text.trim_end())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let secret = chan_wireguard::x25519::StaticSecret::from(bytes);
+        base64::engine::general_purpose::STANDARD
+            .encode(chan_wireguard::x25519::PublicKey::from(&secret).as_bytes())
+    }
+
+    fn wireguard_entry() -> serde_json::Value {
+        serde_json::json!({"endpoint": "wg.chan.app:51820", "public_key": WG_PEER_KEY})
+    }
+
+    #[tokio::test]
+    async fn generate_wireguard_key_writes_the_key_and_stores_its_public_half() {
+        let (origin, server) = discovery_stub(Some(wireguard_entry())).await;
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-1a2b3c4d";
+        let store = store_with_gateway(home.path(), id, &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        let WireguardKeyOutcome::Generated(entry) =
+            generate_wireguard_key(&store, &manager, id).await.unwrap()
+        else {
+            panic!("a gateway that enrolls peers gets a key");
+        };
+        let dir = home.path().join("desktop").join("wireguard");
+        let key_file = crate::wireguard_keys::key_path(&dir, id);
+        let public = public_of_key_file(&key_file);
+        assert_eq!(entry.wireguard_public_key.as_deref(), Some(public.as_str()));
+        assert!(!entry.wireguard_enrolled);
+        assert_eq!(
+            stored_gateway(&store, id).wireguard_public_key.as_deref(),
+            Some(public.as_str())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&key_file), 0o600);
+        }
+        // The private key is in its file and nowhere in the config.
+        let private = fs::read_to_string(&key_file).unwrap();
+        let private = private.trim_end();
+        let config = fs::read_to_string(home.path().join("desktop").join("config.json")).unwrap();
+        assert!(config.contains(&public), "the control finds the public key");
+        assert!(!config.contains(private));
+
+        // Once enrolled, the key reads as enrolled; a new key replaces the
+        // file and the row and reads as not enrolled.
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways[0].wireguard_enrolled_key = Some(public.clone());
+            guard.save(&cfg).unwrap();
+        }
+        let gw = stored_gateway(&store, id);
+        assert!(entry_from_gateway(&gw, None).wireguard_enrolled);
+        let WireguardKeyOutcome::Generated(again) =
+            generate_wireguard_key(&store, &manager, id).await.unwrap()
+        else {
+            panic!("generating again answers the row");
+        };
+        let replaced = public_of_key_file(&key_file);
+        assert_ne!(replaced, public);
+        assert_eq!(
+            again.wireguard_public_key.as_deref(),
+            Some(replaced.as_str())
+        );
+        assert!(!again.wireguard_enrolled);
+        let gw = stored_gateway(&store, id);
+        assert_eq!(gw.wireguard_public_key.as_deref(), Some(replaced.as_str()));
+        assert_eq!(gw.wireguard_enrolled_key.as_deref(), Some(public.as_str()));
+
+        // Removing the row deletes its key and client file.
+        let conf = crate::wireguard_keys::conf_path(&dir, id);
+        fs::write(&conf, "client file").unwrap();
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        assert!(reg.remove(id).unwrap());
+        assert!(!key_file.exists());
+        assert!(!conf.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_wireguard_key_refuses_a_gateway_that_enrolls_no_peers() {
+        let (origin, server) = discovery_stub(None).await;
+        let home = tempfile::tempdir().unwrap();
+        let store = store_with_gateway(home.path(), "gw-1a2b3c4d", &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        let outcome = generate_wireguard_key(&store, &manager, "gw-1a2b3c4d").await;
+        assert!(
+            matches!(outcome, Ok(WireguardKeyOutcome::NotOffered)),
+            "{outcome:?}"
+        );
+        assert!(!home.path().join("desktop").join("wireguard").exists());
+        assert_eq!(
+            stored_gateway(&store, "gw-1a2b3c4d").wireguard_public_key,
+            None
+        );
+        // An unknown id is not found, before any discovery.
+        let outcome = generate_wireguard_key(&store, &manager, "gw-ghost0000").await;
+        assert!(
+            matches!(outcome, Ok(WireguardKeyOutcome::NotFound)),
+            "{outcome:?}"
+        );
+        server.abort();
+
+        // A discovery that fails writes nothing either and says why.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await.unwrap() });
+        let home = tempfile::tempdir().unwrap();
+        let store = store_with_gateway(home.path(), "gw-1a2b3c4d", &origin);
+        let err = generate_wireguard_key(&store, &manager, "gw-1a2b3c4d")
+            .await
+            .expect_err("a failed discovery is an error");
+        assert!(err.starts_with("gateway discovery failed: "), "{err}");
+        assert!(err.contains("404"), "{err}");
+        assert!(!home.path().join("desktop").join("wireguard").exists());
+        server.abort();
+    }
+
+    #[test]
+    fn gateway_row_writes_its_enrollment_fields_only_when_set() {
+        // A row from before the fields reads with them empty.
+        let old: Gateway = serde_json::from_str(
+            r#"{"id":"gw-1a2b3c4d","url":"https://gw.chan.app","wireguard":"/w/a.conf"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.wireguard_public_key, None);
+        assert_eq!(old.wireguard_enrolled_key, None);
+        assert!(old.wireguard_hosts.is_empty());
+        assert!(old.wireguard_cleanup.is_none());
+        // A row without a key writes none of them.
+        let json = serde_json::to_value(&old).unwrap();
+        for key in [
+            "wireguard_public_key",
+            "wireguard_enrolled_key",
+            "wireguard_hosts",
+            "wireguard_cleanup",
+        ] {
+            assert!(json.get(key).is_none(), "{key} in {json}");
+        }
+        // A row with them round-trips.
+        let mut row = old;
+        row.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+        row.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+        row.wireguard_hosts = vec![
+            WireguardHost {
+                name: "proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            },
+            WireguardHost {
+                name: "*.proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+            },
+        ];
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            json["wireguard_hosts"],
+            serde_json::json!([
+                {"name": "proxy.chan.app", "addresses": ["10.7.0.1"]},
+                {"name": "*.proxy.chan.app", "addresses": ["10.7.0.1", "fd00:7::1"]},
+            ])
+        );
+        let back: Gateway = serde_json::from_value(json).unwrap();
+        assert_eq!(back, row);
+    }
+
+    #[test]
+    fn gateway_entry_reads_enrolled_only_for_the_current_key() {
+        let mut gw: Gateway =
+            serde_json::from_str(r#"{"id":"gw-1a2b3c4d","url":"https://gw.chan.app"}"#).unwrap();
+        let entry = entry_from_gateway(&gw, None);
+        assert_eq!(entry.wireguard_public_key, None);
+        assert!(!entry.wireguard_enrolled);
+        gw.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+        let entry = entry_from_gateway(&gw, None);
+        assert_eq!(entry.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+        assert!(
+            !entry.wireguard_enrolled,
+            "a key never sent is not enrolled"
+        );
+        gw.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+        assert!(entry_from_gateway(&gw, None).wireguard_enrolled);
+        gw.wireguard_enrolled_key = Some(WG_PRIVATE_KEY.to_string());
+        assert!(
+            !entry_from_gateway(&gw, None).wireguard_enrolled,
+            "another key enrolled is not this one"
+        );
+        // An enrolled key with no current key is not an enrollment.
+        gw.wireguard_public_key = None;
+        assert!(!entry_from_gateway(&gw, None).wireguard_enrolled);
+    }
+
+    #[test]
+    fn clearing_the_file_drops_the_host_map_and_the_enrolled_key() {
+        let home = tempfile::tempdir().unwrap();
+        let a = wg_file(home.path(), "a.conf", &wg_text());
+        let b = wg_file(home.path(), "b.conf", &wg_text());
+        let id = "gw-1a2b3c4d";
+        let store = store_with_gateway(home.path(), id, "https://gw.chan.app");
+        let enrolled = |file: &Path| {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let gw = &mut cfg.gateways[0];
+            gw.wireguard = Some(file.to_path_buf());
+            gw.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+            gw.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+            gw.wireguard_hosts = vec![WireguardHost {
+                name: "proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }];
+            guard.save(&cfg).unwrap();
+        };
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        // A save that keeps the file keeps the enrollment.
+        enrolled(&a);
+        let kept = reg
+            .update(id, wg_input("", Some(a.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(kept.wireguard_enrolled);
+        assert_eq!(stored_gateway(&store, id).wireguard_hosts.len(), 1);
+        // Another file drops the map and keeps the enrolled key.
+        let moved = reg
+            .update(id, wg_input("", Some(b.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(moved.wireguard_enrolled);
+        let gw = stored_gateway(&store, id);
+        assert!(gw.wireguard_hosts.is_empty());
+        assert_eq!(gw.wireguard_enrolled_key.as_deref(), Some(WG_PEER_KEY));
+        // Clearing the file drops both and keeps the key.
+        enrolled(&a);
+        let cleared = reg.update(id, wg_input("", None)).unwrap().unwrap();
+        assert!(!cleared.wireguard_enrolled);
+        assert_eq!(cleared.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+        let gw = stored_gateway(&store, id);
+        assert_eq!(gw.wireguard, None);
+        assert!(gw.wireguard_hosts.is_empty());
+        assert_eq!(gw.wireguard_enrolled_key, None);
+        assert_eq!(gw.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+    }
+}

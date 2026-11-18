@@ -218,6 +218,66 @@ chan-desktop: ## Build the desktop app through desktop/Makefile.
 desktop-dev: ## Launch the desktop app in dev mode.
 	$(MAKE) -C desktop dev
 
+# ---------------------------------------------------------------------------
+# iOS app (mobile/ios, crate chan-ios). Mirrors desktop/Makefile's
+# dev/build/check/test/lint/fmt/clean over the iOS crate, plus the
+# install flows proven in dev/chan-ios/followups/ios-runbook.md.
+# ---------------------------------------------------------------------------
+
+IOS_DIR := mobile/ios
+# Simulator name or UDID for ios-install-sim.
+IOS_SIM ?= iPhone 17
+# Physical device id for ios-install-device (`xcrun devicectl list devices`).
+IOS_DEVICE ?=
+
+.PHONY: ios-dev
+ios-dev: $(WEB_PREREQ) ## Launch the iOS app in dev mode (Tauri picks the target).
+	cd $(IOS_DIR) && cargo tauri ios dev
+
+.PHONY: ios-build
+ios-build: $(WEB_PREREQ) ## Build the iOS app for the simulator (debug).
+	cd $(IOS_DIR) && rm -rf gen/apple/build && cargo tauri ios build --debug -t aarch64-sim --ci
+
+.PHONY: ios-check
+ios-check: ## Type-check the iOS crate for the device target.
+	$(CARGO) check -p chan-ios --target aarch64-apple-ios
+
+.PHONY: ios-test
+ios-test: ## Run the iOS crate's host tests.
+	$(CARGO) test -p chan-ios --all-targets
+
+.PHONY: ios-lint
+ios-lint: ## Clippy the iOS crate with warnings denied.
+	$(CARGO) clippy -p chan-ios --all-targets -- -D warnings
+
+.PHONY: ios-fmt
+ios-fmt: ## Format the iOS crate.
+	$(CARGO) fmt -p chan-ios
+
+.PHONY: ios-clean
+ios-clean: ## Clean the iOS crate's build artifacts.
+	$(CARGO) clean -p chan-ios
+	rm -rf $(IOS_DIR)/gen/apple/build
+
+.PHONY: ios-install-sim
+ios-install-sim: ios-build ## Build, install, and launch the iOS app on IOS_SIM.
+	@xcrun simctl boot "$(IOS_SIM)" 2>/dev/null || true
+	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphonesimulator/Chan.app)"; \
+	    [ -d "$$app" ] || { echo "error: no simulator Chan.app under DerivedData"; exit 1; }; \
+	    xcrun simctl install "$(IOS_SIM)" "$$app" && \
+	    xcrun simctl launch "$(IOS_SIM)" app.chan.ios
+
+.PHONY: ios-install-device
+ios-install-device: $(WEB_PREREQ) ## Build for device and install on IOS_DEVICE via devicectl.
+	@if [ -z "$(IOS_DEVICE)" ]; then \
+	    echo "error: IOS_DEVICE not set (see: xcrun devicectl list devices)"; exit 1; \
+	fi
+	cd $(IOS_DIR) && rm -rf gen/apple/build && cargo tauri ios build --debug -t aarch64 --ci
+	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphoneos/Chan.app)"; \
+	    [ -d "$$app" ] || { echo "error: no device Chan.app under DerivedData"; exit 1; }; \
+	    xcrun devicectl device install app --device "$(IOS_DEVICE)" "$$app" && \
+	    xcrun devicectl device process launch --device "$(IOS_DEVICE)" app.chan.ios
+
 .PHONY: linux-chan-tarball
 linux-chan-tarball: ## Build the Linux CLI tarball for LINUX_TARGET.
 	$(MAKE) -C packaging/linux \
