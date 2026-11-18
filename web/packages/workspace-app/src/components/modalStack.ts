@@ -1,4 +1,5 @@
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
+import { mayFocus } from "../state/keyboardOwner.svelte";
 
 type ShellOptions = {
   layer: HTMLElement;
@@ -139,7 +140,11 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
           if (opener) opener.focus({ preventScroll: true });
           repair();
         } else if (shouldRestore && !canTakeFocus(document.activeElement)) {
-          shell.openers.find(canTakeFocus)?.focus({ preventScroll: true });
+          // The last dialog gone, its opener gets the keyboard back only
+          // where the keyboard's owner lets it: a survey over the opener's
+          // terminal, an overlay or the Computers launcher keeps it, and a
+          // survey card takes it itself.
+          shell.openers.find((node) => canTakeFocus(node) && mayFocus(node))?.focus({ preventScroll: true });
         }
       });
     },
