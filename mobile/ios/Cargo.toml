@@ -78,7 +78,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 block2 = "0.6"
 
 [dev-dependencies]
-# The ported tests drive real fs work in temp dirs.
+# Tests drive real filesystem work in temporary directories.
 tempfile = { workspace = true }
 # The ACL tests parse permissions/app.toml; no non-test code parses TOML.
 toml = { workspace = true }

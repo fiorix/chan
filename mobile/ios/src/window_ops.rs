@@ -55,10 +55,19 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             let _ = reply.send(result);
         }
         DesktopWindowOp::Open { id, reply } => {
-            let app2 = app.clone();
-            let result = on_main(&app, move || serve::open_window_by_label(&app2, &id))
-                .await
-                .and_then(|inner| inner);
+            let remote = state
+                .devserver_feed
+                .record_for_window_id(&id)
+                .or_else(|| state.devserver_feed.record_for_native_label(&id));
+            let result = if let Some((devserver_id, record)) = remote {
+                crate::mobile_auth::mobile_open_existing_window(&state, &devserver_id, &record)
+                    .await
+            } else {
+                let app2 = app.clone();
+                on_main(&app, move || serve::open_window_by_label(&app2, &id))
+                    .await
+                    .and_then(|inner| inner)
+            };
             let _ = reply.send(result);
         }
         DesktopWindowOp::SetWindowLabel { id, label, reply } => {
@@ -86,18 +95,17 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         }
         DesktopWindowOp::ConnectDevserver { id, reply } => {
             // The launcher's Connect button fires this over the bridge.
-            // A synthesized gateway row connects through its gateway
-            // (discovery, sign-in hand-off when needed, roster fetch);
-            // a direct devserver has no connect flow on this build (the
-            // desktop's is a control-terminal dial, which iOS does not
-            // run), so it refuses loudly instead of parking.
-            let result = match crate::gateway::parse_synthesized_id(&id) {
-                Some((gateway_id, _, _)) => {
-                    crate::gateway::connect_gateway(app, state, gateway_id, true).await
-                }
-                None => Err(format!(
+            // A synthesized gateway row connects as a rostered devserver
+            // (policy check, entry exchange, exact-origin capability mint,
+            // WebView cookie install, workspace/window feed population); a
+            // direct devserver has no control-terminal connect flow on this
+            // build and refuses loudly instead of parking.
+            let result = if crate::gateway::parse_synthesized_id(&id).is_some() {
+                crate::connect_rostered_devserver(app, state, id).await
+            } else {
+                Err(format!(
                     "connecting a direct devserver is not supported on this build; connect through a gateway (id {id})"
-                )),
+                ))
             };
             let _ = reply.send(result);
         }
@@ -169,7 +177,7 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         }
         #[cfg(not(target_os = "ios"))]
         DesktopWindowOp::PickFolder { reply } => {
-            // The launcher's New-Workspace "Browse…" button fires this over the
+            // The launcher's New-Workspace "Browse..." button fires this over the
             // bridge to get a real native folder dialog. The picker is async-
             // callback based and Tauri dialogs must run on the main thread, so the
             // `on_main` hop only SCHEDULES the dialog; the chosen path (or cancel)
@@ -254,7 +262,7 @@ fn hide_window<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
         // to 409 and floods the launcher's eye-handler console). Reaping a
         // standalone terminal's feed row on PTY exit; a client still holding the
         // just-removed row can click its eye, and that hide must land cleanly. Err
-        // (→409) is reserved for the genuine "no desktop attached / manager gone"
+        // (-> 409) is reserved for the genuine "no desktop attached / manager gone"
         // case, which the route body already explains.
         None => Ok(()),
     }
@@ -284,7 +292,7 @@ async fn close_window(
     // A remote row's registry lives on its devserver. Delete it there and let
     // the devserver watch reconcile close the local native view. This preserves
     // the existing remote-close behavior while local rows below gain proper
-    // bare-id → composite-label resolution.
+    // bare-id -> composite-label resolution.
     if state.devserver_feed.record_for_window_id(&id).is_some() {
         let _ = reply.send(crate::discard_devserver_window_by_id(&app, &id).await);
         return;
@@ -329,9 +337,8 @@ async fn set_remote_window_label(
     let Some(_conn) = state.devservers.get(&devserver_id) else {
         return Err(format!("devserver {devserver_id} is not connected"));
     };
-    // This build has no devserver management transport to persist the
-    // label with (the auth lane's entry client mints and navigates
-    // only), so the op refuses loudly instead of parking.
+    // This build exposes no remote window-label mutation endpoint, so the op
+    // refuses loudly instead of parking.
     let _ = (&record, label);
     Err("renaming a devserver window is not supported on this build".to_string())
 }
@@ -348,8 +355,8 @@ async fn request_remote_tmux(
     let Some(_conn) = state.devservers.get(&id) else {
         return Err(format!("devserver {id} is not connected"));
     };
-    // Same refusal as the label op: no devserver management transport
-    // exists on this build to forward the tmux action with.
+    // This build exposes no remote tmux action endpoint, so the op refuses
+    // loudly instead of parking.
     let _ = (connection, request);
     Err("tmux actions on a devserver are not supported on this build".to_string())
 }
@@ -439,11 +446,17 @@ mod tests {
     #[test]
     fn ios_setup_spawns_the_window_ops_consumer() {
         const IOS_RS: &str = include_str!("ios.rs");
-        for required in ["take_window_ops_rx()", "window_ops::run("] {
-            assert!(
-                IOS_RS.contains(required),
-                "ios.rs setup must call {required} (bridge ops hang otherwise)"
-            );
+        for required in [
+            "take_window_ops_rx()",
+            "window_ops::run(",
+            "connect_rostered_devserver(",
+            "connectedScenes",
+        ] {
+            assert!(IOS_RS.contains(required), "ios.rs must contain {required}");
         }
+        assert!(
+            !IOS_RS.contains("[&*app, windows]"),
+            "ios.rs must enumerate scene windows rather than legacy UIApplication.windows"
+        );
     }
 }

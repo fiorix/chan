@@ -257,9 +257,7 @@ pub(crate) mod tests {
             self.state.control_terminal_runs.lock().unwrap().insert(
                 devserver_id.to_string(),
                 crate::state::ControlTerminalRun {
-                    generation: 1,
                     prefix: prefix.clone(),
-                    script_based: true,
                 },
             );
             url

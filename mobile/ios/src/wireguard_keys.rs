@@ -8,9 +8,9 @@
 //! on Unix. The private key never reaches the config, a log, the
 //! projection, or a request.
 //!
-//! Only the key-file and validation surface is ported: no sign-in on
-//! iOS enrolls a tunnel (the app runs no WireGuard fabric), so the
-//! desktop's enrollment build and prepare flow stays behind.
+//! This module covers key-file storage and ingress validation only: no
+//! sign-in on iOS enrolls a tunnel because the app runs no WireGuard
+//! fabric.
 
 use std::io;
 use std::net::IpAddr;
@@ -156,17 +156,6 @@ pub(crate) fn validate_ingresses(
         }
     }
     Ok(())
-}
-
-/// The bytes of the client file at `path`, `None` when there is none. They
-/// hold a private key: they are kept only to recognize an obsolete file
-/// before removing it, never shown.
-pub fn read_client_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("WireGuard: reading {}: {e}", path.display())),
-    }
 }
 
 /// Addresses with prefix lengths as the file reader reads them: an address
