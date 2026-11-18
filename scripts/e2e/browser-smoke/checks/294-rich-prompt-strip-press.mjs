@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
+import { closeEveryTerminal, closeExtraPanes, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -209,36 +209,6 @@ async function catchPending(page, card, submit, tries = 4) {
     }
   }
   return false;
-}
-
-/// Close panes until one is left, taking the "Close tab?" confirmation a
-/// live terminal raises: the terminal cleanup reads one pane only, so a
-/// split the two-pane leg leaves, or one a failure leaves half made, would
-/// hold its terminals past it.
-async function closeExtraPanes(page) {
-  const count = () => page.evaluate(() => document.querySelectorAll(".pane[data-pane-id]").length);
-  let panes = await count();
-  for (let guard = 0; panes > 1; guard += 1) {
-    if (guard >= 4) throw new Error(`still ${panes} panes after ${guard} closes`);
-    await dispatchCommand(page, "app.pane.kill");
-    const deadline = Date.now() + 15_000;
-    let left = panes;
-    while (left >= panes) {
-      if (Date.now() > deadline) throw new Error(`the pane count stayed at ${left}`);
-      const dialog = await page.$('[role="dialog"][aria-labelledby="confirm-title"]');
-      if (dialog) {
-        for (const button of await dialog.$$("button")) {
-          if (await button.evaluate((node) => node.textContent?.trim() === "Close")) {
-            await button.click();
-            break;
-          }
-        }
-      }
-      await sleep(200);
-      left = await count();
-    }
-    panes = left;
-  }
 }
 
 async function paneIds(page) {
