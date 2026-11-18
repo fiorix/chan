@@ -331,6 +331,28 @@ fn publishing_a_file_removes_the_part_an_earlier_layout_left_for_it() {
     assert!(other.exists(), "another file's part is left alone");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_at_the_pinned_path_is_replaced_by_the_download() {
+    // An old cache's snapshot file links into blobs/; with the blob gone the
+    // link dangles, and the download's rename replaces the link itself.
+    let cache = tempfile::tempdir().unwrap();
+    let snapshot = snapshot(cache.path());
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let pinned = snapshot.join("config.json");
+    std::os::unix::fs::symlink("../../blobs/gone", &pinned).unwrap();
+    let server = Server::start(|_| range_response(BODY, 0));
+    let path = client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .expect("a dangling link does not block the download");
+    assert_eq!(path, pinned);
+    assert!(!std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
+}
+
 #[test]
 fn partial_download_resumes_and_publishes_exact_bytes() {
     let cache = tempfile::tempdir().unwrap();
