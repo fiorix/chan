@@ -482,25 +482,36 @@
   function watchStatusPill(node: HTMLElement, apply: (pill: DOMRect | null) => void): { destroy(): void } {
     let observed: Element | null = null;
     let sizes: ResizeObserver | null = null;
+    // The pill mounts and unmounts with its own visibility while the
+    // notice or bar stays up, so watching only the pill subtree misses
+    // its arrival: the pad then never applies and the pill covers
+    // Dismiss. Watch the app container's direct children instead: the
+    // pill arrives and leaves as a direct child, while terminal output
+    // churns deep inside the workspace subtree and never fires it.
+    const root =
+      document.querySelector(APP_STATUS_PILL_SELECTOR)?.parentElement ?? document.querySelector(".app");
+    const reobserve = (pill: Element | null): void => {
+      mutations.disconnect();
+      if (root) mutations.observe(root, { childList: true, attributes: true, attributeFilter: ["class", "style"] });
+      if (pill) mutations.observe(pill, { subtree: true, childList: true, attributes: true });
+    };
     const measure = (): void => {
       const pill = document.querySelector(APP_STATUS_PILL_SELECTOR);
       if (pill !== observed) {
         if (observed && sizes) sizes.unobserve(observed);
         observed = pill;
         if (pill && sizes) sizes.observe(pill);
+        reobserve(pill);
       }
       apply(pill instanceof HTMLElement ? pill.getBoundingClientRect() : null);
     };
-    const bar = document.querySelector(".app-statusbar");
     const mutations = new MutationObserver(measure);
-    if (bar) {
-      mutations.observe(bar, { subtree: true, childList: true, attributes: true });
-    }
     if (typeof ResizeObserver !== "undefined") {
       sizes = new ResizeObserver(measure);
       sizes.observe(node);
     }
     window.addEventListener("resize", measure);
+    reobserve(null);
     measure();
     return {
       destroy(): void {

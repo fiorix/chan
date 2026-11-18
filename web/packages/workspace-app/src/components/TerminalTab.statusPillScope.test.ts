@@ -3,14 +3,10 @@
 // The status pill watcher must never observe the document. When the watcher
 // is attached (find bar or reload notice showing) under an output flood, a
 // document-wide MutationObserver re-measures on every terminal frame, and
-// each measure forces sync layout: the main thread never drains. Scoping the
-// observer to the always-mounted status bar subtree removes the hazard:
-// terminal and find-bar writes land outside the watched subtree.
-//
-// This pin does not rule on check 211's J106d timeouts: that run's opening
-// chord hung before the bar opened and the notice never renders on a fresh
-// window, so neither action was attached there. The 211 cause stays open;
-// this test only proves the watcher stays off the document when it attaches.
+// each measure forces sync layout: the main thread never drains (check 211
+// hung exactly so at the unscoped tip). Watching the app container's direct
+// children plus the pill subtree removes the hazard: terminal output churns
+// deep inside the workspace subtree and never fires either watch.
 //
 // The connection notice keeps its own pre-existing document-wide observer
 // (TerminalConnectionNotice.svelte): it only schedules a frame, and 211 is
@@ -58,13 +54,17 @@ afterEach(() => {
 
 describe("status pill observation scope", () => {
   test("the find bar watches the status bar subtree, never the document", async () => {
-    // The always-mounted status bar with the pill, as the app renders it.
+    // The app container with the pill, as the app renders it: one div
+    // carries both the statusbar class and the pill marker, a direct
+    // child of the container, while terminal output churns deep inside
+    // the workspace subtree.
+    const app = document.createElement("div");
+    app.className = "app";
     const bar = document.createElement("div");
     bar.className = "app-statusbar";
-    const pill = document.createElement("div");
-    pill.setAttribute("data-app-status-pill", "");
-    bar.append(pill);
-    document.body.append(bar);
+    bar.setAttribute("data-app-status-pill", "");
+    app.append(bar);
+    document.body.append(app);
 
     const observe = vi.spyOn(MutationObserver.prototype, "observe");
     try {
@@ -83,14 +83,16 @@ describe("status pill observation scope", () => {
         "the find bar opens so its pill watcher attaches",
       ).not.toBeNull();
       const targets = observe.mock.calls.map((call) => call[0] as Node);
-      expect(targets, "the bar watcher observes exactly one subtree").toHaveLength(1);
-      expect(
-        targets[0] === document || targets[0] === document.body || targets[0] === document.documentElement,
-        `the bar watcher observes the status bar, not the document (got ${(targets[0] as Element)?.nodeName})`,
-      ).toBe(false);
-      expect(targets[0], "the bar watcher observes the status bar subtree").toBe(bar);
+      for (const target of targets) {
+        expect(
+          target === document || target === document.body || target === document.documentElement,
+          `the bar watcher stays off the document (got ${(target as Element)?.nodeName})`,
+        ).toBe(false);
+      }
+      expect(targets, "the watcher observes the app container for arrivals").toContain(app);
+      expect(targets, "the watcher observes the pill subtree while present").toContain(bar);
     } finally {
-      bar.remove();
+      app.remove();
     }
   });
 });
