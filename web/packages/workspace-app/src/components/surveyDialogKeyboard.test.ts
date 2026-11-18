@@ -45,7 +45,7 @@ function overlay(tabId: string | null = null): HTMLElement {
   // jsdom applies no component stylesheet: the window-wide layer paints at
   // its stylesheet's z-index, over the dialogs' 26000.
   target.style.position = "fixed";
-  target.style.zIndex = "39000";
+  target.style.zIndex = "29900";
   document.body.append(target);
   mounted.push(mount(BubbleOverlay, { target, props: { tabId } }));
   flushSync();
@@ -191,4 +191,22 @@ describe("the close prompt and the Team dialog", () => {
       closeTeamDialog();
     }
   });
+});
+
+test("the window-wide survey paints over the dialogs and under the covers", () => {
+  // jsdom applies no stylesheet, so the layers are read from the sources.
+  const sources = import.meta.glob(
+    ["./BubbleOverlay.svelte", "./ModalShell.svelte", "./HamburgerMenu.svelte", "./DisconnectOverlay.svelte", "./ScreensaverOverlay.svelte"],
+    { query: "?raw", import: "default", eager: true },
+  ) as Record<string, string>;
+  const layer = (file: string, selector: string) => {
+    const source = sources[`./${file}`]!;
+    const rule = source.slice(source.indexOf(`${selector} {`));
+    return Number(/z-index:\s*(\d+)/.exec(rule)?.[1]);
+  };
+  const survey = layer("BubbleOverlay.svelte", ".survey-overlay");
+  expect(survey, "over a dialog").toBeGreaterThan(layer("ModalShell.svelte", ".overlay"));
+  expect(survey, "over the menus").toBeGreaterThan(layer("HamburgerMenu.svelte", ".hamburger-menu"));
+  expect(survey, "under the reconnect cover").toBeLessThan(layer("DisconnectOverlay.svelte", ".overlay"));
+  expect(survey, "under the screen lock").toBeLessThan(layer("ScreensaverOverlay.svelte", ".screensaver-backdrop"));
 });
