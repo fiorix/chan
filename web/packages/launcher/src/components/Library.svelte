@@ -200,6 +200,11 @@
   // sends no key.
   const health = (ds: DevserverEntry) => ds.connection_health ?? null;
   const connectionField = (ds: DevserverEntry): string => `devserver:${ds.id}:connection`;
+  // The face's image, by id: the edit button around a configured devserver's
+  // identity is labelled for its action, which replaces what it holds for a
+  // screen reader, so it names the face as its description.
+  const faceIdBase = $props.id();
+  const faceId = (ds: DevserverEntry): string => `${faceIdBase}-face-${ds.id}`;
   // The faces count waits and ages against this clock. A quarter-second tick
   // while any reading shows moves every count by whole seconds without
   // skipping one, and each fresh list of rows restarts it, so a reading
@@ -567,7 +572,7 @@
     </span>
     <PrivateField field={`devserver:${ds.id}:name`} label="computer name"><span class="row-name">{devserverName(ds)}</span></PrivateField>
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
-    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} field={connectionField(ds)} />{/if}
+    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} field={connectionField(ds)} id={faceId(ds)} />{/if}
   </span>
   <span class="ds-addr-row">
     <span class="ds-glyph"></span>
@@ -720,6 +725,7 @@
             type="button"
             title="Edit config"
             aria-label={`Edit config for ${privateText(devserverName(ds), "computer")}`}
+            aria-describedby={health(ds) ? faceId(ds) : undefined}
             onclick={() => openEditDevserver(ds)}>
             {@render dsIdentity(ds, true)}
           </button>

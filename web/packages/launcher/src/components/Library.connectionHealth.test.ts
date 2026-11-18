@@ -175,3 +175,31 @@ describe("the connection face on the Computers deck", () => {
   });
 });
 
+// The description a screen reader reads for `el`: each element its
+// aria-describedby names, by its aria-label or else its text.
+function description(el: Element): string {
+  return (el.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+    .map((id) => document.getElementById(id))
+    .map((ref) => ref?.getAttribute("aria-label") ?? ref?.textContent?.trim() ?? "")
+    .join(" ");
+}
+
+describe("the connection face for a screen reader", () => {
+  it("describes a configured devserver's edit button, whose label replaces its content, with the face's name", () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "stalled", since: NOW - 1_000, wait_since: NOW - 5_000 }))];
+    mountDeck("ds-a");
+    const edit = slot("ds-a").querySelector<HTMLButtonElement>("button.ds-id.editable")!;
+    expect(edit.getAttribute("aria-label")).toBe("Edit config for alpha");
+    expect(description(edit)).toBe("Connection stalled");
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", rtt_ms: 1_300 }))];
+    flushSync();
+    expect(description(edit)).toBe("Connection slow, 1.3 s");
+  });
+
+  it("gives the edit button no description while the row shows no face", () => {
+    library.devservers = [computer("ds-a", "alpha", null)];
+    mountDeck("ds-a");
+    const edit = slot("ds-a").querySelector<HTMLButtonElement>("button.ds-id.editable")!;
+    expect(edit.hasAttribute("aria-describedby")).toBe(false);
+  });
+});
