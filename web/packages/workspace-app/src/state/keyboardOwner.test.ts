@@ -15,7 +15,7 @@ import KeyboardOwnerKindProbe from "../__tests__/keyboardOwnerKindProbe.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
 import { closeConfirmState } from "./closeConfirm.svelte";
-import { confirmState } from "./confirm.svelte";
+import { confirmState, resolveConfirm, uiConfirm } from "./confirm.svelte";
 import {
   KEYBOARD_OWNER_ATTR,
   LAUNCHER_SHOWN_ATTR,
@@ -279,6 +279,28 @@ describe("mayFocus", () => {
     document.body.append(field);
     overlayStack.ids = ["settings"];
     expect(mayFocus(field)).toBe(false);
+  });
+});
+
+describe("the confirm dialog's restore", () => {
+  test("hands the keyboard back to its opener only where the keyboard's owner lets it", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const refused = uiConfirm({ title: "Sure?" });
+    opener.blur();
+    taggedRoot(ownerTag("overlay", "search"));
+    overlayStack.ids = ["search"];
+    resolveConfirm(true);
+    expect(document.activeElement, "under Search").not.toBe(opener);
+    await refused;
+    overlayStack.ids = [];
+    opener.focus();
+    const restored = uiConfirm({ title: "Again?" });
+    opener.blur();
+    resolveConfirm(false);
+    expect(document.activeElement, "with nothing owning the keyboard").toBe(opener);
+    await restored;
   });
 });
 

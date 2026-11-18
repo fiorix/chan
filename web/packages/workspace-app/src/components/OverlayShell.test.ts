@@ -17,6 +17,7 @@ import {
   windowTabBar,
 } from "../state/windowTabBar.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -25,6 +26,7 @@ afterEach(() => {
   windowTabBar.chrome = NO_TITLEBAR_CHROME;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   searchPanel.open = false;
+  document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   flushSync();
   for (const view of mounted.splice(0)) unmount(view);
   document.body.replaceChildren();
@@ -64,6 +66,18 @@ describe("the overlay panel", () => {
 
     expect(target.querySelector('[role="dialog"]'), "the panel closed").toBeNull();
     expect(document.activeElement).toBe(origin);
+  });
+
+  test("leaves the keyboard to the Computers launcher shown when it closes", async () => {
+    const origin = focusOrigin();
+    const target = await openSearchShell();
+    target.querySelector<HTMLInputElement>('[aria-label="query"]')!.focus();
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+
+    searchPanel.open = false;
+    await settle();
+
+    expect(document.activeElement).not.toBe(origin);
   });
 
   test("leaves focus where the caller moved it on close", async () => {

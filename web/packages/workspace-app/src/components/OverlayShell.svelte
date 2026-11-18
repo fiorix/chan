@@ -25,7 +25,7 @@
 
   import type { Snippet } from "svelte";
   import { overlayDepth, type OverlayId } from "../state/store.svelte";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
   import { windowControlsBand } from "../state/windowTabBar.svelte";
   // Each wrapped overlay renders its own maximize/restore + close
@@ -62,9 +62,11 @@
   } = $props();
 
   // The element that held focus when the overlay opened. Closing hands focus
-  // back to it when nothing else took it: focus left on the body or on an
-  // element that went with the panel returns, and a caller that moved focus
-  // on (an opened file) keeps it.
+  // back to it when nothing else took it and the keyboard's owner lets it:
+  // focus left on the body or on an element that went with the panel
+  // returns, a caller that moved focus on (an opened file) keeps it, and an
+  // owner left above it (a survey over its terminal, the Computers launcher)
+  // keeps the keyboard.
   let returnFocus: HTMLElement | null = null;
   $effect.pre(() => {
     if (!open) return;
@@ -76,7 +78,7 @@
       queueMicrotask(() => {
         const current = document.activeElement;
         const fell = current === null || current === document.body || !current.isConnected;
-        if (target?.isConnected && fell) {
+        if (target?.isConnected && fell && mayFocus(target)) {
           target.focus({ preventScroll: true });
         }
       });

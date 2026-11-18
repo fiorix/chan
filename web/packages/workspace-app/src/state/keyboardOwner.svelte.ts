@@ -9,6 +9,7 @@
 // its root is looked up in the page when `ownerRoot` or `mayFocus` asks,
 // never kept, so no reader holds a root from before its surface mounted.
 
+import { setConfirmRestoreGate } from "./confirm.svelte";
 import { appInputBlocked, modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor, type SurveySlot } from "./survey.svelte";
 import { activeTerminalTab } from "./tabs.svelte";
@@ -132,6 +133,9 @@ export function mayFocus(element: Element | null): boolean {
   const root = ownerRoot(current);
   return element !== null && root !== null && root.contains(element);
 }
+
+// The confirm dialog's restore asks too; its module imports nothing.
+setConfirmRestoreGate(mayFocus);
 
 /// Whether an owner above the overlays holds the keyboard: a modal dialog, a
 /// window-wide survey, or a cover over the window (the screen lock, the
