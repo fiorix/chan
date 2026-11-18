@@ -878,6 +878,21 @@ pub(crate) fn indexable_rel_files<'a>(
         })
 }
 
+/// The tree entries of the files [`indexable_rel_files`] yields under `root`,
+/// in walk order. Refuses with `ListingTooLarge` once more than `limit` such
+/// files arrive: the bound counts the files the index reads, so directories
+/// and files it never reads do not fail it. Once `cancel` is set, the next
+/// file returns `Cancelled` instead.
+pub(crate) fn list_indexable_files(
+    root: &Path,
+    policy: &IndexScopePolicy,
+    limit: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<TreeEntry>> {
+    let files = indexable_rel_files(root, root, policy).map(|(_, entry)| entry);
+    tree_entries(root, files, limit, cancel)
+}
+
 /// Whether a recursive listing walk keeps `entry`, entering it when it is a
 /// directory. The atomic writer's reserved names are left out whatever
 /// their type (an in-flight temporary, a create's stage directory), as the

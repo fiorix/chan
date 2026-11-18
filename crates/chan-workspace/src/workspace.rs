@@ -832,6 +832,48 @@ pub mod subtree_test_hooks {
     }
 }
 
+/// A lowered bound on the full rebuild's listing, so a test can cross it
+/// with a few files instead of half a million.
+///
+/// Compiled for this crate's tests and for downstream test builds that
+/// enable `test-hooks`. A bound is keyed by the workspace's graph directory,
+/// so tests over separate workspaces do not interfere, and holds until the
+/// guard `lower` returns is dropped.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod listing_limit_test_hooks {
+    use super::Workspace;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    static LIMITS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct LimitGuard(PathBuf);
+
+    impl Drop for LimitGuard {
+        fn drop(&mut self) {
+            LIMITS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub fn lower(workspace: &Workspace, limit: usize) -> LimitGuard {
+        let key = workspace.paths.graph_dir.clone();
+        assert!(LIMITS.lock().unwrap().insert(key.clone(), limit).is_none());
+        LimitGuard(key)
+    }
+
+    pub(super) fn rebuild_listing_limit(workspace: &Workspace) -> usize {
+        LIMITS
+            .lock()
+            .unwrap()
+            .get(&workspace.paths.graph_dir)
+            .copied()
+            .unwrap_or(crate::fs_ops::LIST_TREE_LIMIT)
+    }
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 struct OpenRecoveryPause {
     reached: std::sync::mpsc::SyncSender<()>,
@@ -3444,8 +3486,14 @@ impl Workspace {
         let graph = self.graph()?;
         // Effective filter = global baseline + this workspace's blocklist
         // additions, so the graph rebuild skips the same subtrees the index
-        // build does (both re-derive it per reindex).
-        let entries = fs_ops::list_tree_scoped(self.root(), policy)?;
+        // build does (both re-derive it per reindex). Only the files the
+        // index reads are listed, and the cap counts those, so a tree of
+        // directories and files the index never reads does not fail it.
+        #[cfg(any(test, feature = "test-hooks"))]
+        let limit = listing_limit_test_hooks::rebuild_listing_limit(self);
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let limit = fs_ops::LIST_TREE_LIMIT;
+        let entries = fs_ops::list_indexable_files(self.root(), policy, limit, cancel)?;
         // Only Markdown files become graph documents. Plain text gets stat
         // rows for reconcile, replaced atomically with the staged graph.
         let total: u64 = entries
@@ -5844,6 +5892,10 @@ pub(crate) fn rename_case_only(dir: &Path, from: &str, to: &str) {
 #[cfg(test)]
 #[path = "workspace_rebuild_skip_tests.rs"]
 mod rebuild_skip_tests;
+
+#[cfg(test)]
+#[path = "workspace_listing_cap_tests.rs"]
+mod listing_cap_tests;
 
 #[cfg(test)]
 mod tests {
