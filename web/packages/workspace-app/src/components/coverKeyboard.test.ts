@@ -47,6 +47,15 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+/// The lock's mount, at the layer its stylesheet sets: jsdom applies no
+/// component stylesheet, and the dialogs' stack sets their layers inline.
+function lockLayer(): HTMLElement {
+  const target = document.body.appendChild(document.createElement("div"));
+  target.style.position = "fixed";
+  target.style.zIndex = "39000";
+  return target;
+}
+
 test("the screen lock over an open dialog holds the keyboard, and the dialog takes it back on unlock", async () => {
   focusOrigin();
   const dialogs = document.body.appendChild(document.createElement("div"));
@@ -57,8 +66,7 @@ test("the screen lock over an open dialog holds the keyboard, and the dialog tak
   const field = document.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
   field.focus();
   expect(document.activeElement, "the dialog's field").toBe(field);
-  const lock = document.body.appendChild(document.createElement("div"));
-  mounted.push(mount(ScreensaverOverlay, { target: lock }));
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
   screensaver.locked = true;
   await settle();
   const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;

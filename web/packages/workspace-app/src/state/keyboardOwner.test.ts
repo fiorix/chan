@@ -28,6 +28,7 @@ import {
   registerKeyboardTaker,
 } from "./keyboardOwner.svelte";
 import {
+  COVER_ROOT_ATTR,
   FULL_WINDOW_COVERS,
   importContactsPanel,
   overlayStack,
@@ -314,17 +315,63 @@ describe("the confirm dialog's restore", () => {
   });
 });
 
+/// A cover's root painted at `z`, raised over the window.
+function raisedCover(cover: (typeof FULL_WINDOW_COVERS)[number], z: number): HTMLElement {
+  const root = document.body.appendChild(document.createElement("div"));
+  root.setAttribute(COVER_ROOT_ATTR, cover);
+  root.style.position = "fixed";
+  root.style.zIndex = String(z);
+  setCoverBlocking(cover, true);
+  return root;
+}
+
 describe("under a cover over the window", () => {
-  test.each(FULL_WINDOW_COVERS)("%s: mayFocus refuses every element, one inside the owner's root included", (cover) => {
-    const { field } = taggedRoot(ownerTag("modal"));
+  test.each(FULL_WINDOW_COVERS)("%s: mayFocus refuses every element, one inside the root of an owner it paints over included", (cover) => {
+    const { field } = taggedRoot(ownerTag("modal"), 26000);
     promptState.open = true;
     const loose = document.createElement("input");
     document.body.append(loose);
-    setCoverBlocking(cover, true);
+    raisedCover(cover, 30000);
     expect(mayFocus(field), "inside the owner's root").toBe(false);
-    expect(mayFocus(loose), "with nothing else owning it").toBe(false);
+    expect(mayFocus(loose), "outside it").toBe(false);
+    promptState.open = false;
+    expect(mayFocus(loose), "with nothing owning it").toBe(false);
     setCoverBlocking(cover, false);
-    expect(mayFocus(field)).toBe(true);
+    expect(mayFocus(loose)).toBe(true);
+  });
+
+  test.each(FULL_WINDOW_COVERS)("%s: an owner whose root paints over the cover holds the keyboard, and one level with it does not", (cover) => {
+    const { root, field } = taggedRoot(ownerTag("modal"), 30002);
+    const take = vi.fn();
+    registerKeyboardTaker(root, take);
+    closeConfirmState.open = true;
+    raisedCover(cover, 30000);
+    expect(mayFocus(field), "painted over the cover").toBe(true);
+    expect(handKeyboardToOwner(), "handed back over the cover").toBe(true);
+    expect(take).toHaveBeenCalledTimes(1);
+    root.style.zIndex = "30000";
+    expect(mayFocus(field), "level with the cover").toBe(false);
+    expect(handKeyboardToOwner(), "handed back level with it").toBe(false);
+    expect(take).toHaveBeenCalledTimes(1);
+  });
+
+  test("an owner painted between two raised covers takes nothing", () => {
+    const { root, field } = taggedRoot(ownerTag("modal"), 30002);
+    const take = vi.fn();
+    registerKeyboardTaker(root, take);
+    closeConfirmState.open = true;
+    raisedCover("reconnect", 30000);
+    raisedCover("screensaver", 39000);
+    expect(mayFocus(field)).toBe(false);
+    expect(handKeyboardToOwner()).toBe(false);
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  test("a raised cover with no root in the page holds the keyboard from every owner", () => {
+    const { field } = taggedRoot(ownerTag("modal"), 30002);
+    closeConfirmState.open = true;
+    setCoverBlocking("session-ended", true);
+    expect(mayFocus(field)).toBe(false);
   });
 
   test.each(FULL_WINDOW_COVERS)("%s: the command deck leaves the keyboard to it", (cover) => {

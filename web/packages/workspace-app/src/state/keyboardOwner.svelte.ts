@@ -11,7 +11,7 @@
 
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setConfirmRestoreGate } from "./confirm.svelte";
-import { appInputBlocked, modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
+import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, raisedCoverKeys, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor } from "./survey.svelte";
 import { activeTerminalTab } from "./tabs.svelte";
 
@@ -138,20 +138,38 @@ export function ownerRoot(current: KeyboardOwner | null = owner()): HTMLElement 
   return current?.tag ? topRoot(current.tag) : null;
 }
 
+/// Whether `root` paints over every cover raised over the window, as the
+/// close prompt paints over the reconnect and session-ended covers. A
+/// raised cover whose root is not in the page holds the keyboard all the
+/// same, and a cover painting at `root`'s level counts as painting over it.
+function paintsOverCovers(root: Element): boolean {
+  const level = paintLevel(root);
+  for (const cover of raisedCoverKeys()) {
+    const roots = document.querySelectorAll(`[${COVER_ROOT_ATTR}="${cover}"]`);
+    if (roots.length === 0) return false;
+    for (const coverRoot of roots) if (paintLevel(coverRoot) >= level) return false;
+  }
+  return true;
+}
+
 /// Whether `element` may take the keyboard: when `element` sits inside the
 /// owner's root, looked up as this asks, or when nothing owns it and
 /// `element` is in no owner surface's root, since a surface takes the
 /// keyboard only while it owns it (a survey card over a terminal that is not
 /// the focused pane's active one). The Computers launcher has no root in the
-/// page, so nothing may take it then, and nothing may while a cover over the
-/// window holds it (`FULL_WINDOW_COVERS`: the reconnect, session-ended,
-/// missing-token and preflight covers and the screen lock).
+/// page, so nothing may take it then. A cover over the window
+/// (`FULL_WINDOW_COVERS`: the reconnect, session-ended, missing-token and
+/// preflight covers and the screen lock) holds it while it shows, but from
+/// an owner whose root paints over every raised cover: the covers rank by
+/// paint, as the dialogs do.
 export function mayFocus(element: Element | null): boolean {
-  if (appInputBlocked()) return false;
   const current = owner();
-  if (current === null) return element === null || element.closest(`[${KEYBOARD_OWNER_ATTR}]`) === null;
+  const covered = appInputBlocked();
+  if (current === null) {
+    return !covered && (element === null || element.closest(`[${KEYBOARD_OWNER_ATTR}]`) === null);
+  }
   const root = ownerRoot(current);
-  return element !== null && root !== null && root.contains(element);
+  return element !== null && root !== null && root.contains(element) && (!covered || paintsOverCovers(root));
 }
 
 // The confirm dialog's restore asks too; its module imports nothing.
@@ -182,13 +200,13 @@ export function registerKeyboardTaker(root: HTMLElement, take: () => void): () =
 }
 
 /// Hand the keyboard to its owner, as the owner's surface takes it. False
-/// with no owner, under a cover, for the Computers launcher, which has no
-/// root in the page, and for a root whose surface registered no way to
-/// take it.
+/// with no owner, under a cover the owner's root does not paint over, for
+/// the Computers launcher, which has no root in the page, and for a root
+/// whose surface registered no way to take it.
 export function handKeyboardToOwner(): boolean {
-  if (appInputBlocked()) return false;
   const root = ownerRoot();
-  const take = root ? takers.get(root) : undefined;
+  if (root === null || (appInputBlocked() && !paintsOverCovers(root))) return false;
+  const take = takers.get(root);
   take?.();
   return take !== undefined;
 }
