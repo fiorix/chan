@@ -25,7 +25,7 @@
 
   import type { Snippet } from "svelte";
   import { overlayDepth, type OverlayId } from "../state/store.svelte";
-  import { mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
   import { windowControlsBand } from "../state/windowTabBar.svelte";
   // Each wrapped overlay renders its own maximize/restore + close
@@ -60,6 +60,28 @@
     label: string;
     children: Snippet;
   } = $props();
+
+  // Handed the keyboard as its owner (a window-wide survey over it closed),
+  // the panel gives it to the element in it that last held it, or takes it
+  // itself.
+  let panel = $state<HTMLDivElement | null>(null);
+  let lastInside: HTMLElement | null = null;
+  $effect(() => {
+    if (!panel) return;
+    const el = panel;
+    const note = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement) lastInside = event.target;
+    };
+    el.addEventListener("focusin", note);
+    const untake = registerKeyboardTaker(el, () => {
+      const target = lastInside?.isConnected && el.contains(lastInside) ? lastInside : el;
+      target.focus({ preventScroll: true });
+    });
+    return () => {
+      el.removeEventListener("focusin", note);
+      untake();
+    };
+  });
 
   // The element that held focus when the overlay opened. Closing hands focus
   // back to it when nothing else took it and the keyboard's owner lets it:
@@ -135,6 +157,7 @@
     oncontextmenu={onContextMenu}
   >
     <div
+      bind:this={panel}
       class="panel"
       class:lifted
       style="width: {resolvedWidth};"

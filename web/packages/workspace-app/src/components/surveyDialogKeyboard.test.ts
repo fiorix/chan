@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
+import OverlayShell from "./OverlayShell.svelte";
+import { createRawSnippet } from "svelte";
 import TeamDialog from "./TeamDialog.svelte";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
@@ -20,7 +22,7 @@ import { focusOrigin, settle } from "../__tests__/dialog";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
 import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
-import { FULL_WINDOW_COVERS, promptState, resolvePrompt, setCoverBlocking, uiPrompt } from "../state/store.svelte";
+import { FULL_WINDOW_COVERS, promptState, resolvePrompt, searchPanel, setCoverBlocking, syncOverlayStack, uiPrompt } from "../state/store.svelte";
 import { resetSurveysForTest, showSurvey, surveyState } from "../state/survey.svelte";
 
 const SURVEY: SurveySpec = { surveyId: "survey-wide", title: "Pick one", bodyMarkdown: "Which?", options: ["A", "B"] };
@@ -151,6 +153,41 @@ describe("a terminal's survey under a cover over the window", () => {
     await tick();
     await settle();
     expect(document.activeElement).toBe(card(target));
+  });
+});
+
+describe("a window-wide survey over Search", () => {
+  test("its close hands the keyboard back to Search's field when it remembered none", async () => {
+    focusOrigin();
+    const search = document.body.appendChild(document.createElement("div"));
+    mounted.push(mount(OverlayShell, {
+      target: search,
+      props: {
+        id: "search",
+        label: "Search",
+        get open() { return searchPanel.open; },
+        onClose: () => { searchPanel.open = false; },
+        children: createRawSnippet(() => ({ render: () => '<input aria-label="query" />' })),
+      },
+    }));
+    searchPanel.open = true;
+    syncOverlayStack();
+    await settle();
+    const query = search.querySelector<HTMLInputElement>('[aria-label="query"]')!;
+    query.focus();
+    // The keyboard at large as the survey arrives: it remembers nothing to
+    // return to, and its close hands the keyboard to Search, the owner.
+    query.blur();
+    const wide = overlay();
+    showSurvey(SURVEY, null);
+    await settle();
+    expect(document.activeElement, "the card over Search").toBe(card(wide));
+    surveyState.windowWide = null;
+    await settle();
+    expect(document.activeElement, "Search's field").toBe(query);
+    searchPanel.open = false;
+    syncOverlayStack();
+    await settle();
   });
 });
 
