@@ -29,7 +29,7 @@
   import { commandTitle } from "../state/commands";
   // The tree button is named by its command, which this registers.
   import "../state/commands/install";
-  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/keyboardOwner.svelte";
+  import { LAUNCHER_SHOWN_ATTR, keyboardOwnedAbovePanes, launcherShownOverWindow } from "../state/keyboardOwner.svelte";
   import {
     closePaneTree,
     hiddenTabStatus,
@@ -40,7 +40,7 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
-  import { keyboardOwnedAbovePanes, ui } from "../state/store.svelte";
+  import { ui } from "../state/store.svelte";
   import { activeLayout, paneShowsTmux } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,

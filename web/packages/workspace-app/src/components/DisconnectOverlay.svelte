@@ -12,7 +12,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // Restart connection and Abandon actions for a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, appInputBlocked, keyboardOwnedAbovePanes, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
+  import { keyboardOwnedAbovePanes, launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
   import { surveyFor } from "../state/survey.svelte";
   import { teamDialogState } from "../state/teamDialog.svelte";

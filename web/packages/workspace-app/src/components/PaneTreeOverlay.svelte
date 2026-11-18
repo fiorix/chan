@@ -64,12 +64,11 @@
   } from "../state/tabs.svelte";
   import {
     appInputBlocked,
-    keyboardOwnedAbovePanes,
     modalDialogOpen,
     tree,
     workspaceDisplayName,
   } from "../state/store.svelte";
-  import { legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
+  import { keyboardOwnedAbovePanes, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";

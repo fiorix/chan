@@ -3,6 +3,7 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import AppStatusBar from "./components/AppStatusBar.svelte";
   import RequestColumn from "./components/RequestColumn.svelte";
+  import { keyboardOwnedAbovePanes } from "./state/keyboardOwner.svelte";
   import { disposeUploadRequests } from "./state/uploadRequest.svelte";
   import ConfirmModal from "./components/ConfirmModal.svelte";
   import ConflictModal from "./components/ConflictModal.svelte";
@@ -91,7 +92,6 @@
     appInputBlocked,
     coverOwnsTextEntry,
     coverOwnsButton,
-    keyboardOwnedAbovePanes,
     modalDialogOpen,
     setTransientStatus,
     syncOverlayStack,

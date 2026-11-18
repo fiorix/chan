@@ -103,6 +103,22 @@ function launcherCovers(): boolean {
 /// survey over the focused pane's terminal holds it.
 export function owner(): KeyboardOwner | null {
   if (launcherCovers()) return { kind: "launcher", tag: null };
+  return pageOwner();
+}
+
+/// Whether something rendered over the panes owns the keyboard: a modal
+/// dialog, a window-wide survey or an overlay (Search, the command deck,
+/// Settings). Ctrl+D and the pane flip read it and stand down rather than
+/// close or turn a tab the user cannot see. It reads the page's owners
+/// alone, the Computers launcher left out; the covers over the window are
+/// `appInputBlocked`'s.
+export function keyboardOwnedAbovePanes(): boolean {
+  const kind = pageOwner()?.kind;
+  return kind === "modal" || kind === "overlay";
+}
+
+/// The owner the page itself shows, in the order the page's owners show.
+function pageOwner(): KeyboardOwner | null {
   if (modalDialogOpen()) return { kind: "modal", tag: ownerTag("modal") };
   const overlay = topOverlay();
   if (overlay !== null) return { kind: "overlay", tag: ownerTag("overlay", overlay) };

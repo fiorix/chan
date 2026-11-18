@@ -5407,15 +5407,6 @@ export function topOverlay(): OverlayId | null {
   return n === 0 ? null : overlayStack.ids[n - 1];
 }
 
-/// True while something rendered over the panes owns the keyboard: an
-/// overlay (Search, the command launcher, Settings) or a modal dialog
-/// (`modalDialogOpen`). Ctrl+D and the pane flip read it and stand down
-/// rather than close or turn a tab the user cannot see. The full-window
-/// covers are `appInputBlocked`'s.
-export function keyboardOwnedAbovePanes(): boolean {
-  return topOverlay() !== null || modalDialogOpen();
-}
-
 /// True while a modal dialog is open: an app-root dialog (the prompt, path
 /// prompt and confirm dialogs, the draft close and file conflict dialogs, the
 /// Team Work setup, the workspace warnings, the contacts import and the
