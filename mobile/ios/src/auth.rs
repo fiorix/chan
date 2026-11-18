@@ -514,6 +514,7 @@ fn launch_signin<R: tauri::Runtime>(
         return Ok(());
     }
     tauri::async_runtime::spawn(expire_slot(gateway.clone()));
+    #[cfg(target_os = "ios")]
     match crate::mobile_auth::start_mobile_signin(app, url.as_str(), id, attempt, shutdown_rx) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -521,6 +522,15 @@ fn launch_signin<R: tauri::Runtime>(
             crate::gateway::withdraw_pending_signin(app_state, id, attempt);
             Err(error)
         }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        // No session starts on this target; the built URL and the
+        // shutdown receiver have no consumer here.
+        let _ = (&url, shutdown_rx);
+        clear_gateway_signin(id, attempt);
+        crate::gateway::withdraw_pending_signin(app_state, id, attempt);
+        Err("presenting the sign-in sheet is only supported on iOS".to_string())
     }
 }
 
