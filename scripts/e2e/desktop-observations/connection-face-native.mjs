@@ -12,6 +12,12 @@
 // only replies that cross the tunnel, and a face that reads slow shows the
 // reply came from the devserver, not from the gateway.
 //
+// Every bounded wait (`until`, `readUntil`, `showScreen`) is a hang guard:
+// it bounds a step that never comes, and its failure names the step. The
+// bounds that measure are `FOCUSED_CADENCE_MS - 400` (a screen's ping ahead
+// of the cadence), the 2.1 s step between two stalled counts, and
+// `CADENCE_SPAN_MS` (the span the feed's pings are counted over).
+//
 // Exit 0 when every reading held, 10 when one did not, 3 when a step the
 // readings rest on did not happen.
 import fs from "node:fs";
@@ -210,7 +216,8 @@ async function cardToFront() {
 }
 
 async function healthyLeg(host) {
-  const healthy = await readUntil("healthy", (card) => card.face?.state === "healthy" && card.detail, 30_000);
+  const healthy = await readUntil("healthy",
+    (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && card.detail, 30_000);
   if (healthy?.ok) {
     pass("the card in front shows a healthy face beside the name and the detail under the address", healthy.card);
   } else {
@@ -229,6 +236,9 @@ const slowReply = (card, max) => {
   const seconds = Number(SLOW_TITLE.exec(card.face?.title ?? "")?.[1] ?? NaN);
   return card.face?.state === "slow" && seconds >= 1.2 && seconds <= max;
 };
+
+/// The detail's last contact as it reads, the clock time that ends it.
+const lastContact = (card) => /Last contact (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
 
 // Every client frame of every flow, read past its request head; a flow
 // from the desktop's own client carries no Origin header.
@@ -322,8 +332,11 @@ async function direct() {
     }, 5_000);
     const gap = next?.ping ? next.ping.at - before.ping.at : null;
     const detail = { gapMs: gap, afterShowMs: next?.ping ? next.ping.at - shown : null };
-    if (gap !== null && gap < FOCUSED_CADENCE_MS - 400) pass("showing the Computers screen pings the feed ahead of the cadence", detail);
-    else fault("showing the Computers screen sent no ping ahead of the cadence", detail);
+    if (gap !== null && gap < FOCUSED_CADENCE_MS - 400 && detail.afterShowMs > 0) {
+      pass("showing the Computers screen pings the feed ahead of the cadence", detail);
+    } else {
+      fault("showing the Computers screen sent no ping ahead of the cadence", detail);
+    }
   } else {
     fault("the desktop sends its feed no ping on the focused cadence", { pings: pings.length });
   }
@@ -350,7 +363,8 @@ async function direct() {
     const second = count(later);
     const age = /No response for (\d+) s/.exec(later?.detail?.text ?? "")?.[1];
     const detail = { first, second, detailAge: age ?? null, card: later };
-    if (Number.isFinite(first) && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second) {
+    // A stall begins at a 4 s wait, so no count reads under 4.
+    if (first >= 4 && Number.isFinite(second) && second - first >= 1 && second - first <= 4 && Number(age) === second) {
       pass("silenced, the face reads stalled and counts in whole seconds", detail);
     } else {
       fault("the stalled face did not count its wait", detail);
@@ -373,9 +387,13 @@ async function direct() {
   await sleep(4_000);
   await shot(host, "reconnecting");
   relay.refuse(false);
-  const restored = await readUntil("restored", (card) => card.face?.state === "healthy" && card.detail?.misses > 0, 90_000);
-  if (restored?.ok) pass("restored, the face reads healthy with the misses in the chart", restored.card);
-  else fault("restored, the face did not read healthy with the misses in the chart", restored?.card ?? null);
+  // The last contact the outage left, which a reply after the restore moves.
+  const outageContact = lastContact(down?.card) ?? lastContact(stalled?.card);
+  const restored = await readUntil("restored", (card) => card.face?.state === "healthy" && card.detail?.misses > 0
+    && outageContact !== null && ![null, "-", outageContact].includes(lastContact(card)), 90_000);
+  const contacts = { outage: outageContact, restored: lastContact(restored?.card) };
+  if (restored?.ok) pass("restored, the face reads healthy with the misses in the chart and a later last contact", { contacts, card: restored.card });
+  else fault("restored, the face did not read healthy with the misses in the chart and a later last contact", { contacts, card: restored?.card ?? null });
   await shot(host, "restored");
 
   // One face and one feed ping per cadence, with two of the devserver's
