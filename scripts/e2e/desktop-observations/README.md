@@ -30,6 +30,8 @@ CHAN_DESKTOP_BIN=/home/ubuntu/target/debug/chan-desktop CHAN_BIN=/home/ubuntu/ta
     /home/ubuntu/evidence/fbpaste-native-01
 ```
 
+- **`scale2-repaint.sh`** opens one ghostty terminal on the desktop at `GDK_SCALE=2`, paints pages, drops the canvas drawing state by a same-size reset, and refocuses the window so the app runs its forced passes. It reads painted pixels per quarter plus the transform before and after: at full scale the repaint lands and the run holds; at half scale the paint stays in the top-left quarter and the run faults. Only the after-refocus miss is a product fault; every earlier miss is inconclusive, and a guest that does not run at scale 2 is refused with that line.
+
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
 
 The Focus/Open fixture also needs Chrome and `puppeteer-core`; the PDF fixture needs the browser smoke's `pdf-lib`. Install the smoke's dependencies in the owning guest and set `OBS_SMOKE_DIR` to that directory when running a copied driver subtree. Set `CHROME_BIN` to the guest's Chrome for Focus/Open. The fixture outputs describe Linux WebKitGTK and a direct devserver connection only.

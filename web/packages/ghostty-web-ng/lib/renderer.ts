@@ -204,8 +204,9 @@ export class CanvasRenderer {
     this.canvas.width = cssWidth * this.devicePixelRatio;
     this.canvas.height = cssHeight * this.devicePixelRatio;
 
-    // Scale context to match DPI (setting canvas.width/height resets the context)
-    this.ctx.scale(this.devicePixelRatio, this.devicePixelRatio);
+    // Scale context to match DPI: the size assignment above reset the
+    // context, so this puts the device scale back for the rest of the frame.
+    this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0);
 
     // Set text rendering properties for crisp text
     this.ctx.textBaseline = 'alphabetic';
@@ -231,6 +232,11 @@ export class CanvasRenderer {
     viewportY: number = 0,
     scrollbarOpacity: number = 1
   ): void {
+    // The canvas scale is absolute, not relative: a host that resets the
+    // drawing state at an unchanged size leaves an identity transform
+    // behind, and the next repaint must heal it without waiting for a
+    // resize. Every row, glyph and cursor below draws in CSS units.
+    this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0);
     this.currentTerm = term;
 
     const cursor = term.getCursor();

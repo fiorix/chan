@@ -39,7 +39,6 @@ export function ghosttyCompatStubs() {
     alignGhosttyRendererToXterm: () => true,
     installGhosttyCustomGlyphs: () => true,
     installGhosttyOverlayScrollbar: () => true,
-    gateGhosttyScrollbarClicks: () => () => {},
   };
 }
 
