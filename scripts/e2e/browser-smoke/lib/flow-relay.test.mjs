@@ -115,6 +115,55 @@ test("shows each chunk with its flow's path and head, drops open flows and refus
   }
 });
 
+/// `promise`, or a failure naming `what` once `ms` pass: a read on a closed
+/// socket and the close of an open one never settle by themselves.
+function within(promise, what, ms = 2_000) {
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no ${what} in ${ms} ms`)), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+test("drops and refuses only the flows a caller names by their request", async () => {
+  const echo = await startEcho();
+  const relay = await startRelay(echo.port);
+  const pageHead = "GET /terminal/ws HTTP/1.1\r\nHost: x\r\nUser-Agent: WebKit\r\n\r\n";
+  const feedHead = "GET /api/library/windows/watch HTTP/1.1\r\nHost: x\r\n\r\n";
+  const page = (flow) => /^user-agent:/im.test(flow.head ?? "");
+  try {
+    const pageSocket = await dial(relay.port);
+    pageSocket.write(pageHead);
+    await read(pageSocket, pageHead.length);
+    const feed = await dial(relay.port);
+    feed.write(feedHead);
+    await read(feed, feedHead.length);
+
+    relay.drop(page);
+    relay.refuse(true, page);
+    await within(closed(pageSocket), "close of the named flow");
+    feed.write("ping");
+    assert.equal((await within(read(feed, 4), "echo on the flow the caller did not name")).text, "ping");
+
+    const refused = await dial(relay.port);
+    refused.write(pageHead);
+    await within(closed(refused), "close of a new named flow");
+    assert.equal(relay.flows.at(-1).refused, true);
+    const feedAgain = await dial(relay.port);
+    feedAgain.write(feedHead);
+    assert.equal((await within(read(feedAgain, feedHead.length), "echo on a new flow the caller did not name")).text, feedHead);
+    assert.equal(relay.summary().refusingSome, true);
+
+    relay.refuse(false);
+    const back = await dial(relay.port);
+    back.write(pageHead);
+    assert.equal((await within(read(back, pageHead.length), "echo once the refusal ends")).text, pageHead);
+    assert.equal(relay.summary().refusingSome, false);
+    for (const socket of [feed, feedAgain, back]) socket.destroy();
+  } finally {
+    await relay.close();
+    await echo.close();
+  }
+});
+
 test("reads a client's masked frames across chunks", () => {
   const reader = clientFrameReader();
   const long = "x".repeat(300);

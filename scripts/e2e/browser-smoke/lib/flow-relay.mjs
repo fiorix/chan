@@ -1,7 +1,8 @@
 // A TCP relay in front of one local port that delays or silences every HTTP
 // and WebSocket flow through it, for checks that put a slow or silent link
-// between a client and its server. It can also drop every open flow, refuse
-// new ones, and show a caller each chunk with the flow it belongs to.
+// between a client and its server. It can also drop open flows, refuse new
+// ones, either all of them or those a caller names by their request, and show
+// a caller each chunk with the flow it belongs to.
 
 import { createServer, connect } from "node:net";
 
@@ -13,6 +14,7 @@ export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
   const taps = [];
   let silent = false;
   let refusing = false;
+  let refusingWhich = null;
   let latencyMs = 0;
   const server = createServer({ allowHalfOpen: true }, (client) => {
     // A refused connection is closed as it is accepted, as a dead link
@@ -23,7 +25,7 @@ export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
     }
     const flow = {
       client, upstream: null, path: null, head: null, queues: [], resume: [],
-      closed: false, clientEnded: false,
+      closed: false, clientEnded: false, refused: false,
     };
     flows.push(flow);
     let requestHead = Buffer.alloc(0);
@@ -72,6 +74,14 @@ export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
           if (headEnd >= 0 || requestHead.length > 16_384) {
             flow.head = requestHead.toString("latin1", 0, headEnd >= 0 ? headEnd : requestHead.length);
             requestHead = Buffer.alloc(0);
+            // A refusal by request closes the flow its head names before
+            // the rest of the request reaches the server.
+            if (refusingWhich?.(flow)) {
+              flow.refused = true;
+              client.destroy();
+              flow.upstream?.destroy();
+              return;
+            }
           }
         }
         for (const tap of taps) tap(flow, index, data);
@@ -137,15 +147,22 @@ export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
         flow.resume.forEach((resume) => resume());
       }
     },
-    /// Close every open flow at both ends, as a link that went away does.
-    drop() {
+    /// Close every open flow at both ends, as a link that went away does;
+    /// with `which`, only the flows `which(flow)` names.
+    drop(which = () => true) {
       for (const flow of flows) {
+        if (!which(flow)) continue;
         flow.client.destroy();
         flow.upstream?.destroy();
       }
     },
-    /// While on, close each new connection as it is accepted.
-    refuse(on) { refusing = on; },
+    /// While on, close each new connection as it is accepted; with `which`,
+    /// close a new flow once its request head has arrived and `which(flow)`
+    /// names it, so the flows it does not name keep connecting.
+    refuse(on, which = null) {
+      refusing = on && !which;
+      refusingWhich = on ? which : null;
+    },
     /// Call `fn(flow, index, chunk)` for each chunk as it arrives, before any
     /// delay: index 0 is the client's, 1 the server's.
     tap(fn) { taps.push(fn); },
@@ -153,10 +170,12 @@ export async function startRelay(targetPort, { host = "127.0.0.1" } = {}) {
       return {
         silent,
         refusing,
+        refusingSome: refusingWhich !== null,
         latencyMs,
         flows: flows.map((flow) => ({
           path: flow.path,
           closed: flow.closed,
+          refused: flow.refused,
           queued: flow.queues.map((queue) => queue.length),
         })),
       };
