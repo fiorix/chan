@@ -44,6 +44,10 @@ impl Server {
                 let seen = Arc::clone(&seen);
                 let handler = Arc::clone(&handler);
                 connections.push(std::thread::spawn(move || {
+                    // An accepted socket inherits the listener's non-blocking
+                    // mode on macOS and the BSDs, which would turn an early
+                    // read into WouldBlock.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
