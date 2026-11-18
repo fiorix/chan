@@ -343,8 +343,11 @@ async function pressPoint(selector) {
 /// A real press on `selector` read with the button held. The button's own
 /// events are recorded in the page, and the release goes to the pointer
 /// with no window activation in between, since an activation while the
-/// button is held is not part of a user's click. A press the button never
-/// saw as a click is the instrument's, not the product's.
+/// button is held is not part of a user's click. The hold is read only
+/// once the button has seen its pointerdown, since XTEST lands
+/// asynchronously and an earlier reading is the state before the press;
+/// a press the button never saw as a click is the instrument's, not the
+/// product's. The button is released whatever the reading finds.
 async function press(selector, card, shotName = null) {
   const point = await pressPoint(selector);
   await page.evaluate((selector) => {
@@ -356,11 +359,24 @@ async function press(selector, card, shotName = null) {
     }
   }, selector);
   await x([], "mousemove", String(point.x), String(point.y), "mousedown", "1");
-  await delay(300);
-  const held = await focusState(card);
-  const unmoved = await page.evaluate(() => document.activeElement === window.__kbdBefore);
-  if (shotName) await shot(shotName);
-  await exec("xdotool", ["mouseup", "1"], { timeout: 30_000 });
+  let held;
+  let unmoved;
+  let atHold;
+  try {
+    await until("the button sees its pointerdown", () => page.evaluate(() => window.__kbdPress.slice()),
+      (seen) => seen.includes("pointerdown"), 3_000).catch(() => null);
+    await delay(300);
+    ({ held, unmoved, atHold } = await page.evaluate(() => ({
+      unmoved: document.activeElement === window.__kbdBefore,
+      atHold: window.__kbdPress.slice(),
+    })).then(async (reading) => ({ ...reading, held: await focusState(card) })));
+    if (shotName) await shot(shotName);
+  } finally {
+    await exec("xdotool", ["mouseup", "1"], { timeout: 30_000 });
+  }
+  if (!atHold.includes("pointerdown")) {
+    throw new Error(`the hold on ${selector} was read before the button saw its pointerdown: ${JSON.stringify(atHold)}`);
+  }
   const events = await until("the button sees the click", () => page.evaluate(() => window.__kbdPress), (seen) => seen.includes("click"), 5_000)
     .catch(() => null);
   if (!events) {
