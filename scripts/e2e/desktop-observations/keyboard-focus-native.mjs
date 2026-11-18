@@ -336,6 +336,7 @@ async function press(selector, card) {
   const point = await pressPoint(selector);
   await page.evaluate((selector) => {
     const button = document.querySelector(selector);
+    window.__kbdBefore = document.activeElement;
     window.__kbdPress = [];
     for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       button.addEventListener(type, (event) => window.__kbdPress.push(event.type), { capture: true, once: true });
@@ -344,13 +345,14 @@ async function press(selector, card) {
   await x([], "mousemove", String(point.x), String(point.y), "mousedown", "1");
   await delay(300);
   const held = await focusState(card);
+  const unmoved = await page.evaluate(() => document.activeElement === window.__kbdBefore);
   await exec("xdotool", ["mouseup", "1"], { timeout: 30_000 });
   const events = await until("the button sees the click", () => page.evaluate(() => window.__kbdPress), (seen) => seen.includes("click"), 5_000)
     .catch(() => null);
   if (!events) {
     throw new Error(`the press never reached ${selector} as a click: ${JSON.stringify(await page.evaluate(() => window.__kbdPress))}`);
   }
-  return { held, events };
+  return { held, unmoved, events };
 }
 
 async function waitForCard(card, timeout = 30_000) {
@@ -479,14 +481,17 @@ async function main() {
   const hostA = await screenPoint(`.terminal-tab[data-terminal-tab-id="${tabA}"] .terminal-host`);
   await x([], "mousemove", String(hostA.x), String(hostA.y), "click", "1");
   const paneA = await activePaneId();
-  const { held: heldB } = await press(`${cardB} .rp-primary`, cardB);
-  if (heldB.where !== "composer") fail("two-pane submit keeps focus and pane", { held: heldB.where });
+  // The press moves no focus: A's element keeps the keyboard while B's
+  // button is held. Only the submit itself may then focus B's composer.
+  const { held: heldB, unmoved: unmovedB } = await press(`${cardB} .rp-primary`, cardB);
+  if (!unmovedB) fail("two-pane submit keeps focus and pane", { held: heldB.where, unmoved: false });
   const sentB = await until("B's submit sends and clears", () => focusState(cardB), (s) =>
     s.text === "" || s.text === null ? s : false,
   ).catch(() => null);
   if (!sentB) fail("two-pane submit keeps focus and pane", { sent: false, state: await focusState(cardB) });
   const paneNow = await activePaneId();
   pass("two-pane submit keeps focus and pane", {
+    held: heldB.where,
     focus: sentB.where,
     paneA,
     paneNow,
