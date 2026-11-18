@@ -5177,7 +5177,12 @@ mod tests {
             Current,
             /// As `Current`, with a change's set ahead of its first pong.
             ChangeBeforePong,
+            /// Answers its first ping at once and each later one
+            /// [`LATE_PONG`] late.
+            DelaysLaterPongs,
         }
+
+        const LATE_PONG: Duration = Duration::from_secs(7);
 
         /// When the mock devserver read each ping and each WebSocket Ping,
         /// as offsets from the test's start.
@@ -5199,14 +5204,18 @@ mod tests {
             let mut first_ping = true;
             while let Some(Ok(message)) = ws.next().await {
                 let at = start.elapsed();
+                let mut late = false;
                 let replies: &[&str] = match &message {
                     Message::Text(text) if text.as_str() == FEED_PING_FRAME => {
                         heard.lock().unwrap().pings.push(at);
                         let before = std::mem::replace(&mut first_ping, false);
+                        late = devserver == Devserver::DelaysLaterPongs && !before;
                         match devserver {
                             Devserver::Older => &[SET],
                             Devserver::ChangeBeforePong if before => &[SET, PONG],
-                            Devserver::Current | Devserver::ChangeBeforePong => &[PONG],
+                            Devserver::Current
+                            | Devserver::ChangeBeforePong
+                            | Devserver::DelaysLaterPongs => &[PONG],
                         }
                     }
                     Message::Ping(_) => {
@@ -5216,6 +5225,9 @@ mod tests {
                     Message::Close(_) => break,
                     _ => &[SET],
                 };
+                if late {
+                    tokio::time::sleep(LATE_PONG).await;
+                }
                 for reply in replies {
                     if ws.send(Message::text(*reply)).await.is_err() {
                         return;
@@ -5352,6 +5364,62 @@ mod tests {
                     "the loss of connection {connection}'s socket"
                 );
             }
+        }
+
+        /// Unfocused, the feed pings every 20 s. While a later ping waits 7 s
+        /// for its pong, the pump reports the time every 2 s: with nothing
+        /// reading the face, it moves to slow and to stalled, each change
+        /// announced, and the reply is timed whole rather than taken for a
+        /// sleep.
+        #[tokio::test(start_paused = true)]
+        async fn the_pump_reports_a_long_wait_every_two_seconds() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            let (client, server) = ws_pair().await;
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            let devserver = tokio::spawn(serve_feed(
+                server,
+                Devserver::DelaysLaterPongs,
+                start,
+                Arc::clone(&heard),
+            ));
+            let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+            sleep_until(start, 26.5).await;
+            assert_eq!(
+                secs(&heard.lock().unwrap().pings),
+                [0.0, 20.0],
+                "the unfocused cadence"
+            );
+            assert_eq!(
+                pumped.faces.load(Ordering::SeqCst),
+                4,
+                "unknown, healthy, slow and stalled, with nothing reading the face"
+            );
+            assert_eq!(
+                face(&snapshot, &clock),
+                Some(chan_server::ConnectionFace::Stalled)
+            );
+            sleep_until(start, 28.0).await;
+            let health = health(&snapshot, &clock).expect("a reading");
+            assert_eq!(
+                health.rtt_ms,
+                Some(7_000),
+                "the 7 s reply was not timed whole"
+            );
+            assert_eq!(
+                health.samples.last().map(|sample| sample.rtt_ms),
+                Some(Some(7_000))
+            );
+            assert_eq!(health.face, chan_server::ConnectionFace::Slow);
+            assert_eq!(
+                pumped.faces.load(Ordering::SeqCst),
+                5,
+                "the reply's slow face was not announced"
+            );
+            devserver.abort();
+            let _ = pumped.task.await;
         }
 
         /// A change's set that reaches the desktop ahead of the first pong
