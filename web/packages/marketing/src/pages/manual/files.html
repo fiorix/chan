@@ -136,7 +136,7 @@
       <li>A cancelled upload reads <strong>Upload cancelled</strong>; a failed one names the file and the reason, never the folder it came from.</li>
       <li>Uploading over a text file refuses bytes that are not UTF-8.</li>
       <li>Counts follow the workspace's included files and update as files change.</li>
-      <li>A dock that closes returns the keyboard to the focused pane's active tab when that dock held it: there a Files tab, a terminal or an editor takes it; otherwise the file actions have no target until a file browser is clicked or focused.</li>
+      <li>When the dock the file actions use closes while it holds the keyboard, the focused pane's active tab takes it if that is a Files tab, a terminal or an editor, and a Files tab becomes the target. Otherwise, and after a close from another window, the file actions have no target until a file browser is clicked or focused.</li>
     </ul>
   </details>
 </section>
