@@ -23,9 +23,10 @@
 //
 // Ink is samples differing from the baseline's own most frequent colour;
 // opaque coverage must equal the sample total. Every reading after the
-// baseline is measured against the baseline's colour. Each bounded wait
-// below is a hang guard: it bounds a stuck engine, and its timeout reports
-// which stage hung.
+// baseline is measured against the baseline's colour, and the baseline's
+// ink must stay below its opaque count in every quarter, since text on a
+// background leaves both. Each bounded wait below is a hang guard: it
+// bounds a stuck engine, and its timeout reports which stage hung.
 
 import { openAttachedTerminal, TERMINAL_SURFACES } from "../lib/terminal-attach.mjs";
 
@@ -99,9 +100,10 @@ export default {
 
     /// Painted pixels per quarter of the backing store, plus the canvas
     /// transform and grid. Without a reference colour the most frequent
-    /// sample of the reading is used; pass the baseline's colour so every
-    /// later reading counts against it. A repaint that fills backgrounds
-    /// and drops every glyph reads full coverage and no ink.
+    /// sample of the reading is used; the reference comes back packed as
+    /// `bgKey` beside the readable `bg`, and passing the baseline's `bgKey`
+    /// makes every later reading count against it. A repaint that fills
+    /// backgrounds and drops every glyph reads full coverage and no ink.
     const measure = (bgRef = null) =>
       page.evaluate(([query, ref]) => {
         const c = document.querySelector(query);
@@ -149,7 +151,7 @@ export default {
         }
         const t = c.getContext("2d").getTransform();
         return {
-          total, opaque, ink, bg: [br, bgg, bb],
+          total, opaque, ink, bg: [br, bgg, bb], bgKey: bg,
           quarters: opaque, width: c.width, height: c.height,
           scaleX: t.a, scaleY: t.d,
           visibility: document.visibilityState,
@@ -184,7 +186,7 @@ export default {
       let previous = null;
       const deadline = Date.now() + 30_000;
       for (;;) {
-        const now = await measure(previous?.bg ?? null);
+        const now = await measure(previous?.bgKey ?? null);
         if (now && now.opaque.every((q, i) => q === now.total[i]) && now.ink.every((q) => q >= INK_FLOOR) && quiet(previous, now)) {
           baseline = now;
           break;
@@ -197,6 +199,11 @@ export default {
         await sleep(300);
       }
       readings.baseline = baseline;
+      // Printed lines on a background leave both ink and plain samples: ink
+      // equal to the opaque count means the reference is not the background.
+      if (baseline.ink.some((q, i) => q >= baseline.opaque[i])) {
+        throw new Error(`instrument fault: the baseline counts every opaque sample as ink: ${JSON.stringify(baseline)}`);
+      }
       // The scale the defect cannot show without: at ratio 1 this check
       // would pass with nothing proven, so a paint off scale 2 fails the
       // check instead of running it.
@@ -226,7 +233,7 @@ export default {
         const c = document.querySelector(query);
         c.width = c.width;
       }, canvas);
-      readings.hidden = await measure(baseline.bg);
+      readings.hidden = await measure(baseline.bgKey);
       if (readings.hidden.quarters.some((q) => q !== 0)) {
         throw new Error(`the discard left paint behind: ${JSON.stringify(readings.hidden)}`);
       }
@@ -237,7 +244,7 @@ export default {
       await sleep(1_500);
       // The store still blank right before the flip: a paint landing
       // during the quiesce would count as the flip's.
-      readings.hidden2 = await measure(baseline.bg);
+      readings.hidden2 = await measure(baseline.bgKey);
       if (readings.hidden2.quarters.some((q) => q !== 0)) {
         throw new Error(`instrument fault: paint landed while hidden: ${JSON.stringify(readings.hidden2)}`);
       }
@@ -253,7 +260,10 @@ export default {
       const resumeDeadline = Date.now() + 10_000;
       let after = null;
       for (;;) {
-        after = await measure(baseline.bg);
+        after = await measure(baseline.bgKey);
+        if (after && after.bgKey !== baseline.bgKey) {
+          throw new Error(`instrument fault: the resume reading used reference ${after.bgKey}, not the baseline's ${baseline.bgKey}`);
+        }
         if (after && after.width === baseline.width && after.height === baseline.height
             && after.scaleX === 2 && after.scaleY === 2
             && after.opaque.every((q, i) => q === after.total[i])
