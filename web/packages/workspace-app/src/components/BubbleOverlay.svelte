@@ -24,7 +24,8 @@
     type SurveySlot,
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
-  import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { keyboardOwned } from "../state/focusGuard.svelte";
 
   let {
     tabId = null,
@@ -64,8 +65,24 @@
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
+      // A remembered survey card is the owner itself, but only while its
+      // terminal is the focused pane's active tab: then the card reads the
+      // window-wide slot and the close hands the keyboard back. Otherwise
+      // the card's own survey counts as an owner and the close leaves the
+      // keyboard where it is. Anything else reads its terminal, so a
+      // survey over that terminal keeps the keyboard and the element
+      // behind it is left alone.
+      const rememberedTerminal = target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
+      const ownerSlot =
+        slot ??
+        (target?.closest(".survey-card") && rememberedTerminal === activeTerminalTab()?.id
+          ? null
+          : rememberedTerminal);
       queueMicrotask(() => {
-        if (!active && shown && ownsKeyboard()) {
+        // The remembered element gets the keyboard back only while no other
+        // owner holds it: a survey closing under a dialog, the launcher or
+        // an overlay must not move focus into the composer behind them.
+        if (!active && shown && ownsKeyboard() && !keyboardOwned(ownerSlot)) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
         }
@@ -92,10 +109,17 @@
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
     }
+    // A re-run while this survey already owns the keyboard (a tab-focus pulse,
+    // a pane event) follows a window-wide owner's hold instead of grabbing
+    // the keyboard back from it. The first arrival still takes it, as before.
+    const regrab = focusedSurveyId === id;
     focusedSurveyId = id;
+    if (regrab && keyboardOwned(null)) return;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard()) card?.focus({ preventScroll: true });
+      if (shown && active?.surveyId === id && ownsKeyboard() && !(regrab && keyboardOwned(null))) {
+        card?.focus({ preventScroll: true });
+      }
     });
   });
 

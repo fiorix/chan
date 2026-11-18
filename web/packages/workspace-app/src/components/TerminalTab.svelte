@@ -238,7 +238,8 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { keyboardOwned, launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { surveyFor } from "../state/survey.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
@@ -259,10 +260,11 @@
     focused: boolean;
   } = $props();
 
-  // Modal dialogs, a survey over this terminal and the Computers launcher
-  // own the keyboard. Centralizing their guard keeps every refocus path
-  // from taking it, the mount and pane focus included; once those owners
-  // release it, the same calls legitimately restore the terminal.
+  // Modal dialogs, a survey over this terminal, the Computers launcher and
+  // overlays over the panes own the keyboard. Centralizing their guard keeps
+  // every refocus path from taking it, the mount and pane focus included;
+  // once those owners release it, the same calls legitimately restore the
+  // terminal.
   function focusTerminal(): void {
     if (refocusRefused(tab.id)) return;
     term?.focus();
@@ -806,6 +808,11 @@
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
+      // A dialog, a window-wide survey, the launcher or an overlay owns the
+      // keyboard over every terminal: the move hands it to nothing, even to
+      // the survey card over the terminal that moved. The rule reads null so
+      // a survey over this terminal alone still reaches its branch below.
+      if (keyboardOwned(null)) return;
       const owner = document.activeElement;
       if (
         owner !== null &&
@@ -813,6 +820,12 @@
         owner !== document.documentElement &&
         !tabEl?.contains(owner)
       ) {
+        return;
+      }
+      // A survey over the terminal that moved gets the keyboard back, as
+      // the find bar, the composer and the terminal do.
+      if (surveyFor(tab.id)) {
+        tabEl?.querySelector<HTMLElement>(".survey-card")?.focus({ preventScroll: true });
         return;
       }
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
@@ -2275,6 +2288,9 @@
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
+  /// Returns whether the send went out: false when the socket is not open,
+  /// so the orchestrator can retry a freshly-spawned lead, and when the
+  /// session is gone, where no retry can succeed.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (id && status !== "exited") terminalConnection.inputRefused();

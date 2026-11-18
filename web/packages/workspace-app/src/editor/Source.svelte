@@ -55,6 +55,7 @@
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
+    mayTakeFocus = () => autoFocus,
     placeholderText,
     extraExtensions = [],
     onCaretChange,
@@ -77,6 +78,9 @@
     /// editor unfocused on mount; otherwise the unconditional
     /// mount focus would race past the host's gate.
     autoFocus?: boolean;
+    /// Decides a delayed focus at the moment it would run. Defaults to the
+    /// host's `autoFocus` as it reads when the frame runs.
+    mayTakeFocus?: () => boolean;
     /// Empty-state placeholder text. Mirrors the same prop on
     /// `Wysiwyg.svelte` so a mode-toggle keeps the placeholder
     /// visible in either mode. Unset = no placeholder (the file
@@ -213,7 +217,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }
@@ -325,7 +329,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
     // Kick off the async resolve for text-class langs. No-op for
@@ -423,7 +427,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }

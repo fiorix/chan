@@ -3960,6 +3960,11 @@ export function bumpTabFocusPulse(): void {
   if (typeof document === "undefined") return;
   const el = document.activeElement;
   if (el instanceof HTMLElement && el !== document.body) {
+    // A dialog or a survey holds the keyboard through its own surface: a
+    // pulse fired while one is open leaves focus where it is instead of
+    // dropping its field to the body. The command deck's own input counts
+    // too: it is the surface holding the keyboard while it is open.
+    if (el.closest('[role="dialog"], [role="alertdialog"], .survey-card')) return;
     el.blur();
   }
 }
