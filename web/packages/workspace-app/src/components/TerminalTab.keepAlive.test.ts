@@ -598,11 +598,11 @@ describe("the keyboard after a relocation", () => {
     }
   });
 
-  // Acceptance 1's launcher leg: the return after a move under the launcher.
-  // The move hands the keyboard to nothing, and the next pulse after the
-  // launcher lets go restores the composer that held it, so the return
-  // target survives the pane move. It pins the end state, not either guard
-  // alone: the null check and the composer's own guard each stop one half.
+  // The return after a move under the launcher: the move hands the keyboard
+  // to nothing, and the next pulse after the launcher lets go restores the
+  // composer that held it, so the return target survives the pane move. It
+  // pins the end state, not either guard alone: the null check and the
+  // composer's own guard each keep this case green by itself.
   test("hands the keyboard to nothing when it moves under the launcher, back on the next pulse", async () => {
     const { root, beside } = await focusedHostBesideEmptyPane();
     showRichPromptForTab(HOST);
