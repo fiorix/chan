@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 // Keyboard ownership on chan-desktop (WebKitGTK): a real pointer press on
 // the Rich Prompt's Submit keeps the composer's focus at the press and after
-// the click; a deck run, and a deck dismissal, that settle while the
-// Computers launcher is shown leave the keyboard with the launcher; and the
-// deck opened by key returns into Search. Anything the guest cannot show ends
-// the run inconclusive, not failed: exit 0 holds, 2 the environment cannot
-// run this driver, 3 inconclusive. Exit 10 reports an observed fault (the
-// wrapper's obs_judge turns it into 1). Its red variant runs on a tree with
-// `keyboard-focus-native.red.patch` applied, which drops the Computers
-// launcher from the keyboard rule: the deck run under the launcher then
-// hands the keyboard back to the page.
+// the click; a two-pane press moves no focus and leaves the other pane
+// active; the deck opened by key returns into Search; and with the
+// Computers launcher shown, a deck run, and a deck dismissal opened from a
+// focused composer, leave the page's keyboard where it was. Those two read
+// the page's focus only, not the launcher's own webview. The dismissal runs
+// last: it fails today, since the deck's close focuses its return target
+// unguarded, and it stays a target for the keyboard arbiter. Anything the
+// guest cannot show ends the run inconclusive, not failed: exit 0 holds, 2
+// the environment cannot run this driver, 3 inconclusive. Exit 10 reports
+// an observed fault (the wrapper's obs_judge turns it into 1). Its red
+// variant runs on a tree with `keyboard-focus-native.red.patch` applied,
+// which drops the Computers launcher from the keyboard rule and the deck's
+// own check: the deck run under the launcher then hands the keyboard back
+// to the page.
 //
 // What XTEST drives and what the inspector drives is deliberate: pointer
 // presses, the Computers chord and typed text go through the real input
@@ -518,6 +523,49 @@ async function main() {
   if (sentB.where !== "composer") fail("two-pane submit keeps focus and pane", { focus: sentB.where });
   pass("two-pane submit keeps focus and pane", { held: heldB.where, focus: sentB.where, paneA, paneNow });
 
+  // The deck opened by key returns into Search.
+  await dispatch("app.search.toggle");
+  await until("search shows its input", () => page.evaluate(() => Boolean(document.querySelector(".search .head input"))), Boolean);
+  const nativeSearchFocus = await page.evaluate(
+    () => document.activeElement === document.querySelector(".search .head input"),
+  );
+  if (!nativeSearchFocus) {
+    await page.evaluate(() => document.querySelector(".search .head input")?.focus());
+  }
+  const searchFocus = await page.evaluate(() => document.activeElement === document.querySelector(".search .head input"));
+  if (!searchFocus) throw new Error("the search input never took focus");
+  await x([], "key", "ctrl+k");
+  const deckByChord = await page
+    .evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input')))
+    .catch(() => false);
+  let openedBy = "chord";
+  if (!deckByChord) {
+    await dispatch("app.launcher.toggle");
+    openedBy = "dispatch";
+  }
+  await until(
+    "the deck takes the query",
+    () => page.evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input'))),
+    Boolean,
+  );
+  await x([], "type", "--delay", "20", "Copy scrollback");
+  await delay(500);
+  await x([], "key", "Return");
+  const back = await until(
+    "the run returns into Search",
+    () =>
+      page.evaluate(() => {
+        const input = document.querySelector(".search .head input");
+        return document.activeElement === input ? (input.value ?? null) : false;
+      }),
+    (value) => value !== false,
+  ).catch(() => false);
+  if (back === false) fail("deck by key returns into Search", { openedBy, active: (await focusState(null)).where });
+  await x([], "type", "Q");
+  const query = await page.evaluate(() => document.querySelector(".search .head input")?.value ?? null);
+  if (!query || !query.includes("Q")) fail("deck by key returns into Search", { openedBy, query });
+  pass("deck by key returns into Search", { openedBy, nativeSearchFocus, query });
+  await dispatch("app.search.toggle");
   // The Computers launcher keeps the keyboard while a deck run settles.
   await x([], "key", "ctrl+shift+p");
   const shown = await until(
@@ -566,20 +614,40 @@ async function main() {
   const settled = await focusState(null);
   if (settled.where !== "body") fail("deck run settles under the launcher", { active: settled.where });
   if (!(await launcherShown())) fail("deck run settles under the launcher", { launcherShown: false });
+  await shot("run-settled");
   pass("deck run settles under the launcher", { active: settled.where, ran });
 
-  // A dismissal: the deck closes by its own toggle and runs nothing.
-  const before = await page.evaluate(() => window.__kbdCommands.length);
+  // A dismissal, last because it is the arbiter's target: the deck opens
+  // from a focused composer, so the composer is its return target; the
+  // Computers launcher then shows over it, and the deck closes by its own
+  // toggle and runs nothing. A close that hands the return target back
+  // takes the keyboard from the launcher.
+  await x([], "key", "ctrl+shift+p");
+  const hiddenFirst = await until("the Computers launcher hides before the dismissal",
+    () => launcherShown().then((shown) => !shown), Boolean, 10_000).catch(() => false);
+  if (!hiddenFirst) inconclusive("computers launcher stayed up", "the toggle before the dismissal did not hide it");
+  const composerA = await screenPoint(`${cardA} .cm-content`);
+  await x([], "mousemove", String(composerA.x), String(composerA.y), "click", "1");
+  await until("A's composer holds the keyboard", () => focusState(cardA), (s) => s.where === "composer", 10_000);
   await openDeck();
+  await x([], "key", "ctrl+shift+p");
+  const shownOverDeck = await until("the Computers launcher shows over the open deck", launcherShown, Boolean, 10_000)
+    .catch(() => false);
+  if (!shownOverDeck) inconclusive("computers launcher did not show over the deck", "ctrl+shift+p with the deck open");
+  if (!(await page.evaluate((deck) => Boolean(document.querySelector(deck)), deck))) {
+    inconclusive("the deck closed when the launcher showed", null);
+  }
+  const before = await page.evaluate(() => window.__kbdCommands.length);
   await dispatch("app.launcher.toggle");
   await deckClosed();
   await delay(500);
-  const dismissed = await focusState(null);
+  const dismissed = await focusState(cardA);
+  await shot("dismissal-settled");
   const extra = await page.evaluate((before) => window.__kbdCommands.slice(before).filter((name) => name !== "app.launcher.toggle"), before);
   if (extra.length) throw new Error(`the dismissal dispatched ${JSON.stringify(extra)}`);
-  if (dismissed.where !== "body") fail("deck dismissal settles under the launcher", { active: dismissed.where });
+  if (dismissed.where !== "body") fail("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer" });
   if (!(await launcherShown())) fail("deck dismissal settles under the launcher", { launcherShown: false });
-  pass("deck dismissal settles under the launcher", { active: dismissed.where });
+  pass("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer" });
   await x([], "key", "ctrl+shift+p");
   const hidden = await until(
     "the Computers launcher hides again",
@@ -587,51 +655,8 @@ async function main() {
     Boolean,
     10_000,
   ).catch(() => false);
-  if (!hidden) inconclusive("computers launcher stayed up", "second toggle did not hide it");
+  if (!hidden) inconclusive("computers launcher stayed up", "the last toggle did not hide it");
 
-  // The deck opened by key returns into Search.
-  await dispatch("app.search.toggle");
-  await until("search shows its input", () => page.evaluate(() => Boolean(document.querySelector(".search .head input"))), Boolean);
-  const nativeSearchFocus = await page.evaluate(
-    () => document.activeElement === document.querySelector(".search .head input"),
-  );
-  if (!nativeSearchFocus) {
-    await page.evaluate(() => document.querySelector(".search .head input")?.focus());
-  }
-  const searchFocus = await page.evaluate(() => document.activeElement === document.querySelector(".search .head input"));
-  if (!searchFocus) throw new Error("the search input never took focus");
-  await x([], "key", "ctrl+k");
-  const deckByChord = await page
-    .evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input')))
-    .catch(() => false);
-  let openedBy = "chord";
-  if (!deckByChord) {
-    await dispatch("app.launcher.toggle");
-    openedBy = "dispatch";
-  }
-  await until(
-    "the deck takes the query",
-    () => page.evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input'))),
-    Boolean,
-  );
-  await x([], "type", "--delay", "20", "Copy scrollback");
-  await delay(500);
-  await x([], "key", "Return");
-  const back = await until(
-    "the run returns into Search",
-    () =>
-      page.evaluate(() => {
-        const input = document.querySelector(".search .head input");
-        return document.activeElement === input ? (input.value ?? null) : false;
-      }),
-    (value) => value !== false,
-  ).catch(() => false);
-  if (back === false) fail("deck by key returns into Search", { openedBy, active: (await focusState(null)).where });
-  await x([], "type", "Q");
-  const query = await page.evaluate(() => document.querySelector(".search .head input")?.value ?? null);
-  if (!query || !query.includes("Q")) fail("deck by key returns into Search", { openedBy, query });
-  pass("deck by key returns into Search", { openedBy, nativeSearchFocus, query });
-  await dispatch("app.search.toggle");
   // Terminals stay up for the guest teardown to remove with the workspace.
 
   save();
