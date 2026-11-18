@@ -13,15 +13,18 @@
 // about 1 s with Show in Computers on it. A click through XTEST on the action
 // must show the screen over that window with the devserver's card in front
 // and the keyboard on it; hiding the screen must leave the cover up with the
-// focus on it. The local arm: a local window has no relay between it and the
-// desktop's embedded server, so its outage is made in the page, by closing
-// its sockets and refusing new ones; its cover must offer no Show in
-// Computers.
+// focus on it; and the action must keep its place when Restart connection
+// and Abandon appear. The local arm: a local window has no relay between it
+// and the desktop's embedded server, so its outage is made in the page, by
+// closing its sockets and dialling new ones to a freed port; its cover must
+// offer no Show in Computers.
 //
 // Every bounded wait (`until`, `toggleScreen`) is a hang guard: it bounds a
 // step that never comes, and its failure names the step. The bounds that
-// measure are COVER_WITHIN_MS (the drop to the cover) and
-// RECOVERY_ACTIONS_MS (past which Restart connection and Abandon show).
+// measure are COVER_WITHIN_MS (the drop to the cover), RECOVERY_ACTIONS_MS
+// (past which Restart connection and Abandon show), HELD_MS (how long the
+// cover must stay after the screen hides) and BOX_TOLERANCE_PX (how far the
+// action may move when the other two appear).
 //
 // Exit 0 when every reading held, 10 when one did not, 3 when a step the
 // readings rest on did not happen and no reading had failed before it.
@@ -38,12 +41,23 @@ const [inspector, work, chan] = process.argv.slice(2);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const LABEL = "cover-link";
 const ACTION = "Show in Computers";
-// The cover shows 600 ms after the watcher's socket closes (STARTUP_GRACE_MS
-// in DisconnectOverlay.svelte); "about 1 s" leaves the rest for the close to
-// reach the page and the inspector to read it.
+// The cover shows 600 ms after the watcher's status last changed
+// (STARTUP_GRACE_MS in DisconnectOverlay.svelte). The watcher's first redial,
+// 500 ms after the drop (WS_RECONNECT_BACKOFF_MIN_MS in transport.ts), flips
+// it to connecting and, refused at the relay, back to reconnecting, and each
+// flip starts the grace again, so the cover shows at about 1.1 s; the rest of
+// the bound is for the refused redial's close to reach the page. The witness
+// stamps the time in the page, so no inspector read is in it.
 const COVER_WITHIN_MS = 1_500;
 // Restart connection and Abandon show 8 s after the drop.
 const RECOVERY_ACTIONS_MS = 8_000;
+// A measurement: the cover must stay, with the focus, this long after the
+// screen hides, so a cover that leaves once the hide has landed is not read
+// as kept.
+const HELD_MS = 2_000;
+// How far Show in Computers may move, in CSS px, when the other two appear:
+// rounding, never a row's height.
+const BOX_TOLERANCE_PX = 0.5;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const secrets = [];
 const mask = (text) => secrets.reduce((s, secret) => s.replaceAll(secret, "<token>"), String(text))
@@ -131,6 +145,13 @@ async function visibleWindows() {
   }
 }
 
+// The cover's buttons the user can reach: a place the cover holds for
+// Restart connection and Abandon before their 8 s is inert.
+const OFFERED = `const offered = (cover) => [...cover.querySelectorAll('button')].filter((b) => {
+    for (let n = b; n; n = n.parentElement) if (n.inert) return false;
+    return true;
+  });`;
+
 // A workspace page of the window `windowId`, by the `w` its URL carries.
 const pageOf = (windowId) => `new URL(location.href).searchParams.get('w') === ${JSON.stringify(windowId)}
   && document.querySelector('#app > *')`;
@@ -139,15 +160,19 @@ const pageOf = (windowId) => `new URL(location.href).searchParams.get('w') === $
 /// mark on its root, with the action's centre in client coordinates.
 const COVER = (windowId) => `(() => {
   if (!(${pageOf(windowId)})) return { skip: true };
+  ${OFFERED}
   const cover = document.querySelector('[data-cover="reconnect"]');
   const active = document.activeElement;
-  const action = cover && [...cover.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(ACTION)});
+  const action = cover && offered(cover).find((b) => b.textContent.trim() === ${JSON.stringify(ACTION)});
   const box = action?.getBoundingClientRect();
   return {
     cover: Boolean(cover),
-    actions: cover ? [...cover.querySelectorAll('button')].map((b) => b.textContent.trim()) : [],
+    actions: cover ? offered(cover).map((b) => b.textContent.trim()) : [],
     error: cover?.querySelector('.error')?.textContent.trim() ?? null,
-    action: box ? { x: box.left + box.width / 2, y: box.top + box.height / 2, disabled: action.disabled } : null,
+    action: box ? {
+      x: box.left + box.width / 2, y: box.top + box.height / 2,
+      box: { left: box.left, top: box.top, width: box.width, height: box.height }, disabled: action.disabled,
+    } : null,
     focusOnCover: active === cover,
     focusInCover: Boolean(cover && active && cover.contains(active)),
     focus: active ? active.tagName.toLowerCase() + (typeof active.className === 'string' && active.className.trim()
@@ -180,10 +205,11 @@ const LAUNCHER = (windowId) => `(() => {
 /// with its actions then, and a trusted click on the action.
 const WITNESS = (windowId) => `(() => {
   if (!(${pageOf(windowId)})) return { skip: true };
+  ${OFFERED}
   const w = window.__coverLink = { cover: null, cleared: null, clicks: [], moves: null };
   const look = () => {
     const cover = document.querySelector('[data-cover="reconnect"]');
-    if (cover && !w.cover) w.cover = { at: Date.now(), actions: [...cover.querySelectorAll('button')].map((b) => b.textContent.trim()) };
+    if (cover && !w.cover) w.cover = { at: Date.now(), actions: offered(cover).map((b) => b.textContent.trim()) };
     if (!cover && w.cover && !w.cleared) w.cleared = Date.now();
   };
   new MutationObserver(look).observe(document.documentElement, { subtree: true, childList: true });
@@ -284,6 +310,15 @@ async function calibrate(host, windowId) {
 const pageFlow = (flow) => /^user-agent:/im.test(flow.head ?? "");
 const FEED_PATH = "/api/library/windows/watch";
 const upgraded = new Set();
+/// Whether `flow` is the watcher socket of the window `windowId`: the tenant's
+/// `/ws`, dialled with the window's `w` (openWatch in transport.ts), not a
+/// terminal's or a document's socket.
+function watcherOf(flow, windowId) {
+  const target = flow.head?.split("\r\n", 1)[0]?.split(" ")[1];
+  if (!target) return false;
+  const url = new URL(target, "http://relay");
+  return url.pathname.endsWith("/ws") && !url.pathname.includes("/api/") && url.searchParams.get("w") === windowId;
+}
 
 let status = 3;
 const windows = [];
@@ -295,10 +330,11 @@ async function devserverArm() {
   const devBase = `http://127.0.0.1:${devPort}`;
   startDevserver(["--bind=127.0.0.1", `--port=${devPort}`]);
   relay = await startRelay(devPort);
-  // A page's WebSocket that its server answered with a switch: the page's
-  // watcher has been open, which the cover needs before it can show.
+  // A page's WebSocket that its server answered with a switch; the window's
+  // watcher among them has been open, which the cover needs before it can
+  // show.
   relay.tap((flow, index, chunk) => {
-    if (index === 1 && pageFlow(flow) && flow.path?.endsWith("/ws") && chunk.toString("latin1", 0, 12) === "HTTP/1.1 101") {
+    if (index === 1 && pageFlow(flow) && chunk.toString("latin1", 0, 12) === "HTTP/1.1 101") {
       upgraded.add(flow);
     }
   });
@@ -331,16 +367,26 @@ async function devserverArm() {
   const windowId = window.window_id;
   const opened = await until(async () => ({ ok: (await inspectOne("open", `(${pageOf(windowId)}) ? { up: true } : { skip: true }`))?.up }), 60_000);
   if (!opened?.ok) throw new Inconclusive("the devserver's window did not open on the desktop");
+  // The desktop titles a devserver's windows with the host label the
+  // devserver reports in its info, falling back to the host it dialled
+  // (main.rs), not with the name it was registered under. Matching that
+  // label, among the windows that appeared, is what ties the X window to the
+  // devserver; a lone new window alone would take anything the desktop
+  // mapped meanwhile.
+  const info = await (await fetch(`${devBase}/api/devserver/info`, { signal: AbortSignal.timeout(10_000) })).json();
+  const machine = info.host_label?.trim() || "127.0.0.1";
   const fresh = (await visibleWindows()).filter((id) => !before.has(id));
   const named = [];
+  const seenNames = [];
   for (const id of fresh) {
     const name = await xdo("getwindowname", id).catch(() => "");
-    if (name.includes(LABEL)) named.push({ id, name });
+    seenNames.push(name);
+    if (name.includes(` ${machine} `)) named.push({ id, name });
   }
-  if (named.length !== 1) throw new Inconclusive(`the devserver's X window is not one: ${JSON.stringify(named)}`);
+  if (named.length !== 1) throw new Inconclusive(`no one new window is titled with ${JSON.stringify(machine)}: ${JSON.stringify(seenNames)}`);
   const host = named[0].id;
-  if (!(await until(async () => ({ ok: upgraded.size > 0 }), 30_000))?.ok) {
-    throw new Inconclusive("the devserver's window opened no WebSocket through the relay");
+  if (!(await until(async () => ({ ok: [...upgraded].some((flow) => watcherOf(flow, windowId)) }), 30_000))?.ok) {
+    throw new Inconclusive("the devserver's window opened no watcher socket through the relay");
   }
   await sleep(2_000);
   await xdo("windowactivate", "--sync", host);
@@ -402,15 +448,8 @@ async function devserverArm() {
   if (!offered) return;
 
   // The trusted click on the action shows the screen over this window with
-  // the devserver's card in front and the keyboard on it. Restart connection
-  // and Abandon show at 8 s and move the action, so a click that would come
-  // near then waits for them and reads the action's point again.
-  let target = await inspectOne("action", COVER(windowId));
-  const margin = RECOVERY_ACTIONS_MS - (Date.now() - dropAt);
-  if (margin < 2_000) {
-    await sleep(Math.max(0, margin + 700));
-    target = await inspectOne("action again", COVER(windowId));
-  }
+  // the devserver's card in front and the keyboard on it.
+  const target = await inspectOne("action", COVER(windowId));
   if (!target?.action || target.action.disabled) throw new Inconclusive(`the action cannot be clicked: ${JSON.stringify(target)}`);
   const sx = Math.round(target.action.x + offset.dx);
   const sy = Math.round(target.action.y + offset.dy);
@@ -449,7 +488,7 @@ async function devserverArm() {
     const seen = await inspectOne("focus back", COVER(windowId));
     return { ok: Boolean(seen?.cover && seen.focusInCover && seen.hasFocus), seen };
   }, 10_000);
-  await sleep(2_000);
+  await sleep(HELD_MS);
   const later = await inspectOne("still covered", COVER(windowId));
   await shot(host, "hidden");
   const hidden = { back: back?.seen ?? null, later };
@@ -459,6 +498,22 @@ async function devserverArm() {
     fault("hiding the screen did not leave the cover up with the focus on it", hidden);
   }
   if (!feedFlow()) fault("the devserver's feed did not keep flowing through the outage", relay.summary());
+
+  // Show in Computers keeps its place when Restart connection and Abandon
+  // appear: its box as the cover showed, against its box once they show.
+  await sleep(Math.max(0, dropAt + RECOVERY_ACTIONS_MS + 500 - Date.now()));
+  const settled = await inspectOne("all actions", COVER(windowId));
+  const boxAtShow = shown.seen.action?.box ?? null;
+  const boxLater = settled?.action?.box ?? null;
+  const moved = boxAtShow && boxLater
+    ? Math.max(...["left", "top", "width", "height"].map((k) => Math.abs(boxLater[k] - boxAtShow[k])))
+    : null;
+  const place = { boxAtShow, boxLater, moved, actions: settled?.actions ?? null };
+  if (moved !== null && moved <= BOX_TOLERANCE_PX && settled.actions.includes("Restart connection") && settled.actions.includes("Abandon")) {
+    pass("Show in Computers keeps its place when Restart connection and Abandon appear", place);
+  } else {
+    fault("Show in Computers moved when Restart connection and Abandon appeared", place);
+  }
 
   // The link restored, the cover clears.
   relay.refuse(false);
@@ -471,10 +526,12 @@ async function devserverArm() {
 }
 
 /// The local window's outage, made in its page: its sockets are noted as they
-/// send, and once cut they close and every new one dials a port nothing
-/// serves, until the outage ends. Installed in the local window's page; the
-/// cut and the restore go to one window, by its `w`.
-const LOCAL_HOOK = `(() => {
+/// send, and once cut they close and every new one dials `deadPort`, a
+/// loopback port the driver bound and freed, until the outage ends. The
+/// fetch standard blocks some low ports, and a blocked port throws where the
+/// watcher's dial has no catch, which would end its redials. Installed in the
+/// local window's page; the cut and the restore go to one window, by its `w`.
+const LOCAL_HOOK = (deadPort) => `(() => {
   const url = new URL(location.href);
   if ((url.searchParams.get('lib') ?? 'local') !== 'local' || !url.searchParams.get('w') || url.searchParams.get('kind') === 'control'
     || !document.querySelector('#app > *')) return { skip: true };
@@ -484,10 +541,15 @@ const LOCAL_HOOK = `(() => {
     WebSocket.prototype.send = function (data) { sockets.add(this); return send.call(this, data); };
     let cut = false;
     window.WebSocket = new Proxy(window.WebSocket, {
-      construct(target, args) { return Reflect.construct(target, cut ? ['ws://127.0.0.1:1/'] : args); },
+      construct(target, args) { return Reflect.construct(target, cut ? ['ws://127.0.0.1:${deadPort}/'] : args); },
     });
+    // The window's watcher: the tenant's /ws, dialled with the window's own w.
+    const watcher = (s) => {
+      const at = new URL(s.url);
+      return at.pathname.endsWith('/ws') && !at.pathname.includes('/api/') && at.searchParams.get('w') === url.searchParams.get('w');
+    };
     window.__coverLinkCut = {
-      seen: () => [...sockets].filter((s) => s.readyState === 1).map((s) => new URL(s.url).pathname),
+      seen: () => [...sockets].filter((s) => s.readyState === 1).map((s) => ({ path: new URL(s.url).pathname, watcher: watcher(s) })),
       cut() { cut = true; for (const s of sockets) s.close(); return true; },
       restore() { cut = false; return true; },
     };
@@ -502,9 +564,10 @@ const localCall = (windowId, call) => `(() => {
 async function localArm() {
   if (!localHost) throw new Inconclusive("no local window was found at the start");
   await xdo("windowactivate", "--sync", localHost);
+  const hook = LOCAL_HOOK(await freePort());
   const hooked = await until(async () => {
-    const seen = await inspectOne("local sockets", LOCAL_HOOK);
-    return { ok: Boolean(seen?.seen?.some((p) => p.endsWith("/ws") && !p.includes("/api/"))), seen };
+    const seen = await inspectOne("local sockets", hook);
+    return { ok: Boolean(seen?.seen?.some((socket) => socket.watcher)), seen };
   }, 30_000);
   if (!hooked?.ok) throw new Inconclusive(`the local window's watcher socket was not reached: ${JSON.stringify(hooked?.seen)}`);
   const windowId = hooked.seen.window;
