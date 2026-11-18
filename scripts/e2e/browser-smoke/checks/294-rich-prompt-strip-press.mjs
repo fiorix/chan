@@ -471,6 +471,15 @@ export default {
               { timeout: 15_000 },
               searchInput,
             );
+            // A run and a dismissal both hand the keyboard back to Search;
+            // the command the run dispatches tells them apart.
+            const queryBefore = await page.$eval(searchInput, (input) => input.value);
+            await page.evaluate(() => {
+              if (!window.__commands294) {
+                window.__commands294 = [];
+                window.addEventListener("chan:command", (event) => window.__commands294.push(event.detail?.name), true);
+              }
+            });
             await dispatchCommand(page, "app.launcher.toggle");
             await page.waitForSelector('[role="dialog"][aria-label="Command launcher"] .deck-input', {
               visible: true,
@@ -484,17 +493,21 @@ export default {
               { timeout: 15_000 },
               "Copy scrollback",
             );
+            await page.evaluate(() => { window.__commands294.length = 0; });
             await page.keyboard.press("Enter");
             await page.waitForFunction(
               (selector) => document.activeElement === document.querySelector(selector),
               { timeout: 15_000 },
               searchInput,
             );
+            const dispatched = await page.evaluate(() => window.__commands294.slice());
+            assert.ok(dispatched.includes("app.terminal.copyScrollback"),
+              `the deck ran Copy scrollback rather than closing: it dispatched ${JSON.stringify(dispatched)}`);
             await page.keyboard.type("Q");
             const query = await page.$eval(searchInput, (input) => input.value);
-            assert.ok(query.includes("Q"), `typed text lands in the Search input, got ${JSON.stringify(query)}`);
+            assert.equal(query, `${queryBefore}Q`, "typed text lands in the Search input");
             await shot(`294-${backend}-search`);
-            result.steps.search = { query };
+            result.steps.search = { queryBefore, query, dispatched };
             await dispatchCommand(page, "app.search.toggle");
 
             result.passed = true;
