@@ -478,7 +478,16 @@ fn a_whole_file_answer_to_a_resume_that_hashes_wrong_is_not_fetched_again() {
     let cache = tempfile::tempdir().unwrap();
     part_file(cache.path(), &BODY[..3]);
     let wrong = b"{\"fixture\":TRUE}\n";
-    let server = Server::start(move |_| response("200 OK", "", wrong));
+    // A second request is refused, so a download that fetches again fails
+    // the checks below rather than looping.
+    let answered = AtomicBool::new(false);
+    let server = Server::start(move |_| {
+        if answered.swap(true, Ordering::SeqCst) {
+            response("503 Service Unavailable", "", b"no second attempt")
+        } else {
+            response("200 OK", "", wrong)
+        }
+    });
     let error = client(cache.path(), &server)
         .get("fixture/model", "config.json")
         .expect_err("the whole file hashes wrong");
