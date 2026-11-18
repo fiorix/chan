@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use chan_tls::rustls;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-use super::tests::{fixture, COMMIT};
+use super::tests::{fixture, in_child, is_child, COMMIT};
 use super::{Client, EmbedError};
 
 const CA: &[u8] = include_bytes!("testdata/ca.der");
@@ -454,35 +454,28 @@ fn https_payload_redirect_refuses_http_before_connecting() {
 
 #[test]
 fn http_proxy_environment_routes_the_download() {
-    const CHILD: &str = "MODELROOTS_HTTP_PROXY_ENDPOINT";
-    if let Ok(endpoint) = std::env::var(CHILD) {
+    const TEST: &str =
+        "index::embeddings::download::tls_tests::http_proxy_environment_routes_the_download";
+    const ORIGIN: &str = "CHAN_DOWNLOAD_TEST_ORIGIN";
+    if is_child(TEST) {
         let cache = tempfile::tempdir().unwrap();
-        let client = client(cache.path(), &endpoint, trusted_config());
+        let mut client = client(
+            cache.path(),
+            &std::env::var(ORIGIN).unwrap(),
+            trusted_config(),
+        );
+        client.proxy_from_env = true;
         let path = client.get("fixture/model", "config.json").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), BODY);
-        println!("proxy-download-completed");
         return;
     }
     let origin = Server::start(false, model_response);
     let proxy = Server::start(false, model_response);
     let endpoint = origin.endpoint(false);
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args([
-        "--exact",
-        "index::embeddings::download::tls_tests::http_proxy_environment_routes_the_download",
-        "--nocapture",
-        "--test-threads=1",
-    ]);
-    for name in super::super::PROXY_VARS {
-        command.env_remove(name);
-    }
-    let output = command
-        .env_remove("NO_PROXY")
-        .env_remove("no_proxy")
-        .env(CHILD, &endpoint)
-        .env("HTTP_PROXY", proxy.endpoint(false))
-        .output()
-        .unwrap();
+    in_child(
+        TEST,
+        &[(ORIGIN, &endpoint), ("HTTP_PROXY", &proxy.endpoint(false))],
+    );
     let proxy = proxy.finish();
     let origin = origin.finish();
     assert_eq!(
@@ -504,42 +497,14 @@ fn http_proxy_environment_routes_the_download() {
         "the client must not bypass HTTP_PROXY"
     );
     assert!(proxy.errors.is_empty());
-    assert!(
-        output.status.success(),
-        "isolated proxy download failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("proxy-download-completed"));
 }
 
 #[test]
 fn unusable_proxy_takes_precedence_over_certificate_error() {
-    const CHILD: &str = "MODELROOTS_PROXY_CLASSIFIER_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args([
-            "--exact",
-            "index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error",
-            "--nocapture",
-            "--test-threads=1",
-        ]);
-        for name in super::super::PROXY_VARS {
-            command.env_remove(name);
-        }
-        let output = command
-            .env(CHILD, "1")
-            .env("HTTPS_PROXY", "https://proxy.invalid:443")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated proxy classifier failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout)
-            .contains("proxy-certificate-precedence-observed"));
+    const TEST: &str =
+        "index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error";
+    if !is_child(TEST) {
+        in_child(TEST, &[("HTTPS_PROXY", "https://proxy.invalid:443")]);
         return;
     }
     let cache = tempfile::tempdir().unwrap();
@@ -581,5 +546,4 @@ fn unusable_proxy_takes_precedence_over_certificate_error() {
         if var == "HTTPS_PROXY" && value == "https://proxy.invalid:443"),
         "the unusable proxy takes precedence over certificate classification: {error:?}"
     );
-    println!("proxy-certificate-precedence-observed");
 }

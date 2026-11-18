@@ -12,6 +12,39 @@ use super::*;
 
 pub(super) const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const BODY: &[u8] = b"{\"fixture\":true}\n";
+const CHILD: &str = "CHAN_DOWNLOAD_TEST_CHILD";
+
+/// Whether this process is the one `in_child` started to run `test`.
+pub(super) fn is_child(test: &str) -> bool {
+    std::env::var(CHILD).is_ok_and(|name| name == test)
+}
+
+/// Run `test`, its path in the crate, alone in a child process with no proxy
+/// variable and `env` set, and return what it printed; fail with its output
+/// when it fails. The environment a test reads goes through a child, where
+/// no other test runs.
+pub(super) fn in_child(test: &str, env: &[(&str, &str)]) -> String {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", test, "--nocapture", "--test-threads=1"]);
+    for name in super::super::PROXY_VARS
+        .into_iter()
+        .chain(["NO_PROXY", "no_proxy"])
+    {
+        command.env_remove(name);
+    }
+    let output = command
+        .env(CHILD, test)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "{test} failed in its child:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
 
 /// A model table that pins `model` at `revision` to `files`, each with the
 /// sha256 and size of its bytes.
@@ -474,6 +507,33 @@ fn a_stalled_server_ends_the_download_at_the_read_timeout() {
         b"",
         "nothing arrived to keep"
     );
+}
+
+#[test]
+fn the_tests_client_ignores_the_environments_proxy() {
+    const TEST: &str =
+        "index::embeddings::download::tests::the_tests_client_ignores_the_environments_proxy";
+    if !is_child(TEST) {
+        // A port nothing listens on: a client that took the proxy fails.
+        let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        in_child(
+            TEST,
+            &[
+                ("ALL_PROXY", &proxy),
+                ("HTTPS_PROXY", &proxy),
+                ("HTTP_PROXY", &proxy),
+            ],
+        );
+        return;
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let server = Server::start(|_| range_response(BODY, 0));
+    let path = client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .expect("the tests' client downloads direct with proxy variables set");
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
 }
 
 #[test]

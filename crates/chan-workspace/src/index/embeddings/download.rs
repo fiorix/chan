@@ -37,6 +37,7 @@ pub(super) struct Client {
     progress: bool,
     models: &'static [EmbeddingModelInfo],
     read_timeout: Duration,
+    proxy_from_env: bool,
     agent: OnceLock<Agent>,
     supplied_config: Option<ClientConfig>,
     // Tests remove a file the embedder has resolved before it is loaded.
@@ -117,6 +118,7 @@ impl Client {
             progress: true,
             models: config::embedding_models(),
             read_timeout: READ_TIMEOUT,
+            proxy_from_env: true,
             agent: OnceLock::new(),
             supplied_config: None,
             #[cfg(test)]
@@ -124,6 +126,9 @@ impl Client {
         })
     }
 
+    /// A client of `endpoint` on `config` that goes direct whatever proxy the
+    /// environment names, so a developer's or CI's proxy cannot reach the
+    /// loopback servers tests download from.
     #[cfg(test)]
     fn with_config(cache: &Path, endpoint: &str, config: ClientConfig) -> Self {
         Self {
@@ -133,6 +138,7 @@ impl Client {
             progress: false,
             models: config::embedding_models(),
             read_timeout: READ_TIMEOUT,
+            proxy_from_env: false,
             agent: OnceLock::new(),
             supplied_config: Some(config),
             publication_observer: None,
@@ -159,7 +165,7 @@ impl Client {
             .https_only(self.endpoint.scheme() == "https")
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(self.read_timeout)
-            .try_proxy_from_env(true)
+            .try_proxy_from_env(self.proxy_from_env)
             .user_agent("unknown/None; hf-hub/0.4.3; rust/unknown")
             .redirect_auth_headers(RedirectAuthHeaders::SameHost)
             .build();
