@@ -620,4 +620,20 @@ mod tests {
             "cs window new did not open a window under the registry row"
         );
     }
+
+    /// iOS boots the bridge consumer: ios.rs setup takes the window-ops
+    /// receiver and spawns window_ops::run, or every gateway bridge op
+    /// sits unread while its handler awaits a reply forever. Pinned in
+    /// source: ios::run blocks on the Tauri event loop, so no host test
+    /// can drive the setup itself.
+    #[test]
+    fn ios_setup_spawns_the_window_ops_consumer() {
+        const IOS_RS: &str = include_str!("ios.rs");
+        for required in ["take_window_ops_rx()", "window_ops::run("] {
+            assert!(
+                IOS_RS.contains(required),
+                "ios.rs setup must call {required} (bridge ops hang otherwise)"
+            );
+        }
+    }
 }

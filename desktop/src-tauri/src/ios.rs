@@ -73,6 +73,91 @@ pub(crate) fn run() {
             if state_for_setup.embedded.set(server).is_err() {
                 tracing::warn!("embedded local server initialized more than once");
             }
+            // Install the connected-devserver feed source so the launcher
+            // merges remote windows + workspaces, mirroring desktop setup.
+            if let Some(embedded) = state_for_setup.embedded() {
+                let feed = Arc::clone(&state_for_setup.devserver_feed);
+                embedded.install_devserver_feed(feed);
+            }
+            // Fill the registry's remove hook now that the AppHandle
+            // exists: the launcher's HTTP DELETE then reaps a live
+            // devserver's connection. The closure holds only the AppHandle
+            // (no Arc cycle) and resolves the AppState from it at call time.
+            let app_for_teardown = app.handle().clone();
+            let _ = state_for_setup.devserver_remove_hook.set(Arc::new(
+                move |id: &str| {
+                    let app = app_for_teardown.clone();
+                    let id = id.to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let state = Arc::clone(&app.state::<Arc<AppState>>());
+                        crate::teardown_devserver_connection(&app, &state, &id).await;
+                    })
+                },
+            ));
+            // The roster poll's node-move handling fires this after tearing
+            // the old managed connection down: the row re-enters the normal
+            // connect flow with a fresh authenticated entry.
+            let app_for_reconnect = app.handle().clone();
+            let _ = state_for_setup
+                .devserver_reconnect_hook
+                .set(Arc::new(move |id: &str| {
+                    let app = app_for_reconnect.clone();
+                    let id = id.to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let state = Arc::clone(&app.state::<Arc<AppState>>());
+                        if let Err(e) =
+                            crate::connect_devserver_impl(app, state, id.clone()).await
+                        {
+                            tracing::warn!(devserver = %id, error = %e, "reconnect after a proxy node move failed");
+                        }
+                    });
+                }));
+            // The gateway analogue: the launcher's HTTP DELETE runs the
+            // full cascade (poll stop, rostered-connection teardown, roster
+            // drop). The registry's remove already dropped the config row,
+            // so the cascade only reaps runtime state.
+            let app_for_gw_remove = app.handle().clone();
+            let _ = state_for_setup.gateway_remove_hook.set(Arc::new(
+                move |id: &str| {
+                    let app = app_for_gw_remove.clone();
+                    let id = id.to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let state = Arc::clone(&app.state::<Arc<AppState>>());
+                        crate::gateway::cascade_disconnect(
+                            &app,
+                            &state,
+                            &id,
+                            crate::gateway::CascadeReason::Removed,
+                        )
+                        .await;
+                    });
+                },
+            ));
+            // Reconnect enabled gateways from the last run. Never opens a
+            // browser: PAT-less rows park as sign-in required until the
+            // user taps Connect.
+            crate::gateway::autoconnect_enabled_gateways(
+                app.handle(),
+                &state_for_setup,
+            );
+            // Spawn the window-ops consumer now that the AppHandle exists:
+            // it owns the bridge receiver and turns lifecycle requests
+            // (gateway connect/disconnect, devserver ops) into action.
+            // Without it every bridge op sits unread while its handler
+            // awaits a reply forever. The task lives until the channel
+            // closes at exit.
+            if let Some(rx) = state_for_setup
+                .embedded()
+                .and_then(|e| e.take_window_ops_rx())
+            {
+                let app_for_ops = app.handle().clone();
+                let state_for_ops = Arc::clone(&state_for_setup);
+                tauri::async_runtime::spawn(crate::window_ops::run(
+                    app_for_ops,
+                    state_for_ops,
+                    rx,
+                ));
+            }
             WebviewWindowBuilder::new(
                 app.handle(),
                 "main",
