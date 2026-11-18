@@ -171,6 +171,7 @@
     closeTabMenu,
     openTabMenu,
   } from "../state/tabMenu.svelte";
+  import { mayTryFocus } from "../state/keyboardOwner.svelte";
   // The Editor right-click menu carries no Open Inspector entry (the
   // pane chrome context menu has it) and no window-reload entry
   // (Cmd+R). Its reload row is different: it force-adopts the on-disk
@@ -247,10 +248,18 @@
     if (!focused) return;
     tabFocusPulse.value;
     queueMicrotask(() => {
-      if (!focused) return;
+      if (!focused || !editorMayFocus()) return;
       focusActiveEditor();
     });
   });
+
+  // The editor takes the keyboard by itself (a pulse, its mount, its
+  // caret and reset frames) only where the keyboard's owner lets it try: a
+  // dialog, a window-wide survey, Search, Settings or the Computers
+  // launcher keeps it, and the command deck hands it on as it closes.
+  function editorMayFocus(): boolean {
+    return mayTryFocus(editorTabEl ?? null);
+  }
 
   function focusActiveEditor(): void {
     if (tab.mode === "wysiwyg") wysiwygRef?.focus();
@@ -1690,7 +1699,8 @@
         <Wysiwyg
           bind:this={wysiwygRef}
           bind:value={() => tab.content, (content) => setTabContent(tab, content)}
-          autoFocus={focused}
+          autoFocus={focused && editorMayFocus()}
+          mayTakeFocus={() => focused && editorMayFocus()}
           shown={active}
           readonly={readOnly}
           extraExtensions={docExtensions}
@@ -1803,7 +1813,8 @@
         <Source
           bind:this={sourceRef}
           bind:value={() => tab.content, (content) => setTabContent(tab, content)}
-          autoFocus={focused}
+          autoFocus={focused && editorMayFocus()}
+          mayTakeFocus={() => focused && editorMayFocus()}
           path={tab.path}
           readonly={readOnly}
           extraExtensions={docExtensions}

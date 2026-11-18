@@ -130,6 +130,17 @@ export function mayFocus(element: Element | null): boolean {
   return element !== null && root !== null && root.contains(element);
 }
 
+/// Whether a surface may try to take the keyboard by itself, on a focus
+/// pulse or as it mounts: as `mayFocus`, except under the command deck. The
+/// deck takes a focus that lands under it back at once and hands the
+/// keyboard to that surface when it closes, so a surface that did not try
+/// would be left nothing when the deck goes.
+export function mayTryFocus(element: Element | null): boolean {
+  const current = owner();
+  if (current?.kind === "overlay" && topOverlay() === "launcher") return true;
+  return mayFocus(element);
+}
+
 /// The per-terminal rule the focus movers read: true while a modal
 /// dialog, a survey over the terminal in `slot`, a window-wide survey, the
 /// Computers launcher or an overlay over the panes holds the keyboard. It
