@@ -19,7 +19,7 @@ usage() { printf 'Usage: %s <out-dir>\n' "$0" >&2; exit 2; }
 [ "$#" -eq 1 ] || usage
 output=$1
 
-export CHAN_BIN="$(command -v cs)"
+export CHAN_BIN
 obs_setup scale2-repaint
 obs_need node xdotool
 mkdir -m 700 "$output"
