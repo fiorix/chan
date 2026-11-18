@@ -304,3 +304,15 @@ test("the session-ended cover arriving over the reconnect cover takes the keyboa
   const cover = await sessionEndedCover();
   expect(document.activeElement, "the session-ended cover's button").toBe(cover.querySelector("button.close"));
 });
+
+test("with the covers mounted before the lock, as the App mounts them, the lock still paints on top", async () => {
+  const cover = await reconnectCover();
+  mountLock();
+  await lockAtLarge();
+  window.dispatchEvent(new Event("focus"));
+  await settle();
+  expect(cover.contains(document.activeElement), "the card under the lock takes nothing").toBe(false);
+  screensaver.locked = false;
+  await settle();
+  expect(cover.contains(document.activeElement), "the card once the lock lifts").toBe(true);
+});
