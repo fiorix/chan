@@ -8,7 +8,7 @@
   import { onDestroy, untrack } from "svelte";
   import { windowLifecycle } from "../state/windowLifecycle.svelte";
   import { clientSession, reconnectClient } from "../state/clientSession.svelte";
-  import { inCoverOver, setCoverBlocking } from "../state/store.svelte";
+  import { setCoverBlocking, topCoverRoot } from "../state/store.svelte";
   import { mayFocus, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
@@ -35,17 +35,17 @@
   );
 
   // Steal focus so keystrokes don't leak to the dead buffer behind the
-  // backdrop, but not from an owner that paints over this cover and so holds
-  // the keyboard over it (the close prompt), nor from a cover painted over
-  // this one (the screen lock).
+  // backdrop, but only while this cover paints on top of the covers (not
+  // under the screen lock, whatever holds the keyboard there), and not from
+  // an owner that paints over this cover and so holds the keyboard over it
+  // (the close prompt).
   $effect(() => {
     if (!ended) return;
     const active = document.activeElement;
-    if (untrack(() => mayFocus(active) || inCoverOver(active, overlayEl))) return;
+    if (untrack(() => topCoverRoot() !== overlayEl || mayFocus(active))) return;
     (active as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      const holder = document.activeElement;
-      if (!mayFocus(holder) && !inCoverOver(holder, overlayEl)) (closeBtn ?? overlayEl)?.focus();
+      if (topCoverRoot() === overlayEl && !mayFocus(document.activeElement)) (closeBtn ?? overlayEl)?.focus();
     });
   });
 

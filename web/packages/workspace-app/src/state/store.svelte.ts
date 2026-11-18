@@ -438,19 +438,6 @@ function onTopCover(target: Element): boolean {
   return root !== null && root === topCoverRoot();
 }
 
-/// Whether `element` sits in the root of a raised cover that paints over
-/// `own`, a cover's own root, as the screen lock's PIN does over the
-/// session-ended cover; at one level, the later root in the document paints
-/// over. A cover arriving under another leaves it the keyboard.
-export function inCoverOver(element: Element | null, own: Element | null): boolean {
-  const root = element?.closest(`[${COVER_ROOT_ATTR}]`);
-  if (!root || !own || root === own) return false;
-  if (raisedCovers[root.getAttribute(COVER_ROOT_ATTR) ?? ""] !== true) return false;
-  const level = paintLevel(root);
-  const ownLevel = paintLevel(own);
-  return level > ownLevel || (level === ownLevel && (own.compareDocumentPosition(root) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-}
-
 /// The root of the raised cover that paints on top, the later one in the
 /// document when two paint at one level; null while no raised cover has a
 /// root in the page.

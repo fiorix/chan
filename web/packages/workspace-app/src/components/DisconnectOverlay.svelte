@@ -12,7 +12,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // Restart connection and Abandon actions for a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, inCoverOver, modalDialogOpen, setCoverBlocking, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, modalDialogOpen, setCoverBlocking, topCoverRoot, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -197,11 +197,12 @@
     if (!visible) return;
     const dialogOpen = modalDialogOpen();
     const active = document.activeElement as HTMLElement | null;
-    // An owner that paints over this cover (the close prompt) holds the
-    // keyboard over it, and its element is not the one to return to; nor is
-    // a cover's painted over this one (the screen lock). A dialog closing
-    // runs this again, and the card takes the keyboard.
-    if (untrack(() => mayFocus(active) || inCoverOver(active, overlayEl))) return;
+    // The card takes the keyboard only while this cover paints on top of
+    // the covers (not under the screen lock, whatever holds the keyboard
+    // there), and not from an owner that paints over this cover (the close
+    // prompt), whose element is not the one to return to either. A dialog
+    // closing runs this again, and the card takes the keyboard.
+    if (untrack(() => topCoverRoot() !== overlayEl || mayFocus(active))) return;
     if (active && active !== document.body && active !== document.documentElement && !active.closest(`[${COVER_ROOT_ATTR}]`)) {
       focusBeforeCover = { element: active, surface: !!active.closest(".terminal-host, .editor-host") };
       deferredFocus = null;
@@ -214,12 +215,11 @@
     if (dialogOpen && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
     queueMicrotask(() => {
-      const holder = document.activeElement;
-      if (!mayFocus(holder) && !inCoverOver(holder, overlayEl)) focusCard();
+      if (topCoverRoot() === overlayEl && !mayFocus(document.activeElement)) focusCard();
     });
     const onWindowFocus = (): void => {
       const holder = document.activeElement;
-      if (!holder?.closest(`[${COVER_ROOT_ATTR}]`) && !mayFocus(holder)) focusCard();
+      if (!holder?.closest(`[${COVER_ROOT_ATTR}]`) && !mayFocus(holder) && topCoverRoot() === overlayEl) focusCard();
     };
     window.addEventListener("focus", onWindowFocus);
     return () => window.removeEventListener("focus", onWindowFocus);

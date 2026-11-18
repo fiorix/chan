@@ -266,3 +266,41 @@ test("the reconnect cover arriving under the screen lock leaves the lock its key
   expect(document.activeElement, "the lock keeps the keyboard").toBe(backdrop);
   expect(cover.contains(document.activeElement)).toBe(false);
 });
+
+/// Lock the screen and leave the keyboard at large under the lock, as when
+/// an engine blurs the PIN field while it is disabled.
+async function lockAtLarge(): Promise<void> {
+  const backdrop = await lock();
+  backdrop.blur();
+  expect(document.activeElement, "the keyboard at large under the lock").toBe(document.body);
+}
+
+test("the session-ended cover arriving under the screen lock takes no keyboard left at large", async () => {
+  mountLock();
+  await lockAtLarge();
+  const cover = await sessionEndedCover();
+  expect(cover.contains(document.activeElement), "the cover under the lock takes nothing").toBe(false);
+});
+
+test("the reconnect cover arriving under the screen lock takes no keyboard left at large", async () => {
+  mountLock();
+  await lockAtLarge();
+  const cover = await reconnectCover();
+  expect(cover.contains(document.activeElement), "the cover under the lock takes nothing").toBe(false);
+});
+
+test("the reconnect cover under the screen lock takes no keyboard at large as the window takes focus", async () => {
+  mountLock();
+  const cover = await reconnectCover();
+  await lockAtLarge();
+  window.dispatchEvent(new Event("focus"));
+  await settle();
+  expect(cover.contains(document.activeElement), "the card under the lock takes nothing").toBe(false);
+});
+
+test("the session-ended cover arriving over the reconnect cover takes the keyboard off its card", async () => {
+  const reconnect = await reconnectCover();
+  expect(reconnect.contains(document.activeElement), "the card holds the keyboard").toBe(true);
+  const cover = await sessionEndedCover();
+  expect(document.activeElement, "the session-ended cover's button").toBe(cover.querySelector("button.close"));
+});
