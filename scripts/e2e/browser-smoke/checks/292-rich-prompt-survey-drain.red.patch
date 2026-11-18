@@ -1,6 +1,6 @@
 --- a/web/packages/workspace-app/src/components/RichPrompt.svelte
 +++ b/web/packages/workspace-app/src/components/RichPrompt.svelte
-@@ -460,7 +460,7 @@
+@@ -458,7 +458,7 @@
        setRichPromptCaret(tab, 0, 0);
        if (focused) {
          queueMicrotask(() => {

@@ -123,7 +123,6 @@
   import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
   import { mayFocus } from "../state/keyboardOwner.svelte";
-  import { surveyFor } from "../state/survey.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -136,17 +135,16 @@
   // background tab's composer steal the keyboard. A focused terminal's
   // composer still yields to what its terminal's own refocus yields to: the
   // keyboard's owner (a modal dialog, the Computers launcher, an overlay over
-  // the panes, a cover) and a survey over this terminal, wherever its pane
-  // is, hold the keyboard while they show.
+  // the panes, a cover, a survey over this terminal) holds the keyboard
+  // while it shows.
   let { tab, focused = false, shown = true }: { tab: TerminalTab; focused?: boolean; shown?: boolean } =
     $props();
 
   let rootEl = $state<HTMLDivElement>();
 
-  /// Whether the keyboard is held away from this composer: by the keyboard's
-  /// owner, or by a survey over this terminal wherever its pane is.
+  /// Whether the keyboard's owner holds the keyboard away from this composer.
   function keyboardHeld(): boolean {
-    return surveyFor(tab.id) !== null || !mayFocus(rootEl ?? null);
+    return !mayFocus(rootEl ?? null);
   }
   let editor = $state<Wysiwyg>();
   let sourceEditor = $state<Source>();

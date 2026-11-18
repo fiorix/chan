@@ -239,7 +239,6 @@
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
   import { handKeyboardToOwner, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
-  import { surveyFor } from "../state/survey.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
@@ -261,12 +260,12 @@
   } = $props();
 
   // The keyboard's owner decides whether this terminal may take the
-  // keyboard, and a survey over this terminal holds its keys wherever its
-  // pane is. Centralizing the guard keeps every refocus path from taking it,
-  // the mount and pane focus included; once the owner releases it, the same
-  // calls legitimately restore the terminal.
+  // keyboard; a survey over it owns the keyboard while this is the focused
+  // pane's active tab. Centralizing the guard keeps every refocus path from
+  // taking it, the mount and pane focus included; once the owner releases
+  // it, the same calls legitimately restore the terminal.
   function keyboardHeld(): boolean {
-    return surveyFor(tab.id) !== null || !mayFocus(host ?? null);
+    return !mayFocus(host ?? null);
   }
 
   function focusTerminal(): void {
