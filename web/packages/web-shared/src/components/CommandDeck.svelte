@@ -786,8 +786,8 @@
     return true;
   }
 
-  /// The deck holds the keyboard while it is open and no modal dialog is
-  /// showing. Enforced here, on every focus change in the page, so it holds
+  /// The deck holds the keyboard while it is open and no owner above it
+  /// holds it. Enforced here, on every focus change in the page, so it holds
   /// for whatever a row or the page does under the deck, at once or later.
   function onPageFocusIn(event: FocusEvent): void {
     if (!open || !overlay) return;
