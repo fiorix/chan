@@ -15,6 +15,7 @@
 // any other node it is how many hops of references the selection reveals.
 
 import { ancestorClosure } from "./containmentSpine";
+import { FS_GRAPH_DEPTH_MAX } from "./depth";
 import { ancestorsExpanded } from "./pathVisibility";
 
 /// The node and edge fields the rules read. A file's or a folder's node
@@ -43,6 +44,12 @@ const REFERENCE_KINDS: ReadonlySet<string> = new Set([
 
 /// The most hops a selection's depth offers.
 export const SELECTION_HOPS_MAX = 6;
+
+/// The most files and folders a raised depth may draw. The layout runs on
+/// the page's main thread over every drawn node and starts over when a depth
+/// step brings many in, so this bounds what one step costs the page. It sits
+/// under 3,519 nodes, the largest graph whose frame cost has been measured.
+export const GRAPH_DRAWN_NODE_BUDGET = 3000;
 
 /// Levels `path` sits below the directory `dir`: 0 for the directory
 /// itself, -1 for a path outside it.
@@ -144,9 +151,10 @@ export function graphNodeIds(input: {
 }
 
 /// The largest depth the selected node can use. A directory: the deepest
-/// level any file or folder sits below it. A language: 1. A file, tag or
-/// mention: the hops its references run before they reach nothing new, held
-/// to `SELECTION_HOPS_MAX`. At least 1 in every case.
+/// level any file or folder sits below it, held to `FS_GRAPH_DEPTH_MAX`, the
+/// most levels the server's fs-graph walk reads. A language: 1. A file, tag
+/// or mention: the hops its references run before they reach nothing new,
+/// held to `SELECTION_HOPS_MAX`. At least 1 in every case.
 export function selectionDepthCap(
   nodes: readonly ViewNode[],
   edges: readonly ViewEdge[],
@@ -159,7 +167,7 @@ export function selectionDepthCap(
       if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
       deepest = Math.max(deepest, levelsBelow(dir, n.path));
     }
-    return deepest;
+    return Math.min(deepest, FS_GRAPH_DEPTH_MAX);
   }
   const selected = nodes.find((n) => n.id === selectedId);
   if (!selected || selected.kind === "language") return 1;
@@ -219,6 +227,41 @@ export function openBelow(
   for (let i = 1; i < parts.length; i += 1) next[parts.slice(0, i).join("/")] = true;
   next[""] = true;
   return next;
+}
+
+/// The depth to open below the directory `dir` when `depth` is asked for:
+/// `depth` itself when the opened set `openBelow` gives draws at most
+/// `budget` files and folders, else the deepest level below it that does.
+/// Never less than one level, which a double-click opens whatever it draws;
+/// the budget bounds how far a depth reaches past it.
+export function depthWithinBudget(
+  nodes: readonly ViewNode[],
+  opened: Opened,
+  dir: string,
+  depth: number,
+  budget: number,
+): number {
+  if (depth <= 1) return depth;
+  // What lies outside `dir` draws the same at every depth: `openBelow`
+  // opens the directories above `dir` and leaves the rest as it was.
+  const outside = openBelow(nodes, opened, dir, 0);
+  const byLevel: number[] = [];
+  let drawn = 0;
+  for (const n of nodes) {
+    if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
+    const level = levelsBelow(dir, n.path);
+    if (level < 0) {
+      if (ancestorsExpanded("", n.path, outside)) drawn += 1;
+    } else {
+      byLevel[level] = (byLevel[level] ?? 0) + 1;
+    }
+  }
+  drawn += byLevel[0] ?? 0;
+  for (let level = 1; level <= depth; level += 1) {
+    drawn += byLevel[level] ?? 0;
+    if (drawn > budget) return Math.max(1, level - 1);
+  }
+  return depth;
 }
 
 /// The opened set with the directory `dir` showing its children: the root,

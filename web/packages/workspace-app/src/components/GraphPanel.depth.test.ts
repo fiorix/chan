@@ -35,7 +35,8 @@ import { invalidateGraph } from "../state/graphData.svelte";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { graphReloadSignal } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { openedForPath } from "../graph/selectionView";
+import { GRAPH_DRAWN_NODE_BUDGET, openedForPath } from "../graph/selectionView";
+import { FS_GRAPH_DEPTH_MAX } from "../graph/depth";
 import { layout, type GraphTab } from "../state/tabs.svelte";
 
 installGraphDom();
@@ -117,11 +118,21 @@ afterEach(() => {
   timers.release();
 });
 
-/// Move the depth slider to `value`, as a drag ends on it.
+/// Move the depth slider to `value` and release it there, as a drag ends.
 async function slideTo(slider: HTMLInputElement, value: number): Promise<void> {
   slider.value = String(value);
   slider.dispatchEvent(new Event("input", { bubbles: true }));
+  slider.dispatchEvent(new Event("change", { bubbles: true }));
   await settle();
+}
+
+/// Move the depth slider through `values` without releasing it.
+async function dragThrough(slider: HTMLInputElement, values: number[]): Promise<void> {
+  for (const value of values) {
+    slider.value = String(value);
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(2);
+  }
 }
 
 async function depthRow(tab: GraphTab): Promise<HTMLElement> {
@@ -179,6 +190,146 @@ describe("the depth slider", () => {
     canvas.props!.onSelect(A);
     await settle(2);
     expect([slider.min, slider.value], "a file's depth is hops, from one").toEqual(["1", "1"]);
+  });
+});
+
+/// Under `top` ("" for the root): 10 folders, 20 under each and 20 notes
+/// under each of those. From `top`, 11 nodes draw at depth 1, 211 at depth 2
+/// and 4,211 at depth 3, past the drawn-node budget.
+function serveWideTree(top: string): void {
+  const view: { nodes: ReturnType<typeof g.dir>[]; edges: ReturnType<typeof g.edge>[] } = { nodes: [g.dir("")], edges: [] };
+  const fs: { nodes: ReturnType<typeof fsg.dir>[]; edges: ReturnType<typeof fsg.contains>[] } = { nodes: [fsg.dir("")], edges: [] };
+  const add = (parent: string, path: string, file: boolean): void => {
+    view.nodes.push(file ? g.file(path) : g.dir(path));
+    view.edges.push(g.edge(parent === "" ? "" : `directory:${parent}`, file ? path : `directory:${path}`, "contains"));
+    fs.nodes.push(file ? fsg.file(path) : fsg.dir(path));
+    fs.edges.push(fsg.contains(parent, path));
+  };
+  const under = (name: string): string => (top ? `${top}/${name}` : name);
+  if (top) add("", top, false);
+  for (let a = 0; a < 10; a += 1) {
+    add(top, under(`a${a}`), false);
+    for (let b = 0; b < 20; b += 1) {
+      add(under(`a${a}`), under(`a${a}/b${b}`), false);
+      for (let c = 0; c < 20; c += 1) add(under(`a${a}/b${b}`), under(`a${a}/b${b}/${c}.md`), true);
+    }
+  }
+  expect(view.nodes.length).toBeGreaterThan(GRAPH_DRAWN_NODE_BUDGET);
+  graphServer.view = view;
+  graphServer.fs = fs;
+}
+
+describe("the depth's bounds", () => {
+  test("a drag applies its value once, when it is released", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    const reads = graphServer.fsGraphCalls.length;
+
+    await dragThrough(slider, [2, 3, 2, 3]);
+    expect(tab.expanded, "nothing opens while the drag is under way").toEqual({ "": true });
+    expect(graphServer.fsGraphCalls.length, "nothing is read while the drag is under way").toBe(reads);
+    expect(row.querySelector(".depth-value")?.textContent?.trim(), "the value follows the drag").toBe("3");
+
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(tab.expanded.notes).toBe(true);
+    expect(tab.expanded["notes/deep"], "the released value, three levels").toBe(true);
+    expect(visibleIds()).toEqual(expect.arrayContaining([D, MAIN]));
+  });
+
+  test("a directory's depth goes no deeper than the server's walk", async () => {
+    // A chain of 13 directories under the root with a note at the bottom.
+    const chain = Array.from({ length: 13 }, (_, i) => Array.from({ length: i + 1 }, (_, j) => `l${j}`).join("/"));
+    const leaf = `${chain.at(-1)}/leaf.md`;
+    graphServer.view = {
+      nodes: [g.dir(""), ...chain.map((path) => g.dir(path)), g.file(leaf)],
+      edges: [
+        ...chain.map((path, i) => g.edge(i === 0 ? "" : `directory:${chain[i - 1]}`, `directory:${path}`, "contains")),
+        g.edge(`directory:${chain.at(-1)}`, leaf, "contains"),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), ...chain.map((path) => fsg.dir(path)), fsg.file(leaf)],
+      edges: [
+        ...chain.map((path, i) => fsg.contains(i === 0 ? "" : chain[i - 1], path)),
+        fsg.contains(chain.at(-1)!, leaf),
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+
+    expect(slider.max, "the note is 14 levels down").toBe(String(FS_GRAPH_DEPTH_MAX));
+    await slideTo(slider, 14);
+    expect(tab.expanded[chain[FS_GRAPH_DEPTH_MAX - 2]], "ten levels show").toBe(true);
+    expect(tab.expanded[chain[FS_GRAPH_DEPTH_MAX - 1]], "the eleventh does not").toBeUndefined();
+  });
+
+  test("a raised depth stops at the deepest level the drawn-node budget fits, and says so", async () => {
+    serveWideTree("");
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    let row = await depthRow(tab);
+    const slider = row.querySelector<HTMLInputElement>("input[type='range']")!;
+    expect(slider.max).toBe("3");
+
+    await slideTo(slider, 3);
+    expect(tab.expanded.a0, "the first level opens").toBe(true);
+    expect(tab.expanded["a0/b0"], "the third would draw past the budget").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+    row = document.body.querySelector<HTMLElement>(".tab-menu-bubble .depth-row")!;
+    expect(row.querySelector(".depth-value")?.textContent?.replace(/\s+/g, " ").trim()).toBe("2 [limit]");
+    expect(row.classList.contains("limited")).toBe(true);
+    expect(row.getAttribute("title")).toContain("more than");
+
+    await slideTo(slider, 1);
+    expect(tab.expanded.a0, "a lowered depth applies").toBeUndefined();
+    expect(row.querySelector(".depth-cue"), "one level below the limit is no limit").toBeNull();
+  });
+
+  test("a graph opened on a directory opens toward its files only as far as the budget fits", async () => {
+    // The first notes under wide/ sit three levels down, past the budget.
+    serveWideTree("wide");
+    const { tab } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ pendingSelectId: "wide", expanded: openedForPath("wide") }),
+    );
+    expect(canvas.props?.selectedId).toBe("directory:wide");
+    expect(tab.expanded["wide/a0"], "the second level fits").toBe(true);
+    expect(tab.expanded["wide/a0/b0"], "the level of its files does not").toBeUndefined();
+    expect(visibleIds().length).toBeLessThanOrEqual(GRAPH_DRAWN_NODE_BUDGET);
+  });
+
+  test("a step reads the children of a bounded number of opened directories", async () => {
+    // 100 empty folders under the root, and one chain two levels deep that
+    // gives the depth its second level. The shared graph holds none of the
+    // empty folders' contents, so opening them reads each from disk.
+    const empty = Array.from({ length: 100 }, (_, i) => `e${i}`);
+    graphServer.view = {
+      nodes: [g.dir(""), g.dir("deep"), g.dir("deep/x"), ...empty.map((path) => g.dir(path))],
+      edges: [
+        g.edge("", "directory:deep", "contains"),
+        g.edge("directory:deep", "directory:deep/x", "contains"),
+        ...empty.map((path) => g.edge("", `directory:${path}`, "contains")),
+      ],
+    };
+    graphServer.fs = {
+      nodes: [fsg.dir(""), fsg.dir("deep"), fsg.dir("deep/x"), ...empty.flatMap((path) => [fsg.dir(path), fsg.file(`${path}/n.md`)])],
+      edges: [
+        fsg.contains("", "deep"),
+        fsg.contains("deep", "deep/x"),
+        ...empty.flatMap((path) => [fsg.contains("", path), fsg.contains(path, `${path}/n.md`)]),
+      ],
+    };
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ expanded: { "": true } }));
+    const slider = (await depthRow(tab)).querySelector<HTMLInputElement>("input[type='range']")!;
+    const reads = graphServer.fsGraphCalls.length;
+
+    await slideTo(slider, 2);
+    await settle(20);
+    expect(tab.expanded.e99, "every empty folder opens").toBe(true);
+    const read = graphServer.fsGraphCalls.slice(reads).filter((call) => /^e\d+$/.test(call.path));
+    expect(read.length, "folders read for one step").toBe(64);
   });
 });
 

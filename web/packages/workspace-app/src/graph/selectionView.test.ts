@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import { directoryNodeId } from "./canvasNodes";
+import { FS_GRAPH_DEPTH_MAX } from "./depth";
 import {
+  depthWithinBudget,
   graphNodeIds,
   openBelow,
   openedDepth,
@@ -180,6 +182,55 @@ describe("the depth's range follows the selected node", () => {
 
   test("a language: one", () => {
     expect(selectionDepthCap(nodes, edges, "language:Markdown")).toBe(1);
+  });
+
+  test("a directory deeper than the server's walk: held to its levels", () => {
+    // A chain of 14 directories with a file at the bottom.
+    const chain = Array.from({ length: 14 }, (_, i) => Array.from({ length: i + 1 }, (_, j) => `l${j}`).join("/"));
+    const deep: ViewNode[] = [
+      { id: "", kind: "folder", path: "" },
+      ...chain.map((path) => ({ id: directoryNodeId(path), kind: "folder", path })),
+      { id: `${chain.at(-1)}/leaf.md`, kind: "file", path: `${chain.at(-1)}/leaf.md` },
+    ];
+    expect(selectionDepthCap(deep, [], "")).toBe(FS_GRAPH_DEPTH_MAX);
+    expect(selectionDepthCap(deep, [], directoryNodeId("l0/l1")), "13 levels below l0/l1").toBe(FS_GRAPH_DEPTH_MAX);
+    expect(selectionDepthCap(deep, [], directoryNodeId(chain[9])), "four folders and the file below").toBe(5);
+  });
+});
+
+describe("the drawn-node budget", () => {
+  // Under the root: a/ with 3 folders of 4 files each, and b/ with 2 files.
+  // Level 1 is a and b, level 2 the 3 folders and b's 2 files, level 3 the
+  // 12 files.
+  const tree: ViewNode[] = [{ id: "", kind: "folder", path: "" }];
+  for (const dir of ["a", "b", "a/x", "a/y", "a/z"]) tree.push({ id: directoryNodeId(dir), kind: "folder", path: dir });
+  for (const dir of ["a/x", "a/y", "a/z"]) {
+    for (let i = 0; i < 4; i += 1) tree.push({ id: `${dir}/${i}.md`, kind: "file", path: `${dir}/${i}.md` });
+  }
+  for (const file of ["b/1.md", "b/2.md"]) tree.push({ id: file, kind: "file", path: file });
+  // Drawn at each depth from the root: 1 + 2 = 3, then 3 + 5 = 8, then 8 + 12 = 20.
+  const root = { "": true };
+
+  test("a depth that fits is applied as asked", () => {
+    expect(depthWithinBudget(tree, root, "", 3, 20)).toBe(3);
+    expect(depthWithinBudget(tree, root, "", 2, 8)).toBe(2);
+  });
+
+  test("a depth past the budget stops at the deepest level that fits", () => {
+    expect(depthWithinBudget(tree, root, "", 3, 19)).toBe(2);
+    expect(depthWithinBudget(tree, root, "", 3, 7)).toBe(1);
+  });
+
+  test("one level opens whatever it draws, as a double-click does", () => {
+    expect(depthWithinBudget(tree, root, "", 3, 1)).toBe(1);
+    expect(depthWithinBudget(tree, root, "", 0, 1), "a closing depth is not raised").toBe(0);
+  });
+
+  test("what shows outside the directory counts against the budget", () => {
+    // b is opened, so its two files show at every depth of a.
+    const opened = { "": true, b: true };
+    expect(depthWithinBudget(tree, opened, "a", 2, 19), "a, x, y, z, 12 files, root, b, 2 files is 20").toBe(1);
+    expect(depthWithinBudget(tree, opened, "a", 2, 20)).toBe(2);
   });
 });
 
