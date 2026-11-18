@@ -25,7 +25,8 @@
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
   import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
-  import { legacyKeyboardOwned, mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
+  import { canTakeFocus } from "@chan/web-shared/modal-focus";
+  import { handKeyboardToOwner, legacyKeyboardOwned, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -52,8 +53,18 @@
   // the effect and its queued callbacks, since docking can move the terminal
   // without remounting this overlay, and focus can move before a callback.
   let card = $state<HTMLDivElement | null>(null);
+  let overlay = $state<HTMLDivElement | null>(null);
   let returnFocus: HTMLElement | null = null;
   let focusedSurveyId: string | null = null;
+
+  // Handed the keyboard as its owner, the survey's card takes it while its
+  // survey shows where it owns the keyboard.
+  $effect(() => {
+    if (!overlay) return;
+    return registerKeyboardTaker(overlay, () => {
+      if (shown && active && ownsKeyboard()) card?.focus({ preventScroll: true });
+    });
+  });
   $effect(() => {
     const id = active?.surveyId ?? null;
     const eligible = ownsKeyboard();
@@ -85,6 +96,10 @@
         if (!active && shown && ownsKeyboard() && !legacyKeyboardOwned(ownerSlot)) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
+        } else if (!active && slot === null && !canTakeFocus(document.activeElement)) {
+          // A window-wide survey held the keyboard over the owner under it
+          // (a dialog): its close hands the keyboard back to that owner.
+          handKeyboardToOwner();
         }
       });
       return;
@@ -125,15 +140,20 @@
       });
       return;
     }
-    // The window-wide card takes the keyboard on its own arrival. A re-run
-    // while it already owns the keyboard (a pane event) follows a window-wide
-    // owner's hold instead of grabbing the keyboard back from it.
+    // The window-wide card takes the keyboard on its arrival where the
+    // keyboard's owner lets it: it paints over the dialogs of its tier and
+    // takes it from them, and leaves it to the Computers launcher and the
+    // covers over the window. Asking reads the owners' state, so this effect
+    // runs again when one lets go. A re-run while it already owns the
+    // keyboard (a pane event) follows a window-wide owner's hold instead of
+    // grabbing the keyboard back from it.
     const regrab = focusedSurveyId === id;
+    if (!regrab && !mayFocus(card)) return;
     focusedSurveyId = id;
     if (regrab && legacyKeyboardOwned(null)) return;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard() && !(regrab && legacyKeyboardOwned(null))) {
+      if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card) && !(regrab && legacyKeyboardOwned(null))) {
         card?.focus({ preventScroll: true });
       }
     });
@@ -172,6 +192,7 @@
 
 {#if active && shown}
   <div
+    bind:this={overlay}
     class="survey-overlay"
     class:per-terminal={slot !== null}
     role="dialog"

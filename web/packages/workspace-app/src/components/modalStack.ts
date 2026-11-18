@@ -1,5 +1,5 @@
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
-import { mayFocus } from "../state/keyboardOwner.svelte";
+import { handKeyboardToOwner, mayFocus, owner, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
 type ShellOptions = {
   layer: HTMLElement;
@@ -8,7 +8,7 @@ type ShellOptions = {
   onKeydown: (event: KeyboardEvent) => void;
 };
 
-type Shell = ShellOptions & { openers: HTMLElement[]; lastFocus: HTMLElement | null };
+type Shell = ShellOptions & { openers: HTMLElement[]; lastFocus: HTMLElement | null; untake: () => void };
 
 const shells: Shell[] = [];
 let generation = 0;
@@ -26,6 +26,10 @@ function inside(shell: Shell, element: Element | null): element is HTMLElement {
 function repair(): void {
   const shell = top();
   if (!shell || inside(shell, document.activeElement)) return;
+  // An owner of the dialogs' tier painted above them (a window-wide
+  // survey) holds the keyboard, as does a cover over the window; the dialog
+  // takes it back when the keyboard is handed back to it.
+  if (owner()?.kind === "modal" && !mayFocus(shell.panel)) return;
   const target = inside(shell, shell.lastFocus) ? shell.lastFocus : shell.panel;
   target.focus({ preventScroll: true });
   // A focus callback can mount or remove a shell synchronously.
@@ -45,8 +49,14 @@ function queueRepair(): void {
 function onFocusIn(): void {
   const shell = top();
   if (!shell) return;
-  if (inside(shell, document.activeElement)) shell.lastFocus = document.activeElement;
-  else queueRepair();
+  if (inside(shell, document.activeElement)) {
+    shell.lastFocus = document.activeElement;
+    // A dialog that takes focus under an owner of its tier painted above
+    // it (its mount, its own field) hands that owner the keyboard back.
+    if (owner()?.kind === "modal" && !mayFocus(shell.panel)) queueMicrotask(handKeyboardToOwner);
+  } else {
+    queueRepair();
+  }
 }
 
 function onFocusOut(): void {
@@ -97,6 +107,8 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
     ...options,
     openers: [...new Set([options.opener, ...(previous?.openers ?? [])].filter((node): node is HTMLElement => node !== null))],
     lastFocus: null,
+    // Handed the keyboard back, the top dialog's focus is repaired.
+    untake: registerKeyboardTaker(options.panel, repair),
   };
   if (!previous) {
     document.addEventListener("keydown", onKeydown, true);
@@ -116,6 +128,7 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
       const wasTop = top() === shell;
       const shouldRestore = !canTakeFocus(document.activeElement) || shell.panel.contains(document.activeElement);
       shells.splice(index, 1);
+      shell.untake();
       const version = ++generation;
       setLayers();
       if (wasTop) observeTop();
@@ -141,10 +154,12 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
           repair();
         } else if (shouldRestore && !canTakeFocus(document.activeElement)) {
           // The last dialog gone, its opener gets the keyboard back only
-          // where the keyboard's owner lets it: a survey over the opener's
-          // terminal, an overlay or the Computers launcher keeps it, and a
-          // survey card takes it itself.
-          shell.openers.find((node) => canTakeFocus(node) && mayFocus(node))?.focus({ preventScroll: true });
+          // where the keyboard's owner lets it. With every opener refused,
+          // the keyboard is handed to that owner: a survey's card takes it,
+          // and an overlay or the Computers launcher keeps what it holds.
+          const opener = shell.openers.find((node) => canTakeFocus(node) && mayFocus(node));
+          if (opener) opener.focus({ preventScroll: true });
+          else handKeyboardToOwner();
         }
       });
     },

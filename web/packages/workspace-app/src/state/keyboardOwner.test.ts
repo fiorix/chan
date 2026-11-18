@@ -19,11 +19,13 @@ import { confirmState } from "./confirm.svelte";
 import {
   KEYBOARD_OWNER_ATTR,
   LAUNCHER_SHOWN_ATTR,
+  handKeyboardToOwner,
   mayFocus,
   owner,
   ownerAboveOverlays,
   ownerRoot,
   ownerTag,
+  registerKeyboardTaker,
 } from "./keyboardOwner.svelte";
 import {
   FULL_WINDOW_COVERS,
@@ -298,6 +300,34 @@ describe("under a cover over the window", () => {
     expect(ownerAboveOverlays(), "the deck alone").toBe(false);
     setCoverBlocking(cover, true);
     expect(ownerAboveOverlays()).toBe(true);
+  });
+});
+
+describe("handing the keyboard back to its owner", () => {
+  test("runs the taker the owner's root registered, and only while it owns the keyboard", () => {
+    const { root } = taggedRoot(ownerTag("modal"));
+    const take = vi.fn();
+    const unregister = registerKeyboardTaker(root, take);
+    expect(handKeyboardToOwner(), "with no owner").toBe(false);
+    promptState.open = true;
+    expect(handKeyboardToOwner()).toBe(true);
+    expect(take).toHaveBeenCalledTimes(1);
+    setCoverBlocking("screensaver", true);
+    expect(handKeyboardToOwner(), "under the screen lock").toBe(false);
+    setCoverBlocking("screensaver", false);
+    unregister();
+    expect(handKeyboardToOwner(), "once unregistered").toBe(false);
+    expect(take).toHaveBeenCalledTimes(1);
+  });
+
+  test("hands nothing under the Computers launcher, which has no root in the page", () => {
+    const { root } = taggedRoot(ownerTag("modal"));
+    const take = vi.fn();
+    registerKeyboardTaker(root, take);
+    promptState.open = true;
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    expect(handKeyboardToOwner()).toBe(false);
+    expect(take).not.toHaveBeenCalled();
   });
 });
 

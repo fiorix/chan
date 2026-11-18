@@ -143,6 +143,31 @@ export function ownerAboveOverlays(): boolean {
   return modalDialogOpen() || appInputBlocked();
 }
 
+/// How each owner surface takes the keyboard when it is handed back to it,
+/// by the root it tags.
+const takers = new WeakMap<Element, () => void>();
+
+/// Register how the owner surface tagged at `root` takes the keyboard when
+/// it is handed back to it; the answer unregisters it.
+export function registerKeyboardTaker(root: HTMLElement, take: () => void): () => void {
+  takers.set(root, take);
+  return () => {
+    if (takers.get(root) === take) takers.delete(root);
+  };
+}
+
+/// Hand the keyboard to its owner, as the owner's surface takes it. False
+/// with no owner, under a cover, for the Computers launcher, which has no
+/// root in the page, and for a root whose surface registered no way to
+/// take it.
+export function handKeyboardToOwner(): boolean {
+  if (appInputBlocked()) return false;
+  const root = ownerRoot();
+  const take = root ? takers.get(root) : undefined;
+  take?.();
+  return take !== undefined;
+}
+
 /// The per-terminal rule the focus movers read: true while a modal
 /// dialog, a survey over the terminal in `slot`, a window-wide survey, the
 /// Computers launcher or an overlay over the panes holds the keyboard. It
