@@ -262,7 +262,7 @@ ios-clean: ## Clean the iOS crate's build artifacts.
 .PHONY: ios-install-sim
 ios-install-sim: ios-build ## Build, install, and launch the iOS app on IOS_SIM.
 	@xcrun simctl boot "$(IOS_SIM)" 2>/dev/null || true
-	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-desktop-*/Build/Products/debug-iphonesimulator/Chan.app)"; \
+	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphonesimulator/Chan.app)"; \
 	    [ -d "$$app" ] || { echo "error: no simulator Chan.app under DerivedData"; exit 1; }; \
 	    xcrun simctl install "$(IOS_SIM)" "$$app" && \
 	    xcrun simctl launch "$(IOS_SIM)" app.chan.ios
@@ -273,7 +273,7 @@ ios-install-device: $(WEB_PREREQ) ## Build for device and install on IOS_DEVICE 
 	    echo "error: IOS_DEVICE not set (see: xcrun devicectl list devices)"; exit 1; \
 	fi
 	cd $(IOS_DIR) && rm -rf gen/apple/build && cargo tauri ios build --debug -t aarch64 --ci
-	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-desktop-*/Build/Products/debug-iphoneos/Chan.app)"; \
+	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphoneos/Chan.app)"; \
 	    [ -d "$$app" ] || { echo "error: no device Chan.app under DerivedData"; exit 1; }; \
 	    xcrun devicectl device install app --device "$(IOS_DEVICE)" "$$app" && \
 	    xcrun devicectl device process launch --device "$(IOS_DEVICE)" app.chan.ios
