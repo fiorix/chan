@@ -343,6 +343,69 @@ const windows = [];
 // The local window, which holds the focus before the devserver connects.
 let localHost = null;
 
+/// Click Show in Computers, read the screen over the window and hide it, and
+/// read the cover after the hide. The action's box as the hide landed, or
+/// null when a fault ended the steps before it.
+async function screenSteps({ host, windowId, offset, dropAt, devserverCard }) {
+  // The trusted click on the action shows the screen over this window with
+  // the devserver's card in front and the keyboard on it.
+  const target = await inspectOne("action", COVER(windowId));
+  if (!target?.action || target.action.disabled) {
+    fault("Show in Computers is offered but cannot be clicked", target);
+    return null;
+  }
+  const sx = Math.round(target.action.x + offset.dx);
+  const sy = Math.round(target.action.y + offset.dy);
+  await xdo("windowactivate", "--sync", host);
+  await xdo("mousemove", sx - 5, sy - 5);
+  await sleep(120);
+  await xdo("mousemove", sx, sy);
+  await sleep(120);
+  const clickAt = Date.now();
+  await xdo("click", "1");
+  const front = await until(async () => {
+    const launcher = await inspectOne("shown", LAUNCHER(windowId));
+    const seen = await inspectOne("shown page", COVER(windowId));
+    return {
+      ok: launcher?.front === devserverCard && launcher.keyboardOnFront && launcher.hasFocus && seen?.covered,
+      launcher, seen,
+    };
+  }, 15_000);
+  const clicks = front?.seen?.witness?.clicks ?? [];
+  const screen = {
+    clickAfterDropMs: clickAt - dropAt, afterClickMs: Date.now() - clickAt, devserverCard, clicks, launcher: front?.launcher ?? null,
+    coverUnderneath: front?.seen?.cover ?? null, error: front?.seen?.error ?? null,
+  };
+  await shot(host, "shown");
+  if (front?.ok && clicks.some((c) => c.trusted && c.text === ACTION) && front.seen.cover) {
+    pass("a trusted click on Show in Computers shows the screen over the window on the devserver's card with the keyboard on it", screen);
+  } else {
+    fault("the click on Show in Computers did not show the devserver's card in front with the keyboard on it", screen);
+    return null;
+  }
+
+  // Hiding the screen leaves the cover up with the focus on it, while the
+  // outage lasts.
+  await toggleScreen(host, "hide", async () => (await inspectOne("hidden", COVER(windowId)))?.covered === false);
+  // The action's box as the hide lands, before the focus is waited for.
+  const landed = await inspectOne("after hide", COVER(windowId));
+  const afterHide = { atMs: Date.now() - dropAt, box: landed?.action?.box ?? null, actions: landed?.actions ?? [] };
+  const back = await until(async () => {
+    const seen = await inspectOne("focus back", COVER(windowId));
+    return { ok: Boolean(seen?.cover && seen.focusInCover && seen.hasFocus), seen };
+  }, 10_000);
+  await sleep(HELD_MS);
+  const later = await inspectOne("still covered", COVER(windowId));
+  await shot(host, "hidden");
+  const hidden = { back: back?.seen ?? null, later };
+  if (back?.ok && later?.cover && later.focusInCover && later.hasFocus) {
+    pass("hiding the screen leaves the cover up with the focus on it", hidden);
+  } else {
+    fault("hiding the screen did not leave the cover up with the focus on it", hidden);
+  }
+  return afterHide;
+}
+
 async function devserverArm() {
   const devPort = await freePort();
   const devBase = `http://127.0.0.1:${devPort}`;
@@ -469,81 +532,47 @@ async function devserverArm() {
   else fault("focus did not park on the cover itself", { focus: shown.seen.focus });
   if (!offered) return;
 
-  // The trusted click on the action shows the screen over this window with
-  // the devserver's card in front and the keyboard on it.
-  const target = await inspectOne("action", COVER(windowId));
-  if (!target?.action || target.action.disabled) throw new Inconclusive(`the action cannot be clicked: ${JSON.stringify(target)}`);
-  const sx = Math.round(target.action.x + offset.dx);
-  const sy = Math.round(target.action.y + offset.dy);
-  await xdo("windowactivate", "--sync", host);
-  await xdo("mousemove", sx - 5, sy - 5);
-  await sleep(120);
-  await xdo("mousemove", sx, sy);
-  await sleep(120);
-  const clickAt = Date.now();
-  await xdo("click", "1");
-  const front = await until(async () => {
-    const launcher = await inspectOne("shown", LAUNCHER(windowId));
-    const seen = await inspectOne("shown page", COVER(windowId));
-    return {
-      ok: launcher?.front === devserverCard && launcher.keyboardOnFront && launcher.hasFocus && seen?.covered,
-      launcher, seen,
-    };
-  }, 15_000);
-  const clicks = front?.seen?.witness?.clicks ?? [];
-  const screen = {
-    clickAfterDropMs: clickAt - dropAt, afterClickMs: Date.now() - clickAt, devserverCard, clicks, launcher: front?.launcher ?? null,
-    coverUnderneath: front?.seen?.cover ?? null, error: front?.seen?.error ?? null,
-  };
-  await shot(host, "shown");
-  if (front?.ok && clicks.some((c) => c.trusted && c.text === ACTION) && front.seen.cover) {
-    pass("a trusted click on Show in Computers shows the screen over the window on the devserver's card with the keyboard on it", screen);
-  } else {
-    fault("the click on Show in Computers did not show the devserver's card in front with the keyboard on it", screen);
-    return;
-  }
-
-  // Hiding the screen leaves the cover up with the focus on it, while the
-  // outage lasts.
-  await toggleScreen(host, "hide", async () => (await inspectOne("hidden", COVER(windowId)))?.covered === false);
-  const back = await until(async () => {
-    const seen = await inspectOne("focus back", COVER(windowId));
-    return { ok: Boolean(seen?.cover && seen.focusInCover && seen.hasFocus), seen };
-  }, 10_000);
-  await sleep(HELD_MS);
-  const later = await inspectOne("still covered", COVER(windowId));
-  await shot(host, "hidden");
-  const hidden = { back: back?.seen ?? null, later };
-  if (back?.ok && later?.cover && later.focusInCover && later.hasFocus) {
-    pass("hiding the screen leaves the cover up with the focus on it", hidden);
-  } else {
-    fault("hiding the screen did not leave the cover up with the focus on it", hidden);
+  // The screen's steps end where a fault is seen; the place readings and the
+  // restore below run whatever they found, and an instrument failure in them
+  // is raised only after those readings.
+  let failed = null;
+  let afterHide = null;
+  try {
+    afterHide = await screenSteps({ host, windowId, offset, dropAt, devserverCard });
+  } catch (error) {
+    if (!(error instanceof Inconclusive)) throw error;
+    failed = error;
   }
   if (!feedFlow()) fault("the devserver's feed did not keep flowing through the outage", relay.summary());
 
-  // Show in Computers keeps its place: its box as the cover showed, after
-  // the screen's show and hide, and once Restart connection and Abandon
-  // show. The box read after the hide, while those two are still held,
-  // tells a move across the click, the show and the hide from one at 8 s;
-  // a hide read after 8 s leaves the two causes together.
+  // Show in Computers keeps its place: its box as the cover showed, as the
+  // screen's hide landed, and once Restart connection and Abandon show. The
+  // box at the hide, while those two are still held, tells a move across the
+  // click, the show and the hide from one at 8 s; a hide that landed after
+  // 8 s, or none, leaves the two causes together.
   await sleep(Math.max(0, dropAt + RECOVERY_ACTIONS_MS + 500 - Date.now()));
   const settled = await inspectOne("all actions", COVER(windowId));
   const shift = (from, to) => from && to
     ? Math.max(...["left", "top", "width", "height"].map((k) => Math.abs(to[k] - from[k])))
     : null;
   const boxAtShow = shown.seen.action?.box ?? null;
-  const boxAfterHide = later?.action && !later.actions.includes("Restart connection") ? later.action.box : null;
+  const hideBefore8s = afterHide !== null && afterHide.box !== null && !afterHide.actions.includes("Restart connection");
+  const boxAfterHide = hideBefore8s ? afterHide.box : null;
   const boxSettled = settled?.action?.box ?? null;
   const place = {
-    boxAtShow, boxAfterHide, boxSettled, actions: settled?.actions ?? null,
+    boxAtShow, afterHide, boxAfterHide, boxSettled, actions: settled?.actions ?? null,
     acrossScreen: shift(boxAtShow, boxAfterHide), at8s: shift(boxAfterHide, boxSettled), overall: shift(boxAtShow, boxSettled),
   };
+  readings.push({ at: Date.now(), step: "place", value: place });
   const moved = (by) => by !== null && by > BOX_TOLERANCE_PX;
+  const untold = afterHide === null
+    ? "no box was read at the hide, as a fault ended the screen's steps first"
+    : "the hide landed after 8 s";
   if (!settled?.actions.includes("Restart connection") || !settled.actions.includes("Abandon") || place.overall === null) {
     fault("Restart connection and Abandon did not show beside Show in Computers at 8 s", place);
   } else if (boxAfterHide === null) {
-    if (moved(place.overall)) fault("Show in Computers moved between the cover's show and 8 s; the hide was read after 8 s, so the cause is not told", place);
-    else pass("Show in Computers keeps its place from the cover's show to Restart connection and Abandon showing", place);
+    if (moved(place.overall)) fault(`Show in Computers moved between the cover's show and 8 s; ${untold}, so the cause is not told`, place);
+    else pass(`Show in Computers keeps its place from the cover's show to Restart connection and Abandon showing (${untold})`, place);
   } else {
     if (moved(place.acrossScreen)) fault("Show in Computers moved across the screen's show and hide", place);
     if (moved(place.at8s)) fault("Show in Computers moved when Restart connection and Abandon appeared", place);
@@ -560,6 +589,7 @@ async function devserverArm() {
   }, 30_000);
   if (cleared?.ok) pass("with the window's flows let through again the cover clears", cleared.seen.witness);
   else fault("the cover stayed with the window's flows let through again", cleared?.seen ?? null);
+  if (failed) throw failed;
 }
 
 /// The local window's outage, made in its page: its sockets are noted as they
