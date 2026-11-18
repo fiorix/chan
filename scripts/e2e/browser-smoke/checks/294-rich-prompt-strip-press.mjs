@@ -152,14 +152,18 @@ async function installPressRecord(page, selector) {
         record.events.push({ type: event.type, node: "window-bubble", prevented: event.defaultPrevented, at: Math.round(performance.now()) }),
       );
     }
-    window.__prompt293.pressRecord = record;
+    window.__prompt294.pressRecord = record;
+    // The press is the evidence only where it lands on the button.
+    if (!record.underIsButton) {
+      throw new Error(`instrument: the centre of ${selector} hit-tests to ${record.under}, not the button`);
+    }
     return point;
   }, selector);
 }
 
 async function readPressRecord(page) {
   return page.evaluate(() => {
-    const record = window.__prompt293.pressRecord;
+    const record = window.__prompt294.pressRecord;
     const active = document.activeElement;
     record.activeAfter = active === null || active === document.body ? "body" : describeActive(active);
     function describeActive(el) {
@@ -511,7 +515,7 @@ export default {
         await page.evaluate(() => window.__prompt294?.restore?.());
       }
     } finally {
-      await writeTerminalPrefs(page, token, { ghostty: original.ghosty });
+      await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
     }
     if (failures.length) throw new Error(failures.join("\n"));
   },
