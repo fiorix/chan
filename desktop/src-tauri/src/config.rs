@@ -665,6 +665,7 @@ fn entry_from_roster_row(
         })
         .unwrap_or_else(|| (gateway.url.clone(), 443));
     let (os, pretty_name) = feed.os_of(&id).unwrap_or_default();
+    let connection_health = connection_health(&id, conns, feed);
     DevserverEntry {
         // Three-way mapping for rostered rows: a live conn reports
         // Connected (the window-feed watchdog still owns quiet-conn
@@ -706,7 +707,22 @@ fn entry_from_roster_row(
         shared: row.shared,
         native_trust_required: row.shared
             && !gateway.trusts_native(row.owner_user_id, &row.devserver_id),
-        connection_health: None,
+        connection_health,
+    }
+}
+
+/// The connection health of a row whose connection the desktop holds, read
+/// from its window feed; none for a row it does not hold, whatever reading a
+/// connection being torn down still keeps.
+fn connection_health(
+    id: &str,
+    conns: &DevserverConns,
+    feed: &crate::DevserverFeed,
+) -> Option<chan_server::ConnectionHealth> {
+    if conns.is_connected(id) {
+        feed.connection_health(id)
+    } else {
+        None
     }
 }
 
@@ -861,7 +877,7 @@ fn entry_from_devserver(
         gateway_url: String::new(),
         shared: false,
         native_trust_required: false,
-        connection_health: None,
+        connection_health: connection_health(&d.id, conns, feed),
     }
 }
 
@@ -3221,6 +3237,70 @@ mod tests {
         )
         .unwrap());
         assert!(reg.list()[2].native_trust_required);
+    }
+
+    /// A window snapshot whose reading has one answered ping.
+    fn answered_snapshot() -> Arc<Mutex<crate::window_watcher_wiring::DevserverWindowSnapshot>> {
+        use crate::connection_health::{Clock, SystemClock};
+        let mut snapshot = crate::window_watcher_wiring::DevserverWindowSnapshot::default();
+        let now = SystemClock.now();
+        snapshot.health.opened(now);
+        snapshot.health.ping_sent(now);
+        snapshot.health.set_arrived(now);
+        snapshot
+            .health
+            .pong(now.plus(std::time::Duration::from_millis(30)));
+        Arc::new(Mutex::new(snapshot))
+    }
+
+    /// Both row builders carry the connection health of a connection the
+    /// desktop holds, read from its window feed, and none for a row whose
+    /// connection it does not hold, whatever reading is still registered.
+    #[test]
+    fn both_row_builders_carry_the_reading_of_a_held_connection() {
+        let (_dir, reg) = registry_with_gateway_roster();
+        let rows = reg.list();
+        let (plain, rostered) = (rows[0].id.clone(), rows[1].id.clone());
+        assert!(rows.iter().all(|row| row.connection_health.is_none()));
+        for id in [&plain, &rostered] {
+            reg.feed.register_windows(id.clone(), answered_snapshot());
+        }
+        assert!(
+            reg.list().iter().all(|row| row.connection_health.is_none()),
+            "a reading showed for a connection the desktop does not hold"
+        );
+        for id in [&plain, &rostered] {
+            reg.conns.set(
+                id.clone(),
+                crate::devserver::DevserverConn {
+                    host: "127.0.0.1".into(),
+                    port: 8787,
+                    token: "tok".into(),
+                    name: "box".into(),
+                    gateway: None,
+                },
+            );
+        }
+        let rows = reg.list();
+        for row in &rows[..2] {
+            let health = row
+                .connection_health
+                .as_ref()
+                .unwrap_or_else(|| panic!("row {} carries no reading", row.id));
+            assert_eq!(
+                health.face,
+                chan_server::ConnectionFace::Healthy,
+                "{}",
+                row.id
+            );
+            assert_eq!(health.rtt_ms, Some(30), "{}", row.id);
+        }
+        assert_eq!(
+            rows[2].connection_health, None,
+            "a rostered row with no connection carries a reading"
+        );
+        reg.conns.remove(&plain);
+        assert_eq!(reg.list()[0].connection_health, None);
     }
 
     #[test]

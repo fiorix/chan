@@ -2,6 +2,7 @@
 
 mod auth;
 mod config;
+mod connection_health;
 mod cs_install;
 mod devserver;
 mod download;
@@ -673,6 +674,9 @@ pub struct DevserverFeed {
     /// fight a watchdog-driven bit, so the feed watchdog owns this flag and
     /// `entry_from_devserver` maps it to `DevserverStatus::Unreachable`.
     unreachable: Mutex<std::collections::HashSet<String>>,
+    /// What paces every devserver feed's pings. Each connection's reading of
+    /// them rides its window snapshot, so it leaves with `forget`.
+    pacer: connection_health::ProbePacer,
 }
 
 impl DevserverFeed {
@@ -811,6 +815,26 @@ impl DevserverFeed {
     /// Whether this devserver's feed sockets are currently marked unreachable.
     fn is_unreachable(&self, id: &str) -> bool {
         self.unreachable.lock().unwrap().contains(id)
+    }
+
+    /// A connected devserver's connection health as its window feed reads it
+    /// now, or `None` with no connection registered or no face to show.
+    fn connection_health(&self, id: &str) -> Option<chan_server::ConnectionHealth> {
+        use connection_health::Clock;
+        let snapshot = self.windows.lock().unwrap().get(id).cloned()?;
+        let mut snapshot = snapshot.lock().unwrap();
+        let now = connection_health::SystemClock.now();
+        snapshot.health.health(now)
+    }
+
+    /// The pace every devserver feed's pings follow.
+    fn probe_pace(&self) -> tokio::sync::watch::Receiver<connection_health::ProbePace> {
+        self.pacer.subscribe()
+    }
+
+    /// A window of the desktop gained or lost the focus, or went away.
+    fn window_focus(&self, label: &str, focused: bool) {
+        self.pacer.window_focus(label, focused);
     }
 
     /// Mark a devserver window LOCALLY buried (or un-buried) so `windows()`
@@ -6354,6 +6378,18 @@ fn main() {
             } => {
                 single_instance::reopen_without_a_window(_app);
             }
+            // The feeds ping faster while a window of the desktop has the
+            // focus, and once when the desktop gains it.
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Focused(focused),
+                ..
+            } => state_for_exit.devserver_feed.window_focus(&label, focused),
+            RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => state_for_exit.devserver_feed.window_focus(&label, false),
             _ => {}
         }
     });
@@ -11316,8 +11352,8 @@ mod tests {
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
         let frame = source_region(
             WIRING_RS,
-            "\n            let first_snapshot = !saw_snapshot;",
-            "\n            feed.write_frame(windows, set.tmux_connections);",
+            "\n                let first_snapshot = !saw_snapshot;",
+            "\n                feed.write_frame(windows, set.tmux_connections);",
         );
         assert!(
             frame.contains("pending_hide_posts_for_feed_snapshot("),

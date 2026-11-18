@@ -22,6 +22,7 @@ use chan_server::WindowRecord;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{watch, Notify};
 
+use crate::connection_health::{Clock, ConnectionReading, ProbePace, SystemClock};
 use crate::devserver::{ConnectionRows, DevserverConn};
 use crate::window_watcher::{
     native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState, PendingHide,
@@ -992,18 +993,21 @@ struct DevserverWindowFeed {
 }
 
 /// One watcher's snapshot, shared with the launcher. Retired tasks retain
-/// only their own Arc, so a late frame cannot repopulate a disconnected feed.
+/// only their own Arc, so a late frame cannot repopulate a disconnected feed,
+/// nor a late pong the reading of a later connection.
 #[derive(Default)]
 pub(crate) struct DevserverWindowSnapshot {
     pub windows: Vec<WindowRecord>,
     pub tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
+    /// The connection's health, read from the pongs of its feed sockets.
+    pub health: ConnectionReading,
 }
 
 impl From<Vec<WindowRecord>> for DevserverWindowSnapshot {
     fn from(windows: Vec<WindowRecord>) -> Self {
         Self {
             windows,
-            tmux_connections: Vec::new(),
+            ..Self::default()
         }
     }
 }
@@ -1491,41 +1495,286 @@ async fn keepalive_pump(
     ws: &mut GatewayWs,
     ping_interval: Duration,
     max_missed: u32,
-    mut on_text: impl FnMut(&str),
+    on_text: impl FnMut(&str),
 ) -> Result<(), String> {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    let mut missed = 0u32;
-    loop {
-        match tokio::time::timeout(ping_interval, ws.next()).await {
-            Ok(Some(message)) => {
-                missed = 0;
-                match message.map_err(|e| format!("watch stream: {e}"))? {
-                    Message::Text(text) => on_text(&text),
-                    Message::Close(_) => break,
-                    // Pong (our keepalive answered), Ping (axum auto-pongs the
-                    // peer's), Binary, Frame: not data, but arriving already reset
-                    // `missed` -- proof the socket is alive.
-                    _ => {}
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {
-                // No inbound for a whole interval: send a keepalive Ping. The
-                // gateway bridge forwards Ping/Pong and axum auto-pongs, so a live
-                // feed answers within the next interval; `max_missed` intervals
-                // with nothing inbound is a half-open zombie.
-                missed += 1;
-                if missed > max_missed {
-                    return Err("feed idle: no frame or pong within deadline".to_string());
-                }
-                ws.send(Message::Ping(Vec::new().into()))
-                    .await
-                    .map_err(|e| format!("feed keepalive ping: {e}"))?;
-            }
+    feed_pump(ws, ping_interval, max_missed, None, on_text).await
+}
+
+/// The text frame a feed's pump times a reply with.
+const FEED_PING_FRAME: &str = r#"{"type":"ping"}"#;
+
+/// The text frame of the devserver's on its window feed that is not a window
+/// set.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum FeedServerFrame {
+    Pong,
+}
+
+/// Whether a text frame on the window feed is the devserver's pong. A pong is
+/// a few bytes, so no window set is parsed for one.
+fn is_feed_pong(text: &str) -> bool {
+    text.len() <= 64
+        && matches!(
+            serde_json::from_str::<FeedServerFrame>(text),
+            Ok(FeedServerFrame::Pong)
+        )
+}
+
+/// What a window feed's pump measures with: the connection's reading (in its
+/// snapshot), the clock it stamps each report with, the desktop's pace, and
+/// what runs when the face the reading shows changes.
+///
+/// One probe serves one feed socket. It sends one ping when the socket opens
+/// and no other until a pong arrives on it, since a devserver too old to
+/// answer sends its set again for each ping. After that first pong it pings
+/// on the cadence of [`ProbePace::focused`] and once for each nudge.
+struct FeedProbe<'a> {
+    snapshot: &'a Mutex<DevserverWindowSnapshot>,
+    clock: &'a dyn Clock,
+    pace: watch::Receiver<ProbePace>,
+    /// The pace's sender is gone: no change will come.
+    pace_closed: bool,
+    on_face: &'a mut (dyn FnMut() + Send),
+    /// This socket has delivered a pong, so the cadence runs.
+    answered: bool,
+    last_ping: tokio::time::Instant,
+    focused: bool,
+    nudges: u64,
+    /// When the pump next reports the time, while a timed ping waits.
+    tick_at: Option<tokio::time::Instant>,
+}
+
+impl<'a> FeedProbe<'a> {
+    fn new(
+        snapshot: &'a Mutex<DevserverWindowSnapshot>,
+        clock: &'a dyn Clock,
+        pace: watch::Receiver<ProbePace>,
+        on_face: &'a mut (dyn FnMut() + Send),
+    ) -> Self {
+        Self {
+            snapshot,
+            clock,
+            pace,
+            pace_closed: false,
+            on_face,
+            answered: false,
+            last_ping: tokio::time::Instant::now(),
+            focused: false,
+            nudges: 0,
+            tick_at: None,
         }
     }
-    Ok(())
+
+    /// Report one event to the reading, stamped under its lock, and run
+    /// `on_face` when the face it shows changed.
+    fn record(
+        &mut self,
+        event: impl FnOnce(&mut ConnectionReading, crate::connection_health::Stamp) -> bool,
+    ) {
+        let (changed, waits) = {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            let now = self.clock.now();
+            let changed = event(&mut snapshot.health, now);
+            (changed, snapshot.health.waits())
+        };
+        self.tick_at = match (waits, self.tick_at) {
+            (false, _) => None,
+            (true, None) => Some(tokio::time::Instant::now() + crate::connection_health::WAKE_TICK),
+            (true, kept) => kept,
+        };
+        if changed {
+            (self.on_face)();
+        }
+    }
+
+    /// The socket opened: report it, and read the pace as it is now, so a
+    /// nudge from before the socket asks for nothing.
+    fn opened(&mut self) {
+        self.record(ConnectionReading::opened);
+        let pace = *self.pace.borrow_and_update();
+        self.focused = pace.focused;
+        self.nudges = pace.nudges;
+        self.answered = false;
+    }
+
+    /// Send one ping. A failed send ends nothing: measuring never retires
+    /// the feed, and the read that follows sees a socket that is gone.
+    async fn ping<S>(&mut self, ws: &mut S)
+    where
+        S: futures::Sink<
+                tokio_tungstenite::tungstenite::Message,
+                Error = tokio_tungstenite::tungstenite::Error,
+            > + Unpin,
+    {
+        use futures::SinkExt;
+        self.record(ConnectionReading::ping_sent);
+        self.last_ping = tokio::time::Instant::now();
+        if let Err(error) = ws
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                FEED_PING_FRAME,
+            ))
+            .await
+        {
+            tracing::debug!(%error, "devserver window feed ping not sent");
+        }
+    }
+
+    fn pong(&mut self) {
+        self.record(ConnectionReading::pong);
+        self.answered = true;
+    }
+
+    fn set_arrived(&mut self) {
+        self.record(ConnectionReading::set_arrived);
+    }
+
+    fn tick(&mut self) {
+        self.tick_at = None;
+        self.record(ConnectionReading::tick);
+    }
+
+    fn lost(&mut self) {
+        self.record(ConnectionReading::lost);
+    }
+
+    /// When the cadence's next ping is due, once this socket has answered.
+    fn next_ping(&self) -> Option<tokio::time::Instant> {
+        self.answered
+            .then(|| self.last_ping + crate::connection_health::cadence(self.focused))
+    }
+
+    /// Take a new pace, answering whether it asks for a ping now.
+    fn paced(&mut self, pace: ProbePace) -> bool {
+        self.focused = pace.focused;
+        let nudged = pace.nudges != self.nudges;
+        self.nudges = pace.nudges;
+        nudged && self.answered
+    }
+}
+
+/// The next pace `probe` reads, or `None` once its sender is gone; pends
+/// forever without a probe or a sender.
+async fn pace_change(probe: Option<&mut FeedProbe<'_>>) -> Option<ProbePace> {
+    match probe {
+        Some(probe) if !probe.pace_closed => match probe.pace.changed().await {
+            Ok(()) => Some(*probe.pace.borrow_and_update()),
+            Err(_) => None,
+        },
+        _ => std::future::pending().await,
+    }
+}
+
+/// Sleep until `at`, or forever without one.
+async fn sleep_until_some(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// [`keepalive_pump`] with the pings of `probe`, when there is one. A pong is
+/// handed to the probe before anything else reads the frame: it is not a set,
+/// `on_text` never sees it, and it does not count as the feed's activity for
+/// the keepalive, whose idle clock moves only for the devserver's other
+/// frames, so its Ping still goes out after `ping_interval` with no set.
+async fn feed_pump<S>(
+    ws: &mut S,
+    ping_interval: Duration,
+    max_missed: u32,
+    mut probe: Option<&mut FeedProbe<'_>>,
+    mut on_text: impl FnMut(&str),
+) -> Result<(), String>
+where
+    S: futures::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + futures::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Unpin,
+{
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    if let Some(probe) = probe.as_deref_mut() {
+        probe.opened();
+        probe.ping(ws).await;
+    }
+    let result = async {
+        let mut missed = 0u32;
+        let mut idle_at = tokio::time::Instant::now() + ping_interval;
+        loop {
+            let ping_at = probe.as_deref().and_then(FeedProbe::next_ping);
+            let tick_at = probe.as_deref().and_then(|probe| probe.tick_at);
+            tokio::select! {
+                message = ws.next() => {
+                    let Some(message) = message else { break };
+                    let message = message.map_err(|e| format!("watch stream: {e}"))?;
+                    if let (Message::Text(text), Some(probe)) = (&message, probe.as_deref_mut()) {
+                        if is_feed_pong(text) {
+                            probe.pong();
+                            continue;
+                        }
+                        probe.set_arrived();
+                    }
+                    missed = 0;
+                    idle_at = tokio::time::Instant::now() + ping_interval;
+                    match message {
+                        Message::Text(text) => on_text(&text),
+                        Message::Close(_) => break,
+                        // Pong (our keepalive answered), Ping (axum auto-pongs the
+                        // peer's), Binary, Frame: not data, but arriving already reset
+                        // `missed` -- proof the socket is alive.
+                        _ => {}
+                    }
+                }
+                () = tokio::time::sleep_until(idle_at) => {
+                    // No inbound for a whole interval: send a keepalive Ping. The
+                    // gateway bridge forwards Ping/Pong and axum auto-pongs, so a live
+                    // feed answers within the next interval; `max_missed` intervals
+                    // with nothing inbound is a half-open zombie.
+                    missed += 1;
+                    if missed > max_missed {
+                        return Err("feed idle: no frame or pong within deadline".to_string());
+                    }
+                    ws.send(Message::Ping(Vec::new().into()))
+                        .await
+                        .map_err(|e| format!("feed keepalive ping: {e}"))?;
+                    idle_at = tokio::time::Instant::now() + ping_interval;
+                }
+                () = sleep_until_some(ping_at) => {
+                    if let Some(probe) = probe.as_deref_mut() {
+                        probe.ping(ws).await;
+                    }
+                }
+                () = sleep_until_some(tick_at) => {
+                    if let Some(probe) = probe.as_deref_mut() {
+                        probe.tick();
+                    }
+                }
+                pace = pace_change(probe.as_deref_mut()) => {
+                    if let Some(probe) = probe.as_deref_mut() {
+                        match pace {
+                            Some(pace) => {
+                                if probe.paced(pace) {
+                                    probe.ping(ws).await;
+                                }
+                            }
+                            None => probe.pace_closed = true,
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Some(probe) = probe {
+        probe.lost();
+    }
+    result
 }
 
 /// A `/watch` frame as the desktop reads it: the rows stay raw JSON until
@@ -1607,10 +1856,12 @@ fn pending_hide_posts_for_feed_snapshot(
 /// `change`. Raw tunnel devservers auth with a bearer header; gateway
 /// devservers auth with the devserver-gate cookie.
 ///
-/// The [`keepalive_pump`] read-deadline turns a half-open socket into an error
-/// instead of a forever-pending `next()`. `saw_frame` is set on the first inbound
-/// frame so the caller can tell a healthy round from a never-connected one; the
-/// first frame also clears any `Unreachable` state (recovery) and announces it.
+/// The [`feed_pump`] read-deadline turns a half-open socket into an error
+/// instead of a forever-pending `next()`, and its probe times the devserver's
+/// pongs into the connection's reading, announcing each change of its face to
+/// the launcher. `saw_frame` is set on the first window set so the caller can
+/// tell a healthy round from a never-connected one; the first set also clears
+/// any `Unreachable` state (recovery) and announces it.
 async fn stream_window_feed(
     id: &str,
     app: &AppHandle,
@@ -1627,74 +1878,91 @@ async fn stream_window_feed(
     };
     let mut saw_snapshot = false;
     let mut rows = ConnectionRows::default();
-    keepalive_pump(&mut ws, FEED_PING_INTERVAL, FEED_MAX_MISSED, |text| {
-        // Any inbound data frame means the feed is live. Mark it, and on the FIRST
-        // such frame clear any Unreachable state so the launcher's red icon clears
-        // the instant the feed reconnects, not at the next drop.
-        if !saw_frame.swap(true, Ordering::Relaxed)
-            && state.devserver_feed.set_unreachable(id, false)
-        {
-            let _ = app.emit(crate::DEVSERVER_CONTROL_RESTORED_EVENT, id.to_string());
-            if let Some(embedded) = state.embedded() {
-                embedded.signal_library_change();
-            }
+    let mut announce_face = || {
+        if let Some(embedded) = state.embedded() {
+            embedded.signal_library_change();
         }
-        if let Some(set) = decode_window_frame(id, text, &mut rows) {
-            let windows = set.windows;
-            // Rows keep their devserver-local tokens: `should_show` reads
-            // token emptiness as the tenant on/off signal, and gateway
-            // navigation credentials are minted at open/retarget time
-            // (`devserver::window_navigation_url`), never stamped into
-            // the feed.
-            let first_snapshot = !saw_snapshot;
-            saw_snapshot = true;
-            let pending_attempts = pending_delete_attempts_for_feed_snapshot(
-                &state.pending_window_deletes,
-                id,
-                &windows,
-                first_snapshot,
-            );
-            for attempt in pending_attempts {
-                crate::spawn_pending_window_delete_attempt(
-                    app.clone(),
-                    Arc::clone(state),
-                    conn.clone(),
-                    attempt,
+    };
+    let mut probe = FeedProbe::new(
+        &feed.snapshot,
+        &SystemClock,
+        state.devserver_feed.probe_pace(),
+        &mut announce_face,
+    );
+    feed_pump(
+        &mut ws,
+        FEED_PING_INTERVAL,
+        FEED_MAX_MISSED,
+        Some(&mut probe),
+        |text| {
+            // Any inbound data frame means the feed is live. Mark it, and on the FIRST
+            // such frame clear any Unreachable state so the launcher's red icon clears
+            // the instant the feed reconnects, not at the next drop.
+            if !saw_frame.swap(true, Ordering::Relaxed)
+                && state.devserver_feed.set_unreachable(id, false)
+            {
+                let _ = app.emit(crate::DEVSERVER_CONTROL_RESTORED_EVENT, id.to_string());
+                if let Some(embedded) = state.embedded() {
+                    embedded.signal_library_change();
+                }
+            }
+            if let Some(set) = decode_window_frame(id, text, &mut rows) {
+                let windows = set.windows;
+                // Rows keep their devserver-local tokens: `should_show` reads
+                // token emptiness as the tenant on/off signal, and gateway
+                // navigation credentials are minted at open/retarget time
+                // (`devserver::window_navigation_url`), never stamped into
+                // the feed.
+                let first_snapshot = !saw_snapshot;
+                saw_snapshot = true;
+                let pending_attempts = pending_delete_attempts_for_feed_snapshot(
+                    &state.pending_window_deletes,
+                    id,
+                    &windows,
+                    first_snapshot,
                 );
+                for attempt in pending_attempts {
+                    crate::spawn_pending_window_delete_attempt(
+                        app.clone(),
+                        Arc::clone(state),
+                        conn.clone(),
+                        attempt,
+                    );
+                }
+                let pending_hides = pending_hide_posts_for_feed_snapshot(
+                    &state.pending_window_hides,
+                    id,
+                    &windows,
+                    first_snapshot,
+                );
+                for hide in pending_hides {
+                    crate::spawn_pending_window_hide_post(Arc::clone(state), conn.clone(), hide);
+                }
+                // Refresh this library's active-transfer cache so the desktop
+                // close guard can see a remote window's in-flight transfer (the
+                // desktop sees no remote `/ws`; the feed bit is its only signal).
+                // The library_id is constant per devserver; an empty snapshot
+                // carries none, but then there are no windows to guard either.
+                if let Some(library_id) = windows.first().map(|r| r.library_id.clone()) {
+                    let active: Vec<String> = windows
+                        .iter()
+                        .filter(|r| r.active_transfer)
+                        .map(native_label)
+                        .collect();
+                    state.refresh_devserver_active_transfers(&library_id, &active);
+                }
+                feed.write_frame(windows, set.tmux_connections);
+                // Re-push the launcher feed: a devserver window change
+                // shifts the merged launcher window set, so signal the embedded
+                // host to re-assemble + re-push. The devserver only pushes on a
+                // real change, so this is already change-gated.
+                if let Some(embedded) = state.embedded() {
+                    embedded.signal_library_change();
+                }
+                feed.change.notify_one();
             }
-            let pending_hides = pending_hide_posts_for_feed_snapshot(
-                &state.pending_window_hides,
-                id,
-                &windows,
-                first_snapshot,
-            );
-            for hide in pending_hides {
-                crate::spawn_pending_window_hide_post(Arc::clone(state), conn.clone(), hide);
-            }
-            // Refresh this library's active-transfer cache so the desktop
-            // close guard can see a remote window's in-flight transfer (the
-            // desktop sees no remote `/ws`; the feed bit is its only signal).
-            // The library_id is constant per devserver; an empty snapshot
-            // carries none, but then there are no windows to guard either.
-            if let Some(library_id) = windows.first().map(|r| r.library_id.clone()) {
-                let active: Vec<String> = windows
-                    .iter()
-                    .filter(|r| r.active_transfer)
-                    .map(native_label)
-                    .collect();
-                state.refresh_devserver_active_transfers(&library_id, &active);
-            }
-            feed.write_frame(windows, set.tmux_connections);
-            // Re-push the launcher feed: a devserver window change
-            // shifts the merged launcher window set, so signal the embedded
-            // host to re-assemble + re-push. The devserver only pushes on a
-            // real change, so this is already change-gated.
-            if let Some(embedded) = state.embedded() {
-                embedded.signal_library_change();
-            }
-            feed.change.notify_one();
-        }
-    })
+        },
+    )
     .await
     .map_err(FeedError::from)
 }
@@ -4836,5 +5104,389 @@ mod tests {
         assert!(refused.is_err(), "the sink never answers");
         assert_eq!(handshakes.server_names(), ["gw.example.test"]);
         assert_eq!(sink.alpn_offers(), [Vec::<String>::new()]);
+    }
+
+    /// The window feed's probe over a socket in memory, on a paused clock, so
+    /// each cadence is read to the millisecond.
+    mod probe {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use futures::{SinkExt, StreamExt};
+        use tokio::time::Instant;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::WebSocketStream;
+
+        use super::super::*;
+        use crate::connection_health::{ProbePacer, Stamp};
+
+        type MemWs = WebSocketStream<tokio::io::DuplexStream>;
+
+        const SET: &str = r#"{"windows":[]}"#;
+        const PONG: &str = r#"{"type":"pong"}"#;
+
+        /// The paused runtime's clock, with a wall clock that follows it from
+        /// the test's start. One serves a test's pumps and reads alike.
+        struct PausedClock {
+            mono0: std::time::Instant,
+        }
+
+        impl PausedClock {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    mono0: Instant::now().into_std(),
+                })
+            }
+        }
+
+        impl Clock for PausedClock {
+            fn now(&self) -> Stamp {
+                let mono = Instant::now().into_std();
+                Stamp {
+                    mono,
+                    wall_ms: 1_700_000_000_000 + (mono - self.mono0).as_millis() as u64,
+                }
+            }
+        }
+
+        async fn ws_pair() -> (MemWs, MemWs) {
+            let (client, server) = tokio::io::duplex(1 << 16);
+            tokio::join!(
+                WebSocketStream::from_raw_socket(client, Role::Client, None),
+                WebSocketStream::from_raw_socket(server, Role::Server, None),
+            )
+        }
+
+        /// How a mock devserver answers its feed client's frames. Each sends
+        /// its window set when the socket opens and again for any client
+        /// frame but a ping, a WebSocket Ping included, as the devserver does.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Devserver {
+            /// Sends its set again for a ping too, and never pongs: a release
+            /// from before the feed answered pings.
+            Older,
+            /// Answers each ping with a pong.
+            Current,
+            /// As `Current`, with a change's set ahead of its first pong.
+            ChangeBeforePong,
+        }
+
+        /// When the mock devserver read each ping and each WebSocket Ping,
+        /// as offsets from the test's start.
+        #[derive(Default)]
+        struct Heard {
+            pings: Vec<Duration>,
+            ws_pings: Vec<Duration>,
+        }
+
+        async fn serve_feed(
+            mut ws: MemWs,
+            devserver: Devserver,
+            start: Instant,
+            heard: Arc<Mutex<Heard>>,
+        ) {
+            if ws.send(Message::text(SET)).await.is_err() {
+                return;
+            }
+            let mut first_ping = true;
+            while let Some(Ok(message)) = ws.next().await {
+                let at = start.elapsed();
+                let replies: &[&str] = match &message {
+                    Message::Text(text) if text.as_str() == FEED_PING_FRAME => {
+                        heard.lock().unwrap().pings.push(at);
+                        let before = std::mem::replace(&mut first_ping, false);
+                        match devserver {
+                            Devserver::Older => &[SET],
+                            Devserver::ChangeBeforePong if before => &[SET, PONG],
+                            Devserver::Current | Devserver::ChangeBeforePong => &[PONG],
+                        }
+                    }
+                    Message::Ping(_) => {
+                        heard.lock().unwrap().ws_pings.push(at);
+                        &[SET]
+                    }
+                    Message::Close(_) => break,
+                    _ => &[SET],
+                };
+                for reply in replies {
+                    if ws.send(Message::text(*reply)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// A probed pump on one socket of a connection whose reading rides
+        /// `snapshot`: the texts its `on_text` read, each through the window
+        /// frame decoder as the feed reads them, and how many times the face
+        /// changed.
+        struct Pumped {
+            texts: Arc<Mutex<Vec<String>>>,
+            faces: Arc<AtomicUsize>,
+            task: tokio::task::JoinHandle<Result<(), String>>,
+        }
+
+        fn pump_probed(
+            mut ws: MemWs,
+            snapshot: &Arc<Mutex<DevserverWindowSnapshot>>,
+            clock: &Arc<PausedClock>,
+            pace: watch::Receiver<ProbePace>,
+        ) -> Pumped {
+            let texts = Arc::new(Mutex::new(Vec::new()));
+            let faces = Arc::new(AtomicUsize::new(0));
+            let task = tokio::spawn({
+                let snapshot = Arc::clone(snapshot);
+                let clock = Arc::clone(clock);
+                let texts = Arc::clone(&texts);
+                let faces = Arc::clone(&faces);
+                async move {
+                    let mut on_face = || {
+                        faces.fetch_add(1, Ordering::SeqCst);
+                    };
+                    let mut probe = FeedProbe::new(&snapshot, &*clock, pace, &mut on_face);
+                    let mut rows = ConnectionRows::default();
+                    feed_pump(
+                        &mut ws,
+                        FEED_PING_INTERVAL,
+                        FEED_MAX_MISSED,
+                        Some(&mut probe),
+                        |text| {
+                            decode_window_frame("dev-1", text, &mut rows);
+                            texts.lock().unwrap().push(text.to_string());
+                        },
+                    )
+                    .await
+                }
+            });
+            Pumped { texts, faces, task }
+        }
+
+        fn health(
+            snapshot: &Mutex<DevserverWindowSnapshot>,
+            clock: &PausedClock,
+        ) -> Option<chan_server::ConnectionHealth> {
+            let mut snapshot = snapshot.lock().unwrap();
+            let now = clock.now();
+            snapshot.health.health(now)
+        }
+
+        fn face(
+            snapshot: &Mutex<DevserverWindowSnapshot>,
+            clock: &PausedClock,
+        ) -> Option<chan_server::ConnectionFace> {
+            health(snapshot, clock).map(|health| health.face)
+        }
+
+        async fn sleep_until(start: Instant, secs: f64) {
+            tokio::time::sleep_until(start + Duration::from_secs_f64(secs)).await;
+        }
+
+        fn secs(heard: &[Duration]) -> Vec<f64> {
+            heard.iter().map(Duration::as_secs_f64).collect()
+        }
+
+        /// A devserver that never answers the feed's ping gets one per
+        /// connection: none on the cadence, none for a nudge, however long
+        /// the socket stays up. Its set for that ping shows no face, and on
+        /// a later socket that set ends the reconnecting the loss of the
+        /// first one began.
+        #[tokio::test(start_paused = true)]
+        async fn a_devserver_that_does_not_answer_gets_one_ping_per_connection() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            pacer.window_focus("w", true);
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            for connection in 1..=2 {
+                let (client, server) = ws_pair().await;
+                let heard = Arc::new(Mutex::new(Heard::default()));
+                let devserver = tokio::spawn(serve_feed(
+                    server,
+                    Devserver::Older,
+                    start,
+                    Arc::clone(&heard),
+                ));
+                let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+                tokio::time::sleep(Duration::from_secs(50)).await;
+                pacer.ping_now();
+                tokio::time::sleep(Duration::from_secs(50)).await;
+                assert_eq!(
+                    heard.lock().unwrap().pings.len(),
+                    1,
+                    "connection {connection} pinged a devserver that never answered more than once"
+                );
+                assert!(
+                    heard.lock().unwrap().ws_pings.len() >= 3,
+                    "fixture: the keepalive did not run on connection {connection}"
+                );
+                assert_eq!(
+                    face(&snapshot, &clock),
+                    None,
+                    "connection {connection} showed a face for a devserver that never answered"
+                );
+                devserver.abort();
+                assert!(
+                    pumped.task.await.unwrap().is_err(),
+                    "fixture: the socket ended"
+                );
+                assert_eq!(
+                    face(&snapshot, &clock),
+                    Some(chan_server::ConnectionFace::Reconnecting),
+                    "the loss of connection {connection}'s socket"
+                );
+            }
+        }
+
+        /// A change's set that reaches the desktop ahead of the first pong
+        /// shows no face for a moment and decides nothing: the pong after it
+        /// turns the reading on, and the cadence starts.
+        #[tokio::test(start_paused = true)]
+        async fn a_changes_set_before_the_pong_still_turns_the_reading_on() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            let (client, server) = ws_pair().await;
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            tokio::spawn(serve_feed(
+                server,
+                Devserver::ChangeBeforePong,
+                start,
+                Arc::clone(&heard),
+            ));
+            let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+            sleep_until(start, 1.0).await;
+            assert_eq!(
+                pumped.texts.lock().unwrap().len(),
+                2,
+                "fixture: the opening set and the change's set"
+            );
+            assert_eq!(
+                face(&snapshot, &clock),
+                Some(chan_server::ConnectionFace::Healthy),
+                "a change's set before the pong kept the reading off"
+            );
+            sleep_until(start, 21.0).await;
+            assert_eq!(
+                secs(&heard.lock().unwrap().pings),
+                [0.0, 20.0],
+                "the cadence did not start at the pong"
+            );
+            pumped.task.abort();
+        }
+
+        /// After the first pong the feed pings every 20 s while no window of
+        /// the desktop has the focus, at once when the desktop gains it,
+        /// every 3 s while it has it, and on the 20 s cadence again from the
+        /// last ping once it loses it. The focus comes 1 s after a ping, so
+        /// the 3 s cadence alone would ping 2 s later.
+        #[tokio::test(start_paused = true)]
+        async fn the_feed_pings_on_the_focus_cadence_and_once_at_a_focus() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            let (client, server) = ws_pair().await;
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            tokio::spawn(serve_feed(
+                server,
+                Devserver::Current,
+                start,
+                Arc::clone(&heard),
+            ));
+            let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+            sleep_until(start, 41.0).await;
+            pacer.window_focus("w", true);
+            sleep_until(start, 51.5).await;
+            pacer.window_focus("w", false);
+            sleep_until(start, 75.0).await;
+            assert_eq!(
+                secs(&heard.lock().unwrap().pings),
+                [0.0, 20.0, 40.0, 41.0, 44.0, 47.0, 50.0, 70.0]
+            );
+            assert_eq!(
+                face(&snapshot, &clock),
+                Some(chan_server::ConnectionFace::Healthy)
+            );
+            pumped.task.abort();
+        }
+
+        /// A pong goes to the reading alone: the frame decoder never reads
+        /// it, so nothing logs it as an unreadable window frame, and it is
+        /// not counted as a set, which would show no face.
+        #[tokio::test(start_paused = true)]
+        async fn a_pong_reaches_the_reading_and_not_the_frame_decoder() {
+            let logs = crate::devserver::log_capture::Lines::default();
+            let _logs = logs.install();
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            pacer.window_focus("w", true);
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            let (client, server) = ws_pair().await;
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            tokio::spawn(serve_feed(
+                server,
+                Devserver::Current,
+                start,
+                Arc::clone(&heard),
+            ));
+            let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+            sleep_until(start, 10.0).await;
+            assert_eq!(
+                heard.lock().unwrap().pings.len(),
+                4,
+                "fixture: four pings answered"
+            );
+            assert_eq!(
+                *pumped.texts.lock().unwrap(),
+                [SET],
+                "a pong reached the frame decoder"
+            );
+            assert_eq!(logs.warnings(), Vec::<String>::new());
+            let health = health(&snapshot, &clock).expect("a pong was taken for a set");
+            assert_eq!(health.face, chan_server::ConnectionFace::Healthy);
+            assert_eq!(health.samples.len(), 4, "{:?}", health.samples);
+            assert_eq!(
+                pumped.faces.load(Ordering::SeqCst),
+                2,
+                "the face changes are unknown, then healthy"
+            );
+            pumped.task.abort();
+        }
+
+        /// Pongs every 3 s are not the feed's activity: with no set for
+        /// 30 s, the keepalive still sends its WebSocket Ping, and the set
+        /// that Ping draws moves its idle clock.
+        #[tokio::test(start_paused = true)]
+        async fn a_pong_does_not_reset_the_keepalive() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            pacer.window_focus("w", true);
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            let (client, server) = ws_pair().await;
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            tokio::spawn(serve_feed(
+                server,
+                Devserver::Current,
+                start,
+                Arc::clone(&heard),
+            ));
+            let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+            sleep_until(start, 65.0).await;
+            let heard = heard.lock().unwrap();
+            assert!(
+                heard.pings.len() >= 20,
+                "fixture: the cadence ran, {:?}",
+                secs(&heard.pings)
+            );
+            assert_eq!(
+                secs(&heard.ws_pings),
+                [30.0, 60.0],
+                "the pongs held the keepalive's Ping off"
+            );
+            pumped.task.abort();
+        }
     }
 }
