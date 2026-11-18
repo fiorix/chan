@@ -160,10 +160,12 @@ export default {
             await waitFor(page, card, "the draft is editable", (value) => value.text === text && value.editable && !value.pending);
 
             // Submit while the terminal prints: the server queues the prompt.
+            // It acks every accepted prompt as queued, so the ack proves no
+            // hold; the recorder not yet started does.
             await page.keyboard.down("Control");
             await page.keyboard.press("Enter");
             await page.keyboard.up("Control");
-            result.queued = await waitFor(page, card, "precondition: the submit is acknowledged as queued",
+            result.queued = await waitFor(page, card, "the server acknowledges the submit",
               (value) => value.prompts.length === 1 && value.sockets.some((socket) => socket.tab === name
                 && socket.acks.some((ack) => ack.id === value.prompts[0].id && ack.queued === true)));
             assert.equal(result.queued.prompts[0].data, text);
@@ -183,7 +185,10 @@ export default {
               (error) => (survey.result = { code: error.code ?? "unknown", stdout: error.stdout ?? "", error: String(error.message ?? error) }),
             );
             await waitFor(page, card, "the survey shows over the terminal", (value) => value.card, 10_000);
-            result.surveyShown = await waitFor(page, card, "the survey holds the keyboard", (value) => value.focus === "survey");
+            result.surveyShown = await waitFor(page, card,
+              "precondition: the survey holds the keyboard while the prompt still waits",
+              (value) => value.focus === "survey" && value.pending
+                && !value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id)));
             await ctx.shot(`292-${backend}-queued-under-survey`);
 
             // Release the queue: the output stops and the prompt drains
