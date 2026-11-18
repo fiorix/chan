@@ -101,9 +101,12 @@ pub(crate) const FORWARDED_EVENTS: [&str; 7] = [
 /// deck position and another window's must not move.
 pub(crate) const SHOW_CARD_EVENT: &str = "launcher-show-devserver-card";
 
-/// How long [`show_card`] waits for a toggle already running on its host.
-/// It covers a first show's page load (`FIRST_LOAD_TIMEOUT`) and its slide.
-const CARD_SHOW_WAIT: Duration = Duration::from_secs(5);
+/// How long [`show_card`] waits for a toggle already running on its host: a
+/// hang guard, not a measure. Every step of a toggle is bounded on its own, a
+/// first show's page load by `FIRST_LOAD_TIMEOUT`, each stage by
+/// `PRIME_TIMEOUT` and the slide by `SLIDE_MS`, which ends even a first show
+/// within about 6 s, so a toggle still running past this has hung.
+const CARD_SHOW_WAIT: Duration = Duration::from_secs(10);
 
 /// Both cards slide together for this long in launcher_transition.js.
 pub(crate) const SLIDE_MS: u64 = 320;
