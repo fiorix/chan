@@ -1,84 +1,34 @@
 // A terminal's composer holds a queued prompt while a survey over the
 // terminal shows; the prompt drains under the survey; a `1` answers the
-// survey and the composer stays empty. The drain cannot wait for the
-// survey (the server drains on its own tick), so the survey shows first
-// and the submit goes through the strip's Send button, which needs no
-// keyboard: every later frame provably lands under the survey.
+// survey and the composer stays empty. The terminal prints until the check
+// releases it, which holds the server's queue (the drainer waits for its
+// output to go quiet), then turns into a raw PTY recorder: the queued
+// prompt is submitted with Ctrl+Enter before the survey shows, drains only
+// after the survey holds the keyboard, and the recorder shows the drained
+// text reached the PTY and the `1` did not. The red variant of this check
+// runs the same file on a tree with
+// `292-rich-prompt-survey-drain.red.patch` applied: the drained composer
+// then takes the keyboard from the survey.
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dispatchCommand } from "../lib/pane-strip.mjs";
+import { recordedSince } from "../lib/pty-recorder.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+const bytesOf = (file) => existsSync(file)
+  ? [...readFileSync(file)].map((byte) => byte.toString(16).padStart(2, "0"))
+  : [];
 
-// The press is the evidence: record what sits under its point and every
-// event the button and the window see, so a missing submit reads as a
-// missing press, a missing click, or a missing send — not as a guess.
-async function installPressRecord(page, selector) {
-  return page.evaluate((selector) => {
-    const button = document.querySelector(selector);
-    if (!button) throw new Error(`no ${selector}`);
-    button.scrollIntoView({ block: "center" });
-    const box = button.getBoundingClientRect();
-    if (!(box.width > 0 && box.height > 0)) throw new Error(`${selector} has no box`);
-    const point = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
-    const describe = (el) =>
-      el ? `${el.tagName}.${typeof el.className === "string" ? el.className : el.className?.baseVal ?? ""}` : null;
-    const under = document.elementFromPoint(point.x, point.y);
-    const record = {
-      selector,
-      point,
-      buttonBox: { x: box.x, y: box.y, width: box.width, height: box.height },
-      under: describe(under),
-      underIsButton: under === button || !!under?.closest?.(selector),
-      events: [],
-    };
-    const note = (node) => (event) =>
-      record.events.push({
-        type: event.type,
-        node,
-        target: describe(event.target),
-        prevented: event.defaultPrevented,
-        at: Math.round(performance.now()),
-      });
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-      button.addEventListener(type, note("button-capture"), true);
-      window.addEventListener(type, note("window-capture"), true);
-      window.addEventListener(type, (event) =>
-        record.events.push({ type: event.type, node: "window-bubble", prevented: event.defaultPrevented, at: Math.round(performance.now()) }),
-      );
-    }
-    window.__prompt292.pressRecord = record;
-    return point;
-  }, selector);
-}
-
-async function readPressRecord(page, card) {
-  return page.evaluate((card) => {
-    const record = window.__prompt292.pressRecord;
-    const active = document.activeElement;
-    const composer = card ? document.querySelector(card) : null;
-    record.activeAfter =
-      active === null || active === document.body
-        ? "body"
-        : composer && composer.contains(active)
-          ? "composer"
-          : `${active.tagName ?? "?"}.${
-            typeof active.className === "string" ? active.className : active.className?.baseVal ?? ""
-          }`;
-    return record;
-  }, card);
-}
-
-// The page's patched WebSocket records prompt frames and delivery acks with
-// the tab and session they rode on. Installed before the first leg opens;
-// each leg resets the prompt list. Fresh dials carry no `session` value
-// (only reattaches do): both legs run in one window, so the tab name scopes
-// each leg's waits and the first leg's closed socket cannot satisfy the
-// second leg's.
+// The page's patched WebSocket records prompt frames, their acks and
+// delivery acks with the tab they rode on. Installed before the first leg
+// opens; each leg resets the prompt list. Both legs run in one window, so the
+// tab name scopes each leg's waits and the first leg's closed socket cannot
+// satisfy the second leg's.
 function traceSurveyDrain() {
   const NativeSocket = window.WebSocket;
   const trace = window.__prompt292 = { sockets: [], prompts: [] };
@@ -89,17 +39,15 @@ function traceSurveyDrain() {
         return Reflect.construct(target, args);
       }
       const socket = Reflect.construct(target, args);
-      // Fresh dials carry no `session` value (only reattaches do); the tab
-      // name scopes the leg.
       const tab = url.searchParams.get("tab_name");
-      const session = url.searchParams.get("session");
-      const record = { socket, tab, session, ready: false, delivered: [] };
+      const record = { socket, tab, ready: false, acks: [], delivered: [] };
       trace.sockets.push(record);
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;
         let frame;
         try { frame = JSON.parse(event.data); } catch { return; }
         if (frame.type === "ready") record.ready = true;
+        if (frame.type === "prompt-ack") record.acks.push({ id: frame.id, queued: frame.queued });
         if (frame.type === "prompt-delivered") record.delivered.push(frame.id);
       });
       const send = socket.send.bind(socket);
@@ -107,7 +55,7 @@ function traceSurveyDrain() {
         if (typeof data === "string") {
           let frame;
           try { frame = JSON.parse(data); } catch { /* Raw input is not JSON. */ }
-          if (frame?.type === "prompt") trace.prompts.push({ ...frame, session });
+          if (frame?.type === "prompt") trace.prompts.push({ ...frame, tab });
         }
         return send(data);
       };
@@ -133,8 +81,8 @@ async function state(page, card) {
         : active.closest(".survey-card") ? "survey"
         : composer?.contains(active) ? "composer" : `${active.tagName}.${active.className?.toString?.() ?? ""}`,
       card: Boolean(composer?.closest(".terminal-tab")?.querySelector(".survey-card")),
-      sockets: trace?.sockets.map(({ socket, tab, session, ready, delivered }) => ({
-        state: socket.readyState, tab, session, ready, delivered,
+      sockets: trace?.sockets.map(({ socket, tab, ready, acks, delivered }) => ({
+        state: socket.readyState, tab, ready, acks, delivered,
       })) ?? [],
       prompts: trace?.prompts ?? [],
     };
@@ -169,13 +117,17 @@ export default {
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
+    const directory = mkdtempSync(join(ctx.workspaceDir, ".surveydrain-292-"));
     const failures = [];
     try {
       await page.evaluate(traceSurveyDrain);
       try {
         for (const backend of ["xterm", "ghostty"]) {
           const name = `Prompt292-${backend}`;
+          // No `1` in the text: the recorder must hold none but a stray key.
           const text = `PROMPT292-${backend}`;
+          const stop = join(directory, `${backend}.stop`);
+          const recorder = join(directory, `${backend}.bytes`);
           const result = { backend, passed: false, pageErrors: [], cleanupErrors: [] };
           const onError = (error) => result.pageErrors.push(String(error));
           page.on("pageerror", onError);
@@ -183,10 +135,15 @@ export default {
           let survey = null;
           try {
             await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
-            const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend);
+            // Output every 200 ms holds the queue; the stop file ends it, at
+            // most 60 s later, and the shell becomes a raw recorder of every
+            // byte the PTY receives.
+            const command =
+              `i=0; while [ ! -e ${shellQuote(stop)} ] && [ $i -lt 300 ]; do echo tick; sleep .2; i=$((i+1)); done; ` +
+              `stty raw -echo && exec dd bs=1 status=none of=${shellQuote(recorder)}`;
+            const row = await openAttachedTerminal(ctx, page, cs, windowId, name, backend, ["--command", command]);
             opened = true;
-            const session = row.session_id;
-            const attachment = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === session);
+            const attachment = await readTerminalAttachment(page, cs, backend, (entry) => entry.session_id === row.session_id);
             assert.ok(attachment.attached, `the ${backend} terminal is attached`);
             await page.evaluate(() => { window.__prompt292.prompts.length = 0; });
             const terminal = attachment.selector;
@@ -201,11 +158,23 @@ export default {
             await page.click(`${card} .cm-content`);
             await page.keyboard.type(text);
             await waitFor(page, card, "the draft is editable", (value) => value.text === text && value.editable && !value.pending);
-            // The survey shows first; the submit, drain and answer all land
-            // under it. `cs terminal survey` blocks server-side until the
-            // survey resolves, so its result is read back, never awaited.
-            survey = { result: null, promise: null };
-            survey.promise = cs(["survey", "--tab-name", name, "--timeout", "60",
+
+            // Submit while the terminal prints: the server queues the prompt.
+            await page.keyboard.down("Control");
+            await page.keyboard.press("Enter");
+            await page.keyboard.up("Control");
+            result.queued = await waitFor(page, card, "precondition: the submit is acknowledged as queued",
+              (value) => value.prompts.length === 1 && value.sockets.some((socket) => socket.tab === name
+                && socket.acks.some((ack) => ack.id === value.prompts[0].id && ack.queued === true)));
+            assert.equal(result.queued.prompts[0].data, text);
+            const id = result.queued.prompts[0].id;
+            assert.ok(!existsSync(recorder), "precondition: the queue is held, the recorder not yet started");
+
+            // The survey shows over the terminal and takes the keyboard.
+            // `cs terminal survey` blocks server-side until the survey
+            // resolves, so its result is read back, never awaited.
+            survey = { result: null };
+            cs(["survey", "--tab-name", name, "--timeout", "60",
               "--title", `Keyboard ownership: 292-${backend}`,
               "--option", "Alpha", "--option", "Beta",
               "The composer holds a queued prompt while this survey shows.",
@@ -215,39 +184,17 @@ export default {
             );
             await waitFor(page, card, "the survey shows over the terminal", (value) => value.card, 10_000);
             result.surveyShown = await waitFor(page, card, "the survey holds the keyboard", (value) => value.focus === "survey");
-            // The Send button needs no keyboard: the press submits under the
-            // survey and must send exactly one prompt. The press record says
-            // what happened when no prompt arrives: a press that never
-            // reached the button, a swallowed click, or a swallowed send.
-            const press = await installPressRecord(page, `${card} .rp-primary`);
-            await page.mouse.move(press.x, press.y);
-            await page.mouse.down();
-            await sleep(250);
-            await page.mouse.up();
-            result.press = await readPressRecord(page, card);
-            await ctx.shot(`292-${backend}-press`);
-            try {
-              result.sent = await waitFor(page, card, "the submit sends one prompt", (value) => value.prompts.length === 1, 5000);
-            } catch (error) {
-              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(result.press)}`);
-            }
-            assert.equal(result.sent.prompts[0].data, text);
-            assert.equal(typeof result.sent.prompts[0].id, "string");
-            const id = result.sent.prompts[0].id;
+            await ctx.shot(`292-${backend}-queued-under-survey`);
+
+            // Release the queue: the output stops and the prompt drains
+            // under the survey, which keeps the keyboard.
+            writeFileSync(stop, "");
             result.delivered = await waitFor(page, card, "the prompt drains without taking the keyboard",
               (value) => value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id))
-                && value.text === "" && !value.pending && value.focus !== "composer" && value.note === null, 10_000);
+                && value.text === "" && !value.pending && value.focus === "survey" && value.note === null, 20_000);
+            result.drainedBytes = (await recordedSince("the drained prompt reaches the PTY", recorder, 0, "50")).length;
             await ctx.shot(`292-${backend}-drained-under-survey`);
-            // The click left DOM focus on the Send button; selecting the
-            // tab hands the keyboard back to the card through the app's
-            // own focus routing.
-            let reselected = false;
-            for (const tab of await page.$$(".pane .tabs .tab-row > .tab")) {
-              const label = await tab.$eval(".path", (path) => path.textContent?.trim() ?? "").catch(() => "");
-              if (label === name) { await tab.click(); reselected = true; break; }
-            }
-            assert.ok(reselected, "the leg's terminal tab is selected again");
-            await waitFor(page, card, "returning to the survey gives its card the keyboard", (value) => value.focus === "survey");
+
             await page.keyboard.press("1");
             await waitFor(page, card, "the survey card closes", (value) => !value.card, 20_000);
             result.answered = await waitFor(page, card, "the composer stays empty",
@@ -257,6 +204,10 @@ export default {
             assert.ok(survey.result, "the survey answered");
             assert.equal(survey.result.code, 0);
             assert.equal(survey.result.stdout, "Alpha");
+            await sleep(500);
+            const bytes = bytesOf(recorder);
+            result.recorded = bytes.length;
+            assert.ok(!bytes.includes("31"), `the 1 reached the PTY: ${JSON.stringify(bytes)}`);
             assert.deepEqual(result.pageErrors, []);
             await ctx.shot(`292-${backend}-answered-composer-empty`);
             result.passed = true;
@@ -274,6 +225,8 @@ export default {
                 result.passed = false;
               }
             };
+            // An early failure leaves the loop printing until its bound.
+            await cleanup("queue release", async () => writeFileSync(stop, ""));
             await cleanup("owned terminal cleanup", async () => {
               // The tab bus closes whatever tab is active, live session or
               // not; `cs terminal close` only matches live sessions.
@@ -291,6 +244,7 @@ export default {
         await page.evaluate(() => window.__prompt292?.restore());
       }
     } finally {
+      try { rmSync(directory, { recursive: true, force: true }); } catch { /* The workspace teardown removes it. */ }
       await writeTerminalPrefs(page, token, { ghostty: original.ghostty });
     }
     if (failures.length) throw new Error(failures.join("\n"));
