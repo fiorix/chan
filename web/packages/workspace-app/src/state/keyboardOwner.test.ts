@@ -274,6 +274,16 @@ describe("mayFocus", () => {
     expect(mayFocus(document.body)).toBe(false);
   });
 
+  test("refuses an owner surface's element while that surface owns nothing", () => {
+    resetLayout([terminalTab({ id: "t1" })]);
+    const { field: card } = taggedRoot(ownerTag("terminal-survey", "t-elsewhere"));
+    const loose = document.createElement("input");
+    document.body.append(loose);
+    expect(owner()).toBeNull();
+    expect(mayFocus(card), "a card over a terminal that is not the focused pane's active one").toBe(false);
+    expect(mayFocus(loose), "an element in no owner surface").toBe(true);
+  });
+
   test("refuses every element when the owner has no root in the page", () => {
     const field = document.createElement("input");
     document.body.append(field);

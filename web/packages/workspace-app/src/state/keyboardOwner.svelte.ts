@@ -137,15 +137,17 @@ export function ownerRoot(current: KeyboardOwner | null = owner()): HTMLElement 
   return current?.tag ? topRoot(current.tag) : null;
 }
 
-/// Whether `element` may take the keyboard: when nothing owns it, or when
-/// `element` sits inside the owner's root, looked up as this asks. The
-/// Computers launcher has no root in the page, so nothing may take it then,
-/// and nothing may while a cover over the window (the screen lock, the
-/// reconnect or session-ended cover) holds it.
+/// Whether `element` may take the keyboard: when `element` sits inside the
+/// owner's root, looked up as this asks, or when nothing owns it and
+/// `element` is in no owner surface's root, since a surface takes the
+/// keyboard only while it owns it (a survey card over a terminal that is not
+/// the focused pane's active one). The Computers launcher has no root in the
+/// page, so nothing may take it then, and nothing may while a cover over the
+/// window (the screen lock, the reconnect or session-ended cover) holds it.
 export function mayFocus(element: Element | null): boolean {
   if (appInputBlocked()) return false;
   const current = owner();
-  if (current === null) return true;
+  if (current === null) return element === null || element.closest(`[${KEYBOARD_OWNER_ATTR}]`) === null;
   const root = ownerRoot(current);
   return element !== null && root !== null && root.contains(element);
 }
