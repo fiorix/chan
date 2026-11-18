@@ -280,7 +280,7 @@ export default {
             // Step 1: a real press on Submit holds the composer, and the
             // next key reaches it with no click. The release submits the
             // draft; once it delivers, the typed key starts the next one.
-            result.steps.pressRecord = (await pressSubmit(page, card, "294-press-held", shot)).record;
+            result.steps.pressRecord = (await pressSubmit(page, card, `294-${backend}-press-held`, shot)).record;
             await waitFor(page, card, "the submit delivers",
               (value) => (value.text === "" && !value.pending ? value : false));
             await page.keyboard.type("x");
@@ -324,7 +324,7 @@ export default {
             if (!(await catchPending(page, card, keyboardSubmit(recallText)))) {
               throw new Error("never caught a pending prompt in 4 submits");
             }
-            result.steps.recallPress = (await pressSubmit(page, card, "294-recall-press", shot)).record;
+            result.steps.recallPress = (await pressSubmit(page, card, `294-${backend}-recall-press`, shot)).record;
             result.steps.recall = await waitFor(page, card, "the run recalls",
               (value) => (!value.pending && value.text === recallText ? value : false), 10_000);
             assert.equal(result.steps.recall.where, "composer", "focus holds through the recall");
@@ -344,7 +344,7 @@ export default {
             if (!(await catchPending(page, card, keyboardSubmit(failText)))) {
               throw new Error("never caught a pending prompt for the failed recall");
             }
-            result.steps.failedPress = (await pressSubmit(page, card, "294-failed-press", shot)).record;
+            result.steps.failedPress = (await pressSubmit(page, card, `294-${backend}-failed-press`, shot)).record;
             const failed = await waitFor(page, card, "the failed recall says the connection was lost",
               (value) => value.note === "connection lost, message may still be queued", 9000);
             const dropped = (await page.evaluate(() => window.__prompt294.droppedCancels)) - droppedBefore;
