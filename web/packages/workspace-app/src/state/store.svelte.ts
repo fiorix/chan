@@ -4990,22 +4990,12 @@ export function clearLauncherDraft(): void {
   persistLauncherDraft();
 }
 
-/// Element holding the keyboard when the launcher last opened from closed:
-/// the deck's heir while it stays open. Captured in `openCommandLauncher`,
-/// where every open funnels (the deck captures the same element); refreshed
-/// on each closed-to-open transition, never on a branch re-open, and read
-/// only while the launcher is open, so no close path needs to clear it.
-let launcherOpener: HTMLElement | null = null;
-
 /// Open this window's launcher. From closed it starts at the root with no
 /// scope, the first row selected and the last query kept, so the chord never
 /// lands in the branch or scope of an earlier visit. With `path` it opens
 /// inside that branch instead, on an empty query, whether or not it was
 /// already open. Idempotent when already open with no `path`.
 export function openCommandLauncher(path: readonly string[] = []): void {
-  if (!launcherDraft.visible && typeof document !== "undefined") {
-    launcherOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  }
   if (!launcherDraft.visible || path.length > 0) {
     launcherDraft.path = [...path];
     launcherDraft.selectedId = null;
@@ -5771,25 +5761,22 @@ export function persistDateFormat(formatId: string): void {
   });
 }
 
-/// The dock whose close is running held the keyboard when its holder is
-/// inside it or in its open menu. The holder is the launcher's opener while
-/// the launcher is open, else the active element. A holder that cannot take
-/// focus, as canTakeFocus reads it, hands over only with no Search or
-/// Settings overlay open and no dialog or survey up; anything else moves
-/// nothing, and the dock's dispose empties the target until a file browser
-/// is focused.
+/// The dock whose close is running held the keyboard when the element
+/// holding it is inside the dock or in its open menu, or when the keyboard
+/// is at large (nothing holds it that can take focus, as canTakeFocus reads
+/// it). The pulse that follows reaches only surfaces that ask the keyboard's
+/// owner, so it moves nothing while Search, Settings, a dialog or a survey
+/// holds the keyboard. Anything else holding it moves nothing either: the
+/// open command deck hands the keyboard on as it closes, and the dock's
+/// dispose empties the target until a file browser is focused.
 function dockHeldKeyboard(side: "left" | "right"): boolean {
   if (typeof document === "undefined") return true;
+  const holder = document.activeElement;
+  if (holder === null || !canTakeFocus(holder)) return true;
   const root = document.querySelector(`.browser-side-pane.${side}`);
-  const holder = launcherPanel.open ? launcherOpener : document.activeElement;
-  if (holder !== null && (root?.contains(holder) === true ||
-    (root !== null && root.querySelector('.hamburger-trigger[aria-expanded="true"]') !== null && holder.closest(".hamburger-menu") !== null))) {
-    return true;
-  }
-  if (holder === null || !canTakeFocus(holder)) {
-    return !searchPanel.open && !settingsPanel.open && !modalDialogOpen();
-  }
-  return false;
+  if (root === null) return false;
+  if (root.contains(holder)) return true;
+  return root.querySelector('.hamburger-trigger[aria-expanded="true"]') !== null && holder.closest(".hamburger-menu") !== null;
 }
 
 export function setBrowserSidePane(side: "left" | "right", open: boolean): void {
