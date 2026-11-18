@@ -689,15 +689,19 @@ export default {
         );
       }
       details.mouseOnLeg.selection = "";
+      await closeTerminal(TAB_G);
       // A bare press-and-release reporting program (DECSET 1000 alone:
       // htop, nano, `less --mouse`) owns the pointer with no drag
       // tracking either: the release must not copy, and the drag must
-      // still report. The sentinel stays seeded across the drag.
+      // still report. The sentinel stays seeded across the drag. A fresh
+      // tab: the cat probe above still holds the old tab's foreground,
+      // so a shell command typed there would feed the cat, not the shell.
+      await openTerminal(TAB_G, TERMINAL_SURFACES.ghostty);
       await cs([
         "write",
         "--tab-name",
         TAB_G,
-        `printf '\\033[?1002l\\033[?1000;1006h${MARK_PREFIX}MODE1000_%s\\n' ${MARK_ARG}\\n`,
+        `printf '\\033[?1000;1006h${MARK_PREFIX}MODE1000_%s\\n' ${MARK_ARG}\\n`,
       ]);
       await waitScrollback(TAB_G, `${MARK_PREFIX}MODE1000_${MARK_ARG}`);
       await seedClipboard();
