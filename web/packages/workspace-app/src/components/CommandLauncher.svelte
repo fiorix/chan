@@ -878,11 +878,14 @@
     // A survey card counts only in its pane while that pane is focused: a
     // run that left focus at large after moving to another pane must not
     // hand the keyboard to a card mounted and visible elsewhere.
+    // A survey card counts only for its own terminal: the card's terminal
+    // against the active one, read from state. A sole pane renders no
+    // `focused` class, so a class read drops the keyboard there.
     if (
       heir &&
       heir.closest(".survey-card") &&
       !modalDialogOpen() &&
-      heir.closest(".pane.focused")
+      heir.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId === activeTerminalTab()?.id
     )
       return true;
     if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
