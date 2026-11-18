@@ -12,7 +12,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // Restart connection and Abandon actions for a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, modalDialogOpen, setCoverBlocking, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, inCoverOver, modalDialogOpen, setCoverBlocking, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -198,9 +198,10 @@
     const dialogOpen = modalDialogOpen();
     const active = document.activeElement as HTMLElement | null;
     // An owner that paints over this cover (the close prompt) holds the
-    // keyboard over it, and its element is not the one to return to. A
-    // dialog closing runs this again, and the card takes the keyboard.
-    if (untrack(() => mayFocus(active))) return;
+    // keyboard over it, and its element is not the one to return to; nor is
+    // a cover's painted over this one (the screen lock). A dialog closing
+    // runs this again, and the card takes the keyboard.
+    if (untrack(() => mayFocus(active) || inCoverOver(active, overlayEl))) return;
     if (active && active !== document.body && active !== document.documentElement && !active.closest(`[${COVER_ROOT_ATTR}]`)) {
       focusBeforeCover = { element: active, surface: !!active.closest(".terminal-host, .editor-host") };
       deferredFocus = null;
@@ -213,7 +214,8 @@
     if (dialogOpen && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
     queueMicrotask(() => {
-      if (!mayFocus(document.activeElement)) focusCard();
+      const holder = document.activeElement;
+      if (!mayFocus(holder) && !inCoverOver(holder, overlayEl)) focusCard();
     });
     const onWindowFocus = (): void => {
       const holder = document.activeElement;

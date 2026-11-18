@@ -420,16 +420,35 @@ export function raisedCoverKeys(): string[] {
 /// field that takes no typing.
 export const COVER_ROOT_ATTR = "data-cover";
 
-/// True when `target` is a text-entry control on the surface of a cover that
-/// is up: an input that takes text, a textarea or an editable element whose
-/// nearest marked cover root names a raised cover. A control on a cover that
-/// marks no root, or on a cover that is not raised, reads false, so the guard
-/// fails closed.
+/// True when `target` is a text-entry control on the surface of the cover
+/// that holds the keyboard: an input that takes text, a textarea or an
+/// editable element whose nearest marked cover root is the raised cover that
+/// paints on top. A control on a cover that marks no root, on a cover that
+/// is not raised, or on one painted under another raised cover reads false,
+/// so the guard fails closed.
 export function coverOwnsTextEntry(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   if (!isTextEntry(target)) return false;
-  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
-  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+  return onTopCover(target);
+}
+
+/// Whether `target` sits on the raised cover that paints on top.
+function onTopCover(target: Element): boolean {
+  const root = target.closest(`[${COVER_ROOT_ATTR}]`);
+  return root !== null && root === topCoverRoot();
+}
+
+/// Whether `element` sits in the root of a raised cover that paints over
+/// `own`, a cover's own root, as the screen lock's PIN does over the
+/// session-ended cover; at one level, the later root in the document paints
+/// over. A cover arriving under another leaves it the keyboard.
+export function inCoverOver(element: Element | null, own: Element | null): boolean {
+  const root = element?.closest(`[${COVER_ROOT_ATTR}]`);
+  if (!root || !own || root === own) return false;
+  if (raisedCovers[root.getAttribute(COVER_ROOT_ATTR) ?? ""] !== true) return false;
+  const level = paintLevel(root);
+  const ownLevel = paintLevel(own);
+  return level > ownLevel || (level === ownLevel && (own.compareDocumentPosition(root) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
 }
 
 /// The root of the raised cover that paints on top, the later one in the
@@ -450,11 +469,12 @@ export function topCoverRoot(): Element | null {
   return top;
 }
 
-/// Native activation belongs only to an enabled button on a raised cover.
+/// Native activation belongs only to an enabled button on the raised cover
+/// that paints on top: under the screen lock, the reconnect and
+/// session-ended covers' buttons act on no key.
 export function coverOwnsButton(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLButtonElement) || target.matches(":disabled")) return false;
-  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
-  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+  return onTopCover(target);
 }
 
 /// Input types that act on a click or a pointer rather than on typed text.

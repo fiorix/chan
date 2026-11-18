@@ -8,7 +8,8 @@
 // over both lifts, Cancel has the keyboard again. With no owner to take
 // the keyboard, the cover on top takes it, as the prompt over it closes or
 // a cover over it lifts, and the screen lock, which takes it itself, keeps
-// it. The real covers, lock and prompt, in jsdom.
+// it: a cover arriving under the lock leaves it the keyboard, and its
+// buttons take no key. The real covers, lock and prompt, in jsdom.
 
 import { mount, tick, unmount, type Component } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -23,7 +24,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { promptState, raisedCoverKeys, ui, workspace } from "../state/store.svelte";
+import { coverOwnsButton, promptState, raisedCoverKeys, ui, workspace } from "../state/store.svelte";
 import { __resetWindowLifecycle, markWindowHidden } from "../state/windowLifecycle.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
@@ -242,4 +243,26 @@ test("no cover under the screen lock takes its keyboard, nor takes the keyboard 
   resolveCloseConfirm("cancel");
   await settle();
   expect(cover.contains(document.activeElement), "the cover under the lock takes nothing").toBe(false);
+});
+
+test("the session-ended cover arriving under the screen lock leaves the lock its keyboard, and its button no key", async () => {
+  mountLock();
+  const backdrop = await lock();
+  const cover = await sessionEndedCover();
+  const close = cover.querySelector<HTMLButtonElement>("button.close")!;
+  expect(document.activeElement, "the lock keeps the keyboard").toBe(backdrop);
+  expect(coverOwnsButton(close), "Enter and Space cannot reach the cover's button under the lock").toBe(false);
+  screensaver.locked = false;
+  await settle();
+  expect(coverOwnsButton(close), "the cover's button once the lock lifts").toBe(true);
+  expect(document.activeElement, "and the keyboard with it").toBe(close);
+});
+
+test("the reconnect cover arriving under the screen lock leaves the lock its keyboard", async () => {
+  mountLock();
+  const backdrop = await lock();
+  const cover = await reconnectCover();
+  expect(raisedCoverKeys()).toContain("reconnect");
+  expect(document.activeElement, "the lock keeps the keyboard").toBe(backdrop);
+  expect(cover.contains(document.activeElement)).toBe(false);
 });
