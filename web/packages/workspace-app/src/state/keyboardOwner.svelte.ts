@@ -94,7 +94,7 @@ function topRoot(tag: string): HTMLElement | null {
 /// reader runs again when it changes; the answer comes from the attribute,
 /// which is current both when the launcher covers the page and when it
 /// uncovers, before the observer has run.
-function launcherCovers(): boolean {
+export function launcherCovers(): boolean {
   void launcherShown;
   return launcherShownOverWindow();
 }

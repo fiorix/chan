@@ -1402,7 +1402,8 @@ mod tests {
         );
         assert!(TERMINAL_TAB.contains("from \"../state/keyboardOwner.svelte\";"));
         assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
-        assert!(WINDOW_TAB_BAR.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
+        assert!(KEYBOARD_OWNER.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
+        assert!(WINDOW_TAB_BAR.contains("$derived(launcherCovers())"));
     }
 
     #[test]
