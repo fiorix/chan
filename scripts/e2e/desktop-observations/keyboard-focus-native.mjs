@@ -523,49 +523,58 @@ async function main() {
   if (sentB.where !== "composer") fail("two-pane submit keeps focus and pane", { focus: sentB.where });
   pass("two-pane submit keeps focus and pane", { held: heldB.where, focus: sentB.where, paneA, paneNow });
 
-  // The deck opened by key returns into Search.
+  // The deck opened by its chord returns into Search. The page's command
+  // bus records what a deck run dispatches, so a run is told apart from a
+  // dismissal by its command, not by where the keyboard lands.
+  await page.evaluate(() => {
+    window.__kbdCommands = [];
+    window.addEventListener("chan:command", (event) => window.__kbdCommands.push(event.detail?.name ?? null));
+  });
+  const searchInput = ".search .head input";
+  const deckInput = '[role="dialog"][aria-label="Command launcher"] .deck-input';
   await dispatch("app.search.toggle");
-  await until("search shows its input", () => page.evaluate(() => Boolean(document.querySelector(".search .head input"))), Boolean);
-  const nativeSearchFocus = await page.evaluate(
-    () => document.activeElement === document.querySelector(".search .head input"),
-  );
+  await until("search shows its input", () => page.evaluate((input) => Boolean(document.querySelector(input)), searchInput), Boolean);
+  const nativeSearchFocus = await page.evaluate((input) => document.activeElement === document.querySelector(input), searchInput);
   if (!nativeSearchFocus) {
-    await page.evaluate(() => document.querySelector(".search .head input")?.focus());
+    await page.evaluate((input) => document.querySelector(input)?.focus(), searchInput);
   }
-  const searchFocus = await page.evaluate(() => document.activeElement === document.querySelector(".search .head input"));
+  const searchFocus = await page.evaluate((input) => document.activeElement === document.querySelector(input), searchInput);
   if (!searchFocus) throw new Error("the search input never took focus");
-  await x([], "key", "ctrl+k");
-  const deckByChord = await page
-    .evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input')))
+  const queryBefore = await page.evaluate((input) => document.querySelector(input)?.value ?? "", searchInput);
+  // Off macOS the deck's chord is Ctrl+Alt+K (the key bridge leaves it to the page).
+  await x([], "key", "ctrl+alt+k");
+  const opened = await until("the deck opens by its chord",
+    () => page.evaluate((input) => Boolean(document.querySelector(input)), deckInput), Boolean, 5000).catch(() => false);
+  if (!opened) inconclusive("deck by key returns into Search", "ctrl+alt+k opened no deck");
+  const deckFocused = await until("the deck input takes the keyboard",
+    () => page.evaluate((input) => document.activeElement === document.querySelector(input), deckInput), Boolean, 5000)
     .catch(() => false);
-  let openedBy = "chord";
-  if (!deckByChord) {
-    await dispatch("app.launcher.toggle");
-    openedBy = "dispatch";
-  }
-  await until(
-    "the deck takes the query",
-    () => page.evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input'))),
-    Boolean,
-  );
+  if (!deckFocused) fail("deck by key returns into Search", { deckInputFocused: false, active: (await focusState(null)).where });
+  await page.evaluate(() => { window.__kbdCommands.length = 0; });
   await x([], "type", "--delay", "20", "Copy scrollback");
-  await delay(500);
+  await until("the deck selects Copy scrollback",
+    () => page.evaluate(() => document.querySelector('[role="option"][aria-selected="true"] .deck-result-title')?.textContent?.trim() ?? null),
+    (title) => title === "Copy scrollback", 10_000);
   await x([], "key", "Return");
   const back = await until(
     "the run returns into Search",
     () =>
-      page.evaluate(() => {
-        const input = document.querySelector(".search .head input");
+      page.evaluate((selector) => {
+        const input = document.querySelector(selector);
         return document.activeElement === input ? (input.value ?? null) : false;
-      }),
+      }, searchInput),
     (value) => value !== false,
   ).catch(() => false);
-  if (back === false) fail("deck by key returns into Search", { openedBy, active: (await focusState(null)).where });
+  if (back === false) fail("deck by key returns into Search", { active: (await focusState(null)).where });
+  const dispatched = await page.evaluate(() => window.__kbdCommands.slice());
+  if (!dispatched.includes("app.terminal.copyScrollback")) fail("deck by key returns into Search", { ran: false, dispatched });
   await x([], "type", "Q");
-  const query = await page.evaluate(() => document.querySelector(".search .head input")?.value ?? null);
-  if (!query || !query.includes("Q")) fail("deck by key returns into Search", { openedBy, query });
-  pass("deck by key returns into Search", { openedBy, nativeSearchFocus, query });
+  const query = await page.evaluate((input) => document.querySelector(input)?.value ?? null, searchInput);
+  await shot("search-after-run");
+  if (query !== `${queryBefore}Q`) fail("deck by key returns into Search", { queryBefore, query });
+  pass("deck by key returns into Search", { openedBy: "chord", nativeSearchFocus, queryBefore, query, dispatched });
   await dispatch("app.search.toggle");
+
   // The Computers launcher keeps the keyboard while a deck run settles.
   await x([], "key", "ctrl+shift+p");
   const shown = await until(
@@ -576,12 +585,10 @@ async function main() {
   ).catch(() => false);
   if (!shown) inconclusive("computers launcher did not show", "ctrl+shift+p showed no data-launcher-shown");
   pass("computers launcher shown", {});
-  // The page's command bus records what a deck run dispatches, so a run is
-  // told apart from a dismissal by its command, not by the deck closing.
-  await page.evaluate(() => {
-    window.__kbdCommands = [];
-    window.addEventListener("chan:command", (event) => window.__kbdCommands.push(event.detail?.name ?? null));
-  });
+  // The command recorder the Search step installed starts empty here, so a
+  // run is told apart from a dismissal by its command, not by the deck
+  // closing.
+  await page.evaluate(() => { window.__kbdCommands.length = 0; });
   const deck = '[role="dialog"][aria-label="Command launcher"]';
   const openDeck = async () => {
     await dispatch("app.launcher.toggle");
