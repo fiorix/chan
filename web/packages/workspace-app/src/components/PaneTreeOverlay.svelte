@@ -67,7 +67,7 @@
     tree,
     workspaceDisplayName,
   } from "../state/store.svelte";
-  import { keyboardOwnedAbovePanes, mayFocus, owner } from "../state/keyboardOwner.svelte";
+  import { handKeyboardToOwner, keyboardOwnedAbovePanes, mayFocus, owner } from "../state/keyboardOwner.svelte";
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";
@@ -160,9 +160,10 @@
 
   /// Hand the keyboard back when the tree closed without showing a tab and
   /// left it nowhere: to the element it opened from where the keyboard's
-  /// owner lets it, else to the active tab's surface, unless a survey over
-  /// that terminal or the desktop's launcher holds it, or a dialog or a cover
-  /// has come up and owns it.
+  /// owner lets it, else to the active tab's surface while nothing owns it,
+  /// else to the owner as its surface takes it (a survey over that terminal;
+  /// the desktop's launcher takes nothing here). A dialog or a cover come up
+  /// owns it already.
   function restoreFocus(target: HTMLElement | null): void {
     if (paneTree.open || modalDialogOpen() || appInputBlocked()) return;
     const current = document.activeElement;
@@ -170,6 +171,7 @@
     if (!fell) return;
     if (canTakeFocus(target) && mayFocus(target)) target.focus({ preventScroll: true });
     else if (owner() === null) bumpTabFocusPulse();
+    else handKeyboardToOwner();
   }
 
   // Hybrid Nav, a dialog or a cover coming up closes the tree.
