@@ -45,6 +45,8 @@
   import AddCard from "./AddCard.svelte";
   import DevserverForm from "./DevserverForm.svelte";
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
+  import ConnectionFace from "./ConnectionFace.svelte";
+  import ConnectionDetail from "./ConnectionDetail.svelte";
   import {
     library,
     revokeDevserverNativeTrust,
@@ -193,6 +195,22 @@
   }
 
   const connected = (ds: DevserverEntry): boolean => ds.status === "connected";
+  // The connection health the desktop reads for a devserver it holds a
+  // connection to; null without one, and for a row from a producer that
+  // sends no key.
+  const health = (ds: DevserverEntry) => ds.connection_health ?? null;
+  const connectionField = (ds: DevserverEntry): string => `devserver:${ds.id}:connection`;
+  // The faces count waits and ages against this clock. A quarter-second tick
+  // while any reading shows moves every count by whole seconds without
+  // skipping one.
+  let now = $state(Date.now());
+  const readingShown = $derived(library.devservers.some((ds) => health(ds) !== null));
+  $effect(() => {
+    if (!readingShown) return;
+    now = Date.now();
+    const timer = setInterval(() => { now = Date.now(); }, 250);
+    return () => clearInterval(timer);
+  });
   // The devserver's connection dropped out from under it: the control script
   // exited, or a connected transport stopped answering. The identity row's
   // machine icon turns RED (the same icon is green while connected)
@@ -546,6 +564,7 @@
     </span>
     <PrivateField field={`devserver:${ds.id}:name`} label="computer name"><span class="row-name">{devserverName(ds)}</span></PrivateField>
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
+    {#if health(ds)}<ConnectionFace health={health(ds)!} {now} field={connectionField(ds)} />{/if}
   </span>
   <span class="ds-addr-row">
     <span class="ds-glyph"></span>
@@ -571,7 +590,7 @@
   </span>
 {/snippet}
 
-{#snippet machineCard(node: MachineNode)}
+{#snippet machineCard(node: MachineNode, active: boolean)}
   <section class="card machine">
     {#if node.kind === "local"}
       <div class="card-header machine-header" data-deck-row tabindex="-1">
@@ -785,6 +804,10 @@
           {/if}
         </div>
       </div>
+      {#if active && health(ds)}
+        <!-- The card in front carries its connection detail under the address. -->
+        <div class="ds-health"><ConnectionDetail health={health(ds)!} {now} field={connectionField(ds)} /></div>
+      {/if}
       {#if hasContent(node)}
         {@render machineContent(node)}
       {:else if ds.pending_signin}
@@ -822,11 +845,11 @@
      card, like the deck itself, exists only where that bridge does. -->
 {#if hasDesktopBridge}
   <Carousel deck="computers" items={deckCards} label="Computers">
-    {#snippet card(item: DeckCard)}
+    {#snippet card(item: DeckCard, active: boolean)}
       {#if item.kind === "windows"}
         <AllWindows {tree} />
       {:else if item.kind === "machine"}
-        {@render machineCard(item.node)}
+        {@render machineCard(item.node, active)}
       {:else if item.kind === "orphans"}
         {@render orphanCard()}
       {:else}
@@ -844,7 +867,7 @@
   </Carousel>
 {:else}
   {#each tree.machines as node (machineKey(node))}
-    {@render machineCard(node)}
+    {@render machineCard(node, false)}
   {/each}
   {#if tree.orphans.length}
     {@render orphanCard()}
@@ -893,6 +916,9 @@
     color: var(--text);
   }
 
+  /* The connection detail under the devserver's address, its text in line
+     with the name's. */
+  .ds-health { padding: 0.1rem 0.6rem 0.6rem 1.75rem; }
   /* The devserver identity block (name row over address row). On the mutable
      surface it is a button: the whole block opens the edit-config form, lifting
      a hover tint; the read-only surface renders it as a static div. */
