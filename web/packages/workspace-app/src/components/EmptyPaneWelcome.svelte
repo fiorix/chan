@@ -23,6 +23,7 @@
   // caller is shown as given.
 
   import { onMount, tick, untrack, type Component } from "svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
   import BeadedTorus from "./BeadedTorus.svelte";
   import BranchingWreath from "./BranchingWreath.svelte";
@@ -177,11 +178,14 @@
     return () => clearTimeout(timer);
   });
 
+  // The welcome takes the keyboard left at large, where the keyboard's owner
+  // lets it: not under the Computers launcher, a dialog, an overlay or a
+  // cover over the window.
   $effect(() => {
     const surface = welcome;
     if (!surface) return;
     queueMicrotask(() => {
-      if (surface.isConnected && document.activeElement === document.body) {
+      if (surface.isConnected && document.activeElement === document.body && mayFocus(surface)) {
         surface.focus({ preventScroll: true });
       }
     });
