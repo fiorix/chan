@@ -170,7 +170,7 @@ export default {
       // The zeros line reaches the last column: a short zeros line would
       // still pass the ink floor on the left while proving nothing about
       // the right edge.
-      const zeros = (await cs(["scrollback", "--tab-name", TAB])).stdout.split("\n").filter((l) => /^0+$/.test(l));
+      const zeros = (await cs(["scrollback", "--tab-name", TAB])).stdout.split(/\r?\n/).filter((l) => /^0+$/.test(l));
       if (!zeros.some((l) => l.length >= 150)) {
         throw new Error("the full-width line never printed");
       }
