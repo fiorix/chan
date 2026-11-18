@@ -353,28 +353,75 @@ fn bytes_that_miss_their_pin_are_not_published() {
 }
 
 #[test]
-fn a_completed_part_that_hashes_wrong_is_discarded_and_fetched_again() {
+fn a_completed_part_that_hashes_wrong_is_fetched_again_in_the_same_call() {
     let cache = tempfile::tempdir().unwrap();
     let partial = part_file(cache.path(), b"{\"fixture\":TRUE}\n");
     let server = Server::start(|request| match requested_range(request) {
         "bytes=0-" => range_response(BODY, 0),
         _ => response("400 Bad Request", "", b"unexpected range"),
     });
-    let client = client(cache.path(), &server);
-    let error = client
+    let path = client(cache.path(), &server)
         .get("fixture/model", "config.json")
-        .expect_err("a part of the pinned size with the wrong bytes must be refused");
+        .expect("a kept part that hashes wrong is replaced by the whole file");
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
+    assert!(!partial.exists());
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_resume_whose_kept_prefix_is_wrong_restarts_once_from_zero() {
+    let cache = tempfile::tempdir().unwrap();
+    part_file(cache.path(), b"XYZ");
+    let server = Server::start(|request| match requested_range(request) {
+        "bytes=3-" => range_response(BODY, 3),
+        "bytes=0-" => range_response(BODY, 0),
+        _ => response("400 Bad Request", "", b"unexpected range"),
+    });
+    let path = client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .expect("a resume that hashes wrong fetches the whole file once more");
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
+    assert_eq!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| requested_range(request))
+            .collect::<Vec<_>>(),
+        ["bytes=3-", "bytes=0-"],
+        "the resume, then one fresh download in the same call"
+    );
+}
+
+#[test]
+fn a_fresh_download_that_hashes_wrong_after_a_restart_fails() {
+    let cache = tempfile::tempdir().unwrap();
+    let wrong = b"{\"fixture\":TRUE}\n";
+    part_file(cache.path(), &wrong[..3]);
+    let server = Server::start(move |request| match requested_range(request) {
+        "bytes=3-" => range_response(wrong, 3),
+        "bytes=0-" => range_response(wrong, 0),
+        _ => response("400 Bad Request", "", b"unexpected range"),
+    });
+    let error = client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .expect_err("bytes that hash wrong from zero are refused");
     assert!(
         error
             .to_string()
             .contains("does not match its pinned sha256"),
         "{error}"
     );
-    assert!(server.requests.lock().unwrap().is_empty());
-    assert_eq!(std::fs::read(&partial).unwrap(), b"");
-    let path = client.get("fixture/model", "config.json").unwrap();
-    assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        2,
+        "one restart, not a loop"
+    );
+    assert_eq!(
+        std::fs::read(snapshot(cache.path()).join("config.json.part")).unwrap(),
+        b""
+    );
 }
 
 #[test]

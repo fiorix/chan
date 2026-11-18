@@ -91,7 +91,9 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::a_download_fetches_its_pinned_commit_and_publishes_it \
 	index::embeddings::download::tests::partial_download_resumes_and_publishes_exact_bytes \
 	index::embeddings::download::tests::bytes_that_miss_their_pin_are_not_published \
-	index::embeddings::download::tests::a_completed_part_that_hashes_wrong_is_discarded_and_fetched_again \
+	index::embeddings::download::tests::a_completed_part_that_hashes_wrong_is_fetched_again_in_the_same_call \
+	index::embeddings::download::tests::a_resume_whose_kept_prefix_is_wrong_restarts_once_from_zero \
+	index::embeddings::download::tests::a_fresh_download_that_hashes_wrong_after_a_restart_fails \
 	index::embeddings::download::tests::a_whole_file_answer_to_a_resume_restarts_from_it \
 	index::embeddings::download::tests::a_foreign_resume_range_empties_the_part_for_the_next_attempt \
 	index::embeddings::download::tests::a_waiting_download_reuses_the_winners_file \

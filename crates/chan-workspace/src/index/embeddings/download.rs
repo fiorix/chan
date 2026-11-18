@@ -270,18 +270,63 @@ impl Client {
     }
 
     fn download(&self, url: &Url, file: &ModelFile, path: &Path) -> Result<(), DownloadError> {
-        let size = file.size;
         let part_path = path.with_file_name(format!("{}.part", file.name));
         let mut part = open_part(&part_path)?;
         let mut start = part.metadata()?.len();
-        if start > size {
+        if start > file.size {
             part.set_len(0)?;
             part.rewind()?;
             start = 0;
         }
+        let progress = self
+            .progress
+            .then(|| progress_bar(file.size, start, file.name));
+        let mut fresh = start == 0;
+        loop {
+            let actual = self.transfer(url, file, &mut part, start, progress.as_ref())?;
+            if actual == file.sha256 {
+                break;
+            }
+            // Bytes of the right length that hash wrong cannot be resumed.
+            part.set_len(0)?;
+            part.rewind()?;
+            if fresh {
+                return Err(DownloadError::Digest {
+                    file: file.name,
+                    expected: file.sha256,
+                    actual,
+                });
+            }
+            // The kept prefix may be what was wrong: fetch the whole file
+            // once more before failing.
+            fresh = true;
+            start = 0;
+            if let Some(progress) = &progress {
+                progress.set_position(0);
+            }
+        }
+        part.sync_all()?;
+        drop(part);
+        std::fs::rename(&part_path, path)?;
+        if let Some(progress) = progress {
+            progress.finish();
+        }
+        Ok(())
+    }
+
+    /// Fill `part` from its first `start` bytes to `file`'s pinned size, and
+    /// return the sha256 of all of it.
+    fn transfer(
+        &self,
+        url: &Url,
+        file: &ModelFile,
+        part: &mut File,
+        mut start: u64,
+        progress: Option<&ProgressBar>,
+    ) -> Result<String, DownloadError> {
+        let size = file.size;
         let mut hasher = Sha256::new();
-        hash_prefix(&mut part, start, &mut hasher)?;
-        let progress = self.progress.then(|| progress_bar(size, start, file.name));
+        hash_prefix(part, start, &mut hasher)?;
         if start != size {
             let response = self
                 .request(url)?
@@ -307,7 +352,7 @@ impl Client {
                 part.rewind()?;
                 start = 0;
                 hasher = Sha256::new();
-                if let Some(progress) = &progress {
+                if let Some(progress) = progress {
                     progress.set_position(0);
                 }
             }
@@ -333,28 +378,12 @@ impl Client {
                 part.write_all(&buffer[..read])?;
                 hasher.update(&buffer[..read]);
                 remaining -= read as u64;
-                if let Some(progress) = &progress {
+                if let Some(progress) = progress {
                     progress.inc(read as u64);
                 }
             }
         }
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != file.sha256 {
-            // Bytes of the right length that hash wrong cannot be resumed.
-            part.set_len(0)?;
-            return Err(DownloadError::Digest {
-                file: file.name,
-                expected: file.sha256,
-                actual,
-            });
-        }
-        part.sync_all()?;
-        drop(part);
-        std::fs::rename(&part_path, path)?;
-        if let Some(progress) = progress {
-            progress.finish();
-        }
-        Ok(())
+        Ok(format!("{:x}", hasher.finalize()))
     }
 }
 
