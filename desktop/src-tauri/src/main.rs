@@ -4570,6 +4570,18 @@ fn devserver_id_for_window_label(feed: &DevserverFeed, label: &str) -> Option<St
     feed.devserver_id_for_library(library_id)
 }
 
+/// The Computers card that Show in Computers brings to the front for the
+/// window `label`: its devserver's, named by the devserver's id, which is the
+/// card's key on the Computers screen. `Ok(None)` when no devserver holds the
+/// window's library any more, where the screen opens at its first card. A
+/// window that no devserver serves (a local window, a control terminal) is
+/// refused.
+fn devserver_card_for_window(feed: &DevserverFeed, label: &str) -> Result<Option<String>, String> {
+    let library_id = devserver_library_id_from_window_label(label)
+        .ok_or_else(|| format!("{label} is not a devserver window"))?;
+    Ok(feed.devserver_id_for_library(library_id))
+}
+
 /// Reload the calling webview window. Backs the SPA's tab
 /// context-menu "Reload" entry AND the
 /// `Cmd+R` accelerator wired in `KEY_BRIDGE_JS`. The accelerator
@@ -4842,6 +4854,25 @@ fn hide_from_close_confirm<R: tauri::Runtime>(
 #[tauri::command]
 fn close_window_refusal(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Option<String> {
     last_window::check_window(&app, window.label(), last_window::Gesture::Close).err()
+}
+
+/// Show the Computers screen over the calling devserver window, or keep it
+/// shown, with that devserver's card in front and the keyboard on it (the
+/// disconnect overlay's Show in Computers). The card is resolved from the
+/// window's `<library_id>::<window_id>` label through the feed's cached
+/// lookup, as Reconnect resolves its devserver, and the screen opens at its
+/// first card when no devserver holds the library any more. It reads the
+/// desktop's own state and the launcher's library, nothing of the devserver's,
+/// so it works while the devserver does not answer. Refused on a window no
+/// devserver serves and when the screen did not show.
+#[tauri::command]
+async fn show_computers_for_window(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let card = devserver_card_for_window(&state.devserver_feed, window.label())?;
+    launcher_panel::show_card(&app, window.label(), card.as_deref()).await
 }
 
 /// Abandon the devserver backing a workspace window (the disconnect overlay's
@@ -5559,6 +5590,7 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         close_window_refusal,
         abandon_devserver_for_window,
         reconnect_devserver_for_window,
+        show_computers_for_window,
         // The command deck's library-window actions. Both resolve the
         // library from the invoking window's own label, so a window reaches
         // only its own; the ACL decides which windows may invoke at all.
@@ -10303,6 +10335,27 @@ mod tests {
         );
         assert_eq!(devserver_id_for_window_label(&feed, "local::w-1"), None);
         assert_eq!(devserver_id_for_window_label(&feed, "lib-fed"), None);
+    }
+
+    /// Show in Computers brings the window's devserver card to the front by
+    /// the devserver's id, the card's key; a devserver window whose library no
+    /// devserver holds any more gets the screen's first card, and a window no
+    /// devserver serves is refused rather than shown some other card.
+    #[test]
+    fn show_in_computers_names_the_windows_devserver_card() {
+        let feed = DevserverFeed::default();
+        feed.seed_library_id("ds-1".to_string(), "lib-fed".to_string());
+        assert_eq!(
+            devserver_card_for_window(&feed, "lib-fed::w-1"),
+            Ok(Some("ds-1".to_string()))
+        );
+        assert_eq!(devserver_card_for_window(&feed, "lib-gone::w-1"), Ok(None));
+        for label in ["local::w-1", "control-terminal-ds-1", "lib-fed", "about"] {
+            assert_eq!(
+                devserver_card_for_window(&feed, label),
+                Err(format!("{label} is not a devserver window")),
+            );
+        }
     }
 
     /// The library-window commands scope every action to the library named by

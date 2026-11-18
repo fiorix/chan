@@ -16,8 +16,9 @@
 //! stops a window holding two webviews from resolving as a `WebviewWindow`.
 //! Outside Tauri the launcher webview has no Tauri IPC, so launcher_ipc.js
 //! gives the page the calls its desktop module makes, and this module
-//! answers exactly the commands in `LauncherCommand` and forwards exactly the
-//! events in `FORWARDED_EVENTS`.
+//! answers exactly the commands in `LauncherCommand`, forwards exactly the
+//! events in `FORWARDED_EVENTS` and sends one host's launcher alone the card
+//! event, `SHOW_CARD_EVENT`.
 //!
 //! Off macOS a window wears the launcher menubar while its launcher shows,
 //! except on Windows a window whose title bar holds its page's tab bar
@@ -93,6 +94,16 @@ pub(crate) const FORWARDED_EVENTS: [&str; 7] = [
     "auth-changed",
     crate::gateway::LAUNCHER_NOTICE,
 ];
+
+/// The event that brings one card of the Computers screen to the front
+/// (web-launcher App.svelte). Unlike [`FORWARDED_EVENTS`] it goes to one
+/// host's launcher alone ([`show_card`]), since each launcher keeps its own
+/// deck position and another window's must not move.
+pub(crate) const SHOW_CARD_EVENT: &str = "launcher-show-devserver-card";
+
+/// How long [`show_card`] waits for a toggle already running on its host.
+/// It covers a first show's page load (`FIRST_LOAD_TIMEOUT`) and its slide.
+const CARD_SHOW_WAIT: Duration = Duration::from_secs(5);
 
 /// Both cards slide together for this long in launcher_transition.js.
 pub(crate) const SLIDE_MS: u64 = 320;
@@ -264,6 +275,55 @@ pub(crate) async fn show_for_attention(app: &AppHandle) -> bool {
     true
 }
 
+/// Show `host`'s launcher, or keep it shown, and bring the card of the
+/// devserver `devserver_id` to the front of its Computers screen with the
+/// keyboard on it; `None` brings the screen's first card. The card goes once
+/// the show has returned, as `show_for_attention`'s event does, so a
+/// launcher the show had to build has loaded and subscribed, and it goes to
+/// this host's launcher alone. A toggle already running on the host is waited
+/// for, so the screen ends shown whichever way that toggle was going.
+pub(crate) async fn show_card(
+    app: &AppHandle,
+    host: &str,
+    devserver_id: Option<&str>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + CARD_SHOW_WAIT;
+    let _guard = loop {
+        if let Some(guard) = TransitionGuard::take(host) {
+            break guard;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the Computers screen is still moving over this window".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if !panel_is_visible(host) {
+        show_async(app, host).await?;
+        if !panel_is_visible(host) {
+            return Err("the Computers screen did not show over this window".into());
+        }
+    }
+    let script = show_card_js(devserver_id);
+    let host = host.to_string();
+    // A screen that was already shown may have lost the keyboard to its
+    // host page; the card's focus is only the launcher page's own.
+    window_ops::on_main(app, move || {
+        reclaim_keyboard(&host);
+        evaluate_in_launcher(&host, &script);
+    })
+    .await
+}
+
+/// The script that hands a launcher page [`SHOW_CARD_EVENT`], naming the
+/// devserver whose card goes in front, or `null` for the screen's first card.
+fn show_card_js(devserver_id: Option<&str>) -> String {
+    format!(
+        "window.__chanLauncherHost&&window.__chanLauncherHost.emit({},{});",
+        serde_json::json!(SHOW_CARD_EVENT),
+        serde_json::json!({ "devserverId": devserver_id }),
+    )
+}
+
 pub(crate) fn toggle(app: &AppHandle, host: &str) {
     spawn_transition(app, host, !panel_is_visible(host));
 }
@@ -399,11 +459,6 @@ pub(crate) fn has_launcher(host: &str) -> bool {
 }
 
 /// Evaluate `script` in `host`'s launcher, when it has one. Main thread.
-/// Compiled everywhere like [`has_launcher`].
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "only the macOS wake repaint calls it")
-)]
 pub(crate) fn evaluate_in_launcher(host: &str, script: &str) {
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
@@ -1685,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn every_event_the_launcher_listens_to_is_forwarded() {
+    fn every_event_the_launcher_listens_to_reaches_it() {
         const LAUNCHER_APP: &str = include_str!("../../../web/packages/launcher/src/App.svelte");
         let mut listened: Vec<String> = LAUNCHER_APP
             .match_indices("onTauriEvent")
@@ -1699,9 +1754,71 @@ mod tests {
             .collect();
         listened.extend(invoked(crate::privacy::BRIDGE, "listen('", '\''));
         listened.sort();
-        let mut forwarded: Vec<String> = FORWARDED_EVENTS.iter().map(|e| e.to_string()).collect();
-        forwarded.sort();
-        assert_eq!(listened, forwarded);
+        // The card event is the one the desktop addresses to a single
+        // launcher, and the only one.
+        let mut delivered: Vec<String> = FORWARDED_EVENTS
+            .iter()
+            .chain([&SHOW_CARD_EVENT])
+            .map(|e| e.to_string())
+            .collect();
+        delivered.sort();
+        assert_eq!(listened, delivered);
+        assert!(!FORWARDED_EVENTS.contains(&SHOW_CARD_EVENT));
+    }
+
+    /// The card event names the devserver by the card's key, or no devserver
+    /// for the screen's first card, in the field the launcher reads.
+    #[test]
+    fn the_card_event_names_the_devserver_or_none() {
+        const COMPUTER_ACTIONS: &str =
+            include_str!("../../../web/packages/launcher/src/state/computerActions.ts");
+        assert_eq!(
+            show_card_js(Some("ds-1")),
+            r#"window.__chanLauncherHost&&window.__chanLauncherHost.emit("launcher-show-devserver-card",{"devserverId":"ds-1"});"#
+        );
+        assert_eq!(
+            show_card_js(None),
+            r#"window.__chanLauncherHost&&window.__chanLauncherHost.emit("launcher-show-devserver-card",{"devserverId":null});"#
+        );
+        // A quote in an id stays inside its JSON string.
+        assert!(show_card_js(Some("a\"b")).contains(r#"{"devserverId":"a\"b"}"#));
+        assert!(COMPUTER_ACTIONS.contains("devserverId"));
+    }
+
+    /// The card goes to the host's own launcher once a show has made it
+    /// visible, under the host's transition guard so no toggle interleaves,
+    /// and never through the broadcast every launcher hears. Pinned in the
+    /// source because the show needs a live webview.
+    #[test]
+    fn the_card_follows_the_show_in_the_hosts_launcher_alone() {
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let (production, _) = SOURCE
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, rest) = production
+            .split_once("\npub(crate) async fn show_card(")
+            .expect("the function exists");
+        let show = rest
+            .split_once("\n}\n")
+            .expect("it ends at a column-0 brace")
+            .0;
+        let guard = show
+            .find("TransitionGuard::take(host)")
+            .expect("the card waits for the host's transition guard");
+        let shown = show
+            .find("show_async(app, host).await?;")
+            .expect("a hidden screen is shown first");
+        let checked = show
+            .find("if !panel_is_visible(host) {\n            return Err(")
+            .expect("a show that did not happen is refused");
+        let keyboard = show
+            .find("reclaim_keyboard(&host);")
+            .expect("the shown launcher holds the keyboard");
+        let card = show
+            .find("evaluate_in_launcher(&host, &script);")
+            .expect("the card goes to this host's launcher");
+        assert!(guard < shown && shown < checked && checked < keyboard && keyboard < card);
+        assert!(!show.contains("emit("), "the card is not broadcast");
     }
 
     #[test]

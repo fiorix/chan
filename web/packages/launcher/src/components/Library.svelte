@@ -55,6 +55,7 @@
     clearError,
   } from "../state/library.svelte";
   import {
+    ALL_WINDOWS_CARD,
     connectComputer,
     canOpenWorkspaceWindow,
     detachTmux,
@@ -282,7 +283,7 @@
     | { key: string; label: string; kind: "orphans" }
     | { key: string; label: string; kind: "add" };
   const deckCards = $derived.by((): DeckCard[] => {
-    const cards: DeckCard[] = [{ key: "all-windows", label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
+    const cards: DeckCard[] = [{ key: ALL_WINDOWS_CARD, label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
       key: machineKey(node),
       label: privateText(machineName(node), node.kind === "local" ? "This machine" : "Computer"),
       kind: "machine" as const,

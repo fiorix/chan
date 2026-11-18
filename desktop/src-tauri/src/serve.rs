@@ -5268,6 +5268,28 @@ mod tests {
         );
     }
 
+    /// The reconnecting cover offers Show in Computers only where the
+    /// installed desktop advertises its command, so the advertisement names
+    /// it, and every devserver window class the desktop opens is granted it.
+    #[test]
+    fn show_in_computers_is_advertised_and_granted_to_every_devserver_window() {
+        assert!(
+            crate::runtime_capability::GATEWAY_WINDOW_COMMANDS
+                .contains(&"show_computers_for_window"),
+            "native_vocabulary must advertise show_computers_for_window"
+        );
+        for (class, label, origin) in ORIGIN_CLASSES {
+            if !label.starts_with("lib-") {
+                continue;
+            }
+            let (app_commands, _) = effective_grants(label, origin);
+            assert!(
+                app_commands.contains("show_computers_for_window"),
+                "{class}: `show_computers_for_window` must be granted"
+            );
+        }
+    }
+
     /// A page's tab bar in the title bar reaches every window class that
     /// shows the workspace app: the title bar commands, the preference pair,
     /// the window controls and the launcher's menus a page draws on Windows,

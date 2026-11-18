@@ -15,11 +15,13 @@ import {
   openTmuxWindow,
   setWindowShown,
   showComputerCard,
+  showDevserverCard,
   turnOffWorkspace,
   turnOnAndOpenWorkspace,
 } from "./computerActions";
 import { cancelConfirm, confirm } from "./confirm.svelte";
-import { decks, resetDeck } from "./deck.svelte";
+import { decks, resetDeck, showCard } from "./deck.svelte";
+import { library } from "./library.svelte";
 import { screen } from "./screen.svelte";
 import { resetWindowManager } from "./windowManager.svelte";
 
@@ -364,6 +366,43 @@ describe("the command deck's wrappers", () => {
     expect(screen.current).toBe("computers");
     expect(decks.computers.activeKey).toBe("ds-deck");
     expect(decks.computers.focusSeq).toBe(asked + 1);
+  });
+
+  it("showDevserverCard brings a listed devserver's card, and the first card for any other", () => {
+    library.loaded = true;
+    library.devservers = [{ id: "ds-listed" } as DevserverEntry];
+    try {
+      screen.current = "gateways";
+      showCard("computers", "local");
+      const asked = decks.computers.focusSeq;
+      expect(showDevserverCard("ds-listed")).toBe(true);
+      expect(screen.current).toBe("computers");
+      expect(decks.computers.activeKey).toBe("ds-listed");
+      expect(decks.computers.focusSeq).toBe(asked + 1);
+      expect(showDevserverCard("ds-gone")).toBe(true);
+      expect(decks.computers.activeKey).toBe("all-windows");
+      showCard("computers", "local");
+      expect(showDevserverCard(null)).toBe(true);
+      expect(decks.computers.activeKey).toBe("all-windows");
+      expect(decks.computers.focusSeq).toBe(asked + 3);
+    } finally {
+      library.loaded = false;
+      library.devservers = [];
+      resetDeck();
+    }
+  });
+
+  it("showDevserverCard holds the devserver's key until the library has been read", () => {
+    library.loaded = false;
+    library.devservers = [];
+    try {
+      expect(showDevserverCard("ds-later"), "an unread registry cannot say the row is gone").toBe(false);
+      expect(decks.computers.activeKey).toBe("ds-later");
+      expect(showDevserverCard(null), "no devserver needs no reading").toBe(true);
+      expect(decks.computers.activeKey).toBe("all-windows");
+    } finally {
+      resetDeck();
+    }
   });
 
   it("copyGatewayPublicKey writes the whole key to the clipboard", async () => {
