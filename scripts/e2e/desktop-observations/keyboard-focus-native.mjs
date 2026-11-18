@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 // Keyboard ownership on chan-desktop (WebKitGTK): a real pointer press on
-// the Rich Prompt's Submit keeps the composer's focus at the press and after
-// the click; a two-pane press moves no focus and leaves the other pane
-// active; the deck opened by key returns into Search; and with the
+// the Rich Prompt's Submit keeps the composer's focus at the press and
+// after the click; a two-pane press moves no focus and leaves the other
+// pane active; the deck opened by key returns into Search; and with the
 // Computers launcher shown, a deck run, and a deck dismissal opened from a
 // focused composer, leave the page's keyboard where it was. Those two read
 // the page's focus only, not the launcher's own webview. The dismissal runs
 // last: it fails today, since the deck's close focuses its return target
-// unguarded, and it stays a target for the keyboard arbiter. Anything the
-// guest cannot show ends the run inconclusive, not failed: exit 0 holds, 2
-// the environment cannot run this driver, 3 inconclusive. Exit 10 reports
-// an observed fault (the wrapper's obs_judge turns it into 1). Its red
-// variant runs on a tree with `keyboard-focus-native.red.patch` applied,
-// which drops the Computers launcher from the keyboard rule alone: the
-// Copy scrollback row then focuses its terminal from under the launcher.
-// The deck's own launcher check alone is no red: the rule at the end of
-// that check covers it. On a tree with 294's red patch the press steps fail; with
-// --keep-going the run records each fault and goes on, so one red reading
-// shows every step that fails on it.
+// without asking the keyboard rule, and it stays red until that focus asks
+// it. Anything the guest cannot show ends the run inconclusive, not failed:
+// exit 0 holds, 2 the environment cannot run this driver, 3 inconclusive.
+// Exit 10 reports an observed fault (the wrapper's obs_judge turns it into
+// 1). Its red variant runs on a tree with `keyboard-focus-native.red.patch`
+// applied, which drops the Computers launcher from the keyboard rule alone:
+// the Copy scrollback row then focuses its terminal from under the
+// launcher. The deck's own launcher check alone is no red: the rule at the
+// end of that check covers it. On a tree with 294's red patch the press
+// steps fail; with --keep-going the run records each fault and goes on, so
+// one red reading shows every step that fails on it.
 //
 // What XTEST drives and what the inspector drives is deliberate: pointer
 // presses, the Computers chord and typed text go through the real input
@@ -668,11 +668,11 @@ async function main() {
   await shot("run-settled");
   pass("deck run settles under the launcher", { active: settled.where, ran });
 
-  // A dismissal, last because it is the arbiter's target: the deck opens
-  // from a focused composer, so the composer is its return target; the
-  // Computers launcher then shows over it, and the deck closes by its own
-  // toggle and runs nothing. A close that hands the return target back
-  // takes the keyboard from the launcher.
+  // A dismissal, last because it fails until the deck's dismissal focus
+  // asks the keyboard rule: the deck opens from a focused composer, so the
+  // composer is its return target; the Computers launcher then shows over
+  // it, and the deck closes by its own toggle and runs nothing. A close
+  // that hands the return target back takes the keyboard from the launcher.
   await x([], "key", "ctrl+shift+p");
   const hiddenFirst = await until("the Computers launcher hides before the dismissal",
     () => launcherShown().then((shown) => !shown), Boolean, 10_000).catch(() => false);
