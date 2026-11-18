@@ -9,6 +9,7 @@
 // its root is looked up in the page when `ownerRoot` or `mayFocus` asks,
 // never kept, so no reader holds a root from before its surface mounted.
 
+import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setConfirmRestoreGate } from "./confirm.svelte";
 import { appInputBlocked, modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor } from "./survey.svelte";
@@ -188,4 +189,23 @@ export function handKeyboardToOwner(): boolean {
   const take = root ? takers.get(root) : undefined;
   take?.();
   return take !== undefined;
+}
+
+// When the last cover over the window lifts with the keyboard at large (the
+// cover's own field went with it), the keyboard goes to its owner as the
+// owner's surface takes it: a dialog under the screen lock takes its field
+// back on unlock.
+if (typeof document !== "undefined") {
+  $effect.root(() => {
+    let covered = appInputBlocked();
+    $effect(() => {
+      const now = appInputBlocked();
+      if (covered && !now) {
+        queueMicrotask(() => {
+          if (!appInputBlocked() && !canTakeFocus(document.activeElement)) handKeyboardToOwner();
+        });
+      }
+      covered = now;
+    });
+  });
 }

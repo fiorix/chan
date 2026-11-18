@@ -28,7 +28,8 @@ function repair(): void {
   if (!shell || inside(shell, document.activeElement)) return;
   // An owner of the dialogs' tier painted above them (a window-wide
   // survey) holds the keyboard, as does a cover over the window; the dialog
-  // takes it back when the keyboard is handed back to it.
+  // takes it back when the keyboard is handed back to it, as the survey
+  // closes or as the last cover lifts.
   if (owner()?.kind === "modal" && !mayFocus(shell.panel)) return;
   const target = inside(shell, shell.lastFocus) ? shell.lastFocus : shell.panel;
   target.focus({ preventScroll: true });
