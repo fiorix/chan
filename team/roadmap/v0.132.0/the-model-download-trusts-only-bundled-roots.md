@@ -84,7 +84,7 @@ The native selection is 65 names: the 62 the cross-platform section records plus
 
 ## The pinned layout, 2026-11-18
 
-On 2026-11-18 the owner decided that the download writes a pinned layout instead of hf-hub's (`dev/v0132/decisions.md`, "The review stage", point 1: "hf-hub: yes agree"). That reverses the layout half of the v0.131.0 decision above, and of contract 3. Built on `v0132/download` from `842532b7d`.
+On 2026-11-18 the owner decided that the download writes a pinned layout instead of hf-hub's (`dev/v0132/decisions.md` in the development tree, "The review stage", point 1: "hf-hub: yes agree"). That reverses the layout half of the v0.131.0 decision above, and of contract 3. Built on `v0132/download` from `842532b7d`.
 
 - **The pins.** The model table (`config::EMBEDDING_MODELS`) pins each model's commit and the sha256 and size of each file chan downloads.
   - They were read from the Hub on 2026-11-18: the API's `main` commit, the LFS sha256 for the weights and bge-m3's tokenizer, and the other files fetched at that commit and hashed. Each fetched file's git blob id matched the one the API names.
@@ -102,10 +102,17 @@ On 2026-11-18 the owner decided that the download writes a pinned layout instead
   - With that CA in the bundle `SSL_CERT_FILE` names, the pinned `config.json` downloads; without it, the download fails with the certificate error.
   - Run against `842532b7d`, the certificate half passes, since today's trust already refuses the CA. The completing half fails there on the request shape, not on trust: today's client reached the proxy through TLS and asked for `resolve/main`, which the pinned proxy does not serve.
   - Replacing the production trust line with an empty root store turns the completing half red on this branch.
-- **The merge record's follow-ups.** These close: no timeouts, the blob not checked against its hash, and the dangling snapshot link (there are no links). Still open: a 206 at a foreign range, `refs/.tmp*` after a crash, and the duplicated `ca.der`.
+- **The merge record's follow-ups.** All close. The timeouts are set, and every file is checked against its pinned hash. A dangling snapshot link no longer blocks: the download's rename replaces the link at the pinned path (a Unix test holds it). A 206 at another range than the one asked empties the part, so the next attempt starts clean. `fetch-models` skips a `refs/.tmp*` a crash left, and `.part` files. The TLS tests make their CA at run time, so no `ca.der` is duplicated.
 - **The real reading** (2026-11-18, in an sdme guest against the Hub):
   - `chan workspace index download-model` into an empty cache fetched `BAAI/bge-small-en-v1.5`'s three pinned files in about 4 s.
   - They landed as plain files under `snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/`, beside `refs/main` and an empty lock file each. No link, `blobs/` or `.part` remained, and each sha256 was the pinned one.
   - A second run reported the model present.
   - A three-note workspace with semantic search on, served by `chan serve`, answered `chan workspace search` in hybrid mode. For a query sharing no word with any note, the matching note ranked first.
-- **The native Windows selection** (`CHAN_WORKSPACE_WINDOWS_TESTS` in the root Makefile) names the reworked tests: 51 names, 39 of them the download's. It has not run on the Windows VM. The Windows trust reading stays pending, and the macOS reading stays postponed by the owner.
+- **The fix round** (one reader's should-fix items and notes):
+  - A resume answered with the whole file restarts from it, and one answered at another range empties the part.
+  - bge-m3 is refused before any request: "BAAI/bge-m3 cannot be downloaded: its Hub repository publishes no model.safetensors". Settings and the CLI still list it until the owner decides whether it stays; if it goes, the refusal path stays for the next such model.
+  - A resume that hashes wrong fetches the whole file once more in the same call.
+  - One rule decides "downloaded" for the downloader, the resolver and the seeder, and all of a model's files come from one snapshot.
+  - The part an earlier chan left in `blobs/` is removed once its file is published.
+  - A test checks the table itself: lowercase 40-hex commits, 64-hex sha256s with sizes, and the files the embedder reads.
+- **The native Windows selection** (`CHAN_WORKSPACE_WINDOWS_TESTS` in the root Makefile) names the reworked tests: 58 names, 46 of them the download's. The Windows trust reading stays pending, and the macOS reading stays postponed by the owner.
