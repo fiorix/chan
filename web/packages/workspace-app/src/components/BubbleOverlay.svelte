@@ -65,10 +65,17 @@
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
-      // The rule reads the remembered element's terminal, so a survey over
-      // that terminal counts as an owner: its card keeps the keyboard and
-      // the remembered element behind it is left alone.
-      const ownerSlot = slot ?? target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
+      // A remembered survey card is the owner itself: the terminal rule
+      // would count that terminal's survey and refuse the return to the
+      // card it took the keyboard from, so a card reads the window-wide
+      // slot instead. Anything else reads its terminal, so a survey over
+      // that terminal keeps the keyboard and the element behind it is left
+      // alone.
+      const ownerSlot =
+        slot ??
+        (target?.closest(".survey-card")
+          ? null
+          : (target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null));
       queueMicrotask(() => {
         // The remembered element gets the keyboard back only while no other
         // owner holds it: a survey closing under a dialog, the launcher or

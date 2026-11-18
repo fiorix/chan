@@ -671,6 +671,40 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
     }
   });
 
+  // The window-wide survey's close hands the keyboard back to the card it
+  // took it from: a remembered survey card is the owner itself, not an
+  // element behind one.
+  test("a closing window-wide survey hands the keyboard back to the terminal's card", async () => {
+    const terminal = await focusedTerminal();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const overlay = mount(BubbleOverlay, { target });
+    showSurvey(SURVEY, terminal.tab.id);
+    await settle();
+    const card = terminal.target.querySelector<HTMLElement>(".survey-card");
+    expect(card, "the terminal survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the terminal card takes the keyboard").toBe(card));
+    showSurvey({ ...SURVEY, surveyId: "survey-window-p6" }, null);
+    await settle();
+    const wide = target.querySelector<HTMLElement>(".survey-card");
+    expect(wide, "the window-wide survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the window-wide card takes the keyboard").toBe(wide));
+    const focus = vi.spyOn(card!, "focus");
+    try {
+      // The window-wide survey is answered elsewhere: its slot retires
+      // through the remote-close path, as a timeout or another window does.
+      closeSurveyFromRemote("survey-window-p6");
+      await settle();
+      expect(focus, "the terminal card is asked for the keyboard").toHaveBeenCalled();
+      await vi.waitFor(() => expect(document.activeElement, "the terminal card keeps the keyboard").toBe(card));
+    } finally {
+      focus.mockRestore();
+      resetSurveysForTest();
+      unmount(overlay);
+      target.remove();
+    }
+  });
+
   // The window-wide survey's close returns the remembered element only while
   // no other owner holds the keyboard: with a survey over the remembered
   // element's terminal, the close leaves the keyboard with that survey's card.
