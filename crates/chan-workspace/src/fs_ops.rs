@@ -1732,7 +1732,12 @@ fn write_xattrs_via_fd(
 /// Open `rel` through the cap-std `Dir` and dup the fd into a
 /// `std::fs::File`. Used as a bridge to crates (like `xattr`) that
 /// expect `std::fs::File` for their `FileExt` impls.
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
 fn open_std_file_through_dir(dir: &cap_std::fs::Dir, rel: &Path) -> Option<std::fs::File> {
     use std::os::fd::AsFd;
     let cap_file = dir.open(rel).ok()?;
