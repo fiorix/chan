@@ -683,11 +683,14 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     // view's release is what lets the program finish.
     let rig = Rig::new(
         2 * 1024 * 1024,
-        "stty -onlcr; read -r _; seq 1 200000; printf '__STREAM_DONE__'",
+        "stty -onlcr; read -r _; seq 1 1000000; printf '__STREAM_DONE__'",
     )
     .await;
     // Socket A attaches before the flood and reads one live frame, then
-    // stops draining entirely.
+    // stops draining entirely. The flood is sized so the hold engages by
+    // construction on any transport: at ~6.9 MB it outruns the kernel's
+    // send buffering (capped at wmem_max) plus the 1 MiB pacing credit, so
+    // the slowest view is a full credit behind before the flood ends.
     let (mut stalled, initial) = rig.attach().await;
     // The hold is observed structurally: the reader parks waiting for
     // progress while A holds the session back.
@@ -713,10 +716,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         }
     }
     // Socket B drains everything the program writes, prelude replay included.
-    // A stalled drain is an idle transport: read the socket with the hang
+    // A stalled drain is an idle transport: read the socket with a hang
     // guard directly, so a run where the program is never released fails
-    // with its own name instead of a generic read timeout. Same 60 s as
-    // the elapsed hang guard below.
+    // with its own name instead of a generic read timeout. Sixty seconds
+    // of silence trips it; a slow but flowing drain is judged by the
+    // elapsed hang guard below instead.
     let drain_hang = std::time::Duration::from_secs(60);
     loop {
         // The marker ends the stream, so only the tail can complete the
@@ -765,12 +769,11 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
         elapsed >= std::time::Duration::from_secs(4),
         "the hold engaged before the drain completed: {elapsed:?}"
     );
-    // Hang guard, not a contract bound: sized from a 40-run series on a
-    // Linux development host (worst measured elapsed 5.42 s; the macOS
-    // runner was never measured). A green run never prints the timing
-    // line, so the guard names it.
+    // Hang guard, not a contract bound: provisional 120 s for the
+    // measurement series below; finalized at ten times its worst there.
+    // A green run never prints the timing line, so the guard names it.
     assert!(
-        elapsed <= std::time::Duration::from_secs(60),
+        elapsed <= std::time::Duration::from_secs(120),
         "the drain did not complete within the hang guard after {elapsed:?}"
     );
     assert!(
@@ -779,7 +782,7 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     );
     let mut expected = Vec::new();
     expected.extend_from_slice(CHILD_READY);
-    for index in 1..=200000 {
+    for index in 1..=1000000 {
         // The child disables ONLCR, so each newline arrives as LF on both
         // systems; a macOS writer outrunning its reader through ONLCR can
         // emit CR CR LF, which renders the same and only a byte-exact reader
@@ -814,13 +817,10 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     }
     // Socket A resumes: exactly one same-generation session frame, a numeric
     // missed count, the retained tail once, no error. The resume's duration
-    // is the machine's like the drain's, so the same 60 s hang guard
-    // applies (worst measured resume 46.3 ms over 40 single-test runs on
-    // a Linux development host; the macOS runner was never measured). A
-    // green run never prints the timing line, so the guard names the
-    // elapsed resume time.
+    // is the machine's like the drain's, so the same hang guard applies;
+    // provisional like the drain's, finalized from the series below.
     let resume_at = std::time::Instant::now();
-    let resume_bound = std::time::Duration::from_secs(60);
+    let resume_bound = std::time::Duration::from_secs(120);
     let mut sessions = 0;
     let mut tail = Vec::new();
     let recovery = loop {
@@ -857,7 +857,13 @@ async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
     let missed = recovery["missed_bytes"]
         .as_u64()
         .expect("numeric missed_bytes");
-    assert_eq!(missed, 0, "nothing evicted: the whole flood fits the ring");
+    // The ring cannot hold the whole flood behind a stalled view, so the
+    // release must report eviction; what matters is that the count exists
+    // and the retained tail below is complete and in order.
+    assert!(
+        missed > 0,
+        "a stalled view behind a 6.9 MB flood is evicted: {missed}"
+    );
     loop {
         if tail.ends_with(DONE_MARKER) {
             break;
