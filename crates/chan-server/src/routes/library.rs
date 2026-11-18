@@ -1387,7 +1387,9 @@ async fn handle_watch_library_windows(
 ///
 /// While it waits for a change the feed answers each client `ping` with a
 /// `pong` ([`WindowFeedClientFrame`]) and keeps waiting, so a ping sends no
-/// set. Any other client frame ends the wait as a change does.
+/// set. Any other client frame ends the wait as a change does. The gate is
+/// read before each pong too, and a ping a stopping surface reads ends the
+/// socket in place of its pong.
 ///
 /// The surface's gate is read at the head of each turn, before the set is
 /// assembled: a turn that begins while the surface is still starting sends
@@ -1468,6 +1470,11 @@ async fn watch_library_windows(
                 msg = socket.recv() => match msg {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break 'feed,
                     Some(Ok(Message::Text(text))) if is_window_feed_ping(text.as_str()) => {
+                        // A stopping surface publishes nothing, a pong
+                        // included: the socket ends as a refused turn's does.
+                        if feed.refusal().is_some() {
+                            break 'feed;
+                        }
                         if socket.send(Message::text(PONG_FRAME)).await.is_err() {
                             break 'feed; // the client is gone
                         }
@@ -9649,7 +9656,12 @@ mod window_feed_ping_tests {
     /// Serve `host`'s launcher on a real listener and attach a client to its
     /// window feed, which has read the feed's first set.
     async fn attach(host: &Arc<WorkspaceHost>) -> (Client, WindowSet, tokio::task::JoinHandle<()>) {
-        let app = launcher_router(host.clone(), None, None);
+        attach_to(launcher_router(host.clone(), None, None)).await
+    }
+
+    /// Serve `app` on a real listener and attach a client to its window
+    /// feed, which has read the feed's first set.
+    async fn attach_to(app: axum::Router) -> (Client, WindowSet, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -9745,6 +9757,50 @@ mod window_feed_ping_tests {
             next_frame(&mut client).await,
             Frame::Set(first),
             "the feed sent a frame between the ping's pong and the set of a change"
+        );
+        server.abort();
+    }
+
+    /// A ping read once the surface has begun to stop draws no pong: the
+    /// feed publishes nothing from the stop on, and its socket ends. The
+    /// host signals no change, so the ping's arm is the only one that reads
+    /// the stop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ping_to_a_stopping_surface_ends_the_feed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let host = quiet_host(home.path());
+        let stopping = Arc::new(AtomicBool::new(false));
+        let read = Arc::clone(&stopping);
+        let gate: super::WindowFeedGate = Arc::new(move || {
+            if read.load(Ordering::SeqCst) {
+                return Err(super::WindowFeedRefusal::Stopping);
+            }
+            Ok(())
+        });
+        let app =
+            super::admitting_launcher_router(host.clone(), None, None, None, None, Some(gate));
+        let (mut client, _first, server) = attach_to(app).await;
+        client
+            .send(tungstenite::Message::text(PING))
+            .await
+            .expect("send a ping");
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Pong,
+            "fixture: a surface that is not stopping did not answer a ping"
+        );
+
+        stopping.store(true, Ordering::SeqCst);
+        client
+            .send(tungstenite::Message::text(PING))
+            .await
+            .expect("send a ping");
+
+        assert_eq!(
+            next_frame(&mut client).await,
+            Frame::Ended,
+            "a stopping surface answered a ping on its feed"
         );
         server.abort();
     }
