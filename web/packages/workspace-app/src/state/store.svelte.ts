@@ -168,6 +168,7 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
+import { paintLevel } from "./paintLevel";
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
@@ -429,6 +430,24 @@ export function coverOwnsTextEntry(target: EventTarget | null): boolean {
   if (!isTextEntry(target)) return false;
   const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
   return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+}
+
+/// The root of the raised cover that paints on top, the later one in the
+/// document when two paint at one level; null while no raised cover has a
+/// root in the page.
+export function topCoverRoot(): Element | null {
+  if (typeof document === "undefined") return null;
+  let top: Element | null = null;
+  let topLevel = -Infinity;
+  for (const root of document.querySelectorAll(`[${COVER_ROOT_ATTR}]`)) {
+    if (raisedCovers[root.getAttribute(COVER_ROOT_ATTR) ?? ""] !== true) continue;
+    const level = paintLevel(root);
+    if (level >= topLevel) {
+      top = root;
+      topLevel = level;
+    }
+  }
+  return top;
 }
 
 /// Native activation belongs only to an enabled button on a raised cover.

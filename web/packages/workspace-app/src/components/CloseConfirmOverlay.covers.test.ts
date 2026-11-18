@@ -5,8 +5,10 @@
 // keyboard onto Cancel, Escape cancels it and Tab cycles its buttons, and a
 // key lands on the prompt rather than on the cover's own button beneath it.
 // Neither cover takes the keyboard back from it, and when the screen lock
-// over both lifts, Cancel has the keyboard again. The real covers, lock and
-// prompt, in jsdom.
+// over both lifts, Cancel has the keyboard again. With no owner to take
+// the keyboard, the cover on top takes it, as the prompt over it closes or
+// a cover over it lifts, and the screen lock, which takes it itself, keeps
+// it. The real covers, lock and prompt, in jsdom.
 
 import { mount, tick, unmount, type Component } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -165,8 +167,9 @@ test("the session-ended cover takes the keyboard from a field it paints over", a
   expect(document.activeElement, "the cover's button").toBe(cover.querySelector("button.close"));
 });
 
-test("the close prompt over the reconnect cover takes Cancel back when the screen lock over both lifts", async () => {
-  // The lock's rain draws on a canvas and asks about reduced motion and fonts.
+/// The screen lock mounted at its layer, unlocked. Its rain draws on a
+/// canvas and asks about reduced motion and fonts.
+function mountLock(): void {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
     recordingContext2d().ctx as unknown as RenderingContext,
   );
@@ -182,14 +185,61 @@ test("the close prompt over the reconnect cover takes Cancel back when the scree
     files: [],
   });
   Object.assign(screensaver, { enabled: true, timeout_secs: 300, theme: "plain", pin_set: true, locked: false, loaded: true });
-  await reconnectCover();
-  const { cancel } = await promptOver();
   layered(ScreensaverOverlay, 39000);
+}
+
+/// Bring the mounted lock up; it takes the keyboard onto its backdrop.
+async function lock(): Promise<HTMLElement> {
   screensaver.locked = true;
   await settle();
-  expect(document.activeElement, "the lock takes the keyboard").toBe(document.querySelector(".screensaver-backdrop"));
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  expect(document.activeElement, "the lock takes the keyboard").toBe(backdrop);
+  return backdrop;
+}
+
+test("the close prompt over the reconnect cover takes Cancel back when the screen lock over both lifts", async () => {
+  mountLock();
+  await reconnectCover();
+  const { cancel } = await promptOver();
+  await lock();
   screensaver.locked = false;
   await settle();
   expect(raisedCoverKeys(), "the reconnect cover is still up").toEqual(["reconnect"]);
   expect(document.activeElement, "Cancel once the lock lifts").toBe(cancel);
+});
+
+test("the close prompt closing over the session-ended cover hands the cover the keyboard", async () => {
+  const cover = await sessionEndedCover();
+  await promptOver();
+  resolveCloseConfirm("cancel");
+  await settle();
+  expect(document.activeElement, "the cover's button").toBe(cover.querySelector("button.close"));
+});
+
+test("the reconnect cover takes the keyboard back onto its card when the screen lock over it lifts", async () => {
+  mountLock();
+  const cover = await reconnectCover();
+  expect(cover.contains(document.activeElement), "the card holds the keyboard").toBe(true);
+  await lock();
+  screensaver.locked = false;
+  await settle();
+  expect(raisedCoverKeys(), "the reconnect cover is still up").toEqual(["reconnect"]);
+  expect(cover.contains(document.activeElement), "the card once the lock lifts").toBe(true);
+});
+
+test("no cover under the screen lock takes its keyboard, nor takes the keyboard at large under it", async () => {
+  mountLock();
+  const cover = await sessionEndedCover();
+  await promptOver();
+  const backdrop = await lock();
+  resolveCloseConfirm("cancel");
+  await settle();
+  expect(document.activeElement, "the lock keeps the keyboard as the prompt closes").toBe(backdrop);
+  void uiCloseConfirm();
+  await settle();
+  backdrop.blur();
+  expect(document.activeElement, "the keyboard at large under the lock").toBe(document.body);
+  resolveCloseConfirm("cancel");
+  await settle();
+  expect(cover.contains(document.activeElement), "the cover under the lock takes nothing").toBe(false);
 });

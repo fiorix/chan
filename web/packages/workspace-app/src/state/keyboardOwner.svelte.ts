@@ -11,7 +11,8 @@
 
 import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setConfirmRestoreGate } from "./confirm.svelte";
-import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, raisedCoverKeys, topOverlay, type OverlayId } from "./store.svelte";
+import { paintLevel } from "./paintLevel";
+import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, raisedCoverKeys, topCoverRoot, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor } from "./survey.svelte";
 import { activeTerminalTab, bumpTabFocusPulse } from "./tabs.svelte";
 
@@ -61,18 +62,6 @@ if (typeof document !== "undefined") {
     attributes: true,
     attributeFilter: [LAUNCHER_SHOWN_ATTR],
   });
-}
-
-/// How high an element paints: the largest z-index on it or an ancestor.
-/// Owner surfaces are fixed layers with their own z-index, so this orders
-/// two roots of one kind, such as a dialog shown over another.
-function paintLevel(element: Element): number {
-  let level = 0;
-  for (let node: Element | null = element; node; node = node.parentElement) {
-    const z = Number.parseInt(getComputedStyle(node).zIndex, 10);
-    if (Number.isFinite(z) && z > level) level = z;
-  }
-  return level;
 }
 
 /// The root tagged `tag` that paints on top; the later one in the document
@@ -190,8 +179,9 @@ export function ownerAboveOverlays(): boolean {
 /// by the root it tags.
 const takers = new WeakMap<Element, () => void>();
 
-/// Register how the owner surface tagged at `root` takes the keyboard when
-/// it is handed back to it; the answer unregisters it.
+/// Register how the owner surface tagged at `root`, or the cover over the
+/// window rooted there, takes the keyboard when it is handed back to it;
+/// the answer unregisters it.
 export function registerKeyboardTaker(root: HTMLElement, take: () => void): () => void {
   takers.set(root, take);
   return () => {
@@ -211,15 +201,33 @@ export function handKeyboardToOwner(): boolean {
   return take !== undefined;
 }
 
+/// Hand the keyboard to the cover over the window that paints on top, as
+/// its surface takes it: the session-ended cover onto its button, the
+/// reconnect cover onto its card. False with no cover up, while a raised
+/// cover has no root in the page, and when the top cover registered no way
+/// to take it, as the screen lock, the missing-token and the preflight
+/// covers do not: each takes the keyboard itself as it shows.
+export function handKeyboardToTopCover(): boolean {
+  const raised = raisedCoverKeys();
+  if (raised.length === 0) return false;
+  if (raised.some((cover) => document.querySelector(`[${COVER_ROOT_ATTR}="${cover}"]`) === null)) return false;
+  const root = topCoverRoot();
+  const take = root ? takers.get(root) : undefined;
+  take?.();
+  return take !== undefined;
+}
+
 // When a cover over the window lifts with the keyboard at large (the
 // cover's own field went with it), the keyboard goes to its owner as the
 // owner's surface takes it, where the owner paints over every cover still
 // up: a dialog under the screen lock takes its field back on unlock, and
 // the close prompt over the reconnect cover takes Cancel back when the lock
-// over both lifts. With nothing owning it and no cover left, the tab-focus
-// pulse hands it to the focused pane's active tab, unless the reconnect
-// cover is among the covers lifting: that cover pulses the tab itself, for a
-// terminal or an editor it saw holding the keyboard, and only then.
+// over both lifts. With no owner to take it and a cover still up, the cover
+// on top takes it: the reconnect card as the lock over it lifts. With
+// nothing owning it and no cover left, the tab-focus pulse hands it to the
+// focused pane's active tab, unless the reconnect cover is among the covers
+// lifting: that cover pulses the tab itself, for a terminal or an editor it
+// saw holding the keyboard, and only then.
 if (typeof document !== "undefined") {
   $effect.root(() => {
     let raised = raisedCoverKeys();
@@ -230,8 +238,9 @@ if (typeof document !== "undefined") {
         const reconnect = lifted.includes("reconnect");
         queueMicrotask(() => {
           if (canTakeFocus(document.activeElement)) return;
-          if (owner() !== null) handKeyboardToOwner();
-          else if (!appInputBlocked() && !reconnect) bumpTabFocusPulse();
+          if (owner() !== null && handKeyboardToOwner()) return;
+          if (appInputBlocked()) handKeyboardToTopCover();
+          else if (owner() === null && !reconnect) bumpTabFocusPulse();
         });
       }
       raised = now;

@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus } from "../state/keyboardOwner.svelte";
+  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
   import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
@@ -221,6 +221,13 @@
     };
     window.addEventListener("focus", onWindowFocus);
     return () => window.removeEventListener("focus", onWindowFocus);
+  });
+
+  // Handed the keyboard as the cover on top (the close prompt over it went,
+  // or a cover over it lifted), it takes it onto its card.
+  $effect(() => {
+    if (!overlayEl) return;
+    return registerKeyboardTaker(overlayEl, () => focusCard());
   });
 
   function restoreFocus(returnTo: FocusReturn, epoch: number): void {

@@ -21,12 +21,14 @@
     flushAndHideWindow,
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
-  import { discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
+  import { appInputBlocked, discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
   import { tmuxPaneTabs } from "../state/tabs.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { connectionHealth } from "../state/connectionHealth.svelte";
-  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { handKeyboardToTopCover, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { canTakeFocus } from "@chan/web-shared/modal-focus";
+  import { untrack } from "svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -131,6 +133,22 @@
   $effect(() => {
     if (!overlayEl) return;
     return registerKeyboardTaker(overlayEl, () => (cancelBtn ?? overlayEl)?.focus());
+  });
+
+  // Closing over a cover leaves the keyboard at large, the prompt's buttons
+  // gone with it: the cover on top takes it, as its surface does.
+  let showing = false;
+  $effect(() => {
+    if (open) {
+      showing = true;
+      return;
+    }
+    if (!showing) return;
+    showing = false;
+    if (!untrack(() => appInputBlocked())) return;
+    queueMicrotask(() => {
+      if (!canTakeFocus(document.activeElement)) handKeyboardToTopCover();
+    });
   });
 
   // Escape cancels; Tab/Shift+Tab cycle the three buttons and never leak focus
