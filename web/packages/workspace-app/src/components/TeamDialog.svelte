@@ -94,9 +94,7 @@
   $effect(() => {
     if (tookKeyboard || !dialogEl || !mayFocus(dialogEl)) return;
     tookKeyboard = true;
-    queueMicrotask(() => {
-      if (mayFocus(dialogEl ?? null)) nameInputEl?.focus();
-    });
+    queueMicrotask(() => nameInputEl?.focus());
   });
   $effect(() => {
     if (!dialogEl) return;

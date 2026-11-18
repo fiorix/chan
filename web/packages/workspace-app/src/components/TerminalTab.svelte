@@ -805,17 +805,15 @@
     else if (host?.contains(target)) keyboardSurface = "terminal";
   }
 
-  // Give the keyboard back to the find input, the composer or the terminal,
-  // whichever last took it and is still open, when this is still the focused
-  // terminal and nothing outside it has taken the keyboard since the move.
+  // Give the keyboard back when this is still the focused terminal and
+  // nothing outside it has taken the keyboard since the move: to its owner
+  // when something owns it, as the owner's surface takes it (a survey over
+  // this terminal among them; the Computers launcher takes nothing here),
+  // else to the find input, the composer or the terminal, whichever last
+  // took it and is still open.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
-      // A dialog, a window-wide survey, the launcher or an overlay owns the
-      // keyboard over every terminal: the move hands it to nothing, even to
-      // the survey card over the terminal that moved.
-      const current = owner();
-      if (current !== null && current.kind !== "terminal-survey") return;
       const holder = document.activeElement;
       if (
         holder !== null &&
@@ -825,9 +823,7 @@
       ) {
         return;
       }
-      // A survey over the terminal that moved, the owner here, gets the
-      // keyboard back, as the find bar, the composer and the terminal do.
-      if (current !== null) {
+      if (owner() !== null) {
         handKeyboardToOwner();
         return;
       }

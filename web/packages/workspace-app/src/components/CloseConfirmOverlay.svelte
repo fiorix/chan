@@ -126,9 +126,7 @@
     if (tookKeyboard || !mayFocus(overlayEl)) return;
     tookKeyboard = true;
     (document.activeElement as HTMLElement | null)?.blur();
-    queueMicrotask(() => {
-      if (mayFocus(overlayEl)) (cancelBtn ?? overlayEl)?.focus();
-    });
+    queueMicrotask(() => (cancelBtn ?? overlayEl)?.focus());
   });
   $effect(() => {
     if (!overlayEl) return;

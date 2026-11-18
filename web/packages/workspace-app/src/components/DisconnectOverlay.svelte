@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
+  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus } from "../state/keyboardOwner.svelte";
   import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
@@ -227,9 +227,7 @@
     if (holder !== document.body && holder !== document.documentElement && !holder?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
     // The tab pulse invokes the terminal or editor's own focus routine, which
     // re-arms its real keyboard surface and cursor after the cover has gone.
-    if (returnTo.surface) {
-      if (owner() === null) bumpTabFocusPulse();
-    }
+    if (returnTo.surface) bumpTabFocusPulse();
     else if (saved.isConnected) saved.focus({ preventScroll: true });
   }
 
