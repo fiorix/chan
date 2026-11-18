@@ -378,41 +378,64 @@ fn a_completed_part_that_hashes_wrong_is_discarded_and_fetched_again() {
 }
 
 #[test]
-fn ignored_resume_range_restarts_from_full_response() {
-    let cache = tempfile::tempdir().unwrap();
-    let partial = part_file(cache.path(), &BODY[..3]);
-    let server = Server::start(|_| response("200 OK", "", BODY));
-    let path = client(cache.path(), &server)
-        .get("fixture/model", "config.json")
-        .expect("an ignored resume range must restart from its full response");
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        BODY,
-        "the full response replaces the partial prefix"
-    );
-    assert!(
-        !partial.exists(),
-        "the restarted download consumes its part"
-    );
-    assert_eq!(
-        server.requests.lock().unwrap().len(),
-        1,
-        "the full response is consumed without another request"
-    );
+fn a_whole_file_answer_to_a_resume_restarts_from_it() {
+    // A proxy that ignores Range answers with every byte, as a 200 or as a
+    // 206 that names the whole file.
+    for whole in [response("200 OK", "", BODY), range_response(BODY, 0)] {
+        let cache = tempfile::tempdir().unwrap();
+        let partial = part_file(cache.path(), &BODY[..3]);
+        let server = Server::start(move |_| whole.clone());
+        let path = client(cache.path(), &server)
+            .get("fixture/model", "config.json")
+            .expect("a whole-file answer to a resume must restart from it");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            BODY,
+            "the whole file replaces the partial prefix"
+        );
+        assert!(
+            !partial.exists(),
+            "the restarted download consumes its part"
+        );
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "the whole file is consumed without another request"
+        );
+    }
 }
 
 #[test]
-fn mismatched_resume_range_never_appends_bytes() {
+fn a_foreign_resume_range_empties_the_part_for_the_next_attempt() {
     let cache = tempfile::tempdir().unwrap();
     let partial = part_file(cache.path(), &BODY[..3]);
-    let server = Server::start(|_| range_response(BODY, 0));
-    assert!(
-        client(cache.path(), &server)
-            .get("fixture/model", "config.json")
-            .is_err(),
-        "incorrect Content-Range must refuse resume"
+    let server = Server::start(|request| match requested_range(request) {
+        "bytes=3-" => range_response(BODY, 2),
+        "bytes=0-" => range_response(BODY, 0),
+        _ => response("400 Bad Request", "", b"unexpected range"),
+    });
+    let client = client(cache.path(), &server);
+    let error = client
+        .get("fixture/model", "config.json")
+        .expect_err("a reply at another range must not continue the part");
+    assert!(error.to_string().contains("does not continue"), "{error}");
+    assert_eq!(
+        std::fs::read(&partial).unwrap(),
+        b"",
+        "the refused part is emptied, so the same request is not refused again"
     );
-    assert_eq!(std::fs::read(partial).unwrap(), &BODY[..3]);
+    let path = client.get("fixture/model", "config.json").unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
+    assert_eq!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| requested_range(request))
+            .collect::<Vec<_>>(),
+        ["bytes=3-", "bytes=0-"]
+    );
 }
 
 /// Return once a download waits on the lock at `path`. Linux lists a

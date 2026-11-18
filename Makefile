@@ -92,8 +92,8 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::partial_download_resumes_and_publishes_exact_bytes \
 	index::embeddings::download::tests::bytes_that_miss_their_pin_are_not_published \
 	index::embeddings::download::tests::a_completed_part_that_hashes_wrong_is_discarded_and_fetched_again \
-	index::embeddings::download::tests::ignored_resume_range_restarts_from_full_response \
-	index::embeddings::download::tests::mismatched_resume_range_never_appends_bytes \
+	index::embeddings::download::tests::a_whole_file_answer_to_a_resume_restarts_from_it \
+	index::embeddings::download::tests::a_foreign_resume_range_empties_the_part_for_the_next_attempt \
 	index::embeddings::download::tests::a_waiting_download_reuses_the_winners_file \
 	index::embeddings::download::tests::a_stalled_server_ends_the_download_at_the_read_timeout \
 	index::embeddings::download::tests::the_tests_client_ignores_the_environments_proxy \

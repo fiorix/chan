@@ -269,10 +269,21 @@ impl Client {
                 .set("Range", &format!("bytes={start}-"))
                 .call()
                 .map_err(Box::new)?;
-            if response.status() == 200 && start != 0 {
-                // A proxy may ignore Range and send the whole file. Validate
-                // it before replacing the prefix, while retaining the lock.
-                validate_resume(&response, 0, size)?;
+            // A proxy may ignore Range and send the whole file, as a 200 or
+            // as a 206 of every byte. Validate it before replacing the
+            // prefix, while retaining the lock.
+            let whole = start != 0
+                && (response.status() == 200
+                    || response.header("Content-Range")
+                        == Some(format!("bytes 0-{}/{size}", size - 1).as_str()));
+            if let Err(error) = validate_resume(&response, if whole { 0 } else { start }, size) {
+                // A reply at another range cannot continue the part, and the
+                // same request would meet it again: the next attempt starts
+                // clean.
+                part.set_len(0)?;
+                return Err(error);
+            }
+            if whole {
                 part.set_len(0)?;
                 part.rewind()?;
                 start = 0;
@@ -280,8 +291,6 @@ impl Client {
                 if let Some(progress) = &progress {
                     progress.set_position(0);
                 }
-            } else {
-                validate_resume(&response, start, size)?;
             }
             let mut reader = response.into_reader();
             let mut remaining = size - start;
