@@ -112,12 +112,12 @@ fn certificate_failure(mut error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 impl Client {
-    pub(super) fn new(cache: &Path) -> Result<Self, EmbedError> {
+    pub(super) fn new(cache: &Path) -> Self {
         let token = dirs::home_dir()
             .and_then(|home| std::fs::read_to_string(home.join(".cache/huggingface/token")).ok())
             .map(|token| token.trim().to_owned())
             .filter(|token| !token.is_empty());
-        Ok(Self {
+        Self {
             cache: cache.to_owned(),
             endpoint: Url::parse(ENDPOINT).expect("the fixed Hub endpoint is a URL"),
             token,
@@ -129,7 +129,7 @@ impl Client {
             supplied_config: None,
             #[cfg(test)]
             publication_observer: None,
-        })
+        }
     }
 
     /// A client of `endpoint` on `config` that goes direct whatever proxy the
@@ -504,17 +504,8 @@ fn cached(repo: &Path, model: &EmbeddingModelInfo, filename: &str) -> Option<Pat
     filling.is_file().then_some(filling)
 }
 
-struct FileLock(File);
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // A descriptor inherited by a child must not extend this download's
-        // critical section after its owner releases the guard.
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-fn lock(path: &Path) -> Result<FileLock, DownloadError> {
+/// The lock file at `path`, held exclusively until the returned file closes.
+fn lock(path: &Path) -> Result<File, DownloadError> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -523,7 +514,7 @@ fn lock(path: &Path) -> Result<FileLock, DownloadError> {
     // Waits while another download of the file runs. The holder's requests
     // are bounded by the agent's timeouts, so a stalled holder lets go.
     FileExt::lock_exclusive(&file)?;
-    Ok(FileLock(file))
+    Ok(file)
 }
 
 fn validate_resume(response: &Response, start: u64, size: u64) -> Result<(), DownloadError> {

@@ -678,9 +678,7 @@ fn a_download_through_an_inspecting_proxy_trusts_the_system_store() {
     const TRUSTED: &str = "CHAN_DOWNLOAD_TEST_TRUSTED";
     if is_child(TEST) {
         let cache = std::path::PathBuf::from(std::env::var(CACHE).unwrap());
-        let result = Client::new(&cache)
-            .unwrap()
-            .get(crate::DEFAULT_MODEL, "config.json");
+        let result = Client::new(&cache).get(crate::DEFAULT_MODEL, "config.json");
         if std::env::var_os(TRUSTED).is_some() {
             let path =
                 result.expect("the proxy's CA in the system store lets the download through");

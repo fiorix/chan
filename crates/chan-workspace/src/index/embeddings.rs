@@ -217,7 +217,7 @@ impl Embedder {
     /// probe also detects weights that load but fail during inference. A
     /// second failure surfaces to the caller.
     pub fn open(model_id: &str, cache_dir: &Path) -> Result<Self, EmbedError> {
-        let client = download::Client::new(cache_dir)?;
+        let client = download::Client::new(cache_dir);
         Self::open_with_client(model_id, cache_dir, &client)
     }
 
@@ -589,7 +589,7 @@ mod tests {
             .join(repo_dir_name(crate::DEFAULT_MODEL))
             .join("snapshots/test-model/model.safetensors");
         std::fs::write(weights, []).unwrap();
-        let client = download::Client::new(cache.path()).unwrap();
+        let client = download::Client::new(cache.path());
         let error = Embedder::open_once(crate::DEFAULT_MODEL, cache.path(), &client)
             .expect_err("empty weights must fail before an OS-specific mmap attempt");
         assert!(
