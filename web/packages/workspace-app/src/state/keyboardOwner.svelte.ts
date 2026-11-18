@@ -4,8 +4,10 @@
 // survey over the focused pane's active terminal. `owner()` reads that
 // order from state, and each owner surface tags its root with
 // KEYBOARD_OWNER_ATTR so `mayFocus` can tell an element inside the owner
-// from one under it. Every owner is reactive state, so a derived value or
-// effect that asked while one showed asks again when it lets go.
+// from one under it. The owner is read from reactive state, so a derived
+// value or effect that asked while one showed asks again when it lets go;
+// its root is looked up in the page when `ownerRoot` or `mayFocus` asks,
+// never kept, so no reader holds a root from before its surface mounted.
 
 import { modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
 import { surveyFor, type SurveySlot } from "./survey.svelte";
@@ -16,9 +18,10 @@ export const KEYBOARD_OWNER_ATTR = "data-keyboard-owner";
 
 export type KeyboardOwnerKind = "launcher" | "modal" | "overlay" | "terminal-survey";
 
-/// The keyboard's owner and the element it owns the keyboard within. The
-/// Computers launcher is a second webview, so it has no root in this page.
-export type KeyboardOwner = { kind: KeyboardOwnerKind; root: HTMLElement | null };
+/// The keyboard's owner: its kind, and the tag its root carries in the page.
+/// The Computers launcher is a second webview, so it has no root here and no
+/// tag.
+export type KeyboardOwner = { kind: KeyboardOwnerKind; tag: string | null };
 
 /// The value an owner surface tags its root with: the kind, and for an
 /// overlay or a terminal's survey the overlay id or terminal tab id that
@@ -75,7 +78,8 @@ function paintLevel(element: Element): number {
 function topRoot(tag: string): HTMLElement | null {
   let top: HTMLElement | null = null;
   let topLevel = -Infinity;
-  for (const root of document.querySelectorAll<HTMLElement>(`[${KEYBOARD_OWNER_ATTR}="${tag}"]`)) {
+  for (const root of document.querySelectorAll<HTMLElement>(`[${KEYBOARD_OWNER_ATTR}]`)) {
+    if (root.getAttribute(KEYBOARD_OWNER_ATTR) !== tag) continue;
     const level = paintLevel(root);
     if (level >= topLevel) {
       top = root;
@@ -85,34 +89,48 @@ function topRoot(tag: string): HTMLElement | null {
   return top;
 }
 
+/// Whether the Computers launcher covers the page. The state is read so a
+/// reader runs again when it changes; the answer comes from the attribute,
+/// which is current both when the launcher covers the page and when it
+/// uncovers, before the observer has run.
+function launcherCovers(): boolean {
+  void launcherShown;
+  return launcherShownOverWindow();
+}
+
 /// The keyboard's owner, or null when nothing above the panes and no
-/// survey over the focused pane's terminal holds it. The launcher is read
-/// from its state, which re-runs a reader when it hides, and from its
-/// attribute, which is current before the observer runs.
+/// survey over the focused pane's terminal holds it.
 export function owner(): KeyboardOwner | null {
-  if (launcherShown || launcherShownOverWindow()) return { kind: "launcher", root: null };
-  if (modalDialogOpen()) return { kind: "modal", root: topRoot(ownerTag("modal")) };
+  if (launcherCovers()) return { kind: "launcher", tag: null };
+  if (modalDialogOpen()) return { kind: "modal", tag: ownerTag("modal") };
   const overlay = topOverlay();
-  if (overlay !== null) return { kind: "overlay", root: topRoot(ownerTag("overlay", overlay)) };
+  if (overlay !== null) return { kind: "overlay", tag: ownerTag("overlay", overlay) };
   const terminal = activeTerminalTab();
   if (terminal && surveyFor(terminal.id) !== null) {
-    return { kind: "terminal-survey", root: topRoot(ownerTag("terminal-survey", terminal.id)) };
+    return { kind: "terminal-survey", tag: ownerTag("terminal-survey", terminal.id) };
   }
   return null;
 }
 
-/// Whether `element` may take the keyboard: never while the Computers
-/// launcher is shown; otherwise when nothing owns the keyboard, or when
-/// `element` sits inside the owner's root.
+/// The element the owner holds the keyboard within, looked up in the page
+/// now: of the roots carrying its tag, the one that paints on top. Null for
+/// the Computers launcher, for no owner, and for an owner whose surface has
+/// not mounted.
+export function ownerRoot(current: KeyboardOwner | null = owner()): HTMLElement | null {
+  return current?.tag ? topRoot(current.tag) : null;
+}
+
+/// Whether `element` may take the keyboard: when nothing owns it, or when
+/// `element` sits inside the owner's root, looked up as this asks. The
+/// Computers launcher has no root in the page, so nothing may take it then.
 export function mayFocus(element: Element | null): boolean {
   const current = owner();
   if (current === null) return true;
-  if (current.kind === "launcher") return false;
-  return element !== null && current.root !== null && current.root.contains(element);
+  const root = ownerRoot(current);
+  return element !== null && root !== null && root.contains(element);
 }
 
-/// The per-terminal rule the focus movers read before `mayFocus`, kept as
-/// it was so moving them here changes nothing they do: true while a modal
+/// The per-terminal rule the focus movers read: true while a modal
 /// dialog, a survey over the terminal in `slot`, a window-wide survey, the
 /// Computers launcher or an overlay over the panes holds the keyboard. It
 /// counts a survey over that terminal in any pane, and no survey over

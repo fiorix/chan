@@ -10,6 +10,7 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import BubbleOverlay from "../components/BubbleOverlay.svelte";
 import KeyboardOwnerKindProbe from "../__tests__/keyboardOwnerKindProbe.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import type { SurveySpec } from "../api/client";
@@ -20,6 +21,7 @@ import {
   LAUNCHER_SHOWN_ATTR,
   mayFocus,
   owner,
+  ownerRoot,
   ownerTag,
 } from "./keyboardOwner.svelte";
 import {
@@ -60,7 +62,7 @@ afterEach(async () => {
 });
 
 /// A tagged owner root painted at `z`, holding one input.
-function ownerRoot(tag: string, z?: number): { root: HTMLElement; field: HTMLInputElement } {
+function taggedRoot(tag: string, z?: number): { root: HTMLElement; field: HTMLInputElement } {
   const root = document.createElement("div");
   root.setAttribute(KEYBOARD_OWNER_ATTR, tag);
   root.style.position = "fixed";
@@ -91,31 +93,35 @@ describe("owner() names the owner and its root", () => {
   });
 
   test.each(MODALS)("%s is the modal owner, rooted at the modal's tag", (_name, take) => {
-    const { root } = ownerRoot(ownerTag("modal"));
+    const { root } = taggedRoot(ownerTag("modal"));
     take();
-    expect(owner()).toEqual({ kind: "modal", root });
+    expect(owner()).toEqual({ kind: "modal", tag: "modal" });
+    expect(ownerRoot()).toBe(root);
   });
 
   test.each(["search", "launcher", "settings"] as OverlayId[])("the %s overlay is the overlay owner, rooted at its own tag", (id) => {
-    ownerRoot(ownerTag("overlay", id === "search" ? "settings" : "search"));
-    const { root } = ownerRoot(ownerTag("overlay", id));
+    taggedRoot(ownerTag("overlay", id === "search" ? "settings" : "search"));
+    const { root } = taggedRoot(ownerTag("overlay", id));
     overlayStack.ids = [id];
-    expect(owner()).toEqual({ kind: "overlay", root });
+    expect(owner()).toEqual({ kind: "overlay", tag: `overlay:${id}` });
+    expect(ownerRoot()).toBe(root);
   });
 
   test("the top overlay of the stack owns it", () => {
-    const { root } = ownerRoot(ownerTag("overlay", "search"));
-    ownerRoot(ownerTag("overlay", "settings"));
+    const { root } = taggedRoot(ownerTag("overlay", "search"));
+    taggedRoot(ownerTag("overlay", "settings"));
     overlayStack.ids = ["settings", "search"];
-    expect(owner()).toEqual({ kind: "overlay", root });
+    expect(owner()).toEqual({ kind: "overlay", tag: "overlay:search" });
+    expect(ownerRoot()).toBe(root);
   });
 
   test("the survey over the focused pane's active terminal owns it, rooted at that terminal's tag", () => {
     resetLayout([terminalTab({ id: "t1" })]);
-    ownerRoot(ownerTag("terminal-survey", "t2"));
-    const { root } = ownerRoot(ownerTag("terminal-survey", "t1"));
+    taggedRoot(ownerTag("terminal-survey", "t2"));
+    const { root } = taggedRoot(ownerTag("terminal-survey", "t1"));
     showSurvey(SURVEY, "t1");
-    expect(owner()).toEqual({ kind: "terminal-survey", root });
+    expect(owner()).toEqual({ kind: "terminal-survey", tag: "terminal-survey:t1" });
+    expect(ownerRoot()).toBe(root);
   });
 
   test("a survey over a terminal that is not the focused pane's active tab owns nothing", () => {
@@ -126,19 +132,67 @@ describe("owner() names the owner and its root", () => {
 
   test("the Computers launcher owns it with no root in the page", () => {
     document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
-    expect(owner()).toEqual({ kind: "launcher", root: null });
+    expect(owner()).toEqual({ kind: "launcher", tag: null });
+    expect(ownerRoot()).toBeNull();
+  });
+
+  test("the Computers launcher stops owning it as its mark goes, before the observer runs", async () => {
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    await tick();
+    expect(owner()?.kind).toBe("launcher");
+    document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    expect(owner()).toBeNull();
   });
 
   test("of two roots of one kind, the one that paints on top is the owner's", () => {
-    const { root: upper } = ownerRoot(ownerTag("modal"), 39000);
-    ownerRoot(ownerTag("modal"), 26000);
+    const { root: upper } = taggedRoot(ownerTag("modal"), 39000);
+    taggedRoot(ownerTag("modal"), 26000);
     promptState.open = true;
-    expect(owner()?.root).toBe(upper);
+    expect(ownerRoot()).toBe(upper);
+  });
+
+  test("of two roots of one kind painting at one level, the later one in the document is the owner's", () => {
+    taggedRoot(ownerTag("modal"), 26000);
+    const { root: later } = taggedRoot(ownerTag("modal"), 26000);
+    promptState.open = true;
+    expect(ownerRoot()).toBe(later);
   });
 
   test("a modal shown without a tagged root owns the keyboard with no root", () => {
     promptState.open = true;
-    expect(owner()).toEqual({ kind: "modal", root: null });
+    expect(owner()).toEqual({ kind: "modal", tag: "modal" });
+    expect(ownerRoot()).toBeNull();
+  });
+
+  test("a root that mounts after the owner shows is found when asked", () => {
+    promptState.open = true;
+    const before = owner();
+    expect(ownerRoot(before)).toBeNull();
+    const { root, field } = taggedRoot(ownerTag("modal"));
+    expect(ownerRoot(before)).toBe(root);
+    expect(mayFocus(field)).toBe(true);
+  });
+
+  test("the survey overlays are the roots the owner names", async () => {
+    resetLayout([terminalTab({ id: "t1" })]);
+    const terminalTarget = document.createElement("div");
+    const wideTarget = document.createElement("div");
+    document.body.append(terminalTarget, wideTarget);
+    const overTerminal = mount(BubbleOverlay, { target: terminalTarget, props: { tabId: "t1" } });
+    const windowWide = mount(BubbleOverlay, { target: wideTarget });
+    try {
+      showSurvey(SURVEY, "t1");
+      await tick();
+      expect(owner()?.kind).toBe("terminal-survey");
+      expect(ownerRoot()).toBe(terminalTarget.querySelector(".survey-overlay"));
+      showSurvey(WIDE_SURVEY, null);
+      await tick();
+      expect(owner()?.kind).toBe("modal");
+      expect(ownerRoot()).toBe(wideTarget.querySelector(".survey-overlay"));
+    } finally {
+      await unmount(overTerminal);
+      await unmount(windowWide);
+    }
   });
 });
 
@@ -184,7 +238,7 @@ describe("mayFocus", () => {
   });
 
   test("lets an element inside the owner's root take it, and refuses one outside", () => {
-    const { field: inside } = ownerRoot(ownerTag("modal"));
+    const { field: inside } = taggedRoot(ownerTag("modal"));
     const outside = document.createElement("input");
     document.body.append(outside);
     promptState.open = true;
@@ -196,7 +250,7 @@ describe("mayFocus", () => {
   test("follows the owner: inside the terminal's survey card, not the terminal under it", () => {
     resetLayout([terminalTab({ id: "t1" })]);
     const terminal = document.createElement("div");
-    const { root, field: card } = ownerRoot(ownerTag("terminal-survey", "t1"));
+    const { root, field: card } = taggedRoot(ownerTag("terminal-survey", "t1"));
     terminal.append(root);
     const host = document.createElement("textarea");
     terminal.append(host);
@@ -207,7 +261,7 @@ describe("mayFocus", () => {
   });
 
   test("refuses every element while the Computers launcher is shown, one inside a root included", () => {
-    const { field } = ownerRoot(ownerTag("modal"));
+    const { field } = taggedRoot(ownerTag("modal"));
     promptState.open = true;
     document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
     expect(mayFocus(field)).toBe(false);

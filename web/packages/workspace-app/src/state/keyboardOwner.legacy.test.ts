@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The per-terminal rule the focus movers read before `mayFocus`: a modal
+// The per-terminal rule the focus movers read: a modal
 // dialog, a survey over that terminal, a window-wide survey, the Computers
 // launcher while shown, and an overlay over the panes (the command launcher,
 // Search, Settings). While one of them owns the keyboard, neither the
