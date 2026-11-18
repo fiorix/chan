@@ -790,8 +790,9 @@
     );
   });
 
-  /// The clipboard rows, each worded by its catalog command and run by the
-  /// key that does the same.
+  /// The clipboard rows, worded by their catalog commands. Paste lands in the
+  /// clicked row's folder rather than the shared targetDirectory: the
+  /// right-click names the destination.
   const CLIPBOARD_ROWS = [
     { command: "copy", id: "app.browser.copySelection" },
     { command: "cut", id: "app.browser.cutSelection" },
@@ -846,6 +847,14 @@
   function uploadEntry(path: string, isDir: boolean): void {
     menu = null;
     uploadToEntry(path, isDir);
+  }
+  /// The row menu's Paste: into the clicked row's folder, the row itself when
+  /// it is a directory and its parent when it is a file, in a tree and in a
+  /// list alike.
+  function pasteEntry(path: string, isDir: boolean): void {
+    activate();
+    menu = null;
+    void pasteIntoTarget(isDir ? path : parentDir(path));
   }
   /// Delete from the key or the row menu. A row inside a multi-selection
   /// deletes the whole selection, the way a drag of it moves the whole
@@ -959,7 +968,7 @@
         fbClipboardSet(command, paths);
         break;
       }
-      case "paste": void pasteIntoTarget(pasteDestination()); break;
+      case "paste": void pasteIntoTarget(targetDirectory()); break;
       case "selectAll": fbSelectSet(rows.map((row) => row.path), selection.path ?? undefined); break;
       case "selectMode": selectionMode = !selectionMode; break;
       case "toggle":
@@ -1069,15 +1078,6 @@
     if (!cur) return defaultCreateDirectory();
     if (entryByPath.get(cur)?.is_dir) return cur;
     return parentDir(cur);
-  }
-
-  /// The menu's Paste destination: the clicked row's folder, the row itself
-  /// when it is a directory and its parent when it is a file, in a tree and
-  /// in a list alike. Without an open menu (the chord, the launcher) the
-  /// shared rule applies.
-  function pasteDestination(): string {
-    if (menu) return menu.isDir ? menu.path : parentDir(menu.path);
-    return targetDirectory();
   }
 
   /// Paste the clipboard into the resolved target dir, then select the
@@ -1629,7 +1629,7 @@
     {/if}
     <div class="ctx-sep" role="separator"></div>
     {#each CLIPBOARD_ROWS as action (action.command)}
-      <button role="menuitem" disabled={action.command === "paste" && !fbClipboard.mode} onclick={() => runCommand(action.command)}>
+      <button role="menuitem" disabled={action.command === "paste" && !fbClipboard.mode} onclick={() => action.command === "paste" ? pasteEntry(menu!.path, menu!.isDir) : runCommand(action.command)}>
         <span class="menu-row-label">{commandTitle(action.id)}</span><span class="menu-row-chord">{browserCommandChord(action.command, browserKeys.vim)}</span>
       </button>
     {/each}
