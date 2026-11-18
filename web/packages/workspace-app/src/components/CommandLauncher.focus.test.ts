@@ -66,7 +66,15 @@ import {
   searchPanel,
   uiPrompt,
 } from "../state/store.svelte";
-import { tabFocusPulse } from "../state/tabs.svelte";
+import {
+  activePane,
+  layout,
+  moveTab,
+  setActivePane,
+  splitPane,
+  tabFocusPulse,
+  type LeafNode,
+} from "../state/tabs.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -91,6 +99,11 @@ const runDrop = vi.fn(() => origin.remove());
 /// A command that asks a question in a prompt dialog, as Set terminal name
 /// does; the dialog outlives the launcher.
 const runPrompt = vi.fn(() => void uiPrompt("Name"));
+/// A command that splits the pane, as Split right does: the run moves the
+/// keyboard's home to a new empty pane while the deck closes.
+const runSplit = vi.fn(() => {
+  splitPane(activePane().id, "column");
+});
 /// A command whose run waits on something slow, as a Computers action waiting
 /// for a window page does; the test releases it.
 let held: { promise: Promise<void>; resolve: () => void } | null = null;
@@ -172,6 +185,15 @@ registerCommands([
     requirement: "any",
     available: () => true,
     run: runPrompt,
+  },
+  {
+    id: "test.focus.split",
+    title: "Split right",
+    category: "Global",
+    scope: "window",
+    requirement: "any",
+    available: () => true,
+    run: runSplit,
   },
   {
     id: "test.focus.held",
@@ -568,10 +590,60 @@ describe("focus when the launcher closes", () => {
     }
   });
 
+  test("a Split right run from the card leaves the keyboard on the body", async () => {
+    const tab = terminalTab();
+    resetLayout([tab]);
+    // The run moves the card to the pane just left: the focused pane's
+    // active terminal is no longer the card's, so the card arm declines
+    // and the shared rule has nothing to return. Without the decline the
+    // fall-through hands the card the keyboard.
+    const surveyTarget = document.createElement("div");
+    surveyTarget.className = "pane";
+    surveyTarget.setAttribute("data-terminal-tab-id", tab.id);
+    document.body.append(surveyTarget);
+    try {
+      mounted.push(mount(BubbleOverlay, { target: surveyTarget, props: { tabId: tab.id } }) as Record<string, unknown>);
+      showSurvey({ surveyId: "launcher-focus-split", title: null, bodyMarkdown: "Choose", options: ["OK"] }, tab.id);
+      await flush();
+      const card = surveyTarget.querySelector<HTMLElement>(".survey-card");
+      expect(card, "the survey shows its card").not.toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(card));
+      const target = document.createElement("div");
+      document.body.append(target);
+      mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+      openCommandLauncher();
+      await flush();
+      expect(document.activeElement, "the launcher takes focus").toBe(target.querySelector(".deck-input"));
+      // Keys stay with the survey while it shows, so the run goes through a
+      // row click, the way a user reaches it under a survey.
+      const row = [...target.querySelectorAll<HTMLButtonElement>(".deck-result")].find(
+        (candidate) => candidate.querySelector(".deck-result-title")?.textContent === "Split right",
+      );
+      expect(row, "the deck lists the split command").toBeDefined();
+      const focus = vi.spyOn(card!, "focus");
+      try {
+        row!.click();
+        await flush();
+        expect(runSplit, "the run executed").toHaveBeenCalled();
+        expect(launcherPanel.open, "the run closes the deck").toBe(false);
+        await flush();
+        expect(focus, "the return does not reach the pane just left").not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(document.activeElement, "the keyboard is left on the body").toBe(document.body));
+      } finally {
+        focus.mockRestore();
+      }
+    } finally {
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      surveyTarget.remove();
+    }
+  });
+
   test("a run that settles with a window-wide survey up returns the keyboard to its card", async () => {
     // The modal-first arm's pin: the heir is the window-wide survey's card,
     // which has no focus repair of its own, so only the arm can hand it the
-    // keyboard back.
+    // keyboard back. It pins the predicate, not a user path (the App refuses
+    // the launcher chord under that survey).
     const surveyTarget = document.createElement("div");
     document.body.append(surveyTarget);
     try {
@@ -611,13 +683,15 @@ describe("focus when the launcher closes", () => {
     }
   });
 
-  test("a run that settles with a survey card over an inactive tab leaves it alone", async () => {
+  test("a run that settles with a survey card in an unfocused pane leaves it alone", async () => {
     const first = terminalTab({ id: "term-first" });
     const second = terminalTab({ id: "term-second" });
     resetLayout([first, second]);
-    // The active tab's own survey owns the keyboard; the card over the other
-    // tab is not its terminal's card, so the return refuses it. Without the
-    // terminal check the survey-card arm would hand it the keyboard.
+    // The focused pane's own survey owns the keyboard; the card in the other
+    // pane is not its terminal's card, so the return refuses it. Without the
+    // terminal check the survey-card arm would hand it the keyboard. Paired
+    // with the Split-right case above, which moves the card's pane out from
+    // under it.
     const activeTarget = document.createElement("div");
     activeTarget.setAttribute("data-terminal-tab-id", first.id);
     document.body.append(activeTarget);
@@ -636,6 +710,15 @@ describe("focus when the launcher closes", () => {
       await flush();
       const card = idleTarget.querySelector<HTMLElement>(".survey-card");
       expect(card, "the idle survey shows its card").not.toBeNull();
+      // The card moves to a pane of its own, which stays unfocused while the
+      // first pane keeps the keyboard.
+      const other = splitPane("pane-test", "column");
+      expect(other, "the split opens another pane").not.toBeNull();
+      moveTab("pane-test", second.id, other!);
+      setActivePane("pane-test");
+      await flush();
+      const idlePane = layout.nodes[other!] as LeafNode;
+      expect(idlePane.tabs.map((tab) => tab.id), "the card's tab moved to the other pane").toContain(second.id);
       // The idle card never takes the keyboard on arrival; the deck opens
       // from it the way a click would leave it there.
       card!.focus();
