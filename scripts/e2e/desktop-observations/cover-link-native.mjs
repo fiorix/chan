@@ -367,12 +367,12 @@ async function devserverArm() {
   const windowId = window.window_id;
   const opened = await until(async () => ({ ok: (await inspectOne("open", `(${pageOf(windowId)}) ? { up: true } : { skip: true }`))?.up }), 60_000);
   if (!opened?.ok) throw new Inconclusive("the devserver's window did not open on the desktop");
-  // The desktop titles a devserver's windows with the host label the
+  // The desktop titles a direct devserver's windows with the host label the
   // devserver reports in its info, falling back to the host it dialled
   // (main.rs), not with the name it was registered under. Matching that
   // label, among the windows that appeared, is what ties the X window to the
-  // devserver; a lone new window alone would take anything the desktop
-  // mapped meanwhile.
+  // devserver; a lone new window would take anything the desktop mapped
+  // meanwhile.
   const info = await (await fetch(`${devBase}/api/devserver/info`, { signal: AbortSignal.timeout(10_000) })).json();
   const machine = info.host_label?.trim() || "127.0.0.1";
   const fresh = (await visibleWindows()).filter((id) => !before.has(id));
@@ -499,20 +499,35 @@ async function devserverArm() {
   }
   if (!feedFlow()) fault("the devserver's feed did not keep flowing through the outage", relay.summary());
 
-  // Show in Computers keeps its place when Restart connection and Abandon
-  // appear: its box as the cover showed, against its box once they show.
+  // Show in Computers keeps its place: its box as the cover showed, after
+  // the screen's show and hide, and once Restart connection and Abandon
+  // show. The box read after the hide, while those two are still held,
+  // tells a move across the click, the show and the hide from one at 8 s;
+  // a hide read after 8 s leaves the two causes together.
   await sleep(Math.max(0, dropAt + RECOVERY_ACTIONS_MS + 500 - Date.now()));
   const settled = await inspectOne("all actions", COVER(windowId));
-  const boxAtShow = shown.seen.action?.box ?? null;
-  const boxLater = settled?.action?.box ?? null;
-  const moved = boxAtShow && boxLater
-    ? Math.max(...["left", "top", "width", "height"].map((k) => Math.abs(boxLater[k] - boxAtShow[k])))
+  const shift = (from, to) => from && to
+    ? Math.max(...["left", "top", "width", "height"].map((k) => Math.abs(to[k] - from[k])))
     : null;
-  const place = { boxAtShow, boxLater, moved, actions: settled?.actions ?? null };
-  if (moved !== null && moved <= BOX_TOLERANCE_PX && settled.actions.includes("Restart connection") && settled.actions.includes("Abandon")) {
-    pass("Show in Computers keeps its place when Restart connection and Abandon appear", place);
+  const boxAtShow = shown.seen.action?.box ?? null;
+  const boxAfterHide = later?.action && !later.actions.includes("Restart connection") ? later.action.box : null;
+  const boxSettled = settled?.action?.box ?? null;
+  const place = {
+    boxAtShow, boxAfterHide, boxSettled, actions: settled?.actions ?? null,
+    acrossScreen: shift(boxAtShow, boxAfterHide), at8s: shift(boxAfterHide, boxSettled), overall: shift(boxAtShow, boxSettled),
+  };
+  const moved = (by) => by !== null && by > BOX_TOLERANCE_PX;
+  if (!settled?.actions.includes("Restart connection") || !settled.actions.includes("Abandon") || place.overall === null) {
+    fault("Restart connection and Abandon did not show beside Show in Computers at 8 s", place);
+  } else if (boxAfterHide === null) {
+    if (moved(place.overall)) fault("Show in Computers moved between the cover's show and 8 s; the hide was read after 8 s, so the cause is not told", place);
+    else pass("Show in Computers keeps its place from the cover's show to Restart connection and Abandon showing", place);
   } else {
-    fault("Show in Computers moved when Restart connection and Abandon appeared", place);
+    if (moved(place.acrossScreen)) fault("Show in Computers moved across the screen's show and hide", place);
+    if (moved(place.at8s)) fault("Show in Computers moved when Restart connection and Abandon appeared", place);
+    if (!moved(place.acrossScreen) && !moved(place.at8s)) {
+      pass("Show in Computers keeps its place across the screen and when Restart connection and Abandon appear", place);
+    }
   }
 
   // The link restored, the cover clears.
