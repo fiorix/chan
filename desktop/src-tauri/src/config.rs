@@ -706,6 +706,7 @@ fn entry_from_roster_row(
         shared: row.shared,
         native_trust_required: row.shared
             && !gateway.trusts_native(row.owner_user_id, &row.devserver_id),
+        connection_health: None,
     }
 }
 
@@ -860,6 +861,7 @@ fn entry_from_devserver(
         gateway_url: String::new(),
         shared: false,
         native_trust_required: false,
+        connection_health: None,
     }
 }
 

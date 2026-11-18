@@ -405,6 +405,49 @@ export interface DevserverEntry {
   shared: boolean;
   /** A shared roster row that needs explicit native-IPC consent before connect. */
   native_trust_required: boolean;
+  /**
+   * This devserver's connection health while the desktop holds a connection
+   * to it; null with no reading: a disconnected or connecting devserver, one
+   * whose feed answers no ping, and every row off the desktop.
+   */
+  connection_health: ConnectionHealth | null;
+}
+
+/**
+ * What a devserver's connection health reads: `unknown` before its first
+ * reply, `healthy`, `slow` or `stalled` from its replies, and `reconnecting`
+ * from the loss of its feed socket until a later one answers.
+ */
+export type ConnectionFace = "unknown" | "healthy" | "slow" | "stalled" | "reconnecting";
+
+/** One finished ping of a devserver's connection health. */
+export interface ConnectionSample {
+  /** When the ping left, in Unix milliseconds. */
+  at: number;
+  /** How long its reply took in milliseconds; null for a ping its feed
+   * socket was lost before answering. */
+  rtt_ms: number | null;
+}
+
+/**
+ * A connected devserver's connection health, as the desktop reads it from
+ * the replies to the pings it sends on the devserver's window feed. Every
+ * time is Unix milliseconds on the desktop's clock, which is this page's.
+ */
+export interface ConnectionHealth {
+  face: ConnectionFace;
+  /** When `face` took its value. */
+  since: number;
+  /** The latest reply time in milliseconds; null before the first. */
+  rtt_ms: number | null;
+  /** When the oldest ping still waiting for its reply left; null with none
+   * waiting or before the devserver's first reply. */
+  wait_since: number | null;
+  /** When the devserver's last frame on the feed arrived; null before the
+   * first. */
+  last_contact: number | null;
+  /** The last finished pings, oldest first, at most 60. */
+  samples: ConnectionSample[];
 }
 
 // ---- The gateway registry -------------------------------------------------
