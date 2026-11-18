@@ -152,7 +152,7 @@ export default {
     try {
       // PAINT
       await cs(["write", "--tab-name", TAB,
-        `for i in $(seq -w 1 ${LINES}); do printf '${MARK}LINE_%s the quick brown fox jumps over the lazy dog, packing my box with five dozen liquor jugs\\n' "$i"; done; cols=$(tput cols 2>/dev/null || echo 200); printf "%0${cols}d\\n" 0; printf '${MARK}%s\\n' DONE
+        `for i in $(seq -w 1 ${LINES}); do printf '${MARK}LINE_%s the quick brown fox jumps over the lazy dog, packing my box with five dozen liquor jugs\\n' "$i"; done; cols=$(tput cols 2>/dev/null || echo 200); printf "%0\${cols}d\\n" 0; printf '${MARK}%s\\n' DONE
 `]);
       await waitScrollback(`${MARK}DONE`);
       if ((await cs(["scrollback", "--tab-name", TAB])).stdout.includes("syntax error")) {
