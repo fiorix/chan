@@ -15,22 +15,25 @@
 # clickable Dismiss stayed, 2 the environment cannot run it, 3 inconclusive.
 #
 # Evidence table: each claimed hop witnesses its own row with the command
-# that performs it and the output line that proves it. The install, proxy,
-# and eval rows all run in the inspected page (page_eval reads its
-# /workspace- URL in one place). J87 timed out waiting for the dial with
-# panes.out predating cs new and new-tab.out only queued, so the tab row
-# proves the request landed server-side and the dial row cites that run's
-# 60 s bound; the verdict cites both rows.
+# that performs it and the output line that proves it. The driven page is
+# the /workspace- one (page_eval reads its URL in one place); the proxy
+# also installs on every live page, since a second page dials for real
+# while the driven page dials trapped (J128: the tab owned a session the
+# driven page never recorded). The tab row proves the request landed
+# server-side and the dial row cites that run's 60 s bound; the session
+# row fails the run naming its session when the hold leaked; the verdict
+# cites the tab, dial and session rows.
 #
 # | hop              | command                                              | witness                                                        |
 # |------------------|------------------------------------------------------|----------------------------------------------------------------|
 # | window visible   | xdotool getwindowgeometry, xdpyinfo                | output/window-geometry.txt, output/display-dimensions.txt      |
 # | workspace served | chan serve "$WS"                                  | serve.out ("opened ... in chan-desktop")                       |
 # | control socket   | cs pane list --window ... > panes.out              | panes.out lists the window (zero tabs: pre-request)            |
-# | install proxy    | page_eval proxy IIFE                               | __pcov is an object, else inconclusive                         |
+# | install proxy    | page_eval proxy IIFE + all-pages install           | __pcov is an object, else inconclusive; proxy-all.out          |
 # | tab row          | cs terminal new ... > new-tab.out                    | new-tab.out ("terminal request queued") + tab_listed           |
-# | dial row         | poll __pcov.dials, 60 s bound (J87 ran it out)       | dial {command, session:null} or the timeout dump               |
-# | verdict          | obs_verdict / obs_judge                              | cites the tab row and the dial row                             |
+# | dial row         | poll all pages' __pcov.dials, 60 s bound            | first-dial.json {command, session:null} or the timeout dump   |
+# | session row      | cs terminal list --json filtered to the tab        | "[]", else inconclusive naming the session                    |
+# | verdict          | obs_verdict / obs_judge                              | cites the tab, dial and session rows                           |
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,8 +103,18 @@ done
 
 # A CLI tab whose first socket's frames never reach the page: the page holds
 # no session id, so the reload opens a plain shell and owes the notice.
-page_eval "(() => { if (window.__pcov) return window.__pcov.dials.length; window.__pcov = { dials: [] }; const Native = window.WebSocket; window.WebSocket = new Proxy(Native, { construct(target, args) { const url = new URL(String(args[0])); if (url.pathname !== '/api/terminal/ws') return Reflect.construct(target, args); window.__pcov.dials.push({ command: url.searchParams.get('command'), session: url.searchParams.get('session') }); return { readyState: Native.CONNECTING, binaryType: 'arraybuffer', close() { this.readyState = Native.CLOSED; }, send() { throw new Error('held terminal socket cannot send'); } }; } }); return window.__pcov.dials.length; })()" > /dev/null
+PROXY_IIFE="(() => { if (window.__pcov) return window.__pcov.dials.length; window.__pcov = { dials: [] }; const Native = window.WebSocket; window.WebSocket = new Proxy(Native, { construct(target, args) { const url = new URL(String(args[0])); if (url.pathname !== '/api/terminal/ws') return Reflect.construct(target, args); window.__pcov.dials.push({ command: url.searchParams.get('command'), session: url.searchParams.get('session') }); return { readyState: Native.CONNECTING, binaryType: 'arraybuffer', close() { this.readyState = Native.CLOSED; }, send() { throw new Error('held terminal socket cannot send'); } }; } }); return window.__pcov.dials.length; })()"
+page_eval "$PROXY_IIFE" > /dev/null
 [ "$(page_eval "typeof window.__pcov" 2>/dev/null)" = '"object"' ] || obs_inconclusive "the WebSocket proxy did not install in the inspected page"
+# A second live page dials for real while the driven page dials trapped
+# (J128: the tab owned a server session the driven page never recorded):
+# trap every live page too. The driven page's own proof above still gates
+# the run; this loop only widens the trap.
+node "$HERE/inspect.mjs" "$INSPECTOR" all "$PROXY_IIFE" > "$OBS_WORK/proxy-all.out" 2>&1 || true
+obs_log "proxy on all live pages: $(python3 -c 'import json,sys
+rows = [json.loads(l) for l in sys.stdin if l.strip()]
+ok = [r for r in rows if isinstance(r.get("value"), int)]
+print(f"{len(ok)} of {len(rows)} pages answer with the proxy")' < "$OBS_WORK/proxy-all.out")"
 cs terminal new --window "$CHAN_WINDOW_ID" --tab-name "$TAB" --command "$COMMAND" > "$OBS_WORK/new-tab.out" 2>&1 || obs_inconclusive "the CLI tab was not created: $(cat "$OBS_WORK/new-tab.out")"
 # The request queues; prove the tab exists server-side before waiting for
 # its dial, so a lost request and a silent page fail in different places.
@@ -112,9 +125,17 @@ tab_listed() {
 obs_wait 60 "the CLI tab to appear server-side" tab_listed
 obs_log "waiting for the held dial"
 held_deadline=$((SECONDS + 60))
-until [ "$(page_eval "window.__pcov.dials.length" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; do
+DIAL=""
+until DIAL="$(node "$HERE/inspect.mjs" "$INSPECTOR" all 'window.__pcov && window.__pcov.dials.length ? window.__pcov.dials : []' 2>/dev/null | python3 -c 'import json,sys
+for line in sys.stdin:
+    try: row = json.loads(line)
+    except ValueError: continue
+    for dial in row.get("value") or []:
+        if isinstance(dial, dict) and dial.get("command") == sys.argv[1]:
+            print(json.dumps(dial)); raise SystemExit
+' "$COMMAND")"; [ -n "$DIAL" ]; do
     if [ "$SECONDS" -ge "$held_deadline" ]; then
-        obs_log "no dial observed; inspector pages: $(node "$HERE/inspect.mjs" "$INSPECTOR" list 2>/dev/null | head -c 600 || echo unreadable)"
+        obs_log "no dial observed; inspector pages: $(node "$HERE/inspect.mjs" "$INSPECTOR" list 2>/dev/null || echo unreadable)"
         CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs terminal list --json > "$OBS_WORK/tabs-at-timeout.json" 2>&1 || true
         CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs pane list --window "$CHAN_WINDOW_ID" --json > "$OBS_WORK/panes-at-timeout.json" 2>&1 || true
         page_eval "document.readyState" > "$OBS_WORK/ready-at-timeout.txt" 2>&1 || true
@@ -122,6 +143,11 @@ until [ "$(page_eval "window.__pcov.dials.length" 2>/dev/null || echo 0)" -gt 0 
     fi
     sleep 1
 done
+printf '%s\n' "$DIAL" > "$OBS_WORK/first-dial.json"
+obs_log "first held dial for the requested command: $DIAL"
+[ "$(printf '%s' "$DIAL" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("session"))')" = "None" ] || obs_inconclusive "the held first socket carries a session id: $DIAL"
+LIVE="$(CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs terminal list --json 2>/dev/null | python3 -c 'import json,sys; rows=[r for g in json.load(sys.stdin).get("groups", {}).values() for r in g]; print(json.dumps([{"name": r.get("name"), "id": r.get("session_id"), "window": r.get("window")} for r in rows if r.get("name") == sys.argv[1] and r.get("session_id")]))' "$TAB" 2>/dev/null || echo readout-failed)"
+[ "$LIVE" = "[]" ] || obs_inconclusive "the held first socket created a server session $LIVE; the reload would restore instead of owing its notice"
 page_eval "location.reload()" > /dev/null 2>&1 || true
 obs_wait 60 "the CLI reload notice" notice_present
 obs_shot "pillcover-notice.png"
