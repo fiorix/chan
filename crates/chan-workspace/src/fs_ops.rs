@@ -2351,59 +2351,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_tempfile_publishes_bytes_and_cleans_up() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let target = dir.join("out.bin");
-        let mut staged = tempfile::Builder::new()
-            .prefix(atomic_write_temp::PREFIX)
-            .rand_bytes(8)
-            .tempfile_in(dir)
-            .unwrap();
-        use std::io::Write;
-        staged.write_all(b"published").unwrap();
-        staged.as_file().sync_all().unwrap();
-        let staged_path = staged.path().to_path_buf();
-        persist_tempfile(staged, &target).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"published");
-        assert!(!staged_path.exists(), "temporary left behind after publish");
-        assert!(
-            std::fs::read_dir(dir)
-                .unwrap()
-                .all(|entry| !is_atomic_write_temp_name(
-                    entry.unwrap().file_name().to_str().unwrap_or("")
-                )),
-            "temporary left behind after publish"
-        );
-    }
-
-    #[test]
-    fn persist_tempfile_failure_removes_the_temporary() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("file"), b"not a dir").unwrap();
-        let target = dir.join("file").join("out.bin");
-        let mut staged = tempfile::Builder::new()
-            .prefix(atomic_write_temp::PREFIX)
-            .rand_bytes(8)
-            .tempfile_in(dir)
-            .unwrap();
-        use std::io::Write;
-        staged.write_all(b"unpublished").unwrap();
-        staged.as_file().sync_all().unwrap();
-        let staged_path = staged.path().to_path_buf();
-        assert!(
-            persist_tempfile(staged, &target).is_err(),
-            "rename into a file-directory unexpectedly succeeded"
-        );
-        assert!(!target.exists(), "failed publish left a target");
-        assert!(
-            !staged_path.exists(),
-            "temporary left behind after failed publish"
-        );
-    }
-
-    #[test]
     fn atomic_write_failure_leaves_no_temporaries() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();

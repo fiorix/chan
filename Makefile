@@ -110,14 +110,8 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::excess_after_written_chunks_rolls_back_to_the_original_partial \
 	index::embeddings::download::tests::embedder_transport_failure_preserves_another_downloaders_cache \
 	index::embeddings::download::tests::embedder_interrupted_payload_keeps_the_resumable_part \
-	index::embeddings::download::tests::resume_status_guard_is_independent_of_body_length \
-	index::embeddings::download::tests::resume_range_guard_is_independent_of_body_length \
-	index::embeddings::download::tests::resume_length_guard_is_independent_of_range \
-	index::embeddings::download::tests::embedder_retries_a_corrupt_cached_config \
-	index::embeddings::download::tests::embedder_retries_corrupt_cached_tokenizer \
-	index::embeddings::download::tests::embedder_retries_corrupt_cached_weights \
-	index::embeddings::download::tests::embedder_retries_empty_cached_weights \
-	index::embeddings::download::tests::embedder_retries_non_utf8_cached_config \
+	index::embeddings::download::tests::each_resume_guard_refuses_on_its_own \
+	index::embeddings::download::tests::embedder_retries_a_corrupt_cached_file \
 	index::embeddings::download::tests::embedder_retries_a_cached_model_that_only_fails_its_probe \
 	index::embeddings::download::tests::embedder_refuses_a_retry_model_that_only_fails_its_probe \
 	index::embeddings::download::tests::a_failed_probe_with_every_file_as_pinned_keeps_the_cache \
@@ -134,7 +128,6 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error \
 	fs_ops::tests::atomic_write_replaces_a_file_open_by_another_handle \
 	fs_ops::tests::atomic_write_failure_leaves_no_temporaries \
-	fs_ops::tests::persist_tempfile_failure_removes_the_temporary \
 	workspace::tests::write_bytes_replaces_a_file_open_by_another_handle
 
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a

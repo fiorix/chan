@@ -914,56 +914,66 @@ fn parsed_response(status: &str, headers: &str) -> Response {
 }
 
 #[test]
-fn resume_status_guard_is_independent_of_body_length() {
-    let response = parsed_response("200 OK", "Content-Length: 7\r\n");
-    assert!(
-        matches!(
-            validate_resume(&response, 3, 10),
-            Err(DownloadError::InvalidResume)
-        ),
-        "a 200 response cannot append to a nonempty part even when its length fits"
-    );
-    let response = parsed_response("200 OK", "Content-Length: 10\r\n");
-    validate_resume(&response, 0, 10).unwrap();
-}
-
-#[test]
-fn resume_range_guard_is_independent_of_body_length() {
-    let response = parsed_response(
-        "206 Partial Content",
-        "Content-Range: bytes 0-6/10\r\nContent-Length: 7\r\n",
-    );
-    assert!(
-        matches!(
-            validate_resume(&response, 3, 10),
-            Err(DownloadError::InvalidResume)
-        ),
-        "a wrong range is refused even when Content-Length matches remaining bytes"
-    );
-    let response = parsed_response(
-        "206 Partial Content",
-        "Content-Range: bytes 3-9/10\r\nContent-Length: 7\r\n",
-    );
-    validate_resume(&response, 3, 10).unwrap();
-}
-
-#[test]
-fn resume_length_guard_is_independent_of_range() {
-    for length in ["6", "8", "not-a-size"] {
-        let response = parsed_response(
+fn each_resume_guard_refuses_on_its_own() {
+    // Each refused reply fails one guard and passes the others: a 200 for a
+    // nonempty part, a wrong range, a wrong length.
+    for (status, headers, start, size, accepted) in [
+        ("200 OK", "Content-Length: 7\r\n", 3, 10, false),
+        ("200 OK", "Content-Length: 10\r\n", 0, 10, true),
+        (
             "206 Partial Content",
-            &format!("Content-Range: bytes 3-9/10\r\nContent-Length: {length}\r\n"),
+            "Content-Range: bytes 0-6/10\r\nContent-Length: 7\r\n",
+            3,
+            10,
+            false,
+        ),
+        (
+            "206 Partial Content",
+            "Content-Range: bytes 3-9/10\r\nContent-Length: 7\r\n",
+            3,
+            10,
+            true,
+        ),
+        (
+            "206 Partial Content",
+            "Content-Range: bytes 3-9/10\r\nContent-Length: 6\r\n",
+            3,
+            10,
+            false,
+        ),
+        (
+            "206 Partial Content",
+            "Content-Range: bytes 3-9/10\r\nContent-Length: 8\r\n",
+            3,
+            10,
+            false,
+        ),
+        (
+            "206 Partial Content",
+            "Content-Range: bytes 3-9/10\r\nContent-Length: not-a-size\r\n",
+            3,
+            10,
+            false,
+        ),
+        (
+            "206 Partial Content",
+            "Content-Range: bytes 3-9/10\r\n",
+            3,
+            10,
+            true,
+        ),
+    ] {
+        let response = parsed_response(status, headers);
+        let result = validate_resume(&response, start, size);
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{status} with {headers:?} resuming at {start} of {size}: {result:?}"
         );
-        assert!(
-            matches!(
-                validate_resume(&response, 3, 10),
-                Err(DownloadError::InvalidResume)
-            ),
-            "a wrong length is refused even when the range matches: {length}"
-        );
+        if !accepted {
+            assert!(matches!(result, Err(DownloadError::InvalidResume)));
+        }
     }
-    let response = parsed_response("206 Partial Content", "Content-Range: bytes 3-9/10\r\n");
-    validate_resume(&response, 3, 10).unwrap();
 }
 
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
@@ -1006,10 +1016,6 @@ fn model_file_server(revision: &'static str, files: HashMap<&'static str, Vec<u8
             _ => response("400 Bad Request", "", b"unexpected model range"),
         }
     })
-}
-
-fn recovers_corrupt_cached_file(filename: &str, corrupt: &[u8]) {
-    recovers_corrupt_cached_file_with(filename, |_| corrupt.to_vec(), false);
 }
 
 fn recovers_corrupt_cached_file_with(
@@ -1092,28 +1098,16 @@ fn recovers_corrupt_cached_file_with(
 }
 
 #[test]
-fn embedder_retries_a_corrupt_cached_config() {
-    recovers_corrupt_cached_file("config.json", b"{");
-}
-
-#[test]
-fn embedder_retries_corrupt_cached_tokenizer() {
-    recovers_corrupt_cached_file("tokenizer.json", b"{");
-}
-
-#[test]
-fn embedder_retries_corrupt_cached_weights() {
-    recovers_corrupt_cached_file("model.safetensors", b"not-safetensors");
-}
-
-#[test]
-fn embedder_retries_empty_cached_weights() {
-    recovers_corrupt_cached_file("model.safetensors", b"");
-}
-
-#[test]
-fn embedder_retries_non_utf8_cached_config() {
-    recovers_corrupt_cached_file("config.json", &[0xff, 0xfe]);
+fn embedder_retries_a_corrupt_cached_file() {
+    for (filename, corrupt) in [
+        ("config.json", &b"{"[..]),
+        ("config.json", &[0xff, 0xfe][..]),
+        ("tokenizer.json", &b"{"[..]),
+        ("model.safetensors", &b"not-safetensors"[..]),
+        ("model.safetensors", &b""[..]),
+    ] {
+        recovers_corrupt_cached_file_with(filename, |_| corrupt.to_vec(), false);
+    }
 }
 
 #[test]

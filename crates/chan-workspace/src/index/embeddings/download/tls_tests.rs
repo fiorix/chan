@@ -214,17 +214,6 @@ fn assert_certificate_error(error: &EmbedError, request_url: &str) {
         display.to_ascii_lowercase().contains("certificate"),
         "certificate error must name its cause: {display}"
     );
-    println!("MODELROOTS_CERTIFICATE_DISPLAY={display}");
-    if let EmbedError::Certificate(transport) = error {
-        println!(
-            "MODELROOTS_CERTIFICATE_TRANSPORT_JSON={}",
-            serde_json::to_string(transport).unwrap()
-        );
-    }
-    println!(
-        "MODELROOTS_CERTIFICATE_JSON={}",
-        serde_json::json!({"error": display})
-    );
 }
 
 #[test]
