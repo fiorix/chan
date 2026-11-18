@@ -22,7 +22,7 @@ import { commandById, commandContext, commandUnavailableReason } from "../state/
 import { commandSurfaceId } from "../state/commands/browser";
 import {
   browserSelection, browserSidePanes, closeSettings, fbActiveInstanceId, fbClipboard, fbClipboardClear,
-  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet, openSettings, setBrowserSidePane, settingsPanel,
+  fbTreeInstance, fileOps, loadTreeDir, fbClipboardSet, openSettings, searchPanel, setBrowserSidePane, settingsPanel,
 } from "../state/store.svelte";
 import {
   activeBrowserTab, activeFileTab, cancelPaneMode, enterPaneMode, layout, paneMode, restoreLayout,
@@ -58,6 +58,7 @@ afterEach(async () => {
   cancelPaneMode();
   fbClipboardClear();
   closeSettings();
+  searchPanel.open = false;
   await unmountApp();
   browserSelection.path = null;
   browserSelection.paths = [];
@@ -572,6 +573,29 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
     return field;
   }
 
+  test("a chord with the keyboard on the body under Search moves nothing", async () => {
+    await remountWithChord();
+    await targetDock();
+    searchPanel.open = true;
+    await settleLong();
+    const field = await vi.waitFor(() => {
+      const input = document.querySelector<HTMLElement>(".search .head input");
+      expect(input, "Search input rendered").toBeTruthy();
+      return input!;
+    });
+    field.focus();
+    await settleLong();
+    expect(fbActiveInstanceId(), "focusing Search moves no target").toBe("fb-dock-left");
+    field.blur();
+    await settleLong();
+    expect(document.activeElement, "blur parked the keyboard on the body").toBe(document.body);
+    press({ key: "y", code: "KeyY", ctrlKey: true, altKey: true });
+    await settleLong();
+    expect(browserSidePanes.left, "left dock closed").toBe(false);
+    expect(document.activeElement, "focus stays on the body under Search").toBe(document.body);
+    expect(fbActiveInstanceId(), "no fallback without a focused file browser").toBeNull();
+  });
+
   test("a chord with the keyboard on the body under Settings moves nothing", async () => {
     await remountWithChord();
     await targetDock();
@@ -629,6 +653,7 @@ describe("closing the targeted dock hands the target to the focused pane", () =>
   test("a fresh mount starts with no overlay", async () => {
     await layOut();
     expect(settingsPanel.open, "Settings closed by the previous teardown").toBe(false);
+    expect(searchPanel.open, "Search closed by the previous teardown").toBe(false);
     expect(document.querySelector('[aria-label="Settings sections"]'), "no settings surface mounted").toBeNull();
   });
 
