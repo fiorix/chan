@@ -211,8 +211,8 @@ desktop-dev: ## Launch the desktop app in dev mode.
 
 # ---------------------------------------------------------------------------
 # iOS app (mobile/ios, crate chan-ios). Mirrors desktop/Makefile's
-# dev/build/check/test/lint/fmt/clean over the iOS crate, plus the
-# install flows proven in dev/chan-ios/followups/ios-runbook.md.
+# dev/build/check/test/lint/fmt/clean over the iOS crate, plus simulator
+# and physical-device install targets.
 # ---------------------------------------------------------------------------
 
 IOS_DIR := mobile/ios
@@ -253,20 +253,22 @@ ios-clean: ## Clean the iOS crate's build artifacts.
 .PHONY: ios-install-sim
 ios-install-sim: ios-build ## Build, install, and launch the iOS app on IOS_SIM.
 	@xcrun simctl boot "$(IOS_SIM)" 2>/dev/null || true
-	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphonesimulator/Chan.app)"; \
-	    [ -d "$$app" ] || { echo "error: no simulator Chan.app under DerivedData"; exit 1; }; \
-	    xcrun simctl install "$(IOS_SIM)" "$$app" && \
+	@products_dir="$$(xcodebuild -project $(IOS_DIR)/gen/apple/chan-ios.xcodeproj -scheme chan-ios_iOS -configuration debug -sdk iphonesimulator -showBuildSettings 2>/dev/null | sed -n 's/^[[:space:]]*BUILT_PRODUCTS_DIR = //p' | head -n 1)"; \
+	    [ -n "$$products_dir" ] && [ -d "$$products_dir/Chan.app" ] || { echo "error: no simulator Chan.app under $${products_dir:-DerivedData}"; exit 1; }; \
+	    xcrun simctl install "$(IOS_SIM)" "$$products_dir/Chan.app" && \
 	    xcrun simctl launch "$(IOS_SIM)" app.chan.ios
 
+# Release is required on physical devices: rust-embed reads web-launcher/dist
+# from the Mac filesystem in debug builds, so only release bakes the bundle in.
 .PHONY: ios-install-device
-ios-install-device: $(WEB_PREREQ) ## Build for device and install on IOS_DEVICE via devicectl.
+ios-install-device: $(WEB_PREREQ) ## Build for device (release) and install on IOS_DEVICE via devicectl.
 	@if [ -z "$(IOS_DEVICE)" ]; then \
 	    echo "error: IOS_DEVICE not set (see: xcrun devicectl list devices)"; exit 1; \
 	fi
-	cd $(IOS_DIR) && rm -rf gen/apple/build && cargo tauri ios build --debug -t aarch64 --ci
-	@app="$$(echo ~/Library/Developer/Xcode/DerivedData/chan-ios-*/Build/Products/debug-iphoneos/Chan.app)"; \
-	    [ -d "$$app" ] || { echo "error: no device Chan.app under DerivedData"; exit 1; }; \
-	    xcrun devicectl device install app --device "$(IOS_DEVICE)" "$$app" && \
+	cd $(IOS_DIR) && rm -rf gen/apple/build && cargo tauri ios build -t aarch64 --ci
+	@products_dir="$$(xcodebuild -project $(IOS_DIR)/gen/apple/chan-ios.xcodeproj -scheme chan-ios_iOS -configuration release -sdk iphoneos -showBuildSettings 2>/dev/null | sed -n 's/^[[:space:]]*BUILT_PRODUCTS_DIR = //p' | head -n 1)"; \
+	    [ -n "$$products_dir" ] && [ -d "$$products_dir/Chan.app" ] || { echo "error: no device Chan.app under $${products_dir:-DerivedData}"; exit 1; }; \
+	    xcrun devicectl device install app --device "$(IOS_DEVICE)" "$$products_dir/Chan.app" && \
 	    xcrun devicectl device process launch --device "$(IOS_DEVICE)" app.chan.ios
 
 .PHONY: linux-chan-tarball
