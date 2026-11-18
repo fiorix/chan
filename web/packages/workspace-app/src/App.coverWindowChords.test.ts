@@ -32,9 +32,11 @@ vi.mock("./api/desktop", async (importOriginal) => ({
 
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout } from "./__tests__/tabs";
+import { resolveCloseConfirm, uiCloseConfirm } from "./state/closeConfirm.svelte";
 import { MAC_MENUBAR_WINDOW_CHORDS } from "./state/menubarChords";
 import { FULL_WINDOW_COVERS, launcherPanel, setCoverBlocking, type FullWindowCover } from "./state/store.svelte";
 import { layout, type LeafNode } from "./state/tabs.svelte";
+import { __resetWindowLifecycle, markWindowHidden } from "./state/windowLifecycle.svelte";
 
 stubAppEnvironment();
 
@@ -210,5 +212,41 @@ describe("chan-desktop off macOS", () => {
     expect(toggle.defaultPrevented, "the bridge claimed the toggle").toBe(true);
     expect(plain.defaultPrevented, "plain Ctrl+P stays blocked behind the cover").toBe(true);
     expect(reachedWindow).toEqual([]);
+  });
+});
+
+describe("the close prompt over a cover", () => {
+  test("Enter and Space on its buttons keep their activation, and on a button under the cover do not", async () => {
+    markWindowHidden();
+    await settle();
+    // jsdom applies no stylesheet: the layers the stylesheets set go inline.
+    const cover = document.querySelector<HTMLElement>('[data-cover="session-ended"]');
+    expect(cover, "the session-ended cover is up").not.toBeNull();
+    cover!.style.zIndex = "30001";
+    void uiCloseConfirm();
+    await settle();
+    const prompt = document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="Close this window?"]')!;
+    prompt.style.zIndex = "30002";
+    const under = document.body.appendChild(document.createElement("button"));
+    try {
+      const buttons = [...prompt.querySelectorAll<HTMLButtonElement>("button")];
+      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Hide", "Close", "Cancel"]);
+      for (const button of buttons) {
+        for (const key of ["Enter", " "]) {
+          button.focus();
+          const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+          button.dispatchEvent(event);
+          expect(event.defaultPrevented, `${JSON.stringify(key)} on ${button.textContent?.trim()}`).toBe(false);
+        }
+      }
+      const blocked = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      under.dispatchEvent(blocked);
+      expect(blocked.defaultPrevented, "Enter on a button under the cover").toBe(true);
+    } finally {
+      under.remove();
+      resolveCloseConfirm("cancel");
+      __resetWindowLifecycle();
+      await settle();
+    }
   });
 });
