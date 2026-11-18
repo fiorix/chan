@@ -308,10 +308,13 @@ impl Client {
             .then(|| progress_bar(file.size, start, file.name));
         let mut fresh = start == 0;
         loop {
-            let actual = self.transfer(url, file, &mut part, start, progress.as_ref())?;
+            let (actual, from_zero) =
+                self.transfer(url, file, &mut part, start, progress.as_ref())?;
             if actual == file.sha256 {
                 break;
             }
+            // A whole-file answer to a resume was a fresh attempt already.
+            fresh |= from_zero;
             // Bytes of the right length that hash wrong cannot be resumed.
             part.set_len(0)?;
             part.rewind()?;
@@ -340,7 +343,8 @@ impl Client {
     }
 
     /// Fill `part` from its first `start` bytes to `file`'s pinned size, and
-    /// return the sha256 of all of it.
+    /// return the sha256 of all of it, and whether those bytes all came in
+    /// this call (from zero).
     fn transfer(
         &self,
         url: &Url,
@@ -348,7 +352,7 @@ impl Client {
         part: &mut File,
         mut start: u64,
         progress: Option<&ProgressBar>,
-    ) -> Result<String, DownloadError> {
+    ) -> Result<(String, bool), DownloadError> {
         let size = file.size;
         let mut hasher = Sha256::new();
         hash_prefix(part, start, &mut hasher)?;
@@ -408,7 +412,7 @@ impl Client {
                 }
             }
         }
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok((format!("{:x}", hasher.finalize()), start == 0))
     }
 }
 

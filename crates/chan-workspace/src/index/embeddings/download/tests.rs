@@ -474,6 +474,28 @@ fn a_fresh_download_that_hashes_wrong_after_a_restart_fails() {
 }
 
 #[test]
+fn a_whole_file_answer_to_a_resume_that_hashes_wrong_is_not_fetched_again() {
+    let cache = tempfile::tempdir().unwrap();
+    part_file(cache.path(), &BODY[..3]);
+    let wrong = b"{\"fixture\":TRUE}\n";
+    let server = Server::start(move |_| response("200 OK", "", wrong));
+    let error = client(cache.path(), &server)
+        .get("fixture/model", "config.json")
+        .expect_err("the whole file hashes wrong");
+    assert!(
+        error
+            .to_string()
+            .contains("does not match its pinned sha256"),
+        "{error}"
+    );
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        1,
+        "the whole-file answer was the fresh attempt: no second download in the call"
+    );
+}
+
+#[test]
 fn a_whole_file_answer_to_a_resume_restarts_from_it() {
     // A proxy that ignores Range answers with every byte, as a 200 or as a
     // 206 that names the whole file.
