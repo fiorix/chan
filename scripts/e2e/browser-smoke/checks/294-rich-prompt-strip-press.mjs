@@ -340,7 +340,11 @@ export default {
 
             // The failed recall: the cancel frame never goes out, so the
             // ack timer fails the run instead. The drop is installed before
-            // the catch so no cancel can slip out first.
+            // the catch so no cancel can slip out first. The drop counter
+            // spans the backends, so this leg reads its own share of it, and
+            // the note the composer shows only on a failed run is the proof
+            // the recall failed rather than went through.
+            const droppedBefore = await page.evaluate(() => window.__prompt294.droppedCancels);
             await page.evaluate(() => {
               window.__prompt294.dropCancel = true;
             });
@@ -349,10 +353,10 @@ export default {
               throw new Error("never caught a pending prompt for the failed recall");
             }
             result.steps.failedPress = (await pressSubmit(page, card, "294-failed-press", shot)).record;
-            await sleep(6500);
-            const failed = await focusState(page, card);
-            const dropped = await page.evaluate(() => window.__prompt294.droppedCancels);
-            assert.ok(dropped > 0, "the cancel frame was dropped");
+            const failed = await waitFor(page, card, "the failed recall says the connection was lost",
+              (value) => value.note === "connection lost, message may still be queued", 9000);
+            const dropped = (await page.evaluate(() => window.__prompt294.droppedCancels)) - droppedBefore;
+            assert.ok(dropped > 0, "this leg dropped its own cancel frame");
             assert.equal(failed.where, "composer", "focus holds through the failed recall");
             assert.equal(failed.text, failText, "the failed recall keeps the text");
             await page.evaluate(() => {
