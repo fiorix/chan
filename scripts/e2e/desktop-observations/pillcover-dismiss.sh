@@ -83,11 +83,25 @@ done
 # A CLI tab whose first socket's frames never reach the page: the page holds
 # no session id, so the reload opens a plain shell and owes the notice.
 page_eval "(() => { if (window.__pcov) return window.__pcov.dials.length; window.__pcov = { dials: [] }; const Native = window.WebSocket; window.WebSocket = new Proxy(Native, { construct(target, args) { const url = new URL(String(args[0])); if (url.pathname !== '/api/terminal/ws') return Reflect.construct(target, args); window.__pcov.dials.push({ command: url.searchParams.get('command'), session: url.searchParams.get('session') }); return { readyState: Native.CONNECTING, binaryType: 'arraybuffer', close() { this.readyState = Native.CLOSED; }, send() { throw new Error('held terminal socket cannot send'); } }; } }); return window.__pcov.dials.length; })()" > /dev/null
+[ "$(page_eval "typeof window.__pcov" 2>/dev/null)" = '"object"' ] || obs_inconclusive "the WebSocket proxy did not install in the inspected page"
 cs terminal new --window "$CHAN_WINDOW_ID" --tab-name "$TAB" --command "$COMMAND" > "$OBS_WORK/new-tab.out" 2>&1 || obs_inconclusive "the CLI tab was not created: $(cat "$OBS_WORK/new-tab.out")"
+# The request queues; prove the tab exists server-side before waiting for
+# its dial, so a lost request and a silent page fail in different places.
+tab_listed() {
+    CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs terminal list --json 2>/dev/null |
+        python3 -c 'import json,sys; rows=[r for g in json.load(sys.stdin).get("groups", {}).values() for r in g]; print(any(r.get("name") == sys.argv[1] for r in rows))' "$TAB" 2>/dev/null | grep -q True
+}
+obs_wait 60 "the CLI tab to appear server-side" tab_listed
 obs_log "waiting for the held dial"
 held_deadline=$((SECONDS + 60))
 until [ "$(page_eval "window.__pcov.dials.length" 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null; do
-    [ "$SECONDS" -lt "$held_deadline" ] || obs_inconclusive "the CLI tab never dialled"
+    if [ "$SECONDS" -ge "$held_deadline" ]; then
+        obs_log "no dial observed; inspector pages: $(node "$HERE/inspect.mjs" "$INSPECTOR" list 2>/dev/null | head -c 600 || echo unreadable)"
+        CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs terminal list --json > "$OBS_WORK/tabs-at-timeout.json" 2>&1 || true
+        CHAN_CONTROL_SOCKET="$CHAN_CONTROL_SOCKET" cs pane list --window "$CHAN_WINDOW_ID" --json > "$OBS_WORK/panes-at-timeout.json" 2>&1 || true
+        page_eval "document.readyState" > "$OBS_WORK/ready-at-timeout.txt" 2>&1 || true
+        obs_inconclusive "the CLI tab never dialled (state in tabs-at-timeout.json, panes-at-timeout.json and the inspector list above)"
+    fi
     sleep 1
 done
 page_eval "location.reload()" > /dev/null 2>&1 || true
