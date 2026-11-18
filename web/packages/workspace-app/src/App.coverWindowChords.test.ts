@@ -34,7 +34,7 @@ import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tes
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { resolveCloseConfirm, uiCloseConfirm } from "./state/closeConfirm.svelte";
 import { MAC_MENUBAR_WINDOW_CHORDS } from "./state/menubarChords";
-import { FULL_WINDOW_COVERS, launcherPanel, setCoverBlocking, type FullWindowCover } from "./state/store.svelte";
+import { COVER_ROOT_ATTR, FULL_WINDOW_COVERS, launcherPanel, promptState, resolvePrompt, setCoverBlocking, uiPrompt, type FullWindowCover } from "./state/store.svelte";
 import { layout, type LeafNode } from "./state/tabs.svelte";
 import { __resetWindowLifecycle, markWindowHidden } from "./state/windowLifecycle.svelte";
 
@@ -215,6 +215,29 @@ describe("chan-desktop off macOS", () => {
   });
 });
 
+/// A cover's root raised over the window at `z`, standing in for the cover
+/// itself: the guard reads only the raised covers and their roots' layers.
+function coverRoot(cover: FullWindowCover, z: number): HTMLElement {
+  const root = document.body.appendChild(document.createElement("div"));
+  root.setAttribute(COVER_ROOT_ATTR, cover);
+  root.style.position = "fixed";
+  root.style.zIndex = String(z);
+  setCoverBlocking(cover, true);
+  return root;
+}
+
+/// Enter and Space on each button, as their keydowns reach the guard.
+function keysOn(buttons: HTMLButtonElement[]): Array<[string, boolean]> {
+  return buttons.flatMap((button) =>
+    ["Enter", " "].map((key): [string, boolean] => {
+      button.focus();
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      button.dispatchEvent(event);
+      return [`${JSON.stringify(key)} on ${button.textContent?.trim()}`, event.defaultPrevented];
+    }),
+  );
+}
+
 describe("the close prompt over a cover", () => {
   test("Enter and Space on its buttons keep their activation, and on a button under the cover do not", async () => {
     markWindowHidden();
@@ -246,6 +269,46 @@ describe("the close prompt over a cover", () => {
       under.remove();
       resolveCloseConfirm("cancel");
       __resetWindowLifecycle();
+      await settle();
+    }
+  });
+
+  test("Enter and Space on its buttons are cancelled under the screen lock, which paints over it", async () => {
+    markWindowHidden();
+    await settle();
+    document.querySelector<HTMLElement>('[data-cover="session-ended"]')!.style.zIndex = "30001";
+    void uiCloseConfirm();
+    await settle();
+    const prompt = document.querySelector<HTMLElement>('[role="alertdialog"][aria-label="Close this window?"]')!;
+    prompt.style.zIndex = "30002";
+    const lock = coverRoot("screensaver", 39000);
+    try {
+      const keys = keysOn([...prompt.querySelectorAll<HTMLButtonElement>("button")]);
+      expect(keys.length).toBe(6);
+      for (const [key, cancelled] of keys) expect(cancelled, key).toBe(true);
+    } finally {
+      lock.remove();
+      resolveCloseConfirm("cancel");
+      __resetWindowLifecycle();
+      await settle();
+    }
+  });
+});
+
+describe("an app-root dialog under the reconnect cover", () => {
+  test("Enter and Space on its buttons are cancelled, the cover painting over it", async () => {
+    void uiPrompt("Name");
+    await settle();
+    const dialog = document.querySelector<HTMLElement>('.modal[role="dialog"]')!;
+    expect(dialog.parentElement?.style.zIndex, "the dialogs' stack sets its layer inline").toBe("26000");
+    const cover = coverRoot("reconnect", 30000);
+    try {
+      const keys = keysOn([...dialog.querySelectorAll<HTMLButtonElement>("button")]);
+      expect(keys.length).toBeGreaterThan(0);
+      for (const [key, cancelled] of keys) expect(cancelled, key).toBe(true);
+    } finally {
+      cover.remove();
+      if (promptState.open) resolvePrompt(null);
       await settle();
     }
   });
