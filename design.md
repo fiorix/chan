@@ -58,12 +58,13 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `chan-tls` | Shared TLS trust for the Rust clients `crates/chan-tls/design.md` lists as its callers: the platform verifier on macOS and Windows, the system bundle beside the bundled WebPKI roots elsewhere. |
 | `chan` | The CLI binary: argument parsing, `chan serve`, the devserver verbs, workspace management, self-upgrade. |
 | `desktop` | chan-desktop, the Tauri shell: native windows, the launcher, devserver and gateway connections. The same binary is the CLI when invoked as `chan`, `cs`, `chan-files` or `chan-edit`, and a terminal window as `chan-term`. |
+| `mobile/ios` | chan-ios, the Tauri iOS shell: the embedded loopback launcher in a single webview, system-sheet gateway sign-in, and rostered devserver entry. |
 | `web/packages/workspace-app` | The workspace SPA: terminal, editor, file browser, graph, dashboard, search, settings. |
 | `web/packages/launcher` | The launcher SPA: the Computers screen that lists machines, workspaces and windows. |
 | `web/packages/marketing` | The chan.app site and the user manual. |
 | `gateway` | The gateway services: identity, profile, devserver-control, devserver-proxy, and the admin CLI. |
 
-The dependency direction is the point of the split. `chan-workspace` owns no HTTP serving; its optional embedding model downloader takes TLS trust from `chan-tls`. `chan-library` composes workspaces and terminals without a frontend; `chan-server` wraps a tenant in routes and the embedded bundle; `chan` and `chan-desktop` drive the stack. The gateway consumes the core only through the tunnel protocol, so the single-binary build never links Postgres or OAuth.
+The dependency direction is the point of the split. `chan-workspace` owns no HTTP serving; its optional embedding model downloader takes TLS trust from `chan-tls`. `chan-library` composes workspaces and terminals without a frontend; `chan-server` wraps a tenant in routes and the embedded bundle; `chan`, `chan-desktop` and `chan-ios` drive the stack. The gateway consumes the core only through the tunnel protocol, so the single-binary build never links Postgres or OAuth.
 
 ```mermaid
 flowchart LR
@@ -187,6 +188,8 @@ chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devser
 
 The local desktop's `cs window new` mints a window through the desktop bridge, then chan-server waits up to ten seconds for its id to be live in the calling tenant's session registry before returning it to the shell. This makes the id immediately usable by `--window` commands; native focus remains the operating system's decision. A connection timeout exits 124 and names the id without deleting its record. A devserver has no desktop window-management bridge, even when a desktop views its windows.
 
+chan-ios is the Tauri iOS shell in `mobile/ios`. It runs the embedded loopback server and launcher in a single webview without CLI personalities, native multi-window management or local terminal seeding: gateway sign-in runs in `ASWebAuthenticationSession` against the `chan://auth/callback` redirect with PKCE, opening a rostered devserver installs the gateway session cookies and navigates that webview to the tenant URL, and a left-edge swipe returns to the loopback launcher while roster polling pauses in the background.
+
 ## Process metrics
 
 The outer server router owns a metrics runtime shared by its launcher and all tenants. One worker samples process and subsystem counters every second into a bounded ten-minute memory history; a separate worker scans chan-home storage while someone reads it. Dashboard, `chan metrics`, and an optional socket-activated source for Linux `systemd-report` read the same cache. The source queries the running devserver and never owns collection or starts that devserver. Measurement scopes, the HTTP contract, and example user units are in [docs/metrics.md](docs/metrics.md).
@@ -200,6 +203,7 @@ The outer server router owns a metrics runtime shared by its launcher and all te
 | Workspace bearer tokens, server and editor preferences, extension declarations | chan-server, under the chan home, secrets at mode 0600 |
 | Devserver token, its shared terminal tenant's token, enabled workspace set | the devserver's state under the chan home, tokens at mode 0600 |
 | Desktop config: devservers, gateways, window placement, viewer privacy | chan-desktop, under the chan home |
+| Mobile config: gateways, devservers, native trust, gateway PATs | chan-ios, config under the chan home (`.chan` in Application Support on iOS unless `CHAN_HOME` is set) and gateway PATs in the iOS Keychain |
 | Browser viewer privacy | localStorage per origin; individual reveals in sessionStorage per tab |
 | Launcher screen and badge positions | sessionStorage per browser tab or native launcher webview |
 | Accounts, tokens, grants, policy, audit | the gateway's profile service, in Postgres |
