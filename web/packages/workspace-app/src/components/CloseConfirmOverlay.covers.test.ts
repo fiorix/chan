@@ -4,8 +4,9 @@
 // so it holds the keyboard over them: raised over either cover it takes the
 // keyboard onto Cancel, Escape cancels it and Tab cycles its buttons, and a
 // key lands on the prompt rather than on the cover's own button beneath it.
-// When the screen lock over both lifts, Cancel has the keyboard again. The
-// real covers, lock and prompt, in jsdom.
+// Neither cover takes the keyboard back from it, and when the screen lock
+// over both lifts, Cancel has the keyboard again. The real covers, lock and
+// prompt, in jsdom.
 
 import { mount, tick, unmount, type Component } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -20,7 +21,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { raisedCoverKeys, ui, workspace } from "../state/store.svelte";
+import { promptState, raisedCoverKeys, ui, workspace } from "../state/store.svelte";
 import { __resetWindowLifecycle, markWindowHidden } from "../state/windowLifecycle.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
@@ -61,6 +62,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   screensaver.locked = false;
+  promptState.open = false;
   resolveCloseConfirm("cancel");
   for (const view of mounted.splice(0)) unmount(view);
   await settle();
@@ -128,6 +130,40 @@ async function promptOver(): Promise<{ prompt: HTMLElement; cancel: HTMLButtonEl
   expect(document.activeElement, "Cancel takes the keyboard").toBe(cancel);
   return { prompt, cancel };
 }
+
+test("the reconnect cover leaves the close prompt over it the keyboard as the window takes focus", async () => {
+  await reconnectCover();
+  const { cancel } = await promptOver();
+  window.dispatchEvent(new Event("focus"));
+  await settle();
+  expect(document.activeElement, "Cancel keeps the keyboard as the window takes focus").toBe(cancel);
+  // A dialog's state changing runs the cover's focus effect again.
+  promptState.open = true;
+  await settle();
+  expect(document.activeElement, "Cancel keeps the keyboard as the cover looks again").toBe(cancel);
+});
+
+test("the reconnect cover takes the keyboard from a field it paints over", async () => {
+  const field = document.body.appendChild(document.createElement("textarea"));
+  field.focus();
+  const cover = await reconnectCover();
+  expect(cover.contains(document.activeElement), "the cover's card").toBe(true);
+});
+
+test("the session-ended cover arriving under the close prompt leaves Cancel the keyboard", async () => {
+  const { cancel } = await promptOver();
+  const cover = await sessionEndedCover();
+  expect(raisedCoverKeys()).toContain("session-ended");
+  expect(document.activeElement, "Cancel keeps the keyboard").toBe(cancel);
+  expect(cover.contains(document.activeElement), "Enter cannot reach the cover's button").toBe(false);
+});
+
+test("the session-ended cover takes the keyboard from a field it paints over", async () => {
+  const field = document.body.appendChild(document.createElement("textarea"));
+  field.focus();
+  const cover = await sessionEndedCover();
+  expect(document.activeElement, "the cover's button").toBe(cover.querySelector("button.close"));
+});
 
 test("the close prompt over the reconnect cover takes Cancel back when the screen lock over both lifts", async () => {
   // The lock's rain draws on a canvas and asks about reduced motion and fonts.

@@ -24,7 +24,7 @@
   import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
 
   // Recovery actions (Restart connection / Abandon) are offered only on a devserver-backed
   // desktop window: a stuck remote connection the user can force back or give up
@@ -195,7 +195,12 @@
   /// keeps its own focus.
   $effect(() => {
     if (!visible) return;
+    const dialogOpen = modalDialogOpen();
     const active = document.activeElement as HTMLElement | null;
+    // An owner that paints over this cover (the close prompt) holds the
+    // keyboard over it, and its element is not the one to return to. A
+    // dialog closing runs this again, and the card takes the keyboard.
+    if (untrack(() => mayFocus(active))) return;
     if (active && active !== document.body && active !== document.documentElement && !active.closest(`[${COVER_ROOT_ATTR}]`)) {
       focusBeforeCover = { element: active, surface: !!active.closest(".terminal-host, .editor-host") };
       deferredFocus = null;
@@ -205,11 +210,14 @@
     }
     // ModalShell repairs focus into its top dialog. Leave that keyboard owner
     // alone throughout the cover and after it clears.
-    if (modalDialogOpen() && active?.closest('.modal[role="dialog"]')) return;
+    if (dialogOpen && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
-    queueMicrotask(() => focusCard());
+    queueMicrotask(() => {
+      if (!mayFocus(document.activeElement)) focusCard();
+    });
     const onWindowFocus = (): void => {
-      if (!document.activeElement?.closest(`[${COVER_ROOT_ATTR}]`)) focusCard();
+      const holder = document.activeElement;
+      if (!holder?.closest(`[${COVER_ROOT_ATTR}]`) && !mayFocus(holder)) focusCard();
     };
     window.addEventListener("focus", onWindowFocus);
     return () => window.removeEventListener("focus", onWindowFocus);

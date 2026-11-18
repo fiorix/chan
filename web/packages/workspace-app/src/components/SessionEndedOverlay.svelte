@@ -5,10 +5,11 @@
   // This stacks above the reconnect overlay. The detached arm also covers
   // native desktop windows; hidden and closed arms follow the watcher.
 
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { windowLifecycle } from "../state/windowLifecycle.svelte";
   import { clientSession, reconnectClient } from "../state/clientSession.svelte";
   import { setCoverBlocking } from "../state/store.svelte";
+  import { mayFocus } from "../state/keyboardOwner.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let closeBtn: HTMLButtonElement | null = $state(null);
@@ -33,11 +34,17 @@
       : "the leader closed this window and ended its terminals; it cannot be reopened",
   );
 
-  // Steal focus so keystrokes don't leak to the dead buffer behind the backdrop.
+  // Steal focus so keystrokes don't leak to the dead buffer behind the
+  // backdrop, but not from an owner that paints over this cover and so holds
+  // the keyboard over it (the close prompt).
   $effect(() => {
     if (!ended) return;
-    (document.activeElement as HTMLElement | null)?.blur();
-    queueMicrotask(() => (closeBtn ?? overlayEl)?.focus());
+    const active = document.activeElement;
+    if (untrack(() => mayFocus(active))) return;
+    (active as HTMLElement | null)?.blur();
+    queueMicrotask(() => {
+      if (!mayFocus(document.activeElement)) (closeBtn ?? overlayEl)?.focus();
+    });
   });
 
   // Best-effort self-close. window.close() only acts on a script-opened window
