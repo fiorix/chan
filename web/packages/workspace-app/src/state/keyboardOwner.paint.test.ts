@@ -26,6 +26,7 @@ const sources = import.meta.glob(
     "../components/AppStatusBar.svelte",
     "../components/PaneTreeOverlay.svelte",
     "../components/HamburgerMenu.svelte",
+    "../components/ConnectionIndicator.svelte",
     "../../../web-shared/src/components/CommandDeck.svelte",
   ],
   { query: "?raw", import: "default", eager: true },
@@ -63,6 +64,7 @@ const chrome = {
   "the status bar": layer("AppStatusBar.svelte", ".app-statusbar"),
   "the pane tree": layer("PaneTreeOverlay.svelte", ".pane-tree-layer"),
   "the menus": layer("HamburgerMenu.svelte", ".hamburger-menu"),
+  "the connection popover": layer("ConnectionIndicator.svelte", ".connection-popover"),
 };
 
 afterEach(() => {
@@ -98,7 +100,7 @@ describe("the keyboard's owners paint in the order they hold it", () => {
     expect(survey, "over the menus").toBeGreaterThan(chrome["the menus"]);
   });
 
-  test("the command deck that holds the keyboard paints over the status bar, the pane tree and the menus", () => {
+  test("the command deck that holds the keyboard paints over the status bar, the pane tree, the menus and the connection popover", () => {
     overlayStack.ids = ["launcher"];
     for (const [surface, under] of Object.entries(chrome)) {
       expect(commandDeckLayer(), `over ${surface}`).toBeGreaterThan(under);
@@ -129,8 +131,10 @@ describe("the keyboard's owners paint in the order they hold it", () => {
     expect(commandDeckLayer(), "the command deck under a dialog").toBeGreaterThan(terminalSurvey);
   });
 
-  test("the command deck paints at the layer its host names", () => {
+  test("the command deck paints at the layer its host names, and over the whole page with none", () => {
+    // The launcher's deck names no layer and keeps this one, over the
+    // launcher's own layers (1000 at most).
     const deck = rule("../../../web-shared/src/components/CommandDeck.svelte", ".deck-overlay");
-    expect(deck).toMatch(/z-index:\s*var\(--deck-layer,\s*\d+\)/);
+    expect(deck).toMatch(/z-index:\s*var\(--deck-layer,\s*32000\)/);
   });
 });
