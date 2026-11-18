@@ -603,6 +603,12 @@ fn a_waiting_download_reuses_the_winners_file() {
         // The contender misses the cache and waits on the lock the winner
         // holds while it publishes.
         until_the_lock_has_a_waiter(&snapshot.join("config.json.lock"));
+        // Observed on every platform: off Linux the helper only pauses, and a
+        // lock that did not block would have ended the contender already.
+        assert!(
+            !downloader.is_finished(),
+            "the contender waits on the winner's lock"
+        );
         std::fs::write(snapshot.join("config.json"), BODY).unwrap();
         drop(holder);
         let path = downloader
