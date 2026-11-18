@@ -670,9 +670,11 @@ async fn attach_collecting(address: std::net::SocketAddr, id: &str) -> (Client, 
 /// pacing/tests::progress_renews_deadline_and_cut_loose_stays_latched
 /// and pacing/tests::expiring_one_view_preserves_the_other_views_credit_and_deadline.
 ///
-/// The 2 MiB ring holds the whole ~1.4 MiB flood, so no view can be evicted
-/// and every recovery below is lossless by construction: a 64 KiB ring lets
-/// even the draining view fall behind under load, which makes the live
+/// The 2 MiB ring cannot hold the ~6.9 MB flood behind a view that never
+/// reads, so the stalled view is evicted by construction (its missed count
+/// is asserted above zero) while the draining view keeps up and recovers
+/// without loss (its missed count is asserted zero): a 64 KiB ring would
+/// let even the draining view fall behind under load, which makes the live
 /// view's outcome a race instead of a contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_view_releases_the_program_while_a_second_view_drains() {
