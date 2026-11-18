@@ -5563,17 +5563,6 @@ export function fbActiveInstanceId(): string | null {
   return browserFocus.instanceId;
 }
 
-/// Pulse the focused pane's active tab when its dock closes. The tab
-/// becomes the target only through the existing focus path, when its
-/// surface asks for the keyboard and its focus effect activates it (a Files
-/// tab; terminal and editor surfaces answer without taking the target).
-/// With no file browser active the target stays empty and only the pulse
-/// runs. A background pane never takes the keyboard: the pulse effects
-/// refuse while unfocused. The target follows the keyboard.
-function pulseFocusedTab(): void {
-  bumpTabFocusPulse();
-}
-
 /// Set the selection to a single entry (a plain click / programmatic
 /// reveal). Resets the multi-set and the range anchor to that entry so a
 /// subsequent shift+click ranges from here. `null` clears the selection.
@@ -5793,7 +5782,12 @@ export function setBrowserSidePane(side: "left" | "right", open: boolean): void 
   // window, `chan config set`) bypasses the setter and hands nothing over;
   // the dock's dispose then empties the target. Direct writes of the flag
   // (prefs hydration, standalone bootstrap, tests) bypass it the same way.
-  if (!open && browserFocus.instanceId === `fb-dock-${side}` && dockHeldKeyboard(side)) pulseFocusedTab();
+  // The pulse hands the keyboard to the focused pane's active tab: it
+  // becomes the target only through the existing focus path, when its
+  // surface asks for the keyboard and its focus effect activates it (a Files
+  // tab; terminal and editor surfaces answer without taking the target), and
+  // a background pane never takes the keyboard. The target follows it.
+  if (!open && browserFocus.instanceId === `fb-dock-${side}` && dockHeldKeyboard(side)) bumpTabFocusPulse();
   browserSidePanes[side] = open;
   persistBrowserSidePanes();
 }
