@@ -367,12 +367,15 @@ describe("Library: devserver groups", () => {
   });
 
   // A connected devserver with no rows on the card, the desktop hiding them
-  // or not.
-  async function quietDevserver(rows_hidden: boolean): Promise<Element> {
+  // or not; with no flag given, its row carries no rows_hidden key, as a
+  // producer that sends no such key lists it.
+  async function quietDevserver(rows_hidden?: boolean): Promise<Element> {
     await saveDevserver({ host: "quiet.example", port: 9100, label: "quiet" });
-    library.devservers = library.devservers.map(
-      (d): DevserverEntry => (d.host === "quiet.example" ? { ...d, status: "connected", rows_hidden } : d),
-    );
+    library.devservers = library.devservers.map((d): DevserverEntry => {
+      if (d.host !== "quiet.example") return d;
+      const { rows_hidden: _sent, ...row } = d;
+      return (rows_hidden === undefined ? { ...row, status: "connected" } : { ...row, status: "connected", rows_hidden }) as DevserverEntry;
+    });
     mountList();
     const quiet = [...target!.querySelectorAll("section.machine")].find((m) => m.textContent?.includes("quiet.example"));
     expect(quiet).toBeTruthy();
@@ -380,6 +383,8 @@ describe("Library: devserver groups", () => {
   }
   const hintOf = (machine: Element): string | undefined =>
     machine.querySelector(".empty-hint")?.textContent?.replace(/\s+/g, " ").trim();
+  const emptyPrompt =
+    "No workspaces on this devserver yet. Add one with the buttons above, or run chan workspace serve /path/on/that/machine --on quiet in a terminal here.";
 
   it("says a connected devserver's rows show again when the desktop hides them for an outage", async () => {
     const quiet = await quietDevserver(true);
@@ -390,9 +395,12 @@ describe("Library: devserver groups", () => {
 
   it("keeps the empty prompt for a connected devserver with no rows that the desktop does not hide", async () => {
     const quiet = await quietDevserver(false);
-    expect(hintOf(quiet)).toBe(
-      "No workspaces on this devserver yet. Add one with the buttons above, or run chan workspace serve /path/on/that/machine --on quiet in a terminal here.",
-    );
+    expect(hintOf(quiet)).toBe(emptyPrompt);
+  });
+
+  it("keeps the empty prompt for a connected devserver whose row carries no rows_hidden key", async () => {
+    const quiet = await quietDevserver();
+    expect(hintOf(quiet)).toBe(emptyPrompt);
   });
 
   it("says the hidden rows show again under a control terminal the outage leaves on the card", () => {
