@@ -1,0 +1,22 @@
+# The iOS app's own commands. The single webview (label main) gets the
+# set in capabilities/ios.json; no other capability exists on iOS.
+
+[[permission]]
+identifier = "allow-terminal-background-opacity"
+description = "Enables the terminal_background_opacity command (the app's terminal background opacity, which every terminal tab paints with)."
+commands.allow = ["terminal_background_opacity"]
+
+[[permission]]
+identifier = "allow-set-terminal-background-opacity"
+description = "Enables the set_terminal_background_opacity command (the Settings slider's write of the app's terminal background opacity)."
+commands.allow = ["set_terminal_background_opacity"]
+
+[[permission]]
+identifier = "allow-gateway-csrf-token"
+description = "Enables an exact-origin gateway window to read its current CSRF token."
+commands.allow = ["gateway_csrf_token"]
+
+[[permission]]
+identifier = "allow-mobile-back-to-computers"
+description = "Enables the mobile_back_to_computers command (back-to-Computers navigation on iOS)."
+commands.allow = ["mobile_back_to_computers"]
