@@ -310,14 +310,32 @@ async function calibrate(host, windowId) {
 const pageFlow = (flow) => /^user-agent:/im.test(flow.head ?? "");
 const FEED_PATH = "/api/library/windows/watch";
 const upgraded = new Set();
-/// Whether `flow` is the watcher socket of the window `windowId`: the tenant's
-/// `/ws`, dialled with the window's `w` (openWatch in transport.ts), not a
-/// terminal's or a document's socket.
-function watcherOf(flow, windowId) {
-  const target = flow.head?.split("\r\n", 1)[0]?.split(" ")[1];
+
+/// The page's path prefix, read as its transport reads it (`readPrefix` in
+/// transport.ts): the `chan-prefix` meta its server injects, trimmed, kept
+/// only when it starts with a slash, without trailing slashes, and empty for
+/// a page served at the root. A devserver's terminal window is served under
+/// `/api/terminal`, a workspace window under its tenant's prefix.
+const PAGE_PREFIX = `(() => {
+  const v = document.querySelector('meta[name="chan-prefix"]')?.getAttribute('content')?.trim() ?? '';
+  return v && v.startsWith('/') ? v.replace(/\\/+$/, '') : '';
+})()`;
+
+/// The request target of `flow` (path and query), from its head.
+const requestTarget = (flow) => flow.head?.split("\r\n", 1)[0]?.split(" ")[1] ?? null;
+
+/// Whether `flow` is the watcher socket of the window `windowId`, whose page
+/// has the path prefix `prefix`. openWatch (transport.ts) dials
+/// `${prefix}/ws` with the window's `w`. The page's other sockets sit under
+/// the same prefix (a terminal's `${prefix}/api/terminal/ws`, a document's
+/// `${prefix}/api/doc/ws` and a drawing's `${prefix}/api/scene/ws`, the last
+/// two with the same `w`) or at the root (the colour and theme watches), so
+/// the path must be the watcher's exactly.
+function watcherOf(flow, windowId, prefix) {
+  const target = requestTarget(flow);
   if (!target) return false;
   const url = new URL(target, "http://relay");
-  return url.pathname.endsWith("/ws") && !url.pathname.includes("/api/") && url.searchParams.get("w") === windowId;
+  return url.pathname === `${prefix}/ws` && url.searchParams.get("w") === windowId;
 }
 
 let status = 3;
@@ -365,7 +383,10 @@ async function devserverArm() {
   secrets.push(window.token);
   windows.push(window);
   const windowId = window.window_id;
-  const opened = await until(async () => ({ ok: (await inspectOne("open", `(${pageOf(windowId)}) ? { up: true } : { skip: true }`))?.up }), 60_000);
+  const opened = await until(async () => {
+    const page = await inspectOne("open", `(${pageOf(windowId)}) ? { up: true, prefix: ${PAGE_PREFIX}, location: location.pathname } : { skip: true }`);
+    return { ok: Boolean(page?.up), page };
+  }, 60_000);
   if (!opened?.ok) throw new Inconclusive("the devserver's window did not open on the desktop");
   // The desktop titles a direct devserver's windows with the host label the
   // devserver reports in its info, falling back to the host it dialled
@@ -385,8 +406,9 @@ async function devserverArm() {
   }
   if (named.length !== 1) throw new Inconclusive(`no one new window is titled with ${JSON.stringify(machine)}: ${JSON.stringify(seenNames)}`);
   const host = named[0].id;
-  if (!(await until(async () => ({ ok: [...upgraded].some((flow) => watcherOf(flow, windowId)) }), 30_000))?.ok) {
-    throw new Inconclusive("the devserver's window opened no watcher socket through the relay");
+  const prefix = opened.page.prefix;
+  if (!(await until(async () => ({ ok: [...upgraded].some((flow) => watcherOf(flow, windowId, prefix)) }), 30_000))?.ok) {
+    throw new Inconclusive(`the devserver's window opened no watcher socket through the relay: no switched socket is ${prefix}/ws with w=${windowId}; the switched ones: ${JSON.stringify([...upgraded].map(requestTarget))}`);
   }
   await sleep(2_000);
   await xdo("windowactivate", "--sync", host);
@@ -558,13 +580,18 @@ const LOCAL_HOOK = (deadPort) => `(() => {
     window.WebSocket = new Proxy(window.WebSocket, {
       construct(target, args) { return Reflect.construct(target, cut ? ['ws://127.0.0.1:${deadPort}/'] : args); },
     });
-    // The window's watcher: the tenant's /ws, dialled with the window's own w.
+    // The window's watcher, as watcherOf reads it: the page's prefix and
+    // /ws exactly, dialled with the window's own w.
+    const prefix = ${PAGE_PREFIX};
     const watcher = (s) => {
       const at = new URL(s.url);
-      return at.pathname.endsWith('/ws') && !at.pathname.includes('/api/') && at.searchParams.get('w') === url.searchParams.get('w');
+      return at.pathname === prefix + '/ws' && at.searchParams.get('w') === url.searchParams.get('w');
     };
     window.__coverLinkCut = {
-      seen: () => [...sockets].filter((s) => s.readyState === 1).map((s) => ({ path: new URL(s.url).pathname, watcher: watcher(s) })),
+      seen: () => [...sockets].filter((s) => s.readyState === 1).map((s) => {
+        const at = new URL(s.url);
+        return { target: at.pathname + at.search, prefix, watcher: watcher(s) };
+      }),
       cut() { cut = true; for (const s of sockets) s.close(); return true; },
       restore() { cut = false; return true; },
     };
@@ -630,7 +657,9 @@ try {
   } catch { /* best effort */ }
   fs.writeFileSync(path.join(work, "results.json"), mask(JSON.stringify({
     status, checks, readings,
-    flows: relay?.flows.map((flow) => ({ path: flow.path, page: pageFlow(flow), closed: flow.closed, refused: flow.refused })) ?? [],
+    flows: relay?.flows.map((flow) => ({
+      path: flow.path, target: requestTarget(flow), page: pageFlow(flow), closed: flow.closed, refused: flow.refused,
+    })) ?? [],
     relay: relay?.summary() ?? null,
   }, null, 2)) + "\n");
   fs.writeFileSync(path.join(work, "devserver.log"), mask(logs.join("")));
