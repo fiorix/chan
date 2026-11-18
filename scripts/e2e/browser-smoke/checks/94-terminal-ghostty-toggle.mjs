@@ -701,7 +701,7 @@ export default {
         "write",
         "--tab-name",
         TAB_G,
-        `printf '\\033[?1000;1006h${MARK_PREFIX}MODE1000_%s\\n' ${MARK_ARG}\\n`,
+        `printf '\\033[?1000;1006h${MARK_PREFIX}MODE1000_%s\\n' ${MARK_ARG}\n`,
       ]);
       await waitScrollback(TAB_G, `${MARK_PREFIX}MODE1000_${MARK_ARG}`);
       await seedClipboard();
