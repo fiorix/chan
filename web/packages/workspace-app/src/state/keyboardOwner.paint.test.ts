@@ -22,6 +22,7 @@ const sources = import.meta.glob(
     "../components/MissingTokenOverlay.svelte",
     "../components/PreflightOverlay.svelte",
     "../components/ModalShell.svelte",
+    "../components/TeamDialog.svelte",
     "../components/AppStatusBar.svelte",
     "../components/PaneTreeOverlay.svelte",
     "../components/HamburgerMenu.svelte",
@@ -56,6 +57,7 @@ const survey = layer("BubbleOverlay.svelte", ".survey-overlay");
 const terminalSurvey = layer("BubbleOverlay.svelte", ".survey-overlay.per-terminal");
 const dialogs = {
   "an app-root dialog": layer("ModalShell.svelte", ".overlay"),
+  "the Team dialog": layer("TeamDialog.svelte", ".team-dialog-backdrop"),
 };
 const chrome = {
   "the status bar": layer("AppStatusBar.svelte", ".app-statusbar"),

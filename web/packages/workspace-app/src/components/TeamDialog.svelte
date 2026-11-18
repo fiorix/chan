@@ -726,11 +726,15 @@
 </div>
 
 <style>
+  /* A modal dialog: over the overlays' stack (Search, Settings and the
+     command deck, 25000 and up while a dialog shows), whose keyboard it
+     holds, and a step under the app-root dialogs (26000), so a prompt
+     raised while it is open paints over it and takes the keyboard. */
   .team-dialog-backdrop {
     position: fixed;
     inset: 0;
     background: color-mix(in srgb, var(--bg) 75%, transparent);
-    z-index: 50;
+    z-index: 25990;
     display: flex;
     align-items: center;
     justify-content: center;
