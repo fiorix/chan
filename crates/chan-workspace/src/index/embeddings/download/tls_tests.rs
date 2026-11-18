@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use chan_tls::rustls;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+use super::tests::{fixture, COMMIT};
 use super::{Client, EmbedError};
 
 const CA: &[u8] = include_bytes!("testdata/ca.der");
@@ -15,8 +16,6 @@ const LEAF: &[u8] = include_bytes!("testdata/localhost.der");
 const KEY: &[u8] = include_bytes!("testdata/localhost-key.pk8");
 const IO_LIMIT: Duration = Duration::from_secs(3);
 const SERVER_LIMIT: Duration = Duration::from_secs(15);
-const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-const ETAG: &str = "abcdef0123456789abcdef0123456789abcdef01";
 const BODY: &[u8] = b"{\"tls_fixture\":true}\n";
 
 fn trusted_config() -> rustls::ClientConfig {
@@ -170,25 +169,28 @@ fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn model_response(request: &str) -> Vec<u8> {
-    let (last, body) = match range(request) {
-        "bytes=0-0" => (0, &BODY[..1]),
-        "bytes=0-" => (BODY.len() - 1, BODY),
-        _ => return response("400 Bad Request", "", b"unexpected fixture range"),
-    };
+    if range(request) != "bytes=0-" {
+        return response("400 Bad Request", "", b"unexpected fixture range");
+    }
     response(
         "206 Partial Content",
         &format!(
-            "Content-Range: bytes 0-{last}/{}\r\nx-repo-commit: {COMMIT}\r\netag: \"{ETAG}\"\r\n",
+            "Content-Range: bytes 0-{}/{}\r\n",
+            BODY.len() - 1,
             BODY.len()
         ),
-        body,
+        BODY,
     )
+}
+
+/// A client of `endpoint` on `config` with the fixture model pinned to `BODY`.
+fn client(cache: &std::path::Path, endpoint: &str, config: rustls::ClientConfig) -> Client {
+    Client::with_config(cache, endpoint, config).pinned(fixture(BODY))
 }
 
 fn payload_redirect_server(destination: &Server) -> Server {
     let location = format!("{}payload", destination.endpoint(true));
     Server::start(false, move |request| match range(request) {
-        "bytes=0-0" => model_response(request),
         "bytes=0-" => response("302 Found", &format!("Location: {location}\r\n"), b""),
         _ => response("400 Bad Request", "", b"unexpected pre-redirect range"),
     })
@@ -226,83 +228,11 @@ fn assert_certificate_error(error: &EmbedError, request_url: &str) {
 }
 
 #[test]
-fn trusted_tls_configuration_downloads_metadata_and_payload() {
-    let cache = tempfile::tempdir().unwrap();
-    let server = Server::start(true, model_response);
-    let client = Client::with_config(cache.path(), &server.endpoint(true), trusted_config());
-    let result = client.get("fixture/model", "config.json");
-    let observed = server.finish();
-    assert!(
-        observed.errors.is_empty(),
-        "fixture errors: {:?}",
-        observed.errors
-    );
-    let path = result.expect("the explicitly trusted fixture CA must allow the transfer");
-    assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(observed.accepted, 2);
-    assert_eq!(
-        observed
-            .requests
-            .iter()
-            .map(|request| range(request))
-            .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
-    );
-}
-
-#[test]
-fn untrusted_metadata_certificate_preserves_the_transport_error() {
-    let cache = tempfile::tempdir().unwrap();
-    let marker = cache
-        .path()
-        .join(super::super::repo_dir_name(crate::DEFAULT_MODEL))
-        .join("cache-marker");
-    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-    std::fs::write(&marker, b"preserve certificate failure").unwrap();
-    let server = Server::start(true, model_response);
-    let client = Client::with_config(
-        cache.path(),
-        &server.endpoint(true),
-        chan_tls::client_config().unwrap(),
-    );
-    let result =
-        super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client);
-    let request_url = format!(
-        "{}{}/resolve/main/config.json",
-        server.endpoint(true),
-        crate::DEFAULT_MODEL
-    );
-    let observed = server.finish();
-    let error = result.expect_err("the fixture CA is absent from shared trust");
-    assert_certificate_error(&error, &request_url);
-    assert!(
-        marker.is_file(),
-        "certificate refusal must preserve the model cache"
-    );
-    assert_eq!(
-        std::fs::read(&marker).unwrap(),
-        b"preserve certificate failure"
-    );
-    assert_eq!(
-        observed.accepted, 1,
-        "the TLS endpoint must have been reached"
-    );
-    assert!(
-        observed.requests.is_empty(),
-        "untrusted TLS must carry no HTTP"
-    );
-    assert!(
-        !observed.errors.is_empty(),
-        "server must observe the TLS refusal"
-    );
-}
-
-#[test]
 fn trusted_tls_configuration_downloads_the_redirected_payload() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let source = payload_redirect_server(&destination);
-    let client = Client::with_config(cache.path(), &source.endpoint(false), trusted_config());
+    let client = client(cache.path(), &source.endpoint(false), trusted_config());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
     let destination = destination.finish();
@@ -324,7 +254,7 @@ fn trusted_tls_configuration_downloads_the_redirected_payload() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination
@@ -341,14 +271,14 @@ fn untrusted_payload_certificate_preserves_the_transport_error() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let source = payload_redirect_server(&destination);
-    let client = Client::with_config(
+    let client = client(
         cache.path(),
         &source.endpoint(false),
         chan_tls::client_config().unwrap(),
     );
     let result = client.get("fixture/model", "config.json");
     let request_url = format!(
-        "{}fixture/model/resolve/main/config.json",
+        "{}fixture/model/resolve/{COMMIT}/config.json",
         source.endpoint(false)
     );
     let source = source.finish();
@@ -364,7 +294,7 @@ fn untrusted_payload_certificate_preserves_the_transport_error() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination.accepted, 1,
@@ -391,7 +321,7 @@ fn authorization(request: &str) -> Option<&str> {
 }
 
 #[test]
-fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
+fn same_host_relative_redirects_keep_bearer() {
     let cache = tempfile::tempdir().unwrap();
     let server = Server::start(true, |request| {
         if request.starts_with("GET /relative-config ") {
@@ -400,7 +330,7 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
             response("302 Found", "Location: /relative-config\r\n", b"")
         }
     });
-    let mut client = Client::with_config(cache.path(), &server.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &server.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let observed = server.finish();
@@ -411,14 +341,14 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
     );
     let path = result.expect("same-host relative redirects preserve the transfer");
     assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(observed.accepted, 4);
+    assert_eq!(observed.accepted, 2);
     assert_eq!(
         observed
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-0", "bytes=0-", "bytes=0-"]
+        ["bytes=0-", "bytes=0-"]
     );
     for request in &observed.requests {
         assert_eq!(
@@ -430,16 +360,14 @@ fn same_host_relative_redirects_keep_bearer_on_metadata_and_payload() {
 }
 
 #[test]
-fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
+fn cross_host_redirects_strip_bearer() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(true, model_response);
     let location = format!("https://localhost:{}/payload", destination.addr.port());
     let source = Server::start(true, move |_| {
-        response("302 Found", &format!(
-            "Location: {location}\r\nx-repo-commit: {COMMIT}\r\nx-linked-etag: \"{ETAG}\"\r\netag: discarded-etag\r\n"
-        ), b"")
+        response("302 Found", &format!("Location: {location}\r\n"), b"")
     });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &source.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
@@ -456,15 +384,15 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
     );
     let path = result.expect("cross-host HTTPS redirects preserve the transfer");
     assert_eq!(std::fs::read(path).unwrap(), BODY);
-    assert_eq!(source.accepted, 2);
-    assert_eq!(destination.accepted, 2);
+    assert_eq!(source.accepted, 1);
+    assert_eq!(destination.accepted, 1);
     assert_eq!(
         source
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     assert_eq!(
         destination
@@ -472,7 +400,7 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     for request in &source.requests {
         assert_eq!(authorization(request), Some("Bearer fixture-bearer"));
@@ -484,56 +412,6 @@ fn cross_host_redirects_strip_bearer_on_metadata_and_payload() {
             "cross-host redirect must strip Authorization: {request}"
         );
     }
-    let repo = cache
-        .path()
-        .join(super::super::repo_dir_name("fixture/model"));
-    assert!(
-        repo.join("blobs")
-            .join(ETAG)
-            .with_extension("lock")
-            .is_file(),
-        "linked ETag owns the cache blob lock on every platform"
-    );
-    assert!(!repo.join("blobs/discarded-etag.lock").exists());
-}
-
-#[test]
-fn https_metadata_redirect_refuses_http_before_connecting() {
-    let cache = tempfile::tempdir().unwrap();
-    let destination = Server::start(false, model_response);
-    let location = format!("{}payload", destination.endpoint(false));
-    let source = Server::start(true, move |_| {
-        response(
-            "302 Found",
-            &format!(
-                "Location: {location}\r\nx-repo-commit: {COMMIT}\r\nx-linked-etag: \"{ETAG}\"\r\n"
-            ),
-            b"",
-        )
-    });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
-    client.token = Some("fixture-bearer".to_owned());
-    let result = client.get("fixture/model", "config.json");
-    let source = source.finish();
-    let destination = destination.finish();
-    assert_eq!(
-        destination.accepted, 0,
-        "an HTTPS metadata redirect must never connect to HTTP"
-    );
-    assert!(destination.requests.is_empty());
-    let error = result.expect_err("HTTPS metadata downgrade is refused");
-    assert!(
-        error.to_string().contains("https"),
-        "downgrade cause is visible: {error}"
-    );
-    assert_eq!(source.accepted, 1);
-    assert_eq!(source.requests.len(), 1);
-    assert_eq!(range(&source.requests[0]), "bytes=0-0");
-    assert_eq!(
-        authorization(&source.requests[0]),
-        Some("Bearer fixture-bearer")
-    );
-    assert!(source.errors.is_empty());
 }
 
 #[test]
@@ -541,14 +419,10 @@ fn https_payload_redirect_refuses_http_before_connecting() {
     let cache = tempfile::tempdir().unwrap();
     let destination = Server::start(false, model_response);
     let location = format!("{}payload", destination.endpoint(false));
-    let source = Server::start(true, move |request| {
-        if range(request) == "bytes=0-0" {
-            model_response(request)
-        } else {
-            response("302 Found", &format!("Location: {location}\r\n"), b"")
-        }
+    let source = Server::start(true, move |_| {
+        response("302 Found", &format!("Location: {location}\r\n"), b"")
     });
-    let mut client = Client::with_config(cache.path(), &source.endpoint(true), trusted_config());
+    let mut client = client(cache.path(), &source.endpoint(true), trusted_config());
     client.token = Some("fixture-bearer".to_owned());
     let result = client.get("fixture/model", "config.json");
     let source = source.finish();
@@ -563,14 +437,14 @@ fn https_payload_redirect_refuses_http_before_connecting() {
         error.to_string().contains("https"),
         "downgrade cause is visible: {error}"
     );
-    assert_eq!(source.accepted, 2);
+    assert_eq!(source.accepted, 1);
     assert_eq!(
         source
             .requests
             .iter()
             .map(|request| range(request))
             .collect::<Vec<_>>(),
-        ["bytes=0-0", "bytes=0-"]
+        ["bytes=0-"]
     );
     for request in &source.requests {
         assert_eq!(authorization(request), Some("Bearer fixture-bearer"));
@@ -579,11 +453,11 @@ fn https_payload_redirect_refuses_http_before_connecting() {
 }
 
 #[test]
-fn http_proxy_environment_routes_metadata_and_payload() {
+fn http_proxy_environment_routes_the_download() {
     const CHILD: &str = "MODELROOTS_HTTP_PROXY_ENDPOINT";
     if let Ok(endpoint) = std::env::var(CHILD) {
         let cache = tempfile::tempdir().unwrap();
-        let client = Client::with_config(cache.path(), &endpoint, trusted_config());
+        let client = client(cache.path(), &endpoint, trusted_config());
         let path = client.get("fixture/model", "config.json").unwrap();
         assert_eq!(std::fs::read(path).unwrap(), BODY);
         println!("proxy-download-completed");
@@ -595,7 +469,7 @@ fn http_proxy_environment_routes_metadata_and_payload() {
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command.args([
         "--exact",
-        "index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload",
+        "index::embeddings::download::tls_tests::http_proxy_environment_routes_the_download",
         "--nocapture",
         "--test-threads=1",
     ]);
@@ -613,10 +487,11 @@ fn http_proxy_environment_routes_metadata_and_payload() {
     let origin = origin.finish();
     assert_eq!(
         proxy.requests.len(),
-        2,
-        "HTTP_PROXY must carry metadata and payload requests"
+        1,
+        "HTTP_PROXY must carry the download request"
     );
-    let absolute_request = format!("GET {endpoint}fixture/model/resolve/main/config.json HTTP/1.1");
+    let absolute_request =
+        format!("GET {endpoint}fixture/model/resolve/{COMMIT}/config.json HTTP/1.1");
     for request in &proxy.requests {
         assert_eq!(
             request.lines().next(),

@@ -1,4 +1,7 @@
-//! Blocking retrieval of the three embedding files into the Hub cache layout.
+//! Blocking retrieval of an embedding model's pinned files. Each file is
+//! fetched from its pinned commit into `snapshots/<commit>/<file>.part`,
+//! hashed while it is written, and renamed into place once its sha256 and
+//! size match the model table; `refs/main` then names the commit.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -9,14 +12,15 @@ use std::time::Duration;
 use chan_tls::rustls::{self, ClientConfig};
 use fs4::fs_std::FileExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ureq::{Agent, RedirectAuthHeaders, Response};
 use url::Url;
 
+use super::super::config::{self, EmbeddingModelInfo, ModelFile};
 use super::{proxy_env_issue, repo_dir_name, EmbedError};
 
 const ENDPOINT: &str = "https://huggingface.co";
-const MAX_RELATIVE_REDIRECTS: usize = 5;
 
 #[cfg(test)]
 type PublicationObserver = dyn Fn(&Path) + Send + Sync;
@@ -26,35 +30,12 @@ pub(super) struct Client {
     endpoint: Url,
     token: Option<String>,
     progress: bool,
-    agents: OnceLock<Agents>,
+    models: &'static [EmbeddingModelInfo],
+    agent: OnceLock<Agent>,
     supplied_config: Option<ClientConfig>,
-    // Tests observe the critical section without racing another downloader.
+    // Tests remove a file the embedder has resolved before it is loaded.
     #[cfg(test)]
     publication_observer: Option<Box<PublicationObserver>>,
-}
-
-struct Agents {
-    metadata: Agent,
-    payload: Agent,
-}
-
-impl Agents {
-    fn new(config: ClientConfig, https_only: bool) -> Self {
-        let config = Arc::new(config);
-        let builder = || {
-            ureq::AgentBuilder::new()
-                .tls_config(Arc::clone(&config))
-                .https_only(https_only)
-                .try_proxy_from_env(true)
-                .user_agent("unknown/None; hf-hub/0.4.3; rust/unknown")
-        };
-        Self {
-            metadata: builder().redirects(0).build(),
-            payload: builder()
-                .redirect_auth_headers(RedirectAuthHeaders::SameHost)
-                .build(),
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -63,18 +44,20 @@ enum DownloadError {
     Request(#[from] Box<ureq::Error>),
     #[error("I/O error {0}")]
     Io(#[from] io::Error),
-    #[error("Header {0} is missing")]
-    MissingHeader(&'static str),
-    #[error("Header {0} is invalid")]
-    InvalidHeader(&'static str),
     #[error("Invalid part file - corrupted file")]
     InvalidResume,
     #[error("Lock acquisition failed: {0}")]
     LockAcquisition(PathBuf),
-    #[error("too many relative redirects")]
-    RedirectLimit,
-    #[error("invalid model cache path")]
-    InvalidPath,
+    #[error("{model} has no pinned {file}")]
+    Unpinned { model: String, file: String },
+    #[error("{file} does not match its pinned sha256 {expected}: got {actual}")]
+    Digest {
+        file: &'static str,
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("model URL: {0}")]
+    Url(#[from] url::ParseError),
     #[error("TLS configuration: {0}")]
     Tls(#[from] chan_tls::Error),
 }
@@ -117,12 +100,6 @@ fn certificate_failure(mut error: &(dyn std::error::Error + 'static)) -> bool {
     }
 }
 
-struct Metadata {
-    commit: String,
-    etag: String,
-    size: u64,
-}
-
 impl Client {
     pub(super) fn new(cache: &Path) -> Result<Self, EmbedError> {
         let token = dirs::home_dir()
@@ -134,7 +111,8 @@ impl Client {
             endpoint: Url::parse(ENDPOINT).expect("the fixed Hub endpoint is a URL"),
             token,
             progress: true,
-            agents: OnceLock::new(),
+            models: config::embedding_models(),
+            agent: OnceLock::new(),
             supplied_config: None,
             #[cfg(test)]
             publication_observer: None,
@@ -148,22 +126,36 @@ impl Client {
             endpoint: Url::parse(endpoint).expect("the test endpoint is a URL"),
             token: None,
             progress: false,
-            agents: OnceLock::new(),
+            models: config::embedding_models(),
+            agent: OnceLock::new(),
             supplied_config: Some(config),
             publication_observer: None,
         }
     }
 
-    fn agents(&self) -> Result<&Agents, DownloadError> {
-        if let Some(agents) = self.agents.get() {
-            return Ok(agents);
+    /// This client with `models` in place of chan's model table.
+    #[cfg(test)]
+    fn pinned(mut self, models: &'static [EmbeddingModelInfo]) -> Self {
+        self.models = models;
+        self
+    }
+
+    fn agent(&self) -> Result<&Agent, DownloadError> {
+        if let Some(agent) = self.agent.get() {
+            return Ok(agent);
         }
         let config = match &self.supplied_config {
             Some(config) => config.clone(),
             None => chan_tls::client_config()?,
         };
-        let agents = Agents::new(config, self.endpoint.scheme() == "https");
-        Ok(self.agents.get_or_init(|| agents))
+        let agent = ureq::AgentBuilder::new()
+            .tls_config(Arc::new(config))
+            .https_only(self.endpoint.scheme() == "https")
+            .try_proxy_from_env(true)
+            .user_agent("unknown/None; hf-hub/0.4.3; rust/unknown")
+            .redirect_auth_headers(RedirectAuthHeaders::SameHost)
+            .build();
+        Ok(self.agent.get_or_init(|| agent))
     }
 
     pub(super) fn get(&self, model: &str, filename: &str) -> Result<PathBuf, EmbedError> {
@@ -172,146 +164,83 @@ impl Client {
     }
 
     fn get_inner(&self, model: &str, filename: &str) -> Result<PathBuf, DownloadError> {
-        if !model.split('/').all(model_component) || !filename_component(filename) {
-            return Err(DownloadError::InvalidPath);
-        }
+        let (info, file) = self.pin(model, filename)?;
         let repo = self.cache.join(repo_dir_name(model));
-        if let Some(path) = cached(&repo, filename) {
+        if let Some(path) = cached(&repo, info, filename) {
             return Ok(path);
         }
-        let url = self
-            .endpoint
-            .join(&format!("{model}/resolve/main/{filename}"))
-            .map_err(|_| DownloadError::InvalidPath)?;
-        let metadata = self.metadata(&url)?;
-        let blobs = repo.join("blobs");
-        std::fs::create_dir_all(&blobs)?;
-        let blob = blobs.join(&metadata.etag);
-        let _lock = lock_blob(&blob)?;
-
-        // The other downloader may have completed while we waited. Keep the
-        // lock through publication, including the Windows rename fallback.
-        if let Some(path) = cached(&repo, filename) {
-            return Ok(path);
-        }
-        if !std::fs::metadata(&blob).is_ok_and(|file| file.is_file() && file.len() == metadata.size)
-        {
-            self.download(&url, &blob, metadata.size, filename)?;
-        }
-        let snapshot = repo.join("snapshots").join(&metadata.commit);
+        let snapshot = repo.join("snapshots").join(info.revision);
         std::fs::create_dir_all(&snapshot)?;
-        let pointer = snapshot.join(filename);
+        let path = snapshot.join(file.name);
+        let _lock = lock(&snapshot.join(format!("{}.lock", file.name)))?;
+        // The other downloader may have completed while we waited.
+        if !path.is_file() {
+            let url = self
+                .endpoint
+                .join(&format!("{model}/resolve/{}/{}", info.revision, file.name))?;
+            self.download(&url, file, &path)?;
+        }
+        publish_ref(&repo, info.revision)?;
         #[cfg(test)]
         if let Some(observer) = &self.publication_observer {
-            observer(&blob);
+            observer(&path);
         }
-        publish_blob(&blob, &pointer, symlink_file)?;
-        publish_ref(&repo, &metadata.commit)?;
-        #[cfg(test)]
-        if let Some(observer) = &self.publication_observer {
-            observer(&blob);
-        }
-        Ok(pointer)
+        Ok(path)
     }
 
-    fn request(&self, agent: &Agent, url: &Url) -> ureq::Request {
-        let mut request = agent.get(url.as_str());
-        if url.host_str() == self.endpoint.host_str()
-            && (self.endpoint.scheme() != "https" || url.scheme() == "https")
-        {
-            if let Some(token) = &self.token {
-                request = request.set("Authorization", &format!("Bearer {token}"));
-            }
-        }
-        request
-    }
-
-    fn metadata(&self, url: &Url) -> Result<Metadata, DownloadError> {
-        let agents = self.agents()?;
-        let mut current = url.clone();
-        let mut followed = 0;
-        let response = loop {
-            let response = self
-                .request(&agents.metadata, &current)
-                .set("Range", "bytes=0-0")
-                .call()
-                .map_err(Box::new)?;
-            if matches!(response.status(), 301 | 302 | 303 | 307 | 308) {
-                let location = header(&response, "Location")?;
-                let next = current
-                    .join(location)
-                    .map_err(|_| DownloadError::InvalidHeader("Location"))?;
-                if Url::parse(location).is_err() && !location.starts_with("//") {
-                    if followed == MAX_RELATIVE_REDIRECTS {
-                        return Err(DownloadError::RedirectLimit);
-                    }
-                    followed += 1;
-                    current = next;
-                    continue;
-                }
-            }
-            break response;
-        };
-        let etag = response
-            .header("x-linked-etag")
-            .or_else(|| response.header("etag"))
-            .ok_or(DownloadError::MissingHeader("etag"))?
-            .replace('"', "");
-        let commit = header(&response, "x-repo-commit")?.to_owned();
-        if !identifier(&etag) {
-            return Err(DownloadError::InvalidHeader("etag"));
-        }
-        if !identifier(&commit) {
-            return Err(DownloadError::InvalidHeader("x-repo-commit"));
-        }
-        let response = if (300..400).contains(&response.status()) {
-            let location = current
-                .join(header(&response, "Location")?)
-                .map_err(|_| DownloadError::InvalidHeader("Location"))?;
-            self.request(&agents.payload, &location)
-                .set("Range", "bytes=0-0")
-                .call()
-                .map_err(Box::new)?
-        } else {
-            response
-        };
-        let range = header(&response, "Content-Range")?;
-        let size = range
-            .rsplit_once('/')
-            .and_then(|(_, total)| total.parse().ok())
-            .ok_or(DownloadError::InvalidHeader("Content-Range"))?;
-        Ok(Metadata { commit, etag, size })
-    }
-
-    fn download(
+    fn pin(
         &self,
-        url: &Url,
-        blob: &Path,
-        size: u64,
+        model: &str,
         filename: &str,
-    ) -> Result<(), DownloadError> {
-        let part = blob.with_extension("part");
-        let mut file = open_part(&part)?;
-        let mut start = file.metadata()?.len();
+    ) -> Result<(&'static EmbeddingModelInfo, &'static ModelFile), DownloadError> {
+        self.models
+            .iter()
+            .find(|info| info.id == model)
+            .and_then(|info| {
+                let file = info.files.iter().find(|file| file.name == filename)?;
+                Some((info, file))
+            })
+            .ok_or_else(|| DownloadError::Unpinned {
+                model: model.to_owned(),
+                file: filename.to_owned(),
+            })
+    }
+
+    fn request(&self, url: &Url) -> Result<ureq::Request, DownloadError> {
+        let mut request = self.agent()?.get(url.as_str());
+        if let Some(token) = &self.token {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+        Ok(request)
+    }
+
+    fn download(&self, url: &Url, file: &ModelFile, path: &Path) -> Result<(), DownloadError> {
+        let size = file.size;
+        let part_path = path.with_file_name(format!("{}.part", file.name));
+        let mut part = open_part(&part_path)?;
+        let mut start = part.metadata()?.len();
         if start > size {
-            file.set_len(0)?;
-            file.rewind()?;
+            part.set_len(0)?;
+            part.rewind()?;
             start = 0;
         }
-        let progress = self.progress.then(|| progress_bar(size, start, filename));
+        let mut hasher = Sha256::new();
+        hash_prefix(&mut part, start, &mut hasher)?;
+        let progress = self.progress.then(|| progress_bar(size, start, file.name));
         if start != size {
             let response = self
-                .request(&self.agents()?.payload, url)
+                .request(url)?
                 .set("Range", &format!("bytes={start}-"))
                 .call()
                 .map_err(Box::new)?;
             if response.status() == 200 && start != 0 {
-                // A proxy may ignore Range and send the whole blob. Validate
+                // A proxy may ignore Range and send the whole file. Validate
                 // it before replacing the prefix, while retaining the lock.
                 validate_resume(&response, 0, size)?;
-                file.set_len(0)?;
-                file.rewind()?;
+                part.set_len(0)?;
+                part.rewind()?;
                 start = 0;
+                hasher = Sha256::new();
                 if let Some(progress) = &progress {
                     progress.set_position(0);
                 }
@@ -334,19 +263,30 @@ impl Client {
                     break;
                 }
                 if read as u64 > remaining {
-                    file.set_len(start)?;
+                    part.set_len(start)?;
                     return Err(DownloadError::InvalidResume);
                 }
-                file.write_all(&buffer[..read])?;
+                part.write_all(&buffer[..read])?;
+                hasher.update(&buffer[..read]);
                 remaining -= read as u64;
                 if let Some(progress) = &progress {
                     progress.inc(read as u64);
                 }
             }
         }
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&part, blob)?;
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != file.sha256 {
+            // Bytes of the right length that hash wrong cannot be resumed.
+            part.set_len(0)?;
+            return Err(DownloadError::Digest {
+                file: file.name,
+                expected: file.sha256,
+                actual,
+            });
+        }
+        part.sync_all()?;
+        drop(part);
+        std::fs::rename(&part_path, path)?;
         if let Some(progress) = progress {
             progress.finish();
         }
@@ -356,9 +296,10 @@ impl Client {
 
 fn open_part(path: &Path) -> io::Result<File> {
     // Windows append-only handles cannot truncate a corrupt or ignored-range
-    // partial. The blob lock serializes these seekable writes.
+    // partial. The file lock serializes these seekable writes.
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .truncate(false)
         .open(path)?;
@@ -366,10 +307,25 @@ fn open_part(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn header<'a>(response: &'a Response, name: &'static str) -> Result<&'a str, DownloadError> {
-    response
-        .header(name)
-        .ok_or(DownloadError::MissingHeader(name))
+/// Feed the part's first `len` bytes to `hasher`, leaving its cursor at `len`.
+fn hash_prefix(part: &mut File, len: u64, hasher: &mut Sha256) -> io::Result<()> {
+    part.rewind()?;
+    let mut prefix = (&mut *part).take(len);
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = prefix.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if part.stream_position()? != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the partial download shrank while it was hashed",
+        ));
+    }
+    Ok(())
 }
 
 fn identifier(value: &str) -> bool {
@@ -379,33 +335,32 @@ fn identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn model_component(value: &str) -> bool {
-    !value.is_empty()
-        && !matches!(value, "." | "..")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn filename_component(value: &str) -> bool {
-    matches!(
-        value,
-        "config.json" | "tokenizer.json" | "model.safetensors"
-    )
-}
-
-fn cached(repo: &Path, filename: &str) -> Option<PathBuf> {
+/// The cached copy of `filename`: the pinned snapshot's, or the one in the
+/// snapshot `refs/main` names while that snapshot holds every file the model
+/// pins. An earlier chan wrote its cache at whatever commit `main` was then,
+/// with each file a link into `blobs/` or, without links, renamed into
+/// place; both read here.
+fn cached(repo: &Path, model: &EmbeddingModelInfo, filename: &str) -> Option<PathBuf> {
+    let snapshots = repo.join("snapshots");
+    let pinned = snapshots.join(model.revision).join(filename);
+    if pinned.is_file() {
+        return Some(pinned);
+    }
     let commit = std::fs::read_to_string(repo.join("refs/main")).ok()?;
     if !identifier(&commit) {
         return None;
     }
-    let pointer = repo.join("snapshots").join(commit).join(filename);
-    pointer.is_file().then_some(pointer)
+    let snapshot = snapshots.join(commit);
+    model
+        .files
+        .iter()
+        .all(|file| snapshot.join(file.name).is_file())
+        .then(|| snapshot.join(filename))
 }
 
-struct BlobLock(File);
+struct FileLock(File);
 
-impl Drop for BlobLock {
+impl Drop for FileLock {
     fn drop(&mut self) {
         // A descriptor inherited by a child must not extend this download's
         // critical section after its owner releases the guard.
@@ -413,16 +368,15 @@ impl Drop for BlobLock {
     }
 }
 
-fn lock_blob(blob: &Path) -> Result<BlobLock, DownloadError> {
-    let path = blob.with_extension("lock");
+fn lock(path: &Path) -> Result<FileLock, DownloadError> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)?;
+        .open(path)?;
     for attempt in 0..=5 {
         match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Ok(BlobLock(file)),
+            Ok(()) => return Ok(FileLock(file)),
             Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
                 if attempt < 5 {
                     std::thread::sleep(Duration::from_secs(1));
@@ -431,7 +385,7 @@ fn lock_blob(blob: &Path) -> Result<BlobLock, DownloadError> {
             Err(error) => return Err(error.into()),
         }
     }
-    Err(DownloadError::LockAcquisition(path))
+    Err(DownloadError::LockAcquisition(path.to_owned()))
 }
 
 fn validate_resume(response: &Response, start: u64, size: u64) -> Result<(), DownloadError> {
@@ -464,47 +418,6 @@ fn progress_bar(size: u64, start: u64, filename: &str) -> ProgressBar {
     bar.set_message(filename.to_owned());
     bar.set_position(start);
     bar
-}
-
-fn publish_blob(
-    blob: &Path,
-    pointer: &Path,
-    symlink: impl FnOnce(&Path, &Path) -> io::Result<()>,
-) -> io::Result<()> {
-    if pointer.is_file() {
-        return Ok(());
-    }
-    let name = blob
-        .file_name()
-        .ok_or_else(|| io::Error::other("blob has no filename"))?;
-    let relative = Path::new("..").join("..").join("blobs").join(name);
-    match symlink(&relative, pointer) {
-        Ok(()) => Ok(()),
-        Err(error) if symlink_unavailable(&error) => std::fs::rename(blob, pointer),
-        Err(error) => Err(error),
-    }
-}
-
-fn symlink_unavailable(error: &io::Error) -> bool {
-    #[cfg(windows)]
-    if error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD as i32)
-    {
-        return true;
-    }
-    matches!(
-        error.kind(),
-        io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
-    )
-}
-
-#[cfg(unix)]
-fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(source, destination)
-}
-
-#[cfg(windows)]
-fn symlink_file(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(source, destination)
 }
 
 fn publish_ref(repo: &Path, commit: &str) -> io::Result<()> {

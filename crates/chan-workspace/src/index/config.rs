@@ -25,6 +25,21 @@ pub struct EmbeddingModelInfo {
     pub note: &'static str,
     #[serde(rename = "default")]
     pub is_default: bool,
+    /// The Hub commit chan downloads the model's files from.
+    #[serde(skip)]
+    pub revision: &'static str,
+    /// The files chan downloads, each with the sha256 and size of its bytes
+    /// at `revision`.
+    #[serde(skip)]
+    pub files: &'static [ModelFile],
+}
+
+/// One file of a pinned model revision, by its name in the Hub repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelFile {
+    pub name: &'static str,
+    pub sha256: &'static str,
+    pub size: u64,
 }
 
 const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
@@ -35,6 +50,24 @@ const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
         size_label: "~130 MB",
         note: "Small English model; fastest curated option.",
         is_default: true,
+        revision: "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        files: &[
+            ModelFile {
+                name: "config.json",
+                sha256: "094f8e891b932f2000c92cfc663bac4c62069f5d8af5b5278c4306aef3084750",
+                size: 743,
+            },
+            ModelFile {
+                name: "tokenizer.json",
+                sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+                size: 711396,
+            },
+            ModelFile {
+                name: "model.safetensors",
+                sha256: "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+                size: 133466304,
+            },
+        ],
     },
     EmbeddingModelInfo {
         id: "BAAI/bge-base-en-v1.5",
@@ -43,6 +76,24 @@ const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
         size_label: "~440 MB",
         note: "Medium English model with higher recall than small.",
         is_default: false,
+        revision: "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+        files: &[
+            ModelFile {
+                name: "config.json",
+                sha256: "bc00af31a4a31b74040d73370aa83b62da34c90b75eb77bfa7db039d90abd591",
+                size: 777,
+            },
+            ModelFile {
+                name: "tokenizer.json",
+                sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+                size: 711396,
+            },
+            ModelFile {
+                name: "model.safetensors",
+                sha256: "c7c1988aae201f80cf91a5dbbd5866409503b89dcaba877ca6dba7dd0a5167d7",
+                size: 437955512,
+            },
+        ],
     },
     EmbeddingModelInfo {
         id: "BAAI/bge-large-en-v1.5",
@@ -51,6 +102,24 @@ const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
         size_label: "~1.3 GB",
         note: "Large English model; highest-capacity English option.",
         is_default: false,
+        revision: "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+        files: &[
+            ModelFile {
+                name: "config.json",
+                sha256: "446712fac367857b4b1302762fe1cd7bfa8b3c4b77b4dc5d77c4025407660896",
+                size: 779,
+            },
+            ModelFile {
+                name: "tokenizer.json",
+                sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+                size: 711396,
+            },
+            ModelFile {
+                name: "model.safetensors",
+                sha256: "45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
+                size: 1340616616,
+            },
+        ],
     },
     EmbeddingModelInfo {
         id: "BAAI/bge-m3",
@@ -59,6 +128,21 @@ const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
         size_label: "~2.3 GB",
         note: "Multilingual BGE model for mixed-language workspaces.",
         is_default: false,
+        revision: "5617a9f61b028005a4858fdac845db406aefb181",
+        // This commit publishes no model.safetensors, so the download stops
+        // at the weights with no request for them.
+        files: &[
+            ModelFile {
+                name: "config.json",
+                sha256: "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa",
+                size: 687,
+            },
+            ModelFile {
+                name: "tokenizer.json",
+                sha256: "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
+                size: 17098108,
+            },
+        ],
     },
 ];
 

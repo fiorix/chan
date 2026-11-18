@@ -510,8 +510,8 @@ pub fn repo_dir_name(model_id: &str) -> String {
 /// `refs/main` present, plus at least one `snapshots/<hash>/`
 /// directory containing `config.json`, `tokenizer.json`, and
 /// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, blobs-only state from an aborted model
-/// download) fails the check.
+/// downloaded snapshot, a `.part` left by an interrupted download)
+/// fails the check.
 fn model_files_present(repo_dir: &Path) -> bool {
     if !repo_dir.join("refs").join("main").is_file() {
         return false;
