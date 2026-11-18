@@ -21,6 +21,11 @@ use super::super::config::{self, EmbeddingModelInfo, ModelFile};
 use super::{proxy_env_issue, repo_dir_name, EmbedError};
 
 const ENDPOINT: &str = "https://huggingface.co";
+/// The updater's connect bound. In place of its bound on the whole transfer,
+/// a bound on each read: the weights run past a gigabyte, so a stalled
+/// server ends a download and a slow one does not.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(test)]
 type PublicationObserver = dyn Fn(&Path) + Send + Sync;
@@ -31,6 +36,7 @@ pub(super) struct Client {
     token: Option<String>,
     progress: bool,
     models: &'static [EmbeddingModelInfo],
+    read_timeout: Duration,
     agent: OnceLock<Agent>,
     supplied_config: Option<ClientConfig>,
     // Tests remove a file the embedder has resolved before it is loaded.
@@ -112,6 +118,7 @@ impl Client {
             token,
             progress: true,
             models: config::embedding_models(),
+            read_timeout: READ_TIMEOUT,
             agent: OnceLock::new(),
             supplied_config: None,
             #[cfg(test)]
@@ -127,6 +134,7 @@ impl Client {
             token: None,
             progress: false,
             models: config::embedding_models(),
+            read_timeout: READ_TIMEOUT,
             agent: OnceLock::new(),
             supplied_config: Some(config),
             publication_observer: None,
@@ -151,6 +159,8 @@ impl Client {
         let agent = ureq::AgentBuilder::new()
             .tls_config(Arc::new(config))
             .https_only(self.endpoint.scheme() == "https")
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(self.read_timeout)
             .try_proxy_from_env(true)
             .user_agent("unknown/None; hf-hub/0.4.3; rust/unknown")
             .redirect_auth_headers(RedirectAuthHeaders::SameHost)

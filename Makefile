@@ -95,6 +95,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::ignored_resume_range_restarts_from_full_response \
 	index::embeddings::download::tests::mismatched_resume_range_never_appends_bytes \
 	index::embeddings::download::tests::a_waiting_download_reuses_the_winners_file \
+	index::embeddings::download::tests::a_stalled_server_ends_the_download_at_the_read_timeout \
 	index::embeddings::download::tests::a_cached_model_opens_and_embeds_with_its_existing_files \
 	index::embeddings::download::tests::a_download_uses_the_supplied_tls_configuration \
 	index::embeddings::download::tests::a_pinned_file_is_read_without_a_request \

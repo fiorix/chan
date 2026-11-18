@@ -405,6 +405,50 @@ fn a_waiting_download_reuses_the_winners_file() {
 }
 
 #[test]
+fn a_stalled_server_ends_the_download_at_the_read_timeout() {
+    let cache = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let stalled = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        // The headers promise the body; none of it comes.
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{}\r\n\r\n",
+                    BODY.len() - 1,
+                    BODY.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    });
+    let mut client =
+        Client::with_config(cache.path(), &endpoint, chan_tls::client_config().unwrap())
+            .pinned(fixture(BODY));
+    client.read_timeout = Duration::from_millis(300);
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(client.get("fixture/model", "config.json").map(|_| ()));
+    });
+    let result = finished.recv_timeout(Duration::from_secs(10));
+    let _ = release.send(());
+    stalled.join().unwrap();
+    result
+        .expect("a stalled server must not hang the download")
+        .expect_err("the stalled download fails");
+    assert_eq!(
+        std::fs::read(snapshot(cache.path()).join("config.json.part")).unwrap(),
+        b"",
+        "nothing arrived to keep"
+    );
+}
+
+#[test]
 fn a_cached_model_opens_and_embeds_with_its_existing_files() {
     let cache = tempfile::tempdir().unwrap();
     crate::index::test_support::seed_embedding_model(cache.path());
