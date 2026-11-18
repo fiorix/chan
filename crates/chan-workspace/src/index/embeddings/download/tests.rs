@@ -20,16 +20,18 @@ pub(super) fn is_child(test: &str) -> bool {
 }
 
 /// Run `test`, its path in the crate, alone in a child process with no proxy
-/// variable and `env` set, and return what it printed; fail with its output
-/// when it fails. The environment a test reads goes through a child, where
-/// no other test runs.
+/// or CA bundle variable and `env` set, and return what it printed; fail
+/// with its output when it fails. The environment a test reads goes through
+/// a child, where no other test runs.
 pub(super) fn in_child(test: &str, env: &[(&str, &str)]) -> String {
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", test, "--nocapture", "--test-threads=1"]);
-    for name in super::super::PROXY_VARS
-        .into_iter()
-        .chain(["NO_PROXY", "no_proxy"])
-    {
+    for name in super::super::PROXY_VARS.into_iter().chain([
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    ]) {
         command.env_remove(name);
     }
     let output = command

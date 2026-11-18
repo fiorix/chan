@@ -129,6 +129,14 @@ fn serve(
     observed: &Mutex<Observation>,
     answer: &impl Fn(&str) -> Vec<u8>,
 ) -> io::Result<()> {
+    let request = read_head(stream)?;
+    observed.lock().unwrap().requests.push(request.clone());
+    stream.write_all(&answer(&request))?;
+    stream.flush()
+}
+
+/// A request's head, through the blank line that ends it.
+fn read_head(stream: &mut impl Read) -> io::Result<String> {
     let deadline = Instant::now() + IO_LIMIT;
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
@@ -141,11 +149,7 @@ fn serve(
         stream.read_exact(&mut byte)?;
         header.push(byte[0]);
     }
-    let request = String::from_utf8(header)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    observed.lock().unwrap().requests.push(request.clone());
-    stream.write_all(&answer(&request))?;
-    stream.flush()
+    String::from_utf8(header).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn range(request: &str) -> &str {
@@ -535,4 +539,225 @@ fn unusable_proxy_takes_precedence_over_certificate_error() {
         if var == "HTTPS_PROXY" && value == "https://proxy.invalid:443"),
         "the unusable proxy takes precedence over certificate classification: {error:?}"
     );
+}
+
+/// What a TLS-inspecting proxy saw: each tunnel asked for, the server name
+/// each handshake it completed named, each request inside one, and the
+/// handshakes the client refused.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct Inspected {
+    tunnels: Vec<String>,
+    server_names: Vec<String>,
+    requests: Vec<String>,
+    refused: Vec<String>,
+}
+
+/// A loopback HTTP proxy that accepts each CONNECT, then terminates the
+/// tunnel's TLS itself with `leaf`, as a TLS-inspecting proxy does, and
+/// answers each request with `answer`.
+#[cfg(target_os = "linux")]
+struct InspectingProxy {
+    addr: SocketAddr,
+    stopped: Arc<AtomicBool>,
+    inspected: Arc<Mutex<Inspected>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+impl InspectingProxy {
+    fn start(
+        leaf: chan_tls::testing::pki::Issued,
+        answer: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        let inspected = Arc::new(Mutex::new(Inspected::default()));
+        let seen = Arc::clone(&inspected);
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf.cert.clone()], leaf.key.clone_key())
+            .unwrap(),
+        );
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + SERVER_LIMIT;
+            while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("proxy accept failed: {error}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket.set_read_timeout(Some(IO_LIMIT)).unwrap();
+                socket.set_write_timeout(Some(IO_LIMIT)).unwrap();
+                let Ok(tunnel) = read_head(&mut socket) else {
+                    continue;
+                };
+                seen.lock()
+                    .unwrap()
+                    .tunnels
+                    .push(tunnel.lines().next().unwrap_or("").to_owned());
+                if socket
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .is_err()
+                {
+                    continue;
+                }
+                let connection = rustls::ServerConnection::new(Arc::clone(&config)).unwrap();
+                let mut stream = rustls::StreamOwned::new(connection, socket);
+                match read_head(&mut stream) {
+                    // ureq names the target in absolute form inside a tunnel;
+                    // a server takes either form.
+                    Ok(request) => {
+                        let request = request.replacen(" https://huggingface.co/", " /", 1);
+                        let mut seen = seen.lock().unwrap();
+                        seen.server_names
+                            .push(stream.conn.server_name().unwrap_or("").to_owned());
+                        seen.requests
+                            .push(request.lines().next().unwrap_or("").to_owned());
+                        drop(seen);
+                        let _ = stream.write_all(&answer(&request));
+                        let _ = stream.flush();
+                    }
+                    Err(error) => seen.lock().unwrap().refused.push(error.to_string()),
+                }
+            }
+        });
+        Self {
+            addr,
+            stopped,
+            inspected,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) -> Inspected {
+        self.stopped.store(true, Ordering::Release);
+        self.worker.take().unwrap().join().unwrap();
+        std::mem::take(&mut *self.inspected.lock().unwrap())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for InspectingProxy {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// The default model's config.json as the Hub serves it at the pinned
+/// commit.
+#[cfg(target_os = "linux")]
+const DEFAULT_CONFIG: &[u8] = include_bytes!("testdata/bge-small-en-v1.5-config.json");
+
+/// The production client behind a TLS-inspecting proxy: `HTTPS_PROXY` names
+/// a loopback proxy that presents its own leaf for huggingface.co. With the
+/// proxy's CA in the bundle `SSL_CERT_FILE` names, the system store chan's
+/// trust decision reads on Linux, the pinned file downloads; without it the
+/// download fails with the certificate error. No name is resolved and
+/// nothing leaves the machine.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_download_through_an_inspecting_proxy_trusts_the_system_store() {
+    const TEST: &str = "index::embeddings::download::tls_tests::a_download_through_an_inspecting_proxy_trusts_the_system_store";
+    const CACHE: &str = "CHAN_DOWNLOAD_TEST_CACHE";
+    const TRUSTED: &str = "CHAN_DOWNLOAD_TEST_TRUSTED";
+    if is_child(TEST) {
+        let cache = std::path::PathBuf::from(std::env::var(CACHE).unwrap());
+        let result = Client::new(&cache)
+            .unwrap()
+            .get(crate::DEFAULT_MODEL, "config.json");
+        if std::env::var_os(TRUSTED).is_some() {
+            let path =
+                result.expect("the proxy's CA in the system store lets the download through");
+            assert_eq!(std::fs::read(path).unwrap(), DEFAULT_CONFIG);
+        } else {
+            let error = result.expect_err("a proxy CA outside the system store is refused");
+            assert!(
+                matches!(error, EmbedError::Certificate(_)),
+                "the refusal is the certificate error: {error:?}"
+            );
+        }
+        return;
+    }
+    let pinned = crate::index::config::embedding_model(crate::DEFAULT_MODEL).unwrap();
+    let file = pinned
+        .files
+        .iter()
+        .find(|file| file.name == "config.json")
+        .unwrap();
+    assert_eq!(
+        format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(DEFAULT_CONFIG)
+        ),
+        file.sha256,
+        "testdata/bge-small-en-v1.5-config.json must be the pinned file: refresh it from \
+         resolve/{}/config.json when the pin moves",
+        pinned.revision
+    );
+    let ca = chan_tls::testing::pki::ca("chan inspecting proxy test CA");
+    let leaf = chan_tls::testing::pki::leaf_for(&ca, "huggingface.co");
+    let home = tempfile::tempdir().unwrap();
+    let bundle = home.path().join("proxy-ca.pem");
+    std::fs::write(&bundle, ca.pem()).unwrap();
+    let path = format!(
+        "/{}/resolve/{}/config.json",
+        crate::DEFAULT_MODEL,
+        pinned.revision
+    );
+    let served = path.clone();
+    let proxy = InspectingProxy::start(leaf, move |request| {
+        if request.lines().next() == Some(format!("GET {served} HTTP/1.1").as_str())
+            && request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("host: huggingface.co"))
+        {
+            response("200 OK", "", DEFAULT_CONFIG)
+        } else {
+            response("404 Not Found", "", b"not a pinned file")
+        }
+    });
+    let proxy_url = format!("http://{}", proxy.addr);
+    let home_dir = home.path().to_str().unwrap();
+    for trusted in [true, false] {
+        let cache = home
+            .path()
+            .join(if trusted { "trusted" } else { "untrusted" });
+        let mut env = vec![
+            ("HOME", home_dir),
+            (CACHE, cache.to_str().unwrap()),
+            ("HTTPS_PROXY", proxy_url.as_str()),
+        ];
+        if trusted {
+            env.extend([("SSL_CERT_FILE", bundle.to_str().unwrap()), (TRUSTED, "1")]);
+        }
+        in_child(TEST, &env);
+    }
+    let inspected = proxy.finish();
+    assert_eq!(
+        inspected.tunnels, ["CONNECT huggingface.co:443 HTTP/1.1"; 2],
+        "both downloads tunnel to the Hub's name through the proxy"
+    );
+    assert_eq!(inspected.server_names, ["huggingface.co"]);
+    assert_eq!(
+        inspected.requests,
+        [format!("GET {path} HTTP/1.1")],
+        "only the download that trusts the proxy's CA sends its request"
+    );
+    assert_eq!(inspected.refused.len(), 1, "{:?}", inspected.refused);
 }

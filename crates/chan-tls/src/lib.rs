@@ -208,9 +208,13 @@ mod platform {
 /// Stand-ins for the tests of the clients that take [`client_config`]: a
 /// test hands a client a recorded copy of the shared config and a sink to
 /// dial, and reads back that the client started its handshake with that
-/// config and what it offered on the wire.
+/// config and what it offered on the wire; or it makes a CA and a leaf
+/// that CA signs ([`testing::pki`]) to stand up a server the client must
+/// trust through the system store.
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing {
+    pub mod pki;
+
     use std::io::Read;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::{Arc, Mutex};
@@ -367,8 +371,7 @@ pub mod testing {
 
 /// The CA, leaf and in-memory handshake the integration tests use too.
 #[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-mod support;
+use testing::pki as support;
 
 #[cfg(test)]
 mod tests {

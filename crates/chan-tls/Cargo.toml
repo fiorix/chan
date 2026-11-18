@@ -10,16 +10,19 @@ publish = false
 
 [features]
 # Stand-ins for the tests of the clients that take the shared config: a
-# session store that records the handshakes a config starts and a loopback
-# listener that reads what each one offers. Enabled from dev-dependencies
-# only.
-test-support = []
+# session store that records the handshakes a config starts, a loopback
+# listener that reads what each one offers, and a CA with the leaves it
+# signs. Enabled from dev-dependencies only.
+test-support = ["dep:ring"]
 
 [dependencies]
 # `std` for the client session cache; `tls12` so a gateway behind an edge
 # that speaks only TLS 1.2 still connects when this crate is built alone.
 rustls = { workspace = true, features = ["std", "tls12"] }
 tracing = { workspace = true }
+# Signs the test-support CA and its leaves, with the ring rustls already
+# links.
+ring = { workspace = true, optional = true }
 
 # The operating system verifies each chain, its own distrust included.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
@@ -31,6 +34,6 @@ rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
 
 [dev-dependencies]
-# Signs the CA and the leaf the handshake tests make at run time
-# (tests/support), with the ring rustls already links.
+# Signs the CA and the leaves the tests make at run time (testing::pki,
+# which tests/support builds in) when the test-support feature is off.
 ring = { workspace = true }
