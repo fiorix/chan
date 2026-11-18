@@ -5,16 +5,14 @@
 # active pane; the deck opened by its chord runs a row and returns into
 # Search; with the Computers launcher shown, a deck run leaves the page's
 # focus where it was; and, last, a deck opened from a focused composer and
-# dismissed under the launcher leaves it there too. That last step fails
-# today: the deck's dismissal focuses its return target without asking the
-# keyboard rule.
+# dismissed under the launcher leaves it there too.
 #
 # This runs under xvfb-run with a fixed screen, like terminal-size-native.sh.
 # Drivers: argv are passed to keyboard-focus-native.mjs unchanged;
 # --keep-going records every fault and runs on, for a red tree.
 # Exit codes follow lib.sh: 0 every step held, 1 a fault was observed (the
-# run's keyboard-focus.json names each in "faults"; today that is the
-# dismissal alone), 2 the environment cannot run this driver, 3 inconclusive.
+# run's keyboard-focus.json names each in "faults"), 2 the environment
+# cannot run this driver, 3 inconclusive.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
