@@ -671,6 +671,50 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
     }
   });
 
+  // A closing window-wide survey hands the keyboard to a remembered card
+  // only while its terminal is the focused pane's active tab: a card in an
+  // inactive tab or pane is left alone, and the keyboard stays on the body.
+  test("a closing window-wide survey leaves a remembered card on an inactive tab alone", async () => {
+    const [first, second] = seatTerminals([
+      terminalTab({ id: "term-p16a", richPromptDraftPath: draftPath("owner-p16a") }),
+      terminalTab({ id: "term-p16b", richPromptDraftPath: draftPath("owner-p16b") }),
+    ]);
+    await mountTerminal(TerminalTab, first!);
+    const { target: idle } = await mountTerminal(TerminalTab, second!);
+    const wideTarget = document.createElement("div");
+    document.body.append(wideTarget);
+    mountedDialogs.push({
+      component: mount(BubbleOverlay, { target: wideTarget }) as Record<string, unknown>,
+      target: wideTarget,
+    });
+    showSurvey(SURVEY, second!.id);
+    await settle();
+    const card = idle.querySelector<HTMLElement>(".survey-card");
+    expect(card, "the terminal survey shows").not.toBeNull();
+    // The card over the inactive tab never takes the keyboard on arrival;
+    // the survey holds it the way a click would leave it there.
+    card!.focus();
+    await settle();
+    expect(document.activeElement, "the idle card holds the keyboard").toBe(card);
+    showSurvey({ ...SURVEY, surveyId: "survey-window-p16" }, null);
+    await settle();
+    const wideCard = wideTarget.querySelector<HTMLElement>(".survey-card");
+    expect(wideCard, "the window-wide survey shows").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement, "the window-wide card takes the keyboard").toBe(wideCard));
+    const focus = vi.spyOn(card!, "focus");
+    try {
+      // The window-wide survey is answered elsewhere: its slot retires
+      // through the remote-close path, as a timeout or another window does.
+      closeSurveyFromRemote("survey-window-p16");
+      await settle();
+      expect(focus, "the idle card is asked for no focus").not.toHaveBeenCalled();
+      expect(document.activeElement, "the keyboard is left on the body").toBe(document.body);
+    } finally {
+      focus.mockRestore();
+      resetSurveysForTest();
+    }
+  });
+
   // The window-wide survey's close hands the keyboard back to the card it
   // took it from: a remembered survey card is the owner itself, not an
   // element behind one.
@@ -751,8 +795,8 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
   // the field and the composer's effect takes it.
   test("a Team dialog field keeps the keyboard across a chord tab switch", async () => {
     const [first] = seatTerminals([
-      terminalTab({ richPromptDraftPath: draftPath("owner-team") }),
-      terminalTab({ richPromptDraftPath: draftPath("owner-team-2") }),
+      terminalTab({ id: "term-team-a", richPromptDraftPath: draftPath("owner-team") }),
+      terminalTab({ id: "term-team-b", richPromptDraftPath: draftPath("owner-team-2") }),
     ]);
     const { target } = await mountTerminal(TerminalTab, first!);
     const socket = TerminalSocket.all.at(-1)!;
@@ -779,8 +823,8 @@ describe("a tab-focus pulse while an owner holds the keyboard", () => {
   // the keyboard on the prompt's Cancel button.
   test("a close prompt button keeps the keyboard across a chord tab switch", async () => {
     const [first] = seatTerminals([
-      terminalTab({ richPromptDraftPath: draftPath("owner-close") }),
-      terminalTab({ richPromptDraftPath: draftPath("owner-close-2") }),
+      terminalTab({ id: "term-close-a", richPromptDraftPath: draftPath("owner-close") }),
+      terminalTab({ id: "term-close-b", richPromptDraftPath: draftPath("owner-close-2") }),
     ]);
     const { target } = await mountTerminal(TerminalTab, first!);
     const socket = TerminalSocket.all.at(-1)!;

@@ -24,7 +24,7 @@
     type SurveySlot,
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
-  import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
   import { keyboardOwned } from "../state/focusGuard.svelte";
 
   let {
@@ -65,17 +65,19 @@
       focusedSurveyId = null;
       const target = returnFocus;
       returnFocus = null;
-      // A remembered survey card is the owner itself: the terminal rule
-      // would count that terminal's survey and refuse the return to the
-      // card it took the keyboard from, so a card reads the window-wide
-      // slot instead. Anything else reads its terminal, so a survey over
-      // that terminal keeps the keyboard and the element behind it is left
-      // alone.
+      // A remembered survey card is the owner itself, but only while its
+      // terminal is the focused pane's active tab: then the card reads the
+      // window-wide slot and the close hands the keyboard back. Otherwise
+      // the card's own survey counts as an owner and the close leaves the
+      // keyboard where it is. Anything else reads its terminal, so a
+      // survey over that terminal keeps the keyboard and the element
+      // behind it is left alone.
+      const rememberedTerminal = target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null;
       const ownerSlot =
         slot ??
-        (target?.closest(".survey-card")
+        (target?.closest(".survey-card") && rememberedTerminal === activeTerminalTab()?.id
           ? null
-          : (target?.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId ?? null));
+          : rememberedTerminal);
       queueMicrotask(() => {
         // The remembered element gets the keyboard back only while no other
         // owner holds it: a survey closing under a dialog, the launcher or
