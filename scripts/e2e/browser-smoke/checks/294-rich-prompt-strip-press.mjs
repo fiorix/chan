@@ -1,8 +1,9 @@
 // A real pointer press on the Rich Prompt's strip keeps the keyboard on
 // the composer: with the button held the composer's field stays focused,
 // and after the release the next key reaches it with no click. The same
-// hold keeps focus through a recall and a failed recall, and a two-pane
-// press sends without activating the other pane. A deck run opened over
+// hold keeps focus through a recall and a failed recall, made while the
+// shell prints so that each submit is still queued at the press, and a
+// two-pane press sends without activating the other pane. A deck run opened over
 // Search returns to the Search input. The red variant of this check runs
 // the same file on a tree with the strip's pointerdown handler removed:
 // step 1 then fails on any engine that focuses a button on a press.
@@ -14,13 +15,14 @@
 // questions, so the check reports them without failing on them.
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeEveryTerminal, dispatchCommand } from "../lib/pane-strip.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
 // Where the keyboard is, from the page's own active element.
 async function focusState(page, card) {
@@ -262,6 +264,7 @@ export default {
           const onError = (error) => result.pageErrors.push(String(error));
           page.on("pageerror", onError);
           let opened = false;
+          const stop = join(ctx.workspaceDir, `.press294-${backend}.stop`);
           try {
             await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
             const { card } = await openComposer(ctx, page, cs, windowId, backend, name, text);
@@ -286,6 +289,20 @@ export default {
             await page.keyboard.up("Control");
             await waitFor(page, card, "the second draft delivers",
               (value) => value.text === "" && !value.pending);
+
+            // From here to the secondary press, the shell prints until the
+            // check releases it, at most 120 s: the server holds every submit
+            // in its queue (its drainer waits for quiet output), so each
+            // press below lands on a prompt that is still waiting. The
+            // marker is split in the command so only the output carries it.
+            rmSync(stop, { force: true });
+            await cs(["write", "--tab-name", name,
+              `i=0; while [ ! -e ${shellQuote(stop)} ] && [ $i -lt 600 ]; do printf 'HO%sLD\\n' ''; sleep .2; i=$((i+1)); done\n`]);
+            const holdDeadline = Date.now() + 15_000;
+            while (!(await cs(["scrollback", "--tab-name", name])).stdout.includes("HOLD")) {
+              if (Date.now() > holdDeadline) throw new Error("precondition: the shell never started holding the queue");
+              await sleep(200);
+            }
 
             // Step 2: stop control. Submit again, catch the pending prompt,
             // and press while it waits.
@@ -352,6 +369,7 @@ export default {
             } else {
               result.steps.secondary = "absent: no queued prompt to recall";
             }
+            writeFileSync(stop, "");
 
             // Two panes: B's composer is open while A is active. A real
             // click on B's Submit sends without activating B.
@@ -493,6 +511,7 @@ export default {
             await shot(`294-${backend}-failure`).catch(() => {});
           } finally {
             page.off("pageerror", onError);
+            try { writeFileSync(stop, ""); } catch (error) { result.cleanupErrors.push(`queue release: ${error.message}`); }
             if (opened) {
               await page
                 .evaluate(() => Boolean(document.querySelector(".search .head input")))
