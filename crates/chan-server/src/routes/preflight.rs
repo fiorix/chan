@@ -13,7 +13,9 @@
 //!     recovery pass that is progressing. Reading a file, using a terminal
 //!     and editing all need no index; only search does. Claimed recovery
 //!     reports `pending` without locking; build or reindex work on a ready
-//!     generation reports `done`. A genuine index error reports `failed`.
+//!     generation reports `done`. A genuine index error reports `failed`
+//!     without locking either: the window is as usable without an index as
+//!     during a cold build, and the index status chip names the error.
 //!     Recovery that has no worker assigned to it never converges, so it
 //!     reports as a decision offering a rebuild, and that DOES lock. The
 //!     route never reports it for a served workspace, whose indexer
@@ -26,8 +28,9 @@
 //!     decision sticks via the existing `semantic_enabled` flag rather
 //!     than needing new state.
 //!
-//! `locked` is simply `phase != ready`; the OverlayShell hides its close
-//! button + ignores ESC while it is true and dismisses on `ready`.
+//! `locked` is `phase == needs_decision`: the boot waits on a choice only
+//! the user can make and on nothing else. The OverlayShell hides its close
+//! button + ignores ESC while it is true and dismisses once it clears.
 
 use std::sync::Arc;
 
@@ -46,8 +49,8 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 struct PreflightSnapshot {
     phase: Phase,
-    /// True until `phase == ready`. The single signal the OverlayShell
-    /// keys its lock on.
+    /// True while `phase == needs_decision`. The single signal the
+    /// OverlayShell keys its lock on.
     locked: bool,
     readiness: WorkspaceReadiness,
     steps: Vec<PreflightStep>,
@@ -99,11 +102,12 @@ struct Summary {
 
 /// What the boot overlay does with the snapshot.
 ///
-/// There is deliberately no `Running`. Boot waits on a user decision or a
-/// failure and on nothing else: an index pass in flight is reported through
-/// `readiness` and the `index` step, never by holding the overlay. Removing
-/// the variant is what makes "a progressing pass does not lock the workspace"
-/// structural rather than a flag someone can flip back.
+/// There is deliberately no `Running`. Boot waits on a user decision and on
+/// nothing else: an index pass in flight is reported through `readiness` and
+/// the `index` step, never by holding the overlay. Removing the variant is
+/// what makes "a progressing pass does not lock the workspace" structural
+/// rather than a flag someone can flip back. `Failed` reports a failed step
+/// without holding the overlay either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
@@ -273,10 +277,13 @@ fn build_snapshot(
         steps.push(step);
     }
 
-    // Failed index work, a missing embedding model, or unclaimed recovery
-    // requires user action and locks the workspace. Claimed recovery stays
-    // visible through readiness and a Pending index step without locking.
-    // Build or reindex work on a ready generation leaves the index step Done.
+    // A missing embedding model or unclaimed recovery asks the user to
+    // choose and locks the workspace. Failed index work is reported on the
+    // step and in `error` without locking: files, terminals and editing need
+    // no index, and the index status chip carries the error. Claimed
+    // recovery stays visible through readiness and a Pending index step
+    // without locking. Build or reindex work on a ready generation leaves
+    // the index step Done.
     let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
         Phase::Failed
     } else if steps.iter().any(|s| s.state == StepState::NeedsDecision) {
@@ -287,7 +294,7 @@ fn build_snapshot(
 
     PreflightSnapshot {
         phase,
-        locked: phase != Phase::Ready,
+        locked: phase == Phase::NeedsDecision,
         readiness,
         error: index_error(status),
         steps,
@@ -618,8 +625,8 @@ mod tests {
             file: "a.md".into(),
         };
         assert!(settled_snapshot(&ws, &building).summary.is_some());
-        // A failed index locks the boot on phase Failed, which is not settled,
-        // so the onboarding summary stays off the snapshot.
+        // A failed index reports phase Failed, which is not settled, so the
+        // onboarding summary stays off the snapshot.
         let failed = IndexStatus::Error {
             message: "boom".into(),
         };
@@ -866,9 +873,9 @@ mod tests {
 
     #[test]
     fn an_index_error_outranks_a_stalled_recovery() {
-        // Both map to a locked overlay, but a failed index carries the real
-        // diagnosis; offering "rebuild the index" over an index that just
-        // failed to build would send the user in a circle.
+        // A failed index carries the real diagnosis; offering "rebuild the
+        // index" over an index that just failed to build would send the user
+        // in a circle.
         assert_eq!(
             index_step(
                 &IndexStatus::Error {
@@ -935,6 +942,8 @@ mod tests {
 
     #[test]
     fn index_error_fails_with_message() {
+        // A failed index is reported, not a decision: the window opens and
+        // the step and the error say what failed.
         let (_c, _r, ws) = workspace();
         let snap = build_snapshot(
             &ws,
@@ -943,7 +952,13 @@ mod tests {
             },
         );
         assert_eq!(snap.phase, Phase::Failed);
-        assert!(snap.locked);
+        assert!(
+            !snap.locked,
+            "a failed index must not hold the window behind the cover"
+        );
+        let index = snap.steps.iter().find(|s| s.id == "index").unwrap();
+        assert_eq!(index.state, StepState::Failed);
+        assert!(index.decision.is_none());
         let error = snap.error.as_ref().expect("failed phase carries an error");
         assert_eq!(error.step, "index");
         assert_eq!(error.message, "boom");

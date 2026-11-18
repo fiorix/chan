@@ -7,6 +7,7 @@ import { ApiError } from "../api/errors";
 import type { PreflightSnapshot } from "../api/types";
 import PreflightOverlay from "./PreflightOverlay.svelte";
 import { pendingTimers } from "../__tests__/fakeTimers";
+import { raisedCoverKeys } from "../state/store.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -431,4 +432,41 @@ test("decision buttons take focus and cycle Tab within the cover", async () => {
     document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
     expect(document.activeElement?.textContent).toBe("Retry");
   }
+});
+
+const failedIndex = (state: "ready" | "recovering") => ({
+  phase: "failed", locked: false, readiness: { state },
+  steps: [{ id: "index", label: "Build search index", state: "failed" }],
+  error: { step: "index", message: "the search index has more than 500000 files to read" },
+}) as PreflightSnapshot;
+
+test("a failed index opens the window and asks no further poll", async () => {
+  vi.useFakeTimers();
+  const preflight = vi.spyOn(api, "preflight").mockResolvedValue(failedIndex("ready"));
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PreflightOverlay, { target }));
+  await flushSnapshot();
+
+  expect(preflight).toHaveBeenCalledTimes(1);
+  expect(target.querySelector("[data-cover=preflight]"), "no cover over the window").toBeNull();
+  expect(raisedCoverKeys(), "the app's input is not blocked").toEqual([]);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(preflight, "nothing a poll reads changes until another pass").toHaveBeenCalledTimes(1);
+  expect(pendingTimers()).toBe(0);
+});
+
+test("a failed index whose pass is retried keeps polling until it settles", async () => {
+  vi.useFakeTimers();
+  const preflight = vi.spyOn(api, "preflight")
+    .mockResolvedValueOnce(failedIndex("recovering"))
+    .mockResolvedValue(ready);
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(PreflightOverlay, { target }));
+  await flushSnapshot();
+
+  expect(target.querySelector("[data-cover=preflight]")).toBeNull();
+  expect(pendingTimers(), "a recovering workspace is polled again").toBe(1);
+  await vi.advanceTimersByTimeAsync(750);
+  expect(preflight).toHaveBeenCalledTimes(2);
+  expect(pendingTimers(), "the ready answer ends polling").toBe(0);
 });

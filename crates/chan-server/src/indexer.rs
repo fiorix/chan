@@ -895,7 +895,7 @@ fn spawn_coordinator(
                     }
                     Ok(RecoveryPassResult::ActionFailed(error)) => {
                         *shared.status.lock().unwrap() = IndexStatus::Error {
-                            message: error.to_string(),
+                            message: action_error_message(error),
                         };
                     }
                     Ok(RecoveryPassResult::ReportRefreshFailed(error)) => {
@@ -942,6 +942,19 @@ fn spawn_coordinator(
             }
         }
     })
+}
+
+/// The index status message for a failed pass action. A listing over its cap
+/// is the one failure a setting fixes, so its message names the setting: the
+/// directories the index leaves out.
+fn action_error_message(error: &chan_workspace::ChanError) -> String {
+    match error {
+        chan_workspace::ChanError::ListingTooLarge { limit, .. } => format!(
+            "the search index has more than {limit} files to read; add the directories it \
+             should skip under Settings > This workspace > Excluded directories"
+        ),
+        other => other.to_string(),
+    }
 }
 
 fn drain_required_generation(
@@ -3780,5 +3793,52 @@ mod tests {
 
         drop(tx);
         coordinator.await.unwrap();
+    }
+
+    /// The index status the coordinator over `status` publishes next as an
+    /// error, read within the convergence budget.
+    async fn next_error(status: &Arc<Mutex<IndexStatus>>) -> String {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let current = status.lock().unwrap().clone();
+                if let IndexStatus::Error { message } = current {
+                    break message;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the index status never read as an error")
+    }
+
+    // A full rebuild over more indexable files than the listing holds fails,
+    // and the index status the chip shows names the setting that fixes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_over_the_cap_names_its_fix_on_the_index_status() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        for n in 0..3 {
+            fs::write(dir.path().join(format!("n{n}.md")), "# N\n").unwrap();
+        }
+        let _limit = chan_workspace::workspace::listing_limit_test_hooks::lower(&workspace, 2);
+        let status = idle_status();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            test_shared(status.clone()),
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(50),
+        );
+        tx.send(workspace.request_recovery(RecoveryAction::FullRebuild))
+            .unwrap();
+
+        let message = next_error(&status).await;
+        coordinator.abort();
+
+        assert!(message.contains("more than 2 files"), "{message}");
+        assert!(
+            message.contains("Settings > This workspace > Excluded directories"),
+            "{message}"
+        );
     }
 }
