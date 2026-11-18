@@ -6,7 +6,7 @@
 // back. The real screen lock, the app's prompt dialog, the close prompt,
 // the Team dialog and a terminal over the stand-in xterm, in jsdom.
 
-import { flushSync, mount, unmount } from "svelte";
+import { createRawSnippet, flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -17,6 +17,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
+import HamburgerMenu from "./HamburgerMenu.svelte";
 import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
 import TeamDialog from "./TeamDialog.svelte";
 import TerminalTab from "./TerminalTab.svelte";
@@ -260,4 +261,28 @@ test("Escape on the screen lock leaves the Team dialog under it open and its lea
   expect(teamDialogState.request, "the Team dialog stays open").not.toBeNull();
   const tabs = Object.values(layout.nodes).flatMap((node) => (node.kind === "leaf" ? (node as LeafNode).tabs : []));
   expect(tabs.map((tab) => tab.id), "the lead terminal stays").toContain("lead-tab");
+});
+
+test("Escape on the screen lock leaves a menu open under it and moves no focus to its trigger", async () => {
+  focusOrigin();
+  const host = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(HamburgerMenu, {
+    target: host,
+    props: { children: createRawSnippet(() => ({ render: () => '<li><button type="button">Row</button></li>' })) },
+  }));
+  flushSync();
+  const trigger = host.querySelector<HTMLButtonElement>(".hamburger-trigger")!;
+  trigger.click();
+  await settle();
+  expect(document.querySelector(".hamburger-menu"), "the menu is open").not.toBeNull();
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  expect(document.activeElement, "the lock takes the keyboard").toBe(backdrop);
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await settle();
+  expect(backdrop.contains(document.activeElement), "the lock keeps the keyboard").toBe(true);
+  expect(document.activeElement).not.toBe(trigger);
+  expect(document.querySelector(".hamburger-menu"), "the menu under the lock stays as it was").not.toBeNull();
 });
