@@ -1,6 +1,6 @@
 //! Seed the per-machine embedding-model cache from a baked-in tarball.
 //!
-//! The release build embeds a zstd-encoded tar of the hf-hub cache layout
+//! The release build embeds a zstd-encoded tar of the model cache layout
 //! at `resources/models.tar.zst` (produced by the `fetch-models` helper).
 //! On first server launch we extract it into the global model cache so
 //! users never block on a HuggingFace download.
@@ -74,10 +74,10 @@ pub fn seed_models_from_bundle() {
 fn extract_bundle(target: &Path) -> std::io::Result<usize> {
     let zr = zstd::Decoder::new(MODEL_BUNDLE)?;
     let mut tar = tar::Archive::new(zr);
-    // Default unpack semantics are correct for the hf-hub layout:
+    // Default unpack semantics are correct for the cache layout:
     // creates intermediate dirs, preserves file mode, doesn't
-    // follow symlinks (tar's encode side already resolved them
-    // into regular files when fetch-models built the bundle).
+    // follow symlinks (the bundle holds regular files: tar's encode
+    // side resolved any link when fetch-models built it).
     let mut count = 0usize;
     for entry in tar.entries()? {
         let mut entry = entry?;
@@ -111,11 +111,11 @@ fn repo_dir_name(model: &str) -> String {
 /// model: `refs/main` present, plus at least one `snapshots/<hash>/`
 /// directory containing `config.json`, `tokenizer.json`, and
 /// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, blobs-only state from an aborted model
-/// fetch) fails the check and the seeder re-extracts. `is_file`
-/// follows symlinks, so the native hf-hub layout (snapshots/ ->
-/// blobs/) and the tarball layout (regular files under snapshots/)
-/// both validate.
+/// downloaded snapshot, a `.part` from an interrupted download)
+/// fails the check and the seeder re-extracts. `is_file` follows
+/// symlinks, so a cache an earlier version wrote in hf-hub's layout
+/// (snapshots/ -> blobs/) validates beside the plain files chan
+/// writes now.
 fn default_model_present(repo_dir: &Path) -> bool {
     if !repo_dir.join("refs").join("main").is_file() {
         return false;

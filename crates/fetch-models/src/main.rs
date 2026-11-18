@@ -15,9 +15,9 @@
 //!      wipes it and the next build re-downloads.
 //!   2. tar+zstd encode the staging dir into the embed bundle.
 //!      Drops `*.lock`, `*.no_exists` and `**/blobs/**` along the
-//!      way; tar follows the snapshots/ symlinks into the blob bytes,
-//!      so the snapshot entries already carry those bytes and keeping
-//!      blobs/ too would store them twice.
+//!      way. chan writes plain files under snapshots/; a staging dir
+//!      an earlier version wrote holds links there into blobs/, which
+//!      tar follows, so keeping blobs/ too would store them twice.
 //!
 //! Run from the workspace root via `make models` or
 //! `cargo run -p fetch-models`. Idempotent: re-running with the

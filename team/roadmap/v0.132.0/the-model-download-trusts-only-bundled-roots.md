@@ -17,7 +17,7 @@ Read at `342dbe791`; the download was not run.
 
 1. The model download takes its TLS configuration from `chan_tls::client_config()`, as the other Rust clients do. That means the platform verifier on macOS and Windows, and the system bundle beside the bundled floor on Linux and the other Unixes, with `SSL_CERT_FILE` and `SSL_CERT_DIR` read where chan-tls reads them. No option disables verification.
 2. A download refused for its certificate names that cause in the CLI's error line and in the Settings and preflight messages.
-3. Nothing else of the download changes: the proxy variables it honours and the `ProxyConfig` error for one it cannot use, the hosts it reaches, and the cache layout, so a model downloaded before is found without a fetch.
+3. Nothing else of the download changes: the proxy variables it honours and the `ProxyConfig` error for one it cannot use, the hosts it reaches, and the cache layout, so a model downloaded before is found without a fetch. (The cache layout half changed on the owner's word of 2026-11-18: see "The pinned layout" below. A model downloaded before is still found without a fetch.)
 
 ## Boundaries
 
@@ -81,3 +81,31 @@ Not merged in v0.131.0. The branch `v0131/modelroots` (tip `c0acad35c`) holds th
 ## Merge record, 2026-11-17
 
 The native selection is 65 names: the 62 the cross-platform section records plus the three the Windows fix added (`snapshot_link_target_uses_native_separators`, `reference_publication_failure_preserves_destination_and_cleans_temporary`, `published_reference_has_regular_file_attributes`). Carried as follow-ups, each with its reason: a 206 whose range starts elsewhere leaves the part until deleted by hand (a foreign-range resume violates HTTP, and the realistic proxy case already recovers); no connect or read timeout on either agent (parity with hf-hub, which sets none); a dangling snapshot link blocks publication until removed by hand (hf-hub parity, and only hand-edited or pre-fix Windows caches hold one); a crash between `make_in` and rename can strand `refs/.tmp*`, which the `fetch-models` bundler does not skip; no blob is checked against its etag before publication (hf-hub verified nothing either); `download/testdata/ca.der` duplicates the updater fixture's `ca.der` (harmless, beside its origin since the merge). The native rerun with the fixed kit ran on the Windows VM at `4e69fac3b`: the 65 selected tests pass on the fixed tree and again on the restored tree, and the negative control's build is red as it must be. The cargo vendor hash is pinned on the branch for this lock (`c6b80d4d6`) and the Nix build in CI at that commit proves it; harvest again if the integration lock moves. Pending: the guest and Windows trust readings and the macOS reading (postponed by the owner).
+
+## The pinned layout, 2026-11-18
+
+On 2026-11-18 the owner decided that the download writes a pinned layout instead of hf-hub's (`dev/v0132/decisions.md`, "The review stage", point 1: "hf-hub: yes agree"). That reverses the layout half of the v0.131.0 decision above, and of contract 3. Built on `v0132/download` from `842532b7d`.
+
+- **The pins.** The model table (`config::EMBEDDING_MODELS`) pins each model's commit and the sha256 and size of each file chan downloads.
+  - They were read from the Hub on 2026-11-18: the API's `main` commit, the LFS sha256 for the weights and bge-m3's tokenizer, and the other files fetched at that commit and hashed. Each fetched file's git blob id matched the one the API names.
+  - `BAAI/bge-m3`'s main commit publishes no `model.safetensors`; the Hub answers 404 for it, so bge-m3 could not download before this change either. Its entry pins two files, and its download stops at the weights before any request. The repository has no official conversion, only community pull requests. Dropping bge-m3 or pinning another commit is the owner's call.
+- **The download.** It fetches `resolve/<commit>/<file>` into `snapshots/<commit>/<file>.part` and hashes while it writes (the kept prefix first on a resume). It renames the part into place only when the sha256 matches, then writes `refs/main`. A part of the pinned size that hashes wrong is emptied. The metadata request, `blobs/` and its links, and the Windows rename fallback are gone, with their tests and the captured hf-hub transfer.
+- **Earlier caches.** A cache written before opens offline. A file comes from the pinned snapshot, or else from the snapshot `refs/main` names while that snapshot holds every pinned file, so a split snapshot is never mixed with the pinned one.
+- **The rest of the build:**
+  - A failed model probe wipes and refetches only when a cached file misses its pin, so an accelerator error no longer costs a download.
+  - The agent has a 10 s connect bound (the updater's) and a 60 s bound on each read.
+  - The file lock blocks, so a second download waits for the first and reuses its file.
+  - The tests' client ignores the environment's proxy; the proxy test opts back in.
+  - An unusable proxy variable is named only for a failed request.
+  - The user agent is `chan/<version>`. Errors read "model download: ..." (`EmbedError::Download`); the certificate variant keeps its classification.
+- **The end-to-end test.** A Linux test runs the production `Client::new` in a child process. Its `HOME` is a temporary directory, and `HTTPS_PROXY` names a loopback proxy that accepts `CONNECT huggingface.co:443` and terminates the TLS with a leaf from a CA made at run time (chan-tls's `testing::pki`).
+  - With that CA in the bundle `SSL_CERT_FILE` names, the pinned `config.json` downloads; without it, the download fails with the certificate error.
+  - Run against `842532b7d`, the certificate half passes, since today's trust already refuses the CA. The completing half fails there on the request shape, not on trust: today's client reached the proxy through TLS and asked for `resolve/main`, which the pinned proxy does not serve.
+  - Replacing the production trust line with an empty root store turns the completing half red on this branch.
+- **The merge record's follow-ups.** These close: no timeouts, the blob not checked against its hash, and the dangling snapshot link (there are no links). Still open: a 206 at a foreign range, `refs/.tmp*` after a crash, and the duplicated `ca.der`.
+- **The real reading** (2026-11-18, in an sdme guest against the Hub):
+  - `chan workspace index download-model` into an empty cache fetched `BAAI/bge-small-en-v1.5`'s three pinned files in about 4 s.
+  - They landed as plain files under `snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/`, beside `refs/main` and an empty lock file each. No link, `blobs/` or `.part` remained, and each sha256 was the pinned one.
+  - A second run reported the model present.
+  - A three-note workspace with semantic search on, served by `chan serve`, answered `chan workspace search` in hybrid mode. For a query sharing no word with any note, the matching note ranked first.
+- **The native Windows selection** (`CHAN_WORKSPACE_WINDOWS_TESTS` in the root Makefile) names the reworked tests: 51 names, 39 of them the download's. It has not run on the Windows VM. The Windows trust reading stays pending, and the macOS reading stays postponed by the owner.
