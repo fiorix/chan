@@ -70,7 +70,7 @@ Docs and checks:
 16. The reply it times is the devserver's own and crosses every leg between them: an ssh forward, a gateway and its tunnel, WireGuard. With decided 1 it is a `{"type":"ping"}` text frame on the feed, which the devserver answers with `{"type":"pong"}`.
 17. A sleep of the local machine never reads as a slow reply or a stall: a ping in flight across a sleep is not timed, and neither is a reply that took longer than 45 s.
 18. Measuring never retires or redials the feed. The feed keeps its 30 s keepalive, its two-interval rule and its two-round lost mark, and the measurement adds no reason for the feed's tmux windows to close.
-19. The desktop does not ping a devserver whose release does not answer the feed's ping, which it learns from that devserver's info at connect. Its card shows the status glyph and no face.
+19. The desktop learns whether a devserver answers the feed's ping from its first reply: it sends one ping when the feed opens, a pong turns the reading on, and the window set an older devserver sends back instead (any client frame makes it re-send its set) turns pinging off for that connection. The devserver's info is not the carrier, since a gateway's proxy answers 404 under `/api/devserver/*` (`gateway/crates/devserver-proxy/src/proxy.rs:322-326`, `:913-915`). A devserver that does not answer shows the status glyph and no face.
 
 ### Cases
 
@@ -93,11 +93,11 @@ Docs and checks:
 
 ## Boundaries
 
-- The devserver: `crates/chan-server/src/routes/library.rs` answers a ping on the window feed, and the info route gains one additive field saying so, with their tests. No other route, frame or protocol number changes (decided 1).
+- The devserver: `crates/chan-server/src/routes/library.rs` answers a ping on the window feed, with its tests. No other route, frame or protocol number changes (decided 1).
 - The registry wire: `DevserverEntry` in `crates/chan-library/src/devserver_registry.rs` gains the reading (face, its start, latest reply time, the wait's start, last contact, up to 60 samples). It is always serialized, `null` without a reading, and `#[serde(default)]` for older producers, with its byte tests. The mirror is in `web/packages/launcher/src/api/library.ts`, plus the demo backend.
 - The desktop:
   - The feed pump in `window_watcher_wiring.rs` sends the ping on the cadence and hands a pong to the reading, never to the frame decoder.
-  - The reading, its classification and its tests live in a module of their own; `DevserverFeed` in `main.rs` holds one reading per devserver; `config.rs` fills both row builders; `devserver.rs` reads the info field.
+  - The reading, its classification and its tests live in a module of their own; `DevserverFeed` in `main.rs` holds one reading per devserver; `config.rs` fills both row builders. The feed pump hands a pong to the reading before it decodes a window frame, so a pong is neither logged as an unreadable frame nor taken for a set.
   - A command shows the Computers screen over the calling window on its devserver's card, sending the card after the show as `show_for_attention` does. Its grant goes in `permissions/app.toml`, `capabilities/workspace.json`, the gateway grant list in `runtime_capability.rs` (with the ACL parity tests in `serve.rs`) and `native_vocabulary`.
   - `desktop/design.md`.
 - The launcher: the face and detail on the devserver card in `Library.svelte`; the chart math moved from the workspace app; the 2 s refresh of devserver rows while one has a reading (`state/library.svelte.ts`); the card event in `App.svelte`; `launcher/design.md`.
@@ -116,7 +116,7 @@ Docs and checks:
 ## Acceptance
 
 1. Before the build, a reading through the gateway fixture (`scripts/e2e/gateway-zone.sh`) of what answers a WebSocket Ping from the desktop's feed: the proxy, the devserver or both. It grounds the line marked inferred above.
-2. The devserver: a test that the library window feed answers `{"type":"ping"}` with `{"type":"pong"}` and sends its window sets unchanged, and that the info route carries its field. Red at the base.
+2. The devserver: a test that the library window feed answers `{"type":"ping"}` with `{"type":"pong"}` and sends its window sets unchanged, and that any other client frame is still answered as before. Red at the base.
 3. The desktop's reading, as Rust tests with an injected clock, each seen red against a deliberate break:
    - every face and threshold of items 7 and 8;
    - the 60-sample cap with misses;
@@ -148,7 +148,7 @@ Docs and checks:
 
 The owner took the four recommendations on 2026-11-18 ("ok i take your recommendations, let's do it"; `dev/v0132/decisions.md`, "The health badge row's four choices"):
 
-1. The devserver answers `{"type":"ping"}` with `{"type":"pong"}` on its window feed and says so in its info; the desktop sends that ping on the feed it already holds, and a devserver of an older release gives no reading.
+1. The devserver answers `{"type":"ping"}` with `{"type":"pong"}` on its window feed; the desktop sends that ping on the feed it already holds and learns from the first reply whether the devserver answers it (contract 19: a gateway's proxy hides the devserver's info, so the info cannot carry it), and a devserver of an older release gives no reading.
 2. The window keeps its early redial of a silent watcher socket and the wake probe's deadline (contract 4); a terminal's early redial of a stalled socket goes, so an untouched stalled terminal waits for its own 45 s deadline.
 3. The face sits beside the devserver's name on the card's identity row, and the detail under its address on the card in front, shown while connected; captures of this and of a face-only card with a popover go to the owner before the badge lands.
 4. The Computers page a browser opens at a server's `/` is not in this row: a browser tab gets the cover alone.
