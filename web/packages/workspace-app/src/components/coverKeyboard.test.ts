@@ -2,18 +2,24 @@
 //
 // A dialog open when a cover comes up over the window: the cover holds the
 // keyboard while it shows, and the dialog takes it back when the cover
-// lifts. The real screen lock and the app's prompt dialog, in jsdom.
+// lifts. The real screen lock, the app's prompt dialog, the close prompt
+// and the Team dialog, in jsdom.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 import ScreensaverOverlay from "./ScreensaverOverlay.svelte";
+import TeamDialog from "./TeamDialog.svelte";
 import Harness from "../__tests__/ModalStackHarness.svelte";
 import { focusOrigin, settle } from "../__tests__/dialog";
 import { recordingContext2d } from "../__tests__/canvas";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { demoWorkspaceInfo } from "../demo/data";
+import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { screensaver } from "../state/screensaver.svelte";
 import { promptState, resolvePrompt, uiPrompt, workspace } from "../state/store.svelte";
+import { closeTeamDialog, openTeamDialog } from "../state/teamDialog.svelte";
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 
@@ -39,6 +45,8 @@ beforeEach(() => {
 afterEach(async () => {
   screensaver.locked = false;
   if (promptState.open) resolvePrompt(null);
+  resolveCloseConfirm("cancel");
+  closeTeamDialog();
   for (const component of mounted.splice(0)) await unmount(component);
   await settle();
   workspace.info = null;
@@ -80,4 +88,41 @@ test("the screen lock over an open dialog holds the keyboard, and the dialog tak
   screensaver.locked = false;
   await settle();
   expect(document.activeElement, "the dialog's field once the lock lifts").toBe(field);
+});
+
+/// Bring the screen lock up over the page and lift it.
+async function lockAndUnlock(): Promise<void> {
+  mounted.push(mount(ScreensaverOverlay, { target: lockLayer() }));
+  screensaver.locked = true;
+  await settle();
+  const backdrop = document.querySelector<HTMLElement>(".screensaver-backdrop")!;
+  expect(document.activeElement, "the lock takes the keyboard").toBe(backdrop);
+  screensaver.locked = false;
+  await settle();
+}
+
+test("the close prompt takes the keyboard back onto Cancel when the screen lock over it lifts", async () => {
+  focusOrigin();
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(CloseConfirmOverlay, { target }));
+  void uiCloseConfirm();
+  await settle();
+  const cancel = target.querySelector<HTMLButtonElement>("button.cancel")!;
+  expect(document.activeElement, "Cancel as the prompt shows").toBe(cancel);
+  await lockAndUnlock();
+  expect(document.activeElement, "Cancel once the lock lifts").toBe(cancel);
+});
+
+test("the Team dialog takes the keyboard back onto its name field when the screen lock over it lifts", async () => {
+  resetLayout([terminalTab({ id: "lead-tab", terminalSessionId: "lead-session" })]);
+  focusOrigin();
+  const request = { leadTabId: "lead-tab", leadPaneId: "pane-test" };
+  openTeamDialog(request);
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(TeamDialog, { target, props: { request } }));
+  await settle();
+  const name = target.querySelector<HTMLInputElement>(".team-field input")!;
+  expect(document.activeElement, "the name field as the dialog shows").toBe(name);
+  await lockAndUnlock();
+  expect(document.activeElement, "the name field once the lock lifts").toBe(name);
 });
