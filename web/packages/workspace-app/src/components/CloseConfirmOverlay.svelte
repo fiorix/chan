@@ -26,6 +26,7 @@
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { connectionHealth } from "../state/connectionHealth.svelte";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -152,6 +153,7 @@
     role="alertdialog"
     aria-modal="true"
     aria-label="Close this window?"
+    data-keyboard-owner={ownerTag("modal")}
     tabindex="-1"
     bind:this={overlayEl}
     onkeydown={onKeydown}

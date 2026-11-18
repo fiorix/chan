@@ -8,6 +8,7 @@
   import { deckPendingReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
   import { registerModalShell } from "./modalStack";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
 
   let {
     labelledby,
@@ -87,6 +88,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledby}
+    data-keyboard-owner={ownerTag("modal")}
     tabindex="-1"
   >
     {@render children()}

@@ -26,6 +26,7 @@
   import { consumeKey } from "../state/shortcuts";
   import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
   import { keyboardOwned } from "../state/focusGuard.svelte";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -160,6 +161,7 @@
     class:per-terminal={slot !== null}
     role="dialog"
     aria-modal="true"
+    data-keyboard-owner={slot === null ? ownerTag("modal") : ownerTag("terminal-survey", slot)}
   >
     <!-- The card is the focusable survey surface (tabindex -1, focused on
          appear); its keydown is the 1..N / F / X shortcut handler, scoped here

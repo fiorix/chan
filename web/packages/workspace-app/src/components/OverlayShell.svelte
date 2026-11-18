@@ -25,6 +25,7 @@
 
   import type { Snippet } from "svelte";
   import { overlayDepth, type OverlayId } from "../state/store.svelte";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
   import { windowControlsBand } from "../state/windowTabBar.svelte";
   // Each wrapped overlay renders its own maximize/restore + close
@@ -140,6 +141,7 @@
       role="dialog"
       aria-label={label}
       data-overlay={id}
+      data-keyboard-owner={ownerTag("overlay", id)}
       tabindex="-1"
     >
       {@render children()}

@@ -90,6 +90,7 @@
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
   import { keyboardOwned, launcherShownOverWindow } from "../state/focusGuard.svelte";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -846,6 +847,7 @@
 </script>
 
 <CommandDeck
+  ownerTag={ownerTag("overlay", "launcher")}
   open={launcherDraft.visible}
   bind:draft={deckDraft}
   items={visibleEntries}

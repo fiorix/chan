@@ -49,6 +49,7 @@
     onFocusLost,
     mayTakeFocus,
     toggleChord,
+    ownerTag,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -85,6 +86,9 @@
     /// therefore never sees the chord then: the deck closes on it, so the
     /// chord toggles.
     toggleChord?: (event: KeyboardEvent) => boolean;
+    /// The value the host tags the deck's root with when its keyboard rule
+    /// tells an element inside the deck from one under it by that tag.
+    ownerTag?: string;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -1002,7 +1006,7 @@
 {/snippet}
 
 {#if open}
-  <div bind:this={overlay} class="deck-overlay" data-direction={direction}>
+  <div bind:this={overlay} class="deck-overlay" data-direction={direction} data-keyboard-owner={ownerTag}>
     <button class="deck-backdrop" type="button" tabindex="-1" aria-label="Hide command launcher" onclick={onClose}></button>
     <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role, a11y_no_noninteractive_element_interactions -->
     <section

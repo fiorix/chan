@@ -33,6 +33,7 @@
     validateTeamConfig,
   } from "../state/teamDialog.svelte";
   import { runTeamBootstrap, wireToDialog } from "../state/teamOrchestrator.svelte";
+  import { ownerTag } from "../state/keyboardOwner.svelte";
 
   /// Team Work dialog. Opens over the already-created Team Work Lead
   /// terminal (the dialog request
@@ -352,6 +353,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby="team-dialog-title"
+    data-keyboard-owner={ownerTag("modal")}
   >
     <header class="team-dialog-header">
       <h2 id="team-dialog-title">Spawn agents</h2>
