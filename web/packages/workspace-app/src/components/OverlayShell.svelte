@@ -142,7 +142,6 @@
       onclick={(e) => e.stopPropagation()}
       role="dialog"
       aria-label={label}
-      data-overlay={id}
       data-keyboard-owner={ownerTag("overlay", id)}
       tabindex="-1"
     >

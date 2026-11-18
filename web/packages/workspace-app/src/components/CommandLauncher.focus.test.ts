@@ -68,6 +68,7 @@ import {
   resolvePathPrompt,
   resolvePrompt,
   searchPanel,
+  syncOverlayStack,
   uiPrompt,
   workspace,
 } from "../state/store.svelte";
@@ -234,6 +235,8 @@ async function openFromOrigin(): Promise<HTMLElement> {
   document.body.append(target);
   mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
   openCommandLauncher();
+  // The App keeps the overlays' stack in step with their open flags.
+  syncOverlayStack();
   await flush();
   expect(document.activeElement, "the launcher takes focus").toBe(
     target.querySelector(".deck-input"),
@@ -300,6 +303,7 @@ afterEach(() => {
   if (promptState.open) resolvePrompt(null);
   document.body.innerHTML = "";
   launcherPanel.open = false;
+  overlayStack.ids = [];
   resetTerminals();
   xterm.textareaFocus = false;
   vi.clearAllMocks();
@@ -645,10 +649,11 @@ describe("focus when the launcher closes", () => {
   });
 
   test("a run that settles with a window-wide survey up returns the keyboard to its card", async () => {
-    // The modal-first arm's pin: the heir is the window-wide survey's card,
-    // which has no focus repair of its own, so only the arm can hand it the
-    // keyboard back. It pins the predicate, not a user path (the App refuses
-    // the launcher chord under that survey).
+    // The heir is the window-wide survey's card, which has no focus repair
+    // of its own, so only the return can hand it the keyboard back, and the
+    // owner lets it: the card is inside the owner's root. It pins the
+    // predicate, not a user path (the App refuses the launcher chord under
+    // that survey).
     const surveyTarget = document.createElement("div");
     document.body.append(surveyTarget);
     try {
@@ -907,6 +912,39 @@ describe("the launcher's return under another overlay", () => {
       await runFromLauncher(target, "Toggle nothing");
       expect(launcherPanel.open, "the run closes the deck").toBe(false);
       expect(document.activeElement, "focus returns to the Search input").toBe(input);
+    } finally {
+      searchPanel.open = false;
+      launcherPanel.open = false;
+      overlayStack.ids = [];
+      searchTarget.remove();
+    }
+  });
+
+  test("Search opened over the open deck keeps the keyboard, and the deck takes it back as Search closes", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
+    launcherPanel.open = true;
+    overlayStack.ids = ["launcher"];
+    await flush();
+    const deckInput = target.querySelector<HTMLElement>(".deck-input");
+    expect(document.activeElement, "the deck holds the keyboard").toBe(deckInput);
+    const searchTarget = document.createElement("div");
+    document.body.append(searchTarget);
+    try {
+      mounted.push(mount(SearchPanel, { target: searchTarget }) as Record<string, unknown>);
+      searchPanel.open = true;
+      overlayStack.ids = ["launcher", "search"];
+      await flush();
+      const input = searchTarget.querySelector<HTMLElement>(".search .head input");
+      expect(input, "the search panel shows its input").not.toBeNull();
+      input!.focus();
+      await flush();
+      expect(document.activeElement, "Search, the top overlay, keeps the keyboard").toBe(input);
+      searchPanel.open = false;
+      overlayStack.ids = ["launcher"];
+      await flush();
+      expect(document.activeElement, "the deck once Search closes").toBe(deckInput);
     } finally {
       searchPanel.open = false;
       launcherPanel.open = false;

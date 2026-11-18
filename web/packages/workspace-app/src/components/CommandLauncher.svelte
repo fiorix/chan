@@ -60,10 +60,8 @@
     clearLauncherDraft,
     closeCommandLauncher,
     launcherDraft,
-    modalDialogOpen,
     openSettings,
     persistLauncherDraft,
-    topOverlay,
   } from "../state/store.svelte";
   import {
     SURFACE_LABELS,
@@ -86,10 +84,9 @@
   import {
     activePane,
     activeTabInPane,
-    activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { launcherShownOverWindow, legacyKeyboardOwned, ownerAboveOverlays, ownerTag } from "../state/keyboardOwner.svelte";
+  import { mayFocus, owner, ownerAboveOverlays, ownerTag } from "../state/keyboardOwner.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -285,15 +282,6 @@
       recent: recentAtOpen,
       chord: chordFor,
     };
-  }
-
-  /// Whether the heir sits inside the current top overlay's own panel.
-  /// OverlayShell stamps each panel with its overlay id, so the check does
-  /// not depend on the panel's accessible name.
-  function topOverlayPanelContains(heir: Element): boolean {
-    const top = topOverlay();
-    if (!top) return false;
-    return !!heir.closest('[data-overlay="' + top + '"]');
   }
 
   /// A setting the deck cannot change in place is edited in the overlay.
@@ -865,28 +853,14 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
-  mayTakeFocus={(heir) => {
-    // The Computers launcher owns the keyboard outright: a focus change in
-    // the page while it shows would take the window's first responder back.
-    // (This predicate reads LAUNCHER_SHOWN_ATTR directly, so the check is
-    // fresh.) Otherwise a run hands the keyboard back where it owns it: a
-    // window-wide modal dialog takes its heir back; a survey card takes
-    // its own terminal's card back while no modal owns the keyboard and
-    // refuses any other card, read from state (a sole pane renders no
-    // `focused` class, so a class read drops the keyboard there); a top
-    // overlay's panel takes its heir back while no modal is open.
-    // Anything else, and no heir at all, goes through the shared rule,
-    // which still refuses the terminal and its composer while an owner
-    // holds them.
-    if (launcherShownOverWindow()) return false;
-    if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
-    if (heir?.closest(".survey-card"))
-      return (
-        !modalDialogOpen() &&
-        heir.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId === activeTerminalTab()?.id
-      );
-    if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
-    return !legacyKeyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
-  }}
+  mayTakeFocus={(heir) =>
+    // The deck asks with no heir while it is open, to take the keyboard
+    // back into itself, which it does only while it owns the keyboard: not
+    // from an overlay opened over it, and not under the Computers launcher,
+    // where a focus change in the page would take the window's first
+    // responder back. A run's return and a dismissal ask once the deck is
+    // gone, with the element they would focus or none: the keyboard's
+    // owner answers.
+    heir === undefined ? owner()?.tag === ownerTag("overlay", "launcher") : mayFocus(heir)}
   {toggleChord}
 />
