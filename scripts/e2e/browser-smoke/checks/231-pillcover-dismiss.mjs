@@ -162,15 +162,23 @@ export default {
       await ctx.waitWindowLive(WINDOW);
       await waitIndexIdle(page, token, "the CLI tab dance");
 
-      await holdFirstDial(page);
+      // Install on every live page: the runner keeps its own page on the
+      // same window, and an untrapped page dials for real (J106c: the
+      // real socket came from the page without the proxy while the
+      // trapped dial on this page looked fine).
+      for (const p of await ctx.browser.pages().catch(() => [page])) {
+        try { await holdFirstDial(p); } catch {}
+      }
       await cli(ctx, WINDOW, ["new", "--window", WINDOW, "--tab-name", TAB, "--command", COMMAND]);
       opened = true;
       const dial = await firstDial(page);
       if (dial.command !== COMMAND) throw new Error(`held first socket carries ${JSON.stringify(dial.command)}, not the requested command`);
       if (dial.session !== null) throw new Error(`held first socket has session id ${JSON.stringify(dial.session)}, not none`);
       const { stdout: listOut } = await cli(ctx, WINDOW, ["list", "--json"]);
-      if (Object.values(JSON.parse(listOut).groups ?? {}).flat().some((row) => row.name === TAB)) {
-        throw new Error("the held first socket created a server session; the reload would restore instead of owing its notice");
+      const live = Object.values(JSON.parse(listOut).groups ?? {}).flat()
+        .filter((row) => row.name === TAB && row.session_id);
+      if (live.length > 0) {
+        throw new Error(`the held first socket created a server session ${JSON.stringify(live.map((row) => ({ name: row.name, id: row.session_id, window: row.window })))}; the reload would restore instead of owing its notice`);
       }
       // The notice is owed only once the page has persisted the tab's
       // pending command to its reload marker; reloading before that
