@@ -6,8 +6,8 @@
 //! A gateway connect calls `open_gateway_signin`. We generate a random
 //! state nonce and a PKCE `code_verifier` (kept in-process) and start
 //! the authentication session at
-//! `/desktop/authorize?...&redirect_uri=chan://auth/callback&state=<nonce>\
-//! &code_challenge=<challenge>&code_challenge_method=S256`.
+//! `/mobile/authorize?...&redirect_uri=chan://auth/callback&state=<nonce>\
+//! &scopes=mobile.account&code_challenge=<challenge>&code_challenge_method=S256`.
 //! The gateway handles OAuth (passkeys, autofill, all native to the
 //! session's browser), mints a PAT, stores it under a one-time
 //! redemption `code` bound to the S256 challenge, and navigates back to
@@ -18,7 +18,7 @@
 //! The session hands the captured URL to the settle path in-process (no
 //! OS scheme registration, no second-instance spawn). The settle
 //! validates the state nonce in constant time, then swaps
-//! `{code, code_verifier}` for the PAT (`POST /desktop/authorize/redeem`
+//! `{code, code_verifier}` for the PAT (`POST /mobile/authorize/redeem`
 //! against the identity origin held in the slot, never one named by the
 //! callback URL), commits the PAT under the connect attempt's credential
 //! lock, and continues that same attempt. The commit keeps the PAT or
@@ -26,8 +26,8 @@
 //! commit, or during it, which then undoes it, putting back the token
 //! it replaced, unless a replacing connect waits for the PAT) keep
 //! nothing of this sign-in, and its PAT is then revoked at the identity
-//! origin, with itself as the bearer. Only a current attempt emits
-//! `auth-changed` or `auth-error`.
+//! origin (`DELETE /mobile/v1/token`), with itself as the bearer. Only a
+//! current attempt emits `auth-changed` or `auth-error`.
 //!
 //! PKCE (RFC 7636, S256): the `code_verifier` is 32 CSPRNG bytes
 //! encoded base64url-no-pad to a 43-char ASCII string; that STRING is
@@ -102,10 +102,11 @@ pub const AUTH_ERROR: &str = "auth-error";
 
 const KEYCHAIN_SERVICE: &str = "chan-desktop";
 
-/// Account-level gateway scope: one PAT reads the account's devserver
-/// roster and mints entries for any of its devservers (own or shared).
-/// Requested as the SOLE scope; the gateway rejects mixed requests.
-const DESKTOP_ACCOUNT_SCOPES: &str = "desktop.account";
+/// Account-level mobile gateway scope: one PAT reads the account's
+/// devserver roster and mints entries for any of its devservers (own or
+/// shared). Requested as the SOLE scope; the gateway rejects mixed
+/// requests.
+const MOBILE_ACCOUNT_SCOPES: &str = "mobile.account";
 
 const EXPIRES_IN_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -534,10 +535,10 @@ fn launch_signin<R: tauri::Runtime>(
     }
 }
 
-/// The gateway's authorize page with the sign-in's parameters. The
-/// `redirect_uri` is the mobile callback; scope, PKCE, label, and expiry
-/// ride exactly as the desktop sends them. No WireGuard key rides: this
-/// leg enrolls nothing.
+/// The gateway's mobile authorize page with the sign-in's parameters:
+/// `redirect_uri` is `chan://auth/callback`, `scopes` is `mobile.account`,
+/// and PKCE, label, and expiry ride alongside them. No WireGuard key
+/// rides: this leg enrolls nothing.
 fn authorize_url(
     discovery: &crate::devserver::GatewayDiscovery,
     redirect_uri: &str,
@@ -551,10 +552,10 @@ fn authorize_url(
         ("label", label),
         ("code_challenge", challenge),
         ("code_challenge_method", "S256".to_string()),
-        ("scopes", DESKTOP_ACCOUNT_SCOPES.to_string()),
+        ("scopes", MOBILE_ACCOUNT_SCOPES.to_string()),
         ("expires_in", EXPIRES_IN_SECONDS.to_string()),
     ];
-    url::Url::parse_with_params(&discovery.desktop_authorize_url, &params)
+    url::Url::parse_with_params(&discovery.mobile_authorize_url, &params)
         .map_err(|e| format!("building authorize URL: {e}"))
 }
 
@@ -910,7 +911,7 @@ enum Revoked {
 /// goes through the shared HTTP client and its WireGuard proxy decision, as
 /// the redeem does.
 async fn revoke_inner(identity_origin: &str, secret: &str) -> Result<Revoked, String> {
-    let url = format!("{}/desktop/v1/token", identity_origin.trim_end_matches('/'));
+    let url = format!("{}/mobile/v1/token", identity_origin.trim_end_matches('/'));
     let client = crate::devserver::tls_client_builder()
         .and_then(|builder| {
             builder
@@ -1028,7 +1029,7 @@ async fn redeem_inner(
     code_verifier: &str,
 ) -> Result<RedeemedPat, RedeemError> {
     let url = format!(
-        "{}/desktop/authorize/redeem",
+        "{}/mobile/authorize/redeem",
         identity_origin.trim_end_matches('/')
     );
     let body = serde_json::json!({ "code": code, "code_verifier": code_verifier });
@@ -1078,8 +1079,8 @@ fn decode_redeemed(body: &[u8]) -> Result<RedeemedPat, RedeemError> {
 }
 
 /// Map an identity-origin `error=` reason token to the banner string. The
-/// tokens are the gateway's stable desktop-authorize vocabulary; the human
-/// strings live here on the desktop so gateway deploys never reword the UI.
+/// tokens are the gateway's stable authorize error vocabulary; the human
+/// strings live in the client so gateway deploys never reword the UI.
 fn signin_error_message(reason: &str) -> String {
     match reason {
         "user_cancelled" => "sign-in was cancelled in the browser".to_string(),
@@ -1226,8 +1227,8 @@ pub(crate) mod tests {
 
     #[test]
     fn signin_error_message_maps_the_authorize_reason_tokens() {
-        // The gateway's stable `error=` vocabulary (desktop_authorize):
-        // banner strings live desktop-side, one per token, and an unknown
+        // The gateway's stable `error=` vocabulary (`/mobile/authorize`):
+        // banner strings live client-side, one per token, and an unknown
         // token still names itself so a future reason is never swallowed.
         assert_eq!(
             signin_error_message("user_cancelled"),
@@ -1257,8 +1258,9 @@ pub(crate) mod tests {
 
     #[test]
     fn authorize_url_with_the_mobile_redirect_keeps_every_other_parameter() {
-        // The iOS leg sends the registered mobile callback as its redirect;
-        // scope, PKCE, label, and expiry ride exactly as on desktop.
+        // The iOS leg sends the registered mobile callback and `mobile.account`
+        // scope to `/mobile/authorize`, with PKCE, label, and expiry and no
+        // WireGuard key parameter.
         let discovery = crate::gateway::tests::runtime_with(Vec::new()).discovery;
         let url = authorize_url(
             &discovery,
@@ -1268,6 +1270,8 @@ pub(crate) mod tests {
             "challenge".into(),
         )
         .unwrap();
+        assert_eq!(url.origin().ascii_serialization(), "https://gw.chan.app");
+        assert_eq!(url.path(), "/mobile/authorize");
         let pairs: Vec<(String, String)> = url
             .query_pairs()
             .map(|(name, value)| (name.into_owned(), value.into_owned()))
@@ -1280,7 +1284,7 @@ pub(crate) mod tests {
                 ("label", "chan-ios @ host"),
                 ("code_challenge", "challenge"),
                 ("code_challenge_method", "S256"),
-                ("scopes", "desktop.account"),
+                ("scopes", "mobile.account"),
                 ("expires_in", "2592000"),
             ]
             .into_iter()
@@ -1553,7 +1557,7 @@ pub(crate) mod tests {
         assert_eq!(pat.expires_at, None);
         let request = stub.join().expect("stub thread");
         assert!(
-            request.starts_with("POST /desktop/authorize/redeem HTTP/1.1"),
+            request.starts_with("POST /mobile/authorize/redeem HTTP/1.1"),
             "{request}"
         );
         assert!(request.contains(r#""code":"one-time-abc""#), "{request}");
@@ -1619,28 +1623,37 @@ pub(crate) mod tests {
     }
 
     /// An identity answering every request with `status` and `body`, which
-    /// reports the `Authorization` header each request carried.
+    /// reports the method, path, and `Authorization` header each request carried.
     async fn status_identity(
         status: u16,
         body: &'static str,
-    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<Option<String>>) {
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<(axum::http::Method, String, Option<String>)>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let (seen, bearers) = tokio::sync::mpsc::unbounded_channel();
-        let router = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
-            let seen = seen.clone();
-            async move {
-                let _ = seen.send(
-                    headers
-                        .get(axum::http::header::AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string),
-                );
-                (axum::http::StatusCode::from_u16(status).unwrap(), body)
-            }
-        });
+        let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+        let router = axum::Router::new().fallback(
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    let _ = seen.send((
+                        method,
+                        uri.path().to_string(),
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    ));
+                    (axum::http::StatusCode::from_u16(status).unwrap(), body)
+                }
+            },
+        );
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (origin, bearers)
+        (origin, requests)
     }
 
     #[tokio::test]
@@ -1659,7 +1672,7 @@ pub(crate) mod tests {
             (404, "", None),
             (503, "frontend not built", None),
         ] {
-            let (origin, mut bearers) = status_identity(status, body).await;
+            let (origin, mut requests) = status_identity(status, body).await;
             let answer = revoke_inner(&origin, "chan_pat_test").await;
             match expected {
                 Some(revoked) => assert_eq!(answer, Ok(revoked), "{status}"),
@@ -1672,8 +1685,11 @@ pub(crate) mod tests {
                     );
                 }
             }
+            let (method, path, bearer) = requests.recv().await.unwrap();
+            assert_eq!(method, axum::http::Method::DELETE, "{status}");
+            assert_eq!(path, "/mobile/v1/token", "{status}");
             assert_eq!(
-                bearers.recv().await.unwrap().as_deref(),
+                bearer.as_deref(),
                 Some("Bearer chan_pat_test"),
                 "{status}: the token is its own bearer"
             );

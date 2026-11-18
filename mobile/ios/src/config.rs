@@ -1871,11 +1871,11 @@ mod tests {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: "https://gw.chan.app".into(),
-            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            mobile_authorize_url: "https://gw.chan.app/mobile/authorize".into(),
+            mobile_entry_url: "https://gw.chan.app/mobile/v1/devserver/entry".into(),
+            mobile_roster_url: "https://gw.chan.app/mobile/v1/devservers".into(),
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
             wireguard: None,
         }
     }
@@ -2467,8 +2467,9 @@ mod tests {
                         "kind": "chan-gateway",
                         "api_version": 1,
                         "identity_origin": o,
-                        "desktop_authorize_url": format!("{o}/desktop/authorize"),
-                        "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                        "mobile_authorize_url": format!("{o}/mobile/authorize"),
+                        "mobile_entry_url": format!("{o}/mobile/v1/devserver/entry"),
+                        "mobile_roster_url": format!("{o}/mobile/v1/devservers"),
                         "devserver_proxy_origin": "https://proxy.chan.app",
                         "devserver_proxy_host_depth": 2,
                     });
