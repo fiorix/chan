@@ -203,3 +203,33 @@ describe("the connection face for a screen reader", () => {
     expect(edit.hasAttribute("aria-describedby")).toBe(false);
   });
 });
+
+describe("the face's clock", () => {
+  let visibility: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  });
+  afterEach(() => visibility.mockRestore());
+
+  const show = (state: DocumentVisibilityState) => {
+    visibility.mockReturnValue(state);
+    document.dispatchEvent(new Event("visibilitychange"));
+    flushSync();
+  };
+
+  it("stops while the screen is hidden and reads the time again when it shows", () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "stalled", since: NOW - 1_000, wait_since: NOW - 5_000 }))];
+    mountDeck("ds-a");
+    expect(face("ds-a")!.textContent!.trim()).toBe("stalled 5 s");
+    show("hidden");
+    vi.advanceTimersByTime(3_000);
+    flushSync();
+    expect(face("ds-a")!.textContent!.trim(), "the clock ticked while hidden").toBe("stalled 5 s");
+    expect(vi.getTimerCount(), "a timer runs while hidden").toBe(0);
+    show("visible");
+    expect(face("ds-a")!.textContent!.trim()).toBe("stalled 8 s");
+    vi.advanceTimersByTime(1_000);
+    flushSync();
+    expect(face("ds-a")!.textContent!.trim()).toBe("stalled 9 s");
+  });
+});

@@ -209,11 +209,18 @@
   // while any reading shows moves every count by whole seconds without
   // skipping one, and each fresh list of rows restarts it, so a reading
   // counts from the moment it arrives: a stall the desktop read at 4 s never
-  // shows a count from a tick before it.
+  // shows a count from a tick before it. The clock stops while the page is
+  // hidden, where no count shows, and reads the time again when it shows.
   let now = $state(Date.now());
   const readingShown = $derived(library.devservers.some((ds) => health(ds) !== null));
+  let pageShown = $state(typeof document === "undefined" || document.visibilityState === "visible");
   $effect(() => {
-    if (!readingShown) return;
+    const read = (): void => { pageShown = document.visibilityState === "visible"; };
+    document.addEventListener("visibilitychange", read);
+    return () => document.removeEventListener("visibilitychange", read);
+  });
+  $effect(() => {
+    if (!readingShown || !pageShown) return;
     void library.devservers;
     now = Date.now();
     const timer = setInterval(() => { now = Date.now(); }, 250);
