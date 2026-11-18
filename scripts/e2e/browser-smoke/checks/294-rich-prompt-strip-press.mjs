@@ -297,7 +297,7 @@ export default {
           const stop = join(ctx.workspaceDir, `.press294-${backend}.stop`);
           try {
             await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
-            const { card } = await openComposer(ctx, page, cs, windowId, backend, name, text);
+            const { card, terminal } = await openComposer(ctx, page, cs, windowId, backend, name, text);
             opened = true;
             await page.evaluate(() => {
               window.__prompt294.prompts.length = 0;
