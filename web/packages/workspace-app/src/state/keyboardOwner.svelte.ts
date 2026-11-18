@@ -206,7 +206,8 @@ export function handKeyboardToOwner(): boolean {
 /// reconnect cover onto its card. False with no cover up, while a raised
 /// cover has no root in the page, and when the top cover registered no way
 /// to take it, as the screen lock, the missing-token and the preflight
-/// covers do not: each takes the keyboard itself as it shows.
+/// covers do not: the lock and the preflight cover take the keyboard
+/// themselves as they show, and the missing-token cover takes none.
 export function handKeyboardToTopCover(): boolean {
   const raised = raisedCoverKeys();
   if (raised.length === 0) return false;
