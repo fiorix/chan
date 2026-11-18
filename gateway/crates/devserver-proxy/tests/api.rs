@@ -3821,7 +3821,7 @@ async fn the_entry_credentials_client_reaches_the_devserver_on_every_lane() {
         .await;
     let proxy_addr = serve_router_real(app.router.clone()).await;
 
-    for client in [ClientType::Desktop, ClientType::Browser] {
+    for client in [ClientType::Desktop, ClientType::Mobile, ClientType::Browser] {
         seen.lock().unwrap().clear();
         let credential = mint_for_client(owner, owner, client, "blog", &host, "/blog/");
         let (status, headers, _) = exchange_entry(&app.router, &host, &credential).await;

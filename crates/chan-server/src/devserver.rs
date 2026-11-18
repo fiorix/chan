@@ -4668,11 +4668,12 @@ pub(crate) mod tunnel_test_support {
     }
 
     /// A signed assertion for `caller`: `"owner"` (the owner on a desktop
-    /// session), `"browser owner"`, `"unknown-client owner"` (a client the
-    /// gateway did not state), `"browser grantee"`, `"nil"` (the nil UUID as
-    /// the subject), `"empty"` (an empty subject), or anything else for a
-    /// grantee on a desktop session. The gateway signs neither of the subjects
-    /// that name no user; they are here to prove the tunnel layer refuses them.
+    /// session), `"mobile owner"`, `"browser owner"`, `"unknown-client owner"`
+    /// (a client the gateway did not state), `"mobile grantee"`, `"browser
+    /// grantee"`, `"nil"` (the nil UUID as the subject), `"empty"` (an empty
+    /// subject), or anything else for a grantee on a desktop session. The
+    /// gateway signs neither of the subjects that name no user; they are here
+    /// to prove the tunnel layer refuses them.
     pub(super) fn test_gateway_assertion(
         assertion: &TunnelAssertion,
         aud: &str,
@@ -4682,8 +4683,10 @@ pub(crate) mod tunnel_test_support {
         let owner = Caller::OWNER_ID;
         let (subject, client) = match caller {
             "owner" => (owner, ClientType::Desktop),
+            "mobile owner" => (owner, ClientType::Mobile),
             "browser owner" => (owner, ClientType::Browser),
             "unknown-client owner" => (owner, ClientType::Unknown),
+            "mobile grantee" => (Caller::GRANTEE_ID, ClientType::Mobile),
             "browser grantee" => (Caller::GRANTEE_ID, ClientType::Browser),
             "nil" => ("00000000-0000-0000-0000-000000000000", ClientType::Desktop),
             "empty" => ("", ClientType::Desktop),
@@ -22453,10 +22456,12 @@ mod tests {
         for (caller, reaches) in [
             ("local", true),
             ("owner", true),
+            ("mobile owner", false),
             ("browser owner", false),
             ("unknown-client owner", false),
             ("owner, pre-client gateway", false),
             ("grantee", false),
+            ("mobile grantee", false),
             ("browser grantee", false),
         ] {
             for leg in [
