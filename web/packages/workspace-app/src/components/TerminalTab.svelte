@@ -475,7 +475,10 @@
   /// Keep one pane control clear of the window status pill while the pill
   /// shows: read the pill's box from the page (the lane's selector) and
   /// apply the overlap, if any. The observers live only while the control
-  /// using this action is mounted.
+  /// using this action is mounted. The mutation observer watches only the
+  /// always-mounted status bar subtree the pill lives under: observing the
+  /// whole document would re-measure on every terminal frame and find
+  /// highlight, starving the page under output floods.
   function watchStatusPill(node: HTMLElement, apply: (pill: DOMRect | null) => void): { destroy(): void } {
     let observed: Element | null = null;
     let sizes: ResizeObserver | null = null;
@@ -488,13 +491,11 @@
       }
       apply(pill instanceof HTMLElement ? pill.getBoundingClientRect() : null);
     };
+    const bar = document.querySelector(".app-statusbar");
     const mutations = new MutationObserver(measure);
-    mutations.observe(document.body, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["class", "style"],
-    });
+    if (bar) {
+      mutations.observe(bar, { subtree: true, childList: true, attributes: true });
+    }
     if (typeof ResizeObserver !== "undefined") {
       sizes = new ResizeObserver(measure);
       sizes.observe(node);
