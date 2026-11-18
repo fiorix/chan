@@ -52,8 +52,6 @@ enum DownloadError {
     Io(#[from] io::Error),
     #[error("Invalid part file - corrupted file")]
     InvalidResume,
-    #[error("Lock acquisition failed: {0}")]
-    LockAcquisition(PathBuf),
     #[error("{model} has no pinned {file}")]
     Unpinned { model: String, file: String },
     #[error("{file} does not match its pinned sha256 {expected}: got {actual}")]
@@ -416,18 +414,10 @@ fn lock(path: &Path) -> Result<FileLock, DownloadError> {
         .create(true)
         .truncate(false)
         .open(path)?;
-    for attempt in 0..=5 {
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Ok(FileLock(file)),
-            Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
-                if attempt < 5 {
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err(DownloadError::LockAcquisition(path.to_owned()))
+    // Waits while another download of the file runs. The holder's requests
+    // are bounded by the agent's timeouts, so a stalled holder lets go.
+    FileExt::lock_exclusive(&file)?;
+    Ok(FileLock(file))
 }
 
 fn validate_resume(response: &Response, start: u64, size: u64) -> Result<(), DownloadError> {

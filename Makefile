@@ -107,7 +107,6 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::a_short_transfer_stays_partial_and_resumes_on_the_next_attempt \
 	index::embeddings::download::tests::excess_after_written_chunks_rolls_back_to_the_original_partial \
 	index::embeddings::download::tests::embedder_transport_failure_preserves_another_downloaders_cache \
-	index::embeddings::download::tests::embedder_lock_timeout_keeps_the_active_lock_and_partial \
 	index::embeddings::download::tests::embedder_interrupted_payload_keeps_the_resumable_part \
 	index::embeddings::download::tests::resume_status_guard_is_independent_of_body_length \
 	index::embeddings::download::tests::resume_range_guard_is_independent_of_body_length \

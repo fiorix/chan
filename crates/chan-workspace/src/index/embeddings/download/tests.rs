@@ -370,6 +370,34 @@ fn mismatched_resume_range_never_appends_bytes() {
     assert_eq!(std::fs::read(partial).unwrap(), &BODY[..3]);
 }
 
+/// Return once a download waits on the lock at `path`. Linux lists a
+/// waiting flock in /proc/locks with `->`, against the file's inode;
+/// elsewhere the contender gets a pause to reach the lock.
+fn until_the_lock_has_a_waiter(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let inode = format!(":{}", std::fs::metadata(path).unwrap().ino());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string("/proc/locks")
+            .unwrap()
+            .lines()
+            .any(|line| line.contains("->") && line.split_whitespace().any(|f| f.ends_with(&inode)))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no download waits on the lock"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
 #[test]
 fn a_waiting_download_reuses_the_winners_file() {
     let cache = tempfile::tempdir().unwrap();
@@ -388,7 +416,7 @@ fn a_waiting_download_reuses_the_winners_file() {
         let downloader = scope.spawn(|| client.get("fixture/model", "config.json"));
         // The contender misses the cache and waits on the lock the winner
         // holds while it publishes.
-        std::thread::sleep(Duration::from_millis(300));
+        until_the_lock_has_a_waiter(&snapshot.join("config.json.lock"));
         std::fs::write(snapshot.join("config.json"), BODY).unwrap();
         drop(holder);
         let path = downloader
@@ -750,49 +778,6 @@ fn embedder_transport_failure_preserves_another_downloaders_cache() {
         server.requests.lock().unwrap().len(),
         1,
         "transport failures do not wipe and retry"
-    );
-}
-
-#[test]
-fn embedder_lock_timeout_keeps_the_active_lock_and_partial() {
-    let cache = tempfile::tempdir().unwrap();
-    let snapshot = default_snapshot(cache.path());
-    std::fs::create_dir_all(&snapshot).unwrap();
-    let partial = snapshot.join("config.json.part");
-    let lock_path = snapshot.join("config.json.lock");
-    std::fs::write(&partial, &BODY[..3]).unwrap();
-    let holder = std::fs::File::create(&lock_path).unwrap();
-    FileExt::try_lock_exclusive(&holder).unwrap();
-    let server = Server::start(|_| response("503 Service Unavailable", "", b"locked"));
-    let client = Client::with_config(
-        cache.path(),
-        &server.endpoint,
-        chan_tls::client_config().unwrap(),
-    );
-    let error =
-        super::super::Embedder::open_with_client(crate::DEFAULT_MODEL, cache.path(), &client)
-            .expect_err("another download holds the file lock");
-    let contender = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .unwrap();
-    let contention = FileExt::try_lock_exclusive(&contender)
-        .expect_err("the cache lock path must still name the active downloader's lock");
-    assert_eq!(contention.kind(), fs4::lock_contended_error().kind());
-    FileExt::unlock(&holder).unwrap();
-    assert_eq!(
-        std::fs::read(partial).unwrap(),
-        &BODY[..3],
-        "a lock timeout must preserve the active downloader's partial"
-    );
-    assert!(
-        error.to_string().contains("Lock acquisition failed"),
-        "the lock error is retained: {error}"
-    );
-    assert!(
-        server.requests.lock().unwrap().is_empty(),
-        "a lock timeout never retries under a different inode"
     );
 }
 
