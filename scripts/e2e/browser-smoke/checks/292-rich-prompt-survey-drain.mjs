@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dispatchCommand } from "../lib/pane-strip.mjs";
+import { closeActiveTerminal } from "../lib/pane-strip.mjs";
 import { recordedSince } from "../lib/pty-recorder.mjs";
 import { openAttachedTerminal, readTerminalAttachment } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -228,9 +228,10 @@ export default {
             // An early failure leaves the loop printing until its bound.
             await cleanup("queue release", async () => writeFileSync(stop, ""));
             await cleanup("owned terminal cleanup", async () => {
-              // The tab bus closes whatever tab is active, live session or
-              // not; `cs terminal close` only matches live sessions.
-              if (opened) await dispatchCommand(page, "app.tab.close");
+              // The recorder is a live process, so the close asks first;
+              // the helper confirms it, or the prompt would own the next
+              // leg's keyboard.
+              if (opened) await closeActiveTerminal(page, `${backend} cleanup`);
             });
           }
           if (result.passed && result.pageErrors.length) {
