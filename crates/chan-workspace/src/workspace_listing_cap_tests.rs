@@ -128,3 +128,50 @@ fn a_rebuild_refuses_once_its_indexable_files_pass_the_cap() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn a_rebuild_over_the_cap_leaves_no_marker_of_its_own() {
+    let fixture = Fixture::new();
+    fixture.seed(LIMIT + 1);
+    let marker = fixture.workspace.paths().graph_dir.join(REBUILD_MARKER);
+    assert!(!marker.exists());
+
+    assert!(fixture.workspace.reindex(None).is_err());
+
+    assert!(
+        !marker.exists(),
+        "a refusal that touched neither store left a marker for the next open"
+    );
+}
+
+#[test]
+fn a_rebuild_over_the_cap_keeps_a_marker_an_earlier_pass_left() {
+    let fixture = Fixture::new();
+    fixture.seed(LIMIT + 1);
+    let marker = fixture.workspace.paths().graph_dir.join(REBUILD_MARKER);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, b"started_at = 1\n").unwrap();
+
+    assert!(fixture.workspace.reindex(None).is_err());
+
+    assert!(
+        marker.exists(),
+        "the earlier pass's marker says the stores may disagree, and still does"
+    );
+}
+
+#[test]
+fn a_failed_pass_completes_its_generation_without_a_retry() {
+    let fixture = Fixture::new();
+    let workspace = &fixture.workspace;
+    let generation = workspace.request_recovery(RecoveryAction::FullRebuild);
+    let pass = workspace.begin_recovery().expect("the pass is claimable");
+
+    let status = workspace
+        .finish_recovery(pass, RecoveryOutcome::Failed)
+        .unwrap();
+
+    assert!(status.is_ready(), "{status:?}");
+    assert_eq!(status.completed_generation, generation);
+    assert_eq!(status.pending, None, "the failed pass was requeued");
+}

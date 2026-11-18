@@ -395,6 +395,13 @@ pub enum RecoveryOutcome {
     /// on the passes it claims later, and until one succeeds every
     /// `Complete`, from any claimant, keeps being requeued.
     CompleteWithReportRefreshOwed,
+    /// The pass action failed in a way running the same pass again cannot
+    /// change, such as a listing over its cap: complete the pass's generation
+    /// without requeueing it, so readiness reads ready rather than recovering
+    /// toward a pass that fails each time it runs. An owed persisted-report
+    /// refresh stays owed. The next pass a trigger requests runs the action
+    /// again.
+    Failed,
     /// Requeue the pass, merged into any pass requested meanwhile, and wake the
     /// installed recovery driver.
     Retry,
@@ -1779,7 +1786,9 @@ impl Workspace {
             }
             status.active = None;
             match outcome {
-                RecoveryOutcome::Complete | RecoveryOutcome::CompleteWithReportRefreshOwed => {
+                RecoveryOutcome::Complete
+                | RecoveryOutcome::CompleteWithReportRefreshOwed
+                | RecoveryOutcome::Failed => {
                     status.completed_generation =
                         std::cmp::max(status.completed_generation, pass.generation);
                 }
@@ -3332,8 +3341,18 @@ impl Workspace {
         // point in between leaves the marker on disk, which the
         // next `Workspace::open` promotes into a supervised full rebuild
         // instead of trusting an index that may have skipped its final commit.
+        let marker_was_present = self.paths.graph_dir.join(REBUILD_MARKER).exists();
         self.write_rebuild_marker()?;
-        self.rebuild_graph(cancel, progress, &policy)?;
+        if let Err(error) = self.rebuild_graph(cancel, progress, &policy) {
+            // A listing over its cap refuses before either store is touched,
+            // so the marker goes back to what it was: this pass's own marker
+            // would only make the next open run the same refusal again, and
+            // one an earlier pass left still means the stores may disagree.
+            if matches!(error, ChanError::ListingTooLarge { .. }) && !marker_was_present {
+                self.clear_rebuild_marker();
+            }
+            return Err(error);
+        }
         let index = self.index()?;
         // Push the EFFECTIVE filter (global baseline unioned with this
         // workspace's `excluded_dirs` additions) to the index facade so the
