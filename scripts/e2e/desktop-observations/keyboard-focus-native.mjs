@@ -18,7 +18,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
@@ -332,7 +332,7 @@ async function pressPoint(selector) {
 /// with no window activation in between, since an activation while the
 /// button is held is not part of a user's click. A press the button never
 /// saw as a click is the instrument's, not the product's.
-async function press(selector, card) {
+async function press(selector, card, shotName = null) {
   const point = await pressPoint(selector);
   await page.evaluate((selector) => {
     const button = document.querySelector(selector);
@@ -346,6 +346,7 @@ async function press(selector, card) {
   await delay(300);
   const held = await focusState(card);
   const unmoved = await page.evaluate(() => document.activeElement === window.__kbdBefore);
+  if (shotName) await shot(shotName);
   await exec("xdotool", ["mouseup", "1"], { timeout: 30_000 });
   const events = await until("the button sees the click", () => page.evaluate(() => window.__kbdPress), (seen) => seen.includes("click"), 5_000)
     .catch(() => null);
@@ -353,6 +354,17 @@ async function press(selector, card) {
     throw new Error(`the press never reached ${selector} as a click: ${JSON.stringify(await page.evaluate(() => window.__kbdPress))}`);
   }
   return { held, unmoved, events };
+}
+
+/// A screenshot of the whole X screen into the output's shots folder. A
+/// failed capture is logged and never decides the run.
+async function shot(name) {
+  try {
+    mkdirSync(join(out, "shots"), { recursive: true });
+    await exec("import", ["-window", "root", join(out, "shots", `${name}.png`)], { timeout: 15_000 });
+  } catch (error) {
+    console.log(`keyboard-focus screenshot ${name} failed: ${error.message}`);
+  }
 }
 
 async function waitForCard(card, timeout = 30_000) {
@@ -427,7 +439,7 @@ async function main() {
   await x([], "type", "--delay", "12", TEXT);
   const typed = await until("the draft is editable", () => focusState(cardA), (s) => (s.text === TEXT ? s : false));
   if (typed.where !== "composer") throw new Error(`composer did not take the keyboard: ${typed.where}`);
-  const pressA = await press(`${cardA} .rp-primary`, cardA);
+  const pressA = await press(`${cardA} .rp-primary`, cardA, "press-a-held");
   if (pressA.held.where !== "composer") fail("press holds the composer", { where: pressA.held.where });
   pass("press holds the composer", { where: pressA.held.where, events: pressA.events });
   const delivered = await until("the submit delivers", () => focusState(cardA), (s) => s.text === "" || s.text === null, 15_000)
@@ -442,6 +454,7 @@ async function main() {
     (s) => (s.text === "x" && s.where === "composer" ? s : false),
     5_000,
   ).catch(() => null);
+  await shot("press-a-next-key");
   if (!after) fail("click submits and the next key types", { after: await focusState(cardA) });
   pass("click submits and the next key types", { where: after.where });
   const tabA = await readTerminalId(".terminal-tab.active");
@@ -480,23 +493,30 @@ async function main() {
   await until("B's draft is editable", () => focusState(cardB), (s) => (s.text === "KbdFocusB" && s.editable ? s : false));
   const hostA = await screenPoint(`.terminal-tab[data-terminal-tab-id="${tabA}"] .terminal-host`);
   await x([], "mousemove", String(hostA.x), String(hostA.y), "click", "1");
-  const paneA = await activePaneId();
+  // The click lands asynchronously: read nothing until A is the active pane
+  // and its terminal holds the keyboard.
+  const paneA = await until("pane A is active and holds the keyboard", () => page.evaluate((tabA) => {
+    const terminal = document.querySelector(`.terminal-tab[data-terminal-tab-id="${tabA}"]`);
+    const pane = terminal?.closest(".pane");
+    return pane?.classList.contains("focused") && terminal.contains(document.activeElement)
+      ? pane.getAttribute("data-pane-id")
+      : false;
+  }, tabA), Boolean, 10_000);
+  await shot("twopane-a-active");
   // The press moves no focus: A's element keeps the keyboard while B's
-  // button is held. Only the submit itself may then focus B's composer.
-  const { held: heldB, unmoved: unmovedB } = await press(`${cardB} .rp-primary`, cardB);
+  // button is held. Only the submit itself then focuses B's composer, and A
+  // stays the active pane, as today.
+  const { held: heldB, unmoved: unmovedB } = await press(`${cardB} .rp-primary`, cardB, "twopane-b-held");
   if (!unmovedB) fail("two-pane submit keeps focus and pane", { held: heldB.where, unmoved: false });
   const sentB = await until("B's submit sends and clears", () => focusState(cardB), (s) =>
     s.text === "" || s.text === null ? s : false,
   ).catch(() => null);
   if (!sentB) fail("two-pane submit keeps focus and pane", { sent: false, state: await focusState(cardB) });
   const paneNow = await activePaneId();
-  pass("two-pane submit keeps focus and pane", {
-    held: heldB.where,
-    focus: sentB.where,
-    paneA,
-    paneNow,
-    paneBecameActive: paneNow !== paneA,
-  });
+  await shot("twopane-sent");
+  if (paneNow !== paneA) fail("two-pane submit keeps focus and pane", { paneA, paneNow });
+  if (sentB.where !== "composer") fail("two-pane submit keeps focus and pane", { focus: sentB.where });
+  pass("two-pane submit keeps focus and pane", { held: heldB.where, focus: sentB.where, paneA, paneNow });
 
   // The Computers launcher keeps the keyboard while a deck run settles.
   await x([], "key", "ctrl+shift+p");
