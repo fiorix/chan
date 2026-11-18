@@ -497,6 +497,20 @@ pub(crate) struct ProbePace {
     pub nudges: u64,
 }
 
+impl ProbePace {
+    /// Take the desktop's focus as `focused`, answering whether the pace
+    /// changed. A gain asks for its one ping in the same change, so a feed's
+    /// pump wakes once for the gain and reads both.
+    fn take_focus(&mut self, focused: bool) -> bool {
+        if focused && !self.focused {
+            self.nudges = self.nudges.wrapping_add(1);
+        }
+        let changed = self.focused != focused;
+        self.focused = focused;
+        changed
+    }
+}
+
 /// The desktop's [`ProbePace`], shared by every feed's pump.
 pub(crate) struct ProbePacer {
     /// The labels of the desktop's windows that have the focus. A move of
@@ -532,14 +546,8 @@ impl ProbePacer {
             }
             !windows.is_empty()
         };
-        self.pace.send_if_modified(|pace| {
-            if now_focused && !pace.focused {
-                pace.nudges = pace.nudges.wrapping_add(1);
-            }
-            let changed = pace.focused != now_focused;
-            pace.focused = now_focused;
-            changed
-        });
+        self.pace
+            .send_if_modified(|pace| pace.take_focus(now_focused));
     }
 
     /// Ask every feed whose devserver has answered for one ping now.
@@ -1178,6 +1186,34 @@ mod tests {
         // A ping sent while counted ones wait behind is counted too, so its
         // pong is never another ping's.
         assert!(!reading.waits());
+    }
+
+    /// The desktop gaining the focus is one change of the pace, carrying
+    /// the focus and its ping together. A subscriber cannot tell one change
+    /// from two sent in a row, since a watch keeps only the latest value,
+    /// so the change itself is read.
+    #[test]
+    fn a_focus_gain_is_one_change_of_the_pace() {
+        let mut pace = ProbePace::default();
+        assert!(pace.take_focus(true));
+        assert_eq!(
+            pace,
+            ProbePace {
+                focused: true,
+                nudges: 1
+            },
+            "the gain's change left its ping to another"
+        );
+        assert!(!pace.take_focus(true), "a held focus changed the pace");
+        assert_eq!(pace.nudges, 1);
+        assert!(pace.take_focus(false));
+        assert_eq!(
+            pace,
+            ProbePace {
+                focused: false,
+                nudges: 1
+            }
+        );
     }
 
     #[test]
