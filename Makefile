@@ -108,6 +108,7 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	index::embeddings::download::tests::a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinned_one \
 	index::embeddings::download::tests::a_pinned_snapshot_without_its_ref_is_downloaded_and_gets_its_ref \
 	index::embeddings::download::tests::a_model_that_pins_no_weights_is_never_downloaded \
+	index::embeddings::download::tests::a_model_opens_from_one_snapshot_when_the_cache_changes_between_its_files \
 	index::embeddings::download::tests::cache_reference_cannot_escape_the_snapshot_directory \
 	index::embeddings::download::tests::an_unpinned_model_or_file_is_refused_before_any_request_or_write \
 	index::embeddings::download::tests::a_model_that_publishes_no_weights_is_refused_before_any_request \

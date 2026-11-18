@@ -876,6 +876,48 @@ fn unpublished() -> &'static [EmbeddingModelInfo] {
 }
 
 #[test]
+fn a_model_opens_from_one_snapshot_when_the_cache_changes_between_its_files() {
+    const OLD: &str = "1111111111111111111111111111111111111111";
+    let cache = tempfile::tempdir().unwrap();
+    let repo = cache.path().join(repo_dir_name("fixture/model"));
+    let pinned = snapshot(cache.path());
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::write(pinned.join("config.json"), BODY).unwrap();
+    let server = Server::start(|_| range_response(BODY, 0));
+    let mut client = Client::with_config(
+        cache.path(),
+        &server.endpoint,
+        chan_tls::client_config().unwrap(),
+    )
+    .pinned(pins(
+        "fixture/model",
+        COMMIT,
+        &[
+            ("config.json", BODY),
+            ("tokenizer.json", BODY),
+            ("model.safetensors", BODY),
+        ],
+    ));
+    // While the tokenizer downloads, an earlier chan puts its own complete
+    // snapshot in front: the weights' lookup would read that one.
+    let old = repo.join("snapshots").join(OLD);
+    let (front, named) = (old.clone(), repo.join("refs/main"));
+    client.publication_observer = Some(Box::new(move |_| {
+        std::fs::create_dir_all(&front).unwrap();
+        for name in MODEL_FILES {
+            std::fs::write(front.join(name), BODY).unwrap();
+        }
+        std::fs::write(&named, OLD).unwrap();
+    }));
+    let paths = client.get_model("fixture/model").unwrap();
+    assert_eq!(
+        paths.each_ref().map(|path| path.parent().unwrap()),
+        [old.as_path(); 3],
+        "the three files come from one snapshot: {paths:?}"
+    );
+}
+
+#[test]
 fn cache_reference_cannot_escape_the_snapshot_directory() {
     let cache = tempfile::tempdir().unwrap();
     let repo = cache.path().join(repo_dir_name("fixture/model"));

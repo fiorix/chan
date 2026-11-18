@@ -212,6 +212,28 @@ impl Client {
         Ok(path)
     }
 
+    /// The files the embedder reads of `model`, in `MODEL_FILES` order,
+    /// fetched as needed and then read from one snapshot: another process
+    /// can change the cache between one file's lookup and the next.
+    pub(super) fn get_model(&self, model: &str) -> Result<[PathBuf; 3], EmbedError> {
+        for name in config::MODEL_FILES {
+            self.get(model, name)?;
+        }
+        let repo = self.cache.join(repo_dir_name(model));
+        let snapshot = self
+            .models
+            .iter()
+            .find(|info| info.id == model)
+            .and_then(|info| complete_snapshot(&repo, info))
+            .ok_or_else(|| {
+                EmbedError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{model}: no snapshot holds every file the embedder reads"),
+                ))
+            })?;
+        Ok(config::MODEL_FILES.map(|name| snapshot.join(name)))
+    }
+
     /// Refuse a model the table does not hold, or whose entry pins no copy of
     /// a file the embedder reads, before any of its files is asked for.
     pub(super) fn require_published(&self, model: &str) -> Result<(), EmbedError> {

@@ -265,9 +265,7 @@ impl Embedder {
 
         // Cache lookup precedes client initialization, so an already downloaded
         // model opens without network access or a new trust-store read.
-        let config_path = client.get(model_id, "config.json")?;
-        let tokenizer_path = client.get(model_id, "tokenizer.json")?;
-        let weights_path = client.get(model_id, "model.safetensors")?;
+        let [config_path, tokenizer_path, weights_path] = client.get_model(model_id)?;
 
         let config_raw = std::fs::read(&config_path)?;
         let config: Config =
