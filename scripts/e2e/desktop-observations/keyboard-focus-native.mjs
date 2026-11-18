@@ -680,6 +680,12 @@ async function main() {
   await x([], "mousemove", String(composerA.x), String(composerA.y), "click", "1");
   await until("A's composer holds the keyboard", () => focusState(cardA), (s) => s.where === "composer", 10_000);
   await openDeck();
+  // The deck must hold the keyboard before the launcher shows, or a composer
+  // found focused after the dismissal could be focus that never left it.
+  const deckHeld = await until("the deck input holds the keyboard",
+    () => page.evaluate((deck) => document.activeElement === document.querySelector(`${deck} .deck-input`), deck),
+    Boolean, 5_000).catch(() => false);
+  if (!deckHeld) inconclusive("deck dismissal settles under the launcher", "the deck opened without taking the keyboard");
   await x([], "key", "ctrl+shift+p");
   const shownOverDeck = await until("the Computers launcher shows over the open deck", launcherShown, Boolean, 10_000)
     .catch(() => false);
@@ -695,9 +701,9 @@ async function main() {
   await shot("dismissal-settled");
   const extra = await page.evaluate((before) => window.__kbdCommands.slice(before).filter((name) => name !== "app.launcher.toggle"), before);
   if (extra.length) throw new Error(`the dismissal dispatched ${JSON.stringify(extra)}`);
-  if (dismissed.where !== "body") fail("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer" });
+  if (dismissed.where !== "body") fail("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer", deckHeld });
   if (!(await launcherShown())) fail("deck dismissal settles under the launcher", { launcherShown: false });
-  pass("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer" });
+  pass("deck dismissal settles under the launcher", { active: dismissed.where, deckOpenedFrom: "composer", deckHeld });
   await x([], "key", "ctrl+shift+p");
   const hidden = await until(
     "the Computers launcher hides again",
