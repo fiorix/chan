@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{Config, InvalidNodeBase};
 use crate::devserver_control_client::TunnelView;
 use crate::error::{Error, Result};
-use crate::http::{bearer_token, AppState, DESKTOP_ACCOUNT_SCOPE};
+use crate::http::{bearer_token, AppState, DESKTOP_ACCOUNT_SCOPE, MOBILE_ACCOUNT_SCOPE};
 use crate::profile_client::{IncomingShare, OwnedDevserverSummary};
 
 const MAX_ROSTER_OWNERS: usize = 64;
@@ -78,16 +78,26 @@ struct RosterResponse {
 /// `GET /desktop/v1/devservers` -- see the module doc for the wire
 /// contract and failure semantics.
 pub async fn roster(State(state): State<AppState>, headers: HeaderMap) -> Result<Response> {
+    roster_for_scope(state, headers, DESKTOP_ACCOUNT_SCOPE).await
+}
+
+/// `GET /mobile/v1/devservers` -- same wire contract and failure
+/// semantics as [`roster`], gated strictly on `mobile.account`.
+pub async fn mobile_roster(State(state): State<AppState>, headers: HeaderMap) -> Result<Response> {
+    roster_for_scope(state, headers, MOBILE_ACCOUNT_SCOPE).await
+}
+
+async fn roster_for_scope(
+    state: AppState,
+    headers: HeaderMap,
+    required_scope: &'static str,
+) -> Result<Response> {
     let token = bearer_token(&headers).ok_or(Error::Unauthorized)?;
     let validated = state.api_tokens.validate_no_audit(token).await?;
-    if !validated
-        .scopes
-        .iter()
-        .any(|scope| scope == DESKTOP_ACCOUNT_SCOPE)
-    {
+    if !validated.scopes.iter().any(|scope| scope == required_scope) {
         tracing::warn!(
             user = %validated.username,
-            "roster denied: missing desktop.account scope",
+            "roster denied: missing {required_scope} scope",
         );
         return Err(Error::Unauthorized);
     }

@@ -14,6 +14,7 @@ pub mod devserver_authority;
 pub mod devserver_control_client;
 pub mod error;
 pub mod http;
+pub mod mobile_authorize;
 pub mod pages;
 pub mod profile_client;
 pub mod providers;

@@ -1,11 +1,11 @@
 //! Personal access tokens.
 //!
-//! Issued by identity for tunnel and desktop clients.
+//! Issued by identity for tunnel, desktop, and mobile clients.
 //! Token shape: `chan_pat_<32 random b64url bytes>`. Database stores
 //! only `SHA-256(token)`, so a leak of the table doesn't hand out
 //! live secrets. The plaintext leaves identity only through the one-time
-//! SPA/admin creation response or desktop redemption response and is never
-//! persisted there.
+//! SPA/admin creation response or desktop/mobile redemption response and is
+//! never persisted there.
 //!
 //! Scope is intentionally flat: a token authenticates a user. Workspace
 //! ownership is enforced at the tenant host
@@ -14,12 +14,14 @@
 //!
 //! Every state change writes one row to `api_token_audit`. Actions:
 //! `created` (SPA mint), `created_via_desktop` (desktop-authorize
-//! mint), `created_via_admin` (chan-gateway-admin mint),
-//! `desktop.redeem` (one-time desktop code cashed in), `used`
-//! (validate succeeded), `revoked` (the owner's revoke from the SPA,
-//! or a desktop PAT whose WireGuard enrollment failed before delivery),
-//! `revoked_via_desktop` (a desktop giving back the PAT it presents),
-//! `revoked_via_admin` (operator revoke; written by profile).
+//! mint), `created_via_mobile` (mobile-authorize mint), `created_via_admin`
+//! (chan-gateway-admin mint), `desktop.redeem` (one-time desktop code cashed
+//! in), `mobile.redeem` (one-time mobile code cashed in), `used` (validate
+//! succeeded), `revoked` (the owner's revoke from the SPA, or a desktop PAT
+//! whose WireGuard enrollment failed before delivery), `revoked_via_desktop`
+//! (a desktop giving back the PAT it presents), `revoked_via_mobile` (a mobile
+//! client giving back the PAT it presents), `revoked_via_admin` (operator
+//! revoke; written by profile).
 
 use base64::Engine;
 use chan_tunnel_proto::gateway_assertion::devserver_id_from_token;
@@ -42,24 +44,31 @@ pub(crate) const TOKEN_PREFIX: &str = "chan_pat_";
 /// the set ever grows we can add a CHECK constraint.
 pub const ACTION_CREATED: &str = "created";
 pub const ACTION_CREATED_DESKTOP: &str = "created_via_desktop";
+pub const ACTION_CREATED_MOBILE: &str = "created_via_mobile";
 pub const ACTION_CREATED_ADMIN: &str = "created_via_admin";
 pub const ACTION_DESKTOP_REDEEM: &str = "desktop.redeem";
+pub const ACTION_MOBILE_REDEEM: &str = "mobile.redeem";
 pub const ACTION_USED: &str = "used";
 pub const ACTION_REVOKED: &str = "revoked";
 /// A desktop giving back the PAT it presents, kept apart from
 /// [`ACTION_REVOKED`] so the owner's history never shows it as their own
 /// revoke.
 pub const ACTION_REVOKED_DESKTOP: &str = "revoked_via_desktop";
+/// A mobile client giving back the PAT it presents, kept apart from
+/// [`ACTION_REVOKED`] and [`ACTION_REVOKED_DESKTOP`].
+pub const ACTION_REVOKED_MOBILE: &str = "revoked_via_mobile";
 
 /// Where a `create()` call came from. Each origin records a distinct
 /// audit action so operators (and the user themselves) can tell apart
 /// tokens minted by the SPA's "create token" button, by chan-desktop
-/// bouncing through `/desktop/authorize`, and by an operator running
+/// bouncing through `/desktop/authorize`, by the mobile app bouncing
+/// through `/mobile/authorize`, and by an operator running
 /// `chan-gateway-admin token create`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenOrigin {
     Spa,
     Desktop,
+    Mobile,
     Admin,
 }
 
@@ -68,6 +77,7 @@ impl TokenOrigin {
         match self {
             Self::Spa => ACTION_CREATED,
             Self::Desktop => ACTION_CREATED_DESKTOP,
+            Self::Mobile => ACTION_CREATED_MOBILE,
             Self::Admin => ACTION_CREATED_ADMIN,
         }
     }
@@ -333,7 +343,9 @@ impl ApiTokenService {
             }
             return Err(match new.origin {
                 TokenOrigin::Admin => Error::AdminDevserverAccessDisabled,
-                TokenOrigin::Spa | TokenOrigin::Desktop => Error::DevserverAccessDisabled,
+                TokenOrigin::Spa | TokenOrigin::Desktop | TokenOrigin::Mobile => {
+                    Error::DevserverAccessDisabled
+                }
             });
         };
 
@@ -412,9 +424,30 @@ impl ApiTokenService {
         token_id: Uuid,
         meta: &RequestMeta,
     ) -> Result<Option<GivenBack>> {
-        let revoked = self
-            .soft_revoke(user_id, token_id, ACTION_REVOKED_DESKTOP, meta)
-            .await?;
+        self.give_back_with_action(user_id, token_id, ACTION_REVOKED_DESKTOP, meta)
+            .await
+    }
+
+    /// The soft revoke of [`Self::give_back`] for a mobile client giving back
+    /// the token it presents, audited as [`ACTION_REVOKED_MOBILE`].
+    pub async fn give_back_mobile(
+        &self,
+        user_id: Uuid,
+        token_id: Uuid,
+        meta: &RequestMeta,
+    ) -> Result<Option<GivenBack>> {
+        self.give_back_with_action(user_id, token_id, ACTION_REVOKED_MOBILE, meta)
+            .await
+    }
+
+    pub(crate) async fn give_back_with_action(
+        &self,
+        user_id: Uuid,
+        token_id: Uuid,
+        action: &str,
+        meta: &RequestMeta,
+    ) -> Result<Option<GivenBack>> {
+        let revoked = self.soft_revoke(user_id, token_id, action, meta).await?;
         #[cfg(feature = "test-util")]
         if revoked.is_some() {
             let hold = self
@@ -807,5 +840,15 @@ mod tests {
         let debug = format!("{created:?}");
         assert!(!debug.contains("sentinel-plaintext-pat"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn token_origin_and_mobile_audit_actions_pin_wire_strings() {
+        assert_eq!(TokenOrigin::Spa.audit_action(), "created");
+        assert_eq!(TokenOrigin::Desktop.audit_action(), "created_via_desktop");
+        assert_eq!(TokenOrigin::Mobile.audit_action(), "created_via_mobile");
+        assert_eq!(TokenOrigin::Admin.audit_action(), "created_via_admin");
+        assert_eq!(ACTION_MOBILE_REDEEM, "mobile.redeem");
+        assert_eq!(ACTION_REVOKED_MOBILE, "revoked_via_mobile");
     }
 }

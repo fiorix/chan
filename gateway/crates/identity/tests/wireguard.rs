@@ -104,7 +104,7 @@ async fn discovery_advertises_wireguard_only_when_configured() {
     let (public, _) = apps(&profile, None, "").await;
     let (status, _, baseline) = request(public, "/.well-known/chan-gateway", None, None).await;
     assert_eq!(status, StatusCode::OK);
-    let expected = r#"{"kind":"chan-gateway","api_version":1,"identity_origin":"http://localhost:7000","desktop_authorize_url":"http://localhost:7000/desktop/authorize","desktop_entry_url":"http://localhost:7000/desktop/v1/devserver/entry","roster_url":"http://localhost:7000/desktop/v1/devservers","devserver_proxy_origin":"https://proxy.example.test","devserver_proxy_host_depth":2,"tunnel_url":"https://tunnel.example.test/v1/tunnel"}"#;
+    let expected = r#"{"kind":"chan-gateway","api_version":1,"identity_origin":"http://localhost:7000","desktop_authorize_url":"http://localhost:7000/desktop/authorize","desktop_entry_url":"http://localhost:7000/desktop/v1/devserver/entry","roster_url":"http://localhost:7000/desktop/v1/devservers","mobile_authorize_url":"http://localhost:7000/mobile/authorize","mobile_entry_url":"http://localhost:7000/mobile/v1/devserver/entry","mobile_roster_url":"http://localhost:7000/mobile/v1/devservers","devserver_proxy_origin":"https://proxy.example.test","devserver_proxy_host_depth":2,"tunnel_url":"https://tunnel.example.test/v1/tunnel"}"#;
     assert_eq!(baseline, expected.as_bytes());
     let (public, _) = apps(&profile, Some(enrollment()), "").await;
     let (status, _, body) = request(public, "/.well-known/chan-gateway", None, None).await;
