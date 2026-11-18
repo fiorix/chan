@@ -5,8 +5,9 @@
 // recall gives its text back, on each tab-focus pulse, and when a submit held
 // for its images' paths is sent. A modal dialog, a survey over the terminal,
 // the Computers launcher and an overlay over the panes own the keyboard
-// (`legacyKeyboardOwned`), and while one does none of those moves focus into the
-// composer; once it lets go, the next pulse lands in the composer again.
+// (the keyboard's owner, and a survey over this terminal), and while one does
+// none of those moves focus into the composer; once it lets go, the next
+// pulse lands in the composer again.
 // A TerminalTab is mounted over the stand-in xterm and socket, so the
 // phases arrive as the server's frames.
 

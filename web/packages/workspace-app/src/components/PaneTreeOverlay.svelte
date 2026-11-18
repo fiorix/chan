@@ -54,7 +54,6 @@
     type PaneTreeTab,
   } from "../state/paneTree.svelte";
   import {
-    activeTerminalTab,
     bumpTabFocusPulse,
     layout,
     panesHaveSides,
@@ -68,7 +67,7 @@
     tree,
     workspaceDisplayName,
   } from "../state/store.svelte";
-  import { keyboardOwnedAbovePanes, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
+  import { keyboardOwnedAbovePanes, owner } from "../state/keyboardOwner.svelte";
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";
@@ -169,7 +168,7 @@
     const fell = current === null || current === document.body || !current.isConnected;
     if (!fell) return;
     if (canTakeFocus(target)) target.focus({ preventScroll: true });
-    else if (!legacyKeyboardOwned(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
+    else if (owner() === null) bumpTabFocusPulse();
   }
 
   // Hybrid Nav, a dialog or a cover coming up closes the tree.

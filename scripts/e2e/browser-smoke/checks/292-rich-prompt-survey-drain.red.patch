@@ -1,10 +1,10 @@
 --- a/web/packages/workspace-app/src/components/RichPrompt.svelte
 +++ b/web/packages/workspace-app/src/components/RichPrompt.svelte
-@@ -453,7 +453,7 @@
+@@ -460,7 +460,7 @@
        setRichPromptCaret(tab, 0, 0);
        if (focused) {
          queueMicrotask(() => {
--          if (!legacyKeyboardOwned(tab.id)) activeEditor()?.focusAt(0);
+-          if (!keyboardHeld()) activeEditor()?.focusAt(0);
 +          activeEditor()?.focusAt(0);
          });
        }

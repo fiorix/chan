@@ -238,7 +238,8 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { handKeyboardToOwner, launcherShownOverWindow, legacyKeyboardOwned, owner } from "../state/keyboardOwner.svelte";
+  import { handKeyboardToOwner, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
+  import { surveyFor } from "../state/survey.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
@@ -259,13 +260,17 @@
     focused: boolean;
   } = $props();
 
-  // Modal dialogs, a survey over this terminal, the Computers launcher and
-  // overlays over the panes own the keyboard. Centralizing their guard keeps
-  // every refocus path from taking it, the mount and pane focus included;
-  // once those owners release it, the same calls legitimately restore the
-  // terminal.
+  // The keyboard's owner decides whether this terminal may take the
+  // keyboard, and a survey over this terminal holds its keys wherever its
+  // pane is. Centralizing the guard keeps every refocus path from taking it,
+  // the mount and pane focus included; once the owner releases it, the same
+  // calls legitimately restore the terminal.
+  function keyboardHeld(): boolean {
+    return surveyFor(tab.id) !== null || !mayFocus(host ?? null);
+  }
+
   function focusTerminal(): void {
-    if (legacyKeyboardOwned(tab.id)) return;
+    if (keyboardHeld()) return;
     term?.focus();
   }
 
@@ -2358,7 +2363,7 @@
       focusTerminal();
       return;
     }
-    if (legacyKeyboardOwned(tab.id)) return;
+    if (keyboardHeld()) return;
     host?.focus({ preventScroll: true });
   }
 

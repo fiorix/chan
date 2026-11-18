@@ -11,7 +11,7 @@
 
 import { setConfirmRestoreGate } from "./confirm.svelte";
 import { appInputBlocked, modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
-import { surveyFor, type SurveySlot } from "./survey.svelte";
+import { surveyFor } from "./survey.svelte";
 import { activeTerminalTab } from "./tabs.svelte";
 
 /// The attribute each owner surface puts on its root, valued by `ownerTag`.
@@ -188,19 +188,4 @@ export function handKeyboardToOwner(): boolean {
   const take = root ? takers.get(root) : undefined;
   take?.();
   return take !== undefined;
-}
-
-/// The per-terminal rule the focus movers read: true while a modal
-/// dialog, a survey over the terminal in `slot`, a window-wide survey, the
-/// Computers launcher or an overlay over the panes holds the keyboard. It
-/// counts a survey over that terminal in any pane, and no survey over
-/// another terminal. `except` names an overlay that does not count against
-/// its own return: the command deck's focus return reads the rule after it
-/// closed.
-export function legacyKeyboardOwned(slot: SurveySlot, except?: OverlayId): boolean {
-  if (modalDialogOpen()) return true;
-  if (surveyFor(slot) !== null) return true;
-  if (launcherShown) return true;
-  const top = topOverlay();
-  return top !== null && top !== except;
 }

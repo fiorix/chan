@@ -12,10 +12,10 @@
 // exit 0 holds, 2 the environment cannot run this driver, 3 inconclusive.
 // Exit 10 reports an observed fault (the wrapper's obs_judge turns it into
 // 1). Its red variant runs on a tree with `keyboard-focus-native.red.patch`
-// applied, which drops the Computers launcher from the keyboard rule alone:
+// applied, which drops the Computers launcher from the keyboard's owner:
 // the Copy scrollback row then focuses its terminal from under the
-// launcher. The deck's own launcher check alone is no red: the rule at the
-// end of that check covers it. On a tree with 294's red patch the press
+// launcher. The deck's own reclaim check alone is no red: a run's return
+// asks the owner. On a tree with 294's red patch the press
 // steps fail; with --keep-going the run records each fault and goes on, so
 // one red reading shows every step that fails on it.
 //
