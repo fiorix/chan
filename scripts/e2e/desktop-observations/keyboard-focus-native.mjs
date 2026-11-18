@@ -216,6 +216,43 @@ async function x(params, ...args) {
   return exec("xdotool", [...params, ...args], { timeout: 30_000 });
 }
 
+// Where X input lands on the page: the offset between a screen point and
+// the client point the page's mousemove reports for it, read at two points,
+// which must agree. The page's own window.screenX/Y does not place the
+// webview on WebKitGTK.
+let offset = null;
+
+async function calibrate() {
+  const geometry = Object.fromEntries((await xdotool("getwindowgeometry", "--shell", xid)).split("\n").map((line) => line.split("=")));
+  const [wx, wy, ww, wh] = ["X", "Y", "WIDTH", "HEIGHT"].map((key) => Number(geometry[key]));
+  await page.evaluate(() => {
+    window.__kbdMove = null;
+    addEventListener("mousemove", (event) => {
+      window.__kbdMove = { x: event.clientX, y: event.clientY, trusted: event.isTrusted };
+    }, true);
+  });
+  const seen = [];
+  for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.35]]) {
+    const sx = Math.round(wx + ww * fx);
+    const sy = Math.round(wy + wh * fy);
+    await page.evaluate(() => { window.__kbdMove = null; });
+    await x([], "mousemove", String(sx - 7), String(sy - 7));
+    await delay(120);
+    await xdotool("mousemove", String(sx), String(sy));
+    await until("the page sees the pointer move", () => page.evaluate(() => window.__kbdMove), (move) => move?.trusted, 3_000);
+    await delay(120);
+    const move = await page.evaluate(() => window.__kbdMove);
+    seen.push({ dx: sx - move.x, dy: sy - move.y });
+  }
+  if (seen.some((point) => point.dx !== seen[0].dx || point.dy !== seen[0].dy)) {
+    throw new Error(`X input cannot be placed on the page: the calibration's two points disagree: ${JSON.stringify(seen)}`);
+  }
+  offset = seen[0];
+  verdict.offset = offset;
+}
+
+const toScreen = (point) => ({ x: Math.round(point.x + offset.dx), y: Math.round(point.y + offset.dy) });
+
 async function screenPoint(selector, where = { x: 0.5, y: 0.5 }) {
   const rect = await page.evaluate((selector, where) => {
     const el = document.querySelector(selector);
@@ -226,11 +263,9 @@ async function screenPoint(selector, where = { x: 0.5, y: 0.5 }) {
     return {
       x: Math.round(box.left + box.width * where.x),
       y: Math.round(box.top + box.height * where.y),
-      screenX: window.screenX,
-      screenY: window.screenY,
     };
   }, selector, where);
-  return { x: rect.screenX + rect.x, y: rect.screenY + rect.y };
+  return toScreen(rect);
 }
 
 async function focusState(card) {
@@ -373,6 +408,7 @@ async function main() {
     page = await WebKitPage.open(values.inspector);
   }
   verdict.backend = values.backend ?? "default";
+  await calibrate();
 
   // One terminal, one composer, one real press.
   await cs("terminal", "new", "--window", windowId, "--tab-name", "KbdA").catch((error) => {
@@ -421,7 +457,8 @@ async function main() {
     return { id: empty.getAttribute("data-pane-id"), x: box.left + box.width / 2, y: box.top + 40 };
   });
   if (!emptyPane) inconclusive("the split left no empty pane", null);
-  await x([], "mousemove", String(emptyPane.x), String(emptyPane.y), "click", "1");
+  const emptyPoint = toScreen(emptyPane);
+  await x([], "mousemove", String(emptyPoint.x), String(emptyPoint.y), "click", "1");
   await until(
     "the empty pane activates",
     () => paneIds().then((panes) => panes.find((pane) => pane.id === emptyPane.id)?.focused ?? false),
