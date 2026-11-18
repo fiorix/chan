@@ -942,6 +942,67 @@ fn a_model_opens_from_one_snapshot_when_the_cache_changes_between_its_files() {
     );
 }
 
+/// Make `repo/refs` read-only for this user; false when the user can write
+/// it anyway (root), and the test has nothing to read.
+#[cfg(unix)]
+fn read_only_refs(repo: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let refs = repo.join("refs");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let probe = refs.join("probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        std::fs::remove_file(&probe).unwrap();
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn writable_refs(repo: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(repo.join("refs"), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_download_into_a_cache_whose_ref_cannot_be_written_returns_its_file() {
+    let cache = tempfile::tempdir().unwrap();
+    let repo = cache.path().join(repo_dir_name("fixture/model"));
+    if !read_only_refs(&repo) {
+        eprintln!("skipped: refs/ stays writable for this user");
+        return;
+    }
+    let server = Server::start(|_| range_response(BODY, 0));
+    let result = client(cache.path(), &server).get("fixture/model", "config.json");
+    writable_refs(&repo);
+    let path = result.expect("the ref is best effort");
+    assert_eq!(std::fs::read(path).unwrap(), BODY);
+    assert!(!repo.join("refs/main").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hit_in_a_cache_whose_ref_cannot_be_written_returns_its_file() {
+    let cache = tempfile::tempdir().unwrap();
+    let repo = cache.path().join(repo_dir_name("fixture/model"));
+    let pinned = snapshot(cache.path());
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::write(pinned.join("config.json"), BODY).unwrap();
+    if !read_only_refs(&repo) {
+        eprintln!("skipped: refs/ stays writable for this user");
+        return;
+    }
+    let server = Server::start(|_| response("503 Service Unavailable", "", b"no request expected"));
+    let result = client(cache.path(), &server).get("fixture/model", "config.json");
+    writable_refs(&repo);
+    assert_eq!(
+        result.expect("a read-only cache still reads"),
+        pinned.join("config.json")
+    );
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
 #[test]
 fn cache_reference_cannot_escape_the_snapshot_directory() {
     let cache = tempfile::tempdir().unwrap();

@@ -204,7 +204,7 @@ impl Client {
             self.download(&url, file, &path)?;
             remove_old_part(&repo, file);
         }
-        publish_ref(&repo, info.revision)?;
+        name_pinned_commit(&repo, info.revision);
         #[cfg(test)]
         if let Some(observer) = &self.publication_observer {
             observer(&path);
@@ -523,10 +523,10 @@ fn remove_old_part(repo: &Path, file: &ModelFile) {
     }
 }
 
-/// Point `refs/main` at the pinned commit when it names another, or nothing:
-/// a cache whose pinned files were all published keeps its ref even when a
-/// write of it failed or the ref was removed. Best effort, since a cache
-/// that cannot be written must still be read.
+/// Point `refs/main` at the pinned commit when it names another, or nothing.
+/// No reader needs the ref, since the pinned snapshot is read first, so this
+/// is best effort after a download as on a hit: a cache whose ref cannot be
+/// written still serves its files.
 fn name_pinned_commit(repo: &Path, revision: &str) {
     if std::fs::read_to_string(repo.join("refs/main")).is_ok_and(|named| named == revision) {
         return;
