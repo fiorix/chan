@@ -259,7 +259,7 @@ impl RedemptionStore {
     /// off-path caller cannot probe code state or the challenge. The
     /// entry is consumed on any matched code (a wrong verifier burns
     /// that code, matching the existing single-use remove).
-    fn take(&self, code: &str, verifier: &str) -> Option<RedeemPayload> {
+    pub(crate) fn take(&self, code: &str, verifier: &str) -> Option<RedeemPayload> {
         let now = Instant::now();
         let mut map = self.inner.lock().unwrap();
         map.retain(|_, v| v.expires_at > now);
@@ -285,7 +285,7 @@ fn generate_code() -> String {
 /// over the ASCII bytes of the verifier STRING (RFC 7636 s4.2), not
 /// any decoded form; both sides must agree on this. Base64url is
 /// no-pad, matching [`generate_code`] / [`generate_csrf`].
-fn challenge_for(verifier: &str) -> String {
+pub(crate) fn challenge_for(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
@@ -295,7 +295,7 @@ fn challenge_for(verifier: &str) -> String {
 /// length check alone rejects `plain`-method challenges (a 43-char cap
 /// on the verifier would be a coincidence) and the decode rejects
 /// non-alphabet characters.
-fn valid_code_challenge(challenge: &str) -> bool {
+pub(crate) fn valid_code_challenge(challenge: &str) -> bool {
     if challenge.len() != 43 {
         return false;
     }
@@ -520,9 +520,24 @@ pub async fn take_pending(session: &Session) -> Result<Option<AuthorizeParams>> 
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session remove desktop_authorize: {e}")))
 }
 
+/// Clear any pending desktop authorize params and CSRF nonce so a later
+/// mobile authorize in the same browser session cannot collide with a
+/// stale desktop stash.
+pub(crate) async fn clear_pending(session: &Session) -> Result<()> {
+    session
+        .remove_value(KEY_DESKTOP_AUTHORIZE)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session clear desktop_authorize: {e}")))?;
+    session
+        .remove_value(KEY_DESKTOP_CSRF)
+        .await
+        .map_err(|e| Error::Anyhow(anyhow::anyhow!("session clear desktop_csrf: {e}")))?;
+    Ok(())
+}
+
 /// Generate a 32-byte CSRF nonce, base64url-encoded. Stored in the
 /// session and surfaced into the consent form as a hidden field.
-fn generate_csrf() -> String {
+pub(crate) fn generate_csrf() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -531,7 +546,7 @@ fn generate_csrf() -> String {
 /// Which handoff variant `confirm` renders: the copy differs, the
 /// mechanics (meta refresh + manual link to the loopback callback
 /// target) do not.
-enum Handoff {
+pub(crate) enum Handoff {
     /// PAT minted; the target carries `?code=...`.
     Success,
     /// The user clicked Cancel; the target carries `?error=user_cancelled`.
@@ -728,6 +743,7 @@ pub async fn authorize(
 ) -> Result<Redirect> {
     let params = validate(q, state.cfg.wireguard.is_some())?;
     let uid = current_user_id_optional(&state, &session).await?;
+    crate::mobile_authorize::clear_pending(&session).await?;
     session
         .insert(KEY_DESKTOP_AUTHORIZE, &params)
         .await
@@ -964,7 +980,7 @@ fn render_consent_html(
 
 /// Best-effort coarse phrasing. "30 days", "2 hours" -- never tries
 /// to mix units. Falls back to seconds for sub-minute values.
-fn humanize_expires(secs: i64) -> String {
+pub(crate) fn humanize_expires(secs: i64) -> String {
     const MIN: i64 = 60;
     const HOUR: i64 = 60 * MIN;
     const DAY: i64 = 24 * HOUR;

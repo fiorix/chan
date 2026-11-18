@@ -1,6 +1,6 @@
 # identity-service
 
-Public-facing OAuth2 sign-in service for `gw.{domain}`. Runs the GitHub, Google and GitLab auth-code flow with PKCE, holds the host-only `__Host-id_session` cookie, serves the account SPA (profile, personal access tokens, devserver sharing), answers the desktop API, and mints the short-lived entry credential that hands a user off to a devserver's proxy origin.
+Public-facing OAuth2 sign-in service for `gw.{domain}`. Runs the GitHub, Google and GitLab auth-code flow with PKCE, holds the host-only `__Host-id_session` cookie, serves the account SPA (profile, personal access tokens, devserver sharing), answers the desktop and mobile APIs, and mints the short-lived entry credential that hands a user off to a devserver's proxy origin.
 
 This file is the operator and consumer reference: how to build and run it, its configuration and its HTTP surface. Boundaries, flows, invariants and rationale live in [design.md](design.md).
 
@@ -207,6 +207,27 @@ Desktop API (Bearer PAT):
 | DELETE | `/desktop/v1/token`           | the bearer PAT revokes itself    |
 
 The entry body optionally carries `{path, owner, owner_user_id, devserver_id}` to target an explicit devserver; the response is `{owner_user_id, username, devserver_id, proxy_origin, entry_exchange_url, entry_credential, expires_at}` with `Cache-Control: no-store`. A not-found adds a stable `reason` (`no_devserver`, `devserver_offline`, `access_denied`) so chan-desktop can narrate the failure. The roster answers `{user_id, username, devservers: [{owner_user_id, owner, devserver_id, label, online, proxy_origin|null}]}`. The token route reads no id and no body: the bearer, which must carry `desktop.connect` or `desktop.account`, is the only token it soft-revokes (`revoked_at` set, row and audit kept, a `revoked_via_desktop` audit row), answered 204; a token that was used also gets the owner's revoke cut (profile's durable reservation and the first cut of the owner's tunnels and sessions), spawned by the task that commits the give-back, before that task returns the answer. The request awaits that task without owning its cancellation, so a client leaving between the commit and the spawn cannot lose the cut; the answer still does not wait for the cut to finish. A revoked, expired, unknown or non-desktop bearer, and a session cookie without one, get the same 401 `{"error":"unauthorized"}` as the other desktop routes.
+
+Mobile authorize (PAT mint for the Chan mobile app, `chan://auth/callback` only):
+
+| Method | Path                        | Purpose                           |
+|--------|-----------------------------|-----------------------------------|
+| GET    | `/mobile/authorize`         | validate query, stash, bounce     |
+| GET    | `/mobile/authorize/consent` | mobile consent page               |
+| POST   | `/mobile/authorize/confirm` | allow or deny, then app callback  |
+| POST   | `/mobile/authorize/redeem`  | one-time mobile code to PAT       |
+
+`/mobile/authorize` accepts only `redirect_uri=chan://auth/callback`, PKCE S256, sole scope `mobile.account`, ASCII-graphic `state` (1..=256 bytes), trimmed `label` (1..=64 bytes), and positive `expires_in` clamped to `[60, 7_776_000]`, and rejects `wireguard_public_key` with 400. Redemption consumes strictly from the mobile store, writes `mobile.redeem`, and returns `{id, secret, label, expires_at}` with no `wireguard` field.
+
+Mobile API (Bearer PAT with `mobile.account` only):
+
+| Method | Path                         | Purpose                           |
+|--------|------------------------------|-----------------------------------|
+| POST   | `/mobile/v1/devserver/entry` | mint a `mobile` entry credential  |
+| GET    | `/mobile/v1/devservers`      | account roster (ETag, 304)        |
+| DELETE | `/mobile/v1/token`           | the bearer PAT revokes itself     |
+
+Discovery (`/.well-known/chan-gateway`, `api_version: 1`) advertises `mobile_authorize_url`, `mobile_entry_url` and `mobile_roster_url` alongside the desktop URLs. Each `/mobile/v1/*` route requires `mobile.account` and rejects `desktop.*` and `tunnel` tokens with 401; `/mobile/v1/devserver/entry` signs `ClientType::Mobile`, and `/mobile/v1/token` writes `revoked_via_mobile`.
 
 Internal listener (route-scoped bearers):
 
