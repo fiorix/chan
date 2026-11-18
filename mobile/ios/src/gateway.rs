@@ -2,11 +2,11 @@
 //!
 //! A configured [`Gateway`] is connected at the ACCOUNT level: the app
 //! discovers the gateway once, signs in once per gateway account
-//! (`desktop.account` scope, PAT in the OS keyring), and polls the
-//! gateway's devserver roster; the rostered devservers surface as
-//! synthesized rows in the launcher list and vanish when the gateway
-//! disconnects. This module owns that lifecycle: the runtime map behind
-//! [`GatewayManager`], the connect flow, the roster poll, and the
+//! (`mobile.account` scope, PAT in the OS keyring), and polls the
+//! gateway's `/mobile/v1/devservers` roster; the rostered devservers
+//! surface as synthesized rows in the launcher list and vanish when the
+//! gateway disconnects. This module owns that lifecycle: the runtime map
+//! behind [`GatewayManager`], the connect flow, the roster poll, and the
 //! cascade teardown.
 //!
 //! Failure semantics are load-bearing and test-pinned: an upstream
@@ -1030,12 +1030,12 @@ async fn connect_with_pat<R: tauri::Runtime>(
         return Ok(());
     }
     signal_rows_changed(app, state);
-    let roster_url = discovery
-        .roster_url
-        .as_deref()
-        .expect("discovery publication checked roster URL");
     let Some(fetch) = attempt
-        .wait(fetch_roster(roster_url, &pat.secret, None))
+        .wait(fetch_roster(
+            &discovery.mobile_roster_url,
+            &pat.secret,
+            None,
+        ))
         .await
     else {
         return Ok(());
@@ -1084,17 +1084,18 @@ fn publish_discovery<R: tauri::Runtime>(
         return Ok(None);
     }
     let (title, msg) = match result {
-        Ok(discovery) if discovery.roster_url.is_some() => {
+        Ok(discovery) => {
             return Ok(Some(discovery));
         }
-        Ok(_) => (
-            "Gateway too old",
-            "this gateway is too old for account connections - upgrade the gateway".into(),
-        ),
-        Err(error) => (
-            "Gateway unreachable",
-            format!("gateway discovery failed: {error}"),
-        ),
+        Err(error) => {
+            let text = error.to_string();
+            let title = if text.contains("does not support mobile sign-in") {
+                "Gateway unsupported"
+            } else {
+                "Gateway unreachable"
+            };
+            (title, format!("gateway discovery failed: {text}"))
+        }
     };
     live.attempts.remove(gateway_id);
     if let Some(rt) = live.runtimes.get_mut(gateway_id) {
@@ -1268,7 +1269,7 @@ async fn finish_first_fetch<R: tauri::Runtime>(
         state,
         gateway_id,
         attempt,
-        discovery.roster_url.clone().expect("validated roster URL"),
+        discovery.mobile_roster_url.clone(),
     ) {
         return Ok(());
     }
@@ -1585,11 +1586,10 @@ pub(super) fn resync_roster_polls<R: tauri::Runtime>(
             .iter()
             .filter_map(|(id, rt)| {
                 let cancel = rt.poll_cancel.clone()?;
-                let roster_url = rt.discovery.roster_url.clone()?;
                 Some((
                     id.clone(),
                     rt.discovery.identity_origin.clone(),
-                    roster_url,
+                    rt.discovery.mobile_roster_url.clone(),
                     cancel,
                 ))
             })
@@ -1964,8 +1964,9 @@ pub(crate) mod tests {
                 .attempt;
             let mut rt = runtime_with(Vec::new());
             rt.discovery.identity_origin = origin.into();
-            rt.discovery.desktop_authorize_url = format!("{origin}/desktop/authorize");
-            rt.discovery.roster_url = Some(format!("{origin}/desktop/v1/devservers"));
+            rt.discovery.mobile_authorize_url = format!("{origin}/mobile/authorize");
+            rt.discovery.mobile_entry_url = format!("{origin}/mobile/v1/devserver/entry");
+            rt.discovery.mobile_roster_url = format!("{origin}/mobile/v1/devservers");
             rt.pending_signin = true;
             let discovery = rt.discovery.clone();
             state
@@ -2439,11 +2440,11 @@ pub(crate) mod tests {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: "https://gw.chan.app".into(),
-            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            mobile_authorize_url: "https://gw.chan.app/mobile/authorize".into(),
+            mobile_entry_url: "https://gw.chan.app/mobile/v1/devserver/entry".into(),
+            mobile_roster_url: "https://gw.chan.app/mobile/v1/devservers".into(),
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
             wireguard: None,
         });
         rt.roster = rows;
@@ -2682,7 +2683,7 @@ pub(crate) mod tests {
         let (parts, body) = response.into_parts();
         let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         let app = axum::Router::new().route(
-            "/desktop/v1/devservers",
+            "/mobile/v1/devservers",
             get(move |headers: axum::http::HeaderMap| {
                 let parts = parts.clone();
                 let bytes = bytes.clone();
@@ -2712,7 +2713,7 @@ pub(crate) mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}/desktop/v1/devservers"), handle)
+        (format!("http://{addr}/mobile/v1/devservers"), handle)
     }
 
     fn resp(status: u16, etag: Option<&str>, body: &str) -> axum::response::Response {
@@ -2726,7 +2727,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_failed_roster_request_names_its_cause() {
         let sink = chan_tls::testing::Sink::start();
-        let url = format!("https://{}/desktop/v1/roster", sink.addr);
+        let url = format!("https://{}/mobile/v1/devservers", sink.addr);
         match fetch_roster(&url, "pat-secret", None).await {
             RosterFetch::Upstream(error) => {
                 assert!(
@@ -2796,7 +2797,7 @@ pub(crate) mod tests {
         server.abort();
     }
 
-    /// A gateway in one stub: discovery (loopback http, roster_url
+    /// A gateway in one stub: discovery (loopback http, mobile_roster_url
     /// advertised, proxy origin inside the static grant scope so the
     /// capability mint no-ops under the mock runtime) plus a one-row
     /// roster.
@@ -2832,11 +2833,11 @@ pub(crate) mod tests {
                             "kind": "chan-gateway",
                             "api_version": 1,
                             "identity_origin": o,
-                            "desktop_authorize_url": format!("{o}/desktop/authorize"),
-                            "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                            "mobile_authorize_url": format!("{o}/mobile/authorize"),
+                            "mobile_entry_url": format!("{o}/mobile/v1/devserver/entry"),
+                            "mobile_roster_url": format!("{o}/mobile/v1/devservers"),
                             "devserver_proxy_origin": "https://proxy.chan.app",
                             "devserver_proxy_host_depth": 2,
-                            "roster_url": format!("{o}/desktop/v1/devservers"),
                         });
                         if let Some(entry) = wireguard {
                             doc["wireguard"] = entry;
@@ -2846,7 +2847,7 @@ pub(crate) mod tests {
                 }),
             )
             .route(
-                "/desktop/v1/devservers",
+                "/mobile/v1/devservers",
                 get(move || {
                     let hold = hold.clone();
                     async move {
@@ -2940,7 +2941,7 @@ pub(crate) mod tests {
                 .attempt;
             let mut rt = runtime_with(Vec::new());
             rt.discovery.identity_origin = origin;
-            rt.discovery.roster_url = Some(UNUSED_ROSTER_URL.into());
+            rt.discovery.mobile_roster_url = UNUSED_ROSTER_URL.into();
             rt.pending_signin = true;
             let discovery = rt.discovery.clone();
             state
@@ -3007,14 +3008,12 @@ pub(crate) mod tests {
         rx
     }
 
-    fn assert_stale_discovery_refused(missing_roster: bool) {
+    fn assert_stale_discovery_refused(succeeded: bool) {
         let f = StaleAttempt::new();
         let app = tauri::test::mock_app();
         let notices = notices(&app);
-        let mut discovery = f.discovery.clone();
-        discovery.roster_url = None;
-        let outcome = if missing_roster {
-            Ok(discovery)
+        let outcome = if succeeded {
+            Ok(f.discovery.clone())
         } else {
             Err(GatewayDiscoveryError::Other("old failure".into()))
         };
@@ -3035,6 +3034,75 @@ pub(crate) mod tests {
             notices.try_recv().is_err(),
             "stale discovery raised a notice"
         );
+    }
+
+    #[test]
+    fn stale_discovery_outcome_leaves_successor_untouched() {
+        assert_stale_discovery_refused(true);
+        assert_stale_discovery_refused(false);
+    }
+
+    #[tokio::test]
+    async fn connect_gateway_rejects_pre_mobile_discovery_payload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let disc_origin = origin.clone();
+        let router = axum::Router::new().route(
+            "/.well-known/chan-gateway",
+            axum::routing::get(move || {
+                let o = disc_origin.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "kind": "chan-gateway",
+                        "api_version": 1,
+                        "identity_origin": o,
+                        "desktop_authorize_url": format!("{o}/desktop/authorize"),
+                        "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                        "roster_url": format!("{o}/desktop/v1/devservers"),
+                        "devserver_proxy_origin": "https://proxy.chan.app",
+                        "devserver_proxy_host_depth": 2,
+                        "tunnel_url": "https://proxy.chan.app/v1/tunnel",
+                    }))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        let err = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        )
+        .await
+        .expect_err("pre-mobile gateway discovery must fail");
+        assert!(
+            err.contains("this gateway does not support mobile sign-in"),
+            "{err}"
+        );
+        let view = state
+            .gateway_manager
+            .view("gw-keychain")
+            .expect("discovery error recorded");
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert!(
+            view.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("this gateway does not support mobile sign-in")),
+            "view={view:?}"
+        );
+        let payload = notices.try_recv().expect("unsupported notice emitted");
+        let notice: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(notice["kind"], "error");
+        assert!(
+            notice["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("this gateway does not support mobile sign-in")),
+            "{notice}"
+        );
+        server.abort();
     }
 
     fn age_file(path: &std::path::Path) -> (Vec<u8>, std::time::SystemTime) {
@@ -3108,7 +3176,7 @@ pub(crate) mod tests {
 
     /// No gateway listens here: a tick that got past the PAT load would
     /// record a refused connection instead of the load's own error.
-    const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/desktop/v1/devservers";
+    const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/mobile/v1/devservers";
 
     /// A roster origin answering `status` to one request and reporting the
     /// hit. The tick under test runs detached for resync, so the hit crosses
@@ -3117,7 +3185,7 @@ pub(crate) mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
-            "http://{}/desktop/v1/devservers",
+            "http://{}/mobile/v1/devservers",
             listener.local_addr().unwrap()
         );
         let (hit_tx, hit_rx) = std::sync::mpsc::channel();
@@ -3158,7 +3226,7 @@ pub(crate) mod tests {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         probe.set_nonblocking(true).unwrap();
         let roster_url = format!(
-            "http://{}/desktop/v1/devservers",
+            "http://{}/mobile/v1/devservers",
             probe.local_addr().unwrap()
         );
         let (_dir, state) = pat_load_test_state("https://id.example");
@@ -3205,12 +3273,12 @@ pub(crate) mod tests {
             let mut live = state.gateway_manager.state.lock().unwrap();
             let mut polled = runtime_with(Vec::new());
             polled.discovery.identity_origin = origin.clone();
-            polled.discovery.roster_url = Some(polled_url);
+            polled.discovery.mobile_roster_url = polled_url;
             polled.poll_cancel = Some(CancellationToken::new());
             live.runtimes.insert("gw-polled".into(), polled);
             let mut idle = runtime_with(Vec::new());
             idle.discovery.identity_origin = origin.clone();
-            idle.discovery.roster_url = Some(idle_url);
+            idle.discovery.mobile_roster_url = idle_url;
             live.runtimes.insert("gw-idle".into(), idle);
         }
         let app = tauri::test::mock_app();
@@ -3609,11 +3677,11 @@ pub(crate) mod tests {
                 kind: "chan-gateway".into(),
                 api_version: 1,
                 identity_origin: origin.clone(),
-                desktop_authorize_url: format!("{origin}/desktop/authorize"),
-                desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
+                mobile_authorize_url: format!("{origin}/mobile/authorize"),
+                mobile_entry_url: format!("{origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{origin}/mobile/v1/devservers"),
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
-                roster_url: Some(format!("{origin}/desktop/v1/devservers")),
                 wireguard: None,
             });
             rt.pending_signin = true;

@@ -3,10 +3,10 @@
 //! navigation URL, over the shared TLS trust decision.
 //!
 //! A rostered devserver is reached through its gateway's proxy origin.
-//! The desktop assembles each tenant's navigation from the validated
-//! entry exchange: the entry credential is exchanged by body, never
-//! stamped into a URL, and the resulting opaque session is installed
-//! into the WebView cookie store before navigation.
+//! The app assembles each tenant's navigation from the validated
+//! `/mobile/v1/devserver/entry` exchange: the entry credential is
+//! exchanged by body, never stamped into a URL, and the resulting opaque
+//! session is installed into the WebView cookie store before navigation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -83,7 +83,7 @@ impl std::fmt::Debug for DevserverConn {
 #[derive(Clone)]
 pub struct GatewayConn {
     pub identity_origin: String,
-    pub desktop_entry_url: String,
+    pub mobile_entry_url: String,
     /// Discovery-advertised proxy namespace apex. Entry responses must name one
     /// exact child label beneath this origin with the same scheme/effective port.
     proxy_apex_origin: String,
@@ -111,7 +111,7 @@ impl std::fmt::Debug for GatewayConn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GatewayConn")
             .field("identity_origin", &self.identity_origin)
-            .field("desktop_entry_url", &self.desktop_entry_url)
+            .field("mobile_entry_url", &self.mobile_entry_url)
             .field("proxy_apex_origin", &self.proxy_apex_origin)
             .field("proxy_origin", &self.proxy_origin)
             .field("pat", &"[REDACTED]")
@@ -125,13 +125,13 @@ impl GatewayConn {
     #[cfg(test)]
     pub fn new(
         identity_origin: String,
-        desktop_entry_url: String,
+        mobile_entry_url: String,
         proxy_origin: String,
         pat: String,
     ) -> Self {
         Self {
             identity_origin,
-            desktop_entry_url,
+            mobile_entry_url,
             proxy_apex_origin: proxy_origin.clone(),
             proxy_origin,
             pat,
@@ -583,27 +583,43 @@ pub fn normalize_devserver_url(url: &str) -> Result<String, String> {
     }
 }
 
+/// Raw `GET /.well-known/chan-gateway` wire payload before validation.
+///
+/// The mobile endpoints deserialize as optional so a pre-mobile gateway
+/// (advertising only the desktop fields) decodes cleanly and fails
+/// [`validate_gateway_discovery`] with a dedicated mobile-unsupported message
+/// rather than a generic JSON missing-field error. Desktop-only fields such as
+/// `desktop_authorize_url`, `desktop_entry_url`, `roster_url`, and
+/// `tunnel_url` are ignored when present.
 #[derive(Debug, Clone, Deserialize)]
+struct RawGatewayDiscovery {
+    kind: String,
+    api_version: u32,
+    identity_origin: String,
+    #[serde(default)]
+    mobile_authorize_url: Option<String>,
+    #[serde(default)]
+    mobile_entry_url: Option<String>,
+    #[serde(default)]
+    mobile_roster_url: Option<String>,
+    devserver_proxy_origin: String,
+    devserver_proxy_host_depth: u8,
+    #[serde(default)]
+    wireguard: Option<WireguardDiscovery>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GatewayDiscovery {
     pub kind: String,
     pub api_version: u32,
     pub identity_origin: String,
-    pub desktop_authorize_url: String,
-    pub desktop_entry_url: String,
+    pub mobile_authorize_url: String,
+    pub mobile_entry_url: String,
+    pub mobile_roster_url: String,
     pub devserver_proxy_origin: String,
     pub devserver_proxy_host_depth: u8,
-    /// Account-mode devserver roster endpoint. Presence means the gateway
-    /// supports account-level desktop connections; a gateway without it is
-    /// too old for account mode and the desktop says so instead of
-    /// connecting. `#[serde(default)]`: additive on the wire, older
-    /// gateways simply omit it.
-    #[serde(default)]
-    pub roster_url: Option<String>,
-    /// The gateway's WireGuard ingress. Presence means the gateway enrolls
-    /// a WireGuard key at sign-in; absence means it does not, and the
-    /// desktop then offers no key generation and sends no key.
-    /// `#[serde(default)]`: an older gateway omits it.
-    #[serde(default)]
+    /// The gateway's WireGuard ingress, when advertised. Optional on the wire;
+    /// validated when present.
     pub wireguard: Option<WireguardDiscovery>,
 }
 
@@ -695,45 +711,61 @@ fn require_https_unless_loopback(raw: &str) -> Result<(), String> {
 
 fn validate_gateway_discovery(
     configured_url: &str,
-    d: GatewayDiscovery,
+    raw: RawGatewayDiscovery,
 ) -> Result<GatewayDiscovery, String> {
+    let d = GatewayDiscovery {
+        kind: raw.kind,
+        api_version: raw.api_version,
+        identity_origin: raw.identity_origin,
+        mobile_authorize_url: raw.mobile_authorize_url.unwrap_or_default(),
+        mobile_entry_url: raw.mobile_entry_url.unwrap_or_default(),
+        mobile_roster_url: raw.mobile_roster_url.unwrap_or_default(),
+        devserver_proxy_origin: raw.devserver_proxy_origin,
+        devserver_proxy_host_depth: raw.devserver_proxy_host_depth,
+        wireguard: raw.wireguard,
+    };
     if d.kind != "chan-gateway" || d.api_version != 1 {
         return Err("server is not a supported chan-gateway".to_string());
     }
     if d.devserver_proxy_host_depth != 2 {
         return Err("chan-gateway discovery has an unsupported proxy host depth".to_string());
     }
+    if [
+        d.mobile_authorize_url.as_str(),
+        d.mobile_entry_url.as_str(),
+        d.mobile_roster_url.as_str(),
+    ]
+    .iter()
+    .any(|url| url.trim().is_empty())
+    {
+        return Err("this gateway does not support mobile sign-in".to_string());
+    }
 
     let configured_origin = origin_of(configured_url)?;
     let identity_origin = origin_of(&d.identity_origin)?;
-    let authorize_origin = origin_of(&d.desktop_authorize_url)?;
-    let entry_origin = origin_of(&d.desktop_entry_url)?;
+    let authorize_origin = origin_of(&d.mobile_authorize_url)?;
+    let entry_origin = origin_of(&d.mobile_entry_url)?;
+    let roster_origin = origin_of(&d.mobile_roster_url)?;
     if identity_origin != configured_origin
         || authorize_origin != configured_origin
         || entry_origin != configured_origin
+        || roster_origin != configured_origin
     {
         return Err("chan-gateway discovery is cross-origin".to_string());
-    }
-    // The roster URL is identity-side like the entry URL: same-origin, or
-    // the discovery is lying about where the account roster lives.
-    if let Some(roster_url) = &d.roster_url {
-        if origin_of(roster_url)? != configured_origin {
-            return Err("chan-gateway discovery is cross-origin".to_string());
-        }
-        require_https_unless_loopback(roster_url)?;
     }
     if let Some(wireguard) = &d.wireguard {
         wireguard.validate()?;
     }
 
-    for raw in [
+    for url in [
         configured_url,
         &d.identity_origin,
-        &d.desktop_authorize_url,
-        &d.desktop_entry_url,
+        &d.mobile_authorize_url,
+        &d.mobile_entry_url,
+        &d.mobile_roster_url,
         &d.devserver_proxy_origin,
     ] {
-        require_https_unless_loopback(raw)?;
+        require_https_unless_loopback(url)?;
     }
 
     Ok(d)
@@ -785,7 +817,7 @@ pub async fn discover_gateway(url: &str) -> Result<GatewayDiscovery, GatewayDisc
         )));
     }
     let d = resp
-        .json::<GatewayDiscovery>()
+        .json::<RawGatewayDiscovery>()
         .await
         .map_err(|e| GatewayDiscoveryError::Other(format!("decoding gateway discovery: {e}")))?;
     validate_gateway_discovery(&normalized, d).map_err(Into::into)
@@ -1074,14 +1106,14 @@ fn classify_entry_error(status: reqwest::StatusCode, body: &[u8]) -> GatewayEntr
 }
 
 async fn request_gateway_entry(
-    desktop_entry_url: &str,
+    mobile_entry_url: &str,
     pat: &str,
     entry_target: Option<&GatewayEntryTarget>,
     path: &str,
 ) -> Result<GatewayEntryResponse, GatewayEntryError> {
     let resp = http_client()
         .map_err(GatewayEntryError::Other)?
-        .post(desktop_entry_url)
+        .post(mobile_entry_url)
         .bearer_auth(pat)
         .json(&GatewayEntryRequest {
             path,
@@ -1107,7 +1139,7 @@ async fn gateway_entry(
     path: &str,
 ) -> Result<ValidatedGatewayEntry, GatewayEntryError> {
     let response = request_gateway_entry(
-        &gw.desktop_entry_url,
+        &gw.mobile_entry_url,
         &gw.pat,
         gw.entry_target.as_ref(),
         path,
@@ -1129,7 +1161,7 @@ pub async fn gateway_conn(
     entry_target: Option<GatewayEntryTarget>,
 ) -> Result<GatewayConn, GatewayEntryError> {
     let response = request_gateway_entry(
-        &discovery.desktop_entry_url,
+        &discovery.mobile_entry_url,
         &pat,
         entry_target.as_ref(),
         "/",
@@ -1145,7 +1177,7 @@ pub async fn gateway_conn(
     .map_err(GatewayEntryError::Other)?;
     let gw = GatewayConn {
         identity_origin: discovery.identity_origin.clone(),
-        desktop_entry_url: discovery.desktop_entry_url.clone(),
+        mobile_entry_url: discovery.mobile_entry_url.clone(),
         proxy_apex_origin: origin_of(&discovery.devserver_proxy_origin)
             .map_err(GatewayEntryError::Other)?,
         proxy_origin: entry.proxy_origin.clone(),
@@ -2340,16 +2372,16 @@ pub(crate) mod log_capture {
 mod tests {
     use super::*;
 
-    fn valid_gateway_discovery() -> GatewayDiscovery {
-        GatewayDiscovery {
+    fn valid_gateway_discovery() -> RawGatewayDiscovery {
+        RawGatewayDiscovery {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: "https://gw.chan.app".into(),
-            desktop_authorize_url: "https://gw.chan.app/desktop/authorize".into(),
-            desktop_entry_url: "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            mobile_authorize_url: Some("https://gw.chan.app/mobile/authorize".into()),
+            mobile_entry_url: Some("https://gw.chan.app/mobile/v1/devserver/entry".into()),
+            mobile_roster_url: Some("https://gw.chan.app/mobile/v1/devservers".into()),
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
             wireguard: None,
         }
     }
@@ -2359,6 +2391,18 @@ mod tests {
         let d = validate_gateway_discovery("https://gw.chan.app", valid_gateway_discovery())
             .expect("valid gateway discovery");
         assert_eq!(d.identity_origin, "https://gw.chan.app");
+        assert_eq!(
+            d.mobile_authorize_url,
+            "https://gw.chan.app/mobile/authorize"
+        );
+        assert_eq!(
+            d.mobile_entry_url,
+            "https://gw.chan.app/mobile/v1/devserver/entry"
+        );
+        assert_eq!(
+            d.mobile_roster_url,
+            "https://gw.chan.app/mobile/v1/devservers"
+        );
     }
 
     #[test]
@@ -2372,7 +2416,7 @@ mod tests {
     #[test]
     fn gateway_discovery_rejects_cross_origin_entry_url() {
         let mut d = valid_gateway_discovery();
-        d.desktop_entry_url = "https://evil.example/desktop/v1/devserver/entry".into();
+        d.mobile_entry_url = Some("https://evil.example/mobile/v1/devserver/entry".into());
         let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(err.contains("cross-origin"), "{err}");
     }
@@ -2381,25 +2425,25 @@ mod tests {
     fn gateway_discovery_rejects_http_for_non_loopback() {
         let mut d = valid_gateway_discovery();
         d.identity_origin = "http://gw.chan.app".into();
-        d.desktop_authorize_url = "http://gw.chan.app/desktop/authorize".into();
-        d.desktop_entry_url = "http://gw.chan.app/desktop/v1/devserver/entry".into();
+        d.mobile_authorize_url = Some("http://gw.chan.app/mobile/authorize".into());
+        d.mobile_entry_url = Some("http://gw.chan.app/mobile/v1/devserver/entry".into());
+        d.mobile_roster_url = Some("http://gw.chan.app/mobile/v1/devservers".into());
         d.devserver_proxy_origin = "http://proxy.chan.app".into();
-        d.roster_url = Some("http://gw.chan.app/desktop/v1/devservers".into());
         let err = validate_gateway_discovery("http://gw.chan.app", d).unwrap_err();
         assert!(err.contains("must use https"), "{err}");
     }
 
     #[test]
     fn gateway_discovery_allows_http_loopback_dev() {
-        let d = GatewayDiscovery {
+        let d = RawGatewayDiscovery {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: "http://localhost:7000".into(),
-            desktop_authorize_url: "http://localhost:7000/desktop/authorize".into(),
-            desktop_entry_url: "http://localhost:7000/desktop/v1/devserver/entry".into(),
+            mobile_authorize_url: Some("http://localhost:7000/mobile/authorize".into()),
+            mobile_entry_url: Some("http://localhost:7000/mobile/v1/devserver/entry".into()),
+            mobile_roster_url: Some("http://localhost:7000/mobile/v1/devservers".into()),
             devserver_proxy_origin: "http://127.0.0.1:7002".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: None,
             wireguard: None,
         };
         validate_gateway_discovery("http://localhost:7000", d)
@@ -2461,7 +2505,7 @@ mod tests {
         };
         let gw = GatewayConn::new(
             "https://gw.chan.app".into(),
-            "https://gw.chan.app/desktop/v1/devserver/entry".into(),
+            "https://gw.chan.app/mobile/v1/devserver/entry".into(),
             "https://alice--aaaaaaaaaaaa.p1.proxy.chan.app".into(),
             "sentinel-gateway-pat".into(),
         );
@@ -2659,7 +2703,7 @@ mod tests {
         let response_proxy = proxy_origin.clone();
         let malicious_entry = format!("{sink_origin}/stolen");
         let entry = axum::Router::new().route(
-            "/desktop/v1/devserver/entry",
+            "/mobile/v1/devserver/entry",
             axum::routing::post(move || {
                 let proxy_origin = response_proxy.clone();
                 let entry_url = malicious_entry.clone();
@@ -2683,11 +2727,11 @@ mod tests {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: identity_origin.clone(),
-            desktop_authorize_url: format!("{identity_origin}/desktop/authorize"),
-            desktop_entry_url: format!("{identity_origin}/desktop/v1/devserver/entry"),
+            mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+            mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+            mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
             devserver_proxy_origin: proxy_apex,
             devserver_proxy_host_depth: 2,
-            roster_url: None,
             wireguard: None,
         };
         let err = gateway_conn(&discovery, "pat".into(), Some(test_entry_target()))
@@ -2726,7 +2770,7 @@ mod tests {
         let exchange_seen_route = Arc::clone(&exchange_seen);
         let app = axum::Router::new()
             .route(
-                "/desktop/v1/devserver/entry",
+                "/mobile/v1/devserver/entry",
                 axum::routing::post(move || {
                     let proxy_origin = response_proxy.clone();
                     let entry_seen = Arc::clone(&entry_seen_route);
@@ -2767,11 +2811,11 @@ mod tests {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: identity_origin.clone(),
-            desktop_authorize_url: format!("{identity_origin}/desktop/authorize"),
-            desktop_entry_url: format!("{identity_origin}/desktop/v1/devserver/entry"),
+            mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+            mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+            mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
             devserver_proxy_origin: proxy_apex,
             devserver_proxy_host_depth: 2,
-            roster_url: None,
             wireguard: None,
         };
 
@@ -2803,16 +2847,94 @@ mod tests {
     }
 
     #[test]
-    fn gateway_discovery_tolerates_absent_roster_url() {
-        // Older gateways omit the field entirely; discovery stays valid and
-        // the desktop reports "too old for account mode" instead of failing.
-        let mut d = valid_gateway_discovery();
-        d.roster_url = None;
-        validate_gateway_discovery("https://gw.chan.app", d).expect("absent roster_url is valid");
+    fn gateway_discovery_rejects_pre_mobile_or_blank_mobile_urls() {
+        // A pre-mobile gateway advertises only desktop endpoints: serde
+        // accepts and ignores those fields, and validation fails cleanly with
+        // the dedicated mobile-unsupported message.
+        let desktop_only: RawGatewayDiscovery = serde_json::from_str(
+            r#"{
+                "kind": "chan-gateway",
+                "api_version": 1,
+                "identity_origin": "https://gw.chan.app",
+                "desktop_authorize_url": "https://gw.chan.app/desktop/authorize",
+                "desktop_entry_url": "https://gw.chan.app/desktop/v1/devserver/entry",
+                "roster_url": "https://gw.chan.app/desktop/v1/devservers",
+                "devserver_proxy_origin": "https://proxy.chan.app",
+                "devserver_proxy_host_depth": 2,
+                "tunnel_url": "https://proxy.chan.app/v1/tunnel"
+            }"#,
+        )
+        .expect("desktop-only discovery decodes into raw wire struct");
+        let err = validate_gateway_discovery("https://gw.chan.app", desktop_only)
+            .expect_err("pre-mobile gateway must be rejected");
+        assert!(
+            err.contains("this gateway does not support mobile sign-in"),
+            "{err}"
+        );
+
+        // When a gateway serves both desktop and mobile fields, desktop fields
+        // are ignored and mobile fields populate GatewayDiscovery.
+        let both: RawGatewayDiscovery = serde_json::from_str(
+            r#"{
+                "kind": "chan-gateway",
+                "api_version": 1,
+                "identity_origin": "https://gw.chan.app",
+                "desktop_authorize_url": "https://gw.chan.app/desktop/authorize",
+                "desktop_entry_url": "https://gw.chan.app/desktop/v1/devserver/entry",
+                "roster_url": "https://gw.chan.app/desktop/v1/devservers",
+                "mobile_authorize_url": "https://gw.chan.app/mobile/authorize",
+                "mobile_entry_url": "https://gw.chan.app/mobile/v1/devserver/entry",
+                "mobile_roster_url": "https://gw.chan.app/mobile/v1/devservers",
+                "devserver_proxy_origin": "https://proxy.chan.app",
+                "devserver_proxy_host_depth": 2,
+                "tunnel_url": "https://proxy.chan.app/v1/tunnel"
+            }"#,
+        )
+        .expect("combined discovery decodes into raw wire struct");
+        let validated =
+            validate_gateway_discovery("https://gw.chan.app", both).expect("combined discovery");
+        assert_eq!(
+            validated.mobile_authorize_url,
+            "https://gw.chan.app/mobile/authorize"
+        );
+        assert_eq!(
+            validated.mobile_entry_url,
+            "https://gw.chan.app/mobile/v1/devserver/entry"
+        );
+        assert_eq!(
+            validated.mobile_roster_url,
+            "https://gw.chan.app/mobile/v1/devservers"
+        );
+
+        for missing in [None, Some(String::new()), Some("   \t\n ".to_string())] {
+            let mut d = valid_gateway_discovery();
+            d.mobile_authorize_url = missing.clone();
+            let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
+            assert!(
+                err.contains("this gateway does not support mobile sign-in"),
+                "authorize={missing:?}: {err}"
+            );
+
+            let mut d = valid_gateway_discovery();
+            d.mobile_entry_url = missing.clone();
+            let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
+            assert!(
+                err.contains("this gateway does not support mobile sign-in"),
+                "entry={missing:?}: {err}"
+            );
+
+            let mut d = valid_gateway_discovery();
+            d.mobile_roster_url = missing.clone();
+            let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
+            assert!(
+                err.contains("this gateway does not support mobile sign-in"),
+                "roster={missing:?}: {err}"
+            );
+        }
     }
 
     /// A discovery document as identity serves it, with `wireguard` spliced
-    /// in after `roster_url` when given.
+    /// in when given.
     fn discovery_document(wireguard: Option<&str>) -> String {
         let extra = wireguard
             .map(|entry| format!(",\"wireguard\":{entry}"))
@@ -2820,9 +2942,9 @@ mod tests {
         format!(
             "{{\"kind\":\"chan-gateway\",\"api_version\":1,\
              \"identity_origin\":\"https://gw.chan.app\",\
-             \"desktop_authorize_url\":\"https://gw.chan.app/desktop/authorize\",\
-             \"desktop_entry_url\":\"https://gw.chan.app/desktop/v1/devserver/entry\",\
-             \"roster_url\":\"https://gw.chan.app/desktop/v1/devservers\",\
+             \"mobile_authorize_url\":\"https://gw.chan.app/mobile/authorize\",\
+             \"mobile_entry_url\":\"https://gw.chan.app/mobile/v1/devserver/entry\",\
+             \"mobile_roster_url\":\"https://gw.chan.app/mobile/v1/devservers\",\
              \"devserver_proxy_origin\":\"https://proxy.chan.app\",\
              \"devserver_proxy_host_depth\":2,\
              \"tunnel_url\":\"https://proxy.chan.app/v1/tunnel\"{extra}}}"
@@ -2835,7 +2957,8 @@ mod tests {
     fn gateway_discovery_reads_the_wireguard_entry() {
         let entry =
             format!("{{\"endpoint\":\"wg.chan.app:51820\",\"public_key\":\"{WG_SERVER_KEY}\"}}");
-        let d: GatewayDiscovery = serde_json::from_str(&discovery_document(Some(&entry))).unwrap();
+        let d: RawGatewayDiscovery =
+            serde_json::from_str(&discovery_document(Some(&entry))).unwrap();
         let d = validate_gateway_discovery("https://gw.chan.app", d).expect("a good entry");
         assert_eq!(
             d.wireguard,
@@ -2920,8 +3043,8 @@ mod tests {
     #[test]
     fn gateway_discovery_tolerates_absent_wireguard() {
         // An older gateway, or one that enrolls no peers, omits the key; the
-        // document still validates and the desktop sends no key.
-        let d: GatewayDiscovery = serde_json::from_str(&discovery_document(None)).unwrap();
+        // document still validates and the app sends no key.
+        let d: RawGatewayDiscovery = serde_json::from_str(&discovery_document(None)).unwrap();
         assert_eq!(d.wireguard, None);
         validate_gateway_discovery("https://gw.chan.app", d).expect("absent wireguard is valid");
     }
@@ -2955,19 +3078,39 @@ mod tests {
     }
 
     #[test]
-    fn gateway_discovery_rejects_cross_origin_or_http_roster_url() {
+    fn gateway_discovery_rejects_cross_origin_or_http_mobile_urls() {
         let mut d = valid_gateway_discovery();
-        d.roster_url = Some("https://evil.example/desktop/v1/devservers".into());
+        d.mobile_authorize_url = Some("https://evil.example/mobile/authorize".into());
         let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
         assert!(err.contains("cross-origin"), "{err}");
 
         let mut d = valid_gateway_discovery();
-        d.roster_url = Some("http://gw.chan.app/desktop/v1/devservers".into());
+        d.mobile_roster_url = Some("https://evil.example/mobile/v1/devservers".into());
         let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
-        assert!(
-            err.contains("cross-origin") || err.contains("must use https"),
-            "{err}"
-        );
+        assert!(err.contains("cross-origin"), "{err}");
+
+        // Same host over plain http has a different origin from https://gw.chan.app;
+        // when configured_url is also http on non-loopback, require_https_unless_loopback
+        // rejects each mobile URL individually too.
+        for mutate in [
+            |d: &mut RawGatewayDiscovery| {
+                d.mobile_authorize_url = Some("http://gw.chan.app/mobile/authorize".into());
+            },
+            |d: &mut RawGatewayDiscovery| {
+                d.mobile_entry_url = Some("http://gw.chan.app/mobile/v1/devserver/entry".into());
+            },
+            |d: &mut RawGatewayDiscovery| {
+                d.mobile_roster_url = Some("http://gw.chan.app/mobile/v1/devservers".into());
+            },
+        ] {
+            let mut d = valid_gateway_discovery();
+            mutate(&mut d);
+            let err = validate_gateway_discovery("https://gw.chan.app", d).unwrap_err();
+            assert!(
+                err.contains("cross-origin") || err.contains("must use https"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -3247,7 +3390,7 @@ mod tests {
             let exchange_for_entry = format!("{proxy_origin}/_chan/entry");
             let app = axum::Router::new()
                 .route(
-                    "/desktop/v1/devserver/entry",
+                    "/mobile/v1/devserver/entry",
                     axum::routing::post(move || {
                         let proxy_origin = proxy_for_entry.clone();
                         let exchange_url = exchange_for_entry.clone();
@@ -3328,8 +3471,7 @@ mod tests {
         }
 
         fn gateway_conn(&self) -> DevserverConn {
-            let conn =
-                gateway_test_conn(format!("http://{}/desktop/v1/devserver/entry", self.addr));
+            let conn = gateway_test_conn(format!("http://{}/mobile/v1/devserver/entry", self.addr));
             *conn.gateway.as_ref().unwrap().session.lock().unwrap() = Some(GatewaySession {
                 gate: "opaque".into(),
                 cookie_header: "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1".into(),
@@ -3566,7 +3708,7 @@ mod tests {
         let response_proxy = proxy_origin.clone();
         let app = axum::Router::new()
             .route(
-                "/desktop/v1/devserver/entry",
+                "/mobile/v1/devserver/entry",
                 axum::routing::post(move || {
                     let proxy_origin = response_proxy.clone();
                     async move {
@@ -3597,7 +3739,7 @@ mod tests {
                 }),
             );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let conn = gateway_test_conn(format!("http://{addr}/desktop/v1/devserver/entry"));
+        let conn = gateway_test_conn(format!("http://{addr}/mobile/v1/devserver/entry"));
         let record = window_row("w-1", "/notes-1a2b3c", "tok_local_1");
         let url = window_navigation_url(&conn, &record)
             .await
@@ -3611,14 +3753,14 @@ mod tests {
     async fn navigation_url_mint_failure_surfaces_as_err() {
         // Unreachable entry endpoint (port 9): the open/retarget caller gets
         // an Err to warn on and retry later; nothing else is affected.
-        let conn = gateway_test_conn("http://127.0.0.1:9/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("http://127.0.0.1:9/mobile/v1/devserver/entry".into());
         let record = window_row("w-1", "/notes-1a2b3c", "tok_local_1");
         assert!(window_navigation_url(&conn, &record).await.is_err());
     }
 
     #[tokio::test]
     async fn more_than_session_cap_navigations_reuse_one_opaque_session() {
-        let conn = gateway_test_conn("http://127.0.0.1:9/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("http://127.0.0.1:9/mobile/v1/devserver/entry".into());
         let gw = conn.gateway.as_ref().unwrap();
         *gw.session.lock().unwrap() = Some(GatewaySession {
             gate: "opaque-once".into(),
@@ -3676,7 +3818,7 @@ mod tests {
 
     #[test]
     fn gateway_session_install_returns_with_a_fresh_session() {
-        let conn = gateway_test_conn("https://gw.chan.app/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("https://gw.chan.app/mobile/v1/devserver/entry".into());
         let gw = conn.gateway.as_ref().unwrap();
         *gw.session.lock().unwrap() = Some(GatewaySession {
             gate: "gate-current".into(),
@@ -3717,7 +3859,7 @@ mod tests {
         let exchange_hits_route = Arc::clone(&exchange_hits);
         let app = axum::Router::new()
             .route(
-                "/desktop/v1/devserver/entry",
+                "/mobile/v1/devserver/entry",
                 axum::routing::post(move || {
                     let proxy_origin = response_proxy.clone();
                     let entry_hits = Arc::clone(&entry_hits_route);
@@ -3759,7 +3901,7 @@ mod tests {
                 }),
             );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let conn = gateway_test_conn(format!("http://{addr}/desktop/v1/devserver/entry"));
+        let conn = gateway_test_conn(format!("http://{addr}/mobile/v1/devserver/entry"));
         let gw = conn.gateway.as_ref().unwrap().as_ref().clone();
         let installed = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let installed_for_callback = Arc::clone(&installed);
@@ -3836,7 +3978,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_session_is_not_reused_for_clean_navigation() {
-        let conn = gateway_test_conn("http://127.0.0.1:9/desktop/v1/devserver/entry".into());
+        let conn = gateway_test_conn("http://127.0.0.1:9/mobile/v1/devserver/entry".into());
         let gw = conn.gateway.as_ref().unwrap();
         *gw.session.lock().unwrap() = Some(GatewaySession {
             gate: "expired".into(),
@@ -3916,7 +4058,7 @@ mod tests {
     async fn main_window_resolves_csrf_only_for_matching_connected_gateway_origin() {
         let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
         let proxy_origin = "https://alice--0a1b2c3d4e5f.p1.proxy.chan.app";
-        let mut conn = gateway_test_conn("http://127.0.0.1:9/desktop/v1/devserver/entry".into());
+        let mut conn = gateway_test_conn("http://127.0.0.1:9/mobile/v1/devserver/entry".into());
         {
             let gw = conn.gateway.as_mut().unwrap();
             gw.proxy_origin = proxy_origin.to_string();

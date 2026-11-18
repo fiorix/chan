@@ -825,11 +825,11 @@ mod tests {
             kind: "chan-gateway".into(),
             api_version: 1,
             identity_origin: "https://id.example.test".into(),
-            desktop_authorize_url: "https://id.example.test/desktop/authorize".into(),
-            desktop_entry_url: "https://id.example.test/desktop/v1/devserver/entry".into(),
+            mobile_authorize_url: "https://id.example.test/mobile/authorize".into(),
+            mobile_entry_url: "https://id.example.test/mobile/v1/devserver/entry".into(),
+            mobile_roster_url: "https://id.example.test/mobile/v1/devservers".into(),
             devserver_proxy_origin: "https://devserver.example.test".into(),
             devserver_proxy_host_depth: 2,
-            roster_url: Some("https://id.example.test/desktop/v1/devservers".into()),
             wireguard: None,
         };
         state.gateway_manager.seed_test_runtime(
@@ -925,7 +925,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let stub = axum::Router::new().route(
-            "/desktop/v1/devserver/entry",
+            "/mobile/v1/devserver/entry",
             axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
         );
         let server = tokio::spawn(async move {
@@ -960,11 +960,11 @@ mod tests {
                 kind: "chan-gateway".into(),
                 api_version: 1,
                 identity_origin: origin.clone(),
-                desktop_authorize_url: format!("{origin}/desktop/authorize"),
-                desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
+                mobile_authorize_url: format!("{origin}/mobile/authorize"),
+                mobile_entry_url: format!("{origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{origin}/mobile/v1/devservers"),
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
-                roster_url: Some(format!("{origin}/desktop/v1/devservers")),
                 wireguard: None,
             },
             vec![gateway::RosterDevserver {
@@ -1042,7 +1042,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let stub = axum::Router::new().route(
-            "/desktop/v1/devserver/entry",
+            "/mobile/v1/devserver/entry",
             axum::routing::post(|| async {
                 axum::http::Response::builder()
                     .status(404)
@@ -1084,11 +1084,11 @@ mod tests {
                 kind: "chan-gateway".into(),
                 api_version: 1,
                 identity_origin: origin.clone(),
-                desktop_authorize_url: format!("{origin}/desktop/authorize"),
-                desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
+                mobile_authorize_url: format!("{origin}/mobile/authorize"),
+                mobile_entry_url: format!("{origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{origin}/mobile/v1/devservers"),
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
-                roster_url: Some(format!("{origin}/desktop/v1/devservers")),
                 wireguard: None,
             },
             vec![gateway::RosterDevserver {
@@ -1150,7 +1150,7 @@ mod tests {
 
         let router = axum::Router::new()
             .route(
-                "/desktop/v1/devserver/entry",
+                "/mobile/v1/devserver/entry",
                 axum::routing::post(move || {
                     let proxy_origin = response_proxy.clone();
                     let ds64 = ds64_route.clone();
@@ -1212,11 +1212,11 @@ mod tests {
                 kind: "chan-gateway".into(),
                 api_version: 1,
                 identity_origin: identity_origin.clone(),
-                desktop_authorize_url: format!("{identity_origin}/desktop/authorize"),
-                desktop_entry_url: format!("{identity_origin}/desktop/v1/devserver/entry"),
+                mobile_authorize_url: format!("{identity_origin}/mobile/authorize"),
+                mobile_entry_url: format!("{identity_origin}/mobile/v1/devserver/entry"),
+                mobile_roster_url: format!("{identity_origin}/mobile/v1/devservers"),
                 devserver_proxy_origin: proxy_apex,
                 devserver_proxy_host_depth: 2,
-                roster_url: Some(format!("{identity_origin}/desktop/v1/devservers")),
                 wireguard: None,
             },
             vec![gateway::RosterDevserver {
@@ -1354,7 +1354,7 @@ mod tests {
         let (_dir, state) = test_state();
         let gw = devserver::GatewayConn::new(
             format!("http://{addr}"),
-            format!("http://{addr}/desktop/v1/devserver/entry"),
+            format!("http://{addr}/mobile/v1/devserver/entry"),
             format!("http://{addr}"),
             "pat".into(),
         );

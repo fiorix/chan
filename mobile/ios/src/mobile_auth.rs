@@ -4,14 +4,15 @@
 //!
 //! The desktop answers its OAuth callback on a loopback listener and opens
 //! each devserver tenant in a window of its own. This module carries the
-//! other shape: the authorize page runs in an `ASWebAuthenticationSession`
-//! sheet, the session intercepts the `chan://auth/callback` navigation
-//! in-process, and the captured query settles through the exact desktop
-//! classify plus redeem plus commit path ([`crate::auth`]), so the only
-//! behavioral delta is the browser leg itself. Opening a rostered devserver
-//! mints the window record, reinstalls the gateway session cookies (each
-//! install returns only after the cookie store confirms), and navigates the
-//! single webview to the tenant URL; back-to-Computers navigates it home.
+//! mobile shape: `/mobile/authorize` (`mobile.account` scope) runs in an
+//! `ASWebAuthenticationSession` sheet, the session intercepts the
+//! `chan://auth/callback` navigation in-process, and the captured query
+//! settles through [`crate::auth`] (`POST /mobile/authorize/redeem`, with
+//! unkept tokens self-revoked via `DELETE /mobile/v1/token`). Opening a
+//! rostered devserver mints the window record, reinstalls the gateway
+//! session cookies (each install returns only after the cookie store
+//! confirms), and navigates the single webview to the tenant URL;
+//! back-to-Computers navigates it home.
 //!
 //! The HTTP bridge callbacks that open devservers carry no app handle, so app
 //! boot setup (`ios.rs`) stashes one here (`stash_mobile_app_handle`); opens
@@ -27,9 +28,10 @@ use tauri::Manager;
 
 use crate::gateway::GatewayAttempt;
 
-/// The OAuth callback the mobile leg sends as `redirect_uri` and the
-/// authentication session intercepts. Exact value, allowlisted gateway-side
-/// beside the loopback form; the same scope, PKCE, and redeem ride it.
+/// The OAuth callback the mobile leg sends to `/mobile/authorize` as
+/// `redirect_uri` and the authentication session intercepts. Exact value,
+/// allowlisted on the gateway's mobile authorize flow with `mobile.account`
+/// scope, PKCE, and `/mobile/authorize/redeem`.
 pub(crate) const MOBILE_REDIRECT_URI: &str = "chan://auth/callback";
 
 /// The callback scheme the authentication session watches for.
@@ -731,7 +733,7 @@ mod tests {
         let mut conn = direct_conn();
         conn.gateway = Some(Box::new(crate::devserver::GatewayConn::new(
             "https://id.example".into(),
-            "https://id.example/desktop/v1/devserver/entry".into(),
+            "https://id.example/mobile/v1/devserver/entry".into(),
             "https://owner--disc.proxy.example".into(),
             "chan_pat_x".into(),
         )));
