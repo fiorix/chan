@@ -589,8 +589,7 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
     crate::titlebar_tabs::launcher_visibility_changed(host);
     #[cfg(not(target_os = "macos"))]
     sync_launcher_menu(app, host);
-    #[cfg(target_os = "macos")]
-    let _ = app;
+    app.state::<Arc<AppState>>().devserver_feed.ping_now();
     true
 }
 
@@ -1427,6 +1426,29 @@ mod tests {
             .expect("a show that did not happen unmarks it");
         assert!(covered < uncovered);
         assert!(show.contains("if !matches!(shown, Ok(true))"));
+    }
+
+    #[test]
+    fn a_shown_launcher_asks_every_devserver_feed_for_a_ping() {
+        // The Computers screen shows each card's connection face fresh: a
+        // launcher that took the keyboard asks the feeds for one ping, and a
+        // show that did not happen asks for none.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let (_, rest) = SOURCE
+            .split_once("\nfn show_now(")
+            .expect("the function exists");
+        let show = rest
+            .split_once("\n}\n")
+            .expect("it ends at a column-0 brace")
+            .0;
+        let ping = show
+            .find("devserver_feed.ping_now()")
+            .expect("the show asks the feeds for a ping");
+        let unshown = show.find("return false;").expect("a show can fail");
+        assert!(
+            unshown < ping,
+            "a show that did not happen asked for a ping"
+        );
     }
 
     #[test]

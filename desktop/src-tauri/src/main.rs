@@ -837,6 +837,12 @@ impl DevserverFeed {
         self.pacer.window_focus(label, focused);
     }
 
+    /// Ask every devserver that answers its feed's ping for one now, so the
+    /// Computers screen shows each card's face fresh as it shows.
+    fn ping_now(&self) {
+        self.pacer.ping_now();
+    }
+
     /// Mark a devserver window LOCALLY buried (or un-buried) so `windows()`
     /// overrides its `connected`. Returns whether it changed, so the caller
     /// fires the library-change signal only on a real flip.
@@ -10254,6 +10260,15 @@ mod tests {
             register < seed && seed < poll,
             "register the snapshot before seeding rows, and seed before starting the poll",
         );
+    }
+
+    #[test]
+    fn the_computers_screen_asks_every_devserver_feed_for_one_ping() {
+        let feed = DevserverFeed::default();
+        let pace = feed.probe_pace();
+        feed.ping_now();
+        assert_eq!(pace.borrow().nudges, 1);
+        assert!(!pace.borrow().focused, "a ping asked for no focus");
     }
 
     #[test]
