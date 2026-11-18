@@ -1186,9 +1186,6 @@ pub(crate) mod tests {
         settle(app, action)
     }
 
-    /// How long [`assert_listener_destroyed`] waits for the queued client's
-    /// reset before it reports the listener still listening.
-
     #[tokio::test(start_paused = true)]
     async fn stale_slot_timer_keeps_the_successor_and_current_timer_stops_it() {
         let _serial = SLOT_TEST_LOCK.lock().await;
