@@ -5,8 +5,8 @@
 // output to go quiet), then turns into a raw PTY recorder: the queued
 // prompt is submitted with Ctrl+Enter before the survey shows, drains only
 // after the survey holds the keyboard, and the recorder shows the drained
-// text reached the PTY and the `1` did not. The red variant of this check
-// runs the same file on a tree with
+// text reached the PTY and nothing after it, the `1` included. The red
+// variant of this check runs the same file on a tree with
 // `292-rich-prompt-survey-drain.red.patch` applied: the drained composer
 // then takes the keyboard from the survey.
 
@@ -23,6 +23,24 @@ const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const bytesOf = (file) => existsSync(file)
   ? [...readFileSync(file)].map((byte) => byte.toString(16).padStart(2, "0"))
   : [];
+
+/// The recorder's size once it has stopped growing for half a second, so a
+/// drain read mid-write counts all of its bytes.
+async function settledSize(file) {
+  const deadline = Date.now() + 10_000;
+  let size = bytesOf(file).length;
+  let steadySince = Date.now();
+  while (Date.now() - steadySince < 500) {
+    if (Date.now() > deadline) throw new Error(`the recorder kept growing for 10 s; it holds ${size} bytes`);
+    await sleep(100);
+    const next = bytesOf(file).length;
+    if (next !== size) {
+      size = next;
+      steadySince = Date.now();
+    }
+  }
+  return size;
+}
 
 // The page's patched WebSocket records prompt frames, their acks and
 // delivery acks with the tab they rode on. Installed before the first leg
@@ -197,7 +215,8 @@ export default {
             result.delivered = await waitFor(page, card, "the prompt drains without taking the keyboard",
               (value) => value.sockets.some((socket) => socket.tab === name && socket.delivered.includes(id))
                 && value.text === "" && !value.pending && value.focus === "survey" && value.note === null, 20_000);
-            result.drainedBytes = (await recordedSince("the drained prompt reaches the PTY", recorder, 0, "50")).length;
+            await recordedSince("the drained prompt reaches the PTY", recorder, 0, "50");
+            result.drainedBytes = await settledSize(recorder);
             await ctx.shot(`292-${backend}-drained-under-survey`);
 
             await page.keyboard.press("1");
@@ -213,6 +232,8 @@ export default {
             const bytes = bytesOf(recorder);
             result.recorded = bytes.length;
             assert.ok(!bytes.includes("31"), `the 1 reached the PTY: ${JSON.stringify(bytes)}`);
+            assert.equal(bytes.length, result.drainedBytes,
+              `no byte reached the PTY after the drain: ${JSON.stringify(bytes.slice(result.drainedBytes))}`);
             assert.deepEqual(result.pageErrors, []);
             await ctx.shot(`292-${backend}-answered-composer-empty`);
             result.passed = true;
