@@ -1995,7 +1995,7 @@
      when the window-wide slot is empty. -->
 <BubbleOverlay />
 <!-- Screensaver cover. Mounts at App root so z-index sits above every
-     chan overlay (screensaver-backdrop uses z=2000). Renders nothing
+     chan overlay (screensaver-backdrop uses z=39000). Renders nothing
      while screensaver.locked === false; when locked it covers the SPA
      and accepts PIN entry. -->
 <ScreensaverOverlay />
