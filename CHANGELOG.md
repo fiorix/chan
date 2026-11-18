@@ -9,7 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Chan for iOS (Tauri app, TestFlight-ready build).** The iOS app runs the embedded loopback stack on device and loads the launcher in a single webview: add a gateway URL in the existing Gateways form, sign in through the system authentication sheet against the gateway's `/mobile/authorize` flow (`mobile.account` scope, `chan://auth/callback` PKCE callback, `/mobile/authorize/redeem`, `/mobile/v1/token`), browse roster devservers from `/mobile/v1/devservers` on Computers, open them through `/mobile/v1/devserver/entry` plus tenant navigation, and swipe left-edge back to Computers. Gateways that do not advertise the mobile discovery URLs are refused with a clear message; roster polling pauses in background and resyncs on foreground; CHAN_HOME lives under Application Support and PATs in the iOS Keychain. App id `app.chan.ios`.
-- **Mobile sign-in for self-hosted gateways.** The identity authorize flow accepts the registered `chan://auth/callback` alongside the loopback callback, code-level with no per-deployment config; same scope, same PKCE, same redeem.
+- **Mobile sign-in and bearer surface for self-hosted gateways.** `chan-gateway-identity` exposes a dedicated `/mobile/authorize` PKCE consent flow (sole scope `mobile.account`, code-pinned `chan://auth/callback`, isolated redemption store and `created_via_mobile` / `mobile.redeem` / `revoked_via_mobile` audit actions) plus `/mobile/v1/devservers`, `/mobile/v1/devserver/entry` (`client = "mobile"`), and `/mobile/v1/token`, advertised additively in `/.well-known/chan-gateway` with no per-deployment config while keeping `/desktop/authorize` strictly loopback-only.
 
 ## [v0.133.0] - 2026-11-22
 
