@@ -13,12 +13,13 @@
 //! install returns only after the cookie store confirms), and navigates the
 //! single webview to the tenant URL; back-to-Computers navigates it home.
 //!
-//! The HTTP bridge callbacks that open devservers carry no app handle, so
-//! the rostered-connect path stashes one here (`stash_mobile_app_handle`);
-//! opens refuse until a stash lands. Roster polling pauses while the app is
+//! The HTTP bridge callbacks that open devservers carry no app handle, so app
+//! boot setup (`ios.rs`) stashes one here (`stash_mobile_app_handle`); opens
+//! refuse until setup completes. Roster polling pauses while the app is
 //! backgrounded through an `NSNotificationCenter` observer registered from
-//! the same path; the OS would freeze the timers anyway, and the foreground
-//! transition resyncs immediately instead of waiting out the poll period.
+//! app boot setup (`ensure_mobile_lifecycle_observer`); the OS would freeze
+//! the timers anyway, and the foreground transition resyncs immediately
+//! instead of waiting out the poll period.
 
 use std::sync::{Arc, OnceLock};
 
@@ -112,13 +113,13 @@ pub(crate) fn settle_mobile_outcome<R: tauri::Runtime>(
     }
 }
 
-/// The app handle the rostered-connect path stashes for the bridge-open path,
-/// which runs without one. Set once; a rostered open before any rostered
-/// connect refuses instead of navigating nowhere.
+/// The app handle app boot setup (`ios.rs`) stashes for the bridge-open path,
+/// which runs without one. Set once; an open before setup completes refuses
+/// instead of navigating nowhere.
 static MOBILE_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
-/// Stash the app handle bridge opens navigate through. Idempotent: the first
-/// rostered connect wins, later ones are the same handle.
+/// Stash the app handle bridge opens navigate through. Idempotent: app boot
+/// setup sets it once and any repeat call carries the same handle.
 pub(crate) fn stash_mobile_app_handle(app: &tauri::AppHandle) {
     let _ = MOBILE_APP.set(app.clone());
 }
@@ -168,9 +169,8 @@ pub(crate) async fn mobile_open_devserver(
     crate::devserver::install_gateway_webview_session(&app, &conn, None)?;
     let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
     let webview = app
-        .webview_windows()
-        .into_values()
-        .next()
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
         .ok_or_else(|| "no webview to open the devserver in".to_string())?;
     webview
         .navigate(url)
@@ -178,19 +178,54 @@ pub(crate) async fn mobile_open_devserver(
     Ok(())
 }
 
-/// The loopback launcher URL back-to-Computers navigates home to: the
-/// embedded library's root, the same URL the single webview boots on.
-pub(crate) fn mobile_launcher_url(state: &crate::AppState) -> Result<url::Url, String> {
-    let addr = state
-        .embedded()
-        .map(|embedded| embedded.addr())
-        .ok_or_else(|| "the local library is not running".to_string())?;
-    launcher_url_for_addr(addr)
+/// Navigate `"main"` to an already-existing remote window record on a connected
+/// gateway devserver, reinstalling the WebView session cookies first.
+pub(crate) async fn mobile_open_existing_window(
+    state: &Arc<crate::AppState>,
+    id: &str,
+    record: &chan_server::WindowRecord,
+) -> Result<(), String> {
+    let app = mobile_app_handle()
+        .ok_or_else(|| "the mobile app handle is not ready; connect again".to_string())?;
+    mobile_open_existing_window_with_app(&app, state, id, record).await
 }
 
-/// The launcher root URL for an embedded loopback address.
-pub(crate) fn launcher_url_for_addr(addr: std::net::SocketAddr) -> Result<url::Url, String> {
-    url::Url::parse(&format!("http://{addr}/")).map_err(|e| format!("launcher URL: {e}"))
+pub(crate) async fn mobile_open_existing_window_with_app<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<crate::AppState>,
+    id: &str,
+    record: &chan_server::WindowRecord,
+) -> Result<(), String> {
+    let conn = mobile_gateway_conn(&state.devservers, id)?;
+    let target = crate::devserver::window_navigation_url(&conn, record).await?;
+    crate::devserver::install_gateway_webview_session(app, &conn, None)?;
+    let url = url::Url::parse(&target).map_err(|e| format!("devserver target URL: {e}"))?;
+    let webview = app
+        .get_webview_window("main")
+        .ok_or_else(|| "no main webview to open the devserver in".to_string())?;
+    webview
+        .navigate(url)
+        .map_err(|e| format!("opening the devserver: {e}"))?;
+    Ok(())
+}
+
+/// The loopback launcher URL back-to-Computers navigates home to: the
+/// embedded library's root carrying its per-launch bearer token, the same URL
+/// the single webview boots on.
+pub(crate) fn mobile_launcher_url(state: &crate::AppState) -> Result<url::Url, String> {
+    let embedded = state
+        .embedded()
+        .ok_or_else(|| "the local library is not running".to_string())?;
+    launcher_url_for_addr(embedded.addr(), embedded.launcher_token())
+}
+
+/// The launcher root URL for an embedded loopback address and bearer token.
+pub(crate) fn launcher_url_for_addr(
+    addr: std::net::SocketAddr,
+    token: &str,
+) -> Result<url::Url, String> {
+    url::Url::parse_with_params(&format!("http://{addr}/"), &[("t", token)])
+        .map_err(|e| format!("launcher URL: {e}"))
 }
 
 /// Back to Computers: re-navigate the invoking webview to the loopback
@@ -282,15 +317,20 @@ mod ios {
             });
         }
         let start = {
-            let app = app.clone();
             let gateway_id = gateway_id.to_string();
             let attempt = Arc::clone(attempt);
             let authorize_url = authorize_url.to_string();
             move || {
-                if let Err(error) =
-                    start_mobile_session(&authorize_url, &gateway_id, &attempt, outcome_tx)
-                {
-                    crate::auth::fail_mobile_signin(app, &gateway_id, &attempt, error);
+                let outcome_tx = Arc::new(Mutex::new(Some(outcome_tx)));
+                if let Err(error) = start_mobile_session(
+                    &authorize_url,
+                    &gateway_id,
+                    &attempt,
+                    Arc::clone(&outcome_tx),
+                ) {
+                    if let Some(tx) = outcome_tx.lock().unwrap().take() {
+                        let _ = tx.send(MobileAuthOutcome::Failed(error));
+                    }
                 }
             }
         };
@@ -375,7 +415,7 @@ mod ios {
         authorize_url: &str,
         gateway_id: &str,
         attempt: &Arc<GatewayAttempt>,
-        outcome_tx: tokio::sync::oneshot::Sender<MobileAuthOutcome>,
+        outcome_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<MobileAuthOutcome>>>>,
     ) -> Result<(), String> {
         if MainThreadMarker::new().is_none() {
             return Err("the sign-in sheet starts on the main thread only".to_string());
@@ -387,7 +427,6 @@ mod ios {
         // error; every capture is Send, and the outcome crosses to the
         // forwarder task. The block never panics: a panic here would unwind
         // through ObjC.
-        let outcome_tx = Mutex::new(Some(outcome_tx));
         let completion = RcBlock::new(move |callback_url: *mut NSURL, error: *mut NSError| {
             let outcome = read_session_outcome(callback_url, error);
             if let Some(tx) = outcome_tx.lock().unwrap().take() {
@@ -592,8 +631,8 @@ mod ios {
     static MOBILE_LIFECYCLE_REGISTER: Mutex<()> = Mutex::new(());
     static MOBILE_LIFECYCLE: OnceLock<Retained<MobileLifecycleObserver>> = OnceLock::new();
 
-    /// Observe background and foreground transitions once per process, from the
-    /// rostered-connect path that owns an app handle. Any thread may register;
+    /// Observe background and foreground transitions once per process,
+    /// registered from app boot setup (`ios.rs`). Any thread may register;
     /// the callbacks only flip the poll flag and spawn resync ticks.
     pub(crate) fn ensure_mobile_lifecycle_observer(
         app: &tauri::AppHandle,
@@ -719,8 +758,13 @@ mod tests {
     fn launcher_url_format() {
         let addr: std::net::SocketAddr = "127.0.0.1:8471".parse().unwrap();
         assert_eq!(
-            launcher_url_for_addr(addr).unwrap().as_str(),
-            "http://127.0.0.1:8471/"
+            launcher_url_for_addr(addr, "tok-123").unwrap().as_str(),
+            "http://127.0.0.1:8471/?t=tok-123"
+        );
+        assert_eq!(
+            launcher_url_for_addr(addr, "a+b&c=d/e").unwrap().as_str(),
+            "http://127.0.0.1:8471/?t=a%2Bb%26c%3Dd%2Fe",
+            "bearer token query parameter must be URL-encoded"
         );
     }
 
@@ -734,9 +778,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mobile_open_refuses_before_any_rostered_connect() {
-        // The stash is iOS-only, so no host test can set it: the open always
-        // refuses here, before touching the connection.
+    async fn mobile_open_refuses_before_app_setup_stashes_handle() {
+        // App boot setup (ios.rs) stashes MOBILE_APP on iOS; in a host unit
+        // test MOBILE_APP is unset, so the open refuses before touching the
+        // connection.
         let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
         assert!(mobile_app_handle().is_none());
         let refused = mobile_open_devserver(
@@ -751,6 +796,95 @@ mod tests {
         assert!(
             refused.contains("not ready"),
             "an unstashed open names the missing handle: {refused}",
+        );
+
+        let record = chan_server::WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "lib-1".into(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "notes Window 1".into(),
+            ordinal: 1,
+            label: "notes".into(),
+            workspace_path: Some("/srv/notes".into()),
+            prefix: "/notes".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        let refused_existing = mobile_open_existing_window(&state, "gw:1", &record)
+            .await
+            .unwrap_err();
+        assert!(refused_existing.contains("not ready"), "{refused_existing}");
+    }
+
+    #[tokio::test]
+    async fn mobile_open_existing_window_navigates_main_to_gateway_tenant_url() {
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let conn = gateway_conn();
+        conn.gateway
+            .as_ref()
+            .unwrap()
+            .seed_fresh_session_for_test("csrf-open");
+        let record = chan_server::WindowRecord {
+            window_id: "w-42".into(),
+            library_id: "lib-99".into(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "notes Window 1".into(),
+            ordinal: 1,
+            label: "notes".into(),
+            workspace_path: Some("/srv/notes".into()),
+            prefix: "/api/notes-1a2b3c".into(),
+            token: "unused-on-gateway".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+
+        let app = tauri::test::mock_app();
+        // Refuses when disconnected.
+        assert_eq!(
+            mobile_open_existing_window_with_app(app.handle(), &state, "gw:1", &record)
+                .await
+                .unwrap_err(),
+            "devserver is not connected"
+        );
+
+        state.devservers.set("gw:1".into(), conn);
+        // Refuses when main webview does not exist.
+        assert!(
+            mobile_open_existing_window_with_app(app.handle(), &state, "gw:1", &record)
+                .await
+                .unwrap_err()
+                .contains("no main webview")
+        );
+
+        let main = tauri::WebviewWindowBuilder::new(
+            &app,
+            "main",
+            tauri::WebviewUrl::External("http://127.0.0.1:8471/?t=boot".parse().unwrap()),
+        )
+        .build()
+        .expect("mock main webview");
+
+        mobile_open_existing_window_with_app(app.handle(), &state, "gw:1", &record)
+            .await
+            .expect("existing gateway window opens in main");
+        assert_eq!(
+            main.url().unwrap().as_str(),
+            "https://owner--disc.proxy.example/api/notes-1a2b3c/index.html"
         );
     }
 

@@ -14,7 +14,9 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -200,34 +202,10 @@ pub struct WireguardIngress {
 }
 
 impl Gateway {
-    /// The source identifying the current tunnel for adoption and status.
-    pub fn wireguard_source(&self) -> Option<&Path> {
-        self.wireguard_enrollment
-            .as_ref()
-            .map(|enrollment| enrollment.key_file.as_path())
-            .or(self.wireguard.as_deref())
-    }
-
     pub fn trusts_native(&self, owner_user_id: uuid::Uuid, devserver_id: &str) -> bool {
         self.native_trust.iter().any(|trust| {
             trust.owner_user_id == Some(owner_user_id) && trust.devserver_id == devserver_id
         })
-    }
-
-    /// The row's host map as the proxy routes it, passed at every adopt of
-    /// the row's file.
-    pub fn host_routes(&self) -> Vec<chan_wireguard::HostRoute> {
-        self.wireguard_enrollment
-            .as_ref()
-            .and_then(|enrollment| enrollment.ingresses.first())
-            .map(|ingress| &ingress.hosts)
-            .unwrap_or(&self.wireguard_hosts)
-            .iter()
-            .map(|host| chan_wireguard::HostRoute {
-                name: host.name.clone(),
-                addresses: host.addresses.clone(),
-            })
-            .collect()
     }
 }
 
@@ -724,7 +702,7 @@ fn entry_from_devserver(
         // the key stays on the wire so the launcher parses it unconditionally.
         pending_signin: false,
         // The connected library id, learned from the live window feed (`None`
-        // until this devserver is connected with ≥1 window). `pane_color` matches
+        // until this devserver is connected with >= 1 window). `pane_color` matches
         // a devserver window's `library_id` against this (in the feed) to resolve
         // its colour; the entry carries no colour (each library's colour is on
         // its own host).
@@ -1493,7 +1471,7 @@ mod tests {
                 host: "box.example.com".into(),
                 port: 8787,
                 label: Some("lab".into()),
-                script: Some("ssh -L …".into()),
+                script: Some("ssh -L ...".into()),
                 token: Some("tok_secret".into()),
                 clear_token: false,
                 auto_hide_control: false,
@@ -1799,10 +1777,10 @@ mod tests {
             })
             .expect("add")
             .id;
-        // Missing id: nothing dropped → hook must NOT fire.
+        // Missing id: nothing dropped -> hook must NOT fire.
         assert!(!reg.remove("nope").expect("remove ok"));
         assert!(fired.lock().unwrap().is_empty());
-        // Real id: row dropped → hook fires once with that id.
+        // Real id: row dropped -> hook fires once with that id.
         assert!(reg.remove(&id).expect("remove ok"));
         assert_eq!(fired.lock().unwrap().as_slice(), &[id]);
     }
