@@ -137,7 +137,6 @@
     <div
       class="panel"
       class:lifted
-      data-overlay-id={id}
       style="width: {resolvedWidth};"
       onclick={(e) => e.stopPropagation()}
       role="dialog"

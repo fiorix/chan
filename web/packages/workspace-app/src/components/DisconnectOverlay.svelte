@@ -12,7 +12,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // Restart connection and Abandon actions for a stuck remote connection.
 
-  import { COVER_ROOT_ATTR, appInputBlocked, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, modalDialogOpen, setCoverBlocking, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -20,11 +20,8 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { keyboardOwnedAbovePanes, launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
-  import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
-  import { surveyFor } from "../state/survey.svelte";
-  import { teamDialogState } from "../state/teamDialog.svelte";
-  import { closeConfirmState } from "../state/closeConfirm.svelte";
+  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
+  import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { onDestroy, onMount, tick } from "svelte";
@@ -218,20 +215,6 @@
     return () => window.removeEventListener("focus", onWindowFocus);
   });
 
-  function keyboardOwnerContains(saved: HTMLElement): boolean {
-    if (modalDialogOpen()) {
-      return !!(
-        (surveyFor(null) && saved.closest('.survey-overlay:not(.per-terminal)[role="dialog"]')) ||
-        (teamDialogState.request && saved.closest('.team-dialog[role="dialog"]')) ||
-        (closeConfirmState.open && saved.closest('.overlay[role="alertdialog"][aria-label="Close this window?"]'))
-      );
-    }
-    const overlay = topOverlay();
-    if (overlay === "launcher") return !!saved.closest('.deck-shell[role="dialog"]');
-    if (overlay) return saved.closest<HTMLElement>('.panel[role="dialog"]')?.dataset.overlayId === overlay;
-    return false;
-  }
-
   function restoreFocus(returnTo: FocusReturn, epoch: number): void {
     if (recoveryEpoch !== epoch || !outageResolved) return;
     if (launcherShownOverWindow()) {
@@ -239,13 +222,13 @@
       return;
     }
     const saved = returnTo.element;
-    if (appInputBlocked() || (keyboardOwnedAbovePanes() && !keyboardOwnerContains(saved))) return;
-    const owner = document.activeElement;
-    if (owner !== document.body && owner !== document.documentElement && !owner?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
+    if (!mayFocus(saved)) return;
+    const holder = document.activeElement;
+    if (holder !== document.body && holder !== document.documentElement && !holder?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
     // The tab pulse invokes the terminal or editor's own focus routine, which
     // re-arms its real keyboard surface and cursor after the cover has gone.
     if (returnTo.surface) {
-      if (!legacyKeyboardOwned(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
+      if (owner() === null) bumpTabFocusPulse();
     }
     else if (saved.isConnected) saved.focus({ preventScroll: true });
   }
