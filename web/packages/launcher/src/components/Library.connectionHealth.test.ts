@@ -111,6 +111,19 @@ describe("the connection face on the Computers deck", () => {
     expect(detail("ds-a")!.textContent).toContain("No response for 7 s");
   });
 
+  it("counts a fresh reading from the moment it arrives, not from the clock's last tick", () => {
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", since: NOW - 3_000, rtt_ms: 30, wait_since: NOW - 3_000 }))];
+    mountDeck("ds-a");
+    expect(face("ds-a")!.textContent!.trim()).toBe("3.0 s");
+    // 900 ms on, before the clock's next tick, the desktop reads the 4 s
+    // stall and the row arrives.
+    vi.setSystemTime(NOW + 900);
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "stalled", since: NOW + 900, wait_since: NOW + 900 - 4_000 }))];
+    flushSync();
+    expect(face("ds-a")!.textContent!.trim()).toBe("stalled 4 s");
+    expect(detail("ds-a")!.textContent).toContain("No response for 4 s");
+  });
+
   it("counts reconnecting from its start while a ping still waits", () => {
     library.devservers = [computer("ds-a", "alpha", reading({ face: "reconnecting", since: NOW - 12_000, wait_since: NOW - 40_000 }))];
     mountDeck("ds-a");

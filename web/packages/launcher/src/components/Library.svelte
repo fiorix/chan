@@ -202,11 +202,14 @@
   const connectionField = (ds: DevserverEntry): string => `devserver:${ds.id}:connection`;
   // The faces count waits and ages against this clock. A quarter-second tick
   // while any reading shows moves every count by whole seconds without
-  // skipping one.
+  // skipping one, and each fresh list of rows restarts it, so a reading
+  // counts from the moment it arrives: a stall the desktop read at 4 s never
+  // shows a count from a tick before it.
   let now = $state(Date.now());
   const readingShown = $derived(library.devservers.some((ds) => health(ds) !== null));
   $effect(() => {
     if (!readingShown) return;
+    void library.devservers;
     now = Date.now();
     const timer = setInterval(() => { now = Date.now(); }, 250);
     return () => clearInterval(timer);
