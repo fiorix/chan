@@ -24,7 +24,7 @@ import { demoWorkspaceInfo } from "../demo/data";
 import { closeConfirmState, resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { screensaver } from "../state/screensaver.svelte";
-import { coverOwnsButton, promptState, raisedCoverKeys, ui, workspace } from "../state/store.svelte";
+import { COVER_ROOT_ATTR, coverOwnsButton, coverOwnsTextEntry, promptState, raisedCoverKeys, setCoverBlocking, ui, workspace } from "../state/store.svelte";
 import { __resetWindowLifecycle, markWindowHidden } from "../state/windowLifecycle.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
@@ -315,4 +315,25 @@ test("with the covers mounted before the lock, as the App mounts them, the lock 
   screensaver.locked = false;
   await settle();
   expect(cover.contains(document.activeElement), "the card once the lock lifts").toBe(true);
+});
+
+test("typing reaches the screen lock's PIN field only while the lock paints on top", async () => {
+  mountLock();
+  const backdrop = await lock();
+  backdrop.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  await settle();
+  const pin = backdrop.querySelector<HTMLInputElement>('input[type="password"]')!;
+  expect(coverOwnsTextEntry(pin), "the lock on top takes typing").toBe(true);
+  // The missing-token cover's root at its layer, over the lock's 39000.
+  const missing = document.body.appendChild(document.createElement("div"));
+  missing.setAttribute(COVER_ROOT_ATTR, "missing-token");
+  missing.style.position = "fixed";
+  missing.style.zIndex = "40000";
+  setCoverBlocking("missing-token", true);
+  try {
+    expect(coverOwnsTextEntry(pin), "the PIN field under the missing-token cover takes none").toBe(false);
+  } finally {
+    setCoverBlocking("missing-token", false);
+    missing.remove();
+  }
 });
