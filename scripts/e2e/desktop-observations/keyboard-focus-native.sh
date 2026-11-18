@@ -66,9 +66,7 @@ done
 dpkg-query -W libwebkit2gtk-4.1-0 > "$output/engine-package.txt"
 "$CHAN_DESKTOP_BIN" --version > "$output/desktop-version.txt"
 obs_log "window $xid is visible on $DISPLAY; engine $(cat "$output/engine-package.txt")"
-set +e
+obs_verdict
 node "$HERE/keyboard-focus-native.mjs" --inspector "$INSPECTOR" --xid "$xid" --output "$output" "${driver_args[@]}"
 verdict=$?
-set -e
-obs_verdict
 obs_judge "$verdict" "keyboard focus fault observed on chan-desktop; see keyboard-focus.json"

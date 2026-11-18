@@ -7,8 +7,9 @@
 // the run inconclusive, not failed: exit 0 holds, 2 the environment cannot
 // run this driver, 3 inconclusive. Exit 10 reports an observed fault (the
 // wrapper's obs_judge turns it into 1). Its red variant runs on a tree with
-// `../browser-smoke/checks/294-rich-prompt-strip-press.red.patch` applied:
-// the first press then moves focus out of the composer.
+// `keyboard-focus-native.red.patch` applied, which drops the Computers
+// launcher from the keyboard rule: the deck run under the launcher then
+// hands the keyboard back to the page.
 //
 // What XTEST drives and what the inspector drives is deliberate: pointer
 // presses, the Computers chord and typed text go through the real input
@@ -291,6 +292,32 @@ async function pressPoint(selector) {
   return point;
 }
 
+/// A real press on `selector` read with the button held. The button's own
+/// events are recorded in the page, and the release goes to the pointer
+/// with no window activation in between, since an activation while the
+/// button is held is not part of a user's click. A press the button never
+/// saw as a click is the instrument's, not the product's.
+async function press(selector, card) {
+  const point = await pressPoint(selector);
+  await page.evaluate((selector) => {
+    const button = document.querySelector(selector);
+    window.__kbdPress = [];
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      button.addEventListener(type, (event) => window.__kbdPress.push(event.type), { capture: true, once: true });
+    }
+  }, selector);
+  await x([], "mousemove", String(point.x), String(point.y), "mousedown", "1");
+  await delay(300);
+  const held = await focusState(card);
+  await exec("xdotool", ["mouseup", "1"], { timeout: 30_000 });
+  const events = await until("the button sees the click", () => page.evaluate(() => window.__kbdPress), (seen) => seen.includes("click"), 5_000)
+    .catch(() => null);
+  if (!events) {
+    throw new Error(`the press never reached ${selector} as a click: ${JSON.stringify(await page.evaluate(() => window.__kbdPress))}`);
+  }
+  return { held, events };
+}
+
 async function waitForCard(card, timeout = 30_000) {
   await until(`composer ${card}`, () => page.evaluate((card) => Boolean(document.querySelector(`${card} .cm-content`)), card), Boolean, timeout);
 }
@@ -362,16 +389,12 @@ async function main() {
   await x([], "type", "--delay", "12", TEXT);
   const typed = await until("the draft is editable", () => focusState(cardA), (s) => (s.text === TEXT ? s : false));
   if (typed.where !== "composer") throw new Error(`composer did not take the keyboard: ${typed.where}`);
-  const press = await pressPoint(`${cardA} .rp-primary`);
-  await x([], "mousemove", String(press.x), String(press.y), "mousedown", "1");
-  await delay(300);
-  const held = await focusState(cardA);
-  await x([], "mouseup", "1");
-  if (held.where !== "composer") fail("press holds the composer", { where: held.where });
-  pass("press holds the composer", { where: held.where });
+  const pressA = await press(`${cardA} .rp-primary`, cardA);
+  if (pressA.held.where !== "composer") fail("press holds the composer", { where: pressA.held.where });
+  pass("press holds the composer", { where: pressA.held.where, events: pressA.events });
   const delivered = await until("the submit delivers", () => focusState(cardA), (s) => s.text === "" || s.text === null, 15_000)
     .catch(() => null);
-  if (!delivered) fail("click submits and the next key types", { submitted: false });
+  if (!delivered) fail("click submits and the next key types", { submitted: false, state: await focusState(cardA) });
   // One key, typed once: a retry would type a second x into a composer
   // that took the first.
   await x([], "type", "x");
@@ -419,11 +442,7 @@ async function main() {
   const hostA = await screenPoint(`.terminal-tab[data-terminal-tab-id="${tabA}"] .terminal-host`);
   await x([], "mousemove", String(hostA.x), String(hostA.y), "click", "1");
   const paneA = await activePaneId();
-  const pressB = await pressPoint(`${cardB} .rp-primary`);
-  await x([], "mousemove", String(pressB.x), String(pressB.y), "mousedown", "1");
-  await delay(300);
-  const heldB = await focusState(cardB);
-  await x([], "mouseup", "1");
+  const { held: heldB } = await press(`${cardB} .rp-primary`, cardB);
   if (heldB.where !== "composer") fail("two-pane submit keeps focus and pane", { held: heldB.where });
   const sentB = await until("B's submit sends and clears", () => focusState(cardB), (s) =>
     s.text === "" || s.text === null ? s : false,

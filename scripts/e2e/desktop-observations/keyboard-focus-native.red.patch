@@ -1,0 +1,20 @@
+--- a/web/packages/workspace-app/src/state/focusGuard.svelte.ts
++++ b/web/packages/workspace-app/src/state/focusGuard.svelte.ts
+@@ -45,7 +45,6 @@
+ export function keyboardOwned(slot: SurveySlot, except?: OverlayId): boolean {
+   if (modalDialogOpen()) return true;
+   if (surveyFor(slot) !== null) return true;
+-  if (launcherShown) return true;
+   const top = topOverlay();
+   return top !== null && top !== except;
+ }
+--- a/web/packages/workspace-app/src/components/CommandLauncher.svelte
++++ b/web/packages/workspace-app/src/components/CommandLauncher.svelte
+@@ -876,7 +876,6 @@
+     // Anything else, and no heir at all, goes through the shared rule,
+     // which still refuses the terminal and its composer while an owner
+     // holds them.
+-    if (launcherShownOverWindow()) return false;
+     if (heir && heir.closest('[aria-modal="true"]:not(.per-terminal)')) return true;
+     if (heir?.closest(".survey-card"))
+       return (
