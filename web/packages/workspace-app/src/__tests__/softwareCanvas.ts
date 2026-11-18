@@ -91,7 +91,8 @@ export class SoftwareCanvasContext {
   /// and resets its drawing state, so the double delegates to the
   /// element's own accessors and resets after each set. Reading back
   /// through the element keeps fractional products visible the way the
-  /// product's size check sees them.
+  /// product's size check sees them. Negative sizes are ignored here
+  /// rather than converted to the element's default; nothing assigns one.
   constructor(canvas: HTMLCanvasElement, cellWidth = 8) {
     this.#canvas = canvas;
     this.#cellWidth = cellWidth;
