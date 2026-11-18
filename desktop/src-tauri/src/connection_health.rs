@@ -52,12 +52,14 @@ pub(crate) const FOCUSED_CADENCE: Duration = Duration::from_secs(3);
 /// The ping cadence after a socket's first reply while no window of the
 /// desktop has the focus.
 pub(crate) const UNFOCUSED_CADENCE: Duration = Duration::from_secs(20);
-/// How often the pump reports the time while a timed ping waits, so a gap
-/// between reports shows that the process did not run.
+/// How often the pump reports the time while
+/// [`waits`](ConnectionReading::waits) holds, so a gap between reports shows
+/// that the process did not run.
 pub(crate) const WAKE_TICK: Duration = Duration::from_secs(2);
-/// A gap between reports longer than this, while a timed ping waits, is a
-/// sleep of the machine on a clock that counts one (or a frozen process):
-/// the pings in flight are not timed.
+/// A gap between reports longer than this, while the pump reports the time
+/// every [`WAKE_TICK`], is a sleep of the machine on a clock that counts one
+/// (or a frozen process): the pings in flight are not timed. Before the
+/// devserver has answered nothing reports the time, and a gap shows nothing.
 const WAKE_GAP: Duration = Duration::from_secs(6);
 /// A step of the wall clock against the monotonic one larger than this,
 /// across a ping's wait, is a sleep on a monotonic clock that pauses during
@@ -220,6 +222,10 @@ pub(crate) struct ConnectionReading {
     /// When the reading was last told the time, for the gap that shows a
     /// sleep.
     observed: Option<Instant>,
+    /// [`waits`](Self::waits) held as the last report ended, so the pump
+    /// reports the time every [`WAKE_TICK`] until the next one: only then
+    /// does a gap since that report show that the process did not run.
+    reports_due: bool,
 }
 
 impl ConnectionReading {
@@ -359,9 +365,10 @@ impl ConnectionReading {
     /// the pings are untimed before anything reads their wait.
     fn observe(&mut self, now: Stamp) {
         if !self.pending.timed.is_empty() {
-            let slept = self
-                .observed
-                .is_some_and(|at| now.mono.saturating_duration_since(at) > WAKE_GAP);
+            let slept = self.reports_due
+                && self
+                    .observed
+                    .is_some_and(|at| now.mono.saturating_duration_since(at) > WAKE_GAP);
             let crossed = if slept {
                 self.pending.timed.len()
             } else {
@@ -380,8 +387,10 @@ impl ConnectionReading {
     /// Read the face at `now` into `shown`, answering whether it changed. A
     /// face a wait crossed a threshold into starts when it crossed it, unless
     /// that was before the face it follows began: slow after a stall starts
-    /// when it is read, not at the wait's first second.
+    /// when it is read, not at the wait's first second. Every report ends
+    /// here, so it also notes whether the pump now reports the time.
     fn settle(&mut self, now: Stamp) -> bool {
+        self.reports_due = self.waits();
         let next = self.face(now);
         let changed = self.shown.map(|(face, _)| face) != next.map(|(face, _)| face);
         if changed {
@@ -1052,6 +1061,48 @@ mod tests {
             reading.tick(hand.wait(2_000));
         }
         assert_eq!(face(&mut reading, hand.at()), Some(ConnectionFace::Stalled));
+    }
+
+    /// Nothing reports the time while the first ping waits, before the
+    /// devserver has answered, so its wait has no gap in reports to show: a
+    /// first reply that took 7 s is timed. A sleep across it is still seen
+    /// as a step of the wall clock.
+    #[test]
+    fn a_first_reply_longer_than_a_report_gap_is_timed() {
+        let mut hand = Hand::new();
+        let mut reading = ConnectionReading::default();
+        reading.opened(hand.at());
+        let sent = hand.at();
+        reading.ping_sent(sent);
+        reading.set_arrived(hand.wait(5));
+        assert!(!reading.waits(), "the first ping asked for reports");
+        reading.pong(hand.wait(6_995));
+        let health = reading.health(hand.at()).unwrap();
+        assert_eq!(
+            health.rtt_ms,
+            Some(7_000),
+            "a 7 s first reply was not timed"
+        );
+        assert_eq!(
+            health.samples,
+            [ConnectionSample {
+                at: sent.wall_ms,
+                rtt_ms: Some(7_000)
+            }]
+        );
+        assert_eq!(health.face, ConnectionFace::Slow);
+
+        let mut hand = Hand::new();
+        let mut reading = ConnectionReading::default();
+        reading.opened(hand.at());
+        reading.ping_sent(hand.at());
+        reading.set_arrived(hand.wait(5));
+        hand.sleep_paused(60_000);
+        reading.pong(hand.wait(100));
+        let health = reading.health(hand.at()).unwrap();
+        assert_eq!(health.rtt_ms, None, "a first ping across a sleep was timed");
+        assert!(health.samples.is_empty(), "{:?}", health.samples);
+        assert_eq!(health.face, ConnectionFace::Healthy);
     }
 
     #[test]
