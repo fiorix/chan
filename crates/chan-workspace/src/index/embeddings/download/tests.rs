@@ -445,10 +445,13 @@ fn a_fresh_download_that_hashes_wrong_after_a_restart_fails() {
     let cache = tempfile::tempdir().unwrap();
     let wrong = b"{\"fixture\":TRUE}\n";
     part_file(cache.path(), &wrong[..3]);
+    // A third request is refused, so a restart that is not bounded fails
+    // the message below rather than looping.
+    let fresh = AtomicBool::new(false);
     let server = Server::start(move |request| match requested_range(request) {
         "bytes=3-" => range_response(wrong, 3),
-        "bytes=0-" => range_response(wrong, 0),
-        _ => response("400 Bad Request", "", b"unexpected range"),
+        "bytes=0-" if !fresh.swap(true, Ordering::SeqCst) => range_response(wrong, 0),
+        _ => response("503 Service Unavailable", "", b"no third attempt"),
     });
     let error = client(cache.path(), &server)
         .get("fixture/model", "config.json")
