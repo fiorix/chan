@@ -391,9 +391,16 @@ impl Index {
         let _write = self.config_write.lock().unwrap();
         let mut candidate = self.config();
         if model == candidate.model {
-            return Ok(());
+            if candidate.replaced_model.is_none() {
+                return Ok(());
+            }
+            // Choosing the model that stood in for a dropped one ends the
+            // note and keeps the vectors it made.
+            candidate.replaced_model = None;
+            return self.persist_config(candidate);
         }
         candidate.model = model;
+        candidate.replaced_model = None;
         self.persist_config(candidate)?;
         // The vectors on disk were produced by the previous model, so wipe
         // them. `clear_vectors` also clears the `vectors_*` stamp so the next
@@ -1801,6 +1808,33 @@ mod tests {
     }
 
     #[test]
+    fn an_index_whose_config_names_a_dropped_model_opens_on_the_default_until_one_is_chosen() {
+        let tmp = make_workspace();
+        let dir = idx_dir(&tmp);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            config::config_path(&dir),
+            format!(
+                "schema_version = {}\nmodel = \"BAAI/bge-m3\"\n",
+                config::SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let idx = Index::open(tmp.path(), &dir).expect("the index opens");
+        assert_eq!(idx.config().model, crate::DEFAULT_MODEL);
+        assert!(idx
+            .config()
+            .model_note()
+            .unwrap()
+            .starts_with("BAAI/bge-m3 is no longer offered"));
+        idx.set_model(crate::DEFAULT_MODEL.into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model, crate::DEFAULT_MODEL);
+            assert_eq!(cfg.model_note(), None, "choosing the model ends the note");
+        }
+    }
+
+    #[test]
     fn corrupt_vector_shard_keeps_bm25_available_and_rebuild_reclaims_it() {
         use super::super::vectors::{pair, VectorStore};
 
@@ -2175,6 +2209,7 @@ mod tests {
             vectors_model: Some("BAAI/bge-large-en-v1.5".to_owned()),
             vectors_dim: Some(1024),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         config::save(&dir, &cfg_on_disk).unwrap();
         drop(idx);
@@ -2210,6 +2245,7 @@ mod tests {
             vectors_model: Some(model.clone()),
             vectors_dim: Some(384),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         std::fs::create_dir_all(&dir).unwrap();
         config::save(&dir, &cfg_on_disk).unwrap();
@@ -2243,6 +2279,7 @@ mod tests {
             vectors_model: Some("BAAI/bge-small-en-v1.5".to_owned()),
             vectors_dim: Some(384),
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         };
         config::save(&dir, &cfg_on_disk).unwrap();
         let _idx = Index::open(tmp.path(), &dir).unwrap();

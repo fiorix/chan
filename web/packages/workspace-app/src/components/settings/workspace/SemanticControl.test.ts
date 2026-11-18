@@ -51,3 +51,30 @@ test("Settings shows the model download refusal without losing the server's deta
     "/api/index/semantic/download",
   ]);
 });
+
+test("Settings says why the default stands in for a model the workspace named that chan dropped", async () => {
+  const note =
+    "BAAI/bge-m3 is no longer offered: its Hub repository publishes no model.safetensors. "
+    + "This workspace uses BAAI/bge-small-en-v1.5 until another model is chosen.";
+  const model = {
+    id: "BAAI/bge-small-en-v1.5", label: "BGE Small EN v1.5", dim: 384, size_label: "~130 MB",
+    note: "", default: true, downloaded: true, current: true,
+  };
+  const state = {
+    mode: "bm25", model_present: true, model_name: model.id, model_note: note,
+    model_path: "/models/bge-small", model_size_bytes: 1, semantic_enabled: false,
+  };
+  workspace.info = demoWorkspaceInfo({
+    metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+    files: [],
+  });
+  recordRequests((request) => {
+    if (request.path === "/api/build-info") return json({ version: "0", build: "test", features: { embeddings: true } });
+    if (request.path === "/api/index/semantic/state") return json(state);
+    if (request.path === "/api/index/semantic/models") return json({ current_model: model.id, models: [model] });
+    throw new Error(`Unexpected request: ${request.method} ${request.path}`);
+  });
+  const target = document.body.appendChild(document.createElement("div"));
+  mounted.push(mount(SemanticControl, { target }));
+  await vi.waitFor(() => expect(target.querySelector("[role=note]")?.textContent).toBe(note));
+});

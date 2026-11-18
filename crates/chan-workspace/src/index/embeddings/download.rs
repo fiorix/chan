@@ -212,12 +212,11 @@ impl Client {
         Ok(path)
     }
 
-    /// Refuse a model whose table entry pins no copy of a file the embedder
-    /// reads, before any of its files is asked for. A model the table does
-    /// not hold is refused by `get`.
+    /// Refuse a model the table does not hold, or whose entry pins no copy of
+    /// a file the embedder reads, before any of its files is asked for.
     pub(super) fn require_published(&self, model: &str) -> Result<(), EmbedError> {
         let Some(info) = self.models.iter().find(|info| info.id == model) else {
-            return Ok(());
+            return Err(EmbedError::UnknownModel(model.to_owned()));
         };
         match config::MODEL_FILES
             .into_iter()

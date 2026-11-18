@@ -124,30 +124,14 @@ const EMBEDDING_MODELS: &[EmbeddingModelInfo] = &[
             },
         ],
     },
-    EmbeddingModelInfo {
-        id: "BAAI/bge-m3",
-        label: "BGE M3",
-        dim: 1024,
-        size_label: "~2.3 GB",
-        note: "Multilingual BGE model for mixed-language workspaces.",
-        is_default: false,
-        revision: "5617a9f61b028005a4858fdac845db406aefb181",
-        // This commit publishes no model.safetensors, so the download stops
-        // at the weights with no request for them.
-        files: &[
-            ModelFile {
-                name: "config.json",
-                sha256: "26159e7ad065073448460117eb24b7a4572f6f4e78eadff65dc0a11c052449fa",
-                size: 687,
-            },
-            ModelFile {
-                name: "tokenizer.json",
-                sha256: "21106b6d7dab2952c1d496fb21d5dc9db75c28ed361a05f5020bbba27810dd08",
-                size: 17098108,
-            },
-        ],
-    },
 ];
+
+/// Models chan once offered, with why each left. A workspace config that
+/// still names one loads with the default model in its place.
+const RETIRED_MODELS: &[(&str, &str)] = &[(
+    "BAAI/bge-m3",
+    "its Hub repository publishes no model.safetensors",
+)];
 
 pub fn embedding_models() -> &'static [EmbeddingModelInfo] {
     EMBEDDING_MODELS
@@ -229,6 +213,30 @@ pub struct IndexConfig {
     /// list). Managed via `GET`/`PUT /api/index/excluded-dirs`.
     #[serde(default)]
     pub excluded_dirs: Vec<String>,
+    /// A model this workspace named that chan does not offer, which the
+    /// default model replaced when the config loaded. Kept so Settings and
+    /// the CLI can say so until a model is chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_model: Option<String>,
+}
+
+impl IndexConfig {
+    /// Why `model` stands in for the model this workspace named, for
+    /// Settings and the CLI; `None` when nothing was replaced.
+    pub fn model_note(&self) -> Option<String> {
+        let replaced = self.replaced_model.as_deref()?;
+        let model = &self.model;
+        Some(
+            match RETIRED_MODELS.iter().find(|(id, _)| *id == replaced) {
+                Some((_, why)) => format!(
+                    "{replaced} is no longer offered: {why}. This workspace uses {model} until another model is chosen."
+                ),
+                None => format!(
+                    "{replaced} is not a model chan offers. This workspace uses {model} until another model is chosen."
+                ),
+            },
+        )
+    }
 }
 
 impl Default for IndexConfig {
@@ -243,6 +251,7 @@ impl Default for IndexConfig {
             // baseline alone applies until the user adds workspace-specific
             // dirs via the CRUD route.
             excluded_dirs: Vec::new(),
+            replaced_model: None,
         }
     }
 }
@@ -290,17 +299,23 @@ pub fn config_path(index_dir: &Path) -> PathBuf {
 
 /// Load the config, falling back to defaults if the file is absent.
 /// A malformed file is an error; we don't silently overwrite a
-/// user's edit.
+/// user's edit. A model chan does not offer (one it dropped, or a
+/// hand edit) is replaced by the default, with the replaced id kept
+/// for `IndexConfig::model_note`, so the index opens.
 pub fn load(index_dir: &Path) -> Result<IndexConfig, ConfigError> {
     let path = config_path(index_dir);
     if !path.exists() {
         return Ok(IndexConfig::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    toml::from_str(&raw).map_err(|source| ConfigError::Decode {
+    let mut cfg: IndexConfig = toml::from_str(&raw).map_err(|source| ConfigError::Decode {
         path,
         source: Box::new(source),
-    })
+    })?;
+    if embedding_model(&cfg.model).is_none() {
+        cfg.replaced_model = Some(std::mem::replace(&mut cfg.model, DEFAULT_MODEL.to_owned()));
+    }
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -329,7 +344,7 @@ mod tests {
     /// A pin the Hub could never serve fails here, not on every user's first
     /// download.
     #[test]
-    fn every_pin_is_well_formed_and_every_model_but_bge_m3_pins_what_the_embedder_reads() {
+    fn every_pin_is_well_formed_and_every_model_pins_what_the_embedder_reads() {
         let hex = |value: &str, len: usize| {
             value.len() == len
                 && value
@@ -354,13 +369,7 @@ mod tests {
                 assert!(file.size > 0, "{} {}: no size", model.id, file.name);
             }
             let names: Vec<_> = model.files.iter().map(|file| file.name).collect();
-            // bge-m3's repository publishes no model.safetensors.
-            let expected: &[&str] = if model.id == "BAAI/bge-m3" {
-                &["config.json", "tokenizer.json"]
-            } else {
-                &MODEL_FILES
-            };
-            assert_eq!(names, expected, "{}: the pinned files", model.id);
+            assert_eq!(names, MODEL_FILES, "{}: the pinned files", model.id);
         }
     }
 
@@ -377,13 +386,14 @@ mod tests {
     fn save_then_load_roundtrips() {
         let tmp = TempDir::new().unwrap();
         let cfg = IndexConfig {
-            model: "BAAI/bge-m3".to_owned(),
+            model: "BAAI/bge-large-en-v1.5".to_owned(),
             chunking: Chunking::Fixed { chars: 512 },
             ..IndexConfig::default()
         };
         save(tmp.path(), &cfg).unwrap();
         let loaded = load(tmp.path()).unwrap();
-        assert_eq!(loaded.model, "BAAI/bge-m3");
+        assert_eq!(loaded.model, "BAAI/bge-large-en-v1.5");
+        assert_eq!(loaded.replaced_model, None);
         assert!(matches!(loaded.chunking, Chunking::Fixed { chars: 512 }));
     }
 
@@ -397,7 +407,6 @@ mod tests {
                 "BAAI/bge-small-en-v1.5",
                 "BAAI/bge-base-en-v1.5",
                 "BAAI/bge-large-en-v1.5",
-                "BAAI/bge-m3",
             ]
         );
         assert_eq!(
@@ -426,13 +435,57 @@ mod tests {
         let lock_dir = tmp.path().join("lock");
         std::fs::create_dir_all(&index_dir).unwrap();
         let on_disk = IndexConfig {
-            model: "BAAI/bge-m3".to_owned(),
+            model: "BAAI/bge-large-en-v1.5".to_owned(),
             ..IndexConfig::default()
         };
         save(&index_dir, &on_disk).unwrap();
         let _holder = WorkspaceLock::acquire(&lock_dir, tmp.path()).unwrap();
         let loaded = load(&index_dir).unwrap();
-        assert_eq!(loaded.model, "BAAI/bge-m3");
+        assert_eq!(loaded.model, "BAAI/bge-large-en-v1.5");
+    }
+
+    /// A workspace that chose BGE M3 before chan dropped it opens with the
+    /// default model and a note that says why.
+    #[test]
+    fn a_config_naming_a_model_chan_dropped_loads_with_the_default_and_a_note() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            config_path(tmp.path()),
+            format!("schema_version = {SCHEMA_VERSION}\nmodel = \"BAAI/bge-m3\"\n"),
+        )
+        .unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.model, DEFAULT_MODEL);
+        assert_eq!(loaded.replaced_model.as_deref(), Some("BAAI/bge-m3"));
+        assert_eq!(
+            loaded.model_note().unwrap(),
+            format!(
+                "BAAI/bge-m3 is no longer offered: its Hub repository publishes no \
+                 model.safetensors. This workspace uses {DEFAULT_MODEL} until another \
+                 model is chosen."
+            )
+        );
+        // The note survives a save until a model is chosen.
+        save(tmp.path(), &loaded).unwrap();
+        let again = load(tmp.path()).unwrap();
+        assert_eq!(again.model, DEFAULT_MODEL);
+        assert_eq!(again.replaced_model.as_deref(), Some("BAAI/bge-m3"));
+    }
+
+    #[test]
+    fn a_config_naming_an_unknown_model_loads_with_the_default_and_a_note() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            config_path(tmp.path()),
+            format!("schema_version = {SCHEMA_VERSION}\nmodel = \"someone/typo\"\n"),
+        )
+        .unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.model, DEFAULT_MODEL);
+        assert!(loaded
+            .model_note()
+            .unwrap()
+            .starts_with("someone/typo is not a model chan offers."));
     }
 
     #[test]

@@ -87,8 +87,8 @@ The native selection is 65 names: the 62 the cross-platform section records plus
 On 2026-11-18 the owner decided that the download writes a pinned layout instead of hf-hub's (`dev/v0132/decisions.md` in the development tree, "The review stage", point 1: "hf-hub: yes agree"). That reverses the layout half of the v0.131.0 decision above, and of contract 3. Built on `v0132/download` from `842532b7d`.
 
 - **The pins.** The model table (`config::EMBEDDING_MODELS`) pins each model's commit and the sha256 and size of each file chan downloads.
-  - They were read from the Hub on 2026-11-18: the API's `main` commit, the LFS sha256 for the weights and bge-m3's tokenizer, and the other files fetched at that commit and hashed. Each fetched file's git blob id matched the one the API names.
-  - `BAAI/bge-m3`'s main commit publishes no `model.safetensors`; the Hub answers 404 for it, so bge-m3 could not download before this change either. Its entry pins two files, and its download stops at the weights before any request. The repository has no official conversion, only community pull requests. Dropping bge-m3 or pinning another commit is the owner's call.
+  - They were read from the Hub on 2026-11-18: the API's `main` commit, the LFS sha256 for the weights, and the other files fetched at that commit and hashed. Each fetched file's git blob id matched the one the API names.
+  - `BAAI/bge-m3`'s main commit publishes no `model.safetensors`: the Hub answers 404 for it, so bge-m3 could not download before this change either, and its repository has no official conversion, only community pull requests. On 2026-11-18 the owner dropped it from the model list (`dev/v0132/decisions.md` in the development tree, "Three badge and model calls", point 2). A workspace whose config names it opens with the default model, and Settings and `chan workspace index status` say why until a model is chosen.
 - **The download.** It fetches `resolve/<commit>/<file>` into `snapshots/<commit>/<file>.part` and hashes while it writes (the kept prefix first on a resume). It renames the part into place only when the sha256 matches, then writes `refs/main`. A part of the pinned size that hashes wrong is emptied. The metadata request, `blobs/` and its links, and the Windows rename fallback are gone, with their tests and the captured hf-hub transfer.
 - **Earlier caches.** A cache written before opens offline. All of a model's files come from one snapshot: the pinned one while it holds every pinned file, else the one `refs/main` names while that one does, else the pinned one a download is filling. Files of two snapshots are never mixed.
 - **The rest of the build:**
@@ -110,7 +110,7 @@ On 2026-11-18 the owner decided that the download writes a pinned layout instead
   - A three-note workspace with semantic search on, served by `chan serve`, answered `chan workspace search` in hybrid mode. For a query sharing no word with any note, the matching note ranked first.
 - **The fix round** (one reader's should-fix items and notes):
   - A resume answered with the whole file restarts from it, and one answered at another range empties the part.
-  - bge-m3 is refused before any request: "BAAI/bge-m3 cannot be downloaded: its Hub repository publishes no model.safetensors". Settings and the CLI still list it until the owner decides whether it stays; if it goes, the refusal path stays for the next such model.
+  - A model whose entry pins no copy of a file the embedder reads is refused before any request, in plain words ("... cannot be downloaded: its Hub repository publishes no model.safetensors"); no shipped model is one now, and a test-only entry holds the path.
   - A resume that hashes wrong fetches the whole file once more in the same call.
   - One rule decides "downloaded" for the downloader, the resolver and the seeder, and all of a model's files come from one snapshot.
   - The part an earlier chan left in `blobs/` is removed once its file is published.

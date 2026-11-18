@@ -260,7 +260,6 @@ impl Embedder {
         cache_dir: &Path,
         client: &download::Client,
     ) -> Result<Self, EmbedError> {
-        let _ = lookup_model(model_id)?;
         client.require_published(model_id)?;
         std::fs::create_dir_all(cache_dir)?;
 
@@ -703,7 +702,11 @@ mod tests {
     #[test]
     fn known_models_resolve() {
         assert!(lookup_model("BAAI/bge-small-en-v1.5").is_ok());
-        assert!(lookup_model("BAAI/bge-m3").is_ok());
+        assert!(lookup_model("BAAI/bge-large-en-v1.5").is_ok());
+        assert!(
+            lookup_model("BAAI/bge-m3").is_err(),
+            "BGE M3 left the model list: its repository publishes no weights"
+        );
     }
 
     #[test]
@@ -735,7 +738,10 @@ mod tests {
             repo_dir_name("BAAI/bge-small-en-v1.5"),
             "models--BAAI--bge-small-en-v1.5"
         );
-        assert_eq!(repo_dir_name("BAAI/bge-m3"), "models--BAAI--bge-m3");
+        assert_eq!(
+            repo_dir_name("BAAI/bge-large-en-v1.5"),
+            "models--BAAI--bge-large-en-v1.5"
+        );
     }
 
     #[test]

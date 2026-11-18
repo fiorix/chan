@@ -113,6 +113,9 @@
         Selected: <code>{selectedSemanticModel()!.id}</code>.
       </p>
     {/if}
+    {#if semantic.state?.model_note}
+      <p class="hint" role="note">{semantic.state.model_note}</p>
+    {/if}
   </div>
 </SettingField>
 

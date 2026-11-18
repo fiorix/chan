@@ -855,14 +855,24 @@ fn a_pinned_snapshot_without_its_ref_is_downloaded_and_gets_its_ref() {
 #[test]
 fn a_model_that_pins_no_weights_is_never_downloaded() {
     let cache = tempfile::tempdir().unwrap();
-    let model = config::embedding_model("BAAI/bge-m3").unwrap();
+    let model = &unpublished()[0];
     let repo = cache.path().join(repo_dir_name(model.id));
     let pinned = repo.join("snapshots").join(model.revision);
     std::fs::create_dir_all(&pinned).unwrap();
     for name in MODEL_FILES {
         std::fs::write(pinned.join(name), b"x").unwrap();
     }
-    assert!(!super::super::model_downloaded_in(model.id, cache.path()).unwrap());
+    assert!(!downloaded(&repo, model));
+}
+
+/// A model whose repository publishes no weights: it pins the config and the
+/// tokenizer only. No model chan offers is one now.
+fn unpublished() -> &'static [EmbeddingModelInfo] {
+    pins(
+        "fixture/unpublished",
+        COMMIT,
+        &[("config.json", BODY), ("tokenizer.json", BODY)],
+    )
 }
 
 #[test]
@@ -932,12 +942,14 @@ fn a_model_that_publishes_no_weights_is_refused_before_any_request() {
         cache.path(),
         &server.endpoint,
         chan_tls::client_config().unwrap(),
-    );
-    let error = super::super::Embedder::open_with_client("BAAI/bge-m3", cache.path(), &client)
-        .expect_err("a model whose repository publishes no weights cannot open");
+    )
+    .pinned(unpublished());
+    let error =
+        super::super::Embedder::open_with_client("fixture/unpublished", cache.path(), &client)
+            .expect_err("a model whose repository publishes no weights cannot open");
     assert_eq!(
         error.to_string(),
-        "BAAI/bge-m3 cannot be downloaded: its Hub repository publishes no model.safetensors"
+        "fixture/unpublished cannot be downloaded: its Hub repository publishes no model.safetensors"
     );
     assert!(
         server.requests.lock().unwrap().is_empty(),

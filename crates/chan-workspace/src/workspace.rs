@@ -3655,6 +3655,12 @@ impl Workspace {
         Ok(self.index()?.config().model)
     }
 
+    /// Why the workspace's model stands in for one it named that chan does
+    /// not offer, for Settings and the CLI; `None` when nothing was replaced.
+    pub fn semantic_model_note(&self) -> Result<Option<String>> {
+        Ok(self.index()?.config().model_note())
+    }
+
     /// Persist the per-workspace embedding model.
     /// The index layer validates the curated model id, clears stale
     /// vector metadata, and preserves BM25.
