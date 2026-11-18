@@ -14,7 +14,9 @@
 // variant runs on a tree with `keyboard-focus-native.red.patch` applied,
 // which drops the Computers launcher from the keyboard rule and the deck's
 // own check: the deck run under the launcher then hands the keyboard back
-// to the page.
+// to the page. On a tree with 294's red patch the press steps fail; with
+// --keep-going the run records each fault and goes on, so one red reading
+// shows every step that fails on it.
 //
 // What XTEST drives and what the inspector drives is deliberate: pointer
 // presses, the Computers chord and typed text go through the real input
@@ -38,10 +40,11 @@ const { values } = parseArgs({
     xid: { type: "string" },
     output: { type: "string" },
     backend: { type: "string" },
+    "keep-going": { type: "boolean" },
   },
 });
 if (!values.inspector || !values.xid || !values.output) {
-  console.error("usage: keyboard-focus-native.mjs --inspector HOST:PORT --xid XID --output DIR [--backend xterm|ghostty]");
+  console.error("usage: keyboard-focus-native.mjs --inspector HOST:PORT --xid XID --output DIR [--backend xterm|ghostty] [--keep-going]");
   process.exit(2);
 }
 if (values.backend && !["xterm", "ghostty"].includes(values.backend)) {
@@ -60,7 +63,12 @@ const verdict = {
 };
 const save = () => writeFileSync(verdictPath, `${JSON.stringify(verdict, null, 2)}\n`, { mode: 0o600 });
 const say = (kind, name, detail) => console.log(`${kind} keyboard-focus ${name}${detail === undefined ? "" : ` ${JSON.stringify(detail)}`}`);
+// With --keep-going a fault is recorded and the run goes on, so a red tree
+// shows every step that can fail on it; the run still exits 10 at its end.
+// A step that failed keeps its failure when the code after it passes it.
+const keepGoing = values["keep-going"] === true;
 const pass = (name, detail) => {
+  if (verdict.steps[name]?.ok === false) return;
   verdict.steps[name] = { ok: true, ...detail };
   save();
   say("PASS", name, detail);
@@ -70,13 +78,13 @@ const fail = (name, detail) => {
   verdict.faults.push(name);
   save();
   say("FAIL", name, detail);
-  process.exit(10);
+  if (!keepGoing) process.exit(10);
 };
 const inconclusive = (name, detail) => {
   verdict.steps[name] = { inconclusive: detail ?? true };
   save();
   say("INCONCLUSIVE", name, detail);
-  process.exit(3);
+  process.exit(keepGoing && verdict.faults.length ? 10 : 3);
 };
 
 const bin = process.env.CHAN_BIN;
@@ -667,6 +675,10 @@ async function main() {
   // Terminals stay up for the guest teardown to remove with the workspace.
 
   save();
+  if (verdict.faults.length) {
+    console.log(`FAULTS keyboard-focus ${JSON.stringify(verdict.faults)}`);
+    process.exit(10);
+  }
   console.log("PASS keyboard-focus all desktop steps held");
 }
 
@@ -683,6 +695,6 @@ main().then(
     } catch {
       /* The work dir is gone; the line above is the record. */
     }
-    process.exit(3);
+    process.exit(keepGoing && verdict.faults.length ? 10 : 3);
   },
 );
