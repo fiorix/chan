@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // Keyboard ownership on chan-desktop (WebKitGTK): a real pointer press on
 // the Rich Prompt's Submit keeps the composer's focus at the press and after
-// the click; a deck run that settles while the Computers launcher is shown
-// leaves the keyboard with the launcher; and the deck opened by key returns
-// into Search. Anything the guest cannot show ends the run inconclusive, not
-// failed: exit 0 holds, 1 (via obs_fault in the wrapper: never here) would be
-// a fault, 2 the environment cannot run this driver, 3 inconclusive.
-// Exit 10 reports an observed fault (the wrapper's obs_judge turns it into 1).
+// the click; a deck run, and a deck dismissal, that settle while the
+// Computers launcher is shown leave the keyboard with the launcher; and the
+// deck opened by key returns into Search. Anything the guest cannot show ends
+// the run inconclusive, not failed: exit 0 holds, 2 the environment cannot
+// run this driver, 3 inconclusive. Exit 10 reports an observed fault (the
+// wrapper's obs_judge turns it into 1). Its red variant runs on a tree with
+// `../browser-smoke/checks/294-rich-prompt-strip-press.red.patch` applied:
+// the first press then moves focus out of the composer.
 //
 // What XTEST drives and what the inspector drives is deliberate: pointer
 // presses, the Computers chord and typed text go through the real input
@@ -237,6 +239,7 @@ async function focusState(card) {
     const active = document.activeElement;
     return {
       text: editor?.textContent ?? null,
+      editable: editor?.getAttribute("contenteditable") === "true",
       where:
         active === null || active === document.body
           ? "body"
@@ -267,6 +270,25 @@ async function paneIds() {
       terminals: node.querySelectorAll(".terminal-tab").length,
     })),
   );
+}
+
+/// The focused pane's id, or null when no pane carries the focused class.
+async function activePaneId() {
+  return (await paneIds()).find((pane) => pane.focused)?.id ?? null;
+}
+
+/// A press point the instrument can stand behind: the element's centre must
+/// hit-test to the element itself, or the press proves nothing about it.
+async function pressPoint(selector) {
+  const point = await screenPoint(selector);
+  const under = await page.evaluate((selector) => {
+    const el = document.querySelector(selector);
+    const box = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2));
+    return hit === el || el.contains(hit) ? null : (hit ? `${hit.tagName}.${hit.className}` : "nothing");
+  }, selector);
+  if (under !== null) throw new Error(`the centre of ${selector} hit-tests to ${under}, not the element`);
+  return point;
 }
 
 async function waitForCard(card, timeout = 30_000) {
@@ -340,23 +362,26 @@ async function main() {
   await x([], "type", "--delay", "12", TEXT);
   const typed = await until("the draft is editable", () => focusState(cardA), (s) => (s.text === TEXT ? s : false));
   if (typed.where !== "composer") throw new Error(`composer did not take the keyboard: ${typed.where}`);
-  const press = await screenPoint(`${cardA} .rp-primary`);
+  const press = await pressPoint(`${cardA} .rp-primary`);
   await x([], "mousemove", String(press.x), String(press.y), "mousedown", "1");
   await delay(300);
   const held = await focusState(cardA);
   await x([], "mouseup", "1");
-  if (held.where !== "composer") throw new Error(`press moved focus out of the composer: ${held.where}`);
+  if (held.where !== "composer") fail("press holds the composer", { where: held.where });
   pass("press holds the composer", { where: held.where });
-  await until("the submit delivers", () => focusState(cardA), (s) => s.text === "" || s.text === null, 15_000);
+  const delivered = await until("the submit delivers", () => focusState(cardA), (s) => s.text === "" || s.text === null, 15_000)
+    .catch(() => null);
+  if (!delivered) fail("click submits and the next key types", { submitted: false });
+  // One key, typed once: a retry would type a second x into a composer
+  // that took the first.
+  await x([], "type", "x");
   const after = await until(
     "the next key reaches the composer",
-    async () => {
-      await x([], "type", "x");
-      return focusState(cardA);
-    },
+    () => focusState(cardA),
     (s) => (s.text === "x" && s.where === "composer" ? s : false),
+    5_000,
   ).catch(() => null);
-  if (!after) throw new Error("the next key did not reach the composer with no click");
+  if (!after) fail("click submits and the next key types", { after: await focusState(cardA) });
   pass("click submits and the next key types", { where: after.where });
   const tabA = await readTerminalId(".terminal-tab.active");
 
@@ -393,17 +418,18 @@ async function main() {
   await until("B's draft is editable", () => focusState(cardB), (s) => (s.text === "KbdFocusB" && s.editable ? s : false));
   const hostA = await screenPoint(`.terminal-tab[data-terminal-tab-id="${tabA}"] .terminal-host`);
   await x([], "mousemove", String(hostA.x), String(hostA.y), "click", "1");
-  const paneA = await activePaneId(page);
-  const pressB = await screenPoint(`${cardB} .rp-primary`);
+  const paneA = await activePaneId();
+  const pressB = await pressPoint(`${cardB} .rp-primary`);
   await x([], "mousemove", String(pressB.x), String(pressB.y), "mousedown", "1");
   await delay(300);
   const heldB = await focusState(cardB);
   await x([], "mouseup", "1");
-  if (heldB.where !== "composer") throw new Error(`press moved focus out of B's composer: ${heldB.where}`);
+  if (heldB.where !== "composer") fail("two-pane submit keeps focus and pane", { held: heldB.where });
   const sentB = await until("B's submit sends and clears", () => focusState(cardB), (s) =>
     s.text === "" || s.text === null ? s : false,
-  );
-  const paneNow = await activePaneId(page);
+  ).catch(() => null);
+  if (!sentB) fail("two-pane submit keeps focus and pane", { sent: false, state: await focusState(cardB) });
+  const paneNow = await activePaneId();
   pass("two-pane submit keeps focus and pane", {
     focus: sentB.where,
     paneA,
@@ -421,17 +447,58 @@ async function main() {
   ).catch(() => false);
   if (!shown) inconclusive("computers launcher did not show", "ctrl+shift+p showed no data-launcher-shown");
   pass("computers launcher shown", {});
-  await dispatch("app.launcher.toggle");
-  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 500)));
-  const deckShown = await page.evaluate(() => Boolean(document.querySelector('[role="dialog"][aria-label="Command launcher"] .deck-input')));
-  if (!deckShown) throw new Error("the command launcher did not open over the Computers launcher");
+  // The page's command bus records what a deck run dispatches, so a run is
+  // told apart from a dismissal by its command, not by the deck closing.
+  await page.evaluate(() => {
+    window.__kbdCommands = [];
+    window.addEventListener("chan:command", (event) => window.__kbdCommands.push(event.detail?.name ?? null));
+  });
+  const deck = '[role="dialog"][aria-label="Command launcher"]';
+  const openDeck = async () => {
+    await dispatch("app.launcher.toggle");
+    await until("the deck opens over the Computers launcher",
+      () => page.evaluate((deck) => Boolean(document.querySelector(`${deck} .deck-input`)), deck), Boolean, 10_000);
+  };
+  const deckClosed = () => until("the deck closes",
+    () => page.evaluate((deck) => !document.querySelector(deck), deck), Boolean, 10_000);
+  const launcherShown = () => page.evaluate(() => document.documentElement.hasAttribute("data-launcher-shown"));
+  // The Computers launcher holds the native keyboard, so the run's query and
+  // its Enter go to the deck through the page, not through XTEST.
+  await openDeck();
   pass("deck opened over the launcher", {});
-  await dispatch("app.launcher.toggle");
+  await page.evaluate((deck) => {
+    const input = document.querySelector(`${deck} .deck-input`);
+    input.value = "Copy scrollback";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, deck);
+  await until("the deck selects Copy scrollback",
+    () => page.evaluate(() => document.querySelector('[role="option"][aria-selected="true"] .deck-result-title')?.textContent?.trim() ?? null),
+    (title) => title === "Copy scrollback", 10_000);
+  await page.evaluate((deck) => {
+    document.querySelector(`${deck} .deck-input`)
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  }, deck);
+  await deckClosed();
+  const ran = await until("the row's command dispatches",
+    () => page.evaluate(() => window.__kbdCommands.includes("app.terminal.copyScrollback")), Boolean, 10_000);
+  await delay(500);
   const settled = await focusState(null);
-  if (settled.where !== "body") throw new Error(`a deck run under the Computers launcher moved page focus to ${settled.where}`);
-  const stillShown = await page.evaluate(() => document.documentElement.hasAttribute("data-launcher-shown"));
-  if (!stillShown) throw new Error("the Computers launcher hid during the deck run");
-  pass("deck settles under the launcher", { active: settled.where });
+  if (settled.where !== "body") fail("deck run settles under the launcher", { active: settled.where });
+  if (!(await launcherShown())) fail("deck run settles under the launcher", { launcherShown: false });
+  pass("deck run settles under the launcher", { active: settled.where, ran });
+
+  // A dismissal: the deck closes by its own toggle and runs nothing.
+  const before = await page.evaluate(() => window.__kbdCommands.length);
+  await openDeck();
+  await dispatch("app.launcher.toggle");
+  await deckClosed();
+  await delay(500);
+  const dismissed = await focusState(null);
+  const extra = await page.evaluate((before) => window.__kbdCommands.slice(before).filter((name) => name !== "app.launcher.toggle"), before);
+  if (extra.length) throw new Error(`the dismissal dispatched ${JSON.stringify(extra)}`);
+  if (dismissed.where !== "body") fail("deck dismissal settles under the launcher", { active: dismissed.where });
+  if (!(await launcherShown())) fail("deck dismissal settles under the launcher", { launcherShown: false });
+  pass("deck dismissal settles under the launcher", { active: dismissed.where });
   await x([], "key", "ctrl+shift+p");
   const hidden = await until(
     "the Computers launcher hides again",
@@ -477,10 +544,11 @@ async function main() {
         return document.activeElement === input ? (input.value ?? null) : false;
       }),
     (value) => value !== false,
-  );
+  ).catch(() => false);
+  if (back === false) fail("deck by key returns into Search", { openedBy, active: (await focusState(null)).where });
   await x([], "type", "Q");
   const query = await page.evaluate(() => document.querySelector(".search .head input")?.value ?? null);
-  if (!query || !query.includes("Q")) throw new Error(`typed text did not land in Search, got ${JSON.stringify(query)}`);
+  if (!query || !query.includes("Q")) fail("deck by key returns into Search", { openedBy, query });
   pass("deck by key returns into Search", { openedBy, nativeSearchFocus, query });
   await dispatch("app.search.toggle");
   // Terminals stay up for the guest teardown to remove with the workspace.
@@ -489,16 +557,19 @@ async function main() {
   console.log("PASS keyboard-focus all desktop steps held");
 }
 
+// A product property that does not hold calls fail() and exits 10; any
+// other error is the instrument's (a wait, a lookup, the inspector), so it
+// ends the run inconclusive.
 main().then(
   () => process.exit(0),
   (error) => {
-    console.error(`FAULT keyboard-focus ${error.message}`);
+    console.error(`INCONCLUSIVE keyboard-focus ${error.message}`);
     try {
-      verdict.fault = String(error.message ?? error);
+      verdict.instrument = String(error.message ?? error);
       save();
     } catch {
       /* The work dir is gone; the line above is the record. */
     }
-    process.exit(10);
+    process.exit(3);
   },
 );
