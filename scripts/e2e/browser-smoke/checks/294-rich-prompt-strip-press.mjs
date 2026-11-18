@@ -3,16 +3,15 @@
 // and after the release the next key reaches it with no click. The same
 // hold keeps focus through a recall and a failed recall, made while the
 // shell prints so that each submit is still queued at the press, and a
-// two-pane press sends without activating the other pane. A deck run opened over
-// Search returns to the Search input. The red variant of this check runs
-// the same file on a tree with the strip's pointerdown handler removed:
-// step 1 then fails on any engine that focuses a button on a press.
+// two-pane press moves no focus, then sends and gives the keyboard to that
+// pane's composer while the other pane stays the active one, as today. A
+// deck run opened over Search returns to the Search input. The red variant
+// of this check runs the same file on a tree with the strip's pointerdown
+// handler removed: step 1 then fails on any engine that focuses a button on
+// a press.
 //
 // What jsdom cannot see (a real press focusing a button) is why this is a
 // guest check: the mounted suite pins the handler, this pins the effect.
-// The image leg only records: whether the composer takes focus when image
-// paths arrive and whether the other pane activates are the owner's open
-// questions, so the check reports them without failing on them.
 
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
@@ -240,11 +239,6 @@ async function activePaneId(page) {
   return active.id;
 }
 
-const ONE_PX_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-  "base64",
-);
-
 export default {
   name: "rich-prompt-strip-press",
   async run(ctx) {
@@ -262,8 +256,6 @@ export default {
     });
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
-    const boxPath = join(ctx.workspaceDir, "box294.png");
-    writeFileSync(boxPath, ONE_PX_PNG);
     const shot = (label) => ctx.shot(`294-${label}`).catch(() => {});
     const failures = [];
     try {
@@ -468,35 +460,6 @@ export default {
             assert.equal(await activePaneId(page), paneA, "A is still the active pane");
             result.steps.twoPane = { pane: paneA, prompts: promptsB.length, record: recordB };
             await shot(`294-${backend}-twopane`);
-
-            // The image leg only records: whether the composer takes focus
-            // when the paths arrive and whether B activates are open owner
-            // questions, so the check reports them without failing on them.
-            const imageText = `![box](${boxPath})`;
-            await page.click(`${cardB} .cm-content`);
-            await page.keyboard.type(imageText);
-            await waitFor(page, cardB, "the image draft is editable",
-              (value) => value.text.includes("box294.png") && value.editable && !value.pending);
-            const pointI = await installPressRecord(page, `${cardB} .rp-primary`);
-            const { heldI, recordI } = await holdPress(page, pointI, async () => ({
-              heldI: await focusState(page, cardB),
-              recordI: await readPressRecord(page),
-            }));
-            const samples = [{ at: 0, focus: heldI.where, pane: await activePaneId(page).catch(() => null) }];
-            for (let elapsed = 250; elapsed <= 6000; elapsed += 250) {
-              await sleep(250);
-              const seen = await focusState(page, cardB);
-              samples.push({ at: elapsed, focus: seen.where, pane: await activePaneId(page).catch(() => null) });
-              if (seen.text === "" && !seen.pending) break;
-            }
-            result.steps.image = {
-              heldFocus: heldI.where,
-              record: recordI,
-              samples,
-              composerFocusedAtEnd: samples[samples.length - 1].focus === "composer",
-              paneBecameActive: samples.some((sample) => sample.pane && sample.pane !== paneA),
-            };
-            await shot(`294-${backend}-image`);
 
             // A deck run opened over Search returns to the Search input.
             await dispatchCommand(page, "app.search.toggle");
