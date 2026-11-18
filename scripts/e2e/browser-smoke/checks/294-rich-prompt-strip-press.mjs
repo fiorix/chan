@@ -365,24 +365,40 @@ export default {
             result.steps.failedRecall = { where: failed.where, text: failed.text, dropped };
             await shot(`294-${backend}-failed`);
 
-            // The secondary action, when the window has a queued prompt to
-            // recall. Absent here unless a submit left one queued.
-            const secondary = await page.$(`${card} .rp-action:not(.rp-primary)`);
-            if (secondary) {
-              const point = await installPressRecord(page, `${card} .rp-action:not(.rp-primary)`);
-              const { held, secondaryRecord } = await holdPress(page, point, async () => ({
-                held: await focusState(page, card),
-                secondaryRecord: await readPressRecord(page),
-              }));
-              try {
-                assert.equal(held.where, "composer", "the secondary press holds the composer");
-              } catch (error) {
-                throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(secondaryRecord)}`);
-              }
-              result.steps.secondary = { where: held.where, record: secondaryRecord };
-            } else {
-              result.steps.secondary = "absent: no queued prompt to recall";
+            // The secondary action: the failed recall's prompt is still
+            // queued behind the printing shell, and recall is offered once
+            // the composer is empty. A disabled button cannot take focus, so
+            // the press proves nothing unless the button is enabled.
+            await page.keyboard.down("Control");
+            await page.keyboard.press("KeyA");
+            await page.keyboard.up("Control");
+            await page.keyboard.press("Backspace");
+            await waitFor(page, card, "precondition: the composer is empty", (value) => value.text === "");
+            const secondaryButton = `${card} .rp-action:not(.rp-primary)`;
+            const secondary = await page.waitForFunction(
+              (selector) => {
+                const button = document.querySelector(selector);
+                return button && !button.disabled ? button.textContent?.trim() || "?" : false;
+              },
+              { timeout: 5000 },
+              secondaryButton,
+            ).then((handle) => handle.jsonValue()).catch(() => null);
+            if (!secondary) {
+              const seen = await page.$eval(secondaryButton, (button) => ({ label: button.textContent?.trim(), disabled: button.disabled }))
+                .catch(() => "absent");
+              throw new Error(`precondition: an enabled secondary recall once the composer is empty; it reads ${JSON.stringify(seen)}`);
             }
+            const secondaryPoint = await installPressRecord(page, secondaryButton);
+            const { held, secondaryRecord } = await holdPress(page, secondaryPoint, async () => ({
+              held: await focusState(page, card),
+              secondaryRecord: await readPressRecord(page),
+            }));
+            try {
+              assert.equal(held.where, "composer", "the secondary press holds the composer");
+            } catch (error) {
+              throw new Error(`${error.message}\nPRESS RECORD: ${JSON.stringify(secondaryRecord)}`);
+            }
+            result.steps.secondary = { label: secondary, where: held.where, record: secondaryRecord };
             writeFileSync(stop, "");
 
             // Two panes: B's composer is open while A is active. A real
