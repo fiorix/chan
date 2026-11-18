@@ -14,7 +14,7 @@
 //! single webview to the tenant URL; back-to-Computers navigates it home.
 //!
 //! The HTTP bridge callbacks that open devservers carry no app handle, so
-//! the rostered-connect path stashes one here ([`stash_mobile_app_handle`]);
+//! the rostered-connect path stashes one here (`stash_mobile_app_handle`);
 //! opens refuse until a stash lands. Roster polling pauses while the app is
 //! backgrounded through an `NSNotificationCenter` observer registered from
 //! the same path; the OS would freeze the timers anyway, and the foreground
