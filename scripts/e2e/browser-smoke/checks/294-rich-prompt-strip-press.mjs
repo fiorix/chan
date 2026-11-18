@@ -72,7 +72,7 @@ function tracePrompts() {
             /* Raw input is not JSON. */
           }
           if (frame?.type === "prompt") trace.prompts.push({ ...frame, tab });
-          if (trace.dropCancel && frame?.type === "prompt-cancel") {
+          if (trace.dropCancel && frame?.type === "cancel-prompt") {
             trace.droppedCancels += 1;
             return;
           }
