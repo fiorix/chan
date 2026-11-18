@@ -1,26 +1,43 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chan_tls::rustls;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use super::tests::{fixture, in_child, is_child, COMMIT};
 use super::{Client, EmbedError};
 
-const CA: &[u8] = include_bytes!("testdata/ca.der");
-const LEAF: &[u8] = include_bytes!("testdata/localhost.der");
-const KEY: &[u8] = include_bytes!("testdata/localhost-key.pk8");
 const IO_LIMIT: Duration = Duration::from_secs(3);
 const SERVER_LIMIT: Duration = Duration::from_secs(15);
 const BODY: &[u8] = b"{\"tls_fixture\":true}\n";
 
+/// The CA the fixture servers chain to, and their leaf for `localhost` and
+/// `127.0.0.1` with its key: made once per test process, so a test that
+/// runs its server in a child makes the child's own.
+fn fixture_pki() -> &'static (
+    CertificateDer<'static>,
+    CertificateDer<'static>,
+    PrivateKeyDer<'static>,
+) {
+    static PKI: OnceLock<(
+        CertificateDer<'static>,
+        CertificateDer<'static>,
+        PrivateKeyDer<'static>,
+    )> = OnceLock::new();
+    PKI.get_or_init(|| {
+        let ca = chan_tls::testing::pki::ca("chan model download test CA");
+        let leaf = chan_tls::testing::pki::leaf(&ca);
+        (ca.cert.clone(), leaf.cert.clone(), leaf.key.clone_key())
+    })
+}
+
 fn trusted_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(CertificateDer::from(CA)).unwrap();
+    roots.add(fixture_pki().0.clone()).unwrap();
     rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -59,10 +76,7 @@ impl Server {
                 .with_safe_default_protocol_versions()
                 .unwrap()
                 .with_no_client_auth()
-                .with_single_cert(
-                    vec![CertificateDer::from(LEAF)],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY.to_vec())),
-                )
+                .with_single_cert(vec![fixture_pki().1.clone()], fixture_pki().2.clone_key())
                 .unwrap(),
             )
         });
