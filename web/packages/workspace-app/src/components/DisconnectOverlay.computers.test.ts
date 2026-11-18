@@ -16,6 +16,7 @@ import { resetHostVocabularyForTests } from "../api/nativeVocabulary";
 import { resetConnectionHealthForTests, setConnectionWatchStatus, watchConnectionProbe } from "../state/connectionHealth.svelte";
 import { overlayStack, ui } from "../state/store.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
+import coverSource from "./DisconnectOverlay.svelte?raw";
 
 type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: unknown) => Promise<unknown> } };
 
@@ -128,6 +129,16 @@ function button(target: HTMLElement, label: string): HTMLButtonElement {
   return found!;
 }
 
+/// The cover's own stylesheet in the test page: vitest applies no component
+/// CSS to a mounted component, and getComputedStyle reads only the rules
+/// the document holds.
+function installStyles(): HTMLStyleElement {
+  const style = document.createElement("style");
+  style.textContent = coverSource.match(/<style>([\s\S]*)<\/style>/)![1];
+  document.head.append(style);
+  return style;
+}
+
 const pressTab = (cover: HTMLElement, shiftKey = false): boolean =>
   cover.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
 
@@ -161,8 +172,18 @@ describe("Show in Computers on the reconnecting cover", () => {
   // The card is centred on the window, so a row that enters it moves every
   // row below. jsdom lays nothing out; what it can show is that no row of
   // the card enters or leaves when Restart connection and Abandon appear:
-  // their place is held, hidden, from the moment the cover shows.
+  // their place is held, hidden by the cover's own stylesheet, from the
+  // moment the cover shows.
   test("keeps its place when Restart connection and Abandon appear", async () => {
+    const style = installStyles();
+    try {
+      await keepsItsPlace();
+    } finally {
+      style.remove();
+    }
+  });
+
+  async function keepsItsPlace(): Promise<void> {
     desktopWindow("dev-1");
     const cover = await dropConnection(await mountCover());
     const card = cover.querySelector<HTMLElement>(".card")!;
@@ -171,8 +192,14 @@ describe("Show in Computers on the reconnecting cover", () => {
     const heldAtShow = [...card.querySelectorAll<HTMLButtonElement>("button")].map((b) => ({
       button: b, text: b.textContent?.trim(), inert: inert(b), disabled: b.disabled,
     }));
+    const restartRow = heldAtShow[0].button.closest<HTMLElement>(".actions")!;
+    const computersRow = heldAtShow[2].button.closest<HTMLElement>(".actions")!;
+    const note = card.querySelector<HTMLElement>(".action-note")!;
+    const shown = () => [restartRow, note, computersRow].map((el) => getComputedStyle(el).visibility);
+    expect(shown(), "Restart connection's row and its note hidden, Show in Computers' row not").toEqual(["hidden", "hidden", "visible"]);
 
     await toRecoveryActions();
+    expect(shown(), "all shown at 8 s").toEqual(["visible", "visible", "visible"]);
     expect([...card.children], "no row entered or left the card").toEqual(rowsAtShow);
     expect(heldAtShow.map(({ text, inert, disabled }) => ({ text, inert, disabled })), "held, not offered, until 8 s").toEqual([
       { text: "Restart connection", inert: true, disabled: true },
@@ -184,7 +211,7 @@ describe("Show in Computers on the reconnecting cover", () => {
     expect(inert(restart)).toBe(false);
     expect(restart.disabled).toBe(false);
     expect(labels(target)).toEqual(["Restart connection", "Abandon", "Show in Computers"]);
-  });
+  }
 
   test("is in the cover's Tab cycle with the other actions", async () => {
     desktopWindow("dev-1");
