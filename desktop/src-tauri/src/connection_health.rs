@@ -512,7 +512,7 @@ impl ProbePacer {
 
     /// A window of the desktop gained or lost the focus, or went away
     /// (`focused` false). When the desktop gains the focus, every feed
-    /// pings once.
+    /// pings once, in the same update of the pace.
     pub(crate) fn window_focus(&self, label: &str, focused: bool) {
         let now_focused = {
             let mut windows = self.focused.lock().unwrap_or_else(|e| e.into_inner());
@@ -523,16 +523,14 @@ impl ProbePacer {
             }
             !windows.is_empty()
         };
-        let mut gained = false;
         self.pace.send_if_modified(|pace| {
-            gained = now_focused && !pace.focused;
+            if now_focused && !pace.focused {
+                pace.nudges = pace.nudges.wrapping_add(1);
+            }
             let changed = pace.focused != now_focused;
             pace.focused = now_focused;
             changed
         });
-        if gained {
-            self.ping_now();
-        }
     }
 
     /// Ask every feed whose devserver has answered for one ping now.
