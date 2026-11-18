@@ -1,7 +1,7 @@
---- a/web/packages/workspace-app/src/state/focusGuard.svelte.ts
-+++ b/web/packages/workspace-app/src/state/focusGuard.svelte.ts
-@@ -45,7 +45,6 @@
- export function keyboardOwned(slot: SurveySlot, except?: OverlayId): boolean {
+--- a/web/packages/workspace-app/src/state/keyboardOwner.svelte.ts
++++ b/web/packages/workspace-app/src/state/keyboardOwner.svelte.ts
+@@ -122,7 +122,6 @@
+ export function legacyKeyboardOwned(slot: SurveySlot, except?: OverlayId): boolean {
    if (modalDialogOpen()) return true;
    if (surveyFor(slot) !== null) return true;
 -  if (launcherShown) return true;

@@ -5,7 +5,7 @@
 // recall gives its text back, on each tab-focus pulse, and when a submit held
 // for its images' paths is sent. A modal dialog, a survey over the terminal,
 // the Computers launcher and an overlay over the panes own the keyboard
-// (`refocusRefused`), and while one does none of those moves focus into the
+// (`legacyKeyboardOwned`), and while one does none of those moves focus into the
 // composer; once it lets go, the next pulse lands in the composer again.
 // A TerminalTab is mounted over the stand-in xterm and socket, so the
 // phases arrive as the server's frames.
@@ -43,7 +43,7 @@ import Terminals from "./Terminals.svelte";
 import { api, type SurveySpec } from "../api/client";
 import { closeConfirmState } from "../state/closeConfirm.svelte";
 import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 import { richPrompt, showRichPromptForTab, toggleRichPromptSource } from "../state/richPrompt.svelte";
 import { overlayStack, ui, workspace } from "../state/store.svelte";
 import { dialogIn } from "../__tests__/dialog";

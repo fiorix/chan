@@ -36,7 +36,7 @@ import PromptModal from "./PromptModal.svelte";
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import SearchPanel from "./SearchPanel.svelte";
 import TerminalTab from "./TerminalTab.svelte";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import {
   attach,

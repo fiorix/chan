@@ -89,8 +89,7 @@
     activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { keyboardOwned, launcherShownOverWindow } from "../state/focusGuard.svelte";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { launcherShownOverWindow, legacyKeyboardOwned, ownerTag } from "../state/keyboardOwner.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -886,7 +885,7 @@
         heir.closest<HTMLElement>("[data-terminal-tab-id]")?.dataset.terminalTabId === activeTerminalTab()?.id
       );
     if (heir && !modalDialogOpen() && topOverlayPanelContains(heir)) return true;
-    return !keyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
+    return !legacyKeyboardOwned(activeTerminalTab()?.id ?? null, "launcher");
   }}
   {toggleChord}
 />

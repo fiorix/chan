@@ -29,7 +29,7 @@
   import { commandTitle } from "../state/commands";
   // The tree button is named by its command, which this registers.
   import "../state/commands/install";
-  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard.svelte";
+  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/keyboardOwner.svelte";
   import {
     closePaneTree,
     hiddenTabStatus,

@@ -42,7 +42,7 @@ import {
   splitPane,
   type LeafNode,
 } from "../state/tabs.svelte";
-import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/keyboardOwner.svelte";
 
 stubAppEnvironment();
 

@@ -238,7 +238,7 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { keyboardOwned, launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import { surveyFor } from "../state/survey.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
@@ -266,7 +266,7 @@
   // once those owners release it, the same calls legitimately restore the
   // terminal.
   function focusTerminal(): void {
-    if (refocusRefused(tab.id)) return;
+    if (legacyKeyboardOwned(tab.id)) return;
     term?.focus();
   }
 
@@ -812,7 +812,7 @@
       // keyboard over every terminal: the move hands it to nothing, even to
       // the survey card over the terminal that moved. The rule reads null so
       // a survey over this terminal alone still reaches its branch below.
-      if (keyboardOwned(null)) return;
+      if (legacyKeyboardOwned(null)) return;
       const owner = document.activeElement;
       if (
         owner !== null &&
@@ -2359,7 +2359,7 @@
       focusTerminal();
       return;
     }
-    if (refocusRefused(tab.id)) return;
+    if (legacyKeyboardOwned(tab.id)) return;
     host?.focus({ preventScroll: true });
   }
 

@@ -8,7 +8,7 @@
 // effect that asked while one showed asks again when it lets go.
 
 import { modalDialogOpen, topOverlay, type OverlayId } from "./store.svelte";
-import { surveyFor } from "./survey.svelte";
+import { surveyFor, type SurveySlot } from "./survey.svelte";
 import { activeTerminalTab } from "./tabs.svelte";
 
 /// The attribute each owner surface puts on its root, valued by `ownerTag`.
@@ -109,4 +109,20 @@ export function mayFocus(element: Element | null): boolean {
   if (current === null) return true;
   if (current.kind === "launcher") return false;
   return element !== null && current.root !== null && current.root.contains(element);
+}
+
+/// The per-terminal rule the focus movers read before `mayFocus`, kept as
+/// it was so moving them here changes nothing they do: true while a modal
+/// dialog, a survey over the terminal in `slot`, a window-wide survey, the
+/// Computers launcher or an overlay over the panes holds the keyboard. It
+/// counts a survey over that terminal in any pane, and no survey over
+/// another terminal. `except` names an overlay that does not count against
+/// its own return: the command deck's focus return reads the rule after it
+/// closed.
+export function legacyKeyboardOwned(slot: SurveySlot, except?: OverlayId): boolean {
+  if (modalDialogOpen()) return true;
+  if (surveyFor(slot) !== null) return true;
+  if (launcherShown) return true;
+  const top = topOverlay();
+  return top !== null && top !== except;
 }

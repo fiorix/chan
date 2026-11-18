@@ -4,7 +4,7 @@
        setRichPromptCaret(tab, 0, 0);
        if (focused) {
          queueMicrotask(() => {
--          if (!refocusRefused(tab.id)) activeEditor()?.focusAt(0);
+-          if (!legacyKeyboardOwned(tab.id)) activeEditor()?.focusAt(0);
 +          activeEditor()?.focusAt(0);
          });
        }

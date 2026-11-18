@@ -1381,10 +1381,10 @@ mod tests {
     fn the_covered_marker_is_the_one_the_terminal_reads() {
         // The host page's terminal skips its resume refocus on this root
         // attribute, and the window tab bar hides its contents on it, both
-        // through the page's focus guard; both sides spell it from one
-        // constant each.
-        const FOCUS_GUARD: &str =
-            include_str!("../../../web/packages/workspace-app/src/state/focusGuard.svelte.ts");
+        // through the page's keyboard owner module; both sides spell it from
+        // one constant each.
+        const KEYBOARD_OWNER: &str =
+            include_str!("../../../web/packages/workspace-app/src/state/keyboardOwner.svelte.ts");
         const TERMINAL_TAB: &str =
             include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
         const WINDOW_TAB_BAR: &str =
@@ -1394,9 +1394,13 @@ mod tests {
             .contains("hostCovered() { document.documentElement.setAttribute(COVERED, ''); }"));
         assert!(TRANSITION_JS
             .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
-        assert!(FOCUS_GUARD.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";"));
-        assert!(FOCUS_GUARD.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)"));
-        assert!(TERMINAL_TAB.contains("from \"../state/focusGuard.svelte\";"));
+        assert!(
+            KEYBOARD_OWNER.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";")
+        );
+        assert!(
+            KEYBOARD_OWNER.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)")
+        );
+        assert!(TERMINAL_TAB.contains("from \"../state/keyboardOwner.svelte\";"));
         assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
         assert!(WINDOW_TAB_BAR.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
     }

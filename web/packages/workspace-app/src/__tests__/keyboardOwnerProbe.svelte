@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyboardOwned } from "../state/focusGuard.svelte";
+  import { legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import type { OverlayId } from "../state/store.svelte";
   import type { SurveySlot } from "../state/survey.svelte";
 
@@ -11,7 +11,7 @@
     except?: OverlayId;
   } = $props();
 
-  const owned = $derived(keyboardOwned(slot, except));
+  const owned = $derived(legacyKeyboardOwned(slot, except));
 </script>
 
 <span data-owned={owned ? "yes" : "no"}></span>

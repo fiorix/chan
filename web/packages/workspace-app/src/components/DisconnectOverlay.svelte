@@ -20,7 +20,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { launcherShownOverWindow, legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
   import { surveyFor } from "../state/survey.svelte";
   import { teamDialogState } from "../state/teamDialog.svelte";
@@ -245,7 +245,7 @@
     // The tab pulse invokes the terminal or editor's own focus routine, which
     // re-arms its real keyboard surface and cursor after the cover has gone.
     if (returnTo.surface) {
-      if (!refocusRefused(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
+      if (!legacyKeyboardOwned(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
     }
     else if (saved.isConnected) saved.focus({ preventScroll: true });
   }

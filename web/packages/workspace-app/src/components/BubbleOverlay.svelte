@@ -25,8 +25,7 @@
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
   import { activeTabInPane, activeTerminalTab, layout, tabFocusPulse } from "../state/tabs.svelte";
-  import { keyboardOwned } from "../state/focusGuard.svelte";
-  import { ownerTag } from "../state/keyboardOwner.svelte";
+  import { legacyKeyboardOwned, ownerTag } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -83,7 +82,7 @@
         // The remembered element gets the keyboard back only while no other
         // owner holds it: a survey closing under a dialog, the launcher or
         // an overlay must not move focus into the composer behind them.
-        if (!active && shown && ownsKeyboard() && !keyboardOwned(ownerSlot)) {
+        if (!active && shown && ownsKeyboard() && !legacyKeyboardOwned(ownerSlot)) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
         }
@@ -115,10 +114,10 @@
     // the keyboard back from it. The first arrival still takes it, as before.
     const regrab = focusedSurveyId === id;
     focusedSurveyId = id;
-    if (regrab && keyboardOwned(null)) return;
+    if (regrab && legacyKeyboardOwned(null)) return;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard() && !(regrab && keyboardOwned(null))) {
+      if (shown && active?.surveyId === id && ownsKeyboard() && !(regrab && legacyKeyboardOwned(null))) {
         card?.focus({ preventScroll: true });
       }
     });

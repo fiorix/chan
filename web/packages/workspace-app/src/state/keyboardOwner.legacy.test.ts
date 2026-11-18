@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The one keyboard-ownership rule over a terminal and its composer: a modal
+// The per-terminal rule the focus movers read before `mayFocus`: a modal
 // dialog, a survey over that terminal, a window-wide survey, the Computers
 // launcher while shown, and an overlay over the panes (the command launcher,
 // Search, Settings). While one of them owns the keyboard, neither the
@@ -12,7 +12,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import KeyboardOwnerProbe from "../__tests__/keyboardOwnerProbe.svelte";
-import { keyboardOwned, LAUNCHER_SHOWN_ATTR, refocusRefused } from "./focusGuard.svelte";
+import { LAUNCHER_SHOWN_ATTR, legacyKeyboardOwned } from "./keyboardOwner.svelte";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState } from "./confirm.svelte";
 import {
@@ -88,37 +88,37 @@ const OWNERS: Owner[] = [
 
 describe("the rule names every owner", () => {
   test.each(OWNERS.map((owner) => [owner.name, owner] as const))("%s owns the keyboard while it shows", async (_name, owner) => {
-    expect(keyboardOwned(SLOT), "nothing shows").toBe(false);
+    expect(legacyKeyboardOwned(SLOT), "nothing shows").toBe(false);
     owner.take();
     // The launcher's mark crosses a MutationObserver; the rest are synchronous.
     await tick();
-    expect(keyboardOwned(SLOT), "the owner shows").toBe(true);
+    expect(legacyKeyboardOwned(SLOT), "the owner shows").toBe(true);
     owner.release();
     await tick();
-    expect(keyboardOwned(SLOT), "the owner let go").toBe(false);
+    expect(legacyKeyboardOwned(SLOT), "the owner let go").toBe(false);
   });
 
   test("a survey over another terminal owns nothing here", () => {
     showSurvey(SURVEY, "tab-elsewhere");
-    expect(keyboardOwned(SLOT)).toBe(false);
-    expect(keyboardOwned("tab-elsewhere")).toBe(true);
+    expect(legacyKeyboardOwned(SLOT)).toBe(false);
+    expect(legacyKeyboardOwned("tab-elsewhere")).toBe(true);
   });
 
   test("the command launcher does not count against its own return", () => {
     const except: OverlayId = "launcher";
     overlayStack.ids = ["launcher"];
-    expect(keyboardOwned(SLOT)).toBe(true);
-    expect(keyboardOwned(SLOT, except)).toBe(false);
+    expect(legacyKeyboardOwned(SLOT)).toBe(true);
+    expect(legacyKeyboardOwned(SLOT, except)).toBe(false);
     overlayStack.ids = ["launcher", "search"];
-    expect(keyboardOwned(SLOT, except)).toBe(true);
+    expect(legacyKeyboardOwned(SLOT, except)).toBe(true);
   });
 
-  test("refocusRefused reads the same rule, overlays included", () => {
-    expect(refocusRefused(SLOT)).toBe(false);
+  test("the rule counts an overlay against a terminal's refocus", () => {
+    expect(legacyKeyboardOwned(SLOT)).toBe(false);
     overlayStack.ids = ["search"];
-    expect(refocusRefused(SLOT)).toBe(true);
+    expect(legacyKeyboardOwned(SLOT)).toBe(true);
     overlayStack.ids = [];
-    expect(refocusRefused(SLOT)).toBe(false);
+    expect(legacyKeyboardOwned(SLOT)).toBe(false);
   });
 });
 

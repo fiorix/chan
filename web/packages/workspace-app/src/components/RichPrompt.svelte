@@ -122,7 +122,7 @@
   import { api } from "../api/client";
   import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
   import { reportUncertainOutcome } from "../state/mutationReport";
-  import { keyboardOwned, refocusRefused } from "../state/focusGuard.svelte";
+  import { legacyKeyboardOwned } from "../state/keyboardOwner.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -134,7 +134,7 @@
   // (keep-alive, like the terminal body), so an ungated focus would let a
   // background tab's composer steal the keyboard. A focused terminal's
   // composer still yields to what its terminal's own refocus yields to
-  // (`refocusRefused`): a modal dialog, a survey over this terminal, the
+  // (`legacyKeyboardOwned`): a modal dialog, a survey over this terminal, the
   // Computers launcher and an overlay over the panes own the keyboard while
   // they show.
   let { tab, focused = false, shown = true }: { tab: TerminalTab; focused?: boolean; shown?: boolean } =
@@ -156,7 +156,7 @@
   // The editor takes the keyboard by itself while `autoFocus` holds: as it
   // mounts, and when its text changes from here, as a delivery empties it.
   // Every owner is reactive state, so the rule re-reads on each change.
-  const editorAutoFocus = $derived(focused && !refocusRefused(tab.id));
+  const editorAutoFocus = $derived(focused && !legacyKeyboardOwned(tab.id));
   let loaded = $state(false);
   let mounting = $state(false);
   let mountError = $state<string | null>(null);
@@ -453,7 +453,7 @@
       setRichPromptCaret(tab, 0, 0);
       if (focused) {
         queueMicrotask(() => {
-          if (!refocusRefused(tab.id)) activeEditor()?.focusAt(0);
+          if (!legacyKeyboardOwned(tab.id)) activeEditor()?.focusAt(0);
         });
       }
       if (phase === "drained") showTransientNote("already sent");
@@ -463,7 +463,7 @@
       void flushWrite();
       if (focused) {
         queueMicrotask(() => {
-          if (!refocusRefused(tab.id)) {
+          if (!legacyKeyboardOwned(tab.id)) {
             activeEditor()?.focusEnd();
             return;
           }
@@ -520,7 +520,7 @@
   /// or an overlay over the panes owns it. Its terminal asks after a move to
   /// another pane drops it.
   export function focus(): void {
-    if (refocusRefused(tab.id)) return;
+    if (legacyKeyboardOwned(tab.id)) return;
     activeEditor()?.focus();
   }
 
@@ -691,7 +691,7 @@
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
     void flushWrite();
-    if (!refocusRefused(tab.id)) view.focus();
+    if (!legacyKeyboardOwned(tab.id)) view.focus();
     pendingChipVisible = false;
     if (graceTimer !== null) clearTimeout(graceTimer);
     graceTimer = setTimeout(() => {
@@ -982,7 +982,7 @@
         bind:value={content}
         path={draftPath}
         autoFocus={editorAutoFocus}
-        mayTakeFocus={() => focused && !keyboardOwned(tab.id)}
+        mayTakeFocus={() => focused && !legacyKeyboardOwned(tab.id)}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
         extraExtensions={editorExtensions}
@@ -995,7 +995,7 @@
         bind:value={content}
         currentPath={draftPath}
         autoFocus={editorAutoFocus}
-        mayTakeFocus={() => focused && !keyboardOwned(tab.id)}
+        mayTakeFocus={() => focused && !legacyKeyboardOwned(tab.id)}
         {shown}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
