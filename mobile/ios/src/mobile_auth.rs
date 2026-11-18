@@ -208,12 +208,14 @@ pub(crate) fn mobile_back_to_computers(
     Ok(())
 }
 
+#[cfg(target_os = "ios")]
 pub(crate) use ios::{ensure_mobile_lifecycle_observer, start_mobile_signin};
 
 /// The authentication session plus the app-lifecycle observer. Both are
 /// platform objects that exist on the mobile target only; the shared settle,
 /// open, and roster entry points above stay platform-free so host tests drive
 /// them.
+#[cfg(target_os = "ios")]
 mod ios {
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, OnceLock};
