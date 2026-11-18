@@ -144,7 +144,8 @@ export function ownerRoot(current: KeyboardOwner | null = owner()): HTMLElement 
 /// keyboard only while it owns it (a survey card over a terminal that is not
 /// the focused pane's active one). The Computers launcher has no root in the
 /// page, so nothing may take it then, and nothing may while a cover over the
-/// window (the screen lock, the reconnect or session-ended cover) holds it.
+/// window holds it (`FULL_WINDOW_COVERS`: the reconnect, session-ended,
+/// missing-token and preflight covers and the screen lock).
 export function mayFocus(element: Element | null): boolean {
   if (appInputBlocked()) return false;
   const current = owner();
@@ -157,11 +158,12 @@ export function mayFocus(element: Element | null): boolean {
 setConfirmRestoreGate(mayFocus);
 
 /// Whether an owner above the overlays holds the keyboard: a modal dialog, a
-/// window-wide survey, or a cover over the window (the screen lock, the
-/// reconnect or session-ended cover). The command deck leaves its keys and
-/// focus to one. A survey over a terminal ranks below the deck and does not
-/// count; nor does the Computers launcher, whose keys never reach the page,
-/// so a deck under it still runs what the page itself sends it.
+/// window-wide survey, or a cover over the window (the reconnect,
+/// session-ended, missing-token and preflight covers and the screen lock).
+/// The command deck leaves its keys and focus to one. A survey over a
+/// terminal ranks below the deck and does not count; nor does the Computers
+/// launcher, whose keys never reach the page, so a deck under it still runs
+/// what the page itself sends it.
 export function ownerAboveOverlays(): boolean {
   return modalDialogOpen() || appInputBlocked();
 }
