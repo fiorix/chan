@@ -305,12 +305,14 @@
     } else if (!isOpen && wasOpen) {
       closeVersion += 1;
       // Preserve the viewport while restoring the caller's focus. A dismissal
-      // whose heir is gone falls back to the focus-lost path under the same
-      // predicate the run's return reads, so the keyboard lands where that
-      // path puts it instead of staying where the deck left it.
+      // asks the same predicate the run's return reads: its heir takes the
+      // keyboard only where the host lets it, and a dismissal whose heir is
+      // gone or refused falls back to the focus-lost path, so the keyboard
+      // lands where that path puts it instead of staying where the deck left
+      // it.
       const heir = canTakeFocus(deferredFocus) ? deferredFocus : returnFocus;
       if (!closingRun) {
-        if (heir?.isConnected) heir.focus({ preventScroll: true });
+        if (heir?.isConnected && (!mayTakeFocus || mayTakeFocus(heir))) heir.focus({ preventScroll: true });
         else if (!mayTakeFocus || mayTakeFocus(null)) onFocusLost?.();
       }
       returnFocus = null;
