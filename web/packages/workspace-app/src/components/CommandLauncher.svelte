@@ -89,7 +89,7 @@
     activeTerminalTab,
     bumpTabFocusPulse,
   } from "../state/tabs.svelte";
-  import { launcherShownOverWindow, legacyKeyboardOwned, ownerTag } from "../state/keyboardOwner.svelte";
+  import { launcherShownOverWindow, legacyKeyboardOwned, ownerAboveOverlays, ownerTag } from "../state/keyboardOwner.svelte";
   import { sessionWindowId } from "../api/client";
   import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
@@ -847,6 +847,7 @@
 
 <CommandDeck
   ownerTag={ownerTag("overlay", "launcher")}
+  ownerAbove={ownerAboveOverlays}
   open={launcherDraft.visible}
   bind:draft={deckDraft}
   items={visibleEntries}

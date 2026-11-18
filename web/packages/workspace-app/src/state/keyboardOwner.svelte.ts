@@ -130,6 +130,15 @@ export function mayFocus(element: Element | null): boolean {
   return element !== null && root !== null && root.contains(element);
 }
 
+/// Whether an owner above the overlays holds the keyboard: a modal dialog or
+/// a window-wide survey. The command deck leaves its keys and focus to one.
+/// A survey over a terminal ranks below the deck and does not count; nor
+/// does the Computers launcher, whose keys never reach the page, so a deck
+/// under it still runs what the page itself sends it.
+export function ownerAboveOverlays(): boolean {
+  return modalDialogOpen();
+}
+
 /// Whether a surface may try to take the keyboard by itself, on a focus
 /// pulse or as it mounts: as `mayFocus`, except under the command deck. The
 /// deck takes a focus that lands under it back at once and hands the

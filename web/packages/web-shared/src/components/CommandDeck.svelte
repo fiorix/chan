@@ -50,6 +50,7 @@
     mayTakeFocus,
     toggleChord,
     ownerTag,
+    ownerAbove,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -89,6 +90,11 @@
     /// The value the host tags the deck's root with when its keyboard rule
     /// tells an element inside the deck from one under it by that tag.
     ownerTag?: string;
+    /// Whether an owner above this deck holds the keyboard, such as a modal
+    /// dialog: the deck then leaves the page's keys and focus to it. A host
+    /// without a keyboard rule leaves this out, and the deck yields to any
+    /// modal dialog showing in the page.
+    ownerAbove?: () => boolean;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -744,6 +750,12 @@
     return input.selectionStart === end && input.selectionEnd === end;
   }
 
+  /// Whether the deck leaves the keyboard to an owner above it: the host's
+  /// answer, or else a modal dialog showing in the page.
+  function yieldsToOwner(): boolean {
+    return ownerAbove ? ownerAbove() : modalShowing();
+  }
+
   /// Whether a modal dialog is showing. This deck is not modal and yields
   /// the keyboard to one.
   function modalShowing(): boolean {
@@ -778,7 +790,7 @@
     if (!open || !overlay) return;
     const target = event.target;
     if (!(target instanceof Node) || overlay.contains(target)) return;
-    if (modalShowing()) return;
+    if (yieldsToOwner()) return;
     reclaimFocus(target);
   }
 
@@ -786,7 +798,7 @@
     if (!open || !overlay || event.defaultPrevented) return;
     // The yield covers the page's own keys too, while a modal repairs focus
     // after removing its active control.
-    if (modalShowing()) return;
+    if (yieldsToOwner()) return;
     const target = event.target;
     const inside = target instanceof Node && overlay.contains(target);
     const page = target === document.body || target === document.documentElement ||
