@@ -408,6 +408,7 @@ mod tests {
         let (signer, ring) = entry_keys();
         for (client, wire) in [
             (ClientType::Desktop, "desktop"),
+            (ClientType::Mobile, "mobile"),
             (ClientType::Browser, "browser"),
         ] {
             let t = encode_entry(
@@ -461,6 +462,7 @@ mod tests {
         for value in [
             serde_json::json!("cli"),
             serde_json::json!("Desktop"),
+            serde_json::json!("Mobile"),
             serde_json::Value::Null,
             serde_json::json!(7),
         ] {

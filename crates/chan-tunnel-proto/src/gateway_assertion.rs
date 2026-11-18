@@ -70,10 +70,11 @@ fn is_default_port(scheme: &str, port: &str) -> bool {
 /// Which client a gateway session was minted for.
 ///
 /// Identity states it on every entry credential it mints: the desktop entry
-/// exchange, which takes a desktop PAT, mints for [`ClientType::Desktop`], and
-/// the browser share landings mint for [`ClientType::Browser`]. devserver-proxy
-/// records it on the session the credential opens and signs it into every
-/// assertion made under that session.
+/// exchange, which takes a desktop PAT, mints for [`ClientType::Desktop`], the
+/// mobile entry exchange, which takes a mobile PAT, mints for
+/// [`ClientType::Mobile`], and the browser share landings mint for
+/// [`ClientType::Browser`]. devserver-proxy records it on the session the
+/// credential opens and signs it into every assertion made under that session.
 ///
 /// A credential or assertion signed before the field existed has no value,
 /// and a value this build does not recognise may come from a newer gateway;
@@ -83,6 +84,7 @@ fn is_default_port(scheme: &str, port: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum ClientType {
     Desktop,
+    Mobile,
     Browser,
     #[default]
     Unknown,
@@ -93,6 +95,7 @@ impl ClientType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Mobile => "mobile",
             Self::Browser => "browser",
             Self::Unknown => "unknown",
         }
@@ -113,6 +116,7 @@ impl<'de> Deserialize<'de> for ClientType {
         let value = serde_json::Value::deserialize(deserializer)?;
         Ok(match value.as_str() {
             Some("desktop") => Self::Desktop,
+            Some("mobile") => Self::Mobile,
             Some("browser") => Self::Browser,
             _ => Self::Unknown,
         })
@@ -452,6 +456,7 @@ mod tests {
         let key = derive_assertion_key("chan_pat_secret");
         for (client, wire) in [
             (ClientType::Desktop, "desktop"),
+            (ClientType::Mobile, "mobile"),
             (ClientType::Browser, "browser"),
             (ClientType::Unknown, "unknown"),
         ] {
@@ -498,6 +503,8 @@ mod tests {
             serde_json::json!("cli"),
             serde_json::json!("Desktop"),
             serde_json::json!("DESKTOP"),
+            serde_json::json!("Mobile"),
+            serde_json::json!("MOBILE"),
             serde_json::json!(" desktop"),
             serde_json::json!(""),
             serde_json::Value::Null,
