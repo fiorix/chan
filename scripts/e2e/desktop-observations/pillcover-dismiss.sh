@@ -13,6 +13,24 @@
 # Bound: about 900 s (index cooldown and rebuild dominate). Exit 0 the
 # notice dismissed, 1 the pill (or anything else) took the centre click or a
 # clickable Dismiss stayed, 2 the environment cannot run it, 3 inconclusive.
+#
+# Evidence table: each claimed hop witnesses its own row with the command
+# that performs it and the output line that proves it. The install, proxy,
+# and eval rows all run in the inspected page (page_eval reads its
+# /workspace- URL in one place). J87 timed out waiting for the dial with
+# panes.out predating cs new and new-tab.out only queued, so the tab row
+# proves the request landed server-side and the dial row cites that run's
+# 60 s bound; the verdict cites both rows.
+#
+# | hop              | command                                              | witness                                                        |
+# |------------------|------------------------------------------------------|----------------------------------------------------------------|
+# | window visible   | xdotool getwindowgeometry, xdpyinfo                | output/window-geometry.txt, output/display-dimensions.txt      |
+# | workspace served | chan serve "$WS"                                  | serve.out ("opened ... in chan-desktop")                       |
+# | control socket   | cs pane list --window ... > panes.out              | panes.out lists the window (zero tabs: pre-request)            |
+# | install proxy    | page_eval proxy IIFE                               | __pcov is an object, else inconclusive                         |
+# | tab row          | cs terminal new ... > new-tab.out                    | new-tab.out ("terminal request queued") + tab_listed           |
+# | dial row         | poll __pcov.dials, 60 s bound (J87 ran it out)       | dial {command, session:null} or the timeout dump               |
+# | verdict          | obs_verdict / obs_judge                              | cites the tab row and the dial row                             |
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
