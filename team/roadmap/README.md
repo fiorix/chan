@@ -46,6 +46,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [mousefamily]: v0.133.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
 [wakescale]: v0.132.0/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md
 [healthbadge]: v0.132.0/connection-health-shows-in-each-window-not-on-its-devservers-computers-badge.md
+[listingcap]: v0.132.0/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md
 
 ### v0.132.0
 
@@ -66,6 +67,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [terminal browser checks' red proofs][termredproofs] | not started | measure |
 | [a lossy link freezes a window][linkhealth] | merged | build |
 | [health moves to the Computers badge][healthbadge] | not started | build |
+| [listing cap locks windows; deep graph][listingcap] | not started | build |
 | [the composer takes a survey's keys][keyowner] | partly built | build |
 | [a fresh shell keeps dead modes][freshmodes] | merged | closed |
 | [try again over an exited terminal][exitedtry] | not started | build |
