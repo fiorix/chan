@@ -5126,21 +5126,29 @@ mod tests {
         const PONG: &str = r#"{"type":"pong"}"#;
 
         /// The paused runtime's clock, with a wall clock that follows it from
-        /// the test's start. One serves a test's pumps and reads alike.
+        /// the test's start. One serves a test's pumps and reads alike, and
+        /// counts its reads: the pump reads it once for each report.
         struct PausedClock {
             mono0: std::time::Instant,
+            reads: AtomicUsize,
         }
 
         impl PausedClock {
             fn new() -> Arc<Self> {
                 Arc::new(Self {
                     mono0: Instant::now().into_std(),
+                    reads: AtomicUsize::new(0),
                 })
+            }
+
+            fn reads(&self) -> usize {
+                self.reads.load(Ordering::SeqCst)
             }
         }
 
         impl Clock for PausedClock {
             fn now(&self) -> Stamp {
+                self.reads.fetch_add(1, Ordering::SeqCst);
                 let mono = Instant::now().into_std();
                 Stamp {
                     mono,
@@ -5307,7 +5315,16 @@ mod tests {
                     Arc::clone(&heard),
                 ));
                 let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
-                tokio::time::sleep(Duration::from_secs(50)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let reads = clock.reads();
+                let ws_pings = heard.lock().unwrap().ws_pings.len();
+                tokio::time::sleep(Duration::from_secs(45)).await;
+                assert_eq!(
+                    clock.reads() - reads,
+                    heard.lock().unwrap().ws_pings.len() - ws_pings,
+                    "connection {connection} reported more than the sets the keepalive drew: \
+                     the time, for a ping its devserver never answers"
+                );
                 pacer.ping_now();
                 tokio::time::sleep(Duration::from_secs(50)).await;
                 assert_eq!(

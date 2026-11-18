@@ -307,9 +307,18 @@ impl ConnectionReading {
         self.settle(now)
     }
 
-    /// Whether a ping that still has its send stamp waits for its pong.
+    /// Whether the pump reports the time: a ping that still has its send
+    /// stamp waits for its pong, on a connection whose devserver has
+    /// answered, over a socket whose sets do not show a devserver that does
+    /// not answer.
     pub(crate) fn waits(&self) -> bool {
-        !self.pending.timed.is_empty()
+        self.answered && !self.unanswered_sets() && !self.pending.timed.is_empty()
+    }
+
+    /// The open socket has delivered a set for a ping and no pong: a
+    /// devserver too old to answer sends its set again for each ping.
+    fn unanswered_sets(&self) -> bool {
+        self.socket.open && !self.socket.answered && self.socket.sets >= 2
     }
 
     /// The reading at `now`, or `None` with no face to show.
@@ -390,8 +399,7 @@ impl ConnectionReading {
 
     fn face(&mut self, now: Stamp) -> Option<(ConnectionFace, Option<u64>)> {
         if self.reconnecting || !self.answered {
-            let unanswered_set = self.socket.open && !self.socket.answered && self.socket.sets >= 2;
-            if unanswered_set {
+            if self.unanswered_sets() {
                 return None;
             }
             let face = if self.reconnecting {
@@ -847,6 +855,35 @@ mod tests {
         assert_eq!(
             health.since, set.wall_ms,
             "slow after the stall started before the stall did"
+        );
+    }
+
+    /// The pump reports the time while a timed ping waits on a connection
+    /// whose devserver has answered, and not over a socket whose set
+    /// answered its ping.
+    #[test]
+    fn only_an_answering_connections_wait_asks_for_reports() {
+        let mut hand = Hand::new();
+        let mut reading = ConnectionReading::default();
+        reading.opened(hand.at());
+        reading.ping_sent(hand.at());
+        reading.set_arrived(hand.at());
+        assert!(!reading.waits(), "a first ping before any reply");
+        reading.pong(hand.wait(40));
+        reading.ping_sent(hand.wait(3_000));
+        assert!(reading.waits(), "a ping after a reply");
+        reading.lost(hand.wait(1_000));
+        reading.opened(hand.wait(1_000));
+        reading.ping_sent(hand.at());
+        reading.set_arrived(hand.at());
+        assert!(
+            reading.waits(),
+            "the first ping of a later socket of an answering connection"
+        );
+        reading.set_arrived(hand.wait(10));
+        assert!(
+            !reading.waits(),
+            "a socket whose set answered its ping still asked for reports"
         );
     }
 
