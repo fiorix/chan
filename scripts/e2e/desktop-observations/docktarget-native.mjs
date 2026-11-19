@@ -1,27 +1,28 @@
 #!/usr/bin/env node
-// The dock hands its file commands to the focused pane's tab on close, on WebKitGTK.
-// The desktop guest counterpart of browser-smoke check 234: the shell seeds
-// docs/a.md and notes/b.md beside an empty target folder; the driver clicks
-// the dock row, closes the dock by its own menu row, copies through the
-// launcher's Copy path and pastes into target, asserting the tab's file on
-// disk and selected. DOM clicks are real in-page clicks and the launcher runs
-// on real keystrokes; the engine, dispatch, handlers and rendering are
-// WebKitGTK's own.
+// The dock hands its file commands to the focused pane's tab on close, on
+// WebKitGTK. The desktop guest counterpart of browser-smoke check 234: the
+// shell seeds docs/a.md and notes/b.md; the driver enters notes in the tab's
+// list by a dispatched double click and selects b.md, opens the left dock by
+// the deck's row and selects its docs/a.md, closes the dock by its own menu
+// row, and runs the deck's Copy path, asserting the keyboard inside the tab's
+// tree and the tab's file on the X clipboard. Row clicks are in-page clicks,
+// the deck runs on real keystrokes, and the engine, dispatch, handlers and
+// rendering are WebKitGTK's own.
 // Usage: node docktarget-native.mjs --inspector HOST:PORT --out DIR --xid XID
 //   --workspace DIR --sha SHA --engine-version V
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Hang guards at 15 s, the same bound the sibling file-browser legs use for
-// row, menu, disk and selection reads (their whole driver runs take seconds;
-// the lane bound is 2700 s). A rejected eval fails fast as "failed: ...".
+// Hang guards, not expected times: 15 s for row and menu reads, the bound the
+// sibling file-browser legs use (their whole driver runs take seconds; the
+// lane bound is 2700 s); 5 s for the clipboard to hold Copy path's text. A
+// rejected eval fails fast as "failed: ...".
 const INSPECTOR_LIST_MS = 5000;
 const EVAL_MS = 8000;
 const ROW_GUARD_MS = 15000;
 const MENU_GUARD_MS = 15000;
-const DISK_GUARD_MS = 15000;
-const SELECT_GUARD_MS = 15000;
+const CLIP_GUARD_MS = 5000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -102,6 +103,19 @@ const stopIfFailed = (phase) => {
   if (failed.length > 0) throw new Error(`stopping after failed precondition in ${phase}: ${failed.map((f) => f.name).join(", ")}`);
 };
 const xdo = (args) => spawnSync("xdotool", args.map(String), { encoding: "utf8", timeout: 15_000 });
+const clip = () => spawnSync("xclip", ["-o", "-selection", "clipboard"], { encoding: "utf8", timeout: 5_000 });
+// Write the verdict: 3 when a precondition failed, 10 when a property did,
+// 0 when the contract held.
+const finish = () => {
+  run.finished = new Date().toISOString();
+  const preFailed = failures.some((f) => f.kind === "precondition");
+  const code = preFailed ? 3 : failures.length > 0 ? 10 : 0;
+  run.ok = code === 0;
+  run.exitCode = code;
+  writeFileSync(join(a.out, "docktarget-native.json"), `${JSON.stringify(run, null, 2)}\n`);
+  console.log(code === 0 ? "docktarget-native: PASS" : `docktarget-native: ${failures.length} check(s) failed`);
+  process.exitCode = code;
+};
 
 const page = (expr, timeoutMs) => inspectorEval(a.inspector, "/workspace-", expr, timeoutMs);
 // Every page expression below is synchronous and returns a value; the
@@ -150,34 +164,6 @@ const clickRow = (root, path) => page(`(() => {
   row.click();
   return "clicked";
 })()`).catch((err) => `failed: ${err.message}`);
-const openMenu = async (root, path) => {
-  const found = await waitRow(root, path);
-  if (found === null) return "missing";
-  if (typeof found !== "string" || found.startsWith("failed:")) return found;
-  const opened = await page(`(() => {
-    const rows = [...document.querySelectorAll('${root} [role="option"], ${root} [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/${path}"));
-    if (!row) return "missing";
-    row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }));
-    return "opened";
-  })()`).catch((err) => `failed: ${err.message}`);
-  if (opened !== "opened") return opened;
-  try {
-    const menu = await until(() => page(`(() => !!document.querySelector(".ctx"))()`).catch((err) => `failed: ${err.message}`),
-      (v) => v === true || (typeof v === "string" && v.startsWith("failed:")), `menu for ${path}`, MENU_GUARD_MS);
-    return menu === true ? "opened" : menu;
-  } catch (err) {
-    return String((err && err.message) || err).startsWith("timeout waiting for") ? "no menu appeared" : `failed: ${String((err && err.message) || err).slice(0, 120)}`;
-  }
-};
-const clickMenuRow = (title) => page(`(() => {
-  const button = [...document.querySelectorAll(".ctx button")].find(
-    (b) => b.querySelector(".menu-row-label")?.textContent?.trim() === ${JSON.stringify(title)});
-  if (!button) return "missing";
-  if (button.disabled) return "disabled";
-  button.click();
-  return "clicked";
-})()`).catch((err) => `failed: ${err.message}`);
 const expandDock = async (path) => {
   const parts = path.split("/");
   for (let i = 1; i <= parts.length; i++) {
@@ -215,7 +201,6 @@ try {
   let seededTab = null;
   try { seededDock = readFileSync(join(ws, "docs", "a.md"), "utf8"); } catch {}
   try { seededTab = readFileSync(join(ws, "notes", "b.md"), "utf8"); } catch {}
-  try { if (!readdirSync(join(ws, "target"))) throw new Error("empty"); } catch { seededTab = null; }
   need("shell seeded root files", seededDock === "dock file\n" && seededTab === "tab file\n",
     seededDock === null || seededTab === null ? "absent" : "present");
   stopIfFailed("seed");
@@ -235,8 +220,15 @@ try {
   else if (typeof notesRow === "string" && notesRow.startsWith("failed:")) need("notes row readable", false, notesRow.slice(0, 120));
   else need("notes row present", notesRow.endsWith("/notes"), String(notesRow).slice(0, 120));
   stopIfFailed("notes row");
-  const entered = await clickRow(".browser:not(.dock)", "notes");
-  if (entered !== "clicked") need("notes folder entered", false, String(entered).slice(0, 120));
+  // The list selects a folder on a click and enters it on a double click.
+  const entered = await page(`(() => {
+    const rows = [...document.querySelectorAll('.browser:not(.dock) [role="option"], .browser:not(.dock) [role="treeitem"]')];
+    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/notes"));
+    if (!row) return "missing";
+    row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    return "entered";
+  })()`).catch((err) => `failed: ${err.message}`);
+  if (entered !== "entered") need("notes folder entered", false, String(entered).slice(0, 120));
   stopIfFailed("notes folder");
   const tabRow = await waitRow(".browser:not(.dock)", "notes/b.md");
   if (tabRow === null) need("tab file row present", false, "absent");
@@ -247,15 +239,39 @@ try {
   need("tab file row selected", tabClicked === "clicked", String(tabClicked).slice(0, 120));
   stopIfFailed("tab file select");
 
-  const docked = await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.browser.toggleLeftDock" } })); return "toggled"; })()`)
-    .catch((err) => `failed: ${err.message}`);
-  need("dock toggled", docked === "toggled", String(docked).slice(0, 120));
-  stopIfFailed("dock toggle");
+  // The dock opens by the deck's "Left file browser dock" row, as a user
+  // opens it: the command has no case on the host bus. The deck stays open
+  // on a toggle, and Escape dismisses it.
+  await page(`(() => { window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.launcher.toggle" } })); return "toggled"; })()`)
+    .catch(() => {});
+  const openerDeck = await waitForValue(
+    `(() => { const input = document.querySelector('[role="dialog"][aria-label="Command launcher"] input[role="combobox"]');
+      return input && input === document.activeElement ? "open" : null; })()`,
+    (v) => v === "open" || failed(v), "deck input to open the dock", ROW_GUARD_MS);
+  if (failed(openerDeck)) need("deck readable", false, String(openerDeck).slice(0, 120));
+  else need("deck open to open the dock", openerDeck === "open", String(openerDeck).slice(0, 120));
+  stopIfFailed("deck open to open the dock");
+  await xdo(["type", "--delay", "60", "Left file browser dock"]);
+  const openerPick = await waitForValue(
+    `(() => { const title = document.querySelector('[role="dialog"][aria-label="Command launcher"] [role="option"][aria-selected="true"] .deck-result-title');
+      return title && title.textContent.trim() === "Left file browser dock" ? "picked" : null; })()`,
+    (v) => v === "picked" || failed(v), "deck dock row to open it", ROW_GUARD_MS);
+  if (failed(openerPick)) need("deck readable", false, String(openerPick).slice(0, 120));
+  else need("deck picked the dock row to open it", openerPick === "picked", String(openerPick).slice(0, 120));
+  stopIfFailed("deck dock row to open it");
+  await xdo(["key", "Return"]);
   const dockVisible = await waitForValue(`(() => !!document.querySelector('.browser-side-pane.left .browser.dock'))()`,
     (v) => v === true || failed(v), "dock mounted", ROW_GUARD_MS);
   if (failed(dockVisible)) need("dock readable", false, String(dockVisible).slice(0, 120));
   else need("dock visible", dockVisible === true, String(dockVisible).slice(0, 120));
   stopIfFailed("dock visible");
+  await xdo(["key", "Escape"]);
+  const openerGone = await waitForValue(
+    `(() => document.querySelector('[role="dialog"][aria-label="Command launcher"]') ? null : "closed")()`,
+    (v) => v === "closed" || failed(v), "deck dismissal after opening the dock", ROW_GUARD_MS);
+  if (failed(openerGone)) need("deck readable", false, String(openerGone).slice(0, 120));
+  else need("deck dismissed after opening the dock", openerGone === "closed", String(openerGone).slice(0, 120));
+  stopIfFailed("deck dismissal after opening the dock");
 
   const expanded = await expandDock("docs");
   if (expanded === null || (typeof expanded === "string" && expanded.startsWith("failed:"))) {
@@ -336,46 +352,20 @@ try {
     .catch((err) => `failed: ${err.message}`);
   check("keyboard is inside the tab's tree", tabFocused === true, String(tabFocused).slice(0, 120));
 
-  const targetMenu = await openMenu(".browser:not(.dock)", "target");
-  if (targetMenu !== "opened") need("target menu opened", false, String(targetMenu).slice(0, 200));
-  else {
-    const pasted = await clickMenuRow("Paste");
-    if (pasted === "disabled") need("paste row enabled", false, "disabled");
-    else need("paste row clicked", pasted === "clicked", String(pasted).slice(0, 120));
-  }
-  stopIfFailed("paste click");
-  let landed = null;
-  let rootAfter = null;
-  const deadLine = Date.now() + DISK_GUARD_MS;
+  // Copy path writes the selection's path to the system clipboard, which the
+  // X clipboard holds once the run settles: the workspace-relative path.
+  let copied = "";
+  const clipDeadline = Date.now() + CLIP_GUARD_MS;
   for (;;) {
-    try { landed = readFileSync(join(ws, "target", "b.md"), "utf8"); } catch { landed = null; }
-    if (landed !== null) break;
-    try { rootAfter = readdirSync(join(ws, "target")); } catch { rootAfter = null; }
-    if (Date.now() > deadLine) break;
-    await sleep(500);
+    const read = clip();
+    copied = read.status === 0 ? String(read.stdout ?? "").trim() : "";
+    if (copied || Date.now() > clipDeadline) break;
+    await sleep(250);
   }
-  rootAfter = rootAfter ?? (() => { try { return readdirSync(join(ws, "target")); } catch { return null; } })();
-  run.listings = { rootAfter, landedFile: landed === null ? null : "target/b.md" };
-  if (landed === null) need("paste reached disk within the hang guard", false, `target/b.md absent after ${DISK_GUARD_MS} ms`);
-  else check("landed on disk", landed === "tab file\n", JSON.stringify(landed).slice(0, 60));
-  stopIfFailed("disk");
-  const kept = await page(`(() => {
-    const rows = [...document.querySelectorAll('.browser [role="option"], .browser [role="treeitem"]')];
-    const row = rows.find((r) => (r.getAttribute("title") || "").endsWith("/target/b.md"));
-    if (!row) return "absent";
-    return row.getAttribute("aria-selected") ?? "unselected";
-  })()`).catch((err) => `failed: ${err.message}`);
-  if (typeof kept === "string" && kept.startsWith("failed:")) need("selection readable", false, kept.slice(0, 120));
-  else check("landed entry selected", kept === "true", JSON.stringify(kept));
-
-  run.finished = new Date().toISOString();
-  const preFailed = failures.some((f) => f.kind === "precondition");
-  const code = preFailed ? 3 : failures.length > 0 ? 10 : 0;
-  run.ok = code === 0;
-  run.exitCode = code;
-  writeFileSync(join(a.out, "docktarget-native.json"), `${JSON.stringify(run, null, 2)}\n`);
-  console.log(code === 0 ? "docktarget-native: PASS" : `docktarget-native: ${failures.length} check(s) failed`);
-  process.exitCode = code;
+  run.clipboard = copied.slice(-160);
+  if (!copied) need("clipboard readable within the hang guard", false, `empty after ${CLIP_GUARD_MS} ms`);
+  else check("Copy path copied the tab's file", copied === "notes/b.md" || copied.endsWith("/notes/b.md"), JSON.stringify(copied.slice(-80)));
+  finish();
 } catch (error) {
   run.finished = new Date().toISOString();
   run.ok = false;

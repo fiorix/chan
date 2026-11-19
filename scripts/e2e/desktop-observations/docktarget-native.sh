@@ -2,12 +2,14 @@
 # The dock hands its file commands to the focused pane's tab on close, on WebKitGTK.
 # The desktop guest counterpart of browser-smoke check 234: Xvfb, openbox,
 # `chan serve` on a throwaway workspace the shell seeds with docs/a.md and
-# notes/b.md beside an empty target folder, chan-desktop with the WebKit
-# remote inspector, then docktarget-native.mjs clicks the dock row, closes
-# the dock by its menu row, copies through the launcher's Copy path and
-# pastes into target, asserting the tab's file on disk and selected. Invoke
-# under xvfb-run with a fixed screen size. Layout mirrors
+# notes/b.md, chan-desktop with the WebKit remote inspector, then
+# docktarget-native.mjs enters notes, opens the dock and selects its row,
+# closes the dock by its menu row and runs the launcher's Copy path,
+# asserting the keyboard in the tab's tree and the tab's file on the X
+# clipboard.
+# Invoke under xvfb-run with a fixed screen size. Layout mirrors
 # terminal-size-native.sh in this directory.
+#   docktarget-native.sh OUTPUT
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +31,7 @@ obs_wait 20 "the window manager" xprop -root _NET_SUPPORTING_WM_CHECK
 obs_start_desktop
 
 WS="$OBS_WORK/ws"
-mkdir -p "$WS/docs" "$WS/notes" "$WS/target"
+mkdir -p "$WS/docs" "$WS/notes"
 printf 'dock file\n' > "$WS/docs/a.md"
 printf 'tab file\n' > "$WS/notes/b.md"
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
