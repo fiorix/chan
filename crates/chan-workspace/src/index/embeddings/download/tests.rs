@@ -378,7 +378,16 @@ fn bytes_that_miss_their_pin_are_not_published() {
     let cache = tempfile::tempdir().unwrap();
     let wrong = b"{\"fixture\":TRUE}\n";
     assert_eq!(wrong.len(), BODY.len());
-    let server = Server::start(move |_| range_response(wrong, 0));
+    // A second request is refused, so a download that fetches again fails
+    // the checks below rather than looping.
+    let answered = AtomicBool::new(false);
+    let server = Server::start(move |_| {
+        if answered.swap(true, Ordering::SeqCst) {
+            response("503 Service Unavailable", "", b"no second attempt")
+        } else {
+            range_response(wrong, 0)
+        }
+    });
     let error = client(cache.path(), &server)
         .get("fixture/model", "config.json")
         .expect_err("bytes of the pinned size that hash wrong must be refused");
@@ -387,6 +396,11 @@ fn bytes_that_miss_their_pin_are_not_published() {
             .to_string()
             .contains("does not match its pinned sha256"),
         "{error}"
+    );
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        1,
+        "a download from zero that hashes wrong is not fetched again"
     );
     let repo = cache.path().join(repo_dir_name("fixture/model"));
     assert!(!snapshot(cache.path()).join("config.json").exists());
