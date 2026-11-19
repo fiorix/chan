@@ -236,7 +236,8 @@ pub(crate) struct ConnectionReading {
 impl ConnectionReading {
     /// A feed socket opened. Its pings, replies and frames start afresh; the
     /// history, the latest reply time and the last contact carry over.
-    /// Answers whether the face changed, as every report does.
+    /// Answers whether the face changed, as every report does; a pong also
+    /// answers true when it ends a wait the reading serves.
     pub(crate) fn opened(&mut self, now: Stamp) -> bool {
         self.observe(now);
         self.pending = PendingPings::default();
@@ -261,14 +262,23 @@ impl ConnectionReading {
     /// time when that ping kept its send stamp and the reply took at most
     /// [`MAX_RTT_MS`]. A pong at any time says the devserver answers the
     /// feed's ping: it turns the reading on and ends reconnecting.
+    ///
+    /// It also answers true, with the face unchanged, when the ping it
+    /// answers had the wait [`health`](Self::health) serves, [`SLOW_WAIT`]
+    /// or more on an answered connection. The launcher counts a served wait
+    /// on until it reads again, so the pump's announcement makes it read
+    /// now: one library push per reply that waited 1 s or more.
     pub(crate) fn pong(&mut self, now: Stamp) -> bool {
         self.observe(now);
         self.contact(now);
+        let answered_before = self.answered;
         self.answered = true;
         self.socket.answered = true;
         self.reconnecting = false;
+        let mut wait_ended = false;
         if let Some(Some(sent)) = self.pending.pop() {
             let took = millis(now.mono.saturating_duration_since(sent.mono));
+            wait_ended = answered_before && took >= millis(SLOW_WAIT);
             if took <= MAX_RTT_MS {
                 self.rtts.push_back(took);
                 if self.rtts.len() > RTT_RUN {
@@ -278,7 +288,8 @@ impl ConnectionReading {
                 self.sample(Some(took));
             }
         }
-        self.settle(now)
+        let changed = self.settle(now);
+        changed || wait_ended
     }
 
     /// A window set arrived. The socket's first set is the one the
@@ -838,6 +849,32 @@ mod tests {
             "two replies under 300 ms with none overdue"
         );
         assert_eq!(health.since, hand.at().wall_ms);
+    }
+
+    /// A pong that ends a wait the reading served reports a change though
+    /// the face stays slow, so the launcher reads again rather than counting
+    /// that wait on; a reply under 1 s ends no served wait.
+    #[test]
+    fn a_pong_that_ends_a_served_wait_reports_a_change() {
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 1_300);
+        reading.ping_sent(hand.wait(3_000));
+        let health = reading.health(hand.wait(1_000)).unwrap();
+        assert_eq!(health.face, ConnectionFace::Slow, "fixture: a slow face");
+        assert!(health.wait_since.is_some(), "fixture: a served wait");
+        assert!(
+            reading.pong(hand.wait(300)),
+            "the pong that ended a served wait reported no change"
+        );
+        let health = reading.health(hand.at()).unwrap();
+        assert_eq!(health.face, ConnectionFace::Slow, "fixture: the face held");
+        assert_eq!(health.wait_since, None);
+        reading.ping_sent(hand.wait(3_000));
+        assert!(
+            !reading.pong(hand.wait(999)),
+            "a 999 ms reply on a slow face reported a change"
+        );
+        assert_eq!(face(&mut reading, hand.at()), Some(ConnectionFace::Slow));
     }
 
     /// What `web/packages/launcher/src/lib/connectionHealth.test.ts` reads

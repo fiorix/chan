@@ -1523,7 +1523,8 @@ fn is_feed_pong(text: &str) -> bool {
 
 /// What a window feed's pump measures with: the connection's reading (in its
 /// snapshot), the clock it stamps each report with, the desktop's pace, and
-/// what runs when the face the reading shows changes.
+/// what runs when the face the reading shows changes or a wait it served
+/// ends.
 ///
 /// One probe serves one feed socket. It sends one ping when the socket opens
 /// and no other until a pong arrives on it, since a devserver too old to
@@ -1564,7 +1565,8 @@ impl<'a> FeedProbe<'a> {
     }
 
     /// Report one event to the reading, stamped under its lock, and run
-    /// `on_face` when the face it shows changed.
+    /// `on_face` when the reading answers that it changed: its face, or a
+    /// wait it served ending at a pong.
     fn record(
         &mut self,
         event: impl FnOnce(&mut ConnectionReading, crate::connection_health::Stamp) -> bool,
@@ -1858,8 +1860,8 @@ fn pending_hide_posts_for_feed_snapshot(
 ///
 /// The [`feed_pump`] read-deadline turns a half-open socket into an error
 /// instead of a forever-pending `next()`, and its probe times the devserver's
-/// pongs into the connection's reading, announcing each change of its face to
-/// the launcher. `saw_frame` is set on the first window set so the caller can
+/// pongs into the connection's reading, announcing each change of its face,
+/// and each reply that ends a wait of 1 s or more, to the launcher. `saw_frame` is set on the first window set so the caller can
 /// tell a healthy round from a never-connected one; the first set also clears
 /// any `Unreachable` state (recovery) and announces it.
 async fn stream_window_feed(
