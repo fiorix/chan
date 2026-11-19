@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(health.since, hand.at().wall_ms);
     }
 
-    /// What the launcher's card test reads
+    /// What `web/packages/launcher/src/lib/connectionHealth.test.ts` reads
     /// (`fixtures/connection-health/slow-reply-in-flight.json`): a connection
     /// slow from two 450 ms replies, read 100 ms into its next ping, serves
     /// no wait, so the launcher does not count that ping's wait up until the

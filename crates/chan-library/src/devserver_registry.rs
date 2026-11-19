@@ -80,10 +80,10 @@ pub struct ConnectionHealth {
     pub face: ConnectionFace,
     /// A slow face whose latest reply time was under the time that ends slow,
     /// with no [`wait_since`](Self::wait_since), when the desktop read it:
-    /// the replies have come back, and slow ends once enough of them have. The launcher shows
-    /// it as the mark alone, named "Connection recovering". `false` for
-    /// every other face. `#[serde(default)]`: a reading without the field
-    /// reads `false`.
+    /// the replies have come back, and slow ends once enough of them have.
+    /// The launcher shows it as the mark alone, named "Connection
+    /// recovering". `false` for every other face. `#[serde(default)]`: a
+    /// reading without the field reads `false`.
     #[serde(default)]
     pub recovering: bool,
     /// When `face` took its value.
@@ -359,14 +359,16 @@ mod tests {
 
     #[test]
     fn a_row_with_a_reading_carries_it_on_the_wire() {
+        // A miss on an earlier socket, then a 1.2 s reply and a 250 ms one:
+        // slow, and recovering with no wait served.
         let health = ConnectionHealth {
             face: ConnectionFace::Slow,
             recovering: true,
             since: 1_700_000_012_000,
-            rtt_ms: Some(850),
-            wait_since: Some(1_700_000_013_500),
+            rtt_ms: Some(250),
+            wait_since: None,
             last_contact: Some(1_700_000_013_400),
-            samples: vec![Some(40), None],
+            samples: vec![None, Some(1_200), Some(250)],
         };
         let entry = row(Some(health));
         let wire = serde_json::to_string(&entry).unwrap();
@@ -374,8 +376,9 @@ mod tests {
             wire,
             format!(
                 "{ROW_HEAD},\"connection_health\":{{\"face\":\"slow\",\
-                 \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":850,\"wait_since\":1700000013500,\
-                 \"last_contact\":1700000013400,\"samples\":[40,null]}}}}"
+                 \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":250,\
+                 \"wait_since\":null,\"last_contact\":1700000013400,\
+                 \"samples\":[null,1200,250]}}}}"
             )
         );
         assert_eq!(

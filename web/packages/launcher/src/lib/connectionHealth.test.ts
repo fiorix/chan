@@ -40,6 +40,10 @@ describe("face words", () => {
     const recovering = health({ face: "slow", recovering: true, rtt_ms: 250 });
     expect(connectionFaceLabel(recovering, 10_000)).toBe("");
     expect(connectionFaceName(recovering, 10_000)).toBe("Connection recovering");
+    // The flag decides whatever the reply time: the launcher keeps no
+    // threshold of its own for it.
+    expect(connectionFaceLabel(health({ face: "slow", recovering: true, rtt_ms: 350 }), 10_000)).toBe("");
+    expect(connectionFaceLabel(health({ face: "slow", recovering: false, rtt_ms: 250 }), 10_000)).toBe("250 ms");
     // A wait the desktop serves ends it.
     const waiting = health({ face: "slow", rtt_ms: 250, wait_since: 8_800 });
     expect(connectionFaceLabel(waiting, 10_000)).toBe("1.2 s");
