@@ -1,39 +1,59 @@
 // The graph's depth is bounded, so raising it keeps the page answering.
 //
 // On a server and workspace of its own (the tree is too large to leave in
-// the suite's shared workspace), a generated tree holds two directories:
-// `chain/`, fourteen levels of nested directories with a note at the
-// bottom, and `wide/`, ten folders of forty folders of fifty notes (20,410
-// files and folders). Once the index is idle, a page opens a graph tab with
-// a directory selected and its first level open, and drags the tab menu's
-// Depth slider from its start to its end with the pointer, as a person does.
+// the suite's shared workspace), a generated tree holds:
 //
-// On `wide`: while the pointer is down the graph draws nothing new (the
-// slider applies on release); on release the depth stops at 2, the deepest
-// level that draws no more than the drawn-node budget, the control reads
-// "2 [limit]" and the address's opened tree holds `wide/a0` but not
-// `wide/a0/b0`; the drag's folder reads stay within the per-step bound; and
-// a frame probe's largest gap from the press until the graph settles stays
-// under GAP_BOUND_MS. On `chain`: the slider ends at 10 and a drag to its
-// end opens ten levels, not fourteen.
+//   wide/     10 folders of 280 folders of 8 notes, all indexed, so the
+//             window's shared graph holds the whole of it: depth 2 draws
+//             about 2,815 nodes, depth 3 about 25,200;
+//   chain/    fourteen nested folders with a note at the bottom;
+//   ignored/  listed in the root .gitignore, so the index and the shared
+//             graph hold none of it and the tab reads it from disk:
+//             heavy/ has 60 folders of 60 notes (a second level would draw
+//             about 3,660 nodes), many/ has 100 folders of 20 notes (about
+//             2,110, more folders than one read takes), and each has a
+//             deep/ folder with a note that gives its depth a second level.
+//
+// Once the index is idle, each leg opens a page whose graph tab has one
+// directory selected and its first level open (and the deep/ folder, for
+// the two ignored legs), opens the tab menu and drags its Depth slider from
+// its start to its end with the pointer, as a person does, then waits for
+// the graph to settle. Every leg's readings are recorded before anything is
+// asserted, so a failing leg leaves the others read.
+//
+//   wide:  while the pointer is down the drawn count does not change; the
+//          release stops at "2 [limit]", draws at most the budget, and the
+//          address's opened tree holds wide/a0 but not wide/a0/b0; a frame
+//          probe's largest gap from the press until the graph settles is
+//          within GAP_BOUND_MS, over a step that brings in about 2,800 nodes.
+//   heavy: the release reads the 60 folders' children before it opens a
+//          level, finds the second level past the budget, and stays at
+//          "1 [limit]" with at most the budget drawn.
+//   many:  the release reads all 100 folders, past the 64 one read takes,
+//          and opens the second level with no further step: the 2,000
+//          notes are drawn.
+//   chain: the slider ends at 10 and a drag to its end opens ten levels.
 //
 // GAP_BOUND_MS: a page that answers input draws its next frame within the
 // 100 ms response budget of the RAIL model; 250 ms leaves two and a half
-// times that for a guest under the suite's load, and stays under the roughly
-// 375 ms a frame took over a 3,519-node graph, the largest graph with a
-// frame-cost reading. A baseline arm reads the idle page first: when its own
-// gaps already pass the bound, or it draws under 30 frames a second, the
-// host cannot judge the bound and the check skips rather than fails.
+// times that for a guest under the suite's load. The layout runs one
+// d3-force tick a frame, about 12 ms over 3,000 nodes and about 160 ms over
+// 20,000 in V8 on a desktop CPU, so a step held to the budget stays well
+// inside the bound and an unbounded one over 25,000 nodes need not. A
+// baseline arm reads the idle page first: when its own gaps already pass
+// the bound, or it draws under 30 frames a second, the host cannot judge
+// the bound, and the check skips once every other reading has passed.
 //
-// The first run at the change must PASS with the drag arm's largest gap and
-// folder read count recorded. At e262cf2df (every intermediate value applied,
-// no cap, no budget, no read bound) it must fail: the drawn count grows while
-// the pointer is down, the depth reaches 3 with no "[limit]", and `chain`'s
-// slider ends at 15; the frame gap and the folder reads are read and
-// recorded either way, so the first base run also shows whether a drag over
-// 20,000 nodes crosses the gap bound.
+// The first run at the change must pass, recording the wide leg's largest
+// gap and each leg's folder reads. At e262cf2df it must fail: on wide the
+// drawn count changes while the pointer is down and the depth reaches 3 with
+// no "[limit]"; on heavy the second level opens and draws past the budget
+// with no "[limit]"; chain's slider ends at 15. The many leg passes there
+// (its old raise read every opened folder at once) and fails at the range's
+// earlier tip, whose raise read 64 and stopped. The wide leg's gap is
+// recorded at every commit; the first base run shows whether a drag over
+// 25,000 nodes crosses the bound.
 
-import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,33 +64,44 @@ import { maskTokens } from "../lib/token-mask.mjs";
 const GAP_BOUND_MS = 250;
 /// The baseline's frame rate under which the host is too loaded to judge.
 const MIN_BASELINE_FPS = 30;
-/// The workspace app's GRAPH_DRAWN_NODE_BUDGET and the folders one step reads.
+/// The workspace app's GRAPH_DRAWN_NODE_BUDGET.
 const DRAWN_NODE_BUDGET = 3000;
-const READS_PER_STEP = 64;
 /// FS_GRAPH_DEPTH_MAX, the server's walk.
 const DEPTH_MAX = 10;
 const CHAIN_LEVELS = 14;
-const WIDE = { top: 10, middle: 40, notes: 50 };
+const WIDE = { top: 10, middle: 280, notes: 8 };
+const HEAVY = { folders: 60, notes: 60 };
+const MANY = { folders: 100, notes: 20 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function note(path, text) {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, `# ${text}\n`);
+}
+
+/// Writes the tree and answers how many notes the index holds of it.
 function generate(root) {
+  writeFileSync(join(root, ".gitignore"), "ignored/\n");
   let dir = join(root, "chain");
   for (let level = 0; level < CHAIN_LEVELS; level += 1) dir = join(dir, `l${level}`);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "leaf.md"), "# Leaf\n");
+  note(join(dir, "leaf.md"), "leaf");
   for (let a = 0; a < WIDE.top; a += 1) {
     for (let b = 0; b < WIDE.middle; b += 1) {
-      const folder = join(root, "wide", `a${a}`, `b${b}`);
-      mkdirSync(folder, { recursive: true });
-      for (let n = 0; n < WIDE.notes; n += 1) writeFileSync(join(folder, `n${n}.md`), `# ${a}-${b}-${n}\n`);
+      for (let n = 0; n < WIDE.notes; n += 1) note(join(root, "wide", `a${a}`, `b${b}`, `n${n}.md`), `${a}-${b}-${n}`);
     }
+  }
+  for (const [name, shape] of [["heavy", HEAVY], ["many", MANY]]) {
+    for (let f = 0; f < shape.folders; f += 1) {
+      for (let n = 0; n < shape.notes; n += 1) note(join(root, "ignored", name, `u${f}`, `n${n}.md`), `${name}-${f}-${n}`);
+    }
+    note(join(root, "ignored", name, "deep", "x.md"), `${name} deep`);
   }
   return 1 + WIDE.top * WIDE.middle * WIDE.notes;
 }
 
 async function authed(origin, token, path) {
   const response = await fetch(new URL(path, origin), { headers: { authorization: `Bearer ${token}` } });
-  assert.ok(response.ok, `GET ${path}: ${response.status}`);
+  if (!response.ok) throw new Error(`GET ${path}: ${response.status}`);
   return response.json();
 }
 
@@ -86,29 +117,25 @@ async function awaitIndexed(origin, token, notes) {
 }
 
 /// The active graph's drawn and total node counts once two samples 250 ms
-/// apart agree with no load in flight.
+/// apart agree with no load in flight; null when it does not settle.
 async function settledGraph(page, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
-    const now = await page.evaluate(() => {
-      const panel = document.querySelector(".graph-tab.active");
-      if (!panel || panel.querySelector(".canvas > .stream-status, .canvas > .placeholder")) return null;
-      const match = (panel.querySelector(".statusbar .stat")?.textContent ?? "").match(/(\d+)\/(\d+) nodes/);
-      return match && Number(match[2]) > 0 ? { drawn: Number(match[1]), total: Number(match[2]) } : null;
-    });
+    const now = await drawnCounts(page).catch(() => null);
     if (now && last && now.drawn === last.drawn && now.total === last.total) return now;
     last = now;
     await sleep(250);
   }
-  throw new Error(`the graph did not settle: ${JSON.stringify(last)}`);
+  return null;
 }
 
-function drawnNow(page) {
+function drawnCounts(page) {
   return page.evaluate(() => {
-    const text = document.querySelector(".graph-tab.active .statusbar .stat")?.textContent ?? "";
-    const match = text.match(/(\d+)\/(\d+) nodes/);
-    return match ? Number(match[1]) : null;
+    const panel = document.querySelector(".graph-tab.active");
+    if (!panel || panel.querySelector(".canvas > .stream-status, .canvas > .placeholder")) return null;
+    const match = (panel.querySelector(".statusbar .stat")?.textContent ?? "").match(/(\d+)\/(\d+) nodes/);
+    return match && Number(match[2]) > 0 ? { drawn: Number(match[1]), total: Number(match[2]) } : null;
   });
 }
 
@@ -125,25 +152,27 @@ function addressTree(page) {
   });
 }
 
-async function addressHolds(page, accept, what) {
+/// The address's opened tree once two reads 500 ms apart agree (the address
+/// is written a moment after the tree changes), or as it stands after 15 s.
+async function addressSettled(page) {
   const deadline = Date.now() + 15_000;
-  let tree = [];
+  let last = null;
   while (Date.now() < deadline) {
-    tree = await addressTree(page);
-    if (accept(tree)) return tree;
-    await sleep(250);
+    await sleep(500);
+    const tree = await addressTree(page).catch(() => []);
+    if (last !== null && JSON.stringify(tree) === JSON.stringify(last)) return tree;
+    last = tree;
   }
-  throw new Error(`the address never held ${what}: ${JSON.stringify(tree)}`);
+  return last ?? [];
 }
 
 async function openDepthRow(page) {
   const tab = await page.$(".graph-tab.active");
-  assert.ok(tab, "no active graph tab");
+  if (!tab) throw new Error("no active graph tab");
   await tab.click({ button: "right" });
   await page.waitForSelector(".tab-menu-bubble .depth-row input[type='range']", { visible: true, timeout: 10_000 });
   return page.evaluate(() => {
-    const row = document.querySelector(".tab-menu-bubble .depth-row");
-    const slider = row.querySelector("input[type='range']");
+    const slider = document.querySelector(".tab-menu-bubble .depth-row input[type='range']");
     return { min: slider.min, max: slider.max, value: slider.value };
   });
 }
@@ -168,7 +197,7 @@ function startProbe(page) {
 
 /// Stop the probe and read the frames it saw and the largest gap between
 /// two of them.
-async function takeProbe(page) {
+function takeProbe(page) {
   return page.evaluate(() => {
     const probe = window.__depthProbe;
     probe.running = false;
@@ -181,14 +210,14 @@ async function takeProbe(page) {
 }
 
 /// Press on the slider's start, move the pointer to its end in steps, read
-/// the drawn count at each step, and release.
+/// the drawn count at each step, and release. The pointer stays on the
+/// track, from its first pixel to its last, so the press and the release
+/// both land on the slider.
 async function dragToEnd(page) {
   const box = await page.$eval(".tab-menu-bubble .depth-row input[type='range']", (el) => {
     const r = el.getBoundingClientRect();
     return { x: r.left, y: r.top + r.height / 2, width: r.width };
   });
-  // The pointer stays on the track, from its first pixel to its last, so
-  // the press and the release both land on the slider.
   const drawnWhileDown = [];
   await page.mouse.move(box.x + 1, box.y);
   await page.mouse.down();
@@ -196,17 +225,17 @@ async function dragToEnd(page) {
   for (let step = 1; step <= steps; step += 1) {
     await page.mouse.move(box.x + 1 + ((box.width - 2) * step) / steps, box.y);
     await sleep(40);
-    drawnWhileDown.push(await drawnNow(page));
+    drawnWhileDown.push((await drawnCounts(page).catch(() => null))?.drawn ?? null);
   }
   await page.mouse.up();
   return drawnWhileDown;
 }
 
-function graphUrl(origin, token, windowId, dir) {
+function graphUrl(origin, token, windowId, dir, opened) {
   const url = new URL(origin);
   url.searchParams.set("t", token);
   url.searchParams.set("w", windowId);
-  const tab = { k: "g", gp: dir, gn: `directory:${dir}`, ge: [dir], a: 1 };
+  const tab = { k: "g", gp: dir, gn: `directory:${dir}`, ge: opened, a: 1 };
   url.hash = "s=" + encodeURIComponent(JSON.stringify({ k: "l", f: 1, t: [tab] }));
   return url.href;
 }
@@ -224,88 +253,108 @@ export default {
       const url = new URL(await server.url);
       const token = url.searchParams.get("t") ?? "";
       await awaitIndexed(url.origin, token, notes);
-      const open = async (dir) => {
+      const open = async (dir, opened = [dir]) => {
         const page = await ctx.browser.newPage();
         pages.push(page);
         await page.setViewport({ width: 1280, height: 800 });
-        const windowId = `smoke-301-${dir}-${Date.now().toString(36)}`;
-        await page.goto(graphUrl(url.origin, token, windowId, dir), { waitUntil: "domcontentloaded", timeout: 60_000 });
+        const windowId = `smoke-301-${dir.replaceAll("/", "-")}-${Date.now().toString(36)}`;
+        await page.goto(graphUrl(url.origin, token, windowId, dir, opened), { waitUntil: "domcontentloaded", timeout: 60_000 });
         await page.waitForSelector(".graph-tab.active canvas", { timeout: 60_000 });
-        await settledGraph(page);
         return page;
       };
-
-      // ---- wide: release, the budget, the reads, the frames -------------
-      const wide = await open("wide");
-      const before = await settledGraph(wide);
-      const slider = await openDepthRow(wide);
-      record.wideSlider = slider;
-      assert.deepEqual([slider.min, slider.value, slider.max], ["0", "1", "3"], "wide/ opens one level of three");
-
-      await startProbe(wide);
-      await sleep(2000);
-      const baseline = await takeProbe(wide);
-      record.baseline = baseline;
-      const baselineFps = baseline.spanMs > 0 ? (1000 * (baseline.frames - 1)) / baseline.spanMs : 0;
-      if (baseline.maxGapMs > GAP_BOUND_MS || baselineFps < MIN_BASELINE_FPS) {
-        ctx.skip(`the idle page cannot judge a ${GAP_BOUND_MS} ms frame bound: ${JSON.stringify(baseline)}`);
-      }
-
-      const reads = [];
-      const onRequest = (request) => {
-        const target = new URL(request.url());
-        if (target.pathname.endsWith("/api/fs-graph")) reads.push(target.searchParams.get("path") ?? "");
+      /// Opens a leg's page, drags its slider to the end and records what
+      /// it reads; an error ends the leg and is recorded with it.
+      const leg = async (name, dir, opened, probe) => {
+        const reading = {};
+        record[name] = reading;
+        let page;
+        try {
+          page = await open(dir, opened);
+          reading.before = await settledGraph(page);
+          reading.slider = await openDepthRow(page);
+          if (probe) {
+            await startProbe(page);
+            await sleep(2000);
+            reading.baseline = await takeProbe(page);
+          }
+          const reads = [];
+          page.on("request", (request) => {
+            const target = new URL(request.url());
+            if (target.pathname.endsWith("/api/fs-graph")) reads.push(target.searchParams.get("path") ?? "");
+          });
+          if (probe) await startProbe(page);
+          try {
+            reading.drawnWhileDown = await dragToEnd(page);
+            reading.after = await settledGraph(page);
+            await sleep(1000);
+          } finally {
+            if (probe) reading.dragged = await takeProbe(page).catch((error) => ({ error: error.message }));
+          }
+          reading.depth = await depthText(page);
+          reading.folderReads = [...new Set(reads)].filter((path) => path !== "" && path.startsWith(`${dir}/`)).length;
+          reading.address = await addressSettled(page);
+          await ctx.shot(`${name}-released`, page).catch(() => {});
+        } catch (error) {
+          reading.error = error.message;
+        }
       };
-      wide.on("request", onRequest);
-      await startProbe(wide);
-      const drawnWhileDown = await dragToEnd(wide);
-      const after = await settledGraph(wide);
-      await sleep(1000);
-      const dragged = await takeProbe(wide);
-      wide.off("request", onRequest);
-      const folders = new Set(reads);
-      Object.assign(record, { before, drawnWhileDown, after, dragged, folderReads: folders.size, requests: reads.length });
-      await ctx.shot("wide-released", wide);
 
-      assert.ok(
-        drawnWhileDown.every((drawn) => drawn === before.drawn),
-        `the drawn graph changed while the pointer was down: ${JSON.stringify({ before: before.drawn, drawnWhileDown })}`,
+      await leg("wide", "wide", ["wide"], true);
+      await leg("heavy", "ignored/heavy", ["ignored", "ignored/heavy", "ignored/heavy/deep"], false);
+      await leg("many", "ignored/many", ["ignored", "ignored/many", "ignored/many/deep"], false);
+      await leg("chain", "chain", ["chain"], false);
+
+      // ---- the verdict, over every reading ------------------------------
+      const failures = [];
+      const expect = (ok, what) => {
+        if (!ok) failures.push(what);
+      };
+      for (const [name, reading] of Object.entries(record)) expect(!reading.error, `${name}: ${reading.error}`);
+      const { wide, heavy, many, chain } = record;
+      expect(
+        wide.before && wide.drawnWhileDown?.every((drawn) => drawn === wide.before.drawn),
+        "wide: the drawn graph changed while the pointer was down",
       );
-      assert.equal(await depthText(wide), "2 [limit]", "the depth stops at the budget and says so");
-      assert.ok(after.drawn <= DRAWN_NODE_BUDGET, `the released depth drew ${after.drawn} nodes`);
-      await addressHolds(
-        wide,
-        (tree) => tree.includes("wide/a0") && !tree.includes("wide/a0/b0"),
-        "wide/a0 opened and wide/a0/b0 closed",
+      expect(wide.depth === "2 [limit]", `wide: the release reads "${wide.depth}", not "2 [limit]"`);
+      expect(wide.after && wide.after.drawn <= DRAWN_NODE_BUDGET, `wide: ${wide.after?.drawn} nodes drawn`);
+      expect(
+        wide.address?.includes("wide/a0") && !wide.address?.includes("wide/a0/b0"),
+        "wide: the opened tree is not wide/a0 open and wide/a0/b0 closed",
       );
-      assert.ok(folders.size <= READS_PER_STEP + 1, `one step read ${folders.size} folders`);
-      assert.ok(
-        dragged.frames * 100 >= dragged.spanMs,
-        `the probe saw too few frames to judge: ${JSON.stringify(dragged)}`,
+      expect(heavy.depth === "1 [limit]", `heavy: the release reads "${heavy.depth}", not "1 [limit]"`);
+      expect(heavy.after && heavy.after.drawn <= DRAWN_NODE_BUDGET, `heavy: ${heavy.after?.drawn} nodes drawn`);
+      expect(heavy.folderReads === HEAVY.folders, `heavy: ${heavy.folderReads} folders read, not its ${HEAVY.folders}`);
+      expect(!heavy.address?.includes("ignored/heavy/u0"), "heavy: the level past the budget opened");
+      expect(many.address?.includes(`ignored/many/u${MANY.folders - 1}`), "many: the folders past the first read did not open");
+      expect(
+        many.after && many.after.drawn >= MANY.folders * MANY.notes,
+        `many: ${many.after?.drawn} nodes drawn, under the ${MANY.folders * MANY.notes} notes`,
       );
-      assert.ok(
-        dragged.maxGapMs <= GAP_BOUND_MS,
-        `a frame gap passed ${GAP_BOUND_MS} ms while the depth changed: ${JSON.stringify(dragged)}`,
+      expect(chain.slider?.max === String(DEPTH_MAX), `chain: the slider ends at ${chain.slider?.max}`);
+      const level = (count) => ["chain", ...Array.from({ length: count }, (_, i) => `l${i}`)].join("/");
+      expect(
+        chain.address?.includes(level(DEPTH_MAX - 1)) && !chain.address?.includes(level(DEPTH_MAX)),
+        `chain: not ${DEPTH_MAX} levels opened`,
       );
 
-      // ---- chain: the server's walk bounds a directory's depth -----------
-      const chain = await open("chain");
-      const chainSlider = await openDepthRow(chain);
-      record.chainSlider = chainSlider;
-      assert.equal(chainSlider.max, String(DEPTH_MAX), `a ${CHAIN_LEVELS + 1}-level directory's depth ends at ${DEPTH_MAX}`);
-      await dragToEnd(chain);
-      await settledGraph(chain);
-      await ctx.shot("chain-released", chain);
-      const levels = (count) => ["chain", ...Array.from({ length: count }, (_, i) => `l${i}`)].join("/");
-      await addressHolds(
-        chain,
-        (tree) => tree.includes(levels(DEPTH_MAX - 1)) && !tree.includes(levels(DEPTH_MAX)),
-        `${DEPTH_MAX} levels opened below chain/ and no more`,
-      );
+      const baseline = wide.baseline;
+      const baselineFps = baseline?.spanMs > 0 ? (1000 * (baseline.frames - 1)) / baseline.spanMs : 0;
+      const judgeable = baseline && baseline.maxGapMs <= GAP_BOUND_MS && baselineFps >= MIN_BASELINE_FPS;
+      record.frameBound = judgeable ? "judged" : "unjudged";
+      if (judgeable) {
+        const dragged = wide.dragged;
+        expect(dragged && !dragged.error && dragged.frames * 100 >= dragged.spanMs, `wide: too few frames to judge: ${JSON.stringify(dragged)}`);
+        expect(dragged && dragged.maxGapMs <= GAP_BOUND_MS, `wide: a frame gap passed ${GAP_BOUND_MS} ms: ${JSON.stringify(dragged)}`);
+      }
+      if (failures.length > 0) {
+        const error = new Error(failures.join("; "));
+        error.smokeDetails = record;
+        throw error;
+      }
+      if (!judgeable) ctx.skip(`every reading passed, but the idle page cannot judge a ${GAP_BOUND_MS} ms frame bound: ${JSON.stringify(baseline)}`);
       return record;
     } catch (error) {
-      // The readings go into the results either way.
-      if (!error.smokeSkip) error.smokeDetails = record;
+      if (!error.smokeSkip && !error.smokeDetails) error.smokeDetails = record;
       throw error;
     } finally {
       for (const page of pages) await page.close().catch(() => {});

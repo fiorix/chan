@@ -26,16 +26,18 @@
 #
 # Expected first run at the change: every check PASS. At e262cf2df, where
 # the graph rebuild lists every entry and a failed index locks preflight:
-# `large` fails at its status (error: "listing exceeds 500000 entries")
-# and preflight (phase failed, locked); `over` fails at the status message
+# `large` fails at its status as soon as it reads error ("listing exceeds
+# 500000 entries"), then at the document count, at preflight (phase failed,
+# locked) and at the search (not ready); `over` fails at the status message
 # (the bare listing error, no excluded directories), preflight (locked),
 # readiness (recovering, the pass requeued), the rerun watch (building
 # about every 30 s) and the edit (a search answers not ready).
 #
 # Run it only inside a container (an sdme guest): it starts a devserver,
 # and each arm writes about half a million files (roughly 2 GiB on a
-# filesystem with 4 KiB blocks; one arm's tree is removed before the next
-# is written). Needs curl and python3.
+# filesystem with 4 KiB blocks). Each arm's tree is removed once the arm
+# ends, passed or failed, so no more than one is on disk; its logs and
+# readings stay in the work dir. Needs curl and python3.
 #
 # Env:
 #   CHAN_BIN                       chan binary (default target/debug/chan)
@@ -45,8 +47,9 @@
 #   TMPDIR                         where the work dir goes (default /var/tmp)
 #
 # Exit 0 every check held, 1 a check failed, 2 the environment cannot run
-# the suite. A failed run keeps its work dir; its CHAN_HOME holds the
-# devserver's bearer token, so delete it once the failure is read.
+# the suite. A failed run keeps its work dir (logs, readings, CHAN_HOME and
+# no tree); its CHAN_HOME holds the devserver's bearer token, so delete it
+# once the failure is read.
 set -uo pipefail
 
 ARMS="${LISTING_CAP_ARMS:-large over}"
@@ -217,6 +220,8 @@ except Exception as error:
 }
 
 start_devserver() {
+  # One devserver at a time: an arm that returned early left its own.
+  stop_server
   export CHAN_HOME="$WORK/$1/chanhome"
   mkdir -p "$CHAN_HOME"
   PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
@@ -257,12 +262,16 @@ turn_on() {
 }
 
 # Poll the index status until the Python predicate $1 over it (named `j`)
-# holds. Leaves the last status in $STATUS; fails after the timeout.
+# holds. Leaves the last status in $STATUS; fails after the timeout, or at
+# once when the predicate $2, if given, holds instead.
 await_index() {
   local deadline=$((SECONDS + TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
     STATUS="$(ws_get /api/index/status)"
     [ "$(jq_py "bool($1)" <<<"$STATUS")" = "True" ] && return 0
+    if [ -n "${2:-}" ] && [ "$(jq_py "bool($2)" <<<"$STATUS")" = "True" ]; then
+      return 1
+    fi
     sleep 1
   done
   return 1
@@ -284,7 +293,8 @@ arm_large() {
     return
   }
 
-  if await_index 'j.get("state") == "idle" and j.get("readiness", {}).get("state") == "ready"'; then
+  if await_index 'j.get("state") == "idle" and j.get("readiness", {}).get("state") == "ready"' \
+    'j.get("state") == "error"'; then
     ok "the index reaches idle and the workspace ready"
   else
     bad "the index did not reach idle: $STATUS"
@@ -434,13 +444,12 @@ for ARM in $ARMS; do
     large) arm_large ;;
     over) arm_over ;;
   esac
-  if [ "$FAILURES" -gt "$failures_before" ]; then
-    KEEP=1
-  else
-    case "$WORK/$ARM/ws" in
-      "$WORK"/large/ws | "$WORK"/over/ws) rm -rf -- "$WORK/$ARM/ws" ;;
-    esac
-  fi
+  stop_server
+  [ "$FAILURES" -gt "$failures_before" ] && KEEP=1
+  # The tree goes whatever the verdict; the readings and logs stay.
+  case "$WORK/$ARM/ws" in
+    "$WORK"/large/ws | "$WORK"/over/ws) rm -rf -- "$WORK/$ARM/ws" ;;
+  esac
 done
 
 echo
