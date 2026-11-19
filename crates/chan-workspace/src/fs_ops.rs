@@ -1918,17 +1918,18 @@ pub fn list_tree_filtered(root: &Path, filter: &WalkFilter) -> Result<Vec<TreeEn
 
 /// `list_tree` variant governed by one generated scope policy.
 pub fn list_tree_scoped(root: &Path, policy: &IndexScopePolicy) -> Result<Vec<TreeEntry>> {
-    list_tree_scoped_cancelable(root, policy, None)
+    list_tree_scoped_cancelable(root, policy, LIST_TREE_LIMIT, None)
 }
 
-/// [`list_tree_scoped`] that stops at the next walked entry once `cancel` is
-/// set, returning [`ChanError::Cancelled`].
+/// [`list_tree_scoped`] bounded at `limit` entries that stops at the next
+/// walked entry once `cancel` is set, returning [`ChanError::Cancelled`].
 pub(crate) fn list_tree_scoped_cancelable(
     root: &Path,
     policy: &IndexScopePolicy,
+    limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
-    list_tree_scoped_inner(root, root, 1, policy, cancel)
+    list_tree_scoped_inner(root, root, 1, policy, limit, cancel)
 }
 
 /// Variant of `list_tree` scoped to the subtree at `subtree_abs`,
@@ -1986,7 +1987,7 @@ pub fn list_tree_prefix_scoped(
     if !subtree_abs.exists() {
         return Ok(Vec::new());
     }
-    list_tree_scoped_inner(root, subtree_abs, 0, policy, None)
+    list_tree_scoped_inner(root, subtree_abs, 0, policy, LIST_TREE_LIMIT, None)
 }
 
 fn list_tree_scoped_inner(
@@ -1994,6 +1995,7 @@ fn list_tree_scoped_inner(
     walk_from: &Path,
     min_depth: usize,
     policy: &IndexScopePolicy,
+    limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<TreeEntry>> {
     let iter: Box<dyn Iterator<Item = DirEntry> + '_> = if walk_from == root {
@@ -2023,7 +2025,7 @@ fn list_tree_scoped_inner(
             });
         Box::new(walker)
     };
-    tree_entries(root, iter, LIST_TREE_LIMIT, cancel)
+    tree_entries(root, iter, limit, cancel)
 }
 
 /// Collect walked entries into tree entries, refusing with

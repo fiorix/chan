@@ -70,7 +70,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [a lossy link freezes a window][linkhealth] | merged | build |
 | [health moves to the Computers badge][healthbadge] | not started | build |
 | [listing cap locks windows; deep graph][listingcap] | not started | build |
-| [cap: links drawn as missing][capghosts] | not started | build |
+| [cap: links drop out of the graph][capghosts] | not started | build |
 | [the composer takes a survey's keys][keyowner] | partly built | build |
 | [a fresh shell keeps dead modes][freshmodes] | merged | closed |
 | [try again over an exited terminal][exitedtry] | not started | build |
