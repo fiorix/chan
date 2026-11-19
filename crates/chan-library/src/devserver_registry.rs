@@ -64,7 +64,7 @@ pub enum ConnectionFace {
     Healthy,
     /// A reply is late, or the latest ones were.
     Slow,
-    /// A reply has waited long, with nothing else arriving meanwhile.
+    /// A reply is waiting, and the devserver has sent nothing for a while.
     Stalled,
     /// The feed socket that answered was lost, and no later one has answered
     /// yet.

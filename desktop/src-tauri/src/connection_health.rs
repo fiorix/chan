@@ -39,8 +39,9 @@ const OK_RTT_MS: u64 = 300;
 /// How many replies in a row a threshold takes, so that one outlier neither
 /// enters nor leaves slow.
 const RTT_RUN: usize = 2;
-/// A reply waiting this long, with no frame of the devserver's arriving
-/// meanwhile, makes the connection stalled: it carries nothing.
+/// Silence this long while a reply waits, counted from its ping or from the
+/// devserver's latest frame after it, makes the connection stalled: it
+/// carries nothing.
 const STALLED_WAIT: Duration = Duration::from_millis(4_000);
 /// The longest reply worth timing. A reply later than this crossed a jump of
 /// the clock or a hang, and neither is the connection's reply time.
