@@ -260,8 +260,9 @@ const slowReply = (card, max) => {
   return card.face?.state === "slow" && seconds >= 1.2 && seconds <= max;
 };
 
-/// The detail's last contact as it reads, the clock time that ends it.
-const lastContact = (card) => /Last contact (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
+/// The last contact as the figures line reads it: the clock time after
+/// Since, the line's last figure and the detail's last words.
+const lastContact = (card) => /Since (.+)$/.exec(card?.detail?.text ?? "")?.[1] ?? null;
 
 // Every client frame of every flow, read past its request head; a flow
 // from the desktop's own client carries no Origin header.

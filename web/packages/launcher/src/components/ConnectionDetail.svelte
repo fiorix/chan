@@ -1,10 +1,10 @@
 <script lang="ts">
   // A connected devserver's connection detail on its card in front: the last
-  // 60 finished pings with a red mark at each miss, the latest, median and
-  // worst reply times, and the last contact to the second. The face beside
-  // the name says the state, counting where it counts, so the detail does
-  // not repeat it. In privacy mode it is concealed behind the devserver's one
-  // connection reveal, the one beside its face.
+  // 60 finished pings with a red mark at each miss, then one line of the
+  // latest, median and worst reply times and the last contact to the second,
+  // as Since. The face beside the name says the state, counting where it
+  // counts, so the detail does not repeat it. In privacy mode it is concealed
+  // behind the devserver's one connection reveal, the one beside its face.
   import { isConcealed } from "@chan/web-shared/privacy";
   import type { ConnectionHealth } from "../api/library";
   import {
@@ -64,8 +64,8 @@
       <span>Latest <strong>{fmt(figures.latest)}</strong></span>
       <span>Median <strong>{fmt(figures.median)}</strong></span>
       <span>Worst <strong>{fmt(figures.worst)}</strong></span>
+      <span>Since <strong>{connectionContactTime(health.last_contact)}</strong></span>
     </div>
-    <div class="contact">Last contact <strong>{connectionContactTime(health.last_contact)}</strong></div>
   {/if}
 </div>
 
@@ -81,8 +81,9 @@
   .baseline { fill: none; stroke: var(--border); stroke-width: 1; }
   .reading { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .miss { fill: none; stroke: var(--danger); stroke-width: 2; stroke-linecap: round; }
-  .figures { display: flex; justify-content: space-between; gap: 8px; white-space: nowrap; }
-  .figures strong, .contact strong { color: var(--text); font-weight: 600; }
-  .contact { margin-top: 4px; }
+  /* One line of figures; a card too narrow for the four wraps it between
+     figures, never inside one, so Since goes first to the next line. */
+  .figures { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; white-space: nowrap; }
+  .figures strong { color: var(--text); font-weight: 600; }
   .redacted { display: inline-block; width: 8em; border-radius: 4px; color: transparent; user-select: none; background: repeating-linear-gradient(135deg, var(--text-secondary, #888) 0 2px, transparent 2px 4px); opacity: 0.55; }
 </style>
