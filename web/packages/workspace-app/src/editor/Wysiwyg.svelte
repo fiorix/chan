@@ -94,6 +94,7 @@
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
+    mayTakeFocus = () => autoFocus,
     shown = true,
     placeholderText,
     extraExtensions = [],
@@ -116,6 +117,12 @@
     /// editor unfocused on mount; otherwise the unconditional mount
     /// focus would race past the host's gate.
     autoFocus?: boolean;
+    /// Decides a delayed focus at the moment it would run: the mount,
+    /// caret-restore and reset frames ask this instead of reading the
+    /// `autoFocus` snapshot they scheduled with, so an owner that took
+    /// the keyboard meanwhile keeps it. Defaults to the host's `autoFocus`
+    /// as it reads when the frame runs.
+    mayTakeFocus?: () => boolean;
     /// Whether the host shows this editor, independently of keyboard focus.
     shown?: boolean;
     /// Empty-state placeholder text. When set the editor adds CM6's
@@ -535,7 +542,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }
@@ -775,7 +782,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   });
@@ -812,7 +819,7 @@
     if (autoFocus) {
       requestAnimationFrame(() => {
         if (!view) return;
-        view.focus();
+        if (mayTakeFocus()) view.focus();
       });
     }
   }

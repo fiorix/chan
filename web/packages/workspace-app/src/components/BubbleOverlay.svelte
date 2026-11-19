@@ -25,6 +25,8 @@
   } from "../state/survey.svelte";
   import { consumeKey } from "../state/shortcuts";
   import { activeTabInPane, layout, tabFocusPulse } from "../state/tabs.svelte";
+  import { canTakeFocus } from "@chan/web-shared/modal-focus";
+  import { handKeyboardToOwner, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
 
   let {
     tabId = null,
@@ -51,8 +53,18 @@
   // the effect and its queued callbacks, since docking can move the terminal
   // without remounting this overlay, and focus can move before a callback.
   let card = $state<HTMLDivElement | null>(null);
+  let overlay = $state<HTMLDivElement | null>(null);
   let returnFocus: HTMLElement | null = null;
   let focusedSurveyId: string | null = null;
+
+  // Handed the keyboard as its owner, the survey's card takes it while its
+  // survey shows where it owns the keyboard.
+  $effect(() => {
+    if (!overlay) return;
+    return registerKeyboardTaker(overlay, () => {
+      if (shown && active && ownsKeyboard()) card?.focus({ preventScroll: true });
+    });
+  });
   $effect(() => {
     const id = active?.surveyId ?? null;
     const eligible = ownsKeyboard();
@@ -65,9 +77,19 @@
       const target = returnFocus;
       returnFocus = null;
       queueMicrotask(() => {
-        if (!active && shown && ownsKeyboard()) {
+        // The remembered element gets the keyboard back only where the
+        // keyboard's owner lets it: a survey closing under a dialog, the
+        // launcher or an overlay must not move focus into the composer
+        // behind them, and a remembered survey card takes it only while its
+        // survey owns the keyboard.
+        const mayRestore = mayFocus(target?.isConnected ? target : null);
+        if (!active && shown && ownsKeyboard() && mayRestore) {
           if (target?.isConnected) target.focus({ preventScroll: true });
           else restoreFocus?.();
+        } else if (!active && slot === null && !canTakeFocus(document.activeElement)) {
+          // A window-wide survey held the keyboard over the owner under it
+          // (a dialog): its close hands the keyboard back to that owner.
+          handKeyboardToOwner();
         }
       });
       return;
@@ -92,10 +114,35 @@
         returnFocus = slot === null || owner?.contains(current) ? current : null;
       }
     }
+    // A card over a terminal asks the keyboard's owner: it takes the keyboard
+    // only while nothing above it holds it (a dialog, a window-wide survey,
+    // an overlay, the Computers launcher). Asking reads the owners' state, so
+    // this effect runs again when the owner above lets go, and the card takes
+    // the keyboard then.
+    if (slot !== null) {
+      if (!mayFocus(card)) return;
+      focusedSurveyId = id;
+      (document.activeElement as HTMLElement | null)?.blur();
+      queueMicrotask(() => {
+        if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card)) {
+          card?.focus({ preventScroll: true });
+        }
+      });
+      return;
+    }
+    // The window-wide card takes the keyboard on its arrival where the
+    // keyboard's owner lets it: it paints over the dialogs of its tier and
+    // takes it from them, and leaves it to the Computers launcher and the
+    // covers over the window. Asking reads the owners' state, so this effect
+    // runs again when one lets go. Once it took the keyboard, a re-run (a
+    // pane event) leaves the keyboard where its owner holds it.
+    if (focusedSurveyId === id || !mayFocus(card)) return;
     focusedSurveyId = id;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => {
-      if (shown && active?.surveyId === id && ownsKeyboard()) card?.focus({ preventScroll: true });
+      if (shown && active?.surveyId === id && ownsKeyboard() && mayFocus(card)) {
+        card?.focus({ preventScroll: true });
+      }
     });
   });
 
@@ -132,10 +179,12 @@
 
 {#if active && shown}
   <div
+    bind:this={overlay}
     class="survey-overlay"
     class:per-terminal={slot !== null}
     role="dialog"
     aria-modal="true"
+    data-keyboard-owner={slot === null ? ownerTag("modal") : ownerTag("terminal-survey", slot)}
   >
     <!-- The card is the focusable survey surface (tabindex -1, focused on
          appear); its keydown is the 1..N / F / X shortcut handler, scoped here
@@ -197,10 +246,15 @@
 {/if}
 
 <style>
+  /* Window-wide: over the panes, the menus (29000), the command deck
+     (29800 at most) and the dialogs (ModalShell's 26000 and up), whose
+     keyboard it holds by painting over them, and under the covers over the
+     window (the reconnect cover's 30000 and up), which paint over it and
+     hold the keyboard while they show. */
   .survey-overlay {
     position: fixed;
     inset: 0;
-    z-index: 39000;
+    z-index: 29900;
     background: color-mix(in srgb, var(--bg) 70%, transparent);
     display: flex;
     align-items: center;

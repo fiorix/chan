@@ -23,6 +23,7 @@
   import { tick, type Snippet } from "svelte";
   import { clampToViewport, triggerMenuX } from "./menuClamp";
   import { portal } from "./portal";
+  import { appInputBlocked } from "../state/store.svelte";
 
   let {
     open = $bindable(false),
@@ -151,9 +152,11 @@
   /// Capture, and stopping propagation, because the app's own Escape handler
   /// is a document listener that would otherwise run first and pop whatever
   /// overlay the menu is sitting on. A menu opened at the cursor has no
-  /// trigger to return to, so focus stays where it is.
+  /// trigger to return to, so focus stays where it is. Under a cover over the
+  /// window, which paints over every menu and holds the keyboard, Escape is
+  /// not the menu's: it would move focus under the cover.
   function onWindowKeyCapture(e: KeyboardEvent): void {
-    if (!open || e.key !== "Escape") return;
+    if (!open || e.key !== "Escape" || appInputBlocked()) return;
     e.preventDefault();
     e.stopPropagation();
     open = false;

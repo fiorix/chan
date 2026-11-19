@@ -1,0 +1,18 @@
+--- a/web/packages/workspace-app/src/components/RichPrompt.svelte
++++ b/web/packages/workspace-app/src/components/RichPrompt.svelte
+@@ -1029,7 +1029,6 @@
+         type="button"
+         class="rp-action"
+         disabled={secondaryAction.disabled}
+-        onpointerdown={keepComposerFocus}
+         onclick={onSecondaryClick}
+       >
+         {secondaryAction.label}
+@@ -1039,7 +1038,6 @@
+       type="button"
+       class="rp-action rp-primary"
+       disabled={primaryAction.disabled}
+-      onpointerdown={keepComposerFocus}
+       onclick={onPrimaryClick}
+     >
+       {primaryAction.label}

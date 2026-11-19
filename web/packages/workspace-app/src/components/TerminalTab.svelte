@@ -238,7 +238,7 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
+  import { handKeyboardToOwner, launcherShownOverWindow, mayFocus, owner } from "../state/keyboardOwner.svelte";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
   import { createTerminalConnectionHealth } from "./terminalConnectionHealth.svelte";
@@ -259,12 +259,17 @@
     focused: boolean;
   } = $props();
 
-  // Modal dialogs, a survey over this terminal and the Computers launcher
-  // own the keyboard. Centralizing their guard keeps every refocus path
-  // from taking it, the mount and pane focus included; once those owners
-  // release it, the same calls legitimately restore the terminal.
+  // The keyboard's owner decides whether this terminal may take the
+  // keyboard; a survey over it owns the keyboard while this is the focused
+  // pane's active tab. Centralizing the guard keeps every refocus path from
+  // taking it, the mount and pane focus included; once the owner releases
+  // it, the same calls legitimately restore the terminal.
+  function keyboardHeld(): boolean {
+    return !mayFocus(host ?? null);
+  }
+
   function focusTerminal(): void {
-    if (refocusRefused(tab.id)) return;
+    if (keyboardHeld()) return;
     term?.focus();
   }
 
@@ -800,19 +805,26 @@
     else if (host?.contains(target)) keyboardSurface = "terminal";
   }
 
-  // Give the keyboard back to the find input, the composer or the terminal,
-  // whichever last took it and is still open, when this is still the focused
-  // terminal and nothing outside it has taken the keyboard since the move.
+  // Give the keyboard back when this is still the focused terminal and
+  // nothing outside it has taken the keyboard since the move: to its owner
+  // when something owns it, as the owner's surface takes it (a survey over
+  // this terminal among them; the Computers launcher takes nothing here),
+  // else to the find input, the composer or the terminal, whichever last
+  // took it and is still open.
   function returnKeyboardAfterRelocation(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
-      const owner = document.activeElement;
+      const holder = document.activeElement;
       if (
-        owner !== null &&
-        owner !== document.body &&
-        owner !== document.documentElement &&
-        !tabEl?.contains(owner)
+        holder !== null &&
+        holder !== document.body &&
+        holder !== document.documentElement &&
+        !tabEl?.contains(holder)
       ) {
+        return;
+      }
+      if (owner() !== null) {
+        handKeyboardToOwner();
         return;
       }
       if (keyboardSurface === "find" && findOpen && searchInput) searchInput.focus();
@@ -2275,6 +2287,9 @@
   /// = fire-and-forget (the orchestrator's lead-identity prompt stays so).
   /// Both Rich Prompt and deliverLeadIdentity reveal the submitted input;
   /// a disconnected retry leaves the reader's viewport untouched.
+  /// Returns whether the send went out: false when the socket is not open,
+  /// so the orchestrator can retry a freshly-spawned lead, and when the
+  /// session is gone, where no retry can succeed.
   function sendPrompt(data: string, agent?: string, id?: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (id && status !== "exited") terminalConnection.inputRefused();
@@ -2343,7 +2358,7 @@
       focusTerminal();
       return;
     }
-    if (refocusRefused(tab.id)) return;
+    if (keyboardHeld()) return;
     host?.focus({ preventScroll: true });
   }
 

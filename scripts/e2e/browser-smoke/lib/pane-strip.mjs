@@ -152,6 +152,61 @@ export async function closeActiveTerminal(page, label) {
   throw new Error(`${label}: the terminal count stayed at ${last.terminals}; the pane holds ${JSON.stringify(last)}`);
 }
 
+/// Close the visible side's active tab of any kind, taking a close
+/// confirmation whose button starts with "Close", and wait until the strip
+/// lists one tab fewer.
+export async function closeActiveTab(page, label) {
+  const before = await readPaneStrip(page);
+  await dispatchCommand(page, "app.tab.close");
+  const deadline = Date.now() + 15_000;
+  let last = before;
+  while (Date.now() < deadline) {
+    last = await readPaneStrip(page);
+    if (last.tabs.length < before.tabs.length) return last;
+    const dialog = await page.$('[role="dialog"][aria-labelledby="confirm-title"]');
+    if (dialog) {
+      for (const button of await dialog.$$("button")) {
+        if (await button.evaluate((node) => node.textContent?.trim().startsWith("Close"))) {
+          await button.click();
+          break;
+        }
+      }
+    }
+    await sleep(200);
+  }
+  throw new Error(`${label}: the strip still lists ${last.tabs.length} tabs; the pane holds ${JSON.stringify(last)}`);
+}
+
+/// Close panes until one is left, taking the "Close tab?" confirmation a
+/// live terminal raises: closeEveryTerminal reads one pane only, so a split
+/// a check leaves, or one a failure leaves half made, would hold its
+/// terminals past it.
+export async function closeExtraPanes(page) {
+  const count = () => page.evaluate(() => document.querySelectorAll(".pane[data-pane-id]").length);
+  let panes = await count();
+  for (let guard = 0; panes > 1; guard += 1) {
+    if (guard >= 4) throw new Error(`still ${panes} panes after ${guard} closes`);
+    await dispatchCommand(page, "app.pane.kill");
+    const deadline = Date.now() + 15_000;
+    let left = panes;
+    while (left >= panes) {
+      if (Date.now() > deadline) throw new Error(`the pane count stayed at ${left}`);
+      const dialog = await page.$('[role="dialog"][aria-labelledby="confirm-title"]');
+      if (dialog) {
+        for (const button of await dialog.$$("button")) {
+          if (await button.evaluate((node) => node.textContent?.trim() === "Close")) {
+            await button.click();
+            break;
+          }
+        }
+      }
+      await sleep(200);
+      left = await count();
+    }
+    panes = left;
+  }
+}
+
 /// The live terminal sessions the server attributes to the page's window, read
 /// from the tenant's terminal roster.
 export async function windowSessions(page, token) {

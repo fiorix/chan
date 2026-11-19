@@ -26,7 +26,7 @@ import { WINDOW_TAB_BAR_MIN_HEIGHT, windowTabBar } from "../state/windowTabBar.s
 import BubbleOverlay from "./BubbleOverlay.svelte";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
 import OverlayShell from "./OverlayShell.svelte";
-import PromptModal from "./PromptModal.svelte";
+import { KEYBOARD_OWNER_ATTR, ownerTag } from "../state/keyboardOwner.svelte";
 
 type TauriWindow = { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
 
@@ -244,11 +244,15 @@ describe("the reconnect overlay", () => {
     const lower = document.body.appendChild(document.createElement("div"));
     lower.className = "panel";
     lower.setAttribute("role", "dialog");
-    lower.dataset.overlayId = "search";
+    lower.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("overlay", "search"));
     const input = lower.appendChild(document.createElement("input"));
     overlayStack.ids = ["search"];
     input.focus();
     await dropConnection();
+    const upper = document.body.appendChild(document.createElement("div"));
+    upper.className = "panel";
+    upper.setAttribute("role", "dialog");
+    upper.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("overlay", "settings"));
     overlayStack.ids = ["search", "settings"];
     watchStatus("open");
     await tick();
@@ -260,8 +264,24 @@ describe("the reconnect overlay", () => {
     const deck = document.body.appendChild(document.createElement("div"));
     deck.className = "deck-shell";
     deck.setAttribute("role", "dialog");
+    deck.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("overlay", "launcher"));
     const input = deck.appendChild(document.createElement("input"));
     overlayStack.ids = ["launcher"];
+    input.focus();
+    await dropConnection();
+    watchStatus("open");
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("returns focus to the Search field that owned it before the drop", async () => {
+    const panel = document.body.appendChild(document.createElement("div"));
+    panel.className = "panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("overlay", "search"));
+    const input = panel.appendChild(document.createElement("input"));
+    overlayStack.ids = ["search"];
     input.focus();
     await dropConnection();
     watchStatus("open");
@@ -278,6 +298,7 @@ describe("the reconnect overlay", () => {
     const root = document.body.appendChild(document.createElement("div"));
     root.className = className;
     root.setAttribute("role", role);
+    root.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("modal"));
     if (label) root.setAttribute("aria-label", label);
     const input = root.appendChild(document.createElement("input"));
     open();
@@ -301,24 +322,6 @@ describe("the reconnect overlay", () => {
     await tick();
     await tick();
     expect(document.activeElement).toBe(card);
-  });
-
-  test("returns focus to the prompt field that owned it before the drop", async () => {
-    promptState.open = true;
-    promptState.title = "Prompt";
-    const target = document.body.appendChild(document.createElement("div"));
-    mounted.push(mount(PromptModal, { target }));
-    await tick();
-    const input = target.querySelector<HTMLInputElement>('.modal[role="dialog"] input')!;
-    input.focus();
-    const blur = vi.spyOn(input, "blur");
-    await dropConnection();
-    expect(blur).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(input);
-    watchStatus("open");
-    await tick();
-    await tick();
-    expect(document.activeElement).toBe(input);
   });
 
   test("does not restore focus while the Computers launcher is shown", async () => {
@@ -658,6 +661,7 @@ describe("the reconnect overlay", () => {
     finishNew();
     await tick();
   });
+
   test("shows a spinner, what it is doing, and the attempt with the time elapsed", async () => {
     ui.wsAttempt = 3;
     const target = await dropConnection();

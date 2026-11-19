@@ -26,10 +26,12 @@ import * as statusBus from "../state/notify.svelte";
 import {
   clearLauncherDraft,
   closeCommandLauncher,
+  commandDeckLayer,
   launcherDraft,
   launcherPanel,
   openCommandLauncher,
   overlayStack,
+  promptState,
   searchPanel,
   syncOverlayStack,
   topOverlay,
@@ -493,6 +495,25 @@ describe("contextual command deck", () => {
     mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
     await flush();
     expect(target.querySelector(".deck-shell")).toBeNull();
+  });
+
+  test("paints at the window's deck layer, which drops under a dialog raised over it", async () => {
+    const target = openLauncher();
+    syncOverlayStack();
+    await flush();
+    // The host names the deck's layer around it; jsdom applies no
+    // stylesheet, so the case reads the property the deck's z-index reads.
+    const layer = () => target.querySelector<HTMLElement>(".deck-overlay")?.parentElement?.style.getPropertyValue("--deck-layer");
+    const holding = layer();
+    expect(holding, "the deck holding the keyboard").toBe(String(commandDeckLayer()));
+    promptState.open = true;
+    try {
+      await flush();
+      expect(layer(), "under a dialog").toBe(String(commandDeckLayer()));
+      expect(layer(), "a layer of its own under a dialog").not.toBe(holding);
+    } finally {
+      promptState.open = false;
+    }
   });
 
   test("opens focused with the window's commands, this machine's rows and six scope orbs", async () => {

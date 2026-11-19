@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import PaneTreeOverlay from "./PaneTreeOverlay.svelte";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 import { closePaneTree, openPaneTree, paneTree, PANE_TREE_ANCHOR_ATTR } from "../state/paneTree.svelte";
+import { KEYBOARD_OWNER_ATTR, LAUNCHER_SHOWN_ATTR, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+import { resetSurveysForTest, showSurvey } from "../state/survey.svelte";
 import type { ProgramStatusRecord } from "../state/programStatus";
 import {
   allTerminalTabs,
@@ -315,6 +317,47 @@ describe("the keyboard", () => {
     expect(paneTree.open).toBe(false);
     expect(document.activeElement).toBe(opener);
     expect(layout.activePaneId, "nothing was picked").toBe("right");
+  });
+
+  test("closing under the Computers launcher hands the keyboard back to nothing", async () => {
+    const opener = document.createElement("input");
+    document.body.append(opener);
+    opener.focus();
+    await open();
+    const pulse = tabFocusPulse.value;
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    try {
+      closePaneTree();
+      await tick();
+      await Promise.resolve();
+      expect(document.activeElement, "the launcher keeps the window's first responder").not.toBe(opener);
+      expect(tabFocusPulse.value, "and no pulse reaches the tab").toBe(pulse);
+    } finally {
+      document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    }
+  });
+
+  test("closing with a survey over the active terminal hands the keyboard to the survey's card", async () => {
+    const opener = document.createElement("input");
+    document.body.append(opener);
+    opener.focus();
+    await open();
+    // The survey over the focused pane's active terminal, and its card,
+    // which takes the keyboard as the survey's surface does.
+    showSurvey({ surveyId: "survey-tree", title: null, bodyMarkdown: "Which?", options: ["A"] }, "build");
+    const root = document.body.appendChild(document.createElement("div"));
+    root.setAttribute(KEYBOARD_OWNER_ATTR, ownerTag("terminal-survey", "build"));
+    const card = root.appendChild(document.createElement("button"));
+    const untake = registerKeyboardTaker(root, () => card.focus());
+    try {
+      closePaneTree();
+      await tick();
+      await Promise.resolve();
+      expect(document.activeElement, "the survey's card, not the opener it refuses").toBe(card);
+    } finally {
+      untake();
+      resetSurveysForTest();
+    }
   });
 
   test("Escape with no element to go back to sends the focus pulse to the active tab", async () => {

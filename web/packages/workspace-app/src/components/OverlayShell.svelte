@@ -24,7 +24,8 @@
   // narrower panels.
 
   import type { Snippet } from "svelte";
-  import { overlayDepth, type OverlayId } from "../state/store.svelte";
+  import { overlayLayer, type OverlayId } from "../state/store.svelte";
+  import { mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
   import { windowControlsBand } from "../state/windowTabBar.svelte";
   // Each wrapped overlay renders its own maximize/restore + close
@@ -60,10 +61,34 @@
     children: Snippet;
   } = $props();
 
+  // Handed the keyboard as its owner (a window-wide survey over it closed),
+  // the panel gives it to the element in it that last held it, or takes it
+  // itself.
+  let panel = $state<HTMLDivElement | null>(null);
+  let lastInside: HTMLElement | null = null;
+  $effect(() => {
+    if (!panel) return;
+    const el = panel;
+    const note = (event: FocusEvent) => {
+      if (event.target instanceof HTMLElement) lastInside = event.target;
+    };
+    el.addEventListener("focusin", note);
+    const untake = registerKeyboardTaker(el, () => {
+      const target = lastInside?.isConnected && el.contains(lastInside) ? lastInside : el;
+      target.focus({ preventScroll: true });
+    });
+    return () => {
+      el.removeEventListener("focusin", note);
+      untake();
+    };
+  });
+
   // The element that held focus when the overlay opened. Closing hands focus
-  // back to it when nothing else took it: focus left on the body or on an
-  // element that went with the panel returns, and a caller that moved focus
-  // on (an opened file) keeps it.
+  // back to it when nothing else took it and the keyboard's owner lets it:
+  // focus left on the body or on an element that went with the panel
+  // returns, a caller that moved focus on (an opened file) keeps it, and an
+  // owner left above it (a survey over its terminal, the Computers launcher)
+  // keeps the keyboard.
   let returnFocus: HTMLElement | null = null;
   $effect.pre(() => {
     if (!open) return;
@@ -75,19 +100,16 @@
       queueMicrotask(() => {
         const current = document.activeElement;
         const fell = current === null || current === document.body || !current.isConnected;
-        if (target?.isConnected && fell) {
+        if (target?.isConnected && fell && mayFocus(target)) {
           target.focus({ preventScroll: true });
         }
       });
     };
   });
 
-  // 10-step gap per depth so any same-overlay sub-layers (popovers,
-  // dropdowns) still have room above their parent without spilling
-  // into the next overlay's slot. Closed (depth -1) collapses to the
-  // base z-index, but the `{#if open}` below means we never paint
-  // anything in that state anyway.
-  const zIndex = $derived(25000 + Math.max(0, overlayDepth(id)) * 10);
+  // Closed (depth -1) collapses to the base layer, but the `{#if open}`
+  // below means we never paint anything in that state anyway.
+  const zIndex = $derived(overlayLayer(id));
 
   // Resolved panel width. An explicit `width` prop from the caller
   // wins (no overlay sets one today, but the override stays useful
@@ -132,14 +154,14 @@
     oncontextmenu={onContextMenu}
   >
     <div
+      bind:this={panel}
       class="panel"
       class:lifted
-      data-overlay-id={id}
       style="width: {resolvedWidth};"
       onclick={(e) => e.stopPropagation()}
       role="dialog"
       aria-label={label}
-      data-overlay={id}
+      data-keyboard-owner={ownerTag("overlay", id)}
       tabindex="-1"
     >
       {@render children()}
