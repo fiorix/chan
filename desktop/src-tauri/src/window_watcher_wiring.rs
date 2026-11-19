@@ -1536,8 +1536,6 @@ struct FeedProbe<'a> {
     /// The pace's sender is gone: no change will come.
     pace_closed: bool,
     on_face: &'a mut (dyn FnMut() + Send),
-    /// This socket has delivered a pong, so the cadence runs.
-    answered: bool,
     last_ping: tokio::time::Instant,
     focused: bool,
     nudges: u64,
@@ -1558,7 +1556,6 @@ impl<'a> FeedProbe<'a> {
             pace,
             pace_closed: false,
             on_face,
-            answered: false,
             last_ping: tokio::time::Instant::now(),
             focused: false,
             nudges: 0,
@@ -1595,7 +1592,6 @@ impl<'a> FeedProbe<'a> {
         let pace = *self.pace.borrow_and_update();
         self.focused = pace.focused;
         self.nudges = pace.nudges;
-        self.answered = false;
     }
 
     /// Send one ping. A failed send ends nothing: measuring never retires
@@ -1622,7 +1618,6 @@ impl<'a> FeedProbe<'a> {
 
     fn pong(&mut self) {
         self.record(ConnectionReading::pong);
-        self.answered = true;
     }
 
     fn set_arrived(&mut self) {
@@ -1638,9 +1633,14 @@ impl<'a> FeedProbe<'a> {
         self.record(ConnectionReading::lost);
     }
 
+    /// Whether this socket has delivered a pong, so the cadence runs.
+    fn answered(&self) -> bool {
+        self.snapshot.lock().unwrap().health.socket_answered()
+    }
+
     /// When the cadence's next ping is due, once this socket has answered.
     fn next_ping(&self) -> Option<tokio::time::Instant> {
-        self.answered
+        self.answered()
             .then(|| self.last_ping + crate::connection_health::cadence(self.focused))
     }
 
@@ -1649,7 +1649,7 @@ impl<'a> FeedProbe<'a> {
         self.focused = pace.focused;
         let nudged = pace.nudges != self.nudges;
         self.nudges = pace.nudges;
-        nudged && self.answered
+        nudged && self.answered()
     }
 }
 
@@ -5362,6 +5362,35 @@ mod tests {
                     face(&snapshot, &clock),
                     Some(chan_server::ConnectionFace::Reconnecting),
                     "the loss of connection {connection}'s socket"
+                );
+            }
+        }
+
+        /// A later socket of a connection whose devserver has answered waits
+        /// for a pong of its own before its cadence runs: a devserver that
+        /// comes back as a release that does not answer gets one ping on it.
+        #[tokio::test(start_paused = true)]
+        async fn a_later_socket_waits_for_its_own_pong_before_its_cadence() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            pacer.window_focus("w", true);
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            for (devserver, pings) in [(Devserver::Current, 4), (Devserver::Older, 1)] {
+                let (client, server) = ws_pair().await;
+                let heard = Arc::new(Mutex::new(Heard::default()));
+                let served = tokio::spawn(serve_feed(server, devserver, start, Arc::clone(&heard)));
+                let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                assert_eq!(
+                    heard.lock().unwrap().pings.len(),
+                    pings,
+                    "pings in 10 s on the focused cadence"
+                );
+                served.abort();
+                assert!(
+                    pumped.task.await.unwrap().is_err(),
+                    "fixture: the socket ended"
                 );
             }
         }

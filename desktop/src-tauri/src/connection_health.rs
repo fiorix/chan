@@ -324,6 +324,12 @@ impl ConnectionReading {
         self.answered && !self.unanswered_sets() && !self.pending.timed.is_empty()
     }
 
+    /// Whether the open feed socket has delivered a pong. Until it has, the
+    /// pump sends that socket no ping after its first.
+    pub(crate) fn socket_answered(&self) -> bool {
+        self.socket.answered
+    }
+
     /// The open socket has delivered a set for a ping and no pong: a
     /// devserver too old to answer sends its set again for each ping.
     fn unanswered_sets(&self) -> bool {
