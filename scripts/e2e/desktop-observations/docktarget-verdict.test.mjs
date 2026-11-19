@@ -30,6 +30,7 @@ function inspectorEval(endpoint, titleSub, expression, timeoutMs) {
     // way the guest does; a driver that evaluates one can never go green.
     if (/\\basync\\b/.test(e)) return {};
     if (has("dblclick")) return "entered";
+    if (has('"tab"')) return scenario === "deck-dropped" ? "elsewhere: BODY." : "tab";
     if (has("chan:command")) return "toggled";
     if (has("browser-toolbar")) return "opened";
     if (has(".twirl")) return "opening";
@@ -37,6 +38,7 @@ function inspectorEval(endpoint, titleSub, expression, timeoutMs) {
     if (has("hamburger-menu")) return "toggle";
     if (has("combobox")) return "open";
     if (has("deck-result-title")) return scenario === "no-handover" && has("Copy path") ? null : "picked";
+    if (has("Command launcher") && has('"open" : "closed"')) return scenario === "deck-closed-on-row" ? "closed" : "open";
     if (has("Command launcher") && has('"closed"')) return "closed";
     if (has("browser-side-pane.left")) return e.includes('"closed"') ? "closed" : true;
     if (has("aria-expanded")) return "open";
@@ -67,7 +69,7 @@ function stagedDriver() {
   return { dir, file };
 }
 
-function runDriver(scenario, clipboard) {
+function runDriver(scenario, clipboard, extra = []) {
   const { dir, file } = stagedDriver();
   const ws = join(dir, "ws");
   mkdirSync(join(ws, "docs"), { recursive: true });
@@ -79,7 +81,7 @@ function runDriver(scenario, clipboard) {
   let code = -1;
   try {
     stdout = execFileSync(process.execPath, [file, "--inspector", "127.0.0.1:1", "--out", out,
-      "--xid", "0x1", "--workspace", ws, "--sha", "b".repeat(40), "--engine-version", "proof"],
+      "--xid", "0x1", "--workspace", ws, "--sha", "b".repeat(40), "--engine-version", "proof", ...extra],
       { encoding: "utf8", timeout: 300_000, env: { ...process.env, P6PROOF_SCENARIO: scenario, P6PROOF_CLIP: clipboard } });
     code = 0;
   } catch (err) {
@@ -131,8 +133,40 @@ test("a dead inspector exits 3", () => {
   assert.equal(code, 3);
 });
 
+test("closing the dock by the deck's row, then Escape, exits 0 and PASS", () => {
+  const { code, lines, json } = runDriver("correct", TAB_PATH, ["--close-by", "deck"]);
+  assert.equal(code, 0);
+  assert.ok(lines.some((l) => l.includes(" ok deck picked the dock row")), "missing the deck's dock row");
+  assert.ok(lines.some((l) => l.includes(" ok deck dismissed by Escape")), "missing the Escape");
+  assert.ok(lines.some((l) => l.includes(" ok keyboard is inside the tab's tree after Escape")), "missing the hand-back read");
+  assert.ok(lines.some((l) => l.endsWith("PASS")));
+  assert.equal(json?.closeBy, "deck");
+  assert.equal(json?.exitCode, 0);
+});
+
+test("a deck close that leaves the tab without the keyboard exits 10 there", () => {
+  const { code, lines, json } = runDriver("deck-dropped", TAB_PATH, ["--close-by", "deck"]);
+  assert.equal(code, 10);
+  assert.ok(lines.some((l) => l.includes("FAIL keyboard is inside the tab's tree after Escape elsewhere: BODY.")), "missing the hand-back FAIL");
+  assert.ok(!lines.some((l) => l.includes("Copy path")), "the run stops before the copy");
+  assert.equal(json?.exitCode, 10);
+});
+
+test("an unknown close mode refuses before the drive", () => {
+  const { code, lines } = runDriver("correct", "", ["--close-by", "chord"]);
+  assert.notEqual(code, 0);
+  assert.equal(lines.filter((l) => l.includes(" ok ")).length, 0);
+});
+
 test("an absolute path to the tab's file counts as the tab's file", () => {
   const { code, json } = runDriver("correct", "/TESTWS/notes/b.md");
   assert.equal(code, 0);
   assert.equal(json?.clipboard, "/TESTWS/notes/b.md");
+});
+
+test("a deck that closes on the dock row exits 3 before the Escape", () => {
+  const { code, lines } = runDriver("deck-closed-on-row", TAB_PATH, ["--close-by", "deck"]);
+  assert.equal(code, 3);
+  assert.ok(lines.some((l) => l.includes("FAIL deck stays open on the dock row")), "missing the deck-open precondition");
+  assert.ok(!lines.some((l) => l.includes("deck dismissed by Escape")), "the run stops before the Escape");
 });

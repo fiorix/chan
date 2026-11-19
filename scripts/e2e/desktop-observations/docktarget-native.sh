@@ -6,10 +6,11 @@
 # docktarget-native.mjs enters notes, opens the dock and selects its row,
 # closes the dock by its menu row and runs the launcher's Copy path,
 # asserting the keyboard in the tab's tree and the tab's file on the X
-# clipboard.
+# clipboard. A second argument "deck" closes the dock by the deck's row
+# instead, then Escape.
 # Invoke under xvfb-run with a fixed screen size. Layout mirrors
 # terminal-size-native.sh in this directory.
-#   docktarget-native.sh OUTPUT
+#   docktarget-native.sh OUTPUT [menu|deck]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +19,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 output=$1
 [ -n "${output:-}" ] || obs_inconclusive "docktarget-native.sh needs an output directory"
+close_by=${2:-menu}
+case $close_by in menu | deck) ;; *) obs_inconclusive "docktarget-native.sh closes the dock by menu or deck, not $close_by" ;; esac
 : "${DISPLAY:?run under xvfb-run}"
 obs_setup docktarget-native
 obs_need node sha256sum xdotool xclip xprop import
@@ -53,7 +56,7 @@ export CHAN_DESKTOP_BIN CHAN_BIN
 obs_log "window $xid is visible on $DISPLAY; engine $ENGINE_VERSION; sha $SHA"
 obs_verdict
 node "$HERE/docktarget-native.mjs" --inspector "$INSPECTOR" --out "$output/recordings" --xid "$xid" \
-  --workspace "$WS" --sha "$SHA" --engine-version "$ENGINE_VERSION" > "$output/driver.log" 2>&1
+  --workspace "$WS" --sha "$SHA" --engine-version "$ENGINE_VERSION" --close-by "$close_by" > "$output/driver.log" 2>&1
 verdict=$?
 echo "driver exit $verdict"
 cat "$output/driver.log" | obs_masked
