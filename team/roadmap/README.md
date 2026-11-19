@@ -49,6 +49,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [listingcap]: v0.132.0/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md
 [capghosts]: v0.132.0/links-to-files-in-a-workspace-over-the-listing-cap-draw-as-missing-in-the-graph.md
 [capwalks]: v0.133.0/the-graph-walks-a-workspace-over-the-listing-cap-three-times-per-load-and-shows-no-folder-layer.md
+[lockholes]: v0.133.0/the-screen-lock-lets-keys-focus-and-viewers-through-to-the-window-under-it.md
 
 ### v0.132.0
 
@@ -91,6 +92,7 @@ Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle (
 | [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 | [cap: three walks, no folder layer][capwalks] | not started | build |
+| [keys and viewers past the screen lock][lockholes] | not started | build |
 
 ## Completed
 
