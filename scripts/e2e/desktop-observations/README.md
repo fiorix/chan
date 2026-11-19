@@ -30,6 +30,15 @@ CHAN_DESKTOP_BIN=/home/ubuntu/target/debug/chan-desktop CHAN_BIN=/home/ubuntu/ta
     /home/ubuntu/evidence/fbpaste-native-01
 ```
 
+- **`docktarget-native.sh`** asks whether the left dock hands its file commands to the focused pane's tab when it closes, on the desktop's engine, as the counterpart of browser-smoke check 234. In a Files tab it enters `notes` and selects `b.md`, opens the left dock by the deck's "Left file browser dock" row and selects the dock's `docs/a.md`, closes the dock, and runs the deck's Copy path. It asserts that the keyboard is inside the tab's tree and that the X clipboard, read with `xclip`, holds the tab's `notes/b.md`. Its second argument picks how the dock closes: `menu`, the default, by the dock's own menu row; `deck` by the deck's row, a toggle the deck stays open on, then Escape, after which the tab's tree must hold the keyboard before the copy runs. `docktarget-native.mjs` is its page-level driver through the engine's inspector and needs Node 22 or newer for the built-in `WebSocket`; `docktarget-verdict.test.mjs` checks its verdicts offline. Build the web bundles, `chan` and the native desktop at the same source revision in the guest, then run the script under a fixed 1600 by 1000 Xvfb screen:
+
+```bash
+CHAN_DESKTOP_BIN=/home/ubuntu/target/debug/chan-desktop CHAN_BIN=/home/ubuntu/target/debug/chan \
+    xvfb-run -a -s '-screen 0 1600x1000x24 -nolisten tcp' \
+    bash scripts/e2e/desktop-observations/docktarget-native.sh \
+    /home/ubuntu/evidence/docktarget-native-01 deck
+```
+
 - **`scale2-repaint.sh`** opens one ghostty terminal on the desktop at `GDK_SCALE=2`, paints pages, drops the canvas drawing state by a same-size reset, and refocuses the window so the app runs its forced passes. It reads painted pixels per quarter plus the transform before and after: at full scale the repaint lands and the run holds; at half scale the paint stays in the top-left quarter and the run faults. Only the after-refocus miss is a product fault; every earlier miss is inconclusive, and a guest that does not run at scale 2 is refused with that line.
 
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
@@ -81,7 +90,7 @@ CHAN_DESKTOP_BIN=target/debug/chan-desktop CHAN_BIN=target/debug/chan \
     scripts/e2e/desktop-observations/hide-stroke.sh
 ```
 
-The shell drivers start their own `Xvfb` and window manager except `terminal-size-native.sh` and `fbpaste-native.sh`, which need the fixed `xvfb-run` display shown below and start their own window manager. They need `Xvfb`, `openbox`, `xdotool`, `xprop`, ImageMagick's `import`, `python3`, `curl` and, for the hide and gateway sign-in drivers, Node 22 or newer for its built-in `WebSocket`. The native terminal-size driver also needs Node 22 or newer for its built-in `WebSocket`. Gateway sign-in also needs `pkg-config` to identify WebKitGTK and uses `gtk-query-settings` to read the display's double-click setting; without the latter it records why the setting is unavailable. A run takes one to two minutes. Its work directory, with the desktop's log, the per-arm records and screenshots, is printed at the start and is left in place after every run, whatever its exit code. Each shell driver logs its source label, the git commit with `-dirty` when its checkout has changes and `-status-unknown` when git cannot read it; the native terminal-size driver writes it to `run.json`.
+The shell drivers start their own `Xvfb` and window manager except `terminal-size-native.sh`, `fbpaste-native.sh` and `docktarget-native.sh`, which need the fixed `xvfb-run` display shown below and start their own window manager. They need `Xvfb`, `openbox`, `xdotool`, `xprop`, ImageMagick's `import`, `python3`, `curl` and, for the hide and gateway sign-in drivers, Node 22 or newer for its built-in `WebSocket`. The native terminal-size driver also needs Node 22 or newer for its built-in `WebSocket`. The docktarget driver also needs `xclip` to read the clipboard. Gateway sign-in also needs `pkg-config` to identify WebKitGTK and uses `gtk-query-settings` to read the display's double-click setting; without the latter it records why the setting is unavailable. A run takes one to two minutes. Its work directory, with the desktop's log, the per-arm records and screenshots, is printed at the start and is left in place after every run, whatever its exit code. Each shell driver logs its source label, the git commit with `-dirty` when its checkout has changes and `-status-unknown` when git cannot read it; the native terminal-size driver writes it to `run.json`.
 
 The hide drivers are sensitive to CPU contention: under load the native window can outlast the wait, and the run then ends inconclusive, not wrong. Record the load beside a result.
 
