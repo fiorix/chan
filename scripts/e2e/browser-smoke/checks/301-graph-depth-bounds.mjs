@@ -37,22 +37,20 @@
 // GAP_BOUND_MS: a page that answers input draws its next frame within the
 // 100 ms response budget of the RAIL model; 250 ms leaves two and a half
 // times that for a guest under the suite's load. The layout runs one
-// d3-force tick a frame, about 12 ms over 3,000 nodes and about 160 ms over
-// 20,000 in V8 on a desktop CPU, so a step held to the budget stays well
-// inside the bound and an unbounded one over 25,000 nodes need not. A
-// baseline arm reads the idle page first: when its own gaps already pass
-// the bound, or it draws under 30 frames a second, the host cannot judge
-// the bound, and the check skips once every other reading has passed.
+// d3-force tick a frame, at the canvas's forces about 13 ms over 3,000
+// nodes and about 110 ms over 20,000 in Node's V8 on a desktop CPU, so a
+// step held to the budget stays well inside the bound and an unbounded one
+// over 25,000 nodes need not. A baseline arm reads the idle page first:
+// when its own gaps already pass the bound, or it draws under 30 frames a
+// second, the host cannot judge the bound, and the check skips once every
+// other reading has passed.
 //
-// The first run at the change must pass, recording the wide leg's largest
-// gap and each leg's folder reads. At e262cf2df it must fail: on wide the
-// drawn count changes while the pointer is down and the depth reaches 3 with
-// no "[limit]"; on heavy the second level opens and draws past the budget
-// with no "[limit]"; chain's slider ends at 15. The many leg passes there
-// (its old raise read every opened folder at once) and fails at the range's
-// earlier tip, whose raise read 64 and stopped. The wide leg's gap is
-// recorded at every commit; the first base run shows whether a drag over
-// 25,000 nodes crosses the bound.
+// What each leg catches: wide, a depth applied at every value of a drag,
+// and a release that opens past the budget or shows no "[limit]"; heavy, a
+// level opened before its folders' notes are counted; many, a raise that
+// stops after the first batch of folder reads; chain, a directory's depth
+// past the server's walk. The result records the wide leg's largest frame
+// gap and each leg's folder reads whether the check passes or not.
 
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

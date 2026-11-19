@@ -24,14 +24,12 @@
 # and an editor are the page's; preflight's `locked` is the one signal the
 # cover keys on, and the index status is what the chip shows.
 #
-# Expected first run at the change: every check PASS. At e262cf2df, where
-# the graph rebuild lists every entry and a failed index locks preflight:
-# `large` fails at its status as soon as it reads error ("listing exceeds
-# 500000 entries"), then at the document count, at preflight (phase failed,
-# locked) and at the search (not ready); `over` fails at the status message
-# (the bare listing error, no excluded directories), preflight (locked),
-# readiness (recovering, the pass requeued), the rerun watch (building
-# about every 30 s) and the edit (a search answers not ready).
+# What each arm catches: `large`, a rebuild whose cap counts entries the
+# index never reads (the status reads error, preflight locks); `over`, a
+# failed index that locks preflight, a listing error that does not name its
+# fix, a pass requeued on a cooldown (a building or recovering sample in
+# the watch), and an error a later apply clears. The `large` arm fails at
+# once on an error status rather than waiting out the timeout.
 #
 # Run it only inside a container (an sdme guest): it starts a devserver,
 # and each arm writes about half a million files (roughly 2 GiB on a
