@@ -1583,8 +1583,19 @@ mod tests {
         let build = body("\nfn build_panel(");
         assert!(build.contains("#[cfg(windows)]\n        report_focus(app, &label, &webview);"));
         let report = body("\nfn report_focus(");
-        assert!(report.contains("controller.add_GotFocus(&handler, &mut token)"));
-        assert!(report.contains("controller.add_LostFocus(&handler, &mut token)"));
+        let at = |needle: &str| {
+            report
+                .find(needle)
+                .expect("the launcher watches both edges")
+        };
+        let gain = at("if gained {");
+        let got = at("controller.add_GotFocus(&handler, &mut token)");
+        let loss = at("} else {");
+        let lost = at("controller.add_LostFocus(&handler, &mut token)");
+        assert!(
+            gain < got && got < loss && loss < lost,
+            "a gain is watched by add_GotFocus and a loss by add_LostFocus"
+        );
         assert!(report.contains(".screen_focus(&host_for_event, gained)"));
         let hide = body("\nfn hide_now(");
         let hidden = hide
