@@ -855,9 +855,10 @@ export type WorkspaceSummary = {
 };
 export type PreflightSnapshot = {
   phase: PreflightPhase;
-  /// True while `phase === "needs_decision"`. The single signal the locked
-  /// surface keys on: while true it shows with no close affordance and
-  /// ignores ESC. A failed step does not lock; it rides `steps` and `error`.
+  /// True while a step waits on the user's choice, beside a failed step too.
+  /// The single signal the locked surface keys on: while true it shows with
+  /// no close affordance and ignores ESC. A failed step alone does not lock;
+  /// it rides `steps` and `error`.
   locked: boolean;
   /// Whether the workspace has settled, independent of `locked`. The boot
   /// unlocks while a recovery or index pass is in flight; the pre-flight
