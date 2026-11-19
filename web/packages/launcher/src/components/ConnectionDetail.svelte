@@ -26,9 +26,8 @@
   const concealed = $derived(isConcealed(field));
   const figures = $derived(connectionFigures(health.samples));
   // The chart fills the detail's width at a fixed height, so it is drawn
-  // for the width the detail has: measured at mount and on every resize,
-  // which a ResizeObserver reports for the card and, without one, the
-  // window's resize stands in for.
+  // for the width the detail has: measured at mount and on every resize the
+  // ResizeObserver reports.
   let box: HTMLDivElement | undefined = $state();
   let boxWidth = $state(0);
   $effect(() => {
@@ -38,10 +37,6 @@
       boxWidth = el.clientWidth;
     };
     measure();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", measure);
-      return () => window.removeEventListener("resize", measure);
-    }
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();

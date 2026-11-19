@@ -71,9 +71,10 @@ export function connectionFaceLabel(health: ConnectionHealth, now: number): stri
   }
 }
 
-/// The face's name, for its title and its accessible name. It carries the
-/// count the words beside the mark show, since a control that holds the face
-/// and is labelled for its own action reads the name alone.
+/// The face's name, for its title and its accessible name. A stalled or
+/// reconnecting face's name carries the count its words show, since a
+/// control that holds the face and is labelled for its own action reads the
+/// name alone.
 export function connectionFaceName(health: ConnectionHealth, now: number): string {
   switch (health.face) {
     case "healthy":

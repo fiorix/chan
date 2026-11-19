@@ -50,7 +50,18 @@ const face = (key: string) => slot(key).querySelector<HTMLElement>(".ds-name-row
 const detail = (key: string) => slot(key).querySelector<HTMLElement>(".ds-health .connection-detail");
 const detailText = (key: string) => detail(key)!.textContent!.replace(/\s+/g, " ").trim();
 
+// jsdom has no ResizeObserver, which the detail measures its width through.
+// Each observed element keeps its callback here, so a test can report a
+// resize.
+const observed = new Map<Element, () => void>();
+
 beforeEach(() => {
+  observed.clear();
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private readonly report: () => void) {}
+    observe(el: Element) { observed.set(el, this.report); }
+    disconnect() {}
+  });
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   vi.setSystemTime(NOW);
   resetDeck();
@@ -66,6 +77,7 @@ afterEach(async () => {
   library.devservers = [];
   await setPrivacy({ enabled: false });
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("the connection face on the Computers deck", () => {
@@ -103,12 +115,6 @@ describe("the connection face on the Computers deck", () => {
   });
 
   it("draws its chart across the detail's width at a fixed height, and again when the card resizes", () => {
-    const observed = new Map<Element, () => void>();
-    vi.stubGlobal("ResizeObserver", class {
-      constructor(private readonly report: () => void) {}
-      observe(el: Element) { observed.set(el, this.report); }
-      disconnect() {}
-    });
     let width = 552;
     const clientWidth = vi.spyOn(Element.prototype, "clientWidth", "get")
       .mockImplementation(function (this: Element) { return this.classList.contains("connection-detail") ? width : 0; });
@@ -130,7 +136,6 @@ describe("the connection face on the Computers deck", () => {
       expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 189 44");
     } finally {
       clientWidth.mockRestore();
-      vi.unstubAllGlobals();
     }
   });
 
