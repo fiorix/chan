@@ -566,7 +566,10 @@ impl ProbePacer {
 
     /// A window of the desktop gained or lost the focus, or went away
     /// (`focused` false). When the desktop gains the focus, every feed
-    /// pings once, in the same update of the pace.
+    /// pings once, in the same update of the pace. A move of the focus
+    /// between two windows pings once too when it is reported loss first,
+    /// as the desktop losing the focus and gaining it, and not when it is
+    /// reported gain first.
     pub(crate) fn window_focus(&self, label: &str, focused: bool) {
         self.holder_focus(label, FocusHolder::Window, focused);
     }
@@ -1283,19 +1286,31 @@ mod tests {
                 nudges: 1
             }
         );
-        // The last focused window going away is the desktop losing it.
+        // Loss first, the move is the desktop losing the focus and gaining
+        // it again: one ping.
         pacer.window_focus("b", false);
+        assert!(!pace.borrow().focused);
+        pacer.window_focus("c", true);
+        assert_eq!(
+            *pace.borrow(),
+            ProbePace {
+                focused: true,
+                nudges: 2
+            }
+        );
+        // The last focused window going away is the desktop losing it.
+        pacer.window_focus("c", false);
         assert_eq!(
             *pace.borrow(),
             ProbePace {
                 focused: false,
-                nudges: 1
+                nudges: 2
             }
         );
-        pacer.window_focus("c", true);
-        assert_eq!(pace.borrow().nudges, 2);
-        pacer.ping_now();
+        pacer.window_focus("d", true);
         assert_eq!(pace.borrow().nudges, 3);
+        pacer.ping_now();
+        assert_eq!(pace.borrow().nudges, 4);
     }
 
     /// The reports Windows makes while a window's Computers screen holds the
