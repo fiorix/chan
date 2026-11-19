@@ -121,8 +121,11 @@
   } from "../graph/sharedGraph";
   import {
     GRAPH_DRAWN_NODE_BUDGET,
+    closeToBudget,
     depthStep,
     depthWithinBudget,
+    drawnTreePaths,
+    fitsBudget,
     graphNodeIds,
     openBelow,
     openedDepth,
@@ -196,9 +199,17 @@
   function onGraphDoubleClick(): void {
     if (!selectedNode || selectedNode.kind !== "folder") return;
     const path = selectedNode.path;
+    depthNote = null;
     if (graphState.expanded[path]) {
       delete graphState.expanded[path];
     } else {
+      // What the graph already holds of the folder decides at once; a
+      // folder still unread opens, is read, and the budget closes it back
+      // if what the read brought does not fit.
+      if (!fitsBudget(drawnTreePaths(nodes, { ...expandedDirs, [path]: true }), GRAPH_DRAWN_NODE_BUDGET)) {
+        depthNote = opensPastBudget(path);
+        return;
+      }
       const before = new Set(visibleNodeIds);
       graphState.expanded[path] = true;
       loadOpenedChildren();
@@ -234,7 +245,7 @@
     }
     const missing: string[] = [];
     for (const dir of Object.keys(expandedDirs)) {
-      if (!dir || !expandedDirs[dir] || withChildren.has(dir) || spineAsked.has(dir)) continue;
+      if (!dir || !expandedDirs[dir] || withChildren.has(dir) || spineAsked.has(dir) || spineHoldsChildren(dir)) continue;
       missing.push(dir);
     }
     if (missing.length === 0) return;
@@ -285,6 +296,7 @@
   let depthDraft = $state<number | null>(null);
   function setDepth(value: number): void {
     depthDraft = null;
+    depthNote = null;
     if (depthDir === null) {
       depthRaise = null;
       graphState.depth = value;
@@ -308,35 +320,26 @@
       graphState.depth = 1;
       depthDraft = null;
       depthRaise = null;
+      depthNote = null;
     }
   }
 
   /// A raise of a directory's depth that is still reading the folders it
   /// would open. A newer depth change, a selection or the tab's end
   /// supersedes it.
-  type DepthRaise = { dir: string; depth: number };
+  type DepthRaise = { dir: string; depth: number; failed: Set<string> };
   let depthRaise: DepthRaise | null = null;
 
-  /// Whether the children of the directory at `path` are known: the drawn
-  /// graph holds one, or the spine read its level (an empty one included),
-  /// or a read was asked for it, which counts it with what is known of it.
-  function childrenKnown(): (path: string) => boolean {
-    const withChildren = new Set<string>();
-    for (const n of nodes) {
-      if ((n.kind === "file" || n.kind === "folder") && n.path) withChildren.add(parentDir(n.path));
-    }
-    return (path) => withChildren.has(path) || spineHoldsChildren(path) || spineAsked.has(path);
-  }
-
   /// Raises the directory `dir`'s depth toward `depth` a level at a time. A
-  /// level opens once the children of the folders above it are read and
-  /// what it draws fits the drawn-node budget; folders are read at most
-  /// OPENED_CHILDREN_READS_PER_STEP at a time, and the budget is counted
-  /// again over what each read brought, so a raise draws no more than the
-  /// budget whatever the shared graph held of the tree, and goes on past
-  /// the first batch with no further step from the user.
+  /// level opens once the spine has read the children of every folder
+  /// above it and what it draws fits the drawn-node budget; folders are
+  /// read at most OPENED_CHILDREN_READS_PER_STEP at a time, and the budget
+  /// is counted again over what each read brought, so the raise goes on past
+  /// the first batch with no further step from the user. A folder whose read
+  /// fails stops the raise below its level. Whatever changes what the tree
+  /// draws after that, the budget's effect closes it back.
   function raiseDepth(dir: string, depth: number, fit: boolean): void {
-    const raise: DepthRaise = { dir, depth };
+    const raise: DepthRaise = { dir, depth, failed: new Set() };
     depthRaise = raise;
     void advanceRaise(raise, fit);
   }
@@ -344,15 +347,14 @@
   async function advanceRaise(raise: DepthRaise, fit: boolean): Promise<void> {
     const before = new Set(visibleNodeIds);
     let first = true;
-    for (;;) {
-      if (depthRaise !== raise) return;
+    while (depthRaise === raise) {
       const step = depthStep(
         nodes,
         expandedDirs,
         raise.dir,
         raise.depth,
         GRAPH_DRAWN_NODE_BUDGET,
-        childrenKnown(),
+        spineHoldsChildren,
         OPENED_CHILDREN_READS_PER_STEP,
       );
       const current = openedDepth(nodes, expandedDirs, raise.dir);
@@ -362,44 +364,60 @@
         graphState.expanded = openBelow(nodes, expandedDirs, raise.dir, Math.max(current, step.depth));
         first = false;
       }
-      if (step.read.length === 0) break;
-      if (!(await readFolders(step.read, raise))) break;
+      const failed = step.read.find((dir) => raise.failed.has(dir));
+      if (failed !== undefined) depthNote = `${failed.split("/").pop()} could not be read; the depth stops above it`;
+      if (step.read.length === 0 || failed !== undefined) break;
+      await readFolders(step.read, raise);
     }
-    if (depthRaise === raise) depthRaise = null;
+    if (depthRaise !== raise) return;
+    depthRaise = null;
     if (fit) void requestExpansionFitAfterUpdate(raise.dir, before);
   }
 
   /// Reads the children of `dirs` into the spine, after any change patch
-  /// already queued, and draws what they bring. Waits for a spine still
-  /// loading; false when the spine failed or `raise` was superseded.
-  async function readFolders(dirs: string[], raise: DepthRaise): Promise<boolean> {
-    while (spineRead === null || spineLoading) {
-      if (spineError !== null || depthRaise !== raise) return false;
+  /// already queued, and draws what they bring; a folder whose read fails
+  /// or is gone joins `raise.failed`. Waits for a spine still loading, and
+  /// stops once `raise` is superseded. A batch a whole fetch superseded
+  /// leaves its folders unread, so the raise reads them again.
+  async function readFolders(dirs: string[], raise: DepthRaise): Promise<void> {
+    while (spineError === null && (spineRead === null || spineLoading)) {
+      if (depthRaise !== raise) return;
       await yieldToFrame();
     }
-    if (spineError !== null || depthRaise !== raise) return false;
-    for (const dir of dirs) spineAsked.add(dir);
-    const seq = spineSeq;
     const read = spineRead;
+    if (depthRaise !== raise) return;
+    if (spineError !== null || read === null) {
+      for (const dir of dirs) raise.failed.add(dir);
+      return;
+    }
+    const seq = spineSeq;
     const run = async (): Promise<void> => {
-      if (seq !== spineSeq || read !== spineRead) return;
       for (const dir of dirs) {
-        let level;
+        if (depthRaise !== raise || seq !== spineSeq || read !== spineRead) break;
         try {
-          level = await fetchSpineLevel(dir, seq);
+          const level = await fetchSpineLevel(dir, seq);
+          if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
+          if (level === null) raise.failed.add(dir);
+          applySpineLevel(read, dir, level);
         } catch {
-          // Counted as read, with what is known of it.
-          continue;
+          raise.failed.add(dir);
         }
-        if (level === "superseded" || seq !== spineSeq || read !== spineRead) return;
-        applySpineLevel(read, dir, level);
       }
-      publishSpine(read);
+      if (seq === spineSeq && read === spineRead) publishSpine(read);
     };
     spinePatches = spinePatches.then(run, run);
     await spinePatches;
-    await tick();
-    return depthRaise === raise;
+  }
+
+  /// What the graph says of a depth or a folder that could not open: a
+  /// folder past the budget, or one the raise could not read.
+  let depthNote = $state<string | null>(null);
+  /// The tree's drawn files and folders when the budget last held, so a
+  /// change past it closes the folders it grew.
+  let budgetDrawn = new Set<string>();
+
+  function opensPastBudget(path: string): string {
+    return `opening ${path.split("/").pop()} would draw more than ${GRAPH_DRAWN_NODE_BUDGET.toLocaleString()} files and folders`;
   }
 
   // The launcher's depth steps show the depth as their value, and read it
@@ -879,6 +897,32 @@
   /// parity) and survives a window reload. A directory is present when its
   /// children should show; the scope root ("") is always expanded.
   const expandedDirs = $derived(graphState.expanded ?? { "": true });
+
+  // The drawn-node budget, held in one place before anything is drawn:
+  // whatever changed the drawn nodes or the opened set (a raise, a
+  // double-click's read, a patch, a whole fetch, a shared graph taken, a
+  // restored tab), a tree past the budget closes back the folders the
+  // change grew, deepest first. What is left is drawn as the budget last
+  // held it, so its own write fits and it runs once more and stops. When
+  // the selected directory is what closes, the status line says why: the
+  // tap before a double-click selects its folder, and a tab opened on a
+  // directory selects it.
+  $effect.pre(() => {
+    const opened = expandedDirs;
+    const drawn = drawnTreePaths(nodes, opened);
+    if (fitsBudget(drawn, GRAPH_DRAWN_NODE_BUDGET)) {
+      budgetDrawn = drawn;
+      return;
+    }
+    const grown = new Set<string>();
+    for (const path of drawn) if (path !== "" && !budgetDrawn.has(path)) grown.add(parentDir(path));
+    const closed = closeToBudget(nodes, opened, GRAPH_DRAWN_NODE_BUDGET, grown);
+    if (closed === null) return;
+    untrack(() => {
+      if (depthDir && opened[depthDir] && !closed[depthDir]) depthNote = opensPastBudget(depthDir);
+      graphState.expanded = closed;
+    });
+  });
 
   /// Set of node ids the graph includes, before the chips: the opened tree
   /// with the selection's reveal laid over it.
@@ -2311,7 +2355,9 @@
         title={depthShallow
           ? "Nothing further to reveal from here"
           : depthLimited
-            ? `The next level would draw more than ${GRAPH_DRAWN_NODE_BUDGET.toLocaleString()} files and folders; double-click a folder to open it alone`
+            ? depthValue === 0
+              ? `Opening this folder would draw more than ${GRAPH_DRAWN_NODE_BUDGET.toLocaleString()} files and folders`
+              : `The next level would draw more than ${GRAPH_DRAWN_NODE_BUDGET.toLocaleString()} files and folders; select a folder below to go deeper there`
             : depthDir !== null
               ? "Directory levels opened below the selected directory"
               : "Hops of references shown from the selected node"}
@@ -2608,6 +2654,9 @@
   <div class="statusbar">
     <span class="stat">
       {visibleNodeIds.size}/{nodes.length} nodes · {visibleEdges.length}/{edges.length} edges
+      {#if depthNote}
+        · <span class="depth-note" role="status">{depthNote}</span>
+      {/if}
       {#if indexBuilding}
         · <span class="indexing" title="The workspace index is not ready; dead-end nodes may resolve once it completes.">{workspaceRecovering ? "workspace recovering…" : "indexing…"}</span>
       {/if}
@@ -2714,6 +2763,10 @@ drag to pan · scroll to zoom · click to select · double-click a directory to 
     .indexing {
       animation: none;
     }
+  }
+  /* Why a depth or a folder did not open: the budget or a failed read. */
+  .depth-note {
+    color: var(--warn-text);
   }
   .hint {
     margin-left: auto;

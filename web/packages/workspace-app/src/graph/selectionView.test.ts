@@ -3,6 +3,8 @@ import { describe, expect, test } from "vitest";
 import { directoryNodeId } from "./canvasNodes";
 import { FS_GRAPH_DEPTH_MAX } from "./depth";
 import {
+  closeToBudget,
+  fitsBudget,
   depthStep,
   depthWithinBudget,
   graphNodeIds,
@@ -209,22 +211,23 @@ describe("the drawn-node budget", () => {
     for (let i = 0; i < 4; i += 1) tree.push({ id: `${dir}/${i}.md`, kind: "file", path: `${dir}/${i}.md` });
   }
   for (const file of ["b/1.md", "b/2.md"]) tree.push({ id: file, kind: "file", path: file });
-  // Drawn at each depth from the root: 1 + 2 = 3, then 3 + 5 = 8, then 8 + 12 = 20.
+  // The root's own level (the root, a and b) always shows and is not
+  // counted. Counted at each depth from the root: 0, then 5, then 5 + 12 = 17.
   const root = { "": true };
 
   test("a depth that fits is applied as asked", () => {
-    expect(depthWithinBudget(tree, root, "", 3, 20)).toBe(3);
-    expect(depthWithinBudget(tree, root, "", 2, 8)).toBe(2);
+    expect(depthWithinBudget(tree, root, "", 3, 17)).toBe(3);
+    expect(depthWithinBudget(tree, root, "", 2, 5)).toBe(2);
   });
 
   test("a depth past the budget stops at the deepest level that fits", () => {
-    expect(depthWithinBudget(tree, root, "", 3, 19)).toBe(2);
-    expect(depthWithinBudget(tree, root, "", 3, 7)).toBe(1);
+    expect(depthWithinBudget(tree, root, "", 3, 16)).toBe(2);
+    expect(depthWithinBudget(tree, root, "", 3, 4)).toBe(1);
   });
 
-  test("one level opens whatever it draws, as a double-click does", () => {
-    expect(depthWithinBudget(tree, root, "", 3, 1)).toBe(1);
-    expect(depthWithinBudget(tree, root, "", 0, 1), "a closing depth is not raised").toBe(0);
+  test("the root's own level shows whatever it draws", () => {
+    expect(depthWithinBudget(tree, root, "", 3, 0)).toBe(1);
+    expect(depthWithinBudget(tree, root, "", 0, 0), "a closing depth is not raised").toBe(0);
   });
 
   test("a level is counted only once the folders above it are read", () => {
@@ -236,21 +239,62 @@ describe("the drawn-node budget", () => {
   });
 
   test("a level already past the budget is not read first", () => {
-    // What is known of the third level, 12 notes on top of 8, already
-    // passes 19, so its unread folders are not asked for.
+    // What is known of the third level, 12 notes on top of 5, already
+    // passes 16, so its unread folders are not asked for.
     const read = (path: string): boolean => !path.startsWith("a/");
-    expect(depthStep(tree, root, "", 3, 19, read, 2)).toEqual({ depth: 2, read: [], limited: true });
+    expect(depthStep(tree, root, "", 3, 16, read, 2)).toEqual({ depth: 2, read: [], limited: true });
   });
 
-  test("an unread directory opens its first level and is read", () => {
-    expect(depthStep(tree, root, "a", 2, 20, (path) => path !== "a", 64)).toEqual({ depth: 1, read: ["a"], limited: false });
+  test("an unread directory is read before its first level opens", () => {
+    expect(depthStep(tree, root, "a", 2, 20, (path) => path !== "a", 64)).toEqual({ depth: 0, read: ["a"], limited: false });
+  });
+
+  test("a first level past the budget does not open, and the root's always shows", () => {
+    expect(depthStep(tree, root, "a", 2, 2, () => true, 64)).toEqual({ depth: 0, read: [], limited: true });
+    expect(depthStep(tree, root, "", 2, 2, () => true, 64)).toEqual({ depth: 1, read: [], limited: true });
+  });
+
+  test("a tree that fits is left as it is", () => {
+    expect(closeToBudget(tree, { "": true, a: true, "a/x": true }, 7, new Set(["a/x"]))).toBeNull();
+  });
+
+  test("a tree past the budget closes what grew, deepest level first", () => {
+    // Open to a/x's notes: 5 + 4 = 9 counted, all of it grown under a.
+    const opened = { "": true, a: true, b: true, "a/x": true };
+    expect(closeToBudget(tree, opened, 8, new Set(["a"]))).toEqual({ "": true, a: true, b: true });
+    expect(closeToBudget(tree, opened, 4, new Set(["a"]))).toEqual({ "": true, b: true });
+  });
+
+  test("the root's own level is not counted", () => {
+    expect(closeToBudget(tree, { "": true }, 0, new Set([""]))).toBeNull();
+    expect(closeToBudget(tree, { "": true, a: true }, 0, new Set(["a"]))).toEqual({ "": true });
+  });
+
+  test("the folders the change grew close, and the rest stays", () => {
+    // a/x and b are open, 9 counted; a/x grew. Closing a/x alone leaves
+    // a's three folders and b's two notes, 5.
+    const opened = { "": true, a: true, b: true, "a/x": true };
+    expect(closeToBudget(tree, opened, 7, new Set(["a/x"]))).toEqual({ "": true, a: true, b: true });
+    // Had b grown, b closes and a/x stays: 3 + 4 = 7.
+    expect(closeToBudget(tree, opened, 8, new Set(["b"]))).toEqual({ "": true, a: true, "a/x": true });
+  });
+
+  test("a folder that grew keeps its own level, its open subfolders closing first", () => {
+    // a grew; a/x is open below it: 3 + 4 = 7 counted. Closing a/x leaves
+    // a's own three folders.
+    expect(closeToBudget(tree, { "": true, a: true, "a/x": true }, 6, new Set(["a"]))).toEqual({ "": true, a: true });
+  });
+
+  test("fitting is counted below the root's own level", () => {
+    expect(fitsBudget(new Set(["", "a", "b", "a/x", "b/1.md"]), 2)).toBe(true);
+    expect(fitsBudget(new Set(["", "a", "b", "a/x", "b/1.md"]), 1)).toBe(false);
   });
 
   test("what shows outside the directory counts against the budget", () => {
     // b is opened, so its two files show at every depth of a.
     const opened = { "": true, b: true };
-    expect(depthWithinBudget(tree, opened, "a", 2, 19), "a, x, y, z, 12 files, root, b, 2 files is 20").toBe(1);
-    expect(depthWithinBudget(tree, opened, "a", 2, 20)).toBe(2);
+    expect(depthWithinBudget(tree, opened, "a", 2, 16), "x, y, z, 12 files and b's 2 files is 17").toBe(1);
+    expect(depthWithinBudget(tree, opened, "a", 2, 17)).toBe(2);
   });
 });
 

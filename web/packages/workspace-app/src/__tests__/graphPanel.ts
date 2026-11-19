@@ -96,6 +96,8 @@ export const graphServer = {
   /// When set, called with each fsGraph request as it arrives, before it is
   /// answered.
   onFsGraph: null as ((request: { path: string; depth: number; cursor?: string }) => void) | null,
+  /// When set, fsGraph refuses a directory it names with the error returned.
+  fsFail: null as ((path: string) => Error | null) | null,
 };
 
 export function resetGraphServer(): void {
@@ -109,6 +111,7 @@ export function resetGraphServer(): void {
   graphServer.graphStreamCalls = 0;
   graphServer.fsGraphCalls = [];
   graphServer.onFsGraph = null;
+  graphServer.fsFail = null;
   canvas.props = null;
   canvas.all = [];
 }
@@ -222,6 +225,8 @@ export function graphApiModule<T extends { api: object }>(actual: T): T {
       fsGraph: vi.fn(async (o: { path: string; depth: number; limit?: number; cursor?: string }) => {
         graphServer.fsGraphCalls.push({ path: o.path, depth: o.depth, cursor: o.cursor });
         graphServer.onFsGraph?.({ path: o.path, depth: o.depth, cursor: o.cursor });
+        const failure = graphServer.fsFail?.(o.path);
+        if (failure) throw failure;
         if (o.limit !== undefined && graphServer.fsGate) await graphServer.fsGate;
         const whole = fsResponse(o.path, o.depth);
         // Every answer carries the scope's ancestors, as the route's does.
