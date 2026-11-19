@@ -9,6 +9,7 @@ Record: in a workspace over the 500,000-entry listing cap, every `/api/graph` lo
 1. One walk per load, shared by the three consumers.
 2. When that walk is over the cap, a scoped walk of directories only (about 46,000 on `chan-dev`) feeds the folder layer and the directory set, so folders, `contains` edges, the root and folder counts come back.
 3. The cap's memory bound holds.
+4. The v0.132.0 row's per-target lookup stays for files, which the directory walk does not list; its folder branch and its ancestor checks then read the directory set instead of statting.
 
 ## Acceptance
 

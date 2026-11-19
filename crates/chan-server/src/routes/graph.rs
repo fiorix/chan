@@ -23,7 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chan_workspace::{
     normalize_graph_edges, resolve_link_target as resolve_link_dst, CocomoSummary, EdgeKind,
-    FileClass, PathClass, PathPermission, ReportFileBucket, ReportFileStats,
+    FileClass, PathClass, PathPermission, ReportFileBucket, ReportFileStats, WorkspacePath,
 };
 use serde::{Deserialize, Serialize};
 
@@ -573,19 +573,24 @@ fn is_image_path(rel: &str) -> bool {
 /// pointing at any on-disk file (LICENSE, .rs source, .sh, ...)
 /// resolves to that real file instead of synthesizing a ghost.
 ///
-/// Returns an empty set when the walk fails, so callers still answer
-/// the request with the indexed graph files alone as the resolver's
-/// universe instead of failing it.
+/// Returns `None` when the walk is over the listing cap, where the graph
+/// looks link targets up one by one instead (`link_targets_on_disk`),
+/// and an empty set when the walk fails otherwise, so callers still
+/// answer the request with the indexed graph files alone as the
+/// resolver's universe instead of failing it.
 fn workspace_disk_files(
     workspace: &chan_workspace::Workspace,
-) -> std::collections::BTreeSet<String> {
+) -> Option<std::collections::BTreeSet<String>> {
     match workspace.list_tree_filtered_unified() {
-        Ok(entries) => entries
-            .into_iter()
-            .filter(|e| !e.is_dir)
-            .map(|e| e.path)
-            .collect(),
-        Err(_) => std::collections::BTreeSet::new(),
+        Ok(entries) => Some(
+            entries
+                .into_iter()
+                .filter(|e| !e.is_dir)
+                .map(|e| e.path)
+                .collect(),
+        ),
+        Err(chan_workspace::ChanError::ListingTooLarge { .. }) => None,
+        Err(_) => Some(std::collections::BTreeSet::new()),
     }
 }
 
@@ -595,20 +600,112 @@ fn workspace_disk_files(
 /// `[notes](../alex/)`); those don't carry between-file graph semantics,
 /// so `build_graph_view` drops their edges.
 ///
-/// Returns an empty set on `list_tree` failure rather than failing the
-/// request. A directory link then counts as an unresolved link target,
-/// and its edge is dropped the same way.
+/// Returns `None` over the listing cap, as `workspace_disk_files` does,
+/// and an empty set on any other `list_tree` failure rather than failing
+/// the request. A directory link then counts as an unresolved link
+/// target, and its edge is dropped the same way.
 fn workspace_disk_dirs(
     workspace: &chan_workspace::Workspace,
-) -> std::collections::BTreeSet<String> {
+) -> Option<std::collections::BTreeSet<String>> {
     match workspace.list_tree_filtered_unified() {
-        Ok(entries) => entries
-            .into_iter()
-            .filter(|e| e.is_dir)
-            .map(|e| e.path)
-            .collect(),
-        Err(_) => std::collections::BTreeSet::new(),
+        Ok(entries) => Some(
+            entries
+                .into_iter()
+                .filter(|e| e.is_dir)
+                .map(|e| e.path)
+                .collect(),
+        ),
+        Err(chan_workspace::ChanError::ListingTooLarge { .. }) => None,
+        Err(_) => Some(std::collections::BTreeSet::new()),
     }
+}
+
+/// The link targets in `edges` that are on disk, as `(files,
+/// directories)`, for a graph whose whole-tree walk is over the listing
+/// cap and lists nothing. A target is looked up as the resolver's first
+/// candidate spells it (percent-decoded, workspace-rooted), and only when
+/// that is the walk's own spelling. It is kept as the walk's
+/// `filter_entry` keeps an entry: every directory above it is a real
+/// directory (an lstat, so a symlinked one stops it, as the walk follows
+/// no symlink) inside the scope policy (excluded directories,
+/// `.gitignore`), and the target itself is a regular file or a directory
+/// inside that policy. Every lookup goes through the workspace's
+/// capability sandbox, so no `..` or symlink leaves the root.
+///
+/// It finds what the walk would list, with two differences: on a
+/// case-folding volume a wrong-case spelling finds a file the walk lists
+/// under its stored spelling only, and an entry below a mount point
+/// inside the root is found where the walk does not descend. The
+/// resolver's other candidates match indexed Markdown files only, so an
+/// extensionless link to a text file (`[[todo]]` for `todo.txt`) and a
+/// source-relative spelling of a non-Markdown file stay dropped over the
+/// cap.
+///
+/// Cost: one lstat per distinct link target that is not an indexed file,
+/// and one per distinct directory above those targets, on every graph
+/// load over the cap. Under the cap the walk's sets answer and nothing is
+/// statted.
+fn link_targets_on_disk(
+    workspace: &chan_workspace::Workspace,
+    edges: &[chan_workspace::Edge],
+    indexed: &std::collections::BTreeSet<&str>,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let policy = workspace.scope_policy();
+    // Each directory above a target is read once per call. The walk
+    // reaches an entry only through real directories its scope keeps.
+    let mut ancestors = std::collections::HashMap::new();
+    let mut walk_descends = |dir: &str| -> bool {
+        if let Some(&descends) = ancestors.get(dir) {
+            return descends;
+        }
+        let real_dir = matches!(
+            workspace.classify_workspace_path(dir),
+            Ok(WorkspacePath::Directory(_))
+        );
+        let descends = real_dir && policy.includes(dir, true);
+        ancestors.insert(dir.to_string(), descends);
+        descends
+    };
+    let no_files = std::collections::BTreeSet::<&str>::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut files = std::collections::BTreeSet::new();
+    let mut dirs = std::collections::BTreeSet::new();
+    for edge in edges {
+        if !matches!(edge.kind, EdgeKind::Link) {
+            continue;
+        }
+        // With no file to match, the resolver answers the decoded target.
+        let decoded = resolve_link_dst(&edge.src, &edge.dst, &no_files);
+        let target = decoded.trim_start_matches('/');
+        if indexed.contains(target) || !seen.insert(target.to_string()) {
+            continue;
+        }
+        let walk_spelling = chan_workspace::fs_ops::validate_rel(target)
+            .ok()
+            .map(|rel| chan_workspace::fs_ops::rel_path_text(&rel));
+        if walk_spelling.as_deref() != Some(target) {
+            continue;
+        }
+        if !target
+            .match_indices('/')
+            .all(|(at, _)| walk_descends(&target[..at]))
+        {
+            continue;
+        }
+        match workspace.classify_workspace_path(target) {
+            Ok(WorkspacePath::Regular(_)) if policy.includes(target, false) => {
+                files.insert(target.to_string());
+            }
+            Ok(WorkspacePath::Directory(_)) if policy.includes(target, true) => {
+                dirs.insert(target.to_string());
+            }
+            _ => {}
+        }
+    }
+    (files, dirs)
 }
 
 /// Image subset of `workspace_disk_files`. Kept as its own predicate so
@@ -1798,12 +1895,24 @@ fn build_graph_view(
     // link resolver's universe; images are the image subset of that
     // walk (Media node kind) while everything else gets the regular
     // File treatment further down.
-    let disk_files = workspace_disk_files(&workspace);
-    let image_files = image_subset(&disk_files);
-    // Directory entries from the same walk. Markdown links whose
+    //
+    // Directory entries come from the same walk. Markdown links whose
     // target is a directory (e.g. `[notes](../notes/)`) stay out of
     // `ghost_set`, and the edge filter below drops their edges.
-    let disk_dirs = workspace_disk_dirs(&workspace);
+    //
+    // Over the listing cap the walk lists nothing, so each link target
+    // is looked up on disk instead; `link_targets_on_disk` states the
+    // cost.
+    let graph_file_set: std::collections::BTreeSet<&str> =
+        files.iter().map(String::as_str).collect();
+    let (disk_files, disk_dirs) = match (
+        workspace_disk_files(&workspace),
+        workspace_disk_dirs(&workspace),
+    ) {
+        (Some(disk_files), Some(disk_dirs)) => (disk_files, disk_dirs),
+        _ => link_targets_on_disk(&workspace, &all_edges, &graph_file_set),
+    };
+    let image_files = image_subset(&disk_files);
     let present_files: std::collections::BTreeSet<&str> = files
         .iter()
         .filter(|path| indexed_file_exists(&workspace, path))
@@ -1831,8 +1940,6 @@ fn build_graph_view(
     // gate used when synthesizing referenced-disk-file nodes, while
     // file_set is what resolve_link_dst and ghost classification
     // consult.
-    let graph_file_set: std::collections::BTreeSet<&str> =
-        files.iter().map(String::as_str).collect();
     let mut file_set = graph_file_set.clone();
     for f in &disk_files {
         file_set.insert(f.as_str());
@@ -2316,7 +2423,7 @@ where
     // regular on-disk file. Without this, `[link](LICENSE)` from a
     // README would not show up in LICENSE's backlinks because the
     // resolver couldn't tell that "LICENSE" was a real file.
-    let disk_files = workspace_disk_files(workspace);
+    let disk_files = workspace_disk_files(workspace).unwrap_or_default();
     let mut file_set: std::collections::BTreeSet<&str> = files.iter().map(String::as_str).collect();
     for f in &disk_files {
         file_set.insert(f.as_str());
@@ -2982,7 +3089,7 @@ mod tests {
         put(root.path(), "scripts/build.sh", b"#!/bin/sh\n");
         put(root.path(), "notes/a.md", b"# A\n");
 
-        let disk = workspace_disk_files(&workspace);
+        let disk = workspace_disk_files(&workspace).expect("under the cap");
         assert!(disk.contains("LICENSE"), "got {disk:?}");
         assert!(disk.contains("src/lib.rs"));
         assert!(disk.contains("scripts/build.sh"));
@@ -3012,7 +3119,7 @@ mod tests {
         // chan-workspace stores the verbatim authored target on the edge.
         assert_eq!(link.dst, "LICENSE");
 
-        let disk = workspace_disk_files(&workspace);
+        let disk = workspace_disk_files(&workspace).expect("under the cap");
         assert!(disk.contains("LICENSE"), "got {disk:?}");
 
         let graph_files = graph.files().unwrap();
@@ -3050,7 +3157,7 @@ mod tests {
         put(root.path(), "docs/agents/alice.md", b"# alice\n");
         put(root.path(), "notes/inner/deep.md", b"# deep\n");
 
-        let dirs = workspace_disk_dirs(&workspace);
+        let dirs = workspace_disk_dirs(&workspace).expect("under the cap");
         assert!(dirs.contains("docs"), "got {dirs:?}");
         assert!(dirs.contains("docs/agents"));
         assert!(dirs.contains("notes"));
@@ -3061,7 +3168,7 @@ mod tests {
 
         // Files set stays clean of directories. The two helpers split
         // the same walk; pin that the split is exclusive.
-        let files = workspace_disk_files(&workspace);
+        let files = workspace_disk_files(&workspace).expect("under the cap");
         assert!(files.contains("docs/intro.md"));
         assert!(!files.contains("docs"));
         assert!(!files.contains("docs/agents"));
@@ -3094,8 +3201,8 @@ mod tests {
             .expect("indexed markdown link edge");
         assert_eq!(link.dst, "some-dir");
 
-        let disk_files = workspace_disk_files(&workspace);
-        let disk_dirs = workspace_disk_dirs(&workspace);
+        let disk_files = workspace_disk_files(&workspace).expect("under the cap");
+        let disk_dirs = workspace_disk_dirs(&workspace).expect("under the cap");
         assert!(disk_dirs.contains("some-dir"), "got {disk_dirs:?}");
         // The link target is NOT a file on disk (it's the directory).
         // Pinning this rules out the referenced-disk-file path
@@ -3131,6 +3238,200 @@ mod tests {
             !keep_edge,
             "edge with dst pointing at a directory should be dropped"
         );
+    }
+
+    /// A workspace app over `workspace/` in a temporary directory that also
+    /// holds `outside.log`. Its one indexed note, `notes/evidence.md`, links
+    /// to a file and an image on disk, to a folder, to a missing file, out
+    /// of the root (by an encoded `..`, and on Unix through a symlink to the
+    /// directory above), into an excluded and an ignored directory, to an
+    /// excluded folder, to a file the `.gitignore` names, to a file its
+    /// negation re-includes under an ignored directory, and on Unix through
+    /// a symlinked directory inside the root and to a symlink itself.
+    fn evidence_route_app() -> GraphRouteApp {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let outer = tempfile::TempDir::new().unwrap();
+        let root = outer.path().join("workspace");
+        put(outer.path(), "outside.log", b"outside\n");
+        put(&root, "evidence/run1/trace.log", b"trace\n");
+        put(&root, "evidence/run1/shot.png", b"png");
+        put(&root, "evidence/run1/key.secret", b"key\n");
+        put(&root, "node_modules/pkg/index.js", b"dep\n");
+        put(&root, ".gitignore", b"build/\n!build/keep.log\n*.secret\n");
+        put(&root, "build/out.log", b"built\n");
+        put(&root, "build/keep.log", b"kept\n");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outer.path(), root.join("out")).unwrap();
+            std::os::unix::fs::symlink("evidence", root.join("alias")).unwrap();
+        }
+        put(
+            &root,
+            "notes/evidence.md",
+            b"# Evidence\n\n\
+              [log](../evidence/run1/trace.log)\n\
+              ![shot](../evidence/run1/shot.png)\n\
+              [run](../evidence/run1/)\n\
+              [gone](../evidence/run1/gone.log)\n\
+              [[%2e%2e/outside.log]]\n\
+              [[out/outside.log]]\n\
+              [[node_modules/pkg/index.js]]\n\
+              [[build/out.log]]\n\
+              [[node_modules]]\n\
+              [[evidence/run1/key.secret]]\n\
+              [[build/keep.log]]\n\
+              [[alias/run1/trace.log]]\n\
+              [[out]]\n",
+        );
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(&root).unwrap();
+        let workspace = lib.open_workspace(&root).unwrap();
+        workspace.index_file("notes/evidence.md").unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(lib, root, workspace)
+        });
+        GraphRouteApp {
+            _cfg: cfg,
+            _root: outer,
+            state,
+        }
+    }
+
+    // Over the listing cap the whole-tree walk lists nothing, and the graph
+    // resolves each link by its target on disk instead, as it does under the
+    // cap: a link to a file or an image there lands on its node, and a link
+    // to a missing file, out of the root, into an excluded or ignored
+    // directory, to an ignored file, to a file a negation re-includes under
+    // an ignored directory, or through a symlinked directory stays a ghost,
+    // whose edge the graph drops; a link to a folder draws no ghost node.
+    // The stored links are read first, so a dropped edge is a ghost and not
+    // a link the index never kept.
+    #[tokio::test]
+    async fn links_resolve_by_their_targets_on_disk_over_the_listing_cap() {
+        let app = evidence_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let stored: std::collections::BTreeSet<String> = workspace
+            .graph()
+            .unwrap()
+            .neighbors("notes/evidence.md")
+            .unwrap()
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::Link))
+            .map(|edge| edge.dst)
+            .collect();
+        let expected_stored = [
+            "%2e%2e/outside.log",
+            "alias/run1/trace.log",
+            "build/keep.log",
+            "build/out.log",
+            "evidence/run1",
+            "evidence/run1/gone.log",
+            "evidence/run1/key.secret",
+            "evidence/run1/shot.png",
+            "evidence/run1/trace.log",
+            "node_modules",
+            "node_modules/pkg/index.js",
+            "out",
+            "out/outside.log",
+        ];
+        assert_eq!(
+            stored,
+            expected_stored.map(String::from).into(),
+            "fixture: the note's stored links"
+        );
+
+        let under = graph_route_body(&app, "/api/graph?depth=1").await;
+        let limit =
+            chan_workspace::workspace::listing_limit_test_hooks::lower_tree_walk(&workspace, 3);
+        assert!(
+            matches!(
+                workspace.list_tree_filtered_unified(),
+                Err(chan_workspace::ChanError::ListingTooLarge { .. })
+            ),
+            "fixture: the walk is not over the lowered cap"
+        );
+        let over = graph_route_body(&app, "/api/graph?depth=1").await;
+        drop(limit);
+
+        for (when, body) in [("under the cap", under), ("over the cap", over)] {
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let links: std::collections::BTreeMap<&str, Option<bool>> = json["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|edge| edge["kind"] == "link" && edge["source"] == "notes/evidence.md")
+                .map(|edge| (edge["target"].as_str().unwrap(), edge["broken"].as_bool()))
+                .collect();
+            assert_eq!(
+                links,
+                std::collections::BTreeMap::from([
+                    ("evidence/run1/shot.png", Some(false)),
+                    ("evidence/run1/trace.log", Some(false)),
+                ]),
+                "{when}, the note's links are not the two files on disk: {body}"
+            );
+            let nodes: std::collections::BTreeMap<&str, &serde_json::Value> = json["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| (node["id"].as_str().unwrap(), node))
+                .collect();
+            for (id, kind) in [
+                ("evidence/run1/trace.log", "file"),
+                ("evidence/run1/shot.png", "media"),
+            ] {
+                let node = nodes
+                    .get(id)
+                    .unwrap_or_else(|| panic!("{when}, no {id} node"));
+                assert_eq!(node["kind"], kind, "{when}: {node}");
+                assert!(node.get("missing").is_none(), "{when}: {node}");
+            }
+            for ghost in [
+                "evidence/run1",
+                "evidence/run1/gone.log",
+                "../outside.log",
+                "out/outside.log",
+                "node_modules/pkg/index.js",
+                "build/out.log",
+                "evidence/run1/key.secret",
+                "build/keep.log",
+                "alias/run1/trace.log",
+            ] {
+                assert!(!nodes.contains_key(ghost), "{when}, {ghost} has a node");
+            }
+        }
+    }
+
+    // The lookup the graph makes over the listing cap, read directly: the
+    // route drops the edge of a link to a folder whether it counts as a
+    // folder or as a ghost, so only here does a folder show. Of the note's
+    // targets it finds the file, the image and the folder on disk, and
+    // neither the missing file nor one out of the root or out of scope, an
+    // excluded folder, a symlink, or a path through a symlinked directory.
+    #[tokio::test]
+    async fn link_targets_on_disk_finds_files_and_folders_in_scope() {
+        let app = evidence_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        let graph = workspace.graph().unwrap();
+        let indexed = graph.files().unwrap();
+        let edges = graph.neighbors("notes/evidence.md").unwrap();
+
+        let (files, dirs) = link_targets_on_disk(
+            &workspace,
+            &edges,
+            &indexed.iter().map(String::as_str).collect(),
+        );
+
+        assert_eq!(
+            files,
+            ["evidence/run1/shot.png", "evidence/run1/trace.log"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(dirs, ["evidence/run1".to_string()].into());
     }
 
     #[test]

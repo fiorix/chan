@@ -839,13 +839,14 @@ pub mod subtree_test_hooks {
     }
 }
 
-/// A lowered bound on the full rebuild's listing, so a test can cross it
-/// with a few files instead of half a million.
+/// Lowered bounds on the full rebuild's listing and on the scoped
+/// whole-tree walk, so a test can cross either with a few files instead of
+/// half a million.
 ///
 /// Compiled for this crate's tests and for downstream test builds that
 /// enable `test-hooks`. A bound is keyed by the workspace's graph directory,
 /// so tests over separate workspaces do not interfere, and holds until the
-/// guard `lower` returns is dropped.
+/// guard `lower` or `lower_tree_walk` returns is dropped.
 #[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod listing_limit_test_hooks {
@@ -854,25 +855,45 @@ pub mod listing_limit_test_hooks {
     use std::path::PathBuf;
     use std::sync::{LazyLock, Mutex};
 
-    static LIMITS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    type Limits = LazyLock<Mutex<HashMap<PathBuf, usize>>>;
 
-    pub struct LimitGuard(PathBuf);
+    static REBUILD_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TREE_WALK_LIMITS: Limits = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct LimitGuard(&'static Limits, PathBuf);
 
     impl Drop for LimitGuard {
         fn drop(&mut self) {
-            LIMITS.lock().unwrap().remove(&self.0);
+            self.0.lock().unwrap().remove(&self.1);
         }
     }
 
     pub fn lower(workspace: &Workspace, limit: usize) -> LimitGuard {
+        lower_in(&REBUILD_LIMITS, workspace, limit)
+    }
+
+    /// Lower the bound of [`Workspace::list_tree_filtered_unified`], the
+    /// walk the graph and the search catalog read, and not the rebuild's.
+    pub fn lower_tree_walk(workspace: &Workspace, limit: usize) -> LimitGuard {
+        lower_in(&TREE_WALK_LIMITS, workspace, limit)
+    }
+
+    fn lower_in(limits: &'static Limits, workspace: &Workspace, limit: usize) -> LimitGuard {
         let key = workspace.paths.graph_dir.clone();
-        assert!(LIMITS.lock().unwrap().insert(key.clone(), limit).is_none());
-        LimitGuard(key)
+        assert!(limits.lock().unwrap().insert(key.clone(), limit).is_none());
+        LimitGuard(limits, key)
     }
 
     pub(super) fn rebuild_listing_limit(workspace: &Workspace) -> usize {
-        LIMITS
+        limit_in(&REBUILD_LIMITS, workspace)
+    }
+
+    pub(super) fn tree_walk_limit(workspace: &Workspace) -> usize {
+        limit_in(&TREE_WALK_LIMITS, workspace)
+    }
+
+    fn limit_in(limits: &Limits, workspace: &Workspace) -> usize {
+        limits
             .lock()
             .unwrap()
             .get(&workspace.paths.graph_dir)
@@ -2435,7 +2456,11 @@ impl Workspace {
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<TreeEntry>> {
         let policy = self.scope_policy();
-        fs_ops::list_tree_scoped_cancelable(self.root(), &policy, cancel)
+        #[cfg(any(test, feature = "test-hooks"))]
+        let limit = listing_limit_test_hooks::tree_walk_limit(self);
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let limit = fs_ops::LIST_TREE_LIMIT;
+        fs_ops::list_tree_scoped_cancelable(self.root(), &policy, limit, cancel)
     }
 
     /// Filtered counterpart of `list_tree_prefix_unified`, still rooted
