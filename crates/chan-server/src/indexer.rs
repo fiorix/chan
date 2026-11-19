@@ -134,6 +134,11 @@ struct IndexerShared {
     bg_embed: BgEmbed,
     cancel: Arc<AtomicBool>,
     search_aggression: SearchAggression,
+    /// The status message of the last full rebuild when it failed for good
+    /// (a listing over its cap). The status keeps reading that error, past
+    /// the per-file applies and reconciles that settle beside it, until the
+    /// next full rebuild starts: none of them builds what the pass did not.
+    final_failure: Arc<Mutex<Option<String>>>,
 }
 
 /// Handle to the background indexer. Drop it (or call `shutdown`)
@@ -242,6 +247,7 @@ impl Indexer {
             bg_embed: bg_embed.clone(),
             cancel: cancel.clone(),
             search_aggression,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         let (rebuild_tx, rebuild_rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
         let workspace_weak = Arc::downgrade(&workspace);
@@ -747,6 +753,7 @@ fn spawn_coordinator(
                 // reports per-file progress, and readiness already says the
                 // workspace is recovering.
                 if full_rebuild {
+                    *shared.final_failure.lock().unwrap() = None;
                     *status_w.lock().unwrap() = IndexStatus::Building {
                         current: 0,
                         total: 0,
@@ -832,6 +839,11 @@ fn spawn_coordinator(
                             RecoveryOutcome::Retry
                         }
                     }
+                    Ok(RecoveryPassResult::ActionFailed(error))
+                        if action_failure_is_final(error) =>
+                    {
+                        RecoveryOutcome::Failed
+                    }
                     Ok(RecoveryPassResult::ActionFailed(_)) | Err(_) => RecoveryOutcome::Retry,
                 };
                 let Some(workspace_w) = workspace.upgrade() else {
@@ -857,6 +869,11 @@ fn spawn_coordinator(
                 }
                 retry_at = match &result {
                     Ok(RecoveryPassResult::ActionFailed(chan_workspace::ChanError::Cancelled)) => {
+                        None
+                    }
+                    Ok(RecoveryPassResult::ActionFailed(error))
+                        if action_failure_is_final(error) =>
+                    {
                         None
                     }
                     Ok(RecoveryPassResult::ActionFailed(_)) | Err(_) => {
@@ -894,9 +911,12 @@ fn spawn_coordinator(
                         }
                     }
                     Ok(RecoveryPassResult::ActionFailed(error)) => {
-                        *shared.status.lock().unwrap() = IndexStatus::Error {
-                            message: error.to_string(),
-                        };
+                        let message = action_error_message(error);
+                        if full_rebuild && action_failure_is_final(error) {
+                            tracing::warn!(%message, "indexer: full rebuild failed for this pass");
+                            *shared.final_failure.lock().unwrap() = Some(message.clone());
+                        }
+                        *shared.status.lock().unwrap() = IndexStatus::Error { message };
                     }
                     Ok(RecoveryPassResult::ReportRefreshFailed(error)) => {
                         tracing::warn!(
@@ -942,6 +962,42 @@ fn spawn_coordinator(
             }
         }
     })
+}
+
+/// Whether a failed pass action fails the same way however often the pass
+/// runs. A listing over its cap does: the tree has to change, or the excluded
+/// directories, before a pass can pass, and both start a pass of their own.
+/// Such a pass is finished as failed rather than retried on the cooldown.
+fn action_failure_is_final(error: &chan_workspace::ChanError) -> bool {
+    matches!(error, chan_workspace::ChanError::ListingTooLarge { .. })
+}
+
+/// The index status message for a failed pass action. A listing over its cap
+/// is the one failure a setting fixes, so its message names the setting: the
+/// directories the index leaves out.
+fn action_error_message(error: &chan_workspace::ChanError) -> String {
+    match error {
+        chan_workspace::ChanError::ListingTooLarge { limit, .. } => format!(
+            "the search index has more than {} files to read; add the directories it \
+             should skip under Settings > This workspace > Excluded directories",
+            grouped(*limit)
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// `n` with a comma between each group of three digits, as the chip reads
+/// it: 500,000.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 fn drain_required_generation(
@@ -1670,11 +1726,12 @@ impl ProgressCallback for StatusUpdater {
                     p.started
                 };
                 // Before the first embed flush this is the foreground
-                // BM25/graph pass, which legitimately gates preflight ->
-                // Building. After it, BM25 is searchable and embeddings are
-                // a background refinement, so we must NOT revert to Building
-                // (that would re-lock preflight on every interleaved
-                // IndexFile tick).
+                // BM25/graph pass, and the status reads Building with its
+                // counter. After it, BM25 is searchable and embeddings are a
+                // background refinement on the idle status's embedding chip,
+                // so an interleaved IndexFile tick must NOT put the status
+                // back to Building, which would turn the chip back to
+                // indexing on every tick.
                 if !started {
                     let file = event.label.clone().unwrap_or_default();
                     if let Ok(mut s) = self.status.lock() {
@@ -1801,13 +1858,17 @@ fn set_idle(workspace: &Workspace, shared: &IndexerShared) {
     // here must RE-ATTACH the chip, not drop it. The coordinator clears the
     // signal when the build resolves, so a settled index reads None here.
     let embedding = shared.bg_embed.lock().unwrap().clone();
+    let final_failure = shared.final_failure.lock().unwrap().clone();
     match workspace.index_stats() {
         Ok(s) => {
-            *shared.status.lock().unwrap() = IndexStatus::Idle {
-                indexed_docs: s.indexed_docs,
-                indexed_vectors: s.indexed_vectors,
-                model: s.model,
-                embedding,
+            *shared.status.lock().unwrap() = match final_failure {
+                Some(message) => IndexStatus::Error { message },
+                None => IndexStatus::Idle {
+                    indexed_docs: s.indexed_docs,
+                    indexed_vectors: s.indexed_vectors,
+                    model: s.model,
+                    embedding,
+                },
             };
             let mut telemetry = shared.telemetry.lock().unwrap();
             telemetry.last_settled_at = Some(now_unix());
@@ -1876,6 +1937,7 @@ mod tests {
             bg_embed: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2881,6 +2943,7 @@ mod tests {
             bg_embed: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         let status = shared.status.clone();
         let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
@@ -2954,6 +3017,7 @@ mod tests {
             bg_embed: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -3158,6 +3222,7 @@ mod tests {
             bg_embed: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: chan_workspace::SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         reconcile_idle(&dead, &shared);
         assert!(matches!(&*status.lock().unwrap(), IndexStatus::Idle { .. }));
@@ -3188,6 +3253,7 @@ mod tests {
             bg_embed: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: chan_workspace::SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         reconcile_idle(&weak, &shared);
         let snapshot = status.lock().unwrap().clone();
@@ -3230,6 +3296,7 @@ mod tests {
             bg_embed: bg_embed.clone(),
             cancel: Arc::new(AtomicBool::new(false)),
             search_aggression: chan_workspace::SearchAggression::Conservative,
+            final_failure: Arc::new(Mutex::new(None)),
         };
         set_idle(&workspace, &shared);
         match status.lock().unwrap().clone() {
@@ -3777,6 +3844,173 @@ mod tests {
             "the refresh retry bound changed: (passes, refreshes) = {counts:?}"
         );
         assert_eq!(counts, (2, 2), "(passes, refreshes)");
+
+        drop(tx);
+        coordinator.await.unwrap();
+    }
+
+    /// The index status the coordinator over `status` publishes next as an
+    /// error, read within the convergence budget.
+    async fn next_error(status: &Arc<Mutex<IndexStatus>>) -> String {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let current = status.lock().unwrap().clone();
+                if let IndexStatus::Error { message } = current {
+                    break message;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the index status never read as an error")
+    }
+
+    // A full rebuild over more indexable files than the listing holds fails,
+    // and the index status the chip shows names the setting that fixes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_over_the_cap_names_its_fix_on_the_index_status() {
+        let (_cfg, dir, workspace) = setup_workspace();
+        for n in 0..3 {
+            fs::write(dir.path().join(format!("n{n}.md")), "# N\n").unwrap();
+        }
+        let _limit = chan_workspace::workspace::listing_limit_test_hooks::lower(&workspace, 2);
+        let status = idle_status();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            test_shared(status.clone()),
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            Duration::from_millis(50),
+        );
+        tx.send(workspace.request_recovery(RecoveryAction::FullRebuild))
+            .unwrap();
+
+        let message = next_error(&status).await;
+        coordinator.abort();
+
+        assert!(message.contains("more than 2 files"), "{message}");
+        assert!(
+            message.contains("Settings > This workspace > Excluded directories"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_listing_cap_reads_with_its_digits_grouped() {
+        let message = action_error_message(&chan_workspace::ChanError::ListingTooLarge {
+            observed: 500_000,
+            limit: 500_000,
+        });
+        assert!(message.contains("more than 500,000 files"), "{message}");
+        assert_eq!(grouped(2), "2");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(12_345_678), "12,345,678");
+    }
+
+    /// Wait until recovery is ready with `generation` complete.
+    async fn await_generation(workspace: &Workspace, generation: WorkspaceGeneration) {
+        tokio::time::timeout(CONVERGENCE_BUDGET, async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.is_ready() && recovery.completed_generation >= generation {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "generation {} never completed: {:?}",
+                generation.get(),
+                workspace.recovery_status()
+            )
+        });
+    }
+
+    // A full rebuild over more indexable files than the listing holds fails
+    // the same way however often it runs, so the pass ends there: it is not
+    // retried on the cooldown, the workspace reads ready, the rebuild marker
+    // is gone and the error stays on the status past an apply that settles
+    // beside it. A later trigger runs the rebuild again, and one under the cap
+    // builds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_over_the_cap_is_final_for_its_pass() {
+        let cooldown = Duration::from_millis(50);
+        let (_cfg, dir, workspace) = setup_workspace();
+        for n in 0..3 {
+            fs::write(dir.path().join(format!("n{n}.md")), "# N\n").unwrap();
+        }
+        let root = workspace.root().to_path_buf();
+        let marker = workspace.paths().graph_dir.join("rebuild.inprogress");
+        let limit = chan_workspace::workspace::listing_limit_test_hooks::lower(&workspace, 2);
+        let (pass_tx, _pass_rx) = tokio::sync::mpsc::unbounded_channel();
+        arm_coordinator_refresh_failure(root.clone(), pass_tx);
+        let status = idle_status();
+        let shared = test_shared(status.clone());
+        let (tx, rx) = mpsc::unbounded_channel::<WorkspaceGeneration>();
+        let coordinator = spawn_coordinator(
+            Arc::downgrade(&workspace),
+            shared.clone(),
+            rx,
+            Arc::new(chan_workspace::NoProgress),
+            cooldown,
+        );
+
+        let first = workspace.request_recovery(RecoveryAction::FullRebuild);
+        tx.send(first).unwrap();
+        let message = next_error(&status).await;
+        assert!(message.contains("Excluded directories"), "{message}");
+        let recovery = workspace.recovery_status();
+        assert!(
+            recovery.is_ready() && recovery.completed_generation >= first,
+            "the failed pass was requeued: {recovery:?}"
+        );
+        assert!(!marker.exists(), "the failed pass left its rebuild marker");
+        tokio::time::sleep(cooldown * 6).await;
+        assert_eq!(
+            coordinator_pass_starts(&root).len(),
+            1,
+            "the failed pass ran again on the cooldown"
+        );
+        assert!(workspace.recovery_status().is_ready());
+
+        // What a per-file apply calls once it settles.
+        set_idle(&workspace, &shared);
+        assert!(
+            matches!(&*status.lock().unwrap(), IndexStatus::Error { message: m } if *m == message),
+            "an apply beside the failed pass cleared its error: {:?}",
+            status.lock().unwrap()
+        );
+
+        // The Rebuild index command requests a full rebuild as this does.
+        let second = workspace.request_recovery(RecoveryAction::FullRebuild);
+        tx.send(second).unwrap();
+        await_generation(&workspace, second).await;
+        assert_eq!(
+            coordinator_pass_starts(&root).len(),
+            2,
+            "a new trigger ran no pass"
+        );
+        assert!(matches!(
+            &*status.lock().unwrap(),
+            IndexStatus::Error { .. }
+        ));
+
+        take_coordinator_refresh_failure(&root);
+        drop(limit);
+        let third = workspace.request_recovery(RecoveryAction::FullRebuild);
+        tx.send(third).unwrap();
+        await_generation(&workspace, third).await;
+        assert!(
+            matches!(
+                &*status.lock().unwrap(),
+                IndexStatus::Idle { indexed_docs, .. } if *indexed_docs >= 3
+            ),
+            "a rebuild under the cap did not build: {:?}",
+            status.lock().unwrap()
+        );
 
         drop(tx);
         coordinator.await.unwrap();

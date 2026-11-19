@@ -24,7 +24,7 @@
       </thead>
       <tbody>
         <tr><td>Command launcher or pane menu</td><td><strong>New graph</strong>, or <kbd>g</kbd> in <a href="/manual/navigation/#hybrid-nav">Hybrid Nav</a></td><td>The workspace root</td></tr>
-        <tr><td>A file's or directory's Details</td><td><strong>New graph here</strong></td><td>That file, or that directory opened deep enough to show its files</td></tr>
+        <tr><td>A file's or directory's Details</td><td><strong>New graph here</strong></td><td>That file, or that directory opened deep enough to show its files, as far as the depth's limit allows</td></tr>
         <tr><td>A tag's, contact's or language's Details</td><td><strong>Graph from here</strong></td><td>That tag, contact or language</td></tr>
         <tr><td><a href="/manual/search/#search">Search workspace</a></td><td><kbd>Enter</kbd> on a tag or mention row</td><td>That tag or mention</td></tr>
         <tr><td>A terminal</td><td><code>cs graph</code>, or <code>cs graph PATH</code></td><td>The root, or that path</td></tr>
@@ -86,23 +86,23 @@
 
 <section class="manual-block" id="depth">
   <h2><a class="heading-anchor" href="#depth">Use depth for a wider view</a></h2>
-  <p>Depth belongs to the selected node. Move <strong>Depth</strong> in the graph menu, or run <strong>Increase depth</strong> or <strong>Decrease depth</strong> from the command launcher.</p>
+  <p>Depth belongs to the selected node. Move <strong>Depth</strong> in the graph menu, or run <strong>Increase depth</strong> or <strong>Decrease depth</strong> from the command launcher. A drag on <strong>Depth</strong> applies when you release it.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
         <tr><th>Selected</th><th>Depth is</th></tr>
       </thead>
       <tbody>
-        <tr><td>A directory</td><td>How many levels are open below it. Lower it to close them, down to 0 to close the directory itself. The rest of the tree stays as you left it.</td></tr>
-        <tr><td>The workspace root</td><td>Levels open below the root, from 1. Raise it for a view of the whole repository.</td></tr>
+        <tr><td>A directory</td><td>How many levels are open below it, up to 10. Lower it to close them, down to 0 to close the directory itself. The rest of the tree stays as you left it.</td></tr>
+        <tr><td>The workspace root</td><td>Levels open below the root, from 1 to 10. Raise it for a view of the whole repository.</td></tr>
         <tr><td>A file, tag, mention or contact</td><td>Hops of references followed from it, in both directions, from 1 to 6. Nodes past the first hop are drawn dimmed, with their directories. It starts again at 1 for each node you select.</td></tr>
         <tr><td>A language</td><td>Fixed at 1: a language always shows its files.</td></tr>
       </tbody>
     </table>
   </div>
-  <p>The control reads <code>[max]</code> when there is nothing further to reveal. Only the selection, its direct neighbours and its path to the root are lit. A node a hop reveals that the open tree already shows does not change, and what hops reveal leaves again when the selection moves, unless its directory is open.</p>
+  <p>The control reads <code>[max]</code> when there is nothing further to reveal, and <code>[limit]</code> when opening the next level would draw more than 3,000 files and folders inside open directories (the files and directories at the workspace root always show and are not counted): a raised depth stops at the deepest level that fits. The limit holds whatever changes what the graph draws: when new files appear in the open tree past it, the open directories they appeared in, or below them, close again, deepest first. A double-click leaves closed a directory that would draw past the limit (one not read yet opens, is read and closes again), and the status line under the graph says that opening it would draw more than 3,000 files and folders. Only the selection, its direct neighbours and its path to the root are lit. A node a hop reveals that the open tree already shows does not change, and what hops reveal leaves again when the selection moves, unless its directory is open.</p>
   <figure class="inline-shot">
-    <div class="shot-placeholder-frame" data-shot="graph-depth" data-shot-kind="clip">clip to capture<small>the workspace root selected, right-click, drag Depth from 1 to 3 and the tree opens level by level, then back to 1; select a top-level Markdown file whose links lead on to files in closed directories, and raise its Depth from 1 to 2: those files appear, dimmed, with their directories</small></div>
+    <div class="shot-placeholder-frame" data-shot="graph-depth" data-shot-kind="clip">clip to capture<small>the workspace root selected, right-click, drag Depth from 1 to 3 and release, and the tree opens three levels, then back to 1; select a top-level Markdown file whose links lead on to files in closed directories, and raise its Depth from 1 to 2: those files appear, dimmed, with their directories</small></div>
   </figure>
   <details class="doc-details">
     <summary>Details and limits</summary>

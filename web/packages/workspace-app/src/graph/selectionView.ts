@@ -15,6 +15,7 @@
 // any other node it is how many hops of references the selection reveals.
 
 import { ancestorClosure } from "./containmentSpine";
+import { FS_GRAPH_DEPTH_MAX } from "./depth";
 import { ancestorsExpanded } from "./pathVisibility";
 
 /// The node and edge fields the rules read. A file's or a folder's node
@@ -43,6 +44,23 @@ const REFERENCE_KINDS: ReadonlySet<string> = new Set([
 
 /// The most hops a selection's depth offers.
 export const SELECTION_HOPS_MAX = 6;
+
+/// The most files and folders opened folders may draw below the root's own
+/// level, which always shows and is not counted, so a workspace whose root
+/// alone holds more still opens folders. The layout runs on
+/// the page's main thread, one tick a frame over every drawn node, and
+/// starts over when a depth step brings many in, so this bounds what one
+/// step costs a frame. One d3-force tick with the canvas's forces at
+/// `DEFAULT_FORCE`, measured in Node's V8 on a desktop CPU, costs about
+/// 13 ms over 3,000 nodes, inside a 16.7 ms frame, and about 110 ms over
+/// 20,000.
+export const GRAPH_DRAWN_NODE_BUDGET = 3000;
+
+/// Whether the budget counts the node at `path`: one inside a folder, below
+/// the root's own level.
+function counted(path: string): boolean {
+  return path.includes("/");
+}
 
 /// Levels `path` sits below the directory `dir`: 0 for the directory
 /// itself, -1 for a path outside it.
@@ -144,9 +162,10 @@ export function graphNodeIds(input: {
 }
 
 /// The largest depth the selected node can use. A directory: the deepest
-/// level any file or folder sits below it. A language: 1. A file, tag or
-/// mention: the hops its references run before they reach nothing new, held
-/// to `SELECTION_HOPS_MAX`. At least 1 in every case.
+/// level any file or folder sits below it, held to `FS_GRAPH_DEPTH_MAX`, the
+/// most levels the server's fs-graph walk reads. A language: 1. A file, tag
+/// or mention: the hops its references run before they reach nothing new,
+/// held to `SELECTION_HOPS_MAX`. At least 1 in every case.
 export function selectionDepthCap(
   nodes: readonly ViewNode[],
   edges: readonly ViewEdge[],
@@ -159,7 +178,7 @@ export function selectionDepthCap(
       if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
       deepest = Math.max(deepest, levelsBelow(dir, n.path));
     }
-    return deepest;
+    return Math.min(deepest, FS_GRAPH_DEPTH_MAX);
   }
   const selected = nodes.find((n) => n.id === selectedId);
   if (!selected || selected.kind === "language") return 1;
@@ -219,6 +238,125 @@ export function openBelow(
   for (let i = 1; i < parts.length; i += 1) next[parts.slice(0, i).join("/")] = true;
   next[""] = true;
   return next;
+}
+
+/// One step of a raise of the directory `dir`'s depth toward `depth`.
+/// Opening a level draws the children of every folder one level above it,
+/// so a level is counted only once each of those folders has been read
+/// (`read`). The step opens the levels it can count that draw at most
+/// `budget` files and folders, and names the folders whose children must be
+/// read before the next level is counted: those one level above it, at most
+/// `batch`. `limited` says a level is past the budget, which stops the raise
+/// below it; what is known of a level is a floor on what it draws, so a
+/// level already past the budget is not read first. The root's own level
+/// always shows.
+export type DepthStep = { depth: number; read: string[]; limited: boolean };
+
+export function depthStep(
+  nodes: readonly ViewNode[],
+  opened: Opened,
+  dir: string,
+  depth: number,
+  budget: number,
+  read: (dir: string) => boolean,
+  batch: number,
+): DepthStep {
+  const least = dir === "" ? 1 : 0;
+  if (depth <= least) return { depth, read: [], limited: false };
+  // What lies outside `dir` draws the same at every depth: `openBelow`
+  // opens the directories above `dir` and leaves the rest as it was.
+  const outside = openBelow(nodes, opened, dir, 0);
+  const byLevel: number[] = [];
+  const foldersByLevel = new Map<number, string[]>();
+  let drawn = 0;
+  for (const n of nodes) {
+    if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
+    const level = levelsBelow(dir, n.path);
+    if (level < 0) {
+      if (counted(n.path) && ancestorsExpanded("", n.path, outside)) drawn += 1;
+      continue;
+    }
+    if (counted(n.path)) byLevel[level] = (byLevel[level] ?? 0) + 1;
+    if (isFolder(n)) {
+      const folders = foldersByLevel.get(level);
+      if (folders) folders.push(n.path);
+      else foldersByLevel.set(level, [n.path]);
+    }
+  }
+  drawn += byLevel[0] ?? 0;
+  for (let level = 1; level <= depth; level += 1) {
+    drawn += byLevel[level] ?? 0;
+    const stop = Math.max(least, level - 1);
+    if (level > least && drawn > budget) return { depth: stop, read: [], limited: true };
+    const unread = (foldersByLevel.get(level - 1) ?? []).filter((path) => !read(path));
+    if (unread.length > 0) return { depth: stop, read: unread.sort().slice(0, batch), limited: false };
+  }
+  return { depth, read: [], limited: false };
+}
+
+/// The depth to open below the directory `dir` when `depth` is asked for,
+/// counting the loaded nodes only: `depth` itself when the opened set
+/// `openBelow` gives draws at most `budget` files and folders, else the
+/// deepest level below it that does.
+export function depthWithinBudget(
+  nodes: readonly ViewNode[],
+  opened: Opened,
+  dir: string,
+  depth: number,
+  budget: number,
+): number {
+  return depthStep(nodes, opened, dir, depth, budget, () => true, 0).depth;
+}
+
+/// The paths of the files and folders the opened set draws.
+export function drawnTreePaths(nodes: readonly ViewNode[], opened: Opened): Set<string> {
+  const drawn = new Set<string>();
+  for (const n of nodes) {
+    if ((n.kind !== "file" && n.kind !== "folder") || n.path === undefined) continue;
+    if (ancestorsExpanded("", n.path, opened)) drawn.add(n.path);
+  }
+  return drawn;
+}
+
+/// Whether the drawn files and folders `drawn` fit `budget`, counting those
+/// below the root's own level.
+export function fitsBudget(drawn: ReadonlySet<string>, budget: number): boolean {
+  let count = 0;
+  for (const path of drawn) if (counted(path)) count += 1;
+  return count <= budget;
+}
+
+/// The opened set closed back until opened folders draw at most `budget`
+/// files and folders below the root's own level; null when they already
+/// do. Only the open folders at or below a folder in `grown`, where the
+/// drawn tree grew, close, deepest first and a level at a time, so a change
+/// closes what it grew and leaves the rest of the tree as it was; the
+/// subfolders of a folder that grew close before the folder itself. Should
+/// those not be enough, which `grown` naming every folder the tree grew in
+/// rules out, every folder closes.
+export function closeToBudget(
+  nodes: readonly ViewNode[],
+  opened: Opened,
+  budget: number,
+  grown: ReadonlySet<string>,
+): Opened | null {
+  if (fitsBudget(drawnTreePaths(nodes, opened), budget)) return null;
+  const next: Opened = { ...opened };
+  const below = [...grown].filter((path) => path !== "");
+  const byDepth = new Map<number, string[]>();
+  for (const path of Object.keys(next)) {
+    if (path === "" || !next[path]) continue;
+    if (!below.some((grew) => path === grew || path.startsWith(`${grew}/`))) continue;
+    const depth = path.split("/").length;
+    const level = byDepth.get(depth);
+    if (level) level.push(path);
+    else byDepth.set(depth, [path]);
+  }
+  for (const depth of [...byDepth.keys()].sort((a, b) => b - a)) {
+    for (const path of byDepth.get(depth)!) delete next[path];
+    if (fitsBudget(drawnTreePaths(nodes, next), budget)) return next;
+  }
+  return { "": true };
 }
 
 /// The opened set with the directory `dir` showing its children: the root,

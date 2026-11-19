@@ -13,7 +13,9 @@
 //!     recovery pass that is progressing. Reading a file, using a terminal
 //!     and editing all need no index; only search does. Claimed recovery
 //!     reports `pending` without locking; build or reindex work on a ready
-//!     generation reports `done`. A genuine index error reports `failed`.
+//!     generation reports `done`. A genuine index error reports `failed`
+//!     without locking either: the window is as usable without an index as
+//!     during a cold build, and the index status chip names the error.
 //!     Recovery that has no worker assigned to it never converges, so it
 //!     reports as a decision offering a rebuild, and that DOES lock. The
 //!     route never reports it for a served workspace, whose indexer
@@ -26,8 +28,9 @@
 //!     decision sticks via the existing `semantic_enabled` flag rather
 //!     than needing new state.
 //!
-//! `locked` is simply `phase != ready`; the OverlayShell hides its close
-//! button + ignores ESC while it is true and dismisses on `ready`.
+//! `locked` is true while any step waits on a choice only the user can make,
+//! a failed index beside it included, and on nothing else. The OverlayShell hides its close
+//! button + ignores ESC while it is true and dismisses once it clears.
 
 use std::sync::Arc;
 
@@ -46,8 +49,8 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 struct PreflightSnapshot {
     phase: Phase,
-    /// True until `phase == ready`. The single signal the OverlayShell
-    /// keys its lock on.
+    /// True while any step needs a decision, whatever the phase. The single
+    /// signal the OverlayShell keys its lock on.
     locked: bool,
     readiness: WorkspaceReadiness,
     steps: Vec<PreflightStep>,
@@ -99,11 +102,12 @@ struct Summary {
 
 /// What the boot overlay does with the snapshot.
 ///
-/// There is deliberately no `Running`. Boot waits on a user decision or a
-/// failure and on nothing else: an index pass in flight is reported through
-/// `readiness` and the `index` step, never by holding the overlay. Removing
-/// the variant is what makes "a progressing pass does not lock the workspace"
-/// structural rather than a flag someone can flip back.
+/// There is deliberately no `Running`. Boot waits on a user decision and on
+/// nothing else: an index pass in flight is reported through `readiness` and
+/// the `index` step, never by holding the overlay. Removing the variant is
+/// what makes "a progressing pass does not lock the workspace" structural
+/// rather than a flag someone can flip back. `Failed` reports a failed step
+/// without holding the overlay either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
@@ -273,26 +277,36 @@ fn build_snapshot(
         steps.push(step);
     }
 
-    // Failed index work, a missing embedding model, or unclaimed recovery
-    // requires user action and locks the workspace. Claimed recovery stays
-    // visible through readiness and a Pending index step without locking.
-    // Build or reindex work on a ready generation leaves the index step Done.
-    let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
-        Phase::Failed
-    } else if steps.iter().any(|s| s.state == StepState::NeedsDecision) {
-        Phase::NeedsDecision
-    } else {
-        Phase::Ready
-    };
-
+    let (phase, locked) = phase_and_lock(&steps);
     PreflightSnapshot {
         phase,
-        locked: phase != Phase::Ready,
+        locked,
         readiness,
         error: index_error(status),
         steps,
         summary: None,
     }
+}
+
+/// The phase a snapshot of `steps` reports, and whether it locks the boot.
+///
+/// A missing embedding model or unclaimed recovery asks the user to choose
+/// and locks the workspace, beside a failed step too, since the cover is the
+/// only place the choice is offered. Failed index work is reported on the
+/// step and in `error` without locking: files, terminals and editing need no
+/// index, and the index status chip carries the error. Claimed recovery
+/// stays visible through readiness and a Pending index step without locking.
+/// Build or reindex work on a ready generation leaves the index step Done.
+fn phase_and_lock(steps: &[PreflightStep]) -> (Phase, bool) {
+    let deciding = steps.iter().any(|s| s.state == StepState::NeedsDecision);
+    let phase = if steps.iter().any(|s| s.state == StepState::Failed) {
+        Phase::Failed
+    } else if deciding {
+        Phase::NeedsDecision
+    } else {
+        Phase::Ready
+    };
+    (phase, deciding)
 }
 
 /// Source-control kind at the workspace root, mirroring chan's own walk: a
@@ -618,8 +632,8 @@ mod tests {
             file: "a.md".into(),
         };
         assert!(settled_snapshot(&ws, &building).summary.is_some());
-        // A failed index locks the boot on phase Failed, which is not settled,
-        // so the onboarding summary stays off the snapshot.
+        // A failed index reports phase Failed, which is not settled, so the
+        // onboarding summary stays off the snapshot.
         let failed = IndexStatus::Error {
             message: "boom".into(),
         };
@@ -866,9 +880,9 @@ mod tests {
 
     #[test]
     fn an_index_error_outranks_a_stalled_recovery() {
-        // Both map to a locked overlay, but a failed index carries the real
-        // diagnosis; offering "rebuild the index" over an index that just
-        // failed to build would send the user in a circle.
+        // A failed index carries the real diagnosis; offering "rebuild the
+        // index" over an index that just failed to build would send the user
+        // in a circle.
         assert_eq!(
             index_step(
                 &IndexStatus::Error {
@@ -935,6 +949,8 @@ mod tests {
 
     #[test]
     fn index_error_fails_with_message() {
+        // A failed index is reported, not a decision: the window opens and
+        // the step and the error say what failed.
         let (_c, _r, ws) = workspace();
         let snap = build_snapshot(
             &ws,
@@ -943,10 +959,70 @@ mod tests {
             },
         );
         assert_eq!(snap.phase, Phase::Failed);
-        assert!(snap.locked);
+        assert!(
+            !snap.locked,
+            "a failed index must not hold the window behind the cover"
+        );
+        let index = snap.steps.iter().find(|s| s.id == "index").unwrap();
+        assert_eq!(index.state, StepState::Failed);
+        assert!(index.decision.is_none());
         let error = snap.error.as_ref().expect("failed phase carries an error");
         assert_eq!(error.step, "index");
         assert_eq!(error.message, "boom");
+    }
+
+    #[test]
+    fn a_decision_beside_a_failed_index_still_locks() {
+        // The cover is the only place a decision is offered, so a failed
+        // index beside one must not unlock the boot and hide the choice.
+        let failed = index_step(
+            &IndexStatus::Error {
+                message: "boom".into(),
+            },
+            WorkspaceReadiness::default(),
+            false,
+        );
+        let model = PreflightStep {
+            id: "model",
+            label: "Embedding model",
+            state: StepState::NeedsDecision,
+            decision: Some(Decision {
+                prompt: "Download the embedding model?",
+                choices: vec![DecisionChoice {
+                    id: "download",
+                    label: "Download model",
+                }],
+            }),
+        };
+        assert_eq!(phase_and_lock(&[failed, model]), (Phase::Failed, true));
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn a_failed_index_beside_a_missing_model_offers_the_download() {
+        let (_c, _r, ws) = workspace();
+        ws.set_semantic_enabled(true).unwrap();
+        let snap = build_snapshot(
+            &ws,
+            &IndexStatus::Error {
+                message: "boom".into(),
+            },
+        );
+        let model = snap
+            .steps
+            .iter()
+            .find(|s| s.id == "model")
+            .expect("semantic-enabled workspace must show a model step");
+        // The test environment's global model cache decides presence.
+        assert_eq!(snap.phase, Phase::Failed);
+        match model.state {
+            StepState::NeedsDecision => assert!(
+                snap.locked,
+                "the model decision is hidden behind an unlocked failed index"
+            ),
+            StepState::Done => assert!(!snap.locked),
+            other => panic!("unexpected model step state: {other:?}"),
+        }
     }
 
     #[cfg(feature = "embeddings")]
