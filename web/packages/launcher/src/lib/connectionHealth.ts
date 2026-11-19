@@ -31,7 +31,8 @@ export function formatConnectionMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
-/// How long the oldest unanswered ping has waited at `now`, 0 with none.
+/// How long the oldest unanswered ping has waited at `now`, 0 with no wait
+/// served.
 export function connectionWaitMs(health: ConnectionHealth, now: number): number {
   return health.wait_since === null ? 0 : Math.max(0, now - health.wait_since);
 }

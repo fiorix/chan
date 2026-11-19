@@ -435,16 +435,17 @@ export type ConnectionFace = "unknown" | "healthy" | "slow" | "stalled" | "recon
  */
 export interface ConnectionHealth {
   face: ConnectionFace;
-  /** A slow face whose latest reply time and wait were both under the time
-   * that ends slow when the desktop read it, shown as the mark alone; false
-   * for every other face. */
+  /** A slow face whose latest reply time was under the time that ends slow,
+   * with no wait served, when the desktop read it, shown as the mark alone;
+   * false for every other face. */
   recovering: boolean;
   /** When `face` took its value. */
   since: number;
   /** The latest reply time in milliseconds; null before the first. */
   rtt_ms: number | null;
-  /** When the oldest ping still waiting for its reply left; null with none
-   * waiting or before the devserver's first reply. */
+  /** When the oldest ping still waiting for its reply left, once it has
+   * waited the second that makes a connection slow; null with none waiting
+   * that long or before the devserver's first reply. */
   wait_since: number | null;
   /** When the devserver's last frame on the feed arrived; null before the
    * first. */

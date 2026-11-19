@@ -117,7 +117,7 @@
       </thead>
       <tbody>
         <tr><td>Bars alone</td><td>Replies come back in time. They show faded before the first reply.</td></tr>
-        <tr><td>A time, such as <code>850 ms</code> or <code>2.4 s</code></td><td>Slow: a reply has waited 1 s, the last one took 1 s or more, or the last two took 400 ms or more. It shows the longer of the last reply and the wait. Two replies in a row under 300 ms make it healthy again; while they recover it shows the bars alone, still in the warning colour.</td></tr>
+        <tr><td>A time, such as <code>850 ms</code> or <code>2.4 s</code></td><td>Slow: a reply has waited 1 s, the last one took 1 s or more, or the last two took 400 ms or more. It shows the longer of the last reply and a wait of 1 s or more. Two replies in a row under 300 ms make it healthy again; while they recover it shows the bars alone, still in the warning colour.</td></tr>
         <tr><td><code>stalled 8 s</code></td><td>Stalled: a reply has waited 4 s or more with nothing arriving from the devserver in the last 4 s.</td></tr>
         <tr><td><code>reconnecting</code></td><td>The connection dropped, or stayed silent until Chan Desktop dropped it, 60 to 90 s into the silence. It reads this until a new one answers.</td></tr>
       </tbody>

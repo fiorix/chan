@@ -78,9 +78,9 @@ pub enum ConnectionFace {
 pub struct ConnectionHealth {
     /// What the reading shows.
     pub face: ConnectionFace,
-    /// A slow face whose latest reply time and current wait were both under
-    /// the time that ends slow when the desktop read it: the replies have
-    /// come back, and slow ends once enough of them have. The launcher shows
+    /// A slow face whose latest reply time was under the time that ends slow,
+    /// with no [`wait_since`](Self::wait_since), when the desktop read it:
+    /// the replies have come back, and slow ends once enough of them have. The launcher shows
     /// it as the mark alone, named "Connection recovering". `false` for
     /// every other face. `#[serde(default)]`: a reading without the field
     /// reads `false`.
@@ -91,8 +91,11 @@ pub struct ConnectionHealth {
     /// The latest reply time in milliseconds, kept across feed sockets;
     /// `None` before the first.
     pub rtt_ms: Option<u64>,
-    /// When the oldest ping still waiting for its reply left, or `None` with
-    /// none waiting or before the devserver's first reply.
+    /// When the oldest ping still waiting for its reply left, once it has
+    /// waited the second that makes a connection slow; `None` with none
+    /// waiting that long or before the devserver's first reply. The
+    /// launcher counts the wait on from the reading until the next one, so
+    /// a shorter wait, any ping's round trip, would count a quick reply up.
     pub wait_since: Option<u64>,
     /// When the devserver's last frame on the feed arrived, kept across feed
     /// sockets; `None` before the first.

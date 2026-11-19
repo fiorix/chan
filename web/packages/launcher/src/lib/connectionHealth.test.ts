@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test, vi } from "vitest";
 import type { ConnectionHealth } from "../api/library";
 import {
@@ -9,6 +10,11 @@ import {
   connectionStateAge,
 } from "./connectionHealth";
 
+/// The reading the desktop serves for a connection slow from two 450 ms
+/// replies, read 100 ms into its next ping; the desktop's
+/// connection_health.rs tests pin it to what the desktop serves.
+const SLOW_IN_FLIGHT = "../../../fixtures/connection-health/slow-reply-in-flight.json";
+
 function health(over: Partial<ConnectionHealth>): ConnectionHealth {
   return { face: "healthy", recovering: false, since: 0, rtt_ms: 20, wait_since: null, last_contact: null, samples: [], ...over };
 }
@@ -16,19 +22,28 @@ function health(over: Partial<ConnectionHealth>): ConnectionHealth {
 describe("face words", () => {
   test("a slow face reads the larger of its reply time and its wait", () => {
     expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 1_300 }), 10_000)).toBe("1.3 s");
-    expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 450, wait_since: 9_200 }), 10_000)).toBe("800 ms");
+    expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 450, wait_since: 8_800 }), 10_000)).toBe("1.2 s");
     expect(connectionFaceName(health({ face: "slow", rtt_ms: 1_300 }), 10_000)).toBe("Connection slow, 1.3 s");
-    expect(connectionFaceName(health({ face: "slow", rtt_ms: 450, wait_since: 9_200 }), 10_000)).toBe("Connection slow, waiting for a reply");
+    expect(connectionFaceName(health({ face: "slow", rtt_ms: 450, wait_since: 8_800 }), 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
-  test("a slow face the desktop read as recovering shows the mark alone until the next reading", () => {
-    // Read 100 ms into a ping's wait, and shown 800 ms later.
-    const recovering = health({ face: "slow", recovering: true, rtt_ms: 250, wait_since: 9_100 });
+  test("a slow face read with a quick ping in flight keeps its reply time until the next reading", () => {
+    const { read_at, health } = JSON.parse(readFileSync(SLOW_IN_FLIGHT, "utf8")) as { read_at: number; health: ConnectionHealth };
+    // The next reading comes 2 s after this one.
+    for (const at of [read_at, read_at + 1_000, read_at + 1_999]) {
+      expect(connectionFaceLabel(health, at)).toBe("450 ms");
+      expect(connectionFaceName(health, at)).toBe("Connection slow, 450 ms");
+    }
+  });
+
+  test("a slow face the desktop read as recovering shows the mark alone, named recovering", () => {
+    const recovering = health({ face: "slow", recovering: true, rtt_ms: 250 });
     expect(connectionFaceLabel(recovering, 10_000)).toBe("");
     expect(connectionFaceName(recovering, 10_000)).toBe("Connection recovering");
-    const slow = health({ face: "slow", rtt_ms: 250, wait_since: 9_100 });
-    expect(connectionFaceLabel(slow, 10_000)).toBe("900 ms");
-    expect(connectionFaceName(slow, 10_000)).toBe("Connection slow, waiting for a reply");
+    // A wait the desktop serves ends it.
+    const waiting = health({ face: "slow", rtt_ms: 250, wait_since: 8_800 });
+    expect(connectionFaceLabel(waiting, 10_000)).toBe("1.2 s");
+    expect(connectionFaceName(waiting, 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
   test("a stalled face counts its wait in whole seconds", () => {

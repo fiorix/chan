@@ -1,0 +1,12 @@
+{
+  "read_at": 1700000007000,
+  "health": {
+    "face": "slow",
+    "recovering": false,
+    "since": 1700000003900,
+    "rtt_ms": 450,
+    "wait_since": null,
+    "last_contact": 1700000003900,
+    "samples": [450, 450]
+  }
+}

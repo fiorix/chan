@@ -33,7 +33,7 @@ const SLOW_RTT_MS: u64 = 400;
 /// Replies must come back under this, [`RTT_RUN`] in a row with none
 /// overdue, for the connection to leave slow. Lower than the entry threshold
 /// so a connection that hovers around it does not change face on every pong.
-/// A slow face whose latest reply and current wait are under it reads
+/// A slow face whose latest reply is under it, with no wait served, reads
 /// [`recovering`](ConnectionHealth::recovering).
 const OK_RTT_MS: u64 = 300;
 /// How many replies in a row a threshold takes, so that one outlier neither
@@ -342,19 +342,31 @@ impl ConnectionReading {
         self.observe(now);
         self.settle(now);
         let (face, since) = self.shown?;
-        // A wait counts once the devserver has answered: before that, a
-        // first ping that never comes back is a devserver too old to answer.
-        let waiting = if self.answered {
-            self.pending.timed.front().copied()
-        } else {
-            None
-        };
+        // A wait is served once the devserver has answered, since before
+        // that a first ping that never comes back is a devserver too old to
+        // answer, and once it reaches SLOW_WAIT. The launcher counts a served
+        // wait on from the reading until the next one, so a shorter wait,
+        // any ping's round trip caught in flight, would count a quick reply
+        // up toward the next reading.
+        let wait_since = self
+            .pending
+            .timed
+            .front()
+            .filter(|sent| {
+                self.answered && now.mono.saturating_duration_since(sent.mono) >= SLOW_WAIT
+            })
+            .map(|sent| sent.wall_ms);
         Some(ConnectionHealth {
             face,
-            recovering: face == ConnectionFace::Slow && recovering(self.rtt_ms, waiting, now),
+            // The latest reply is back under the time that ends slow, and
+            // `classify` ends slow once RTT_RUN in a row are. It changes no
+            // face, so it is read with the reading rather than settled.
+            recovering: face == ConnectionFace::Slow
+                && wait_since.is_none()
+                && self.rtt_ms.unwrap_or(0) < OK_RTT_MS,
             since,
             rtt_ms: self.rtt_ms,
-            wait_since: waiting.map(|sent| sent.wall_ms),
+            wait_since,
             last_contact: self.last_contact,
             samples: self.samples.iter().copied().collect(),
         })
@@ -498,18 +510,6 @@ fn classify(
         ConnectionFace::Healthy
     };
     (face, None)
-}
-
-/// Whether a slow face is recovering at `now`: the latest reply time, the one
-/// the launcher shows, and the wait of the oldest ping still out are both
-/// under [`OK_RTT_MS`], which [`classify`] ends slow at once [`RTT_RUN`]
-/// replies in a row come back under it. It changes no face, so it is read
-/// with the reading rather than settled with the face.
-fn recovering(rtt_ms: Option<u64>, oldest: Option<Stamp>, now: Stamp) -> bool {
-    let waited = oldest.map_or(0, |sent| {
-        millis(now.mono.saturating_duration_since(sent.mono))
-    });
-    rtt_ms.unwrap_or(0) < OK_RTT_MS && waited < OK_RTT_MS
 }
 
 /// What paces the pings of every devserver's feed: whether a window of the
@@ -720,11 +720,9 @@ mod tests {
         let mut reading = answered(&mut hand, 40);
         let sent = hand.wait(3_000);
         reading.ping_sent(sent);
-        assert_eq!(
-            face(&mut reading, hand.wait(999)),
-            Some(ConnectionFace::Healthy),
-            "a 999 ms wait"
-        );
+        let health = reading.health(hand.wait(999)).unwrap();
+        assert_eq!(health.face, ConnectionFace::Healthy, "a 999 ms wait");
+        assert_eq!(health.wait_since, None, "a 999 ms wait was served");
         let health = reading.health(hand.wait(1)).unwrap();
         assert_eq!(health.face, ConnectionFace::Slow, "a 1 s wait");
         assert_eq!(health.wait_since, Some(sent.wall_ms));
@@ -842,8 +840,34 @@ mod tests {
         assert_eq!(health.since, hand.at().wall_ms);
     }
 
-    /// Recovering is a slow face whose latest reply time and current wait
-    /// are both under 300 ms, read whenever the reading is.
+    /// What the launcher's card test reads
+    /// (`fixtures/connection-health/slow-reply-in-flight.json`): a connection
+    /// slow from two 450 ms replies, read 100 ms into its next ping, serves
+    /// no wait, so the launcher does not count that ping's wait up until the
+    /// next reading.
+    #[test]
+    fn a_slow_connections_ping_in_flight_is_served_as_no_wait() {
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 450);
+        reply(&mut reading, &mut hand, 3_000, 450);
+        reading.ping_sent(hand.wait(3_000));
+        let read_at = hand.wait(100);
+        let health = reading.health(read_at).unwrap();
+        assert_eq!(
+            health.face,
+            ConnectionFace::Slow,
+            "fixture: two 450 ms replies"
+        );
+        let served = serde_json::json!({ "read_at": read_at.wall_ms, "health": health });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/connection-health/slow-reply-in-flight.json"
+        ))
+        .unwrap();
+        assert_eq!(served, fixture, "the desktop serves {served}");
+    }
+
+    /// Recovering is a slow face whose latest reply time is under 300 ms
+    /// with no wait served, read whenever the reading is.
     #[test]
     fn a_slow_face_under_300_ms_reads_recovering() {
         let recovering = |reading: &mut ConnectionReading, now: Stamp| {
@@ -859,11 +883,11 @@ mod tests {
         reply(&mut reading, &mut hand, 3_000, 299);
         assert!(recovering(&mut reading, hand.at()), "a 299 ms reply");
         reading.ping_sent(hand.wait(3_000));
-        assert!(recovering(&mut reading, hand.wait(299)), "a 299 ms wait");
-        assert!(!recovering(&mut reading, hand.wait(1)), "a 300 ms wait");
+        assert!(recovering(&mut reading, hand.wait(999)), "a 999 ms wait");
+        assert!(!recovering(&mut reading, hand.wait(1)), "a 1 s wait");
         hand.wait(100);
         reading.pong(hand.at());
-        assert!(!recovering(&mut reading, hand.at()), "a 400 ms reply");
+        assert!(!recovering(&mut reading, hand.at()), "a 1.1 s reply");
         reply(&mut reading, &mut hand, 3_000, 20);
         assert!(recovering(&mut reading, hand.at()), "a 20 ms reply");
         reply(&mut reading, &mut hand, 3_000, 20);

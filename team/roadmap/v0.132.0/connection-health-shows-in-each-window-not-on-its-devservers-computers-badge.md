@@ -52,7 +52,7 @@ Docs and checks:
 
 7. On the desktop's Computers screen, each connected devserver's card shows that devserver's connection health. The faces are the indicator's, drawn with its bars mark:
    - healthy: the mark alone, named "Connection healthy";
-   - slow: the larger of the latest reply time and the current wait ("850 ms"), or the mark alone, named "Connection recovering", while the desktop reads both under 300 ms on a slow face;
+   - slow: the larger of the latest reply time and the current wait once it reaches 1 s ("850 ms"), or the mark alone, named "Connection recovering", while the latest reply time is under 300 ms and no wait shows;
    - stalled: the wait counting ("stalled 8 s");
    - reconnecting: "reconnecting".
    Before the first reply the mark is dimmed and named "Connection status unknown".
