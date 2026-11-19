@@ -1,6 +1,6 @@
 # Connection health shows in each window, not on its devserver's Computers badge
 
-Status: accepted for v0.132.0 by the owner on 2026-11-18, with its four choices decided the same day (`dev/v0132/decisions.md`, "Link health moves to the Computers window", 2026-11-18T13:15:22Z, "yes" to the lead's four points); in build on `v0132/healthbadge`. It takes the place of the review stage's step 5, the connection-health simplifications, and is built after the keyboard arbiter ([the keyboard owner row](the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md)).
+Status: accepted for v0.132.0 by the owner on 2026-11-18, with its four choices decided the same day (`dev/v0132/decisions.md`, "Link health moves to the Computers window", 2026-11-18T13:15:22Z, "yes" to the lead's four points); merged into `v0132/int` at `cb8023739`, with the owner's walk on his Mac (Acceptance 8) outstanding. It takes the place of the review stage's step 5, the connection-health simplifications, and is built after the keyboard arbiter ([the keyboard owner row](the-rich-prompt-takes-the-keyboard-from-a-survey-a-dialog-an-overlay-or-the-launcher.md)).
 
 Record: the owner's words: "i want all of the link health and network information to be present in the Computers window on the badge of each devserver rather than on the window where we have panes; however i do want that window to know when the remote devserver stopped responding when we usually present the screen with connection failed reconnect/abort - could link to the computers/badge from there too". The row moves the display half of [the lossy-link row](a-window-on-a-lossy-link-freezes-with-no-sign-until-its-socket-is-retired.md) from the window to the desktop and keeps that row's cover. That row's open item on the indicator's placement goes with the indicator. The map of the window side's checks and tests is `dev/v0132-team/reviews/stage-review-B-1.md`, sections 3 to 5. Its proposals P4 and P5 fall away with the code they simplify; P1 to P3 may shape what stays and change no item below. The window code merged on `v0132/int` (`7ffdc5475`) and is in no release, so no released window shows an indicator. The UI keeps the word "connection", per the lossy-link row's ruling on names.
 
@@ -52,7 +52,7 @@ Docs and checks:
 
 7. On the desktop's Computers screen, each connected devserver's card shows that devserver's connection health. The faces are the indicator's, drawn with its bars mark:
    - healthy: the mark alone, named "Connection healthy";
-   - slow: the larger of the latest reply time and the current wait ("850 ms"), or the mark alone, named "Connection recovering", while slow with a reading under 300 ms;
+   - slow: the larger of the latest reply time and the current wait ("850 ms"), or the mark alone, named "Connection recovering", while the desktop reads both under 300 ms on a slow face;
    - stalled: the wait counting ("stalled 8 s");
    - reconnecting: "reconnecting".
    Before the first reply the mark is dimmed and named "Connection status unknown".
@@ -66,7 +66,7 @@ Docs and checks:
 ### The measurement
 
 14. The desktop measures each connected devserver once, over the window feed socket it holds to it, however many of that devserver's windows are open, none included. The reading reaches the Computers screen in the serving library's devserver rows; the launcher dials nothing.
-15. It pings every 3 s while a window of the desktop has the focus and every 20 s otherwise, and once more when the desktop gains the focus and when a Computers screen shows. The chart then holds the last three minutes of use, and a card opened after a freeze shows the freeze.
+15. It pings every 3 s while a window of the desktop has the focus and every 20 s otherwise, and once more when the desktop gains the focus and when a Computers screen shows. A move of the focus between two of its windows that the platform reports loss first is a loss and a gain, so it pings once too. The chart then holds the last three minutes of use, and a card opened after a freeze shows the freeze.
 16. The reply it times is the devserver's own and crosses every leg between them: an ssh forward, a gateway and its tunnel, WireGuard. With decided 1 it is a `{"type":"ping"}` text frame on the feed, which the devserver answers with `{"type":"pong"}`.
 17. A sleep of the local machine never reads as a slow reply or a stall: a ping in flight across a sleep is not timed. A sleep is a step of the wall clock against the monotonic one of more than 2 s, or a gap of more than 6 s in the reports the desktop makes every 2 s while a ping waits on a connection whose devserver has answered. A reply that took longer than 45 s is not timed either, while a wait past 45 s keeps counting. On a monotonic clock that counts a sleep (Windows), a sleep under 45 s across a connection's first ping, before any reply, shows no step and no report gap, so that one reply is timed: one slow sample that two fast replies clear.
 18. Measuring never retires or redials the feed. The feed keeps its 30 s keepalive, its two-interval rule and its two-round lost mark, and the measurement adds no reason for the feed's tmux windows to close. A pong does not count as the feed's activity for the keepalive's idle clock, so the 30 s WebSocket Ping still goes out when no set has arrived for 30 s, and the set it draws keeps a window's transfer state (which has no change notice) as fresh as it is today.
@@ -78,7 +78,7 @@ Docs and checks:
 21. The local machine's card shows no face: its library runs inside the desktop, with no network between.
 22. Many windows of one devserver share one reading and one face, and every one of their covers leads to the same card.
 23. A plain browser tab, with no desktop, gets the cover alone: no indicator, no note but the Reconnected one, no Restart connection, Abandon or Show in Computers. The Computers page a browser opens at a server's `/` lists no devserver and shows no face (decided 4).
-24. A window's cover and its devserver's face read different sockets. A cover can show while the face reads healthy (the window's own socket or workspace is gone while the devserver answers), and the face can read stalled while a window's socket still carries frames.
+24. A window's cover and its devserver's face read different sockets. A cover can show while the face reads healthy (the window's own socket or workspace is gone while the devserver answers), and the face can read stalled while a window's socket still carries frames. The desktop's workspace poll is a third reading: while it finds a held devserver not answering, the card lists none of the devserver's windows, tmux connections or workspaces and says they show again when the connection recovers (`rows_hidden` on the row), under any control terminal the outage leaves and in place of an empty devserver's prompt to add a workspace.
 
 ### The cover's action
 
@@ -94,7 +94,7 @@ Docs and checks:
 ## Boundaries
 
 - The devserver: `crates/chan-server/src/routes/library.rs` answers a ping on the window feed, with its tests. No other route, frame or protocol number changes (decided 1).
-- The registry wire: `DevserverEntry` in `crates/chan-library/src/devserver_registry.rs` gains the reading (face, its start, latest reply time, the wait's start, last contact, up to 60 samples). It is always serialized, `null` without a reading, and `#[serde(default)]` for older producers, with its byte tests. The mirror is in `web/packages/launcher/src/api/library.ts`, plus the demo backend.
+- The registry wire: `DevserverEntry` in `crates/chan-library/src/devserver_registry.rs` gains the reading (face, whether a slow face is recovering, its start, latest reply time, the wait's start, last contact, and the reply times of up to 60 pings with `null` for a miss) and `rows_hidden`, whether the desktop lists none of a held devserver's rows because its workspace poll finds it not answering. Both always serialize, the reading as `null` without one, and take `#[serde(default)]` for older producers, with their byte tests. The mirror is in `web/packages/launcher/src/api/library.ts`, plus the demo backend.
 - The desktop:
   - The feed pump in `window_watcher_wiring.rs` sends the ping on the cadence and hands a pong to the reading before it decodes a window frame, so a pong is neither logged as an unreadable frame nor taken for a set, nor counted as activity for the keepalive.
   - The reading, its classification and its tests live in a module of their own; `DevserverFeed` in `main.rs` holds one reading per devserver; `config.rs` fills both row builders.
