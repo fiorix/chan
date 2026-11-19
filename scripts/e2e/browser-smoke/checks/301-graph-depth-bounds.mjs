@@ -59,7 +59,13 @@
 // The pages ask for reduced motion. The tab menu otherwise pops in (from
 // scale 0.92 over 260 ms) and grows by 1.5% under the pointer, so a box
 // read while the menu opens puts the press beside the slider, where the
-// drag moves nothing, or the release short of the slider's end.
+// drag moves nothing, or the release short of the slider's end. The drag
+// reads the slider's box once it holds still across two frames, presses
+// on the thumb where the slider's value puts it (the press point must hit
+// the slider), and aims each step along the track where it stands then: a
+// depth row's "[limit]" cue hides while a drafted value shows, the row
+// narrows, and the slider moves under the pointer. The leg records the
+// slider's value and left edge at each step and the events it saw.
 //
 // What each leg catches: wide, a depth applied at every value of a drag,
 // and a release that opens past the budget or shows no "[limit]"; heavy, a
@@ -243,29 +249,85 @@ function takeProbe(page) {
   });
 }
 
-/// Press on the slider's start, move the pointer to its end in steps, read
-/// the drawn count at each step, and release. The pointer stays on the
-/// track, from its first pixel to its last, so the press and the release
-/// both land on the slider. Answers the drawn counts and the slider's value
-/// as the pointer is released.
+const SLIDER = ".tab-menu-bubble .depth-row input[type='range']";
+/// Half the width of the range input's thumb (Chrome's default thumb).
+const THUMB_HALF = 8;
+
+/// The slider's box, value and bounds once its box reads the same across
+/// two frames, so the menu has stopped moving; null when it does not hold
+/// still within 5 s (a hang guard).
+async function stillSlider(page) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const reads = await page.evaluate((selector) => new Promise((resolve) => {
+      const read = () => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height, min: +el.min, max: +el.max, value: +el.value };
+      };
+      const first = read();
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve([first, read()])));
+    }), SLIDER);
+    if (reads[0] && JSON.stringify(reads[0]) === JSON.stringify(reads[1])) return reads[1];
+    await sleep(50);
+  }
+  return null;
+}
+
+/// Press on the slider's thumb, move the pointer along the track to its
+/// end in steps, read the drawn count at each step, and release. The press
+/// point comes from the slider's value and its box once the box holds
+/// still, and must hit the slider. Each step aims along the track where it
+/// stands then: a row whose "[limit]" cue hides while a drafted value shows
+/// narrows, and its slider moves under the pointer. Answers the drawn
+/// counts, the slider's value and left edge at each step and as the pointer
+/// is released, and what the slider itself saw.
 async function dragToEnd(page) {
-  const slider = ".tab-menu-bubble .depth-row input[type='range']";
-  const box = await page.$eval(slider, (el) => {
-    const r = el.getBoundingClientRect();
-    return { x: r.left, y: r.top + r.height / 2, width: r.width };
-  });
+  const box = await stillSlider(page);
+  if (!box) throw new Error("the depth slider's box did not hold still");
+  const span = box.max - box.min || 1;
+  const thumbAt = (value) => box.left + THUMB_HALF + ((value - box.min) / span) * (box.width - 2 * THUMB_HALF);
+  const y = box.top + box.height / 2;
+  const press = { x: thumbAt(box.value), y };
+  const hit = await page.evaluate(({ x, y }, selector) => {
+    const el = document.elementFromPoint(x, y);
+    return { onSlider: el !== null && el === document.querySelector(selector), at: el ? `${el.tagName}.${el.className}` : null };
+  }, press, SLIDER);
+  if (!hit.onSlider) throw new Error(`the press point is not on the slider: ${JSON.stringify({ press, hit, box })}`);
+  await page.evaluate((selector) => {
+    const el = document.querySelector(selector);
+    window.__sliderEvents = [];
+    for (const type of ["pointerdown", "mousedown", "input", "change", "pointerup"]) {
+      el.addEventListener(type, () => window.__sliderEvents.push(`${type}:${el.value}`));
+    }
+  }, SLIDER);
   const drawnWhileDown = [];
-  await page.mouse.move(box.x + 1, box.y);
+  const values = [];
+  const lefts = [];
+  const startFraction = (box.value - box.min) / span;
+  await page.mouse.move(press.x, press.y);
   await page.mouse.down();
   const steps = 20;
   for (let step = 1; step <= steps; step += 1) {
-    await page.mouse.move(box.x + 1 + ((box.width - 2) * step) / steps, box.y);
+    const now = await page.$eval(SLIDER, (el) => {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, width: r.width };
+    });
+    const fraction = startFraction + ((1 - startFraction) * step) / steps;
+    const x = step === steps
+      ? now.left + now.width - 1
+      : now.left + THUMB_HALF + fraction * (now.width - 2 * THUMB_HALF);
+    await page.mouse.move(x, y);
     await sleep(40);
+    lefts.push(now.left);
+    values.push(await page.$eval(SLIDER, (el) => el.value).catch(() => null));
     drawnWhileDown.push((await drawnCounts(page).catch(() => null))?.drawn ?? null);
   }
-  const released = await page.$eval(slider, (el) => el.value).catch(() => null);
+  const released = await page.$eval(SLIDER, (el) => el.value).catch(() => null);
   await page.mouse.up();
-  return { drawnWhileDown, released };
+  const events = await page.evaluate(() => window.__sliderEvents ?? null).catch(() => null);
+  return { drawnWhileDown, released, trace: { box, press, hit, values, lefts, events } };
 }
 
 function graphUrl(origin, token, windowId, dir, opened) {
@@ -340,6 +402,7 @@ export default {
             const drag = await dragToEnd(page);
             reading.drawnWhileDown = drag.drawnWhileDown;
             reading.released = drag.released;
+            reading.drag = drag.trace;
             reading.after = await settledAfterRelease(page, traffic);
           } finally {
             if (probe) reading.dragged = await takeProbe(page).catch((error) => ({ error: error.message }));
