@@ -291,18 +291,15 @@ function clone<T>(value: T): T {
 /** A healthy reading as of `now`: three minutes of quick replies at the
  * desktop's focused cadence. */
 function demoConnectionHealth(now: number): ConnectionHealth {
-  const samples = Array.from({ length: 60 }, (_, i) => ({
-    at: now - (60 - i) * 3_000,
-    rtt_ms: 18 + ((i * 7) % 11),
-  }));
+  const samples = Array.from({ length: 60 }, (_, i) => 18 + ((i * 7) % 11));
   const latest = samples[samples.length - 1]!;
   return {
     face: "healthy",
     recovering: false,
     since: now - 180_000,
-    rtt_ms: latest.rtt_ms,
+    rtt_ms: latest,
     wait_since: null,
-    last_contact: latest.at + latest.rtt_ms,
+    last_contact: now - 3_000 + latest,
     samples,
   };
 }

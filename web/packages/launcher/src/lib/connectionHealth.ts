@@ -3,7 +3,7 @@
 // devserver's window feed and serves it on the devserver's row; this page
 // counts waits and ages against its own clock, which is the desktop's.
 
-import type { ConnectionHealth, ConnectionSample } from "../api/library";
+import type { ConnectionHealth } from "../api/library";
 
 /// The chart's floor: a spike is clipped at twice the median only once that
 /// passes this, so a fast connection's jitter stays low. It is the desktop's
@@ -76,8 +76,8 @@ export function connectionFaceName(health: ConnectionHealth, now: number): strin
 }
 
 /// Aggregate only answered pings, leaving a dash for every figure before one arrives.
-export function connectionFigures(samples: readonly ConnectionSample[]): ConnectionFigures {
-  const answered = samples.flatMap((sample) => sample.rtt_ms === null ? [] : [sample.rtt_ms]);
+export function connectionFigures(samples: readonly (number | null)[]): ConnectionFigures {
+  const answered = samples.filter((rtt): rtt is number => rtt !== null);
   if (answered.length === 0) return { latest: null, median: null, worst: null };
   const sorted = [...answered].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -90,7 +90,7 @@ export function connectionFigures(samples: readonly ConnectionSample[]): Connect
 /// The chart floor keeps fast-connection jitter low; the larger of that
 /// floor and twice the median clips spikes without flattening normal reply
 /// times.
-export function connectionSparkline(samples: readonly ConnectionSample[], width = CONNECTION_SPARKLINE_WIDTH, height = CONNECTION_SPARKLINE_HEIGHT): ConnectionSparkline {
+export function connectionSparkline(samples: readonly (number | null)[], width = CONNECTION_SPARKLINE_WIDTH, height = CONNECTION_SPARKLINE_HEIGHT): ConnectionSparkline {
   const ceiling = Math.max(CONNECTION_CHART_FLOOR_MS, (connectionFigures(samples).median ?? 0) * 2);
   const x = (index: number) => Math.round(samples.length === 1
     ? width / 2
@@ -105,12 +105,12 @@ export function connectionSparkline(samples: readonly ConnectionSample[], width 
     if (run.length > 0) paths.push(`M ${run.join(" L ")}`);
     run = [];
   };
-  samples.forEach((sample, index) => {
-    if (sample.rtt_ms === null) {
+  samples.forEach((rtt, index) => {
+    if (rtt === null) {
       flush();
       misses.push(x(index));
     } else {
-      run.push(`${x(index)} ${y(sample.rtt_ms)}`);
+      run.push(`${x(index)} ${y(rtt)}`);
     }
   });
   flush();

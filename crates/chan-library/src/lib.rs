@@ -42,8 +42,8 @@ pub use config::{
     TERMINAL_SCROLLBACK_MB_MIN, TERMINAL_SECRET_MASK_SUFFIX_MAX,
 };
 pub use devserver_registry::{
-    ConnectionFace, ConnectionHealth, ConnectionSample, DevserverEntry, DevserverInput,
-    DevserverRegistry, DevserverStatus, CONNECTION_SAMPLE_CAP,
+    ConnectionFace, ConnectionHealth, DevserverEntry, DevserverInput, DevserverRegistry,
+    DevserverStatus, CONNECTION_SAMPLE_CAP,
 };
 pub use error::Error;
 pub use gateway_registry::{

@@ -71,16 +71,6 @@ pub enum ConnectionFace {
     Reconnecting,
 }
 
-/// One finished ping of a [`ConnectionHealth`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConnectionSample {
-    /// When the ping left, in Unix milliseconds.
-    pub at: u64,
-    /// How long its reply took in milliseconds, or `None` for a ping its
-    /// socket was lost before answering.
-    pub rtt_ms: Option<u64>,
-}
-
 /// A connected devserver's connection health, as the desktop reads it from
 /// the replies to the pings it sends on the devserver's window feed. Every
 /// time is Unix milliseconds on the desktop's clock, which is the launcher's.
@@ -107,9 +97,11 @@ pub struct ConnectionHealth {
     /// When the devserver's last frame on the feed arrived, kept across feed
     /// sockets; `None` before the first.
     pub last_contact: Option<u64>,
-    /// The last finished pings, oldest first, at most
-    /// [`CONNECTION_SAMPLE_CAP`].
-    pub samples: Vec<ConnectionSample>,
+    /// The reply times of the last finished pings in milliseconds, oldest
+    /// first, at most [`CONNECTION_SAMPLE_CAP`]: `None` for a ping its feed
+    /// socket was lost before answering. The launcher's chart spaces them by
+    /// place, so they carry no send time.
+    pub samples: Vec<Option<u64>>,
 }
 
 /// One configured devserver, as the launcher lists it. The token is WRITE-ONLY:
@@ -371,16 +363,7 @@ mod tests {
             rtt_ms: Some(850),
             wait_since: Some(1_700_000_013_500),
             last_contact: Some(1_700_000_013_400),
-            samples: vec![
-                ConnectionSample {
-                    at: 1_700_000_010_000,
-                    rtt_ms: Some(40),
-                },
-                ConnectionSample {
-                    at: 1_700_000_011_000,
-                    rtt_ms: None,
-                },
-            ],
+            samples: vec![Some(40), None],
         };
         let entry = row(Some(health));
         let wire = serde_json::to_string(&entry).unwrap();
@@ -389,8 +372,7 @@ mod tests {
             format!(
                 "{ROW_HEAD},\"connection_health\":{{\"face\":\"slow\",\
                  \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":850,\"wait_since\":1700000013500,\
-                 \"last_contact\":1700000013400,\"samples\":[{{\"at\":1700000010000,\
-                 \"rtt_ms\":40}},{{\"at\":1700000011000,\"rtt_ms\":null}}]}}}}"
+                 \"last_contact\":1700000013400,\"samples\":[40,null]}}}}"
             )
         );
         assert_eq!(

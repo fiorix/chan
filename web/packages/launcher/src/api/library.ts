@@ -428,15 +428,6 @@ export interface DevserverEntry {
  */
 export type ConnectionFace = "unknown" | "healthy" | "slow" | "stalled" | "reconnecting";
 
-/** One finished ping of a devserver's connection health. */
-export interface ConnectionSample {
-  /** When the ping left, in Unix milliseconds. */
-  at: number;
-  /** How long its reply took in milliseconds; null for a ping its feed
-   * socket was lost before answering. */
-  rtt_ms: number | null;
-}
-
 /**
  * A connected devserver's connection health, as the desktop reads it from
  * the replies to the pings it sends on the devserver's window feed. Every
@@ -458,8 +449,10 @@ export interface ConnectionHealth {
   /** When the devserver's last frame on the feed arrived; null before the
    * first. */
   last_contact: number | null;
-  /** The last finished pings, oldest first, at most 60. */
-  samples: ConnectionSample[];
+  /** The reply times of the last finished pings in milliseconds, oldest
+   * first, at most 60; null for a ping its feed socket was lost before
+   * answering. */
+  samples: (number | null)[];
 }
 
 // ---- The gateway registry -------------------------------------------------

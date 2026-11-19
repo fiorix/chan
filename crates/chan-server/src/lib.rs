@@ -119,12 +119,11 @@ pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,
 };
 pub use chan_library::{
-    ConnectionFace, ConnectionHealth, ConnectionSample, DevserverEntry, DevserverFeedSource,
-    DevserverInput, DevserverRegistry, DevserverStatus, GatewayEntry, GatewayInput,
-    GatewayRegistry, GatewayStatus, HostedWorkspace, LauncherWorkspace, LocalColorStore,
-    LocalThemeStore, PersistedWorkspace, WireguardIngressStatus, WorkspaceHost,
-    WorkspaceLifecycleOutcome, WorkspaceOverlay, WorkspaceStatus, CONNECTION_SAMPLE_CAP,
-    WIREGUARD_NOT_OFFERED,
+    ConnectionFace, ConnectionHealth, DevserverEntry, DevserverFeedSource, DevserverInput,
+    DevserverRegistry, DevserverStatus, GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus,
+    HostedWorkspace, LauncherWorkspace, LocalColorStore, LocalThemeStore, PersistedWorkspace,
+    WireguardIngressStatus, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceOverlay,
+    WorkspaceStatus, CONNECTION_SAMPLE_CAP, WIREGUARD_NOT_OFFERED,
 };
 pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,

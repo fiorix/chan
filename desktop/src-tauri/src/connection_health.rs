@@ -20,7 +20,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-use chan_server::{ConnectionFace, ConnectionHealth, ConnectionSample, CONNECTION_SAMPLE_CAP};
+use chan_server::{ConnectionFace, ConnectionHealth, CONNECTION_SAMPLE_CAP};
 use tokio::sync::watch;
 
 /// A reply waiting this long makes the connection slow. Well above a healthy
@@ -218,7 +218,8 @@ pub(crate) struct ConnectionReading {
     /// When the devserver's last frame arrived, in Unix milliseconds, kept
     /// across sockets.
     last_contact: Option<u64>,
-    samples: VecDeque<ConnectionSample>,
+    /// The reply times of the last finished pings, `None` for a miss.
+    samples: VecDeque<Option<u64>>,
     /// The face shown and when it took that face, in Unix milliseconds;
     /// `None` with no face.
     shown: Option<(ConnectionFace, u64)>,
@@ -273,7 +274,7 @@ impl ConnectionReading {
                     self.rtts.pop_front();
                 }
                 self.rtt_ms = Some(took);
-                self.sample(sent.wall_ms, Some(took));
+                self.sample(Some(took));
             }
         }
         self.settle(now)
@@ -296,9 +297,8 @@ impl ConnectionReading {
     pub(crate) fn lost(&mut self, now: Stamp) -> bool {
         self.observe(now);
         if self.answered {
-            let missed: Vec<u64> = self.pending.timed.iter().map(|s| s.wall_ms).collect();
-            for at in missed {
-                self.sample(at, None);
+            for _ in 0..self.pending.timed.len() {
+                self.sample(None);
             }
         }
         self.pending = PendingPings::default();
@@ -358,8 +358,8 @@ impl ConnectionReading {
         self.last_contact = Some(now.wall_ms);
     }
 
-    fn sample(&mut self, at: u64, rtt_ms: Option<u64>) {
-        self.samples.push_back(ConnectionSample { at, rtt_ms });
+    fn sample(&mut self, rtt_ms: Option<u64>) {
+        self.samples.push_back(rtt_ms);
         while self.samples.len() > CONNECTION_SAMPLE_CAP {
             self.samples.pop_front();
         }
@@ -701,13 +701,7 @@ mod tests {
         assert_eq!(health.since, WALL0 + 40);
         assert_eq!(health.rtt_ms, Some(40));
         assert_eq!(health.last_contact, Some(WALL0 + 40));
-        assert_eq!(
-            health.samples,
-            [ConnectionSample {
-                at: WALL0,
-                rtt_ms: Some(40)
-            }]
-        );
+        assert_eq!(health.samples, [Some(40)]);
     }
 
     #[test]
@@ -1021,37 +1015,15 @@ mod tests {
             reply(&mut reading, &mut hand, 3_000, 11 + n);
         }
         // Two pings waiting when the socket is lost: two misses.
-        let first = hand.wait(3_000);
-        reading.ping_sent(first);
-        let second = hand.wait(3_000);
-        reading.ping_sent(second);
+        reading.ping_sent(hand.wait(3_000));
+        reading.ping_sent(hand.wait(3_000));
         reading.lost(hand.wait(500));
         let samples = reading.health(hand.at()).unwrap().samples;
         assert_eq!(samples.len(), CONNECTION_SAMPLE_CAP);
-        let tail: Vec<_> = samples[CONNECTION_SAMPLE_CAP - 3..].to_vec();
-        assert_eq!(
-            tail,
-            [
-                ConnectionSample {
-                    at: tail[0].at,
-                    rtt_ms: Some(11 + 64)
-                },
-                ConnectionSample {
-                    at: first.wall_ms,
-                    rtt_ms: None
-                },
-                ConnectionSample {
-                    at: second.wall_ms,
-                    rtt_ms: None
-                },
-            ]
-        );
-        assert_eq!(
-            samples[0].rtt_ms,
-            Some(11 + 7),
-            "the oldest kept is the 60th from the end"
-        );
-        assert!(samples.windows(2).all(|pair| pair[0].at < pair[1].at));
+        // The oldest kept is the 60th from the end: the replies of 18 ms to
+        // 75 ms, then the misses.
+        let kept: Vec<Option<u64>> = (18..=75).map(Some).chain([None, None]).collect();
+        assert_eq!(samples, kept);
     }
 
     #[test]
@@ -1163,13 +1135,7 @@ mod tests {
             Some(7_000),
             "a 7 s first reply was not timed"
         );
-        assert_eq!(
-            health.samples,
-            [ConnectionSample {
-                at: sent.wall_ms,
-                rtt_ms: Some(7_000)
-            }]
-        );
+        assert_eq!(health.samples, [Some(7_000)]);
         assert_eq!(health.face, ConnectionFace::Slow);
 
         let mut hand = Hand::new();
@@ -1247,10 +1213,10 @@ mod tests {
         // The first answer plus the timed ones; the two past the cap were
         // counted, not timed.
         assert_eq!(samples.len(), 1 + PENDING_CAP);
-        for (sample, at) in samples[1..].iter().zip(&sent) {
-            assert_eq!(sample.at, at.wall_ms, "a pong paired with another ping");
+        // The pings left 100 ms apart, so each reply time names its ping.
+        for (rtt_ms, at) in samples[1..].iter().zip(&sent) {
             assert_eq!(
-                sample.rtt_ms,
+                *rtt_ms,
                 Some(hand.at().wall_ms - at.wall_ms),
                 "a pong paired with another ping"
             );

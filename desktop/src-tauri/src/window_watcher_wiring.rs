@@ -5408,10 +5408,7 @@ mod tests {
                 Some(7_000),
                 "the 7 s reply was not timed whole"
             );
-            assert_eq!(
-                health.samples.last().map(|sample| sample.rtt_ms),
-                Some(Some(7_000))
-            );
+            assert_eq!(health.samples.last(), Some(&Some(7_000)));
             assert_eq!(health.face, chan_server::ConnectionFace::Slow);
             assert_eq!(
                 pumped.faces.load(Ordering::SeqCst),

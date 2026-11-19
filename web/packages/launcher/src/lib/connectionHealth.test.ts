@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { ConnectionHealth, ConnectionSample } from "../api/library";
+import type { ConnectionHealth } from "../api/library";
 import {
   connectionContactTime,
   connectionFaceLabel,
@@ -8,8 +8,6 @@ import {
   connectionSparkline,
   connectionStateAge,
 } from "./connectionHealth";
-
-const answers = (rtts: (number | null)[]): ConnectionSample[] => rtts.map((rtt_ms, at) => ({ at, rtt_ms }));
 
 function health(over: Partial<ConnectionHealth>): ConnectionHealth {
   return { face: "healthy", recovering: false, since: 0, rtt_ms: 20, wait_since: null, last_contact: null, samples: [], ...over };
@@ -60,60 +58,60 @@ describe("face words", () => {
 
 describe("connection figures", () => {
   test("uses answered samples for latest, odd median and worst", () => {
-    expect(connectionFigures(answers([50, null, 10, 30]))).toEqual({ latest: 30, median: 30, worst: 50 });
+    expect(connectionFigures([50, null, 10, 30])).toEqual({ latest: 30, median: 30, worst: 50 });
   });
 
   test("averages the middle pair for an even median", () => {
-    expect(connectionFigures(answers([40, 10, 20, 30])).median).toBe(25);
+    expect(connectionFigures([40, 10, 20, 30]).median).toBe(25);
   });
 
   test("has no figures when all samples missed", () => {
-    expect(connectionFigures(answers([null]))).toEqual({ latest: null, median: null, worst: null });
+    expect(connectionFigures([null])).toEqual({ latest: null, median: null, worst: null });
     expect(connectionFigures([])).toEqual({ latest: null, median: null, worst: null });
   });
 
   test("sorts reply times numerically for the median", () => {
-    expect(connectionFigures(answers([5, 100, 20, 30, 9]))).toEqual({ latest: 9, median: 20, worst: 100 });
+    expect(connectionFigures([5, 100, 20, 30, 9])).toEqual({ latest: 9, median: 20, worst: 100 });
   });
 });
 
 describe("chart", () => {
   test("breaks the line at misses and marks their baseline positions", () => {
-    expect(connectionSparkline(answers([10, 20, null, 30, 40]), 40, 40))
+    expect(connectionSparkline([10, 20, null, 30, 40], 40, 40))
       .toEqual({ paths: ["M 3 35 L 12 34", "M 29 34 L 37 33"], misses: [20] });
   });
 
   test("keeps a slow-threshold floor and clips outliers above it", () => {
-    expect(connectionSparkline(answers([10, 20, 1000]), 20, 40).paths).toEqual(["M 3 35 L 10 34 L 17 4"]);
+    expect(connectionSparkline([10, 20, 1000], 20, 40).paths).toEqual(["M 3 35 L 10 34 L 17 4"]);
   });
 
   test("scales to twice the median once that passes the floor", () => {
-    expect(connectionSparkline(answers([500, 600, 5000]), 20, 40).paths).toEqual(["M 3 23 L 10 20 L 17 4"]);
+    expect(connectionSparkline([500, 600, 5000], 20, 40).paths).toEqual(["M 3 23 L 10 20 L 17 4"]);
   });
 
   test("paints the first answer as an inset point", () => {
-    expect(connectionSparkline(answers([100]), 40, 40)).toEqual({ paths: ["M 20 28 L 20 28"], misses: [] });
+    expect(connectionSparkline([100], 40, 40)).toEqual({ paths: ["M 20 28 L 20 28"], misses: [] });
   });
 
   test("a zero median keeps one millisecond of jitter low", () => {
-    expect(connectionSparkline(answers([0, 0, 1]), 40, 40).paths).toEqual(["M 3 36 L 20 36 L 37 36"]);
+    expect(connectionSparkline([0, 0, 1], 40, 40).paths).toEqual(["M 3 36 L 20 36 L 37 36"]);
   });
 
   test("paints a lone answer between missed pings", () => {
-    expect(connectionSparkline(answers([null, 10, null]), 40, 40)).toEqual({ paths: ["M 20 35 L 20 35"], misses: [3, 37] });
+    expect(connectionSparkline([null, 10, null], 40, 40)).toEqual({ paths: ["M 20 35 L 20 35"], misses: [3, 37] });
   });
 
   test("marks misses at both inset edges", () => {
-    expect(connectionSparkline(answers([null, 10, 20, null]), 40, 40)).toEqual({ paths: ["M 14 35 L 26 34"], misses: [3, 37] });
+    expect(connectionSparkline([null, 10, 20, null], 40, 40)).toEqual({ paths: ["M 14 35 L 26 34"], misses: [3, 37] });
   });
 
   test("keeps consecutive misses separate from zero reply times", () => {
-    expect(connectionSparkline(answers([0, null, null, 0]), 40, 40))
+    expect(connectionSparkline([0, null, null, 0], 40, 40))
       .toEqual({ paths: ["M 3 36 L 3 36", "M 37 36 L 37 36"], misses: [14, 26] });
   });
 
   test("marks every miss when no ping was answered", () => {
-    expect(connectionSparkline(answers([null, null, null]), 40, 40)).toEqual({ paths: [], misses: [3, 20, 37] });
+    expect(connectionSparkline([null, null, null], 40, 40)).toEqual({ paths: [], misses: [3, 20, 37] });
   });
 
   test("an empty history draws nothing", () => {
