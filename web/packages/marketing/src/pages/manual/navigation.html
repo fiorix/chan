@@ -10,7 +10,7 @@
     <li>Keep two sets of tabs in one pane, on sides A and B, and flip between them.</li>
     <li>Drag a tab to another pane, to a pane's edge to split it, or to another window of the same workspace.</li>
     <li>Jump to any pane, side, or tab from the pane map.</li>
-    <li>See how the window's connection is doing, and whether typing in a terminal got through.</li>
+    <li>Know when a window loses its connection, and whether typing in a terminal got through.</li>
     <li>Rearrange a whole window with Hybrid Nav, then keep the result or throw it away.</li>
     <li>Hide a window with its terminals still running, or close it.</li>
   </ul>
@@ -75,50 +75,36 @@
 
 <section class="manual-block" id="connection">
   <h2><a class="heading-anchor" href="#connection">Connection health</a></h2>
-  <p>A window keeps asking the chan server for replies and shows when they come late or stop.</p>
-  <p>With tabs in the title bar, an indicator sits at the bar's right end: always on a window of another library, such as a devserver's, and on a local window only while the connection is in trouble. Otherwise it shows in the status bar at the window's top right, and only in trouble.</p>
+  <p>A window keeps checking its connection to the chan server. When the connection drops, a cover reading <code>reconnecting to the chan server</code> greys the window and takes clicks and keys, with the attempt count and the time since the drop. The window keeps redialling, and the cover lifts on its own once the server answers.</p>
+  <p>How a devserver's connection is doing, slow or stalled, with its reply times, shows on its card on the Computers screen: see <a href="/manual/computers/#connection">a devserver's connection health</a>.</p>
+  <p>On a devserver's window in Chan Desktop, the cover also offers three actions.</p>
   <div class="manual-table-wrap">
     <table class="manual-table">
       <thead>
-        <tr><th>The indicator reads</th><th>When</th></tr>
+        <tr><th>Action</th><th>Offered</th><th>What it does</th></tr>
       </thead>
       <tbody>
-        <tr><td>Bars alone</td><td>Replies come back in time. They show faded before the first reply.</td></tr>
-        <tr><td>A time, such as <code>850 ms</code> or <code>2.4 s</code></td><td>Slow: a reply has waited 1 s, or two in a row took 400 ms or more. Two in a row under 300 ms make it healthy again; while they recover it shows no time.</td></tr>
-        <tr><td><code>stalled 6 s</code></td><td>Stalled: a reply has waited 4 s or more with nothing arriving meanwhile.</td></tr>
-        <tr><td><code>reconnecting</code></td><td>The window's connection dropped. It reads this until a new connection answers.</td></tr>
+        <tr><td><strong>Show in Computers</strong></td><td>As soon as the cover shows</td><td>Shows the Computers screen over the window, with the devserver's card in front.</td></tr>
+        <tr><td><strong>Restart connection</strong></td><td>Once the drop has lasted 8 s</td><td>Disconnects the devserver and connects it again, its connect script included, which closes and reopens its windows.</td></tr>
+        <tr><td><strong>Abandon</strong></td><td>Once the drop has lasted 8 s</td><td>Disconnects the devserver.</td></tr>
       </tbody>
     </table>
   </div>
-  <p>Click the indicator, except while the cover is up, for how long the state has lasted, such as <strong>Slow for 12 s</strong>, a chart of recent replies with the missed ones marked, the latest, median and worst reply times, and the time of the last contact.</p>
-  <p>A terminal tab watches its own connection too, and a note at its top right says what that means for your typing.</p>
-  <div class="manual-table-wrap">
-    <table class="manual-table">
-      <thead>
-        <tr><th>The terminal's note says</th><th>When</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>No response for 6 s. Waiting for the connection.</td><td>A check has gone 4 s with no reply and nothing else arriving.</td></tr>
-        <tr><td>Connection lost. Typing is not being sent until it reconnects.</td><td>The terminal's connection closed. The note stays until it is back.</td></tr>
-        <tr><td>Reconnected. Input typed while disconnected may not have been sent.</td><td>You typed while the connection was down or silent. It shows for 12 s, and typing hides it once it has shown for 4 s.</td></tr>
-      </tbody>
-    </table>
-  </div>
-  <p>When the window's connection drops, a cover reading <code>reconnecting to the chan server</code> greys the window and takes clicks and keys, with the attempt count and the time since the drop. The window keeps redialling, and the cover lifts on its own once the server answers.</p>
+  <p>If you typed in a terminal while its connection was down, a note at its top right says <strong>Reconnected. Input typed while disconnected may not have been sent.</strong> once it is back. It shows for 12 s, and typing hides it once it has shown for 4 s.</p>
   <details class="doc-details">
     <summary>Details and limits</summary>
     <ul>
       <li>The window asks every 3 s while it is in front and has had a reply, and every 20 s otherwise.</li>
-      <li>A title bar with tabs stays above the cover, unless a dialog or an overlay holds the keyboard, and shows only the window's title and the indicator, with the window's own buttons.</li>
+      <li>A title bar with tabs stays above the cover, unless a dialog or an overlay holds the keyboard, and shows only the window's title, with the window's own buttons.</li>
       <li>The cover shows once the connection's status has held for 600 ms, about a second after a connection closes, when the first redial, at 500 ms, does not get through.</li>
       <li>A connection that goes silent instead is dropped after 15 s on a window reached over a network that is in front and has had a reply, and after 45 s otherwise.</li>
       <li>On waking, or when a hidden window shows again, the window checks its connection and drops one that does not answer within 3 s, or up to 10 s on a slow link. After a drop for silence, by either deadline or the wake check, the cover waits until 45 s after the last contact.</li>
       <li>Reached over a network means another library in Chan Desktop, or a browser page whose address is not a loopback one such as localhost or 127.0.0.1, so a page reached through an ssh forward counts as local.</li>
-      <li>In Chan Desktop, a window of another library, such as a devserver's, adds <strong>Restart connection</strong> and <strong>Abandon</strong> to the cover once the drop has lasted 8 s (see <a href="/manual/connect/#disconnect">Disconnect and reconnect</a>).</li>
-      <li>A terminal's notes show only on the tab in front, and not under the cover.</li>
-      <li>A stalled terminal connects again on its own once the window's connection has been healthy for 3 s, at most once every 30 s. One you typed into during the stall waits until its connection times out instead.</li>
-      <li>A terminal checks its connection when it opens and every 20 s, and 1 s after you type, at most every 2 s, so a stall shows soon after you type.</li>
-      <li>In the status bar, the close button beside the indicator hides it until the connection reaches a state it has not shown since it was last healthy.</li>
+      <li>Hiding the Computers screen leaves the cover up while the drop lasts. If the devserver has no card any more, the screen opens at its first card. See also <a href="/manual/connect/#disconnect">Disconnect and reconnect</a>.</li>
+      <li>A devserver's window runs the page the devserver serves, so Show in Computers shows only when the devserver and Chan Desktop both come from a release that has it. A control terminal does not offer it, and a local window or a browser page offers none of the three.</li>
+      <li>The note shows only on the tab in front, and not under the cover, and its time counts only while it shows.</li>
+      <li>A terminal shows no note while its connection is slow or silent. One that goes silent on its own connects again after 45 s, and shows the note then if you typed meanwhile.</li>
+      <li>A terminal checks its connection when it opens and every 20 s, and 1 s after you type, at most every 2 s, so the note knows whether your typing got through.</li>
     </ul>
   </details>
 </section>
