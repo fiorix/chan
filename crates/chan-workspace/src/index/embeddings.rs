@@ -541,9 +541,9 @@ pub fn model_files_present(model_id: &str, repo_dir: &Path) -> bool {
 /// run `chan workspace index download-model` or rebuild with `--features
 /// embed-model`".
 ///
-/// Rejects unknown model ids first (mirrors `Embedder::open_once`'s
-/// `lookup_model` gate) so the error path stays consistent
-/// regardless of cache state.
+/// Rejects unknown model ids first, with the `UnknownModel` error
+/// `Embedder::open_once` gives through `require_published`, so the
+/// error path stays consistent regardless of cache state.
 pub fn resolve_model(model_id: &str) -> Result<PathBuf, EmbedError> {
     resolve_model_in(model_id, &global_models_dir())
 }

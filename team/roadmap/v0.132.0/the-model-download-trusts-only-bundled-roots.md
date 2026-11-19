@@ -88,7 +88,7 @@ On 2026-11-18 the owner decided that the download writes a pinned layout instead
 
 - **The pins.** The model table (`config::EMBEDDING_MODELS`) pins each model's commit and the sha256 and size of each file chan downloads.
   - They were read from the Hub on 2026-11-18: the API's `main` commit, the LFS sha256 for the weights, and the other files fetched at that commit and hashed. Each fetched file's git blob id matched the one the API names.
-  - `BAAI/bge-m3`'s main commit publishes no `model.safetensors`: the Hub answers 404 for it, so bge-m3 could not download before this change either, and its repository has no official conversion, only community pull requests. On 2026-11-18 the owner dropped it from the model list (`dev/v0132/decisions.md` in the development tree, "Three badge and model calls", point 2). A workspace whose config names it opens with the default model, and Settings and `chan workspace index status` say why until a model is chosen.
+  - `BAAI/bge-m3`'s main commit publishes no `model.safetensors`: the Hub answers 404 for it, so bge-m3 could not download before this change either, and its repository has no official conversion, only community pull requests. On 2026-11-18 the owner dropped it from the model list (`dev/v0132/decisions.md` in the development tree, "Three badge and model calls", point 2). A workspace whose config names it opens with the default model, and Settings and `chan workspace index status` say why until a model is chosen. Settings offers to keep the default, which ends the note and keeps its vectors; choosing another model ends it and starts the vectors over.
 - **The download.** It fetches `resolve/<commit>/<file>` into `snapshots/<commit>/<file>.part` and hashes while it writes (the kept prefix first on a resume). It renames the part into place only when the sha256 matches, then writes `refs/main`. A part of the pinned size that hashes wrong is emptied. The metadata request, `blobs/` and its links, and the Windows rename fallback are gone, with their tests and the captured hf-hub transfer.
 - **Earlier caches.** A cache written before opens offline. All of a model's files come from one snapshot: the pinned one while it holds every pinned file, else the one `refs/main` names while that one does, else the pinned one a download is filling. Files of two snapshots are never mixed.
 - **The rest of the build:**
@@ -111,8 +111,15 @@ On 2026-11-18 the owner decided that the download writes a pinned layout instead
 - **The fix round** (one reader's should-fix items and notes):
   - A resume answered with the whole file restarts from it, and one answered at another range empties the part.
   - A model whose entry pins no copy of a file the embedder reads is refused before any request, in plain words ("... cannot be downloaded: its Hub repository publishes no model.safetensors"); no shipped model is one now, and a test-only entry holds the path.
-  - A resume that hashes wrong fetches the whole file once more in the same call.
+  - A resume that hashes wrong fetches the whole file once more in the same call, unless the resume was answered with the whole file.
   - One rule decides "downloaded" for the downloader, the resolver and the seeder, and all of a model's files come from one snapshot.
   - The part an earlier chan left in `blobs/` is removed once its file is published.
   - A test checks the table itself: lowercase 40-hex commits, 64-hex sha256s with sizes, and the files the embedder reads.
-- **The native Windows selection** (`CHAN_WORKSPACE_WINDOWS_TESTS` in the root Makefile) names the reworked tests: 58 names, 46 of them the download's. The Windows trust reading stays pending, and the macOS reading stays postponed by the owner.
+- **The last fixes:**
+  - A model opens from one snapshot, resolved once after its files are fetched, even when the cache changes between them.
+  - A whole-file answer to a resume counts as the attempt from zero: if it hashes wrong, the call fails without fetching again.
+  - A reply longer than the size asked empties the part, so the next attempt starts over.
+  - `refs/main` is written best effort after a download, as on a hit: a cache whose `refs/` cannot be written still returns the file (a Unix test with `refs/` read-only).
+  - A test observes the second download waiting on the first one's lock.
+  - Each test whose server could answer a looping download refuses the requests past those it expects, so a broken bound fails instead of hanging.
+- **The native Windows selection** (`CHAN_WORKSPACE_WINDOWS_TESTS` in the root Makefile) names the reworked tests: 60 names, 48 of them the download's. At the tree of `6c29d85df` (2026-11-19) the selection passed natively on the local Windows 11 VM: `test result: ok. 60 passed; 0 failed`. The Windows trust reading stays pending, and the macOS reading stays postponed by the owner.
