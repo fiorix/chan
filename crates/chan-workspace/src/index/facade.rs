@@ -1834,6 +1834,64 @@ mod tests {
         }
     }
 
+    /// An index whose default stood in for BAAI/bge-m3 and has embedded:
+    /// its config keeps the dropped id and stamps the default's vectors.
+    fn open_on_the_stand_in_with_its_vectors(tmp: &TempDir) -> (Index, PathBuf, u32) {
+        let dir = idx_dir(tmp);
+        let dim = config::embedding_model(crate::DEFAULT_MODEL).unwrap().dim;
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            config::config_path(&dir),
+            format!(
+                "schema_version = {}\nmodel = \"{}\"\nreplaced_model = \"BAAI/bge-m3\"\n\
+                 vectors_model = \"{}\"\nvectors_dim = {dim}\n",
+                config::SCHEMA_VERSION,
+                crate::DEFAULT_MODEL,
+                crate::DEFAULT_MODEL
+            ),
+        )
+        .unwrap();
+        let idx = Index::open(tmp.path(), &dir).expect("the index opens");
+        assert!(idx.config().model_note().is_some(), "fixture: the note");
+        assert_eq!(
+            idx.config().vectors_model.as_deref(),
+            Some(crate::DEFAULT_MODEL),
+            "fixture: the stand-in's vectors"
+        );
+        (idx, dir, dim)
+    }
+
+    #[test]
+    fn choosing_the_stand_in_model_ends_the_note_and_keeps_its_vectors() {
+        let tmp = make_workspace();
+        let (idx, dir, dim) = open_on_the_stand_in_with_its_vectors(&tmp);
+        idx.set_model(crate::DEFAULT_MODEL.into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model_note(), None, "choosing the model ends the note");
+            assert_eq!(cfg.vectors_model.as_deref(), Some(crate::DEFAULT_MODEL));
+            assert_eq!(cfg.vectors_dim, Some(dim), "the vectors it made are kept");
+        }
+    }
+
+    #[test]
+    fn choosing_another_model_ends_the_note_and_drops_the_stand_ins_vectors() {
+        let tmp = make_workspace();
+        let (idx, dir, _) = open_on_the_stand_in_with_its_vectors(&tmp);
+        idx.set_model("BAAI/bge-base-en-v1.5".into()).unwrap();
+        for cfg in [idx.config(), config::load(&dir).unwrap()] {
+            assert_eq!(cfg.model, "BAAI/bge-base-en-v1.5");
+            assert_eq!(
+                cfg.model_note(),
+                None,
+                "choosing another model ends the note"
+            );
+            assert!(
+                cfg.vectors_model.is_none(),
+                "another model's vectors start over"
+            );
+        }
+    }
+
     #[test]
     fn corrupt_vector_shard_keeps_bm25_available_and_rebuild_reclaims_it() {
         use super::super::vectors::{pair, VectorStore};
