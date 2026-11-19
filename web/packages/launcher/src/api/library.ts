@@ -444,6 +444,10 @@ export interface ConnectionSample {
  */
 export interface ConnectionHealth {
   face: ConnectionFace;
+  /** A slow face whose latest reply time and wait were both under the time
+   * that ends slow when the desktop read it, shown as the mark alone; false
+   * for every other face. */
+  recovering: boolean;
   /** When `face` took its value. */
   since: number;
   /** The latest reply time in milliseconds; null before the first. */

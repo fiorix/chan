@@ -298,6 +298,7 @@ function demoConnectionHealth(now: number): ConnectionHealth {
   const latest = samples[samples.length - 1]!;
   return {
     face: "healthy",
+    recovering: false,
     since: now - 180_000,
     rtt_ms: latest.rtt_ms,
     wait_since: null,

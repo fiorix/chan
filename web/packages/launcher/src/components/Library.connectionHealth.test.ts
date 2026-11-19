@@ -18,6 +18,7 @@ const NOW = 1_800_000_000_000;
 function reading(over: Partial<ConnectionHealth> = {}): ConnectionHealth {
   return {
     face: "healthy",
+    recovering: false,
     since: NOW - 60_000,
     rtt_ms: 24,
     wait_since: null,
@@ -135,7 +136,7 @@ describe("the connection face on the Computers deck", () => {
   it("shows the mark alone before the first reply and while recovering", () => {
     library.devservers = [
       computer("ds-a", "alpha", reading({ face: "unknown", rtt_ms: null, last_contact: null, samples: [] })),
-      computer("ds-b", "bravo", reading({ face: "slow", rtt_ms: 250 })),
+      computer("ds-b", "bravo", reading({ face: "slow", recovering: true, rtt_ms: 250 })),
     ];
     mountDeck("ds-a");
     expect(face("ds-a")!.textContent!.trim()).toBe("");

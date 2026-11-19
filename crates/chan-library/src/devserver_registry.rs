@@ -88,6 +88,14 @@ pub struct ConnectionSample {
 pub struct ConnectionHealth {
     /// What the reading shows.
     pub face: ConnectionFace,
+    /// A slow face whose latest reply time and current wait were both under
+    /// the time that ends slow when the desktop read it: the replies have
+    /// come back, and slow ends once enough of them have. The launcher shows
+    /// it as the mark alone, named "Connection recovering". `false` for
+    /// every other face. `#[serde(default)]`: a reading without the field
+    /// reads `false`.
+    #[serde(default)]
+    pub recovering: bool,
     /// When `face` took its value.
     pub since: u64,
     /// The latest reply time in milliseconds, kept across feed sockets;
@@ -358,6 +366,7 @@ mod tests {
     fn a_row_with_a_reading_carries_it_on_the_wire() {
         let health = ConnectionHealth {
             face: ConnectionFace::Slow,
+            recovering: true,
             since: 1_700_000_012_000,
             rtt_ms: Some(850),
             wait_since: Some(1_700_000_013_500),
@@ -379,7 +388,7 @@ mod tests {
             wire,
             format!(
                 "{ROW_HEAD},\"connection_health\":{{\"face\":\"slow\",\
-                 \"since\":1700000012000,\"rtt_ms\":850,\"wait_since\":1700000013500,\
+                 \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":850,\"wait_since\":1700000013500,\
                  \"last_contact\":1700000013400,\"samples\":[{{\"at\":1700000010000,\
                  \"rtt_ms\":40}},{{\"at\":1700000011000,\"rtt_ms\":null}}]}}}}"
             )
@@ -388,6 +397,10 @@ mod tests {
             serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
             entry
         );
+        // A reading from a producer that sends no `recovering` is not one.
+        let older = wire.replace("\"recovering\":true,", "");
+        let read = serde_json::from_str::<DevserverEntry>(&older).unwrap();
+        assert!(!read.connection_health.unwrap().recovering);
         for (face, spelled) in [
             (ConnectionFace::Unknown, "\"unknown\""),
             (ConnectionFace::Healthy, "\"healthy\""),

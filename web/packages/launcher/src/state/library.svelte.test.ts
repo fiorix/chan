@@ -721,7 +721,7 @@ describe("connection health polling", () => {
     vi.restoreAllMocks();
   });
 
-  const reading: ConnectionHealth = { face: "healthy", since: 0, rtt_ms: 20, wait_since: null, last_contact: 0, samples: [] };
+  const reading: ConnectionHealth = { face: "healthy", recovering: false, since: 0, rtt_ms: 20, wait_since: null, last_contact: 0, samples: [] };
 
   it("re-lists the devserver rows every 2 s while one has a reading and the screen is visible", async () => {
     stopWatching();

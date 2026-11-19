@@ -12,7 +12,7 @@ import {
 const answers = (rtts: (number | null)[]): ConnectionSample[] => rtts.map((rtt_ms, at) => ({ at, rtt_ms }));
 
 function health(over: Partial<ConnectionHealth>): ConnectionHealth {
-  return { face: "healthy", since: 0, rtt_ms: 20, wait_since: null, last_contact: null, samples: [], ...over };
+  return { face: "healthy", recovering: false, since: 0, rtt_ms: 20, wait_since: null, last_contact: null, samples: [], ...over };
 }
 
 describe("face words", () => {
@@ -23,11 +23,14 @@ describe("face words", () => {
     expect(connectionFaceName(health({ face: "slow", rtt_ms: 450, wait_since: 9_200 }), 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
-  test("a slow face under 300 ms shows the mark alone, named recovering", () => {
-    const recovering = health({ face: "slow", rtt_ms: 250, wait_since: 9_900 });
+  test("a slow face the desktop read as recovering shows the mark alone until the next reading", () => {
+    // Read 100 ms into a ping's wait, and shown 800 ms later.
+    const recovering = health({ face: "slow", recovering: true, rtt_ms: 250, wait_since: 9_100 });
     expect(connectionFaceLabel(recovering, 10_000)).toBe("");
     expect(connectionFaceName(recovering, 10_000)).toBe("Connection recovering");
-    expect(connectionFaceLabel(health({ face: "slow", rtt_ms: 300 }), 10_000)).toBe("300 ms");
+    const slow = health({ face: "slow", rtt_ms: 250, wait_since: 9_100 });
+    expect(connectionFaceLabel(slow, 10_000)).toBe("900 ms");
+    expect(connectionFaceName(slow, 10_000)).toBe("Connection slow, waiting for a reply");
   });
 
   test("a stalled face counts its wait in whole seconds", () => {
