@@ -1,6 +1,6 @@
 # Writers that publish through tempfile's persist cannot replace an open file on Windows
 
-Status: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started.
+Status: accepted for v0.132.0 by the owner on 2026-11-16 ("Take all four recommendations"); not started. Merged into `v0132/int` at `f2b702c50` and closed on the native Windows tests on the VM.
 
 Record: found in v0.131.0's review of the model download's Windows fix (`dev/v0131-team/reviews/review-modelroots-4a.md`, note 8). The model download's ref writer was moved to `std::fs::rename` in that row because `tempfile`'s `persist` failed with os error 5 while a reader held the old file open (Windows test VM, job J201a r2).
 

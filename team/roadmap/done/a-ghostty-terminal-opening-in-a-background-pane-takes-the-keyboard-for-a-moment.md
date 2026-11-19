@@ -21,7 +21,7 @@ xterm.js's `open()` does not focus; the xterm.js backend waits for its `focused`
 
 ## Boundaries
 
-- ghostty-web-ng's `open()` (an open that does not focus, with the caller focusing when its pane is focused) and `TerminalTab`'s call of it. The fork's part 4 ([chan drives ghostty-web from outside](../v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md)) adds a public focus hook; this row does not wait for it, and part 4 keeps what this row settles.
+- ghostty-web-ng's `open()` (an open that does not focus, with the caller focusing when its pane is focused) and `TerminalTab`'s call of it. The fork's part 4 ([chan drives ghostty-web from outside](../v0.133.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md)) adds a public focus hook; this row does not wait for it, and part 4 keeps what this row settles.
 - The xterm.js backend is unchanged.
 
 ## Acceptance

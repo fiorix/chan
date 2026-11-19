@@ -1,6 +1,6 @@
 # Copy as HTML, the link preview, survey bodies and the table widget show wikilinks as typed
 
-Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started.
+Status: accepted for v0.132.0 by the owner on 2026-11-17, by survey at 2026-11-17T09:50Z, answering the first batch of candidates v0.131.0 took with no row ("Accept all six (recommended)"); not started. Moved to v0.133.0 by the owner on 2026-11-19 ("move them and cut").
 
 Record: item 8 of `dev/v0131-team/reports/owner-candidates-1.md`, from the review of the export work (`dev/v0131-team/reviews/review-wikirender-1.md`, note 5) and the scope ruling that kept the other renderers out. [The export row](../done/slides-and-pdf-export-show-wikilinks-as-raw-text.md) made slides and PDF exports show a wikilink's label and recorded these four surfaces, and two seams, as candidates for the owner. Cosmetic.
 
