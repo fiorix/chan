@@ -20,24 +20,28 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-use chan_server::{ConnectionFace, ConnectionHealth, ConnectionSample, CONNECTION_SAMPLE_CAP};
+use chan_server::{ConnectionFace, ConnectionHealth, CONNECTION_SAMPLE_CAP};
 use tokio::sync::watch;
 
 /// A reply waiting this long makes the connection slow. Well above a healthy
 /// round trip through a gateway, so jitter does not trip it.
 const SLOW_WAIT: Duration = Duration::from_millis(1_000);
 /// Replies at or over this make the connection slow once [`RTT_RUN`] in a row
-/// reach it: the delay at which an echoed keystroke visibly lags.
+/// reach it: the delay at which an echoed keystroke visibly lags. The
+/// launcher's chart floor (`CONNECTION_CHART_FLOOR_MS`) is this number.
 const SLOW_RTT_MS: u64 = 400;
 /// Replies must come back under this, [`RTT_RUN`] in a row with none
 /// overdue, for the connection to leave slow. Lower than the entry threshold
 /// so a connection that hovers around it does not change face on every pong.
+/// A slow face whose latest reply is under it, with no wait served, reads
+/// [`recovering`](ConnectionHealth::recovering).
 const OK_RTT_MS: u64 = 300;
 /// How many replies in a row a threshold takes, so that one outlier neither
 /// enters nor leaves slow.
 const RTT_RUN: usize = 2;
-/// A reply waiting this long, with no frame of the devserver's arriving
-/// meanwhile, makes the connection stalled: it carries nothing.
+/// Silence this long while a reply waits, counted from its ping or from the
+/// devserver's latest frame after it, makes the connection stalled: it
+/// carries nothing.
 const STALLED_WAIT: Duration = Duration::from_millis(4_000);
 /// The longest reply worth timing. A reply later than this crossed a jump of
 /// the clock or a hang, and neither is the connection's reply time.
@@ -215,7 +219,8 @@ pub(crate) struct ConnectionReading {
     /// When the devserver's last frame arrived, in Unix milliseconds, kept
     /// across sockets.
     last_contact: Option<u64>,
-    samples: VecDeque<ConnectionSample>,
+    /// The reply times of the last finished pings, `None` for a miss.
+    samples: VecDeque<Option<u64>>,
     /// The face shown and when it took that face, in Unix milliseconds;
     /// `None` with no face.
     shown: Option<(ConnectionFace, u64)>,
@@ -231,7 +236,8 @@ pub(crate) struct ConnectionReading {
 impl ConnectionReading {
     /// A feed socket opened. Its pings, replies and frames start afresh; the
     /// history, the latest reply time and the last contact carry over.
-    /// Answers whether the face changed, as every report does.
+    /// Answers whether the face changed, as every report does; a pong also
+    /// answers true when it ends a wait the reading serves.
     pub(crate) fn opened(&mut self, now: Stamp) -> bool {
         self.observe(now);
         self.pending = PendingPings::default();
@@ -256,24 +262,34 @@ impl ConnectionReading {
     /// time when that ping kept its send stamp and the reply took at most
     /// [`MAX_RTT_MS`]. A pong at any time says the devserver answers the
     /// feed's ping: it turns the reading on and ends reconnecting.
+    ///
+    /// It also answers true, with the face unchanged, when the ping it
+    /// answers had the wait [`health`](Self::health) serves, [`SLOW_WAIT`]
+    /// or more on an answered connection. The launcher counts a served wait
+    /// on until it reads again, so the pump's announcement makes it read
+    /// now: one library push per reply that waited 1 s or more.
     pub(crate) fn pong(&mut self, now: Stamp) -> bool {
         self.observe(now);
         self.contact(now);
+        let answered_before = self.answered;
         self.answered = true;
         self.socket.answered = true;
         self.reconnecting = false;
+        let mut wait_ended = false;
         if let Some(Some(sent)) = self.pending.pop() {
             let took = millis(now.mono.saturating_duration_since(sent.mono));
+            wait_ended = answered_before && took >= millis(SLOW_WAIT);
             if took <= MAX_RTT_MS {
                 self.rtts.push_back(took);
                 if self.rtts.len() > RTT_RUN {
                     self.rtts.pop_front();
                 }
                 self.rtt_ms = Some(took);
-                self.sample(sent.wall_ms, Some(took));
+                self.sample(Some(took));
             }
         }
-        self.settle(now)
+        let changed = self.settle(now);
+        changed || wait_ended
     }
 
     /// A window set arrived. The socket's first set is the one the
@@ -293,9 +309,8 @@ impl ConnectionReading {
     pub(crate) fn lost(&mut self, now: Stamp) -> bool {
         self.observe(now);
         if self.answered {
-            let missed: Vec<u64> = self.pending.timed.iter().map(|s| s.wall_ms).collect();
-            for at in missed {
-                self.sample(at, None);
+            for _ in 0..self.pending.timed.len() {
+                self.sample(None);
             }
         }
         self.pending = PendingPings::default();
@@ -321,6 +336,12 @@ impl ConnectionReading {
         self.answered && !self.unanswered_sets() && !self.pending.timed.is_empty()
     }
 
+    /// Whether the open feed socket has delivered a pong. Until it has, the
+    /// pump sends that socket no ping after its first.
+    pub(crate) fn socket_answered(&self) -> bool {
+        self.socket.answered
+    }
+
     /// The open socket has delivered a set for a ping and no pong: a
     /// devserver too old to answer sends its set again for each ping.
     fn unanswered_sets(&self) -> bool {
@@ -332,15 +353,28 @@ impl ConnectionReading {
         self.observe(now);
         self.settle(now);
         let (face, since) = self.shown?;
-        // A wait counts once the devserver has answered: before that, a
-        // first ping that never comes back is a devserver too old to answer.
-        let wait_since = if self.answered {
-            self.pending.timed.front().map(|sent| sent.wall_ms)
-        } else {
-            None
-        };
+        // A wait is served once the devserver has answered, since before
+        // that a first ping that never comes back is a devserver too old to
+        // answer, and once it reaches SLOW_WAIT. The launcher counts a served
+        // wait on from the reading until the next one, so a shorter wait,
+        // any ping's round trip caught in flight, would count a quick reply
+        // up toward the next reading.
+        let wait_since = self
+            .pending
+            .timed
+            .front()
+            .filter(|sent| {
+                self.answered && now.mono.saturating_duration_since(sent.mono) >= SLOW_WAIT
+            })
+            .map(|sent| sent.wall_ms);
         Some(ConnectionHealth {
             face,
+            // The latest reply is back under the time that ends slow, and
+            // `classify` ends slow once RTT_RUN in a row are. It changes no
+            // face, so it is read with the reading rather than settled.
+            recovering: face == ConnectionFace::Slow
+                && wait_since.is_none()
+                && self.rtt_ms.unwrap_or(0) < OK_RTT_MS,
             since,
             rtt_ms: self.rtt_ms,
             wait_since,
@@ -354,8 +388,8 @@ impl ConnectionReading {
         self.last_contact = Some(now.wall_ms);
     }
 
-    fn sample(&mut self, at: u64, rtt_ms: Option<u64>) {
-        self.samples.push_back(ConnectionSample { at, rtt_ms });
+    fn sample(&mut self, rtt_ms: Option<u64>) {
+        self.samples.push_back(rtt_ms);
         while self.samples.len() > CONNECTION_SAMPLE_CAP {
             self.samples.pop_front();
         }
@@ -544,7 +578,10 @@ impl ProbePacer {
 
     /// A window of the desktop gained or lost the focus, or went away
     /// (`focused` false). When the desktop gains the focus, every feed
-    /// pings once, in the same update of the pace.
+    /// pings once, in the same update of the pace. A move of the focus
+    /// between two windows pings once too when it is reported loss first,
+    /// as the desktop losing the focus and gaining it, and not when it is
+    /// reported gain first.
     pub(crate) fn window_focus(&self, label: &str, focused: bool) {
         self.holder_focus(label, FocusHolder::Window, focused);
     }
@@ -685,13 +722,7 @@ mod tests {
         assert_eq!(health.since, WALL0 + 40);
         assert_eq!(health.rtt_ms, Some(40));
         assert_eq!(health.last_contact, Some(WALL0 + 40));
-        assert_eq!(
-            health.samples,
-            [ConnectionSample {
-                at: WALL0,
-                rtt_ms: Some(40)
-            }]
-        );
+        assert_eq!(health.samples, [Some(40)]);
     }
 
     #[test]
@@ -700,11 +731,9 @@ mod tests {
         let mut reading = answered(&mut hand, 40);
         let sent = hand.wait(3_000);
         reading.ping_sent(sent);
-        assert_eq!(
-            face(&mut reading, hand.wait(999)),
-            Some(ConnectionFace::Healthy),
-            "a 999 ms wait"
-        );
+        let health = reading.health(hand.wait(999)).unwrap();
+        assert_eq!(health.face, ConnectionFace::Healthy, "a 999 ms wait");
+        assert_eq!(health.wait_since, None, "a 999 ms wait was served");
         let health = reading.health(hand.wait(1)).unwrap();
         assert_eq!(health.face, ConnectionFace::Slow, "a 1 s wait");
         assert_eq!(health.wait_since, Some(sent.wall_ms));
@@ -820,6 +849,88 @@ mod tests {
             "two replies under 300 ms with none overdue"
         );
         assert_eq!(health.since, hand.at().wall_ms);
+    }
+
+    /// A pong that ends a wait the reading served reports a change though
+    /// the face stays slow, so the launcher reads again rather than counting
+    /// that wait on; a reply under 1 s ends no served wait.
+    #[test]
+    fn a_pong_that_ends_a_served_wait_reports_a_change() {
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 1_300);
+        reading.ping_sent(hand.wait(3_000));
+        let health = reading.health(hand.wait(1_000)).unwrap();
+        assert_eq!(health.face, ConnectionFace::Slow, "fixture: a slow face");
+        assert!(health.wait_since.is_some(), "fixture: a served wait");
+        assert!(
+            reading.pong(hand.wait(300)),
+            "the pong that ended a served wait reported no change"
+        );
+        let health = reading.health(hand.at()).unwrap();
+        assert_eq!(health.face, ConnectionFace::Slow, "fixture: the face held");
+        assert_eq!(health.wait_since, None);
+        reading.ping_sent(hand.wait(3_000));
+        assert!(
+            !reading.pong(hand.wait(999)),
+            "a 999 ms reply on a slow face reported a change"
+        );
+        assert_eq!(face(&mut reading, hand.at()), Some(ConnectionFace::Slow));
+    }
+
+    /// What `web/packages/launcher/src/lib/connectionHealth.test.ts` reads
+    /// (`fixtures/connection-health/slow-reply-in-flight.json`): a connection
+    /// slow from two 450 ms replies, read 100 ms into its next ping, serves
+    /// no wait, so the launcher does not count that ping's wait up until the
+    /// next reading.
+    #[test]
+    fn a_slow_connections_ping_in_flight_is_served_as_no_wait() {
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 450);
+        reply(&mut reading, &mut hand, 3_000, 450);
+        reading.ping_sent(hand.wait(3_000));
+        let read_at = hand.wait(100);
+        let health = reading.health(read_at).unwrap();
+        assert_eq!(
+            health.face,
+            ConnectionFace::Slow,
+            "fixture: two 450 ms replies"
+        );
+        let served = serde_json::json!({ "read_at": read_at.wall_ms, "health": health });
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/connection-health/slow-reply-in-flight.json"
+        ))
+        .unwrap();
+        assert_eq!(served, fixture, "the desktop serves {served}");
+    }
+
+    /// Recovering is a slow face whose latest reply time is under 300 ms
+    /// with no wait served, read whenever the reading is.
+    #[test]
+    fn a_slow_face_under_300_ms_reads_recovering() {
+        let recovering = |reading: &mut ConnectionReading, now: Stamp| {
+            let health = reading.health(now).unwrap();
+            assert_eq!(health.face, ConnectionFace::Slow);
+            health.recovering
+        };
+        let mut hand = Hand::new();
+        let mut reading = answered(&mut hand, 1_200);
+        assert!(!recovering(&mut reading, hand.at()), "a 1.2 s reply");
+        reply(&mut reading, &mut hand, 3_000, 300);
+        assert!(!recovering(&mut reading, hand.at()), "a 300 ms reply");
+        reply(&mut reading, &mut hand, 3_000, 299);
+        assert!(recovering(&mut reading, hand.at()), "a 299 ms reply");
+        reading.ping_sent(hand.wait(3_000));
+        assert!(recovering(&mut reading, hand.wait(999)), "a 999 ms wait");
+        assert!(!recovering(&mut reading, hand.wait(1)), "a 1 s wait");
+        hand.wait(100);
+        reading.pong(hand.at());
+        assert!(!recovering(&mut reading, hand.at()), "a 1.1 s reply");
+        reply(&mut reading, &mut hand, 3_000, 20);
+        assert!(recovering(&mut reading, hand.at()), "a 20 ms reply");
+        reply(&mut reading, &mut hand, 3_000, 20);
+        let health = reading.health(hand.at()).unwrap();
+        assert_eq!(health.face, ConnectionFace::Healthy);
+        assert!(!health.recovering, "a healthy face read as recovering");
     }
 
     #[test]
@@ -975,37 +1086,15 @@ mod tests {
             reply(&mut reading, &mut hand, 3_000, 11 + n);
         }
         // Two pings waiting when the socket is lost: two misses.
-        let first = hand.wait(3_000);
-        reading.ping_sent(first);
-        let second = hand.wait(3_000);
-        reading.ping_sent(second);
+        reading.ping_sent(hand.wait(3_000));
+        reading.ping_sent(hand.wait(3_000));
         reading.lost(hand.wait(500));
         let samples = reading.health(hand.at()).unwrap().samples;
         assert_eq!(samples.len(), CONNECTION_SAMPLE_CAP);
-        let tail: Vec<_> = samples[CONNECTION_SAMPLE_CAP - 3..].to_vec();
-        assert_eq!(
-            tail,
-            [
-                ConnectionSample {
-                    at: tail[0].at,
-                    rtt_ms: Some(11 + 64)
-                },
-                ConnectionSample {
-                    at: first.wall_ms,
-                    rtt_ms: None
-                },
-                ConnectionSample {
-                    at: second.wall_ms,
-                    rtt_ms: None
-                },
-            ]
-        );
-        assert_eq!(
-            samples[0].rtt_ms,
-            Some(11 + 7),
-            "the oldest kept is the 60th from the end"
-        );
-        assert!(samples.windows(2).all(|pair| pair[0].at < pair[1].at));
+        // The oldest kept is the 60th from the end: the replies of 18 ms to
+        // 75 ms, then the misses.
+        let kept: Vec<Option<u64>> = (18..=75).map(Some).chain([None, None]).collect();
+        assert_eq!(samples, kept);
     }
 
     #[test]
@@ -1117,13 +1206,7 @@ mod tests {
             Some(7_000),
             "a 7 s first reply was not timed"
         );
-        assert_eq!(
-            health.samples,
-            [ConnectionSample {
-                at: sent.wall_ms,
-                rtt_ms: Some(7_000)
-            }]
-        );
+        assert_eq!(health.samples, [Some(7_000)]);
         assert_eq!(health.face, ConnectionFace::Slow);
 
         let mut hand = Hand::new();
@@ -1201,10 +1284,10 @@ mod tests {
         // The first answer plus the timed ones; the two past the cap were
         // counted, not timed.
         assert_eq!(samples.len(), 1 + PENDING_CAP);
-        for (sample, at) in samples[1..].iter().zip(&sent) {
-            assert_eq!(sample.at, at.wall_ms, "a pong paired with another ping");
+        // The pings left 100 ms apart, so each reply time names its ping.
+        for (rtt_ms, at) in samples[1..].iter().zip(&sent) {
             assert_eq!(
-                sample.rtt_ms,
+                *rtt_ms,
                 Some(hand.at().wall_ms - at.wall_ms),
                 "a pong paired with another ping"
             );
@@ -1265,19 +1348,31 @@ mod tests {
                 nudges: 1
             }
         );
-        // The last focused window going away is the desktop losing it.
+        // Loss first, the move is the desktop losing the focus and gaining
+        // it again: one ping.
         pacer.window_focus("b", false);
+        assert!(!pace.borrow().focused);
+        pacer.window_focus("c", true);
+        assert_eq!(
+            *pace.borrow(),
+            ProbePace {
+                focused: true,
+                nudges: 2
+            }
+        );
+        // The last focused window going away is the desktop losing it.
+        pacer.window_focus("c", false);
         assert_eq!(
             *pace.borrow(),
             ProbePace {
                 focused: false,
-                nudges: 1
+                nudges: 2
             }
         );
-        pacer.window_focus("c", true);
-        assert_eq!(pace.borrow().nudges, 2);
-        pacer.ping_now();
+        pacer.window_focus("d", true);
         assert_eq!(pace.borrow().nudges, 3);
+        pacer.ping_now();
+        assert_eq!(pace.borrow().nudges, 4);
     }
 
     /// The reports Windows makes while a window's Computers screen holds the

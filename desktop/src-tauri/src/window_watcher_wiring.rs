@@ -1523,7 +1523,8 @@ fn is_feed_pong(text: &str) -> bool {
 
 /// What a window feed's pump measures with: the connection's reading (in its
 /// snapshot), the clock it stamps each report with, the desktop's pace, and
-/// what runs when the face the reading shows changes.
+/// what runs when the face the reading shows changes or a wait it served
+/// ends.
 ///
 /// One probe serves one feed socket. It sends one ping when the socket opens
 /// and no other until a pong arrives on it, since a devserver too old to
@@ -1536,8 +1537,6 @@ struct FeedProbe<'a> {
     /// The pace's sender is gone: no change will come.
     pace_closed: bool,
     on_face: &'a mut (dyn FnMut() + Send),
-    /// This socket has delivered a pong, so the cadence runs.
-    answered: bool,
     last_ping: tokio::time::Instant,
     focused: bool,
     nudges: u64,
@@ -1558,7 +1557,6 @@ impl<'a> FeedProbe<'a> {
             pace,
             pace_closed: false,
             on_face,
-            answered: false,
             last_ping: tokio::time::Instant::now(),
             focused: false,
             nudges: 0,
@@ -1567,7 +1565,8 @@ impl<'a> FeedProbe<'a> {
     }
 
     /// Report one event to the reading, stamped under its lock, and run
-    /// `on_face` when the face it shows changed.
+    /// `on_face` when the reading answers that it changed: its face, or a
+    /// wait it served ending at a pong.
     fn record(
         &mut self,
         event: impl FnOnce(&mut ConnectionReading, crate::connection_health::Stamp) -> bool,
@@ -1595,7 +1594,6 @@ impl<'a> FeedProbe<'a> {
         let pace = *self.pace.borrow_and_update();
         self.focused = pace.focused;
         self.nudges = pace.nudges;
-        self.answered = false;
     }
 
     /// Send one ping. A failed send ends nothing: measuring never retires
@@ -1622,7 +1620,6 @@ impl<'a> FeedProbe<'a> {
 
     fn pong(&mut self) {
         self.record(ConnectionReading::pong);
-        self.answered = true;
     }
 
     fn set_arrived(&mut self) {
@@ -1638,9 +1635,14 @@ impl<'a> FeedProbe<'a> {
         self.record(ConnectionReading::lost);
     }
 
+    /// Whether this socket has delivered a pong, so the cadence runs.
+    fn answered(&self) -> bool {
+        self.snapshot.lock().unwrap().health.socket_answered()
+    }
+
     /// When the cadence's next ping is due, once this socket has answered.
     fn next_ping(&self) -> Option<tokio::time::Instant> {
-        self.answered
+        self.answered()
             .then(|| self.last_ping + crate::connection_health::cadence(self.focused))
     }
 
@@ -1649,7 +1651,7 @@ impl<'a> FeedProbe<'a> {
         self.focused = pace.focused;
         let nudged = pace.nudges != self.nudges;
         self.nudges = pace.nudges;
-        nudged && self.answered
+        nudged && self.answered()
     }
 }
 
@@ -1858,8 +1860,8 @@ fn pending_hide_posts_for_feed_snapshot(
 ///
 /// The [`feed_pump`] read-deadline turns a half-open socket into an error
 /// instead of a forever-pending `next()`, and its probe times the devserver's
-/// pongs into the connection's reading, announcing each change of its face to
-/// the launcher. `saw_frame` is set on the first window set so the caller can
+/// pongs into the connection's reading, announcing each change of its face,
+/// and each reply that ends a wait of 1 s or more, to the launcher. `saw_frame` is set on the first window set so the caller can
 /// tell a healthy round from a never-connected one; the first set also clears
 /// any `Unreachable` state (recovery) and announces it.
 async fn stream_window_feed(
@@ -5305,19 +5307,19 @@ mod tests {
             heard.iter().map(Duration::as_secs_f64).collect()
         }
 
-        /// A devserver that never answers the feed's ping gets one per
-        /// connection: none on the cadence, none for a nudge, however long
-        /// the socket stays up. Its set for that ping shows no face, and on
-        /// a later socket that set ends the reconnecting the loss of the
-        /// first one began.
+        /// A devserver that never answers the feed's ping gets one per feed
+        /// socket: none on the cadence, none for a nudge, however long the
+        /// socket stays up. Its set for that ping shows no face, and on a
+        /// later socket that set ends the reconnecting the loss of the first
+        /// one began.
         #[tokio::test(start_paused = true)]
-        async fn a_devserver_that_does_not_answer_gets_one_ping_per_connection() {
+        async fn a_devserver_that_does_not_answer_gets_one_ping_per_socket() {
             let start = Instant::now();
             let pacer = ProbePacer::default();
             pacer.window_focus("w", true);
             let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
             let clock = PausedClock::new();
-            for connection in 1..=2 {
+            for socket in 1..=2 {
                 let (client, server) = ws_pair().await;
                 let heard = Arc::new(Mutex::new(Heard::default()));
                 let devserver = tokio::spawn(serve_feed(
@@ -5334,7 +5336,7 @@ mod tests {
                 assert_eq!(
                     clock.reads() - reads,
                     heard.lock().unwrap().ws_pings.len() - ws_pings,
-                    "connection {connection} reported more than the sets the keepalive drew: \
+                    "socket {socket} reported more than the sets the keepalive drew: \
                      the time, for a ping its devserver never answers"
                 );
                 pacer.ping_now();
@@ -5342,16 +5344,16 @@ mod tests {
                 assert_eq!(
                     heard.lock().unwrap().pings.len(),
                     1,
-                    "connection {connection} pinged a devserver that never answered more than once"
+                    "socket {socket} pinged a devserver that never answered more than once"
                 );
                 assert!(
                     heard.lock().unwrap().ws_pings.len() >= 3,
-                    "fixture: the keepalive did not run on connection {connection}"
+                    "fixture: the keepalive did not run on socket {socket}"
                 );
                 assert_eq!(
                     face(&snapshot, &clock),
                     None,
-                    "connection {connection} showed a face for a devserver that never answered"
+                    "socket {socket} showed a face for a devserver that never answered"
                 );
                 devserver.abort();
                 assert!(
@@ -5361,7 +5363,36 @@ mod tests {
                 assert_eq!(
                     face(&snapshot, &clock),
                     Some(chan_server::ConnectionFace::Reconnecting),
-                    "the loss of connection {connection}'s socket"
+                    "the loss of socket {socket}"
+                );
+            }
+        }
+
+        /// A later socket of a connection whose devserver has answered waits
+        /// for a pong of its own before its cadence runs: a devserver that
+        /// comes back as a release that does not answer gets one ping on it.
+        #[tokio::test(start_paused = true)]
+        async fn a_later_socket_waits_for_its_own_pong_before_its_cadence() {
+            let start = Instant::now();
+            let pacer = ProbePacer::default();
+            pacer.window_focus("w", true);
+            let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+            let clock = PausedClock::new();
+            for (devserver, pings) in [(Devserver::Current, 4), (Devserver::Older, 1)] {
+                let (client, server) = ws_pair().await;
+                let heard = Arc::new(Mutex::new(Heard::default()));
+                let served = tokio::spawn(serve_feed(server, devserver, start, Arc::clone(&heard)));
+                let pumped = pump_probed(client, &snapshot, &clock, pacer.subscribe());
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                assert_eq!(
+                    heard.lock().unwrap().pings.len(),
+                    pings,
+                    "pings in 10 s on the focused cadence"
+                );
+                served.abort();
+                assert!(
+                    pumped.task.await.unwrap().is_err(),
+                    "fixture: the socket ended"
                 );
             }
         }
@@ -5408,10 +5439,7 @@ mod tests {
                 Some(7_000),
                 "the 7 s reply was not timed whole"
             );
-            assert_eq!(
-                health.samples.last().map(|sample| sample.rtt_ms),
-                Some(Some(7_000))
-            );
+            assert_eq!(health.samples.last(), Some(&Some(7_000)));
             assert_eq!(health.face, chan_server::ConnectionFace::Slow);
             assert_eq!(
                 pumped.faces.load(Ordering::SeqCst),

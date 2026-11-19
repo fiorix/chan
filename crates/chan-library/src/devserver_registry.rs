@@ -64,21 +64,11 @@ pub enum ConnectionFace {
     Healthy,
     /// A reply is late, or the latest ones were.
     Slow,
-    /// A reply has waited long, with nothing else arriving meanwhile.
+    /// A reply is waiting, and the devserver has sent nothing for a while.
     Stalled,
     /// The feed socket that answered was lost, and no later one has answered
     /// yet.
     Reconnecting,
-}
-
-/// One finished ping of a [`ConnectionHealth`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConnectionSample {
-    /// When the ping left, in Unix milliseconds.
-    pub at: u64,
-    /// How long its reply took in milliseconds, or `None` for a ping its
-    /// socket was lost before answering.
-    pub rtt_ms: Option<u64>,
 }
 
 /// A connected devserver's connection health, as the desktop reads it from
@@ -88,20 +78,33 @@ pub struct ConnectionSample {
 pub struct ConnectionHealth {
     /// What the reading shows.
     pub face: ConnectionFace,
+    /// A slow face whose latest reply time was under the time that ends slow,
+    /// with no [`wait_since`](Self::wait_since), when the desktop read it:
+    /// the replies have come back, and slow ends once enough of them have.
+    /// The launcher shows it as the mark alone, named "Connection
+    /// recovering". `false` for every other face. `#[serde(default)]`: a
+    /// reading without the field reads `false`.
+    #[serde(default)]
+    pub recovering: bool,
     /// When `face` took its value.
     pub since: u64,
     /// The latest reply time in milliseconds, kept across feed sockets;
     /// `None` before the first.
     pub rtt_ms: Option<u64>,
-    /// When the oldest ping still waiting for its reply left, or `None` with
-    /// none waiting or before the devserver's first reply.
+    /// When the oldest ping still waiting for its reply left, once it has
+    /// waited the second that makes a connection slow; `None` with none
+    /// waiting that long or before the devserver's first reply. The
+    /// launcher counts the wait on from the reading until the next one, so
+    /// a shorter wait, any ping's round trip, would count a quick reply up.
     pub wait_since: Option<u64>,
     /// When the devserver's last frame on the feed arrived, kept across feed
     /// sockets; `None` before the first.
     pub last_contact: Option<u64>,
-    /// The last finished pings, oldest first, at most
-    /// [`CONNECTION_SAMPLE_CAP`].
-    pub samples: Vec<ConnectionSample>,
+    /// The reply times of the last finished pings in milliseconds, oldest
+    /// first, at most [`CONNECTION_SAMPLE_CAP`]: `None` for a ping its feed
+    /// socket was lost before answering. The launcher's chart spaces them by
+    /// place, so they carry no send time.
+    pub samples: Vec<Option<u64>>,
 }
 
 /// One configured devserver, as the launcher lists it. The token is WRITE-ONLY:
@@ -356,22 +359,16 @@ mod tests {
 
     #[test]
     fn a_row_with_a_reading_carries_it_on_the_wire() {
+        // A miss on an earlier socket, then a 1.2 s reply and a 250 ms one:
+        // slow, and recovering with no wait served.
         let health = ConnectionHealth {
             face: ConnectionFace::Slow,
+            recovering: true,
             since: 1_700_000_012_000,
-            rtt_ms: Some(850),
-            wait_since: Some(1_700_000_013_500),
+            rtt_ms: Some(250),
+            wait_since: None,
             last_contact: Some(1_700_000_013_400),
-            samples: vec![
-                ConnectionSample {
-                    at: 1_700_000_010_000,
-                    rtt_ms: Some(40),
-                },
-                ConnectionSample {
-                    at: 1_700_000_011_000,
-                    rtt_ms: None,
-                },
-            ],
+            samples: vec![None, Some(1_200), Some(250)],
         };
         let entry = row(Some(health));
         let wire = serde_json::to_string(&entry).unwrap();
@@ -379,15 +376,19 @@ mod tests {
             wire,
             format!(
                 "{ROW_HEAD},\"connection_health\":{{\"face\":\"slow\",\
-                 \"since\":1700000012000,\"rtt_ms\":850,\"wait_since\":1700000013500,\
-                 \"last_contact\":1700000013400,\"samples\":[{{\"at\":1700000010000,\
-                 \"rtt_ms\":40}},{{\"at\":1700000011000,\"rtt_ms\":null}}]}}}}"
+                 \"recovering\":true,\"since\":1700000012000,\"rtt_ms\":250,\
+                 \"wait_since\":null,\"last_contact\":1700000013400,\
+                 \"samples\":[null,1200,250]}}}}"
             )
         );
         assert_eq!(
             serde_json::from_str::<DevserverEntry>(&wire).unwrap(),
             entry
         );
+        // A reading from a producer that sends no `recovering` is not one.
+        let older = wire.replace("\"recovering\":true,", "");
+        let read = serde_json::from_str::<DevserverEntry>(&older).unwrap();
+        assert!(!read.connection_health.unwrap().recovering);
         for (face, spelled) in [
             (ConnectionFace::Unknown, "\"unknown\""),
             (ConnectionFace::Healthy, "\"healthy\""),

@@ -18,11 +18,12 @@ const NOW = 1_800_000_000_000;
 function reading(over: Partial<ConnectionHealth> = {}): ConnectionHealth {
   return {
     face: "healthy",
+    recovering: false,
     since: NOW - 60_000,
     rtt_ms: 24,
     wait_since: null,
     last_contact: NOW - 1_000,
-    samples: [{ at: NOW - 4_000, rtt_ms: 20 }, { at: NOW - 1_000, rtt_ms: 24 }],
+    samples: [20, 24],
     ...over,
   };
 }
@@ -67,7 +68,7 @@ afterEach(async () => {
 
 describe("the connection face on the Computers deck", () => {
   it("shows the face beside the name and the detail under the address on the card in front", () => {
-    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", since: NOW - 27_000, rtt_ms: 1_300, samples: [{ at: NOW - 4_000, rtt_ms: 20 }, { at: NOW - 1_000, rtt_ms: 1_300 }] }))];
+    library.devservers = [computer("ds-a", "alpha", reading({ face: "slow", since: NOW - 27_000, rtt_ms: 1_300, samples: [20, 1_300] }))];
     mountDeck("ds-a");
     expect(slot("ds-a").classList.contains("active")).toBe(true);
     expect(face("ds-a")!.dataset.face).toBe("slow");
@@ -135,7 +136,7 @@ describe("the connection face on the Computers deck", () => {
   it("shows the mark alone before the first reply and while recovering", () => {
     library.devservers = [
       computer("ds-a", "alpha", reading({ face: "unknown", rtt_ms: null, last_contact: null, samples: [] })),
-      computer("ds-b", "bravo", reading({ face: "slow", rtt_ms: 250 })),
+      computer("ds-b", "bravo", reading({ face: "slow", recovering: true, rtt_ms: 250 })),
     ];
     mountDeck("ds-a");
     expect(face("ds-a")!.textContent!.trim()).toBe("");

@@ -3,13 +3,13 @@
 // devserver's window feed and serves it on the devserver's row; this page
 // counts waits and ages against its own clock, which is the desktop's.
 
-import type { ConnectionHealth, ConnectionSample } from "../api/library";
+import type { ConnectionHealth } from "../api/library";
 
-/// A slow connection whose reply time and wait are both under this shows the
-/// mark alone, named "Connection recovering".
-export const CONNECTION_RECOVERED_MS = 300;
 /// The chart's floor: a spike is clipped at twice the median only once that
-/// passes this, so a fast connection's jitter stays low.
+/// passes this, so a fast connection's jitter stays low. It is the desktop's
+/// SLOW_RTT_MS (`desktop/src-tauri/src/connection_health.rs`), so a fast
+/// connection's chart tops out at a reply slow enough to count toward slow.
+/// It scales the drawing and decides no face, so the row does not carry it.
 export const CONNECTION_CHART_FLOOR_MS = 400;
 
 /// The chart and its marks use one view box so the component and path math agree.
@@ -31,14 +31,16 @@ export function formatConnectionMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
-/// How long the oldest unanswered ping has waited at `now`, 0 with none.
+/// How long the oldest unanswered ping has waited at `now`, 0 with no wait
+/// served.
 export function connectionWaitMs(health: ConnectionHealth, now: number): number {
   return health.wait_since === null ? 0 : Math.max(0, now - health.wait_since);
 }
 
 /// The words beside the mark, empty where the mark stands alone: healthy,
-/// unknown, and a slow spell whose reply time and wait are both under
-/// CONNECTION_RECOVERED_MS. A slow face reads the larger of the two.
+/// unknown, and a slow face the desktop read as recovering, which holds until
+/// the next reading. Any other slow face reads the larger of its reply time
+/// and its wait.
 export function connectionFaceLabel(health: ConnectionHealth, now: number): string {
   const wait = connectionWaitMs(health, now);
   switch (health.face) {
@@ -46,10 +48,8 @@ export function connectionFaceLabel(health: ConnectionHealth, now: number): stri
       return "reconnecting";
     case "stalled":
       return `stalled ${Math.floor(wait / 1000)} s`;
-    case "slow": {
-      const ms = Math.max(health.rtt_ms ?? 0, wait);
-      return ms < CONNECTION_RECOVERED_MS ? "" : formatConnectionMs(ms);
-    }
+    case "slow":
+      return health.recovering ? "" : formatConnectionMs(Math.max(health.rtt_ms ?? 0, wait));
     default:
       return "";
   }
@@ -63,7 +63,7 @@ export function connectionFaceName(health: ConnectionHealth, now: number): strin
     case "unknown":
       return "Connection status unknown";
     case "slow": {
-      if (connectionFaceLabel(health, now) === "") return "Connection recovering";
+      if (health.recovering) return "Connection recovering";
       const rtt = health.rtt_ms;
       return rtt !== null && rtt >= connectionWaitMs(health, now)
         ? `Connection slow, ${formatConnectionMs(rtt)}`
@@ -77,8 +77,8 @@ export function connectionFaceName(health: ConnectionHealth, now: number): strin
 }
 
 /// Aggregate only answered pings, leaving a dash for every figure before one arrives.
-export function connectionFigures(samples: readonly ConnectionSample[]): ConnectionFigures {
-  const answered = samples.flatMap((sample) => sample.rtt_ms === null ? [] : [sample.rtt_ms]);
+export function connectionFigures(samples: readonly (number | null)[]): ConnectionFigures {
+  const answered = samples.filter((rtt): rtt is number => rtt !== null);
   if (answered.length === 0) return { latest: null, median: null, worst: null };
   const sorted = [...answered].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -91,7 +91,7 @@ export function connectionFigures(samples: readonly ConnectionSample[]): Connect
 /// The chart floor keeps fast-connection jitter low; the larger of that
 /// floor and twice the median clips spikes without flattening normal reply
 /// times.
-export function connectionSparkline(samples: readonly ConnectionSample[], width = CONNECTION_SPARKLINE_WIDTH, height = CONNECTION_SPARKLINE_HEIGHT): ConnectionSparkline {
+export function connectionSparkline(samples: readonly (number | null)[], width = CONNECTION_SPARKLINE_WIDTH, height = CONNECTION_SPARKLINE_HEIGHT): ConnectionSparkline {
   const ceiling = Math.max(CONNECTION_CHART_FLOOR_MS, (connectionFigures(samples).median ?? 0) * 2);
   const x = (index: number) => Math.round(samples.length === 1
     ? width / 2
@@ -106,12 +106,12 @@ export function connectionSparkline(samples: readonly ConnectionSample[], width 
     if (run.length > 0) paths.push(`M ${run.join(" L ")}`);
     run = [];
   };
-  samples.forEach((sample, index) => {
-    if (sample.rtt_ms === null) {
+  samples.forEach((rtt, index) => {
+    if (rtt === null) {
       flush();
       misses.push(x(index));
     } else {
-      run.push(`${x(index)} ${y(sample.rtt_ms)}`);
+      run.push(`${x(index)} ${y(rtt)}`);
     }
   });
   flush();
