@@ -9,6 +9,7 @@
     <li>See every window on the local machine and your devservers, shown or hidden, in one place.</li>
     <li>Open a standalone terminal, a new workspace, or another window of a workspace.</li>
     <li>Turn workspaces on and off, and connect or disconnect devservers.</li>
+    <li>See how the connection to each devserver is doing, down to its reply times.</li>
     <li>Hide a window while its terminals keep running, and show it again later.</li>
     <li>Do all of it from the keyboard, one letter per action.</li>
   </ul>
@@ -102,6 +103,41 @@
   </figure>
 </section>
 
+<section class="manual-block" id="connection">
+  <h2><a class="heading-anchor" href="#connection">Connection health</a></h2>
+  <figure class="inline-shot">
+    <div class="shot-placeholder-frame" data-shot="computers-connection-health" data-shot-kind="still">screenshot to capture<small>a devserver's card in front over a slow connection: 850 ms beside its name in the warning colour, and under its address Slow for 12 s, the chart, Latest, Median and Worst, and Last contact</small></div>
+    <figcaption>A slow devserver: its reply time beside its name, and the detail on the card in front.</figcaption>
+  </figure>
+  <p>Chan Desktop checks the connection to each devserver it is connected to, and marks how it is doing beside the devserver's name on its card.</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead>
+        <tr><th>Beside the name</th><th>When</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Bars alone</td><td>Replies come back in time. They show faded before the first reply.</td></tr>
+        <tr><td>A time, such as <code>850 ms</code> or <code>2.4 s</code></td><td>Slow: a reply has waited 1 s, the last one took 1 s or more, or the last two took 400 ms or more. It shows the longer of the last reply and the wait. Two replies in a row under 300 ms make it healthy again; while they recover it shows the bars alone.</td></tr>
+        <tr><td><code>stalled 8 s</code></td><td>Stalled: a reply has waited 4 s or more with nothing arriving from the devserver meanwhile.</td></tr>
+        <tr><td><code>reconnecting</code></td><td>The connection dropped. It reads this until a new one answers.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The card in front adds the detail under the devserver's address: how long the state has lasted, such as <strong>Slow for 12 s</strong> or <strong>No response for 8 s</strong>, a chart of the last 60 checks with the missed ones as gaps, the latest, median and worst reply times, and the time of the last contact.</p>
+  <p>While a connected devserver does not answer, its card lists none of its windows and workspaces and reads <strong>Windows and workspaces show again when the connection recovers.</strong> They come back once it answers. A window that loses its connection meanwhile offers <strong>Show in Computers</strong> on its cover, which brings this card to the front (see <a href="/manual/navigation/#connection">a window's connection health</a>).</p>
+  <details class="doc-details">
+    <summary>Details and limits</summary>
+    <ul>
+      <li>Chan Desktop checks each devserver once, however many of its windows are open: every 3 s while one of its windows has the focus, every 20 s otherwise, and once more when it gains the focus and when the Computers screen shows.</li>
+      <li>The check crosses everything between the two machines, such as an ssh tunnel or a gateway and its tunnel, so a devserver reached through a gateway shows the same marks.</li>
+      <li>A sleep of the local machine never reads as slow or stalled: a check in flight across a sleep is not timed, and neither is a reply that took longer than 45 s.</li>
+      <li>No mark shows on This machine's card, on a devserver that is connecting or disconnected, on one that runs a chan too old to answer the check, or in a browser.</li>
+      <li>The mark and a window's cover watch different connections. A window can be covered while its devserver reads healthy, as when the window's own connection or its workspace is gone, and a devserver can read stalled while a window still gets data.</li>
+      <li>In privacy mode the mark keeps its colour, and its words and the detail hide behind one eye button per devserver.</li>
+    </ul>
+  </details>
+</section>
+
 <section class="manual-block" id="gateways">
   <h2><a class="heading-anchor" href="#gateways">Gateways</a></h2>
   <p>Press <kbd>g</kbd>, or click the screen's title, to flip to <strong>Gateways</strong>: the same carousel for the gateways you connect through, with <strong>Add gateway</strong> last. The devservers a gateway gives you show on Computers as cards that read <code>via</code> and the gateway's name.</p>
@@ -118,7 +154,7 @@
       <li>On Windows and Linux the window's menu bar shows only while the screen is open.</li>
       <li>The letters leave forms, a window name you are editing, dialogs and the command launcher alone. Shift or uppercase letters work the same; Cmd, Ctrl and Alt combinations keep their usual meaning.</li>
       <li>Click a window's name to add your own text; the row then reads <code>Terminal Window 2 [build]</code>.</li>
-      <li>A devserver's icon shows its state: connected, connecting, connection lost, or disconnected.</li>
+      <li>A devserver's icon shows its state: connected, connecting, connection lost, or disconnected. The mark beside a connected devserver's name shows how its connection is doing: see <a href="#connection">Connection health</a>.</li>
       <li><strong>Select</strong>, in the top bar, puts a check on each workspace, devserver and tmux connection. The bar at the bottom turns the checked ones on or off, or removes them after you confirm.</li>
       <li>The top bar's command button opens the command launcher with the Computers scope alone.</li>
       <li>In a browser the cards stand one under another, a window row has <strong>Open window</strong> and the eye, and the letters do not apply. Closing a browser tab ends its window's terminals; <a href="/manual/browser/#hide">hide the window</a> first.</li>
