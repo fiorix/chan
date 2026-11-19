@@ -939,9 +939,9 @@
     color: var(--text);
   }
 
-  /* The connection detail under the devserver's address, its text in line
-     with the name's. */
-  .ds-health { padding: 0.1rem 0.6rem 0.6rem 1.75rem; }
+  /* The connection detail under the devserver's address, from the name's
+     left edge to the header actions' right edge. */
+  .ds-health { padding: 0.1rem 0.2rem 0.6rem 1.75rem; }
   /* The devserver identity block (name row over address row). On the mutable
      surface it is a button: the whole block opens the edit-config form, lifting
      a hover tint; the read-only surface renders it as a static div. */

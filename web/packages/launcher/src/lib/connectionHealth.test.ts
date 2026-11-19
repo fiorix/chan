@@ -7,6 +7,7 @@ import {
   connectionFaceName,
   connectionFigures,
   connectionSparkline,
+  connectionSparklineWidth,
 } from "./connectionHealth";
 
 /// The reading the desktop serves for a connection slow from two 450 ms
@@ -145,6 +146,22 @@ describe("chart", () => {
 
   test("an empty history draws nothing", () => {
     expect(connectionSparkline([])).toEqual({ paths: [], misses: [] });
+  });
+});
+
+describe("chart width", () => {
+  test("spans the detail at the chart's one scale, 48 units to 69 px", () => {
+    expect(connectionSparklineWidth(552)).toBe(384);
+    expect(connectionSparklineWidth(276)).toBe(192);
+  });
+
+  test("keeps the default width until the detail has been measured", () => {
+    expect(connectionSparklineWidth(0)).toBe(180);
+  });
+
+  test("spreads the points across the width it is given", () => {
+    expect(connectionSparkline([20, null, 24], connectionSparklineWidth(552)))
+      .toEqual({ paths: ["M 3 42 L 3 42", "M 381 42 L 381 42"], misses: [192] });
   });
 });
 

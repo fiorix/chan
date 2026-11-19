@@ -94,6 +94,38 @@ describe("the connection face on the Computers deck", () => {
     expect(detailText("ds-a")).toMatch(/^Latest /);
   });
 
+  it("draws its chart across the detail's width at a fixed height, and again when the card resizes", () => {
+    const observed = new Map<Element, () => void>();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private readonly report: () => void) {}
+      observe(el: Element) { observed.set(el, this.report); }
+      disconnect() {}
+    });
+    let width = 552;
+    const clientWidth = vi.spyOn(Element.prototype, "clientWidth", "get")
+      .mockImplementation(function (this: Element) { return this.classList.contains("connection-detail") ? width : 0; });
+    try {
+      library.devservers = [computer("ds-a", "alpha", reading({ samples: [20, null, 24] }))];
+      mountDeck("ds-a");
+      const chart = detail("ds-a")!.querySelector<SVGSVGElement>("svg.sparkline")!;
+      expect(chart.getAttribute("viewBox")).toBe("0 0 384 48");
+      expect(chart.style.height).toBe("69px");
+      expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 381 44");
+      expect([...chart.querySelectorAll(".reading")].map((path) => path.getAttribute("d"))).toEqual(["M 3 42 L 3 42", "M 381 42 L 381 42"]);
+      expect(chart.querySelector(".miss")!.getAttribute("d")).toBe("M 192 40 L 192 46");
+      expect(observed.has(detail("ds-a")!), "nothing observes the detail's size").toBe(true);
+      width = 276;
+      observed.get(detail("ds-a")!)!();
+      flushSync();
+      expect(chart.getAttribute("viewBox")).toBe("0 0 192 48");
+      expect(chart.style.height).toBe("69px");
+      expect(chart.querySelector(".baseline")!.getAttribute("d")).toBe("M 3 44 L 189 44");
+    } finally {
+      clientWidth.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("shows a card not in front its face without the detail, and the local machine's card neither", () => {
     library.devservers = [computer("ds-a", "alpha", reading())];
     mountDeck("local");

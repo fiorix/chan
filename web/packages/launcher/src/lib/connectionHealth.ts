@@ -12,14 +12,29 @@ import type { ConnectionHealth } from "../api/library";
 /// It scales the drawing and decides no face, so the row does not carry it.
 export const CONNECTION_CHART_FLOOR_MS = 400;
 
-/// The chart and its marks use one view box so the component and path math agree.
+/// The chart and its marks use one view box so the component and path math
+/// agree: CONNECTION_SPARKLINE_HEIGHT units tall and, until the detail it
+/// fills has been measured, CONNECTION_SPARKLINE_WIDTH units wide.
 export const CONNECTION_SPARKLINE_WIDTH = 180;
 export const CONNECTION_SPARKLINE_HEIGHT = 48;
+/// The chart's height on the card, in CSS pixels. It draws at one scale in
+/// both directions, so a wider card spreads its points further apart and
+/// leaves its height and the weight of its strokes as they are.
+export const CONNECTION_CHART_HEIGHT_PX = 69;
 export const CONNECTION_SPARKLINE_EDGE = 3;
 const CONNECTION_SPARKLINE_PAD = 4;
 export const CONNECTION_SPARKLINE_BASELINE = CONNECTION_SPARKLINE_HEIGHT - CONNECTION_SPARKLINE_PAD;
 export const CONNECTION_SPARKLINE_MISS_TOP = CONNECTION_SPARKLINE_BASELINE - 4;
 export const CONNECTION_SPARKLINE_MISS_BOTTOM = CONNECTION_SPARKLINE_BASELINE + 2;
+
+/// The chart's width in view-box units for a detail `boxWidth` CSS pixels
+/// wide, at the chart's one scale, so its points span the detail's width;
+/// CONNECTION_SPARKLINE_WIDTH before the detail has been measured.
+export function connectionSparklineWidth(boxWidth: number): number {
+  return boxWidth > 0
+    ? boxWidth * CONNECTION_SPARKLINE_HEIGHT / CONNECTION_CHART_HEIGHT_PX
+    : CONNECTION_SPARKLINE_WIDTH;
+}
 
 /// Latest is the last answered ping; median and worst use the answered set.
 export type ConnectionFigures = { latest: number | null; median: number | null; worst: number | null };

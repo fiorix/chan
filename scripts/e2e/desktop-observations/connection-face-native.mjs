@@ -99,6 +99,12 @@ const READ = () => `(() => {
   const local = document.querySelector('.slot[data-key="local"]');
   const face = slot?.querySelector('.ds-name-row .connection-face');
   const detail = slot?.querySelector('.ds-health .connection-detail');
+  const chart = detail?.querySelector('svg.sparkline');
+  const edges = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { left: Math.round(r.left), right: Math.round(r.right) };
+  };
   return {
     key: slot?.getAttribute('data-key') ?? null,
     front: slot?.getAttribute('aria-current') === 'true',
@@ -107,6 +113,9 @@ const READ = () => `(() => {
       text: detail.innerText.replace(/\\s+/g, ' ').trim(),
       misses: detail.querySelectorAll('.miss').length,
       runs: detail.querySelectorAll('.reading').length,
+      chart: chart ? { ...edges(chart), height: getComputedStyle(chart).height } : null,
+      name: edges(slot.querySelector('.ds-name-row .row-name')),
+      actions: edges(slot.querySelector('.machine-actions')),
     } : null,
     faces: slot ? slot.querySelectorAll('.connection-face').length : -1,
     localMarks: local ? local.querySelectorAll('.connection-face, .connection-detail').length : -1,
@@ -219,11 +228,21 @@ async function cardToFront() {
 /// chart, whose text is nothing, so its words start at the figures.
 const detailOpensOnFigures = (card) => /^Latest /.test(card?.detail?.text ?? "");
 
+/// The chart spans the card: from the name's left edge to the right edge of
+/// the header's actions, at its fixed height.
+const chartSpansCard = (card) => {
+  const { chart, name, actions } = card?.detail ?? {};
+  return Boolean(chart && name && actions) && chart.height === "69px"
+    && Math.abs(chart.left - name.left) <= 2 && Math.abs(chart.right - actions.right) <= 2;
+};
+
 async function healthyLeg(host) {
   const healthy = await readUntil("healthy",
     (card) => card.face?.state === "healthy" && card.face.title === "Connection healthy" && detailOpensOnFigures(card), 30_000);
   if (healthy?.ok) {
     pass("the card in front shows a healthy face beside the name and under the address a detail that opens on its chart", healthy.card);
+    if (chartSpansCard(healthy.card)) pass("the detail's chart spans the card from the name to the actions, 69 px high", healthy.card.detail);
+    else fault("the detail's chart does not span the card from the name to the actions at 69 px", healthy.card.detail);
   } else {
     fault("no healthy face beside the name with a detail under the address that opens on its chart", healthy?.card ?? null);
   }
