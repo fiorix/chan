@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 
 import PromptModal from "./PromptModal.svelte";
-import { resolvePrompt, uiPrompt } from "../state/store.svelte";
+import { COVER_ROOT_ATTR, resolvePrompt, setCoverBlocking, uiPrompt } from "../state/store.svelte";
 import {
   clickBackdrop,
   dialogIn,
@@ -164,5 +164,42 @@ describe("PromptModal", () => {
     expect(dialogIn(target)!.textContent).toContain("Set screen-lock PIN");
     expect(input(target).value, "the second prompt's own default").toBe("");
     expect(document.activeElement).toBe(input(target));
+  });
+});
+
+/// The reconnect cover's root raised at its layer, over the dialogs' 26000;
+/// the answer lowers it. The dialog's focus stays where it was, as when the
+/// dialog opened under the cover.
+function raiseReconnectCover(): () => void {
+  const cover = document.body.appendChild(document.createElement("div"));
+  cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
+  cover.style.position = "fixed";
+  cover.style.zIndex = "30000";
+  setCoverBlocking("reconnect", true);
+  return () => {
+    setCoverBlocking("reconnect", false);
+    cover.remove();
+  };
+}
+
+describe("PromptModal under a cover over the window", () => {
+  test("Enter in its field left focused under the reconnect cover submits nothing until the cover lifts", async () => {
+    const target = mountDialog(PromptModal);
+    const { answer } = await open(target);
+    let settled = false;
+    void answer.then(() => (settled = true));
+    const field = input(target);
+    expect(document.activeElement).toBe(field);
+    const lower = raiseReconnectCover();
+    try {
+      press(field, "Enter");
+      await settle();
+      expect(settled, "the prompt stays open during the outage").toBe(false);
+      expect(dialogIn(target)).not.toBeNull();
+    } finally {
+      lower();
+    }
+    press(field, "Enter");
+    await expect(answer, "Enter submits once the cover lifts").resolves.toBe("old.md");
   });
 });

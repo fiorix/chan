@@ -29,7 +29,7 @@
   import { commandTitle } from "../state/commands";
   // The tree button is named by its command, which this registers.
   import "../state/commands/install";
-  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard.svelte";
+  import { keyboardOwnedAbovePanes, launcherCovers } from "../state/keyboardOwner.svelte";
   import {
     closePaneTree,
     hiddenTabStatus,
@@ -40,7 +40,7 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
-  import { keyboardOwnedAbovePanes, ui } from "../state/store.svelte";
+  import { ui } from "../state/store.svelte";
   import { activeLayout, paneShowsTmux } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
@@ -195,21 +195,9 @@
   // the launcher slides in until after it slides away. The launcher and a
   // reconnect cover below this band hide the tree and strip in place, keeping
   // its drag space and closing an open tree.
-  let launcherCovered = $state(launcherShownOverWindow());
+  const launcherCovered = $derived(launcherCovers());
   const reconnectCovered = $derived(ui.disconnectBlocking && !keyboardOwnedAbovePanes());
   const covered = $derived(launcherCovered || reconnectCovered);
-  $effect(() => {
-    const read = () => {
-      launcherCovered = launcherShownOverWindow();
-    };
-    const observer = new MutationObserver(read);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: [LAUNCHER_SHOWN_ATTR],
-    });
-    read();
-    return () => observer.disconnect();
-  });
   $effect(() => {
     if (covered) closePaneTree();
   });

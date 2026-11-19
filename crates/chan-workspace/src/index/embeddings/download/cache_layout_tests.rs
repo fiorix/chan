@@ -1,11 +1,14 @@
+//! A cache an earlier chan wrote through hf-hub's layout, with each file a
+//! link into `blobs/`, opens offline at a commit other than the pinned one.
+
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::{tests::Server, Client};
+use super::tests::pins;
+use super::Client;
 
 const FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const REFERENCE: &[u8] = include_bytes!("testdata/hf-hub-cache/refs-main.bin");
@@ -37,17 +40,6 @@ struct Entry {
     link_target: Option<String>,
     size: Option<u64>,
     sha256: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecordedRequest {
-    path: String,
-    range: String,
-    user_agent: String,
-    authorization_present: bool,
-    status: u16,
-    response_headers: BTreeMap<String, String>,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -84,25 +76,10 @@ fn fixture() -> Fixture {
 }
 
 fn captured_layout() -> Vec<Entry> {
-    let entries: Vec<Entry> = include_str!("testdata/hf-hub-cache/layout.jsonl")
+    include_str!("testdata/hf-hub-cache/layout.jsonl")
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let mut tsv = String::from("path\ttype\tlink_target\tsize\tsha256\n");
-    for entry in &entries {
-        tsv.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
-            entry.path,
-            entry.kind,
-            entry.link_target.as_deref().unwrap_or("-"),
-            entry
-                .size
-                .map_or_else(|| "-".to_owned(), |size| size.to_string()),
-            entry.sha256.as_deref().unwrap_or("-")
-        ));
-    }
-    assert_eq!(tsv, include_str!("testdata/hf-hub-cache/layout.tsv"));
-    entries
+        .collect()
 }
 
 fn inventory(root: &Path) -> Vec<Entry> {
@@ -142,135 +119,6 @@ fn inventory(root: &Path) -> Vec<Entry> {
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     entries
-}
-
-fn header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.eq_ignore_ascii_case(name).then(|| value.trim())
-    })
-}
-
-fn request_shape(request: &str) -> (String, String, String, bool) {
-    let first: Vec<_> = request.lines().next().unwrap().split_whitespace().collect();
-    assert_eq!(first[0], "GET", "captured model transfers use GET");
-    (
-        first[1].to_owned(),
-        header(request, "range").unwrap_or("").to_owned(),
-        header(request, "user-agent").unwrap_or("").to_owned(),
-        header(request, "authorization").is_some(),
-    )
-}
-
-fn replay_response(request: &str, records: &[RecordedRequest], fixture: &Fixture) -> Vec<u8> {
-    let (path, range, _, _) = request_shape(request);
-    let record = records
-        .iter()
-        .find(|record| record.path == path && record.range == range)
-        .expect("the request has a captured response");
-    let body = match record.status {
-        302 => &[][..],
-        206 => {
-            let filename = record.path.rsplit('/').next().unwrap();
-            let bytes = payload(&fixture.files[filename].body_path);
-            let content_range = record.response_headers["Content-Range"]
-                .strip_prefix("bytes ")
-                .unwrap();
-            let (bounds, size) = content_range.split_once('/').unwrap();
-            let (start, end) = bounds.split_once('-').unwrap();
-            assert_eq!(size.parse::<usize>().unwrap(), bytes.len());
-            &bytes[start.parse::<usize>().unwrap()..=end.parse::<usize>().unwrap()]
-        }
-        status => panic!("unexpected captured response status {status}"),
-    };
-    assert_eq!(
-        record.response_headers["Content-Length"]
-            .parse::<usize>()
-            .unwrap(),
-        body.len(),
-        "the captured response length matches its original payload slice"
-    );
-    let reason = if record.status == 302 {
-        "Found"
-    } else {
-        "Partial Content"
-    };
-    let mut response = format!("HTTP/1.0 {} {reason}\r\n", record.status);
-    for (name, value) in &record.response_headers {
-        response.push_str(&format!("{name}: {value}\r\n"));
-    }
-    response.push_str("\r\n");
-    let mut response = response.into_bytes();
-    response.extend_from_slice(body);
-    response
-}
-
-fn assert_hub_reads(root: &Path, fixture: &Fixture, filename: &str, downloaded: &Path) {
-    let reader = hf_hub::Cache::new(root.to_owned()).model(fixture.model.clone());
-    assert_eq!(
-        reader.get(filename).as_deref(),
-        Some(downloaded),
-        "hf-hub must resolve the same captured snapshot as chan"
-    );
-    assert_eq!(
-        std::fs::read(downloaded).unwrap(),
-        payload(&fixture.files[filename].body_path),
-        "the captured model payload must retain its exact bytes"
-    );
-}
-
-#[test]
-fn download_matches_the_cache_and_requests_captured_from_hf_hub() {
-    let fixture = Arc::new(fixture());
-    let records: Arc<Vec<RecordedRequest>> = Arc::new(
-        include_str!("testdata/hf-hub-cache/requests.jsonl")
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect(),
-    );
-    let handler_fixture = Arc::clone(&fixture);
-    let handler_records = Arc::clone(&records);
-    let server =
-        Server::start(move |request| replay_response(request, &handler_records, &handler_fixture));
-    let cache = tempfile::tempdir().unwrap();
-    let client = Client::with_config(
-        cache.path(),
-        &server.endpoint,
-        chan_tls::client_config().unwrap(),
-    );
-    for filename in FILES {
-        let downloaded = client
-            .get(&fixture.model, filename)
-            .expect("the captured hf-hub transfer must download successfully");
-        assert_hub_reads(cache.path(), &fixture, filename, &downloaded);
-    }
-    let observed: Vec<_> = server
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|request| request_shape(request))
-        .collect();
-    let expected: Vec<_> = records
-        .iter()
-        .map(|record| {
-            (
-                record.path.clone(),
-                record.range.clone(),
-                record.user_agent.clone(),
-                record.authorization_present,
-            )
-        })
-        .collect();
-    assert_eq!(
-        observed, expected,
-        "chan must send the model request sequence captured from hf-hub"
-    );
-    assert_eq!(
-        inventory(cache.path()),
-        captured_layout(),
-        "chan must produce the complete cache layout captured from hf-hub"
-    );
 }
 
 fn materialize(root: &Path, fixture: &Fixture, entries: &[Entry]) {
@@ -318,12 +166,23 @@ fn captured_hf_hub_cache_is_read_without_initializing_a_transport() {
         entries,
         "the copied cache must match the unchanged hf-hub capture"
     );
-    // An unsupported URL scheme cannot open a socket if the cache lookup regresses.
+    // Pinned at another commit, the files come through `refs/main`. An
+    // unsupported URL scheme cannot open a socket if the lookup regresses.
+    let files: Vec<_> = FILES
+        .into_iter()
+        .map(|name| (name, payload(&fixture.files[name].body_path)))
+        .collect();
+    let model: &'static str = fixture.model.clone().leak();
     let client = Client::with_config(
         cache.path(),
         "cache-only://offline.invalid/",
         chan_tls::client_config().unwrap(),
-    );
+    )
+    .pinned(pins(
+        model,
+        "1111111111111111111111111111111111111111",
+        &files,
+    ));
     for filename in FILES {
         let downloaded = client
             .get(&fixture.model, filename)
@@ -340,10 +199,13 @@ fn captured_hf_hub_cache_is_read_without_initializing_a_transport() {
             downloaded, pointer,
             "chan must return the captured snapshot path"
         );
-        assert_hub_reads(cache.path(), &fixture, filename, &downloaded);
+        assert_eq!(
+            std::fs::read(&downloaded).unwrap(),
+            payload(&fixture.files[filename].body_path)
+        );
     }
     assert!(
-        client.agents.get().is_none(),
+        client.agent.get().is_none(),
         "reading the captured hf-hub cache must not initialize an HTTP transport"
     );
     assert_eq!(

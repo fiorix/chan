@@ -3,6 +3,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import { menuEscape } from "./menuEscape";
+import { setCoverBlocking } from "../state/store.svelte";
 
 const mounted: HTMLElement[] = [];
 
@@ -105,5 +106,34 @@ test("a closed menu passes Escape through both handlers", () => {
     expect(menu.close).not.toHaveBeenCalled();
   } finally {
     menu.cleanup();
+  }
+});
+
+test("under a cover over the window, Escape aimed outside the menu is the cover's", () => {
+  // As the action pill wires it: the capture on the window, the bubble on
+  // the menu itself; the outside control stands in for the lock's PIN field.
+  const bubble = document.createElement("div");
+  const outside = document.createElement("input");
+  document.body.append(bubble, outside);
+  mounted.push(bubble, outside);
+  const close = vi.fn();
+  const handlers = menuEscape({
+    open: () => true,
+    inside: (target) => target instanceof Node && bubble.contains(target),
+    close,
+  });
+  window.addEventListener("keydown", handlers.capture, true);
+  bubble.addEventListener("keydown", handlers.bubble);
+  setCoverBlocking("screensaver", true);
+  try {
+    const seen = vi.fn();
+    outside.addEventListener("keydown", seen);
+    const event = key(outside, "Escape");
+    expect(close, "the menu under the cover stays as it was").not.toHaveBeenCalled();
+    expect(seen, "the cover's field sees its key").toHaveBeenCalledTimes(1);
+    expect(event.defaultPrevented).toBe(false);
+  } finally {
+    setCoverBlocking("screensaver", false);
+    window.removeEventListener("keydown", handlers.capture, true);
   }
 });

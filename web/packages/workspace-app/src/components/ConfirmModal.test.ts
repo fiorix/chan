@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import ConfirmModal from "./ConfirmModal.svelte";
 import { resolveConfirm, uiConfirm } from "../state/confirm.svelte";
+import { COVER_ROOT_ATTR, setCoverBlocking } from "../state/store.svelte";
 import {
   clickBackdrop,
   dialogIn,
@@ -213,5 +214,34 @@ describe("ConfirmModal", () => {
 
     clickBackdrop(target);
     await expect(answer).resolves.toBe(false);
+  });
+});
+
+describe("under a cover over the window", () => {
+  test("Enter on its focused button answers nothing while the reconnect cover holds the keyboard", async () => {
+    const target = mountDialog(ConfirmModal);
+    const { answer } = await open(target);
+    let settled = false;
+    void answer.then(() => (settled = true));
+    const ok = button(target, "Delete");
+    expect(document.activeElement).toBe(ok);
+    // The reconnect cover's root at its layer, over the dialogs' 26000, with
+    // the dialog's focus where it was, as when it opened under the cover.
+    const cover = document.body.appendChild(document.createElement("div"));
+    cover.setAttribute(COVER_ROOT_ATTR, "reconnect");
+    cover.style.position = "fixed";
+    cover.style.zIndex = "30000";
+    setCoverBlocking("reconnect", true);
+    try {
+      press(ok, "Enter");
+      await settle();
+      expect(settled, "the confirm stays open under the cover").toBe(false);
+      expect(dialogIn(target)).not.toBeNull();
+    } finally {
+      setCoverBlocking("reconnect", false);
+      cover.remove();
+    }
+    press(ok, "Enter");
+    await expect(answer, "Enter answers it once the cover lifts").resolves.toBe(true);
   });
 });

@@ -432,10 +432,10 @@ describe("a setting of this workspace, with the overlay closed", () => {
         current: true,
       },
       {
-        id: "bge-m3",
-        label: "BGE M3",
+        id: "bge-large",
+        label: "BGE large",
         dim: 1024,
-        size_label: "2.2 GB",
+        size_label: "1.3 GB",
         note: "",
         default: false,
         downloaded: false,
@@ -722,7 +722,7 @@ describe("a setting of this workspace, with the overlay closed", () => {
       answerLate(JSON.parse(JSON.stringify(models)) as SemanticModelRegistry),
     );
 
-    const written = entry.write!("bge-m3");
+    const written = entry.write!("bge-large");
     // Sent while the write is unanswered: it sees the old model.
     const read = loadSemantic();
     await vi.waitFor(() => expect(held).toHaveLength(2));
@@ -735,7 +735,7 @@ describe("a setting of this workspace, with the overlay closed", () => {
     for (const answer of [held[2]!, held[3]!, held[0]!, held[1]!]) answer();
     await written;
     await read;
-    expect(entry.read()).toBe("bge-m3");
+    expect(entry.read()).toBe("bge-large");
   });
 
   test("a read in the same turn as a write starts no refresh beside it", async () => {
@@ -870,13 +870,13 @@ describe("a setting of this workspace, with the overlay closed", () => {
     await vi.waitFor(() => expect(entry.read()).toBe("bge-small"));
     expect(entry.options).toEqual([
       { value: "bge-small", label: "BGE small - 384d - 130 MB - downloaded" },
-      { value: "bge-m3", label: "BGE M3 - 1024d - 2.2 GB - not downloaded" },
+      { value: "bge-large", label: "BGE large - 1024d - 1.3 GB - not downloaded" },
     ]);
 
-    await entry.write!("bge-m3");
+    await entry.write!("bge-large");
 
-    expect(api.semanticModelPatch).toHaveBeenCalledWith("bge-m3");
-    expect(entry.read()).toBe("bge-m3");
+    expect(api.semanticModelPatch).toHaveBeenCalledWith("bge-large");
+    expect(entry.read()).toBe("bge-large");
   });
 
   test("the screen lock writes through the running lock, which opens its three settings", async () => {

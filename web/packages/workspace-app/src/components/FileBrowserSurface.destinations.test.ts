@@ -273,6 +273,19 @@ describe("menu Paste follows the clicked row", () => {
     await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
     expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], "notes/sub");
   });
+
+  test("runCommand paste ignores an open row menu", async () => {
+    const surface = await surfaceFor({ name: "open row menu", variant: "dock", selected: "notes/a.md", destination: "notes" });
+    const transfer = vi.spyOn(api, "fsTransfer");
+    fbClipboardSet("copy", ["README.md"]);
+    await pasteAtRow(surface, "notes/sub");
+    expect(document.querySelector(".ctx")).not.toBeNull();
+    surface.target.querySelector<HTMLElement>('[role="tree"]')!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    await vi.waitFor(() => expect(transfer).toHaveBeenCalledTimes(1));
+    expect(transfer).toHaveBeenCalledWith("copy", ["README.md"], "notes");
+  });
 });
 
 test("New without a browser surface uses the default directory", async () => {

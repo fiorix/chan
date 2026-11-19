@@ -394,7 +394,7 @@ describe("CommandDeck focus on close", () => {
       onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
       onSuccess?: (item: DeckItem) => void;
       onFocusLost?: () => void;
-      mayTakeFocus?: () => boolean;
+      mayTakeFocus?: (heir?: HTMLElement | null) => boolean;
     } = {},
   ): Promise<void> {
     origin = document.createElement("button");
@@ -537,6 +537,32 @@ describe("CommandDeck focus on close", () => {
     closeResult().click();
     await flush();
     expect(focus).not.toHaveBeenCalled();
+    expect(onFocusLost).toHaveBeenCalledOnce();
+  });
+
+  it("a dismissal hands its heir nothing the host refuses, and takes the focus-lost path it allows", async () => {
+    const onFocusLost = vi.fn();
+    const mayTakeFocus = vi.fn((heir?: HTMLElement | null) => heir === null);
+    await openFromOrigin(run(), { onFocusLost, mayTakeFocus });
+    const focus = vi.spyOn(origin, "focus");
+    escape();
+    await flush();
+    expect(mayTakeFocus).toHaveBeenCalledWith(origin);
+    expect(focus).not.toHaveBeenCalled();
+    expect(onFocusLost).toHaveBeenCalledOnce();
+  });
+
+  it("a dismissal of a deck opened from the body hands the keyboard to its host", async () => {
+    // The body takes no focus, so the dismissal has no heir, as a run's
+    // return has none, and the host's focus-lost path places the keyboard.
+    origin = document.createElement("button");
+    document.body.appendChild(origin);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const onFocusLost = vi.fn();
+    app = mount(CommandDeckHarness, { target, props: { items: [run()], onFocusLost } }) as Record<string, unknown>;
+    await flush();
+    escape();
+    await flush();
     expect(onFocusLost).toHaveBeenCalledOnce();
   });
 
@@ -2226,6 +2252,21 @@ describe("CommandDeck keyboard hold", () => {
     await mountWith({ items: [toggle()], onChoose: () => showSurface("sync"), mayTakeFocus: () => false });
     await pressFocused("Enter");
     expect(document.activeElement).toBe(surface());
+  });
+
+  it("leaves its keys and focus to an owner its host names above it", async () => {
+    let above = true;
+    const onChoose = vi.fn();
+    await mountWith({ items: plainRows(2), onChoose, ownerAbove: () => above });
+    origin.focus();
+    expect(document.activeElement, "the deck yields to the owner").toBe(origin);
+    const enter = await pressFocused("Enter");
+    expect(enter.defaultPrevented, "the owner keeps its keys").toBe(false);
+    expect(onChoose).not.toHaveBeenCalled();
+    above = false;
+    origin.blur();
+    origin.focus();
+    expect(document.activeElement, "with the owner gone the deck takes it back").toBe(deckInput());
   });
 
   it("takes a key pressed in an element under it, and the keyboard with it", async () => {

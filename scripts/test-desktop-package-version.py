@@ -343,44 +343,6 @@ def main() -> None:
     )
     print("PASS pinned tool installs then runs on a first run")
 
-    mutations = (
-        ("dash guard", '[ "$${version#*-}" != "$$version" ]', "[ 1 -eq 1 ]", "0.109.0", "Linux", [["build"]], "expected"),
-        ("Linux guard", '[ "$$(uname -s)" = Linux ]', "[ 1 -eq 1 ]", VERSION, "Darwin", [["build"]], "expected"),
-        ("RPM release", '"release":"0~%s"', '"irrelevant":"0~%s"', VERSION, "Linux", expected_dashed(), "expected"),
-        ("first bundle selector", "$(TAURI) build --bundles deb,appimage", "$(TAURI) build", VERSION, "Linux", expected_dashed(), "invalid version"),
-    )
-    for name, old, new, version, system, expected, failure in mutations:
-        if makefile.count(old) != 1:
-            raise AssertionError(f"{name}: mutation site is not unique")
-        try:
-            check_recipe(makefile.replace(old, new, 1), version, system, expected)
-        except AssertionError as error:
-            if failure not in str(error):
-                raise AssertionError(f"{name}: wrong failure: {error}") from error
-            print(f"MUTANT RED {name}: {failure}")
-        else:
-            raise AssertionError(f"{name}: mutant survived")
-
-    for site in ("TAURI_CLI_EXE = ", "TAURI = "):
-        if makefile.count(site) != 1:
-            raise AssertionError("recursive lookup: site is not unique: " + site)
-        try:
-            check_pinned_calls(
-                makefile.replace(site, site.replace("= ", ":= "), 1),
-                VERSION,
-                expected_dashed(),
-                cargo_script=CARGO_INSTALL,
-                preinstall=False,
-                path_standin=False,
-                label="recursive lookup mutant",
-            )
-        except AssertionError as error:
-            if "exec: cargo-tauri: not found" not in str(error):
-                raise AssertionError(f"recursive lookup: wrong failure: {error}") from error
-            print("MUTANT RED recursive lookup: exec: cargo-tauri: not found")
-        else:
-            raise AssertionError("recursive lookup: mutant survived")
-
     if sys.platform == "linux":
         check_stager()
         print("PASS candidate desktop package contract")

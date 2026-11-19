@@ -3960,6 +3960,14 @@ export function bumpTabFocusPulse(): void {
   if (typeof document === "undefined") return;
   const el = document.activeElement;
   if (el instanceof HTMLElement && el !== document.body) {
+    // A dialog, a survey or a cover holds the keyboard through its own
+    // surface: a pulse fired while one is open leaves focus where it is
+    // instead of dropping its field to the body. The covers (the screen
+    // lock's PIN, the reconnect and session-ended cards) carry no owner tag,
+    // so the dialog roles, not the tag, are what this reads. The command
+    // deck's own input counts too: it is the surface holding the keyboard
+    // while it is open.
+    if (el.closest('[role="dialog"], [role="alertdialog"]')) return;
     el.blur();
   }
 }

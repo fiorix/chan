@@ -54,7 +54,6 @@
     type PaneTreeTab,
   } from "../state/paneTree.svelte";
   import {
-    activeTerminalTab,
     bumpTabFocusPulse,
     layout,
     panesHaveSides,
@@ -64,12 +63,11 @@
   } from "../state/tabs.svelte";
   import {
     appInputBlocked,
-    keyboardOwnedAbovePanes,
     modalDialogOpen,
     tree,
     workspaceDisplayName,
   } from "../state/store.svelte";
-  import { refocusRefused } from "../state/focusGuard.svelte";
+  import { handKeyboardToOwner, keyboardOwnedAbovePanes, mayFocus, owner } from "../state/keyboardOwner.svelte";
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";
@@ -161,16 +159,19 @@
   });
 
   /// Hand the keyboard back when the tree closed without showing a tab and
-  /// left it nowhere: to the element it opened from, else to the active tab's
-  /// surface, unless a survey over that terminal or the desktop's launcher
-  /// holds it, or a dialog or a cover has come up and owns it.
+  /// left it nowhere: to the element it opened from where the keyboard's
+  /// owner lets it, else to the active tab's surface while nothing owns it,
+  /// else to the owner as its surface takes it (a survey over that terminal;
+  /// the desktop's launcher takes nothing here). A dialog or a cover come up
+  /// owns it already.
   function restoreFocus(target: HTMLElement | null): void {
     if (paneTree.open || modalDialogOpen() || appInputBlocked()) return;
     const current = document.activeElement;
     const fell = current === null || current === document.body || !current.isConnected;
     if (!fell) return;
-    if (canTakeFocus(target)) target.focus({ preventScroll: true });
-    else if (!refocusRefused(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
+    if (canTakeFocus(target) && mayFocus(target)) target.focus({ preventScroll: true });
+    else if (owner() === null) bumpTabFocusPulse();
+    else handKeyboardToOwner();
   }
 
   // Hybrid Nav, a dialog or a cover coming up closes the tree.

@@ -283,9 +283,11 @@ export async function setSemanticEnabled(
 
 /// Pick the workspace's embedding model. Never rejects: it answers the
 /// refusal, which is also `semantic.error`, or null once the model is the
-/// workspace's.
+/// workspace's. Choosing the current model is written only while a note says
+/// it stands in for one chan dropped: the write keeps it and ends the note.
 export async function setSemanticModel(model: string): Promise<string | null> {
-  if (!model || model === semantic.models?.current_model) return null;
+  if (!model) return null;
+  if (model === semantic.models?.current_model && !semantic.state?.model_note) return null;
   if (semantic.modelBusy || semantic.downloading || semantic.enabling) return IN_FLIGHT;
   semantic.modelBusy = true;
   semantic.error = null;

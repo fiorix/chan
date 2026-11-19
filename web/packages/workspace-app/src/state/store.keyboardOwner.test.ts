@@ -2,14 +2,15 @@
 //
 // keyboardOwnedAbovePanes answers whether an overlay, an app-root dialog or
 // the window-wide survey is open over the panes, for Ctrl+D and the pane flip,
-// which stand down while one is.
+// which stand down while one is: a kind check on the page's keyboard owner,
+// the Computers launcher left out.
 
 import { afterEach, describe, expect, test } from "vitest";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState } from "./confirm.svelte";
+import { keyboardOwnedAbovePanes, LAUNCHER_SHOWN_ATTR } from "./keyboardOwner.svelte";
 import {
   importContactsPanel,
-  keyboardOwnedAbovePanes,
   launcherPanel,
   pathPromptState,
   promptState,
@@ -37,6 +38,7 @@ afterEach(() => {
   settingsPanel.open = false;
   syncOverlayStack();
   resetSurveysForTest();
+  document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
 });
 
 const SURVEY = { surveyId: "survey-1", title: null, bodyMarkdown: "Which?", options: ["A"] };
@@ -62,6 +64,14 @@ describe("keyboardOwnedAbovePanes", () => {
     ["the window-wide survey", () => showSurvey(SURVEY, null)],
   ])("is true while %s is open", (_name, open) => {
     open();
+    expect(keyboardOwnedAbovePanes()).toBe(true);
+  });
+
+  test("reads the page's owners under the Computers launcher too", () => {
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    expect(keyboardOwnedAbovePanes()).toBe(false);
+    searchPanel.open = true;
+    syncOverlayStack();
     expect(keyboardOwnedAbovePanes()).toBe(true);
   });
 

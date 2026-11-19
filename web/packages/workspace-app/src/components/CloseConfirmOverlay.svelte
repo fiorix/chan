@@ -21,11 +21,14 @@
     flushAndHideWindow,
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
-  import { discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
+  import { appInputBlocked, discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
   import { tmuxPaneTabs } from "../state/tabs.svelte";
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { connectionHealth } from "../state/connectionHealth.svelte";
+  import { handKeyboardToTopCover, mayFocus, ownerTag, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { canTakeFocus } from "@chan/web-shared/modal-focus";
+  import { untrack } from "svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
@@ -112,10 +115,40 @@
   // Steal focus onto Cancel when the overlay appears: the backdrop stops clicks
   // but keystrokes still flow to whatever was focused (a terminal / editor), so
   // park focus on the safe default and trap Tab over the three buttons below.
+  // It takes the keyboard once per showing, where the keyboard's owner lets
+  // it (not under the Computers launcher, a cover or an owner painted above
+  // it); asking reads the owners' state, so this runs again when one lets go,
+  // and a hand-back to it lands on Cancel too.
+  let tookKeyboard = false;
   $effect(() => {
-    if (!open) return;
+    if (!open) {
+      tookKeyboard = false;
+      return;
+    }
+    if (tookKeyboard || !mayFocus(overlayEl)) return;
+    tookKeyboard = true;
     (document.activeElement as HTMLElement | null)?.blur();
     queueMicrotask(() => (cancelBtn ?? overlayEl)?.focus());
+  });
+  $effect(() => {
+    if (!overlayEl) return;
+    return registerKeyboardTaker(overlayEl, () => (cancelBtn ?? overlayEl)?.focus());
+  });
+
+  // Closing over a cover leaves the keyboard at large, the prompt's buttons
+  // gone with it: the cover on top takes it, as its surface does.
+  let showing = false;
+  $effect(() => {
+    if (open) {
+      showing = true;
+      return;
+    }
+    if (!showing) return;
+    showing = false;
+    if (!untrack(() => appInputBlocked())) return;
+    queueMicrotask(() => {
+      if (!canTakeFocus(document.activeElement)) handKeyboardToTopCover();
+    });
   });
 
   // Escape cancels; Tab/Shift+Tab cycle the three buttons and never leak focus
@@ -152,6 +185,7 @@
     role="alertdialog"
     aria-modal="true"
     aria-label="Close this window?"
+    data-keyboard-owner={ownerTag("modal")}
     tabindex="-1"
     bind:this={overlayEl}
     onkeydown={onKeydown}

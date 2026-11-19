@@ -168,12 +168,15 @@ import {
   proposeDefaultFilename,
 } from "./pathValidate";
 import { basename, parentDir } from "./format";
+import { paintLevel } from "./paintLevel";
+import { canTakeFocus } from "@chan/web-shared/modal-focus";
 import { setNotifyHandler, setStatusReader } from "./notify.svelte";
 import { applyGraphColorPrefs } from "./graphPalette.svelte";
 import {
   allTerminalTabs,
   applyFsWritable,
   applyTerminalRoster,
+  bumpTabFocusPulse,
   clearTabError,
   findTeamWorkPendingLead,
   flagExternalChange,
@@ -417,23 +420,48 @@ export function raisedCoverKeys(): string[] {
 /// field that takes no typing.
 export const COVER_ROOT_ATTR = "data-cover";
 
-/// True when `target` is a text-entry control on the surface of a cover that
-/// is up: an input that takes text, a textarea or an editable element whose
-/// nearest marked cover root names a raised cover. A control on a cover that
-/// marks no root, or on a cover that is not raised, reads false, so the guard
-/// fails closed.
+/// True when `target` is a text-entry control on the surface of the cover
+/// that holds the keyboard: an input that takes text, a textarea or an
+/// editable element whose nearest marked cover root is the raised cover that
+/// paints on top. A control on a cover that marks no root, on a cover that
+/// is not raised, or on one painted under another raised cover reads false,
+/// so the guard fails closed.
 export function coverOwnsTextEntry(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   if (!isTextEntry(target)) return false;
-  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
-  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+  return onTopCover(target);
 }
 
-/// Native activation belongs only to an enabled button on a raised cover.
+/// Whether `target` sits on the raised cover that paints on top.
+function onTopCover(target: Element): boolean {
+  const root = target.closest(`[${COVER_ROOT_ATTR}]`);
+  return root !== null && root === topCoverRoot();
+}
+
+/// The root of the raised cover that paints on top, the later one in the
+/// document when two paint at one level; null while no raised cover has a
+/// root in the page.
+export function topCoverRoot(): Element | null {
+  if (typeof document === "undefined") return null;
+  let top: Element | null = null;
+  let topLevel = -Infinity;
+  for (const root of document.querySelectorAll(`[${COVER_ROOT_ATTR}]`)) {
+    if (raisedCovers[root.getAttribute(COVER_ROOT_ATTR) ?? ""] !== true) continue;
+    const level = paintLevel(root);
+    if (level >= topLevel) {
+      top = root;
+      topLevel = level;
+    }
+  }
+  return top;
+}
+
+/// Native activation belongs only to an enabled button on the raised cover
+/// that paints on top: under the screen lock, the reconnect and
+/// session-ended covers' buttons act on no key.
 export function coverOwnsButton(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLButtonElement) || target.matches(":disabled")) return false;
-  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
-  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+  return onTopCover(target);
 }
 
 /// Input types that act on a click or a pointer rather than on typed text.
@@ -5388,20 +5416,30 @@ export function overlayDepth(id: OverlayId): number {
   return overlayStack.ids.indexOf(id);
 }
 
+/// The layer an open overlay paints at: a step over the overlays' base per
+/// place in the stack, so a newer overlay paints over the one it was opened
+/// from. The 10-step gap leaves an overlay's own sub-layers (popovers,
+/// dropdowns) room above it without reaching the next overlay's.
+export function overlayLayer(id: OverlayId): number {
+  return 25000 + Math.max(0, overlayDepth(id)) * 10;
+}
+
+/// The layer the command deck paints at in this window. While it is the
+/// top overlay and no dialog or window-wide survey is up, it holds the
+/// keyboard and paints over the status bar (28000), the pane tree (28500)
+/// and the menus (29000), under the window-wide survey (29900) and the
+/// covers over the window (30000 and up). Under a dialog, the survey or an
+/// overlay opened over it, it paints at its place in the overlays' stack,
+/// so what holds the keyboard over it paints over it too.
+export function commandDeckLayer(): number {
+  return topOverlay() === "launcher" && !modalDialogOpen() ? 29800 : overlayLayer("launcher");
+}
+
 /// Id of the topmost open overlay, or `null` when nothing is up. Used
 /// by the window-level Escape handler to close one overlay at a time.
 export function topOverlay(): OverlayId | null {
   const n = overlayStack.ids.length;
   return n === 0 ? null : overlayStack.ids[n - 1];
-}
-
-/// True while something rendered over the panes owns the keyboard: an
-/// overlay (Search, the command launcher, Settings) or a modal dialog
-/// (`modalDialogOpen`). Ctrl+D and the pane flip read it and stand down
-/// rather than close or turn a tab the user cannot see. The full-window
-/// covers are `appInputBlocked`'s.
-export function keyboardOwnedAbovePanes(): boolean {
-  return topOverlay() !== null || modalDialogOpen();
 }
 
 /// True while a modal dialog is open: an app-root dialog (the prompt, path
@@ -5749,8 +5787,39 @@ export function persistDateFormat(formatId: string): void {
   });
 }
 
+/// The dock whose close is running held the keyboard when the element
+/// holding it is inside the dock or in its open menu, or when the keyboard
+/// is at large (nothing holds it that can take focus, as canTakeFocus reads
+/// it). The pulse that follows reaches only surfaces that ask the keyboard's
+/// owner, so it moves nothing while Search, Settings, a dialog or a survey
+/// holds the keyboard. Anything else holding it moves nothing either: the
+/// open command deck hands the keyboard on as it closes, and the dock's
+/// dispose empties the target until a file browser is focused.
+function dockHeldKeyboard(side: "left" | "right"): boolean {
+  if (typeof document === "undefined") return true;
+  const holder = document.activeElement;
+  if (holder === null || !canTakeFocus(holder)) return true;
+  const root = document.querySelector(`.browser-side-pane.${side}`);
+  if (root === null) return false;
+  if (root.contains(holder)) return true;
+  return root.querySelector('.hamburger-trigger[aria-expanded="true"]') !== null && holder.closest(".hamburger-menu") !== null;
+}
+
 export function setBrowserSidePane(side: "left" | "right", open: boolean): void {
   if (browserSidePanes[side] === open) return;
+  // Closing the target-holding dock returns the keyboard to the focused
+  // pane's active tab before the side pane unmounts, and only when the dock
+  // held it. The chord, the launcher toggle and the dock menu row all run
+  // through this setter. A close from the preference mirror (another
+  // window, `chan config set`) bypasses the setter and hands nothing over;
+  // the dock's dispose then empties the target. Direct writes of the flag
+  // (prefs hydration, standalone bootstrap, tests) bypass it the same way.
+  // The pulse hands the keyboard to the focused pane's active tab: it
+  // becomes the target only through the existing focus path, when its
+  // surface asks for the keyboard and its focus effect activates it (a Files
+  // tab; terminal and editor surfaces answer without taking the target), and
+  // a background pane never takes the keyboard. The target follows it.
+  if (!open && browserFocus.instanceId === `fb-dock-${side}` && dockHeldKeyboard(side)) bumpTabFocusPulse();
   browserSidePanes[side] = open;
   persistBrowserSidePanes();
 }

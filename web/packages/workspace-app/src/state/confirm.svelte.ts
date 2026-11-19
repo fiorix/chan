@@ -29,6 +29,16 @@ export const confirmState = $state<ConfirmState>({
 // the caret to the invoking surface (terminal, editor) with no click.
 let previouslyFocused: HTMLElement | null = null;
 
+// Whether that element may take the keyboard back, as the keyboard's owner
+// answers: it sets this when it loads (state/keyboardOwner.svelte.ts), so
+// this module still imports nothing.
+let mayRestore: (element: Element) => boolean = () => true;
+
+/// Let the keyboard's owner answer whether a dismissal's restore may focus.
+export function setConfirmRestoreGate(gate: (element: Element) => boolean): void {
+  mayRestore = gate;
+}
+
 /// Show a confirm dialog. Resolves true on OK, false on Cancel / Esc /
 /// outside-click. Pass `destructive: true` to default to Cancel and style
 /// the OK button as a warning. Enter on a button activates it; elsewhere
@@ -71,9 +81,11 @@ export function resolveConfirm(value: boolean): void {
   // work the awaiting caller runs (next-tab focus, restart rebuild) lands
   // after and wins. The isConnected guard skips targets the accept path
   // unmounts (tab close, terminal restart), which degrade to today's
-  // behavior of focus falling to the body.
+  // behavior of focus falling to the body. A target the keyboard's owner
+  // refuses (a survey over its terminal, an overlay, the Computers launcher)
+  // is left alone, and the owner keeps the keyboard.
   const el = previouslyFocused;
   previouslyFocused = null;
-  if (el?.isConnected) el.focus({ preventScroll: true });
+  if (el?.isConnected && mayRestore(el)) el.focus({ preventScroll: true });
   r?.(value);
 }

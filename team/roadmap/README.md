@@ -22,7 +22,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 ## Active
 
 [ghosttyng]: v0.132.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
-[fusemode]: v0.132.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
+[fusemode]: v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md
 [modelroots]: v0.132.0/the-model-download-trusts-only-bundled-roots.md
 [streamlag]: v0.132.0/a-terminal-that-falls-behind-a-fast-stream-loses-part-of-it.md
 [conpty]: v0.132.0/a-ghostty-terminal-on-a-windows-pty-pulls-history-into-the-screen-when-it-grows-taller.md
@@ -43,9 +43,10 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 [docktarget]: v0.132.0/the-launchers-file-commands-lose-their-target-when-the-dock-that-held-it-closes.md
 [detailsclear]: v0.132.0/the-workspace-details-command-clears-the-selection-of-the-file-browser-focused-last.md
 [wikiplaces]: v0.132.0/copy-as-html-the-link-preview-survey-bodies-and-the-table-widget-show-wikilinks-as-typed.md
-[mousefamily]: v0.132.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
+[mousefamily]: v0.133.0/the-attach-prelude-re-asserts-every-mouse-mode-a-program-set-where-a-terminal-keeps-only-the-last.md
 [wakescale]: v0.132.0/terminals-come-back-at-half-scale-in-their-old-grid-after-a-sleep-on-macos.md
 [healthbadge]: v0.132.0/connection-health-shows-in-each-window-not-on-its-devservers-computers-badge.md
+[listingcap]: v0.132.0/a-workspace-over-the-listing-cap-locks-its-windows-and-a-deep-graph-freezes-the-page.md
 
 ### v0.132.0
 
@@ -55,7 +56,6 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | --- | --- | --- |
 | [a fast stream loses output][streamlag] | partly built | build |
 | [AppImage children get its environment][appenv] | partly built | build |
-| [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
 | [chan drives ghostty-web from outside][ghosttyng] | partly built | build |
 | [ConPTY pulls history into the screen][conpty] | partly built | build |
 | [the index pill covers Dismiss][pillcover] | not started | build |
@@ -67,6 +67,7 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [terminal browser checks' red proofs][termredproofs] | not started | measure |
 | [a lossy link freezes a window][linkhealth] | merged | build |
 | [health moves to the Computers badge][healthbadge] | not started | build |
+| [listing cap locks windows; deep graph][listingcap] | not started | build |
 | [the composer takes a survey's keys][keyowner] | partly built | build |
 | [a fresh shell keeps dead modes][freshmodes] | merged | closed |
 | [try again over an exited terminal][exitedtry] | not started | build |
@@ -76,8 +77,16 @@ Opened on 2026-11-15, when the owner cut v0.131.0 at its third milestone and mov
 | [file commands lose a closed dock's target][docktarget] | not started | build |
 | [Workspace details clears the wrong selection][detailsclear] | not started | build |
 | [four places show wikilinks as typed][wikiplaces] | not started | build |
-| [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 | [terminals at half scale after a sleep][wakescale] | merged | build |
+
+### v0.133.0
+
+Opened on 2026-11-18, when the owner moved two v0.132.0 rows out of that cycle ("the fuse-mode appimage is def moving to next v0.133, out of this current cycle; mouse-mode prelude as well").
+
+| Item | State | Next |
+| --- | --- | --- |
+| [the AppImage is unread in FUSE mode][fusemode] | not started | measure |
+| [the prelude re-asserts every mouse mode][mousefamily] | not started | build |
 
 ## Completed
 
@@ -111,7 +120,7 @@ Shipped 2026-11-17; see [release-v0.131.0](../release/release-v0.131.0.md). A no
 - [host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries](v0.132.0/host-programs-started-from-the-appimage-get-the-bundles-environment-and-its-cli-searches-the-current-directory-for-libraries.md) - Host programs started from the AppImage get the bundle's environment and its CLI searches the current directory for libraries (moved to v0.132.0 at the cut on 2026-11-15, built in part and not merged).
 - [one-timed-out-directory-read-fails-a-graph-tabs-first-load](done/one-timed-out-directory-read-fails-a-graph-tabs-first-load.md) - One timed-out directory read fails a graph tab's first load.
 - [slides-and-pdf-export-show-wikilinks-as-raw-text](done/slides-and-pdf-export-show-wikilinks-as-raw-text.md) - Slides and PDF export show wikilinks as raw text.
-- [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.132.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.132.0 at the cut on 2026-11-15 with the environment row, not started).
+- [the-appimages-environment-fixes-are-unread-in-fuse-mode](v0.133.0/the-appimages-environment-fixes-are-unread-in-fuse-mode.md) - The AppImage's environment fixes are unread in FUSE mode (moved to v0.132.0 at the cut on 2026-11-15 with the environment row, not started).
 - [the-clis-self-update-trusts-only-reqwests-bundled-roots](done/the-clis-self-update-trusts-only-reqwests-bundled-roots.md) - The CLI's self-update trusts only reqwest's bundled roots.
 - [the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders](done/the-file-browsers-new-and-paste-rows-and-the-launchers-commands-choose-different-folders.md) - The file browser's New and Paste rows and the launcher's commands of those titles choose different folders.
 - [the-gateways-authorization-page-says-this-computer](done/the-gateways-authorization-page-says-this-computer.md) - The gateway's authorization page says "this computer".

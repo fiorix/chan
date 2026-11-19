@@ -8,6 +8,8 @@
   import { deckPendingReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
   import { registerModalShell } from "./modalStack";
+  import { mayFocus, ownerTag } from "../state/keyboardOwner.svelte";
+  import { appInputBlocked } from "../state/store.svelte";
 
   let {
     labelledby,
@@ -58,6 +60,10 @@
 
   function panelKeydown(event: KeyboardEvent): void {
     if (!registration?.isTop()) return;
+    // Under a cover painted over the dialog (a dialog opening under a cover
+    // takes focus as it mounts), the dialog answers none of its keys: they
+    // go on to the window's guard, which cancels them.
+    if (appInputBlocked() && !mayFocus(panel ?? null)) return;
     focus.onKeydown(event);
     if (event.key === "Tab") event.stopPropagation();
   }
@@ -87,6 +93,7 @@
     role="dialog"
     aria-modal="true"
     aria-labelledby={labelledby}
+    data-keyboard-owner={ownerTag("modal")}
     tabindex="-1"
   >
     {@render children()}

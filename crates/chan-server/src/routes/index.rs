@@ -48,12 +48,17 @@ pub struct SemanticState {
     /// `semantic_enabled` flag AND whether the model is on disk --
     /// the field is "hybrid" only when BOTH are true.
     pub mode: &'static str,
-    /// True when the model files are laid out at the resolver's
-    /// expected path (refs/main + complete snapshot trio). False
+    /// True when every file the embedder reads is in one snapshot at
+    /// the resolver's expected path, by the downloader's own rule. False
     /// when the model hasn't been downloaded.
     pub model_present: bool,
     /// Workspace-configured model id (`IndexConfig::model`).
     pub model_name: String,
+    /// Why `model_name` stands in for a model the workspace named that
+    /// chan does not offer; absent when nothing was replaced. Settings
+    /// shows it until a model is chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_note: Option<String>,
     /// Resolver's expected path under `global_models_dir()`. Stable
     /// regardless of presence -- useful for diagnostics ("look at X
     /// to confirm the download landed").
@@ -140,6 +145,7 @@ fn build_state(
     workspace: &chan_workspace::Workspace,
 ) -> Result<SemanticState, chan_workspace::ChanError> {
     let model_name = workspace.semantic_model()?;
+    let model_note = workspace.semantic_model_note()?;
     let semantic_enabled = workspace.semantic_enabled()?;
     let expected_dir = global_models_dir().join(repo_dir_name(&model_name));
     let model_present = resolve_model(&model_name).is_ok();
@@ -162,6 +168,7 @@ fn build_state(
         mode,
         model_present,
         model_name,
+        model_note,
         model_path: expected_dir.to_string_lossy().into_owned(),
         model_size_bytes,
         semantic_enabled,
@@ -467,13 +474,66 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["current_model"], "BAAI/bge-small-en-v1.5");
         let models = body["models"].as_array().unwrap();
-        assert_eq!(models.len(), 4);
+        assert_eq!(models.len(), 3);
         assert_eq!(models[0]["id"], "BAAI/bge-small-en-v1.5");
         assert_eq!(models[0]["label"], "BGE Small EN v1.5");
         assert_eq!(models[0]["dim"], 384);
         assert_eq!(models[0]["default"], true);
         assert_eq!(models[0]["current"], true);
         assert!(models[0]["downloaded"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_that_named_a_dropped_model_reads_the_default_with_a_note() {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let index = lib.workspace_paths_for(root.path()).unwrap().index;
+        std::fs::create_dir_all(&index).unwrap();
+        std::fs::write(
+            config::config_path(&index),
+            format!(
+                "schema_version = {}\nmodel = \"BAAI/bge-m3\"\n",
+                config::SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..workspace_app_state(lib, root.path().to_path_buf(), workspace)
+        });
+        let router = crate::router(state);
+
+        let (status, body) = request(&router, "GET", "/api/index/semantic/state", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["model_name"], chan_workspace::DEFAULT_MODEL);
+        assert!(
+            body["model_note"]
+                .as_str()
+                .unwrap()
+                .starts_with("BAAI/bge-m3 is no longer offered"),
+            "{body}"
+        );
+        let (_, body) = request(&router, "GET", "/api/index/semantic/models", None).await;
+        assert_eq!(body["current_model"], chan_workspace::DEFAULT_MODEL);
+
+        let (status, body) = request(
+            &router,
+            "PATCH",
+            "/api/index/semantic/model",
+            Some(&format!(
+                r#"{{"model":"{}"}}"#,
+                chan_workspace::DEFAULT_MODEL
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.get("model_note").is_none(),
+            "choosing a model ends the note: {body}"
+        );
     }
 
     #[tokio::test]

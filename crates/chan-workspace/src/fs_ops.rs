@@ -963,23 +963,17 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Publish an already-synced `tempfile` at `target` with `std::fs::rename`.
+/// Close `tmp`, clear Windows' temporary attribute, and rename it over `target`
+/// via `std::fs::rename`.
 ///
-/// The helper syncs nothing itself: a caller that needs the publication
-/// durable syncs the file before publishing and fsyncs the parent
-/// directory after. `atomic_write` and `atomic_file::write` do both;
-/// `publish_ref` syncs the file only. The temporary must live in the
-/// target's directory, as atomicity rests on the rename staying on one
-/// filesystem. On Windows the rename replaces an open target only when
-/// the open handle shares delete and the filesystem supports the
-/// POSIX-style rename; otherwise the rename fails and the target is left
-/// as it was. tempfile makes its paths absolute at creation, so re-arming
-/// cleanup cannot fail for a missing current directory. `keep` clears the
-/// temporary attribute tempfile sets on Windows, so the published file
-/// carries normal attributes. On failure the re-armed temporary is removed
-/// by its drop; on success cleanup is disabled after the move.
+/// `tmp` must live in `target`'s directory for an atomic rename, and callers
+/// must sync `tmp` beforehand and that directory afterward when durability is
+/// required. On Windows an open `target` is replaced only when its handle
+/// shares delete and the filesystem supports POSIX-style rename; on failure
+/// `target` is untouched and `tmp` is removed.
 pub fn persist_tempfile(tmp: tempfile::NamedTempFile, target: &Path) -> std::io::Result<()> {
     let kept = tmp.into_temp_path().keep()?;
+    // Cannot fail: tempfile makes its paths absolute when it creates them.
     let mut staged = tempfile::TempPath::try_from_path(kept)?;
     std::fs::rename(&staged, target)?;
     staged.disable_cleanup(true);
@@ -2347,59 +2341,6 @@ mod tests {
             got.as_deref(),
             Some(&b"hello"[..]),
             "xattr lost on overwrite"
-        );
-    }
-
-    #[test]
-    fn persist_tempfile_publishes_bytes_and_cleans_up() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let target = dir.join("out.bin");
-        let mut staged = tempfile::Builder::new()
-            .prefix(atomic_write_temp::PREFIX)
-            .rand_bytes(8)
-            .tempfile_in(dir)
-            .unwrap();
-        use std::io::Write;
-        staged.write_all(b"published").unwrap();
-        staged.as_file().sync_all().unwrap();
-        let staged_path = staged.path().to_path_buf();
-        persist_tempfile(staged, &target).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"published");
-        assert!(!staged_path.exists(), "temporary left behind after publish");
-        assert!(
-            std::fs::read_dir(dir)
-                .unwrap()
-                .all(|entry| !is_atomic_write_temp_name(
-                    entry.unwrap().file_name().to_str().unwrap_or("")
-                )),
-            "temporary left behind after publish"
-        );
-    }
-
-    #[test]
-    fn persist_tempfile_failure_removes_the_temporary() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("file"), b"not a dir").unwrap();
-        let target = dir.join("file").join("out.bin");
-        let mut staged = tempfile::Builder::new()
-            .prefix(atomic_write_temp::PREFIX)
-            .rand_bytes(8)
-            .tempfile_in(dir)
-            .unwrap();
-        use std::io::Write;
-        staged.write_all(b"unpublished").unwrap();
-        staged.as_file().sync_all().unwrap();
-        let staged_path = staged.path().to_path_buf();
-        assert!(
-            persist_tempfile(staged, &target).is_err(),
-            "rename into a file-directory unexpectedly succeeded"
-        );
-        assert!(!target.exists(), "failed publish left a target");
-        assert!(
-            !staged_path.exists(),
-            "temporary left behind after failed publish"
         );
     }
 

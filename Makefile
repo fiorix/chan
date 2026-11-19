@@ -88,64 +88,55 @@ CHAN_WORKSPACE_WINDOWS_TESTS := \
 	mini_workspace::tests::cross_device_move_refuses_a_file_created_inside_the_race_window \
 	index::embeddings::tests::empty_weights_are_classified_before_mapping \
 	index::embeddings::download::tests::partial_file_supports_resume_and_restart_writes \
+	index::embeddings::download::tests::a_download_fetches_its_pinned_commit_and_publishes_it \
+	index::embeddings::download::tests::publishing_a_file_removes_the_part_an_earlier_layout_left_for_it \
 	index::embeddings::download::tests::partial_download_resumes_and_publishes_exact_bytes \
-	index::embeddings::download::tests::ignored_resume_range_restarts_from_full_response \
-	index::embeddings::download::tests::mismatched_resume_range_never_appends_bytes \
-	index::embeddings::download::tests::two_downloads_of_the_same_blob_publish_once \
-	index::embeddings::download::tests::the_blob_lock_covers_snapshot_and_reference_publication \
+	index::embeddings::download::tests::bytes_that_miss_their_pin_are_not_published \
+	index::embeddings::download::tests::a_completed_part_that_hashes_wrong_is_fetched_again_in_the_same_call \
+	index::embeddings::download::tests::a_resume_whose_kept_prefix_is_wrong_restarts_once_from_zero \
+	index::embeddings::download::tests::a_fresh_download_that_hashes_wrong_after_a_restart_fails \
+	index::embeddings::download::tests::a_whole_file_answer_to_a_resume_that_hashes_wrong_is_not_fetched_again \
+	index::embeddings::download::tests::a_whole_file_answer_to_a_resume_restarts_from_it \
+	index::embeddings::download::tests::a_foreign_resume_range_empties_the_part_for_the_next_attempt \
+	index::embeddings::download::tests::a_waiting_download_reuses_the_winners_file \
+	index::embeddings::download::tests::a_stalled_server_ends_the_download_at_the_read_timeout \
+	index::embeddings::download::tests::the_tests_client_ignores_the_environments_proxy \
+	index::embeddings::download::tests::an_unusable_proxy_is_not_blamed_for_a_failure_without_a_request \
 	index::embeddings::download::tests::a_cached_model_opens_and_embeds_with_its_existing_files \
-	index::embeddings::download::tests::metadata_uses_the_supplied_tls_configuration \
-	index::embeddings::download::tests::redirected_metadata_uses_the_payload_tls_configuration \
-	index::embeddings::download::tests::cached_file_is_read_without_a_request_and_by_hf_hub \
+	index::embeddings::download::tests::a_download_uses_the_supplied_tls_configuration \
+	index::embeddings::download::tests::a_pinned_file_is_read_without_a_request \
+	index::embeddings::download::tests::an_incomplete_snapshot_at_another_commit_is_not_mixed_with_the_pinned_one \
+	index::embeddings::download::tests::a_complete_snapshot_at_another_commit_supplies_every_file_over_a_partial_pinned_one \
+	index::embeddings::download::tests::a_pinned_snapshot_without_its_ref_counts_as_downloaded_and_gets_its_ref \
+	index::embeddings::download::tests::a_model_that_pins_no_weights_is_never_downloaded \
+	index::embeddings::download::tests::a_model_opens_from_one_snapshot_when_the_cache_changes_between_its_files \
 	index::embeddings::download::tests::cache_reference_cannot_escape_the_snapshot_directory \
-	index::embeddings::download::tests::invalid_model_and_filename_are_refused_before_any_request_or_write \
-	index::embeddings::download::tests::existing_snapshot_bypasses_symlink_publication \
-	index::embeddings::download::tests::snapshot_link_target_uses_native_separators \
-	index::embeddings::download::tests::symlink_refusal_renames_into_a_cache_hf_hub_can_read \
-	index::embeddings::download::tests::unsupported_symlink_renames_into_a_cache_hf_hub_can_read \
-	index::embeddings::download::tests::missing_symlink_privilege_renames_into_a_cache_hf_hub_can_read \
-	index::embeddings::download::tests::publication_failure_does_not_move_the_blob \
-	index::embeddings::download::tests::metadata_cannot_escape_the_cache_with_identifiers \
-	index::embeddings::download::tests::a_relative_metadata_redirect_cycle_is_bounded \
+	index::embeddings::download::tests::an_unpinned_model_or_file_is_refused_before_any_request_or_write \
+	index::embeddings::download::tests::a_model_that_publishes_no_weights_is_refused_before_any_request \
 	index::embeddings::download::tests::completed_part_publishes_without_an_invalid_end_range_request \
 	index::embeddings::download::tests::oversized_part_restarts_and_publishes_exact_bytes \
 	index::embeddings::download::tests::a_short_transfer_stays_partial_and_resumes_on_the_next_attempt \
-	index::embeddings::download::tests::excess_body_bytes_preserve_the_original_partial \
+	index::embeddings::download::tests::excess_after_written_chunks_empties_the_part_for_the_next_attempt \
 	index::embeddings::download::tests::embedder_transport_failure_preserves_another_downloaders_cache \
-	index::embeddings::download::tests::embedder_lock_timeout_keeps_the_active_lock_and_partial \
 	index::embeddings::download::tests::embedder_interrupted_payload_keeps_the_resumable_part \
-	index::embeddings::download::tests::cache_identifiers_refuse_paths_and_empty_values \
-	index::embeddings::download::tests::resume_status_guard_is_independent_of_body_length \
-	index::embeddings::download::tests::resume_range_guard_is_independent_of_body_length \
-	index::embeddings::download::tests::resume_length_guard_is_independent_of_range \
-	index::embeddings::download::tests::embedder_retries_a_corrupt_cached_config \
-	index::embeddings::download::tests::embedder_retries_corrupt_cached_tokenizer \
-	index::embeddings::download::tests::embedder_retries_corrupt_cached_weights \
-	index::embeddings::download::tests::embedder_retries_empty_cached_weights \
-	index::embeddings::download::tests::a_waiting_download_reuses_the_winners_renamed_snapshot \
-	index::embeddings::download::tests::a_complete_blob_is_published_without_another_payload \
-	index::embeddings::download::tests::a_wrong_sized_blob_is_replaced_before_publication \
-	index::embeddings::download::tests::excess_after_written_chunks_rolls_back_to_the_original_partial \
+	index::embeddings::download::tests::each_resume_guard_refuses_on_its_own \
+	index::embeddings::download::tests::embedder_retries_a_corrupt_cached_file \
 	index::embeddings::download::tests::embedder_retries_a_cached_model_that_only_fails_its_probe \
 	index::embeddings::download::tests::embedder_refuses_a_retry_model_that_only_fails_its_probe \
-	index::embeddings::download::tests::embedder_retries_non_utf8_cached_config \
+	index::embeddings::download::tests::a_failed_probe_with_every_file_as_pinned_keeps_the_cache \
 	index::embeddings::download::publication_tests::reference_replacement_preserves_open_readers \
 	index::embeddings::download::publication_tests::reference_publication_failure_preserves_destination_and_cleans_temporary \
 	index::embeddings::download::publication_tests::published_reference_has_regular_file_attributes \
-	index::embeddings::download::publication_tests::blob_publication_failure_preserves_the_current_reference \
-	index::embeddings::download::tls_tests::trusted_tls_configuration_downloads_metadata_and_payload \
-	index::embeddings::download::tls_tests::untrusted_metadata_certificate_preserves_the_transport_error \
+	index::embeddings::download::publication_tests::file_publication_failure_preserves_the_current_reference \
 	index::embeddings::download::tls_tests::trusted_tls_configuration_downloads_the_redirected_payload \
 	index::embeddings::download::tls_tests::untrusted_payload_certificate_preserves_the_transport_error \
-	index::embeddings::download::tls_tests::same_host_relative_redirects_keep_bearer_on_metadata_and_payload \
-	index::embeddings::download::tls_tests::cross_host_redirects_strip_bearer_on_metadata_and_payload \
-	index::embeddings::download::tls_tests::https_metadata_redirect_refuses_http_before_connecting \
+	index::embeddings::download::tls_tests::same_host_relative_redirects_keep_bearer \
+	index::embeddings::download::tls_tests::cross_host_redirects_strip_bearer \
 	index::embeddings::download::tls_tests::https_payload_redirect_refuses_http_before_connecting \
+	index::embeddings::download::tls_tests::http_proxy_environment_routes_the_download \
 	index::embeddings::download::tls_tests::unusable_proxy_takes_precedence_over_certificate_error \
-	index::embeddings::download::tls_tests::http_proxy_environment_routes_metadata_and_payload \
 	fs_ops::tests::atomic_write_replaces_a_file_open_by_another_handle \
 	fs_ops::tests::atomic_write_failure_leaves_no_temporaries \
-	fs_ops::tests::persist_tempfile_failure_removes_the_temporary \
 	workspace::tests::write_bytes_replaces_a_file_open_by_another_handle
 
 # Linux chan-desktop build (AppImage/.deb) runs inside an sdme container so a

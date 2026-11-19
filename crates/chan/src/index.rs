@@ -312,6 +312,7 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
             workspace_paths.root.display()
         )
     })?;
+    let model_note = cfg.model_note();
     let model = cfg.model;
     let semantic_enabled = dashboard.semantic_enabled;
     let expected_dir = global_models_dir().join(repo_dir_name(&model));
@@ -336,6 +337,7 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
             "mode": mode,
             "model_present": model_present,
             "model_name": model,
+            "model_note": model_note,
             "model_path": expected_dir.display().to_string(),
             "model_size_bytes": model_size_bytes,
             "semantic_enabled": semantic_enabled,
@@ -346,6 +348,9 @@ fn cmd_index_status(path: Option<PathBuf>, json: bool) -> Result<()> {
         println!("workspace:            {}", canonical_root.display());
         println!("mode:             {mode}");
         println!("model:            {model}");
+        if let Some(note) = &model_note {
+            println!("model note:       {note}");
+        }
         println!("model path:       {}", expected_dir.display());
         println!(
             "model present:    {}",

@@ -54,10 +54,16 @@ pub enum EmbedError {
     Candle(String),
     #[error("tokenizer: {0}")]
     Tokenizer(String),
-    #[error("hf-hub: {0}")]
-    HfHub(String),
+    /// The model download failed: its request, a file that misses its pin,
+    /// or the cache it writes.
+    #[error("model download: {0}")]
+    Download(String),
+    /// The model's Hub repository publishes no copy of a file the embedder
+    /// reads, so the model table pins none and no download is tried.
+    #[error("{model} cannot be downloaded: its Hub repository publishes no {file}")]
+    Unpublished { model: String, file: &'static str },
     /// The model server's certificate failed the shared trust decision.
-    #[error("hf-hub: {0} (certificate verification failed)")]
+    #[error("model download: {0} (certificate verification failed)")]
     Certificate(String),
     /// A proxy env var (`HTTP(S)_PROXY`/`ALL_PROXY`) is set to a value the model
     /// downloader's HTTP client (ureq) cannot use, so a download would run
@@ -201,13 +207,17 @@ impl Embedder {
     /// HuggingFace into `cache_dir` on first use; subsequent opens
     /// are local and fast.
     ///
-    /// Decoding, loading or probing a corrupt cached model removes its
-    /// per-model cache and retries once. Download and filesystem failures
-    /// preserve the cache so resumable bytes and concurrent download locks
-    /// remain intact. The probe also detects weights that load but fail
-    /// during inference. A second failure surfaces to the caller.
+    /// A model that fails to decode, load or probe is fetched once more
+    /// when one of its cached files misses its pinned sha256 or size: the
+    /// per-model cache is removed and the files are downloaded again. A
+    /// failure with every file as pinned is not corruption a download
+    /// repairs (an accelerator error, say), so it surfaces with the cache
+    /// kept. Download and filesystem failures preserve the cache so
+    /// resumable bytes and concurrent download locks remain intact. The
+    /// probe also detects weights that load but fail during inference. A
+    /// second failure surfaces to the caller.
     pub fn open(model_id: &str, cache_dir: &Path) -> Result<Self, EmbedError> {
-        let client = download::Client::new(cache_dir)?;
+        let client = download::Client::new(cache_dir);
         Self::open_with_client(model_id, cache_dir, &client)
     }
 
@@ -223,10 +233,14 @@ impl Embedder {
                 | EmbedError::Tokenizer(_)
                 | EmbedError::Candle(_)),
             ) => {
+                if client.files_match_their_pins(model_id)? {
+                    return Err(first_err);
+                }
                 tracing::warn!(
                     model = model_id,
                     error = %first_err,
-                    "embedder open/probe failed; wiping model cache and retrying",
+                    "embedder open/probe failed on a file that misses its pin; \
+                     wiping model cache and retrying",
                 );
                 wipe_model_cache(model_id, cache_dir)?;
                 let e = Self::open_once(model_id, cache_dir, client)?;
@@ -246,14 +260,12 @@ impl Embedder {
         cache_dir: &Path,
         client: &download::Client,
     ) -> Result<Self, EmbedError> {
-        let _ = lookup_model(model_id)?;
+        client.require_published(model_id)?;
         std::fs::create_dir_all(cache_dir)?;
 
         // Cache lookup precedes client initialization, so an already downloaded
         // model opens without network access or a new trust-store read.
-        let config_path = client.get(model_id, "config.json")?;
-        let tokenizer_path = client.get(model_id, "tokenizer.json")?;
-        let weights_path = client.get(model_id, "model.safetensors")?;
+        let [config_path, tokenizer_path, weights_path] = client.get_model(model_id)?;
 
         let config_raw = std::fs::read(&config_path)?;
         let config: Config =
@@ -506,36 +518,14 @@ pub fn repo_dir_name(model_id: &str) -> String {
     format!("models--{}", model_id.replace('/', "--"))
 }
 
-/// True when `repo_dir` holds a usable copy of `model_id`'s files:
-/// `refs/main` present, plus at least one `snapshots/<hash>/`
-/// directory containing `config.json`, `tokenizer.json`, and
-/// `model.safetensors`. Anything weaker (stray lockfile, half-
-/// downloaded snapshot, blobs-only state from an aborted model
-/// download) fails the check.
-fn model_files_present(repo_dir: &Path) -> bool {
-    if !repo_dir.join("refs").join("main").is_file() {
-        return false;
-    }
-    let snapshots = repo_dir.join("snapshots");
-    let Ok(it) = std::fs::read_dir(&snapshots) else {
-        return false;
-    };
-    for entry in it.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if !ft.is_dir() {
-            continue;
-        }
-        let dir = entry.path();
-        if dir.join("config.json").is_file()
-            && dir.join("tokenizer.json").is_file()
-            && dir.join("model.safetensors").is_file()
-        {
-            return true;
-        }
-    }
-    false
+/// Whether `repo_dir` holds a copy of `model_id` the embedder opens with
+/// no download: every file it reads, in the one snapshot the downloader
+/// would read them from (the pinned one, or the complete one `refs/main`
+/// names). Anything weaker (a stray lockfile, a half-downloaded snapshot, a
+/// `.part` left by an interrupted download) is not. The seeder asks the
+/// same question through this function.
+pub fn model_files_present(model_id: &str, repo_dir: &Path) -> bool {
+    config::embedding_model(model_id).is_some_and(|model| download::downloaded(repo_dir, model))
 }
 
 /// Runtime resolver for the embedding model. Indexes by
@@ -543,17 +533,17 @@ fn model_files_present(repo_dir: &Path) -> bool {
 /// can swap the active model without changing this function.
 ///
 /// Returns the repo directory under `global_models_dir()` when the
-/// model is laid out and ready (matches the same predicate
-/// `embed_seed.rs::default_model_present` uses on the seed path --
-/// either source can populate the cache). Returns
+/// model is laid out and ready (`model_files_present`, the predicate
+/// the seeder's `default_model_present` shares -- either source can
+/// populate the cache). Returns
 /// `EmbedError::ModelNotDownloaded` otherwise; callers propagate it
 /// to the API / CLI surface so the user sees "model not downloaded;
 /// run `chan workspace index download-model` or rebuild with `--features
 /// embed-model`".
 ///
-/// Rejects unknown model ids first (mirrors `Embedder::open_once`'s
-/// `lookup_model` gate) so the error path stays consistent
-/// regardless of cache state.
+/// Rejects unknown model ids first, with the `UnknownModel` error
+/// `Embedder::open_once` gives through `require_published`, so the
+/// error path stays consistent regardless of cache state.
 pub fn resolve_model(model_id: &str) -> Result<PathBuf, EmbedError> {
     resolve_model_in(model_id, &global_models_dir())
 }
@@ -567,7 +557,7 @@ pub fn model_downloaded(model_id: &str) -> Result<bool, EmbedError> {
 pub(crate) fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathBuf, EmbedError> {
     let _ = lookup_model(model_id)?;
     let repo_dir = cache_dir.join(repo_dir_name(model_id));
-    if model_files_present(&repo_dir) {
+    if model_files_present(model_id, &repo_dir) {
         Ok(repo_dir)
     } else {
         Err(EmbedError::ModelNotDownloaded {
@@ -580,7 +570,7 @@ pub(crate) fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathB
 fn model_downloaded_in(model_id: &str, cache_dir: &Path) -> Result<bool, EmbedError> {
     let _ = lookup_model(model_id)?;
     let repo_dir = cache_dir.join(repo_dir_name(model_id));
-    Ok(model_files_present(&repo_dir))
+    Ok(model_files_present(model_id, &repo_dir))
 }
 
 #[cfg(test)]
@@ -596,7 +586,7 @@ mod tests {
             .join(repo_dir_name(crate::DEFAULT_MODEL))
             .join("snapshots/test-model/model.safetensors");
         std::fs::write(weights, []).unwrap();
-        let client = download::Client::new(cache.path()).unwrap();
+        let client = download::Client::new(cache.path());
         let error = Embedder::open_once(crate::DEFAULT_MODEL, cache.path(), &client)
             .expect_err("empty weights must fail before an OS-specific mmap attempt");
         assert!(
@@ -710,7 +700,11 @@ mod tests {
     #[test]
     fn known_models_resolve() {
         assert!(lookup_model("BAAI/bge-small-en-v1.5").is_ok());
-        assert!(lookup_model("BAAI/bge-m3").is_ok());
+        assert!(lookup_model("BAAI/bge-large-en-v1.5").is_ok());
+        assert!(
+            lookup_model("BAAI/bge-m3").is_err(),
+            "BGE M3 left the model list: its repository publishes no weights"
+        );
     }
 
     #[test]
@@ -742,7 +736,10 @@ mod tests {
             repo_dir_name("BAAI/bge-small-en-v1.5"),
             "models--BAAI--bge-small-en-v1.5"
         );
-        assert_eq!(repo_dir_name("BAAI/bge-m3"), "models--BAAI--bge-m3");
+        assert_eq!(
+            repo_dir_name("BAAI/bge-large-en-v1.5"),
+            "models--BAAI--bge-large-en-v1.5"
+        );
     }
 
     #[test]
@@ -750,7 +747,7 @@ mod tests {
         // Pin the happy path. When refs/main + a
         // complete snapshot trio are present, the resolver returns
         // the repo dir; callers proceed to `Embedder::open` against
-        // the cached files without an hf-hub network round-trip.
+        // the cached files without a network round-trip.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join(repo_dir_name("BAAI/bge-small-en-v1.5"));
         seeded_repo(&repo);
@@ -764,7 +761,7 @@ mod tests {
         // prior download → resolver surfaces
         // ModelNotDownloaded with the expected path. The CLI / API
         // layer turns this into the "run `chan workspace index download-model`"
-        // hint instead of triggering an hf-hub network fetch.
+        // hint instead of triggering a model download.
         let tmp = tempfile::tempdir().unwrap();
         let err = resolve_model_in("BAAI/bge-small-en-v1.5", tmp.path()).unwrap_err();
         match err {
@@ -786,7 +783,7 @@ mod tests {
     fn resolve_model_errors_when_snapshot_incomplete() {
         // Half-downloaded state: refs/main present, but the
         // snapshot is missing one of the trio. Rejecting this is
-        // load-bearing -- a hf-hub download interrupted mid-flight
+        // load-bearing -- a model download interrupted mid-flight
         // can leave the dir in this shape, and we don't want the
         // embedder to open a partial model and crash mid-forward-
         // pass. ModelNotDownloaded is the right signal: the caller

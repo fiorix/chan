@@ -13,7 +13,7 @@
   // Restart connection and Abandon actions for a stuck remote connection,
   // and Show in Computers, which shows the devserver's card.
 
-  import { COVER_ROOT_ATTR, appInputBlocked, keyboardOwnedAbovePanes, modalDialogOpen, setCoverBlocking, topOverlay, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, modalDialogOpen, setCoverBlocking, topCoverRoot, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -23,14 +23,11 @@
   } from "../api/desktop";
   import { hostVocabulary } from "../api/nativeVocabulary";
   import { errorText } from "../api/errors";
-  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard.svelte";
-  import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
-  import { surveyFor } from "../state/survey.svelte";
-  import { teamDialogState } from "../state/teamDialog.svelte";
-  import { closeConfirmState } from "../state/closeConfirm.svelte";
+  import { keyboardOwnedAbovePanes, launcherShownOverWindow, mayFocus, registerKeyboardTaker } from "../state/keyboardOwner.svelte";
+  import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { connectionHealth } from "../state/connectionHealth.svelte";
   import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
 
   // Recovery actions (Restart connection / Abandon) are offered only on a devserver-backed
   // desktop window: a stuck remote connection the user can force back or give up
@@ -238,7 +235,15 @@
   /// keeps its own focus.
   $effect(() => {
     if (!visible) return;
+    // Read so a dialog closing over this cover runs this again.
+    modalDialogOpen();
     const active = document.activeElement as HTMLElement | null;
+    // The card takes the keyboard only while this cover paints on top of
+    // the covers (not under the screen lock, whatever holds the keyboard
+    // there), and not from an owner that paints over this cover (the close
+    // prompt), whose element is not the one to return to either. A dialog
+    // closing runs this again, and the card takes the keyboard.
+    if (untrack(() => topCoverRoot() !== overlayEl || mayFocus(active))) return;
     if (active && active !== document.body && active !== document.documentElement && !active.closest(`[${COVER_ROOT_ATTR}]`)) {
       focusBeforeCover = { element: active, surface: !!active.closest(".terminal-host, .editor-host") };
       deferredFocus = null;
@@ -246,31 +251,24 @@
       focusBeforeCover = deferredFocus.returnTo;
       deferredFocus = null;
     }
-    // ModalShell repairs focus into its top dialog. Leave that keyboard owner
-    // alone throughout the cover and after it clears.
-    if (modalDialogOpen() && active?.closest('.modal[role="dialog"]')) return;
     active?.blur();
-    queueMicrotask(() => focusCard());
+    queueMicrotask(() => {
+      if (topCoverRoot() === overlayEl && !mayFocus(document.activeElement)) focusCard();
+    });
     const onWindowFocus = (): void => {
-      if (!document.activeElement?.closest(`[${COVER_ROOT_ATTR}]`)) focusCard();
+      const holder = document.activeElement;
+      if (!holder?.closest(`[${COVER_ROOT_ATTR}]`) && !mayFocus(holder) && topCoverRoot() === overlayEl) focusCard();
     };
     window.addEventListener("focus", onWindowFocus);
     return () => window.removeEventListener("focus", onWindowFocus);
   });
 
-  function keyboardOwnerContains(saved: HTMLElement): boolean {
-    if (modalDialogOpen()) {
-      return !!(
-        (surveyFor(null) && saved.closest('.survey-overlay:not(.per-terminal)[role="dialog"]')) ||
-        (teamDialogState.request && saved.closest('.team-dialog[role="dialog"]')) ||
-        (closeConfirmState.open && saved.closest('.overlay[role="alertdialog"][aria-label="Close this window?"]'))
-      );
-    }
-    const overlay = topOverlay();
-    if (overlay === "launcher") return !!saved.closest('.deck-shell[role="dialog"]');
-    if (overlay) return saved.closest<HTMLElement>('.panel[role="dialog"]')?.dataset.overlayId === overlay;
-    return false;
-  }
+  // Handed the keyboard as the cover on top (the close prompt over it went,
+  // or a cover over it lifted), it takes it onto its card.
+  $effect(() => {
+    if (!overlayEl) return;
+    return registerKeyboardTaker(overlayEl, () => focusCard());
+  });
 
   function restoreFocus(returnTo: FocusReturn, epoch: number): void {
     if (recoveryEpoch !== epoch || !outageResolved) return;
@@ -279,14 +277,12 @@
       return;
     }
     const saved = returnTo.element;
-    if (appInputBlocked() || (keyboardOwnedAbovePanes() && !keyboardOwnerContains(saved))) return;
-    const owner = document.activeElement;
-    if (owner !== document.body && owner !== document.documentElement && !owner?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
+    if (!mayFocus(saved)) return;
+    const holder = document.activeElement;
+    if (holder !== document.body && holder !== document.documentElement && !holder?.closest(`[${COVER_ROOT_ATTR}="reconnect"]`)) return;
     // The tab pulse invokes the terminal or editor's own focus routine, which
     // re-arms its real keyboard surface and cursor after the cover has gone.
-    if (returnTo.surface) {
-      if (!refocusRefused(activeTerminalTab()?.id ?? null)) bumpTabFocusPulse();
-    }
+    if (returnTo.surface) bumpTabFocusPulse();
     else if (saved.isConnected) saved.focus({ preventScroll: true });
   }
 
